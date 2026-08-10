@@ -1,0 +1,38 @@
+# Personal host example. Keep this file readable only by the deployment user
+# after replacing admin_token.
+listen: 127.0.0.1:8080
+admin_listen: 127.0.0.1:8081
+newapi_url: http://127.0.0.1:3000
+mode: available
+db_path: ./data/audit.db
+key_path: ./data/audit.key
+admin_token: "replace-with-a-random-token"
+retention_days: 30
+newapi_token_db_path: ""
+
+interceptors:
+  require-client-credential:
+    type: require_credential
+  optional-body-limit:
+    type: max_body_bytes
+    config:
+      max_bytes: 2097152
+
+routes:
+  - {id: openai-chat-completions, method: POST, path: /v1/chat/completions, match: exact, parser: openai.chat_completions, interceptors: [require-client-credential]}
+  - {id: openai-completions, method: POST, path: /v1/completions, match: exact, parser: openai.completions, interceptors: [require-client-credential]}
+  - {id: openai-responses, method: POST, path: /v1/responses, match: exact, parser: openai.responses, interceptors: [require-client-credential]}
+  - {id: openai-responses-compact, method: POST, path: /v1/responses/compact, match: exact, parser: openai.responses_compact, interceptors: [require-client-credential]}
+  - {id: anthropic-messages, method: POST, path: /v1/messages, match: exact, parser: anthropic.messages, interceptors: [require-client-credential]}
+  - id: gemini-generate-content
+    method: POST
+    path: /v1beta/models/{model}:generateContent
+    match: template
+    parser: gemini.generate_content
+    interceptors: [require-client-credential]
+  - id: gemini-stream-generate-content
+    method: POST
+    path: /v1beta/models/{model}:streamGenerateContent
+    match: template
+    parser: gemini.stream_generate_content
+    interceptors: [require-client-credential]

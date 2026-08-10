@@ -1,0 +1,103 @@
+package proxy
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
+	"testing"
+
+	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/interceptor"
+	"llmapi-logger/internal/routing"
+)
+
+func TestRewriteCopiesControlledForwardingHeaders(t *testing.T) {
+	observed := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		observed <- request.Header.Clone()
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(t, upstream.URL)
+	request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody)
+	request.Header.Add("X-Real-IP", "192.0.2.10")
+	request.Header.Add("X-Forwarded-For", "192.0.2.10")
+	request.Header.Add("X-Forwarded-For", "198.51.100.20")
+	request.Header.Add("X-Forwarded-Proto", "https")
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+
+	headers := <-observed
+	assertHeaderValues(t, headers, "X-Real-IP", []string{"192.0.2.10"})
+	assertHeaderValues(t, headers, "X-Forwarded-For", []string{"192.0.2.10", "198.51.100.20"})
+	assertHeaderValues(t, headers, "X-Forwarded-Proto", []string{"https"})
+}
+
+func TestCancelledRequestDoesNotReceiveJSONError(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(t, upstream.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody).WithContext(ctx)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+	if response.Body.Len() != 0 {
+		t.Fatalf("cancelled response body = %q, want empty", response.Body.String())
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("upstream calls = %d, want 0", got)
+	}
+}
+
+func newTestHandler(t *testing.T, upstreamURL string) http.Handler {
+	t.Helper()
+	routes := []config.RouteConfig{{
+		ID:     "chat",
+		Method: http.MethodPost,
+		Path:   "/v1/chat/completions",
+		Match:  "exact",
+		Parser: "openai.chat_completions",
+	}}
+	matcher, err := routing.Compile(routes)
+	if err != nil {
+		t.Fatalf("compile matcher: %v", err)
+	}
+	engine, err := interceptor.NewEngine(nil, routes)
+	if err != nil {
+		t.Fatalf("compile interceptor engine: %v", err)
+	}
+	target, err := url.Parse(upstreamURL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	return New(target, matcher, engine, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func assertHeaderValues(t *testing.T, header http.Header, name string, expected []string) {
+	t.Helper()
+	actual := header.Values(name)
+	if len(actual) != len(expected) {
+		t.Fatalf("%s values = %#v, want %#v", name, actual, expected)
+	}
+	for index := range expected {
+		if actual[index] != expected[index] {
+			t.Fatalf("%s values = %#v, want %#v", name, actual, expected)
+		}
+	}
+}

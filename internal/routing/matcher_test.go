@@ -1,0 +1,181 @@
+package routing
+
+import (
+	"reflect"
+	"testing"
+
+	"llmapi-logger/internal/config"
+)
+
+func TestMatcherExact(t *testing.T) {
+	matcher := mustCompile(t, []config.RouteConfig{{
+		ID:           "responses",
+		Method:       "POST",
+		Path:         "/v1/responses",
+		Match:        "exact",
+		Parser:       "openai.responses",
+		Interceptors: []string{"auth"},
+	}})
+
+	got, ok := matcher.Match("POST", "/v1/responses")
+	if !ok {
+		t.Fatal("Match() ok = false")
+	}
+	want := Match{
+		RouteID:        "responses",
+		Parser:         "openai.responses",
+		InterceptorIDs: []string{"auth"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Match() = %#v, want %#v", got, want)
+	}
+
+	for _, request := range []struct{ method, path string }{
+		{"GET", "/v1/responses"},
+		{"post", "/v1/responses"},
+		{"POST", "/v1/responses/"},
+		{"POST", "/v1/responses?stream=true"},
+		{"POST", "/v1/other"},
+	} {
+		if _, ok := matcher.Match(request.method, request.path); ok {
+			t.Errorf("Match(%q, %q) ok = true", request.method, request.path)
+		}
+	}
+}
+
+func TestMatcherTemplate(t *testing.T) {
+	matcher := mustCompile(t, []config.RouteConfig{{
+		ID:           "gemini-generate",
+		Method:       "POST",
+		Path:         "/v1beta/models/{model}:generateContent",
+		Match:        "template",
+		Parser:       "gemini.generate_content",
+		Interceptors: []string{"auth", "limit"},
+	}})
+
+	got, ok := matcher.Match("POST", "/v1beta/models/gemini-2.5_flash:generateContent")
+	if !ok {
+		t.Fatal("Match() ok = false")
+	}
+	if got.RouteID != "gemini-generate" || got.Parser != "gemini.generate_content" {
+		t.Fatalf("Match() = %#v", got)
+	}
+	if !reflect.DeepEqual(got.PathParams, map[string]string{"model": "gemini-2.5_flash"}) {
+		t.Fatalf("PathParams = %#v", got.PathParams)
+	}
+	if !reflect.DeepEqual(got.InterceptorIDs, []string{"auth", "limit"}) {
+		t.Fatalf("InterceptorIDs = %#v", got.InterceptorIDs)
+	}
+
+	invalid := []string{
+		"/v1beta/models/:generateContent",
+		"/v1beta/models/a+b:generateContent",
+		"/v1beta/models/a%2Fb:generateContent",
+		"/v1beta/models/a%5cb:generateContent",
+		"/v1beta/models/a/b:generateContent",
+		"/v1beta/models/a:streamGenerateContent",
+	}
+	for _, path := range invalid {
+		if _, ok := matcher.Match("POST", path); ok {
+			t.Errorf("Match(POST, %q) ok = true", path)
+		}
+	}
+}
+
+func TestMatcherRejectsUnsafeEscapedPaths(t *testing.T) {
+	matcher := mustCompile(t, []config.RouteConfig{{ID: "x", Method: "POST", Path: "/v1/x", Match: "exact", Parser: "x"}})
+	paths := []string{
+		"",
+		"v1/x",
+		"/v1/x/",
+		"/v1//x",
+		"/v1/./x",
+		"/v1/../x",
+		"/v1/%2e%2e/x",
+		"/v1%2Fx",
+		"/v1%2fx",
+		"/v1%5Cx",
+		"/v1\\x",
+		"/v1/%zz/x",
+	}
+	for _, path := range paths {
+		if _, ok := matcher.Match("POST", path); ok {
+			t.Errorf("Match(POST, %q) ok = true", path)
+		}
+	}
+}
+
+func TestCompileRejectsInvalidAndOverlappingRoutes(t *testing.T) {
+	base := config.RouteConfig{ID: "x", Method: "POST", Path: "/v1/x", Match: "exact", Parser: "x"}
+	tests := map[string][]config.RouteConfig{
+		"unknown match": {withRoute(base, func(route *config.RouteConfig) { route.Match = "prefix" })},
+		"bad template":  {withRoute(base, func(route *config.RouteConfig) { route.Match = "template" })},
+		"duplicate":     {base, withRoute(base, func(route *config.RouteConfig) { route.ID = "y" })},
+		"overlap": {
+			{ID: "exact", Method: "POST", Path: "/models/gemini:generateContent", Match: "exact", Parser: "x"},
+			{ID: "template", Method: "POST", Path: "/models/{model}:generateContent", Match: "template", Parser: "x"},
+		},
+	}
+	for name, routes := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Compile(routes); err == nil {
+				t.Fatal("Compile() error = nil")
+			}
+		})
+	}
+}
+
+func TestCompileAllowsDistinctMethodsAndTemplateVerbs(t *testing.T) {
+	routes := []config.RouteConfig{
+		{ID: "post", Method: "POST", Path: "/v1/x", Match: "exact", Parser: "x"},
+		{ID: "get", Method: "GET", Path: "/v1/x", Match: "exact", Parser: "x"},
+		{ID: "generate", Method: "POST", Path: "/models/{model}:generateContent", Match: "template", Parser: "x"},
+		{ID: "stream", Method: "POST", Path: "/models/{model}:streamGenerateContent", Match: "template", Parser: "x"},
+	}
+	matcher := mustCompile(t, routes)
+	for method, path := range map[string]string{
+		"GET":  "/v1/x",
+		"POST": "/models/gemini:streamGenerateContent",
+	} {
+		if _, ok := matcher.Match(method, path); !ok {
+			t.Errorf("Match(%q, %q) ok = false", method, path)
+		}
+	}
+}
+
+func TestMatcherDoesNotExposeMutableInterceptorSlice(t *testing.T) {
+	routes := []config.RouteConfig{{ID: "x", Method: "POST", Path: "/v1/x", Match: "exact", Parser: "x", Interceptors: []string{"auth"}}}
+	matcher := mustCompile(t, routes)
+	routes[0].Interceptors[0] = "changed-before-match"
+
+	first, ok := matcher.Match("POST", "/v1/x")
+	if !ok {
+		t.Fatal("first Match() ok = false")
+	}
+	first.InterceptorIDs[0] = "changed-after-match"
+	second, ok := matcher.Match("POST", "/v1/x")
+	if !ok || !reflect.DeepEqual(second.InterceptorIDs, []string{"auth"}) {
+		t.Fatalf("second Match() = %#v, %v", second, ok)
+	}
+}
+
+func TestNilMatcherDoesNotMatch(t *testing.T) {
+	var matcher *Matcher
+	if _, ok := matcher.Match("POST", "/v1/x"); ok {
+		t.Fatal("nil Matcher.Match() ok = true")
+	}
+}
+
+func mustCompile(t *testing.T, routes []config.RouteConfig) *Matcher {
+	t.Helper()
+	matcher, err := Compile(routes)
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	return matcher
+}
+
+func withRoute(route config.RouteConfig, mutate func(*config.RouteConfig)) config.RouteConfig {
+	mutate(&route)
+	return route
+}
