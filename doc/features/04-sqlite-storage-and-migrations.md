@@ -91,7 +91,7 @@ writer 最多聚合 64 ops 或等待 5 ms，然后在一个事务中执行。Beg
 - writer 标记 unhealthy。
 - 通知带 Ack 的调用方。
 - 后续 strict admission 返回 503。
-- available 记录日志并聚合 gap。
+- available 记录安全日志并聚合 gap。gap 只接受程序定义的 reason/detail 配对和计数，不保存底层 error 文本。
 
 下一次事务成功后 writer 恢复 healthy，并 best-effort 写入内存 gap。
 
@@ -99,7 +99,7 @@ writer 最多聚合 64 ops 或等待 5 ms，然后在一个事务中执行。Beg
 
 available：queue 满时立即返回 dropped，不阻塞代理；当前 audit 标 partial/failed。DB 不可用时 gap 只存在内存和日志，恢复后插入 audit_gaps。
 
-strict：BeginAudit 必须成功 COMMIT；admission 时 key、DB、writer 或 writer queue 不健康返回 503，parser queue 不参与 admission。Begin 后 chunk 仍是批量异步写，晚到故障只标 partial/gap，不宣称逐块 durable 或零缺口。
+strict：BeginAudit 必须使用已加载的 key 成功 COMMIT；本次提交失败时返回 503，parser queue 不参与 admission。上一批写入留下的健康快照不替代这次提交，也不会永久阻止后续重试。Begin 后 chunk 仍是批量异步写，晚到故障只标 partial/gap，不宣称逐块 durable 或零缺口。
 
 available/strict 只控制审计持久化故障是否阻止 admission。interceptor 主动 reject、body 超限、error、panic、非法 Decision 或 Body 读取失败都在 NewAPI 前终止，不能因 available 模式而放行；客户端取消按取消结束。
 
@@ -111,18 +111,18 @@ query API 只使用 readerDB：
 - 详情按 audit_id 查询 stage、stream、header。
 - 列表和详情直接读取 audit_records.blocked_by/block_code；它们不需要额外 JOIN。
 - Body 按 stage+seq 分页读取并解密。
-- 普通 raw 下载分批短读，避免长事务阻塞 WAL；受数量、字节和超时限制的同步导出可使用一个只读 snapshot。
+- 普通 raw 下载分批短读，避免长事务阻塞 WAL。
 - 不提供复杂查询 DSL、多租户过滤或独立分析数据库。
 
 ## 8. Parser 写入
 
 非 rejected 的请求 Finalize 成功时 audit_records.parse_status=pending，并尝试把 audit_id 放入内存 parser queue。worker 先用条件更新把 pending 改为 processing，再用 readerDB 读取证据；结果通过 writer 在同一事务中 UPSERT parsed_results，并把 parse_status 更新为 ok、partial、error 或 skipped。rejected audit 在 FinishAudit 时已是 skipped，扫描条件不得把它重新入队。
 
-reparse 直接覆盖 parsed_results，只保留最新 parser_version。进程重启先把 processing 重置为 pending，再扫描 pending 记录重新入队。
+parsed_results 只保留最新 parser_version。进程重启先把 processing 重置为 pending，再扫描 pending 记录重新入队；首版不提供 reparse 管理 API。
 
 ## 9. 启动恢复
 
-migration 后由应用传入当前 Unix ns，执行：
+migration 后、parser 扫描 pending 记录前，由应用传入当前 Unix ns 执行一次恢复：
 
 ~~~sql
 UPDATE audit_records
@@ -133,17 +133,19 @@ SET ended_at_ns = COALESCE(ended_at_ns, :recovered_at_ns),
 WHERE ended_at_ns IS NULL;
 ~~~
 
-同时把仍为 streaming 的 http_stages/body_streams 标为 partial，把遗留 processing 重置为 pending，再重新入队已结束且 pending 的 audit。不推断未提交事务，不补造 Trailer、chunk 或精确结束时间。
+同时把仍为 streaming 的 http_stages/body_streams 标为 partial，并写入稳定 `process_exit`。Body 的 stored length 按已提交 chunk 的 plaintext_length 求和，observed length 至少覆盖已提交的 offset+length；清空不完整 SHA-256，并把 hash_complete/eof_seen 设为 false。遗留 processing 重置为 pending，再重新入队已结束且 pending 的 audit。
+
+只有实际恢复了未终结 audit 时才写一条聚合 `process_exit` gap。重复调用不再修改已恢复记录，也不重复增加 gap。不推断未提交事务，不补造 Header、Trailer、chunk、上游响应或精确结束时间。
 
 ## 10. Retention
 
-retention_days>0 时按[模块 12](12-retention-export-and-maintenance.md)的固定算法执行：只选 ended_at_ns 非空且早于截止日的记录，每个事务最多删除 200 个 audit_records，并依靠外键级联删除全部审计子表；单次运行最多删除 5000 条。audit_gaps 按 ended_at_ns 使用同一截止日单独清理。
+retention_days>0 时按[模块 12](12-retention-and-maintenance.md)的固定算法执行：启动后异步执行一轮，此后每 24 小时执行。只选 ended_at_ns 非空、started_at_ns 早于截止日且 parse_status 不是 processing 的记录；每个 writer 事务最多删除 200 个 audit_records，并依靠外键级联删除全部审计子表，同一事务最多清理 200 条过期 gap；单轮最多分别删除 5000 条 audit 和 5000 条 gap。
 
 不自动 VACUUM；需要收缩文件时停机后手工执行。
 
 ## 11. 备份
 
-个人部署最简单的可靠方式是停服后复制 audit.db 与 key 文件。在线备份必须使用 SQLite backup API，不能只复制 audit.db 而忽略 WAL。数据库和 key 可分开存放，但恢复时两者缺一不可。
+数据库和 key 可分开存放，但必须作为同一个备份集，恢复时两者缺一不可。在线备份必须使用 SQLite backup API，不能只复制 audit.db 而忽略 WAL；完整流程见[部署备份说明](../deployment/backup-and-restore.md)。
 
 ## 12. 测试
 
@@ -155,7 +157,7 @@ retention_days>0 时按[模块 12](12-retention-export-and-maintenance.md)的固
 - strict BeginAudit commit 失败返回 503。
 - available queue 满继续并产生 gap。
 - reader 不占用 writer 连接。
-- kill 后 WAL 恢复，未完成 audit 变 partial。
+- kill 后 WAL 恢复，未完成 audit/stage/body 变 partial，长度由已提交 chunk 恢复；重复恢复幂等且只生成一条聚合 gap。
 - pending parser 重启恢复。
-- retention 级联删除。
+- retention 排除活动/processing 记录，audit/gap 分别遵守 200/5000 上限并级联删除审计子表。
 - DB/WAL 无测试 secret 明文。

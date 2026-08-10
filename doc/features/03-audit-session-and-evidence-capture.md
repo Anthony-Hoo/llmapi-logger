@@ -99,7 +99,7 @@ ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
 
 数据库把 `nonce || ciphertext || tag` 保存为一个 BLOB。AAD 使用 NUL 分隔的受控字段：Request-URI 绑定 audit_id/object_type，Header 再绑定 stage/kind/name/value_index，Body chunk 再绑定 stage/seq，解析结果绑定 audit_id/parser_name。调用方不得自行定义其他格式。
 
-首版只使用这个本地主密钥，不提供多层密钥、轮换或重写工具。需要更换时先导出需保留的数据，再创建新的空数据库和 key。
+首版只使用这个本地主密钥，不提供多层密钥、轮换或重写工具。需要更换时先完整备份旧数据库和旧 key，再创建新的空数据库和 key。
 
 ## 8. Writer 接口与模式
 
@@ -107,13 +107,13 @@ ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
 
 available：queue/DB/key 失败时不阻塞代理，标 partial/failed，写结构化日志；DB 不可用时合并一个内存 gap，下一次成功写入时补记。
 
-strict：BeginAudit 必须同步 COMMIT；admission 时 key、DB、writer 或 writer queue 不健康返回 503，parser queue 不参与 admission。Begin 成功后的 chunk 仍批量异步写，晚到故障只标 partial/gap，不提供逐块 durable ack。
+strict：BeginAudit 必须使用已加载的 key 同步 COMMIT；本次提交失败时返回 503，parser queue 不参与 admission。上一批写入留下的健康快照不替代这次提交，也不会永久阻止后续重试。Begin 成功后的 chunk 仍批量异步写，晚到故障只标 partial/gap，不提供逐块 durable ack。
 
 ## 9. audit_gaps
 
 audit_gaps 只做进程级运维提示，字段为 id、started_at_ns、ended_at_ns、reason、request_count、detail、created_at_ns，不精确关联某个 audit。reason 使用 db_unavailable、queue_full、encryption_error、write_error、process_exit；detail 只能保存稳定错误码和计数，不保存请求数据。
 
-进程内只保留一个合并 gap。DB 恢复时插入并清空；提前退出只能依赖日志，这是 available 的已知限制。
+进程内按固定 reason 各保留一个聚合 gap，同一 audit session 最多计数一次。DB 恢复时插入并清空；提前退出只能依赖日志，这是 available 的已知限制。
 
 ## 10. Parser
 

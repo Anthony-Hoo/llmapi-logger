@@ -4,16 +4,20 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/interceptor"
+	"llmapi-logger/internal/observability"
 	"llmapi-logger/internal/routing"
 )
 
@@ -66,6 +70,7 @@ type handler struct {
 }
 
 func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	started := time.Now()
 	if h.initializationError != nil || h.matcher == nil || h.reverseProxy == nil {
 		h.logger.Error("proxy unavailable", "error", h.initializationError)
 		writeJSON(response, http.StatusServiceUnavailable, interceptorUnavailableJSON)
@@ -82,10 +87,63 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		return
 	}
 
-	session, ok := h.beginAudit(request, match)
+	recorder := observability.NewResponseRecorder(response)
+	response = recorder
+	completion := newRequestCompletionState(h.audit != nil)
+	request = request.WithContext(contextWithRequestCompletion(request.Context(), completion))
+	var session *audit.Session
+	defer func() {
+		if recorder.WriteFailed() {
+			completion.markProxyError("downstream_write_error")
+		}
+		if session != nil {
+			if terminal, ready := session.Terminal(); ready {
+				completion.applyTerminal(terminal)
+			}
+		}
+		completion.finalize(request.Context())
+		snapshot := completion.snapshot()
+		statusCode := recorder.StatusCode()
+		if statusCode == 0 {
+			statusCode = snapshot.statusCode
+		}
+		ttft := time.Duration(-1)
+		if firstWrite, exists := recorder.FirstWriteAt(); exists {
+			ttft = firstWrite.Sub(started)
+			if ttft < 0 {
+				ttft = 0
+			}
+		}
+		auditID := snapshot.auditID
+		if auditID == "" && session != nil {
+			auditID = session.ID()
+		}
+		observability.LogRequestCompleted(request.Context(), h.logger, observability.RequestCompletion{
+			AuditID:       auditID,
+			RouteID:       match.RouteID,
+			Protocol:      protocolForParser(match.Parser),
+			Method:        request.Method,
+			EscapedPath:   escapedPath,
+			StatusCode:    statusCode,
+			Duration:      time.Since(started),
+			TTFT:          ttft,
+			ForwardStatus: snapshot.forwardStatus,
+			CaptureStatus: snapshot.captureStatus,
+			ParseStatus:   snapshot.parseStatus,
+			BlockedBy:     snapshot.blockedBy,
+			BlockCode:     snapshot.blockCode,
+			ErrorCode:     snapshot.errorCode,
+		})
+	}()
+
+	session, ok = h.beginAudit(request, match)
 	if !ok {
+		completion.markAuditUnavailable(true)
 		writeJSON(response, http.StatusServiceUnavailable, auditUnavailableJSON)
 		return
+	}
+	if session == nil && h.audit != nil {
+		completion.markAuditUnavailable(false)
 	}
 	if session != nil {
 		request = request.WithContext(audit.ContextWithSession(request.Context(), session))
@@ -104,6 +162,7 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 
 	result := h.engine.Evaluate(request.Context(), request, match)
 	if result.Cancelled || request.Context().Err() != nil {
+		completion.markClientCancelled()
 		if session != nil {
 			session.MarkClientCancelled()
 		}
@@ -111,6 +170,7 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 	}
 	if result.Internal != nil {
 		blockedBy, blockCode := stableBlock(result.BlockedBy, result.BlockCode)
+		completion.markRejected(http.StatusServiceUnavailable, blockedBy, blockCode, blockCode)
 		if session != nil {
 			session.MarkRejected(http.StatusServiceUnavailable, blockedBy, blockCode)
 		}
@@ -130,6 +190,7 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		blockedBy, blockCode := stableBlock(result.BlockedBy, result.BlockCode)
 		if status < http.StatusBadRequest || status > 499 {
 			status = http.StatusServiceUnavailable
+			completion.markRejected(status, blockedBy, blockCode, blockCode)
 			if session != nil {
 				session.MarkRejected(status, blockedBy, blockCode)
 			}
@@ -137,6 +198,7 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 			writeJSON(response, status, interceptorUnavailableJSON)
 			return
 		}
+		completion.markRejected(status, blockedBy, blockCode, "")
 		if session != nil {
 			session.MarkRejected(status, blockedBy, blockCode)
 		}
@@ -161,18 +223,15 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		}
 	}
 	h.reverseProxy.ServeHTTP(response, request)
+	completion.markCompleted()
 }
 
 func (h *handler) beginAudit(request *http.Request, match routing.Match) (*audit.Session, bool) {
 	if h.audit == nil {
 		return nil, true
 	}
-	if h.audit.Mode() == audit.ModeStrict && !h.audit.Healthy() {
-		h.logger.WarnContext(request.Context(), "strict audit admission failed", "route_id", match.RouteID, "error_category", "audit_unavailable")
-		return nil, false
-	}
 	session, err := h.audit.Begin(request.Context(), request, match)
-	if err == nil {
+	if err == nil && session != nil {
 		return session, true
 	}
 	h.logger.WarnContext(request.Context(), "audit begin failed", "route_id", match.RouteID, "error_category", "audit_unavailable")
@@ -216,14 +275,27 @@ func newReverseProxy(target *url.URL, logger *slog.Logger) *httputil.ReverseProx
 				if session, ok := audit.SessionFromContext(response.Request.Context()); ok {
 					session.WrapResponseReceived(response)
 				}
+				if completion, ok := requestCompletionFromContext(response.Request.Context()); ok && response.Body != nil {
+					response.Body = &observedUpstreamBody{
+						underlying: response.Body,
+						ctx:        response.Request.Context(),
+						state:      completion,
+					}
+				}
 			}
 			return nil
 		},
 		Transport:     transport,
 		BufferPool:    newBufferPool(32 << 10),
 		FlushInterval: -1,
+		// ReverseProxy otherwise sends response-copy errors, including raw
+		// upstream error text, through the process-global logger.
+		ErrorLog: log.New(io.Discard, "", 0),
 		ErrorHandler: func(response http.ResponseWriter, request *http.Request, err error) {
 			if request.Context().Err() != nil || errors.Is(err, context.Canceled) {
+				if completion, ok := requestCompletionFromContext(request.Context()); ok {
+					completion.markClientCancelled()
+				}
 				if session, ok := audit.SessionFromContext(request.Context()); ok {
 					session.MarkClientCancelled()
 				}
@@ -239,6 +311,9 @@ func newReverseProxy(target *url.URL, logger *slog.Logger) *httputil.ReverseProx
 				body = newAPITimeoutJSON
 				category = "upstream_timeout"
 			}
+			if completion, ok := requestCompletionFromContext(request.Context()); ok {
+				completion.markNewAPIError(category)
+			}
 			if session, ok := audit.SessionFromContext(request.Context()); ok {
 				session.MarkNewAPIError(category)
 			}
@@ -246,6 +321,14 @@ func newReverseProxy(target *url.URL, logger *slog.Logger) *httputil.ReverseProx
 			writeJSON(response, status, body)
 		},
 	}
+}
+
+func protocolForParser(parser string) string {
+	protocol, _, _ := strings.Cut(parser, ".")
+	if protocol == "" {
+		return "unknown"
+	}
+	return protocol
 }
 
 func stableBlock(blockedBy, blockCode string) (string, string) {

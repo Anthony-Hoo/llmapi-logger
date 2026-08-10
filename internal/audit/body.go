@@ -172,6 +172,7 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 	}); err != nil {
 		body.faulted = true
 		body.errorCode = "start_body_failed"
+		session.recordGapReasonLocked(gapReasonForWrite(err))
 		session.markStageFaultLocked(stage, body.errorCode)
 		return body
 	}
@@ -221,6 +222,7 @@ func (session *Session) observeBodyLocked(stage *stageCapture, body *bodyCapture
 		}); err != nil {
 			body.faulted = true
 			body.errorCode = "add_chunk_failed"
+			session.recordGapReasonLocked(gapReasonForWrite(err))
 			session.markStageFaultLocked(stage, body.errorCode)
 			continue
 		}
