@@ -1,7 +1,7 @@
 # AI API 审计代理：个人单机版总体设计
 
-> 状态：可实施基线  
-> 日期：2026-08-10  
+> 状态：阶段 4 实现基线
+> 日期：2026-08-10
 > 上游需求：[AI_API_AUDIT_PROXY_KICKOFF.md](../../AI_API_AUDIT_PROXY_KICKOFF.md)
 
 ## 1. 目标与边界
@@ -54,13 +54,13 @@ internal/storage/sqlite/migrations/
 configs/
 ~~~
 
-热路径只做路由、入站拦截、流式 wrapper、长度/hash、32 KiB 字节复制和队列提交。默认 metadata 拦截器不读取 Body；只有路由显式启用 body 拦截器时才有界预读一次并原字节回放。JSON/SSE/gzip 解析仍在请求结束并落库后异步运行。
+热路径只做路由、入站拦截、流式 wrapper、长度/hash、32 KiB 字节复制和队列提交。默认 metadata 拦截器不读取 Body；只有路由显式启用 body 拦截器时才有界预读一次并原字节回放。JSON/SSE/gzip 解析仍在请求结束并落库后异步运行。启动恢复、retention 和安全日志属于后台运维能力，不改变代理字节路径。
 
 ## 4. 运行模式
 
-available：审计失败时继续转发，当前记录标 partial/failed，写结构化日志；DB 可写时插入 audit_gaps，DB 不可用时暂存一个进程内 gap 汇总，下一次成功写入时补记。进程提前退出时只能依赖日志。
+available：审计失败时继续转发，当前记录标 partial/failed，写安全 JSON 日志；DB 可写时插入 audit_gaps，短暂写失败时暂存进程内聚合 gap，后续 writer 事务成功时补记。启动时 DB/key 不可用不会在进程内复杂重建依赖，修复后需要重启；故障期间若进程退出只能依赖日志。
 
-strict：每个白名单请求访问 NewAPI 前，确认 key 可读、DB/writer 可写、队列健康，并同步提交 audit_records 起始行；失败返回 503，NewAPI 不应收到请求。
+strict：每个白名单请求访问 NewAPI 前，必须使用已加载的 key 同步提交 audit_records 起始行；本次提交成功才证明当前 DB/writer 可写，失败返回 503，NewAPI 不应收到请求。上一批写入留下的健康快照不单独决定 admission。
 
 strict 只保证请求开始时 fail-closed。通过 admission 后仍可能遇到崩溃、磁盘故障或最终批事务失败；首版不逐块 fsync，不宣称绝对零缺口，也不能撤回已经发送的响应。
 
@@ -112,7 +112,7 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 响应生成最小摘要，并 UPSERT parsed_results。重启时扫描 pending 记录重新入队；解析不重建完整对话或全文。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health、ready，以及以后若启用的 metrics，统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。阶段 3 的数据功能只做列表、详情、原始请求/响应 Body 和简单筛选，UI 固定使用 React + TypeScript + Vite + Tailwind CSS + shadcn/ui。单条删除、ZIP/批量导出、gaps UI 和 reparse 管理端点暂不实现。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health 和 ready 统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。数据功能只做列表、详情、原始请求/响应 Body 和简单筛选，UI 固定使用 React + TypeScript + Vite + Tailwind CSS + shadcn/ui。首版不实现 metrics、导出、DELETE、gaps UI 或 reparse 管理端点。
 
 ## 9. 模块索引
 
@@ -129,40 +129,30 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 09 | [本地加密、脱敏与管理面保护](09-security-encryption-and-redaction.md) |
 | 10 | [查询 API 与最小 Web UI](10-query-api-and-minimal-web-ui.md) |
 | 11 | [NewAPI Token 只读关联](11-newapi-token-readonly-linking.md) |
-| 12 | [保留与可选单条 JSON 导出](12-retention-export-and-maintenance.md) |
+| 12 | [保留清理](12-retention-and-maintenance.md) |
 | 13 | [日志、健康检查与生命周期](13-observability-health-and-lifecycle.md) |
-| 14 | [测试与性能检查](14-test-benchmark-and-fault-injection.md) |
+| 14 | [测试与发布检查](14-test-benchmark-and-fault-injection.md) |
 | 15 | [Nginx 与部署](15-nginx-and-deployment-integration.md) |
 | 16 | [开源项目参考取舍](16-open-source-reference-assessment.md) |
 | 17 | [入站请求拦截链](17-request-interceptor-chain.md) |
 
-## 10. 个人开发计划：4–6 周兼职
+## 10. 四阶段实施范围
 
 ### 阶段 1：代理与配置
 
-建立 Go 工程、精简 YAML、route matcher、interceptor registry/chain、ReverseProxy、fake NewAPI 和透明性测试。完成 metadata 拦截、固定拒绝响应、JSON、gzip、binary、Query/Header、非白名单 404。
-
-退出：白名单透明转发，未知路径不产生 audit。
+配置、route matcher、interceptor chain、ReverseProxy、SSE flush 和透明性测试。白名单透明转发，未知路径不产生 audit。
 
 ### 阶段 2：SQLite 与证据
 
-实现九表 migration、单 writer、四阶段 tap、length/hash、Header/Trailer、主密钥 AES-GCM、available/strict admission。
-
-退出：完整请求四阶段可比较；DB/WAL 找不到测试 secret 明文。
+九表 migration、单 writer、四阶段证据、AES-GCM、available/strict admission。完整请求四阶段可比较，DB/WAL 不含测试 secret 明文。
 
 ### 阶段 3：Parser 与最小页面
 
-实现 OpenAI、Anthropic 和 Gemini 常见 JSON/SSE 的最小摘要解析，使用单 worker、内存队列和 pending 恢复；管理面只提供列表、详情、raw 请求/响应 Body，并使用 React + TypeScript + Vite + Tailwind CSS + shadcn/ui 构建页面。
-
-本阶段不做单条删除、ZIP/批量导出、gaps UI、reparse 管理端点或复杂全文重建。
-
-退出：parser 失败不影响响应；三协议常见 JSON/SSE 能得到可查询摘要；loopback 管理 API 未带 Bearer token 时返回 401。
+OpenAI、Anthropic、Gemini 常见 JSON/SSE 最小解析；管理面提供列表、详情、raw Body 和 React + shadcn/ui 页面。parser 失败不影响响应，loopback 管理 API 未带 Bearer token 时返回 401。
 
 ### 阶段 4：最小运维收口
 
-实现按 retention_days 清理旧审计；如果个人使用确有需要，再增加可选的单条 JSON 导出。阶段 4 不扩展 ZIP、批量导出、批量删除或后台导出任务。
-
-退出：到期且已终结的记录可小批量清理，现有透明代理、审计、解析和查询能力保持不变。
+实现启动 interrupted/partial 恢复、简单聚合 gap、retention 小批量级联清理、安全 JSON 请求日志、三态 readiness、Docker/Compose/Nginx 示例和 Windows/Linux CGO=0 构建。首版不增加 metrics、导出、DELETE、自动 VACUUM 或复杂运行时重连。
 
 ## 11. 最小验收
 
@@ -176,7 +166,11 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - 拦截链首个 reject 会在调用 NewAPI 前返回；记录 blocked_by/block_code，后续 NewAPI 阶段不存在。
 - 未启用 Body 拦截器时保持流式；启用后允许请求的 Body 回放字节与原请求完全一致，超限固定为 `413` 和 `block_code=body_too_large`。
 - 重启后 pending parser 恢复，未完成 audit 标 partial。
-- 管理面只暴露阶段 3 最小查询范围，loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token。
+- 只有实际恢复未终结记录时增加 process_exit 聚合 gap，重复恢复幂等。
+- retention 只小批量删除已终结且非 processing 的过期记录，并级联子表。
+- 请求完成日志不含 Query、Header value、Body、token、key 或底层错误文本。
+- healthy/degraded/not_ready 与 available/strict 语义一致。
+- 管理面只暴露最小查询范围，loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token。
 
 ## 12. 文档优先级
 

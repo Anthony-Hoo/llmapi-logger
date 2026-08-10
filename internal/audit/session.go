@@ -33,6 +33,21 @@ type stageCapture struct {
 	errorCode     string
 }
 
+// TerminalSummary is the immutable, non-sensitive request outcome available
+// after Finish returns. It contains no Header values, Body bytes, Query, keys,
+// tokens, or underlying error text.
+type TerminalSummary struct {
+	AuditID       string
+	StatusCode    int
+	HasStatusCode bool
+	ForwardStatus string
+	CaptureStatus string
+	ParseStatus   string
+	BlockedBy     string
+	BlockCode     string
+	ErrorCode     string
+}
+
 // Session owns the small, concurrency-safe state for one audit. It never
 // retains complete request or response bodies.
 type Session struct {
@@ -46,6 +61,7 @@ type Session struct {
 	request  context.Context
 	writeCtx context.Context
 	notify   func(string) bool
+	gaps     *gapBuffer
 
 	mu            sync.Mutex
 	stages        map[string]*stageCapture
@@ -55,13 +71,15 @@ type Session struct {
 	blockedBy     *string
 	blockCode     *string
 	errorCode     *string
+	terminal      *TerminalSummary
+	gapRecorded   bool
 
 	finishOnce sync.Once
 	finishErr  error
 }
 
 func newSession(manager *Manager, requestContext context.Context, auditID, routeID string, started time.Time) *Session {
-	return &Session{
+	session := &Session{
 		auditID:       auditID,
 		routeID:       routeID,
 		started:       started,
@@ -75,6 +93,10 @@ func newSession(manager *Manager, requestContext context.Context, auditID, route
 		stages:        make(map[string]*stageCapture, 4),
 		forwardStatus: sqlite.ForwardInProgress,
 	}
+	if manager.mode == ModeAvailable {
+		session.gaps = manager.gaps
+	}
+	return session
 }
 
 // ID returns the opaque audit identifier safe for logs and correlation.
@@ -83,6 +105,20 @@ func (session *Session) ID() string {
 		return ""
 	}
 	return session.auditID
+}
+
+// Terminal returns a copy of the finalized non-sensitive outcome. The second
+// result is false until Finish has completed.
+func (session *Session) Terminal() (TerminalSummary, bool) {
+	if session == nil {
+		return TerminalSummary{}, false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.terminal == nil {
+		return TerminalSummary{}, false
+	}
+	return *session.terminal, true
 }
 
 // WrapRequestReceived starts the inbound stage, stores its Header values, and
@@ -266,6 +302,7 @@ func (session *Session) finish() error {
 		if err := session.store.FinishStage(session.writeCtx, finish); err != nil {
 			writeErrors = append(writeErrors, fmt.Errorf("finish stage %s: %w", finish.Stage, err))
 			captureStatus = sqlite.CapturePartial
+			session.recordGapReason(gapReasonForWrite(err))
 			session.logCaptureFailure(finish.Stage, "finish_stage_failed")
 		}
 	}
@@ -282,10 +319,32 @@ func (session *Session) finish() error {
 	}
 	if err := session.store.FinishAudit(session.writeCtx, finish); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
+		captureStatus = sqlite.CapturePartial
+		session.recordGapReason(gapReasonForWrite(err))
 		session.logCaptureFailure("", "finish_audit_failed")
 	} else if parseStatus == sqlite.ParsePending && session.notify != nil {
 		_ = session.notify(session.auditID)
 	}
+	terminalErrorCode := valueOrEmpty(errorCode)
+	if len(writeErrors) != 0 && terminalErrorCode == "" {
+		terminalErrorCode = "audit_finalize_failed"
+	}
+	terminal := TerminalSummary{
+		AuditID:       session.auditID,
+		ForwardStatus: forwardStatus,
+		CaptureStatus: captureStatus,
+		ParseStatus:   parseStatus,
+		BlockedBy:     valueOrEmpty(blockedBy),
+		BlockCode:     valueOrEmpty(blockCode),
+		ErrorCode:     terminalErrorCode,
+	}
+	if statusCode != nil {
+		terminal.StatusCode = *statusCode
+		terminal.HasStatusCode = true
+	}
+	session.mu.Lock()
+	session.terminal = &terminal
+	session.mu.Unlock()
 	return errors.Join(writeErrors...)
 }
 
@@ -377,6 +436,7 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 		stage.faulted = true
 		stage.errorCode = "start_stage_failed"
 		session.captureFault = true
+		session.recordGapReasonLocked(gapReasonForWrite(err))
 		session.logCaptureFailure(name, stage.errorCode)
 		return stage
 	}
@@ -432,6 +492,7 @@ func (session *Session) addHeadersLocked(stage *stageCapture, kind string, heade
 		}
 	}
 	if err := session.store.AddHeaders(session.writeCtx, values); err != nil {
+		session.recordGapReasonLocked(gapReasonForWrite(err))
 		session.markStageFaultLocked(stage, "add_headers_failed")
 	}
 }
@@ -442,7 +503,27 @@ func (session *Session) markStageFaultLocked(stage *stageCapture, errorCode stri
 		stage.errorCode = errorCode
 	}
 	session.captureFault = true
+	if errorCode == "header_encryption_failed" || errorCode == "body_encryption_failed" {
+		session.recordGapReasonLocked(sqlite.GapReasonEncryption)
+	}
 	session.logCaptureFailure(stage.name, errorCode)
+}
+
+func (session *Session) recordGapReason(reason string) {
+	if session == nil {
+		return
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	session.recordGapReasonLocked(reason)
+}
+
+func (session *Session) recordGapReasonLocked(reason string) {
+	if session == nil || session.gaps == nil || session.gapRecorded {
+		return
+	}
+	session.gapRecorded = true
+	session.gaps.record(reason)
 }
 
 func (session *Session) logCaptureFailure(stage, errorCode string) {
@@ -517,4 +598,11 @@ func cloneString(value *string) *string {
 		return nil
 	}
 	return stringPointer(*value)
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

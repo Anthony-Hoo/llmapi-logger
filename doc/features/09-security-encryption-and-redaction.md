@@ -10,12 +10,12 @@
 
 - 管理面默认监听 `127.0.0.1:8081`。
 - `admin_token` 在任何 `admin_listen` 上都必填，包括 loopback；为空或包含空白字符时启动失败。
-- `/api/v1/*`、`/healthz`、`/readyz` 和 `/metrics` 全部要求静态 Bearer token。
+- `/api/v1/*`、`/healthz` 和 `/readyz` 全部要求静态 Bearer token。
 - 只有本审计代理不含数据的静态管理 UI shell 和其 CSS/JS/font 资源可以免 token 加载。
 
-本节的 health、ready、metrics、API 和 UI 都属于审计代理的独立管理 listener，不是 NewAPI 自身路径。NewAPI health、login、admin、models、UI 和其他非 LLM 白名单请求由 Nginx 直连，不进入代理、拦截或审计。
+本节的 health、ready、API 和 UI 都属于审计代理的独立管理 listener，不是 NewAPI 自身路径。NewAPI health、login、admin、models、UI 和其他非 LLM 白名单请求由 Nginx 直连，不进入代理、拦截或审计。
 - SQLite、WAL、备份中的 Request-URI、Header、Body chunk 和 parsed JSON 必须是密文。
-- 普通运行日志、错误响应、指标标签和列表 API 不得包含凭据或 Body 内容。
+- 普通运行日志、错误响应和列表 API 不得包含凭据或 Body 内容。
 - 同时取得进程权限、主密钥和数据库的本机管理员不在首版威胁模型内。
 
 ## 3. 配置
@@ -26,7 +26,7 @@
 
 ## 4. 管理面鉴权
 
-除本审计代理的静态管理 UI shell 资源外，管理 listener 上的 API、health、ready 和 metrics 请求都必须携带：
+除本审计代理的静态管理 UI shell 资源外，管理 listener 上的 API、health 和 ready 请求都必须携带：
 
 ~~~text
 Authorization: Bearer <configured-token>
@@ -36,7 +36,7 @@ Authorization: Bearer <configured-token>
 
 本审计代理的静态管理 UI shell 只能提供 HTML/CSS/JS/font，不能内嵌审计数据、运行状态、配置 secret 或 token。React 页面由用户输入 token，token 只保存在当前页面的 JavaScript 内存中；不得写入 localStorage、sessionStorage、Cookie、IndexedDB、URL 或 Service Worker cache。
 
-首版只有一个静态 token，不区分读、删、导出等权限，也不记录单独的敏感访问事件。
+首版只有一个静态 token，不区分接口权限，也不记录单独的敏感访问事件。
 
 ## 5. 主密钥
 
@@ -47,7 +47,7 @@ Authorization: Bearer <configured-token>
 - 数据库已有审计数据但 key 文件缺失时禁止生成新 key。
 - key 长度错误或文件不可读时，审计能力标记为不可用：available 仍可转发但不落敏感证据，strict 返回 `503`。
 
-进程只在内存中持有一份主密钥，不把它写入 SQLite、诊断包或导出文件。
+进程只在内存中持有一份主密钥，不把它写入 SQLite、诊断包或普通日志。
 
 ## 6. 密文格式
 
@@ -95,7 +95,7 @@ type Cipher interface {
 ## 8. 脱敏规则
 
 - 列表和详情元数据只展示 Header 名、长度、hash 或 `[REDACTED]`，不自动解密 value。
-- 原始请求/响应与导出属于用户显式操作，按管理面监听规则放行后才解密。
+- 原始请求/响应属于用户显式操作，按管理面监听规则放行后才解密。
 - Query 中配置为敏感的键在日志中只保留键名。
 - Token 关联只落 `newapi_token_id`、`token_name`，不落 NewAPI token key。
 - 错误日志只记录 `audit_id`、组件和错误类别，不记录明文或密文 BLOB。
@@ -104,19 +104,19 @@ type Cipher interface {
 
 - 启动阶段无法加载主密钥：不以明文降级；available 继续代理并报告审计不可用，strict 保持 not ready。
 - 随机数源或加密失败：本条证据不写入；strict 模式拒绝新请求，available 模式继续转发并记录 `audit_gaps`。
-- 解密认证失败：原始读取或导出返回 `500`，日志记录 `decrypt_failed` 和 `audit_id`。
+- 解密认证失败：原始读取返回 `500`，日志记录 `decrypt_failed` 和 `audit_id`。
 - Bearer token 配置为空：无论监听地址为何，配置校验都失败。
 - 不允许忽略 GCM tag 错误，也不返回部分解密内容。
 
 ## 10. Key 备份
 
-数据库与 key 文件必须一起备份。首版不提供轮换、重写或多 key 兼容工具；key 丢失后已有密文无法恢复。确需更换时，先导出需要保留的数据，再创建新的空数据库和 key。
+数据库与 key 文件必须一起备份。首版不提供轮换、重写或多 key 兼容工具；key 丢失后已有密文无法恢复。确需更换时，保留旧数据库与旧 key 的完整备份，再创建新的空数据库和 key。在线数据库必须使用 SQLite `.backup`，详见[部署备份说明](../deployment/backup-and-restore.md)。
 
 ## 11. 测试
 
 - 首次启动生成 32-byte key，文件权限符合平台要求。
 - loopback 和非 loopback 下，空 token 都导致启动失败；正确和错误 token 分别得到成功与 `401`。
-- 未携带 token 时本审计代理的静态管理 UI shell 可加载，但 API、health、ready 和 metrics 均返回 `401`。
+- 未携带 token 时本审计代理的静态管理 UI shell 可加载，但 API、health 和 ready 均返回 `401`。
 - 页面刷新后 token 消失，浏览器持久化存储、Cookie、URL 和静态资源中均无 token。
 - 相同明文重复加密得到不同 BLOB，且都可解密。
 - 篡改 nonce、ciphertext、tag 或 AAD 后解密失败。

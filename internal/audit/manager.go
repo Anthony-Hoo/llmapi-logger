@@ -38,6 +38,7 @@ type Store interface {
 	AddChunk(context.Context, sqlite.BodyChunk) error
 	FinishStage(context.Context, sqlite.StageFinish) error
 	FinishAudit(context.Context, sqlite.AuditFinish) error
+	InsertAuditGaps(context.Context, []sqlite.AuditGap) error
 }
 
 // Sink is the proxy-facing audit admission interface. A nil Session always
@@ -58,6 +59,7 @@ type Manager struct {
 	now    func() time.Time
 	random io.Reader
 	cause  error
+	gaps   *gapBuffer
 
 	notifyMu sync.RWMutex
 	notify   func(string) bool
@@ -77,14 +79,16 @@ func NewManager(store Store, cipher security.Cipher, mode string, logger *slog.L
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Manager{
+	manager := &Manager{
 		store:  store,
 		cipher: cipher,
 		mode:   mode,
 		logger: logger,
 		now:    time.Now,
 		random: rand.Reader,
-	}, nil
+	}
+	manager.gaps = newGapBuffer(store, logger, func() time.Time { return manager.now() })
+	return manager, nil
 }
 
 // NewUnavailable constructs a manager that preserves configured admission
@@ -97,13 +101,15 @@ func NewUnavailable(mode string, cause error, logger *slog.Logger) *Manager {
 	if cause == nil {
 		cause = ErrUnavailable
 	}
-	return &Manager{
+	manager := &Manager{
 		mode:   mode,
 		logger: logger,
 		now:    time.Now,
 		random: rand.Reader,
 		cause:  cause,
 	}
+	manager.gaps = newGapBuffer(nil, logger, func() time.Time { return manager.now() })
+	return manager
 }
 
 // Mode returns the configured admission mode.
@@ -117,6 +123,28 @@ func (manager *Manager) Mode() string {
 // Healthy reports whether new audit parents can currently be admitted.
 func (manager *Manager) Healthy() bool {
 	return manager != nil && manager.store != nil && manager.cipher != nil && manager.cause == nil && manager.store.Healthy()
+}
+
+// StartGapFlusher begins the small best-effort loop that persists aggregate
+// available-mode gaps. It does not rebuild unavailable startup dependencies.
+func (manager *Manager) StartGapFlusher(ctx context.Context) {
+	if manager != nil && manager.gaps != nil {
+		manager.gaps.start(ctx)
+	}
+}
+
+// CloseGaps stops the flusher and makes one final bounded persistence attempt.
+func (manager *Manager) CloseGaps(ctx context.Context) {
+	if manager != nil && manager.gaps != nil {
+		manager.gaps.close(ctx)
+	}
+}
+
+func (manager *Manager) recordGap(reason string) {
+	if manager == nil || manager.mode != ModeAvailable || manager.gaps == nil {
+		return
+	}
+	manager.gaps.record(reason)
 }
 
 // SetCompletionNotifier installs the non-blocking callback used to enqueue a
@@ -150,10 +178,10 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		return nil, errors.New("audit: nil request")
 	}
 	if manager == nil || manager.store == nil || manager.cipher == nil || manager.cause != nil {
+		if manager != nil {
+			manager.recordGap(sqlite.GapReasonDBUnavailable)
+		}
 		return nil, manager.unavailableError()
-	}
-	if manager.mode == ModeStrict && !manager.store.Healthy() {
-		return nil, fmt.Errorf("%w: store is unhealthy", ErrUnavailable)
 	}
 
 	auditID, err := generateAuditID(manager.random)
@@ -166,10 +194,12 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 	}
 	requestURIAdditionalData, err := security.AAD(auditID, "request_uri")
 	if err != nil {
+		manager.recordGap(sqlite.GapReasonEncryption)
 		return nil, fmt.Errorf("audit: request URI AAD: %w", err)
 	}
 	requestURIEncrypted, err := manager.cipher.Encrypt(requestURIAdditionalData, []byte(requestURI))
 	if err != nil {
+		manager.recordGap(sqlite.GapReasonEncryption)
 		return nil, fmt.Errorf("audit: encrypt request URI: %w", err)
 	}
 
@@ -193,12 +223,27 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		ParseStatus:   sqlite.ParsePending,
 	}
 	if err := manager.store.BeginAudit(ctx, record); err != nil {
+		manager.recordGap(gapReasonForWrite(err))
 		return nil, fmt.Errorf("audit: begin record: %w", err)
+	}
+	if manager.gaps != nil {
+		manager.gaps.trigger()
 	}
 
 	session := newSession(manager, ctx, auditID, match.RouteID, started)
 	session.WrapRequestReceived(request)
 	return session, nil
+}
+
+func gapReasonForWrite(err error) string {
+	switch {
+	case errors.Is(err, sqlite.ErrQueueFull):
+		return sqlite.GapReasonQueueFull
+	case errors.Is(err, sqlite.ErrClosed):
+		return sqlite.GapReasonDBUnavailable
+	default:
+		return sqlite.GapReasonWrite
+	}
 }
 
 func (manager *Manager) unavailableError() error {

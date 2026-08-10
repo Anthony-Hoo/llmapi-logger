@@ -22,6 +22,9 @@ const (
 	writeClaimPendingParse
 	writeReleaseProcessingParse
 	writeSaveParsedResult
+	writeRecoverInterruptedAudits
+	writeInsertAuditGaps
+	writeDeleteExpired
 )
 
 type writeRequest struct {
@@ -225,6 +228,12 @@ func applyWrite(transaction *sql.Tx, request writeRequest) error {
 		return releaseProcessingParse(transaction, request.data.(string))
 	case writeSaveParsedResult:
 		return saveParsedResult(transaction, request.data.(ParsedResult))
+	case writeRecoverInterruptedAudits:
+		return recoverInterruptedAudits(transaction, request.data.(*recoveryRequest))
+	case writeInsertAuditGaps:
+		return insertAuditGaps(transaction, request.data.([]AuditGap))
+	case writeDeleteExpired:
+		return deleteExpired(transaction, request.data.(*retentionRequest))
 	default:
 		return fmt.Errorf("sqlite writer: unknown operation %d", request.kind)
 	}

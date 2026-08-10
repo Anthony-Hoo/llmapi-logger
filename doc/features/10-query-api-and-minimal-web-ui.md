@@ -1,24 +1,24 @@
 # 模块 10：查询 API 与最小 React UI
 
-## 1. 目标与阶段 3 范围
+## 1. 目标与范围
 
 本模块只为个人单机部署提供三个数据能力：审计列表、单条详情、原始请求/响应 Body 读取。页面用于快速查看代理实际观察到的 LLM API 请求，不承担通用日志平台或运维控制台职责。
 
-阶段 3 明确不做：
+首版明确不做：
 
 - 单条或批量删除 API。
-- ZIP、筛选结果或批量导出。
+- 在线导出。
 - `audit_gaps` 查询页面和 gaps UI。
 - reparse 管理端点。
 - Header value、完整 parsed JSON 或对话全文的在线重建。
 
-阶段 4 只计划 retention，以及按实际个人需求决定是否增加单条 JSON 导出；这些能力不属于本模块的阶段 3 接口。
+阶段 4 只增加 retention，不扩展本模块的只读查询接口。
 
 ## 2. Listener 与访问控制
 
 - 管理面默认监听 `127.0.0.1:8081`，与代理数据面使用独立 `http.Server` 和 mux。
 - `admin_token` 在 loopback 和非 loopback 上都必填；为空或包含空白字符时服务拒绝启动。
-- `/api/v1/*`、`/healthz`、`/readyz` 以及以后可能注册的 `/metrics` 都经过同一个 Bearer middleware，规则见[模块 09](09-security-encryption-and-redaction.md)。
+- `/api/v1/*`、`/healthz` 和 `/readyz` 都经过同一个 Bearer middleware，规则见[模块 09](09-security-encryption-and-redaction.md)。
 - `/ui/` 的 HTML shell 与静态资源可以无鉴权加载，但不得包含审计数据、运行状态或 secret。
 - 管理路由只注册到管理面，不得出现在代理数据面。
 
@@ -75,7 +75,7 @@ request 读取 `request_sent_to_newapi`，response 读取 `response_received_fro
 - 详情：展示审计摘要、四阶段中实际存在的阶段、Header 名称、Body 摘要和 parser 摘要。
 - raw 下载：用户显式点击后下载请求或响应 Body，不自动加载大内容。
 
-组件优先复用 shadcn/ui 的 `Button`、`Input`、`Table`、`Card`、`Badge`、`Alert`、`Skeleton` 和 `Separator`。阶段 3 不增加删除确认框、导出对话框或 gaps 提示区域。
+组件优先复用 shadcn/ui 的 `Button`、`Input`、`Table`、`Card`、`Badge`、`Alert`、`Skeleton` 和 `Separator`。页面不增加维护或 gaps 控制面。
 
 ## 8. 错误与资源控制
 

@@ -41,7 +41,7 @@ type Snapshot map[string]TokenInfo // key 是 NewAPI token 明文，仅存在内
 
 新 map 完整构建后再通过 `atomic.Value` 一次替换，转发 goroutine 不等待数据库 I/O，也不持有 reload 锁。
 
-原始 token key 不写入本项目 SQLite、日志、指标标签、错误消息或导出。旧 snapshot 被替换后不再引用，交给 Go 运行时回收。
+原始 token key 不写入本项目 SQLite、日志或错误消息。旧 snapshot 被替换后不再引用，交给 Go 运行时回收。
 
 若数据源中同一个 key 对应多个不同 id，该 key 视为歧义并从 map 中移除，同时记录不含 key 的 warning 计数。
 
@@ -119,7 +119,7 @@ warning 只在状态变化时输出，避免每个请求或每个周期刷屏。
 - 重复 key 不关联，且日志不包含该 key。
 - 四种凭据入口及优先级符合约定。
 - rejected audit、缺少 request_sent_to_newapi 的 audit 和 Nginx 直连路径均不查询内存 map、不写 token_links。
-- 搜索本项目 DB、日志和导出，确认没有 NewAPI token key。
+- 搜索本项目 DB 和日志，确认没有 NewAPI token key。
 - token 改名后新请求使用新名称，历史 `token_links` 不变。
 
 ## 12. 实施步骤

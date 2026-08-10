@@ -1,0 +1,53 @@
+services:
+  nginx:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./configs/nginx:/etc/nginx/conf.d:ro
+    depends_on:
+      - audit-proxy
+      - newapi
+    networks:
+      - backend
+
+  audit-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llmapi-logger:local
+    restart: unless-stopped
+    command: ["--config", "/etc/audit-proxy/config.yaml"]
+    ports:
+      - "127.0.0.1:8081:8081"
+    expose:
+      - "8080"
+    volumes:
+      - audit-data:/data
+      - ./configs/audit-proxy.docker.yaml:/etc/audit-proxy/config.yaml:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  newapi:
+    image: calciumion/new-api:latest
+    restart: unless-stopped
+    expose:
+      - "3000"
+    volumes:
+      - newapi-data:/data
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  audit-data:
+  newapi-data:

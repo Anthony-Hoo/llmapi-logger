@@ -42,11 +42,27 @@ const (
 
 	HeaderKindHeader  = "header"
 	HeaderKindTrailer = "trailer"
+
+	GapReasonDBUnavailable = "db_unavailable"
+	GapReasonQueueFull     = "queue_full"
+	GapReasonEncryption    = "encryption_error"
+	GapReasonWrite         = "write_error"
+	GapReasonProcessExit   = "process_exit"
+
+	GapDetailDBUnavailable = "audit_storage_unavailable"
+	GapDetailQueueFull     = "audit_writer_queue_full"
+	GapDetailEncryption    = "audit_encryption_failed"
+	GapDetailWrite         = "audit_write_failed"
+	GapDetailProcessExit   = "interrupted_audits_recovered"
 )
 
 const (
 	writerQueueCapacity = 1024
 	writerBatchSize     = 64
+
+	// RetentionBatchLimit keeps each maintenance write small enough for the
+	// normal audit writer to resume promptly.
+	RetentionBatchLimit = 200
 )
 
 var (
@@ -126,6 +142,24 @@ type BodyChunk struct {
 	PlaintextLength int
 	ObservedAtNS    int64
 	DataEnc         []byte
+}
+
+// AuditGap is an aggregate indication that complete per-request evidence was
+// unavailable. Reason and Detail are stable codes; arbitrary error text is
+// deliberately rejected before it can reach SQLite.
+type AuditGap struct {
+	StartedAtNS  int64
+	EndedAtNS    int64
+	Reason       string
+	RequestCount int
+	Detail       string
+	CreatedAtNS  int64
+}
+
+// RetentionResult reports rows removed by one bounded writer transaction.
+type RetentionResult struct {
+	DeletedAudits int
+	DeletedGaps   int
 }
 
 // BodyFinish is optionally included in StageFinish when a body stream was
@@ -264,6 +298,34 @@ func validateChunk(chunk BodyChunk) error {
 		return errors.New("sqlite: invalid body chunk")
 	}
 	return nil
+}
+
+func validateAuditGap(gap AuditGap) error {
+	if gap.StartedAtNS <= 0 || gap.EndedAtNS < gap.StartedAtNS || gap.CreatedAtNS <= 0 || gap.RequestCount <= 0 {
+		return errors.New("sqlite: invalid audit gap time range or count")
+	}
+	wantDetail, ok := gapDetailForReason(gap.Reason)
+	if !ok || gap.Detail != wantDetail {
+		return errors.New("sqlite: invalid audit gap reason or detail")
+	}
+	return nil
+}
+
+func gapDetailForReason(reason string) (string, bool) {
+	switch reason {
+	case GapReasonDBUnavailable:
+		return GapDetailDBUnavailable, true
+	case GapReasonQueueFull:
+		return GapDetailQueueFull, true
+	case GapReasonEncryption:
+		return GapDetailEncryption, true
+	case GapReasonWrite:
+		return GapDetailWrite, true
+	case GapReasonProcessExit:
+		return GapDetailProcessExit, true
+	default:
+		return "", false
+	}
 }
 
 func validateStageFinish(finish StageFinish) error {

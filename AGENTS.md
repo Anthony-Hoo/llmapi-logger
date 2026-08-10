@@ -28,6 +28,8 @@ NewAPI 的健康检查、登录、管理、模型列表、前端页面及其他�
 ```text
 AI_API_AUDIT_PROXY_KICKOFF.md   # 原始需求
 doc/features/                   # 总体方案和模块设计
+doc/deployment/                 # 单机、容器与备份说明
+Dockerfile / compose.yaml       # 多阶段镜像与单机 Compose
 
 cmd/audit-proxy/                # 程序入口
 internal/
@@ -36,22 +38,20 @@ internal/
   routing/                      # 路径白名单
   interceptor/                  # 入站拦截器、注册表和执行链
   proxy/                        # HTTP 反向代理
-  audit/                        # 审计会话和状态
-  capture/                      # Body、长度和哈希采集
+  audit/                        # 审计会话、阶段与 Body 采集
   storage/sqlite/               # SQLite 读写和内嵌 migration
   parser/                       # OpenAI/Anthropic/Gemini 解析
   security/                     # 本地 AES-GCM 加密
-  tokenlink/newapi/             # 可选 Token 名称关联
   query/                        # 查询 API
+  retention/                    # 简单保留清理
+  observability/                # 安全 JSON 请求日志
   web/
     frontend/                   # React、Vite、shadcn/ui 源码
     dist/                       # 构建后由 Go embed 的静态产物
-  retention/                    # 简单保留清理
-  observability/                # 日志和健康检查
 
-configs/                        # 示例配置
-doc/deployment/                 # 部署说明
-tests/                          # 单元、集成和故障测试
+configs/                        # 应用与 Nginx 示例配置
+scripts/                        # Windows/Linux 发布构建
+tests/                          # 跨模块集成测试
 ```
 
 ## 架构边界
@@ -60,12 +60,13 @@ tests/                          # 单元、集成和故障测试
 - `interceptor` 在 route match 后、访问 NewAPI 前运行；首个拒绝立即短路，模块异常默认拒绝。
 - 拦截器只作用于 Nginx 选入且进程内 Matcher 命中的 LLM API 白名单；NewAPI 的健康检查、登录、管理、模型列表、前端页面和其他接口由 Nginx 直连，不进入本程序、不审计也不拦截。
 - 默认拦截器只读请求元数据；需要 Body 的模块必须显式声明上限，并由框架统一预读和原字节回放，超限固定为 `413` 和 `block_code=body_too_large`。
-- `capture` 只处理字节、长度、哈希和完整性状态。
+- `audit` 的采集层只处理字节、长度、哈希和完整性状态。
 - parser 在请求完成后异步运行，失败不影响转发。
 - SQLite 使用单 writer goroutine，查询使用独立只读连接。
+- 启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
 - 管理端默认监听 `127.0.0.1`，但本机和非 loopback 访问管理 API 都必须使用同一个静态 Token。
 - 敏感 Header、Body、Query 和解析全文使用一个本地 AES-256-GCM key 加密。
-- Token 关联只做名称补充，不参与鉴权或转发判断。
+- 普通 JSON 日志只记录稳定状态和耗时，不记录 Query、Header value、Body、Token、key 或底层错误文本。
 
 ## 开发原则
 

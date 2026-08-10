@@ -20,6 +20,7 @@ import (
 	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/proxy"
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/retention"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
@@ -34,7 +35,9 @@ type App struct {
 	adminServer  *web.Server
 	adminAddress string
 	parserWorker *parser.Worker
+	retention    *retention.Runner
 	auditSink    audit.Sink
+	auditManager *audit.Manager
 	auditStore   *sqlite.Store
 	cipher       security.Cipher
 	mode         string
@@ -86,6 +89,7 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		},
 		adminAddress: configuration.AdminListen,
 		auditSink:    runtime.sink,
+		auditManager: runtime.manager,
 		auditStore:   runtime.store,
 		cipher:       runtime.cipher,
 		mode:         configuration.Mode,
@@ -106,6 +110,13 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		}
 		if runtime.manager != nil {
 			runtime.manager.SetCompletionNotifier(application.parserWorker.Notify)
+		}
+	}
+	if runtime.store != nil && configuration.RetentionDays > 0 {
+		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
+		if err != nil {
+			_ = application.closeComponents()
+			return nil, fmt.Errorf("assemble retention runner: %w", err)
 		}
 	}
 
@@ -133,6 +144,12 @@ func (application *App) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	defer application.closeComponents()
+	if application.auditManager != nil {
+		application.auditManager.StartGapFlusher(ctx)
+	}
+	if application.retention != nil {
+		application.retention.Start(ctx)
+	}
 
 	if application.parserWorker != nil {
 		if err := application.parserWorker.Start(ctx); err != nil {
@@ -212,9 +229,17 @@ func (application *App) Close() error {
 
 func (application *App) closeComponents() error {
 	application.closeOnce.Do(func() {
+		if application.retention != nil {
+			application.retention.Close()
+		}
 		if application.parserWorker != nil {
 			application.parserWorker.Close()
 			application.parserHealthy.Store(false)
+		}
+		if application.auditManager != nil {
+			flushContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			application.auditManager.CloseGaps(flushContext)
+			cancel()
 		}
 		if application.auditStore != nil {
 			application.closeErr = application.auditStore.Close()
@@ -286,31 +311,45 @@ func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntim
 	store, err := sqlite.Open(ctx, configuration.DBPath)
 	if err != nil {
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
-		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
 	}
 	hasAudits, err := store.HasAudits(ctx)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
-		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
+	recovered, recoveryErr := store.RecoverInterruptedAudits(ctx, time.Now().UnixNano())
+	if recoveryErr != nil {
+		_ = store.Close()
+		logger.Warn("interrupted audit recovery failed", "error_category", "recovery_failed")
+		manager := audit.NewUnavailable(configuration.Mode, recoveryErr, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	} else if recovered > 0 {
+		logger.Info("interrupted audits recovered", "recovered_audits", recovered)
 	}
 	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit key unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
-		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
 	}
 	cipher, err := security.NewAESGCM(key)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit cipher unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
-		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
 	}
 	manager, err := audit.NewManager(store, cipher, configuration.Mode, logger)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable")
-		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
+		unavailable := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: unavailable, manager: unavailable}
 	}
 	return auditRuntime{sink: manager, manager: manager, store: store, cipher: cipher}
 }

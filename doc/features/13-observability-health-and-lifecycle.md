@@ -1,140 +1,90 @@
-# 模块 13：日志、健康检查与进程生命周期
+# 模块 13：安全日志、健康检查与生命周期
 
 ## 1. 目标
 
-本模块只提供个人部署需要的基础运行信息：
+阶段 4 只补齐个人部署需要的运行能力：一条安全的请求完成日志、存活/就绪检查、异常退出恢复和有界关闭。首版不提供指标端点、tracing、告警平台或运行时重建整套依赖。
 
-- 能看出代理是否正常转发。
-- 能看出审计数据库、加密 key 和后台解析是否可用。
-- 进程退出时尽量完成在途请求和写队列。
-- 日志不泄露 Header、Body、Query 或 Token。
+## 2. 请求完成日志
 
-首版不接入复杂 tracing、告警平台或多级健康状态机。
+程序输出 `slog` JSON。每个被进程内 Matcher 命中的白名单请求结束时最多记录一条 `llm request completed`，字段固定为：
 
-## 2. 日志
+- `audit_id`（成功分配时）；
+- `route_id`、`protocol`、`method`、不含 Query 的 escaped path；
+- `status_code`、`duration_ms`、`ttft_ms`；
+- `forward_status`、`capture_status`、`parse_status`；
+- 拒绝时的 `blocked_by`、`block_code`；
+- 存在故障时的稳定 `error_code`。
 
-首版只输出结构化 JSON，避免增加日志格式配置。
+日志调用不传入 `http.Request` 或原始 error 对象。禁止记录 Query、Header value、Body、解析全文、admin token、上游凭据、主密钥、密文 BLOB 或底层数据库错误文本。
 
-每条请求日志只包含：
+Nginx 直连 NewAPI 的非白名单请求不进入本程序，因此也没有本程序的请求完成日志。
 
-- `audit_id`
-- `route_id`、`protocol`
-- Method、Path、状态码
-- 总耗时、响应首字节时间
-- `forward_status`、`capture_status`、`parse_status`
-- rejected 请求的 `blocked_by`、`block_code`
-- 稳定错误码
+## 3. 管理面健康接口
 
-禁止记录 Authorization、API Key、Header 值、Body、原始 Query 和解析后的提示词。
+管理 listener 提供：
 
-## 3. 健康接口
-
-管理端提供两个简单接口：
-
-```text
+~~~text
 GET /healthz
 GET /readyz
-```
+~~~
 
-`/healthz` 只表示进程仍在运行。
+两者与 `/api/v1/*` 使用同一个静态 Bearer middleware，即使监听在 loopback 也必须鉴权。静态 `/ui/` shell 可以匿名加载，但不包含状态或审计数据。
 
-这些是审计代理管理 listener 的接口，不是 NewAPI health/UI。数据 listener 只接收明确 LLM API 白名单请求；NewAPI health、login、admin、models、UI 和其他路径由 Nginx 直连，不进入本进程的代理、拦截或审计流程。
+`/healthz` 在进程能够响应 HTTP 时返回存活，不代表审计可写。
 
-`admin_token` 在任何管理监听地址上都必填。`/healthz`、`/readyz`、`/metrics` 和全部 `/api/v1/*` 路由经过同一个静态 Bearer middleware，即使请求来自 loopback 也不例外；缺失或错误 token 返回 `401`。
+`/readyz` 保持四个字段：
 
-静态 React UI shell 与其构建资源不含数据，可以无鉴权加载。页面必须先由用户输入 token 才能读取 health、ready、metrics 或审计数据，token 只保存在当前页面内存中。
-
-`/readyz` 返回：
-
-```json
+~~~json
 {
   "status": "healthy",
   "database": "ok",
   "encryption_key": "ok",
-  "parser_queue": 3
+  "parser_queue": 0
 }
-```
+~~~
 
-状态只使用：
+状态语义：
 
-- `healthy`：转发和审计均可用。
-- `degraded`：仍可转发，但审计或解析有问题。
-- `not_ready`：strict 模式不接收 LLM API 白名单请求。
+| status | HTTP | 条件 |
+| --- | --- | --- |
+| `healthy` | 200 | Store、cipher、audit manager 可用，已配置 parser 已启动 |
+| `degraded` | 200 | parser 不可用；或 available 模式下审计依赖不可用但代理仍可转发 |
+| `not_ready` | 503 | strict 模式下审计依赖不可用，新白名单请求会被 admission 拒绝 |
 
-Token 关联失败只显示为附加功能不可用，不影响主 readiness。
+retention 或 gap flush 失败不改变 readiness。首版没有 `/metrics` 实现。
 
-## 4. 简单指标
+## 4. 启动恢复
 
-首版若实现 `/metrics`，只暴露少量低基数指标：
+SQLite migration/open 成功后、parser 扫描 pending 记录前，应用调用一次恢复：
 
-```text
-audit_requests_total
-audit_request_duration_seconds
-audit_ttft_seconds
-audit_capture_errors_total
-audit_parser_errors_total
-audit_writer_queue_length
-audit_database_size_bytes
-```
+- `ended_at_ns IS NULL` 的 audit 设为 `forward_status=interrupted`、`capture_status=partial`、`error_code=process_exit`，结束时间使用本次恢复时间。
+- 仍为 streaming 的 stage 和 body 设为 partial，并写稳定 `process_exit`。
+- Body 的 stored length 从已提交 chunk 求和，observed length 至少覆盖已提交的 offset+length；未完成 hash、EOF 和 SHA-256 不伪造为完整。
+- 只有实际恢复了 audit 时才增加一条聚合 `process_exit` gap；重复执行没有变化。
+- 遗留 `parse_status=processing` 重置为 pending，再由 parser worker 扫描入队。
 
-指标不使用 audit_id、model、token 名称或完整 path 作为 label。
+恢复不补造未提交的 Header、Trailer、chunk、上游响应或精确退出时间。
+恢复事务失败时关闭本次 Store，不继续组装正常审计、查询和 parser：available 进入 degraded 并继续透明转发，strict 进入 not_ready 并拒绝新的白名单请求；修复后通过重启重试恢复。
 
-## 5. 启动流程
+## 5. 简单 gap
 
-```text
-1. 加载并校验配置
-2. 校验 `admin_token` 非空
-3. 尝试打开 SQLite、执行 migration 并加载或生成 AES key
-4. 启动单 writer 和 parser worker
-5. 启动管理端口
-6. 启动数据端口
-7. available 模式后台每 30 秒重试不可用的审计依赖
-```
+`audit_gaps` 只记录非敏感的时间范围、固定 reason/detail 和计数，用来说明 available 模式中未能持久化的审计范围。它不保存底层 error 文本，也不伪装成单条 audit。
 
-失败行为保持简单：
+DB 暂时写失败后，后续 writer 事务成功时可以补写内存中的聚合 gap。若进程在 DB 不可用时退出，只能依赖安全日志，不能承诺完整恢复。
 
-- 配置或 NewAPI URL 非法：直接退出。
-- strict 模式下数据库或 key 不可用：管理端可启动，但模型请求返回 `503`。
-- available 模式下数据库或 key 不可用：继续代理，写 warning，并每 30 秒重试；这段时间只保留日志和进程级审计缺口，不写明文证据。
-- parser 结束时标记 ok、partial、error 或 skipped，不影响数据面。
+## 6. 依赖故障与关闭
 
-## 6. 进程恢复
+首版不在进程内周期性重建 Store、cipher、query 或 parser。available 模式若启动时 DB/key 不可用，会继续透明转发并处于 degraded；修复文件或权限后需要重启。已经打开的 Store 遇到短暂写失败，可以在后续 writer 事务成功时恢复健康。
 
-不维护复杂 boot 表。启动后执行一次简单恢复：
+收到 SIGINT/SIGTERM 后停止接收新请求，在固定关闭窗口内尽量完成在途代理、parser 和 writer 队列，然后关闭 HTTP server 与 SQLite。超时退出留下的记录由下次启动恢复为 interrupted/partial。
 
-- 查找 `audit_records.ended_at_ns IS NULL` 的记录。
-- 写入 `forward_status=interrupted`、`capture_status=partial`、`error_code=process_exit` 和恢复时间。
-- 未完成 Body 保持 `hash_complete=false`。
-- 把仍为 streaming 的 stage/stream 标记为 partial。
-- 把遗留 `parse_status=processing` 重置为 pending，再重新入队 pending 记录。
+## 7. 最少测试
 
-## 7. 优雅关闭
-
-收到 SIGINT/SIGTERM 时：
-
-1. 停止接收新请求。
-2. 在总计 30 秒内尽量完成在途代理并清空审计写队列。
-3. 关闭 parser worker 和 SQLite。
-
-超时后直接退出，未完成记录在下次启动时按进程异常退出处理。
-
-## 8. 最少测试
-
-- healthy/degraded/not_ready 返回正确。
-- 空 `admin_token` 在 loopback 和非 loopback 配置下都启动失败。
-- API、health、ready 和 metrics 缺少或使用错误 Bearer token 时均返回 `401`。
-- 无 token 可以加载静态 UI shell，但 shell 中不包含 health 状态、指标或审计数据。
-- Nginx 直连的 NewAPI health/login/admin/models/UI/其他路径不产生本进程请求日志、interceptor 调用或 audit。
-- 日志扫描不到测试 Token 和 Body。
-- available 数据库故障仍能转发。
-- strict 数据库故障拒绝新请求。
-- kill 后重启能标记未完成记录。
-- 优雅关闭不会产生 goroutine 泄漏。
-
-## 9. 实施步骤
-
-1. 实现安全日志字段和 request logger。
-2. 实现 `admin_token` 必填校验，以及覆盖 `/healthz`、`/readyz`、`/metrics` 和管理 API 的统一 Bearer middleware。
-3. 接入数据库/key/parser 状态。
-4. 实现启动恢复和优雅关闭。
-5. 增加故障与日志泄漏测试。
+- 请求完成日志字段完整，扫描不到 Query、Header value、Body、token、key 和底层 error 文本。
+- 非白名单请求没有本程序的请求完成日志。
+- `/healthz`、`/readyz` 和 `/api/v1/*` 缺失或使用错误 Bearer token 时返回 `401`。
+- healthy/degraded/not_ready 的 JSON 和 HTTP 状态符合上表。
+- 启动恢复正确修正未终结 audit、streaming stage/body、长度和 parser 状态，且重复执行幂等。
+- 只有实际恢复记录时生成聚合 process_exit gap。
+- available 启动依赖故障仍可转发，strict 返回 `503`；修复启动依赖后通过重启恢复。
+- 优雅关闭不会把仍未完成的证据标成 complete。
