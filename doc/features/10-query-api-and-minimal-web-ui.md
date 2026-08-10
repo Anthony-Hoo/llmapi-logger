@@ -1,150 +1,118 @@
-# 模块 10：查询 API 与嵌入式 React UI
+# 模块 10：查询 API 与最小 React UI
 
-## 1. 目标
+## 1. 目标与阶段 3 范围
 
-本模块为个人单机部署提供够用的审计浏览能力：列表、详情、原始请求/响应读取、删除单条记录，以及同步导出单条或筛选结果。
+本模块只为个人单机部署提供三个数据能力：审计列表、单条详情、原始请求/响应 Body 读取。页面用于快速查看代理实际观察到的 LLM API 请求，不承担通用日志平台或运维控制台职责。
 
-首版范围固定为单机浏览、单条删除和当前请求内完成的导出。
+阶段 3 明确不做：
+
+- 单条或批量删除 API。
+- ZIP、筛选结果或批量导出。
+- `audit_gaps` 查询页面和 gaps UI。
+- reparse 管理端点。
+- Header value、完整 parsed JSON 或对话全文的在线重建。
+
+阶段 4 只计划 retention，以及按实际个人需求决定是否增加单条 JSON 导出；这些能力不属于本模块的阶段 3 接口。
 
 ## 2. Listener 与访问控制
 
-- 默认监听 `127.0.0.1:8081`，与代理数据面使用独立 `http.Server` 和 mux。
-- `admin_token` 在 loopback 和非 loopback 上都必填；为空时服务拒绝启动。
-- `/api/v1/*`、`/healthz`、`/readyz` 和 `/metrics` 全部经过同一个 Bearer middleware，规则见 [模块 09](09-security-encryption-and-redaction.md)。
-- `/ui/` 的 HTML shell 与构建后的静态资源可以无鉴权加载，但其中不得包含审计数据、运行状态或 secret。
+- 管理面默认监听 `127.0.0.1:8081`，与代理数据面使用独立 `http.Server` 和 mux。
+- `admin_token` 在 loopback 和非 loopback 上都必填；为空或包含空白字符时服务拒绝启动。
+- `/api/v1/*`、`/healthz`、`/readyz` 以及以后可能注册的 `/metrics` 都经过同一个 Bearer middleware，规则见[模块 09](09-security-encryption-and-redaction.md)。
+- `/ui/` 的 HTML shell 与静态资源可以无鉴权加载，但不得包含审计数据、运行状态或 secret。
 - 管理路由只注册到管理面，不得出现在代理数据面。
 
-## 3. 固定限制
+Bearer token 缺失或错误统一返回 `401`。监听在 loopback 不是绕过鉴权的理由。
 
-管理监听和 token 直接使用[模块 01](01-configuration-and-route-boundary.md)的 admin_listen、admin_token。首版把列表默认/最大条数固定为 50/200，查询超时固定为 10 秒，同步导出固定最多 500 条、512 MiB、2 分钟；不增加第二套配置 schema。所有上限由服务端强制执行。
+## 3. 数据边界
 
-## 4. 数据读取边界
+查询只会看到由 Nginx 选入且被进程内 Matcher 命中的 LLM API 白名单 audit。NewAPI 的健康检查、登录、管理、模型列表、前端页面和其他路径由 Nginx 直连，不会出现在列表、详情或 raw 接口中。
 
-单条审计查询使用 `audit_records`、`http_stages`、`http_headers`、`body_streams`、`body_chunks`、`parsed_results` 和 `token_links`。audit_gaps 是进程级缺口，单独查询，不伪装成某条 audit 的精确子记录。
+列表只读取 `audit_records`，并可关联 `parsed_results` 和 `token_links` 的窄摘要字段。详情读取阶段、Header 名称与长度、Body 摘要、parser 摘要和 Token 名称关联，但不返回 Header value、Body bytes 或解密后的 `parsed_json_enc`。
 
-列表以 audit_records 为主，可 LEFT JOIN parsed_results 和 token_links 的窄明文字段用于模型和 Token 筛选；不得读取或解密 Header value、Body chunk 或 parsed_json_enc。
-
-## 5. 列表 API
+## 4. 列表 API
 
 ~~~http
 GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 ~~~
 
-可选筛选参数：`from_ns`、`to_ns`、`protocol`、`path`、`model`、`status_code`、`forward_status`、`blocked_by`、`block_code`、`capture_status`、`newapi_token_id`、`token_name`。
+最小范围支持时间、协议、路径、模型、状态码、转发状态、阻断组件/代码、捕获状态和可选 Token 名称关联等简单筛选。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `before_started_at_ns + before_id` 做 keyset 分页；默认 50 条，最大 200 条。
 
-排序固定为 `started_at_ns DESC, audit_id DESC`。下一页同时传上一页末项的 `before_started_at_ns` 和 `before_id`；不使用 offset 分页。
+列表只返回非敏感摘要，并明确包含 `forward_status`、`blocked_by` 和 `block_code`。非法参数返回 `400`。
 
-响应摘要明确包含 `forward_status`、`blocked_by` 和 `block_code`。本地拒绝使用 `forward_status=rejected`；未阻断的请求后两项为空。`limit` 缺省 50，最大 200；非法筛选返回 `400`。
-
-## 6. 详情 API
+## 5. 详情 API
 
 ~~~http
 GET /api/v1/audits/{audit_id}
 ~~~
 
-详情返回：审计元数据、四阶段时间和状态、`forward_status`、`blocked_by`、`block_code`、Header 名称与长度、Body 总长度/hash、parsed result 摘要和 Token 关联。拒绝记录直接展示阻断组件和稳定错误码，不从错误文本反推原因。
+详情返回审计元数据、实际存在的 HTTP 阶段、Header 名称与值长度、Body 长度/hash/完整性、parser 最小摘要和可选 Token 名称关联。interceptor 拒绝的记录直接展示 `forward_status=rejected`、`blocked_by` 和 `block_code`，不会伪造未发生的 NewAPI 或响应阶段。
 
-详情默认不返回 Header value、Body bytes 或完整 parsed JSON。记录不存在返回 `404`。
+原始敏感数据不随详情自动返回；记录不存在返回 `404`。
 
-## 7. 原始请求与响应
+## 6. 原始请求与响应 Body
 
 ~~~http
 GET /api/v1/audits/{audit_id}/raw/request
 GET /api/v1/audits/{audit_id}/raw/response
 ~~~
 
-两个端点只返回 Body 原始字节：request 读取 request_sent_to_newapi，response 读取 response_received_from_newapi。响应 Header 中返回内容类型、捕获长度和 X-Audit-Complete: true|false；完整 URI 与 Header value 通过显式导出获取。
+request 读取 `request_sent_to_newapi`，response 读取 `response_received_from_newapi`。服务按 `body_chunks.seq` 顺序分批读取、逐块解密并写出，避免把完整 Body 再复制到一个大缓冲区。
 
-实现按 `body_chunks.seq` 顺序分批短读、逐块解密和写出，不把完整 Body 一次加载到内存。body_streams 不完整时仍可返回已捕获字节，但必须标记不完整。
+响应使用下载友好的二进制内容类型，并通过响应 Header 返回 observed/stored length、SHA-256 和 `X-Audit-Complete`。证据不完整时可以返回已保存字节，但必须明确标记不完整；阶段或记录不存在返回 `404`。
 
-## 8. 删除单条
+仍处于 `streaming` 的 Body 暂不开放 raw 下载，返回 `409 raw_not_finalized`。只有阶段已经终结为 complete 或 partial 后才读取，因此元数据与不可再变化的分块保持一致，不为个人版引入长时间持有的数据库流式快照。
 
-~~~http
-DELETE /api/v1/audits/{audit_id}
-~~~
+## 7. React UI
 
-- 仅允许删除已终结记录；活动记录返回 `409`。
-- 通过单 SQLite writer 删除 audit_records，并依靠已测试的外键级联删除全部审计子表。
-- 删除成功返回 `204`，不存在返回 `404`。
-- 首版不提供批量删除 API；批量清理由 retention 模块负责。
+前端固定使用 React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui。源码目录为 `internal/web/frontend`，构建产物为 `internal/web/dist`，由 Go embed 编入二进制；生产环境不需要 Node 或 Vite dev server。
 
-UI 删除操作必须二次确认并显示 `audit_id`。删除不可撤销。
+公开 shell 首先显示 token 输入页。token 只保存在 React state/context 内存中，每个数据请求附加 `Authorization: Bearer ...`；刷新、关闭页面或收到 `401` 后清空。不得写入 localStorage、sessionStorage、Cookie、IndexedDB、URL 或 Service Worker。
 
-## 9. 同步导出
+页面保持三块：
 
-~~~http
-GET /api/v1/audits/{audit_id}/export?format=zip
-GET /api/v1/audits/{audit_id}/export?format=json
-GET /api/v1/audits/export?format=json&from_ns=...&to_ns=...
-~~~
+- 列表与简单筛选：展示协议、路径、模型、状态、捕获/解析状态和拦截结果。
+- 详情：展示审计摘要、四阶段中实际存在的阶段、Header 名称、Body 摘要和 parser 摘要。
+- raw 下载：用户显式点击后下载请求或响应 Body，不自动加载大内容。
 
-单条记录支持 zip 或 json；筛选结果只支持 json 数组，筛选参数与列表一致。导出在当前 HTTP 请求内完成并直接流式返回。
+组件优先复用 shadcn/ui 的 `Button`、`Input`、`Table`、`Card`、`Badge`、`Alert`、`Skeleton` 和 `Separator`。阶段 3 不增加删除确认框、导出对话框或 gaps 提示区域。
 
-超过 max_records、预计解密后字节数超过 max_bytes 或执行超时，分别返回 413 或 504。具体文件布局见 [模块 12](12-retention-export-and-maintenance.md)。
+## 8. 错误与资源控制
 
-## 10. React UI
+- 单次查询超时固定为 10 秒，不增加额外配置。
+- SQLite 不可用或查询超时返回 `503`。
+- 密文认证失败返回 `500`，错误体和日志不包含敏感数据。
+- 客户端取消后停止 SQLite 迭代、解密和 raw 输出。
+- raw 开始写出后发生错误时中断输出并记录稳定错误码，不追加伪 JSON 错误体。
 
-前端固定使用 React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui。源码目录统一为 `internal/web/frontend`，Vite 输出目录统一为 `internal/web/dist`，由 `internal/web/embed.go` 使用 `//go:embed dist/*` 编入最终二进制。生产环境只运行 Go 服务，不启动 Node、Vite dev server 或独立静态文件服务。
-
-公开加载的 shell 首先显示 token 输入页。使用 shadcn `Input` 的 password 类型和 `Button` 接收 token，React 只把 token 保存在组件 state/context 内存中。统一 fetch client 为每个数据请求附加 `Authorization: Bearer ...`；刷新、关闭标签页或收到 `401` 后清空 token。禁止 localStorage、sessionStorage、Cookie、IndexedDB、URL query/hash 和 Service Worker 持久化。
-
-页面与组件：
-
-- 列表：shadcn `Table`、`Input`、`Select`、`Badge`、`Pagination` 和 `Skeleton`，可筛选并醒目展示 `rejected`、`blocked_by` 和 `block_code`。
-- 详情：`Card`、`Tabs`、`Badge`、`Separator`，展示阶段、拒绝/阻断字段、Header 名、parsed 摘要和 Token link。
-- 原始查看：`ScrollArea`、`Alert` 和下载 `Button`；显式请求原始 Body，不自动加载大内容。
-- 删除：`AlertDialog` 显示 `audit_id` 并要求二次确认。
-- 导出：`Dialog`、格式 `Select`、`Progress` 和 `Sonner`，调用同步导出端点。
-- 缺口提示：页面顶部使用 `Alert` 和 `Badge` 展示最近的进程级 `audit_gaps`，不得暗示其精确对应某条 audit。
-
-进程级缺口使用单独接口：
-
-~~~http
-GET /api/v1/gaps?from_ns=...&to_ns=...&limit=100
-~~~
-
-## 11. 错误与资源控制
-
-- Bearer token 缺失或错误返回 `401`。
-- SQLite busy、writer 不可用或查询超时返回 `503`。
-- 密文认证失败返回 `500`，错误体不包含敏感数据。
-- 客户端取消时立即停止 SQLite 迭代、解密和导出。
-- 原始流开始写出后发生错误只能中断连接并记录 `audit_id`。
-- 导出和原始读取使用有界 buffer，不复制完整 Body。
-
-## 12. 最小接口
+## 9. 最小接口
 
 ~~~go
 type AuditQuery interface {
+    Healthy() bool
     List(ctx context.Context, f Filter, c Cursor, limit int) (Page, error)
-    Get(ctx context.Context, auditID string) (AuditDetail, error)
-    ListGaps(ctx context.Context, fromNS, toNS int64, limit int) ([]Gap, error)
+    Get(ctx context.Context, auditID string) (Detail, error)
+    RawMeta(ctx context.Context, auditID string, side Side) (RawMetadata, error)
     StreamRaw(ctx context.Context, auditID string, side Side, w io.Writer) error
-    Delete(ctx context.Context, auditID string) error
-    Export(ctx context.Context, f Filter, format Format, w io.Writer) error
 }
 ~~~
 
-读取可以使用只读连接池；删除必须提交给单 SQLite writer，避免绕过写入串行化。
+该接口只读，不需要写入队列、删除方法或导出任务抽象。
 
-## 13. 测试
+## 10. 最少测试
 
-- 分页排序稳定，无重复或遗漏；`forward_status=rejected`、`blocked_by`、`block_code` 的筛选和列表/详情展示一致，且列表 SQL 不访问三个敏感大表。
-- 原始读取按 chunk 顺序输出并正确标记完整性；大 Body 场景内存保持有界。
-- 活动记录删除得到 `409`，终结记录删除后所有审计子表无孤儿行。
-- ZIP/JSON 导出命中记录数、字节数和超时上限。
-- gaps 接口只返回进程级时间区间，不声称精确关联某个 audit。
-- loopback 和非 loopback 的 API 都要求 Bearer；未带 token 时只有静态 UI shell 可加载。
-- React token 只存在内存且刷新后必须重新输入；各页面使用约定的 shadcn 组件。
-- Vite 构建产物可被 Go embed 提供，生产测试中没有 Node 监听端口或进程。
-- API 和 UI 错误中不泄露 Header、Body、token 或密钥。
+- 列表 keyset 分页稳定，筛选非法值返回 `400`，列表查询不读取敏感大字段。
+- 详情只返回 Header 名称/长度和摘要，拒绝记录不出现伪造阶段。
+- raw 按 chunk 顺序输出，并正确报告长度、hash 和完整性；大 Body 输出内存有界。
+- loopback 和非 loopback 的 API、health、ready 均要求 Bearer token；只有静态 UI shell 可匿名加载。
+- React token 只存在内存，刷新后必须重新输入；列表、详情和 raw 下载使用约定技术栈。
+- Vite 构建产物可由 Go embed 提供，生产运行不依赖 Node。
+- API、UI 和日志不泄露 Header value、Body、admin token 或主密钥。
 
-## 14. 实施步骤
+## 11. 实施步骤
 
-1. 实现 Filter、Cursor 和列表/详情 SQL。
-2. 实现 Header/Body/parsed result 的按需解密读取。
-3. 实现单条事务删除。
-4. 实现同步 ZIP/JSON 流式导出。
-5. 实现独立管理 listener、`admin_token` 必填校验和 Bearer middleware。
-6. 用 React、Vite、Tailwind CSS 和 shadcn/ui 实现 token 输入、列表、详情、原始查看、删除、导出与缺口提示。
-7. 把 Vite 产物接入 Go embed，并完成分页、取消、资源上限、鉴权、泄漏和无 Node 运行依赖测试。
+1. 实现 Filter、Cursor、列表和详情只读查询。
+2. 实现 raw metadata 与逐块解密流式读取。
+3. 实现独立管理 listener、Bearer middleware、health 和 ready。
+4. 使用 React + TypeScript + Vite + Tailwind CSS + shadcn/ui 实现 token 输入、列表、详情和 raw 下载。
+5. 接入 Go embed，并完成分页、资源上限、鉴权和敏感数据测试。

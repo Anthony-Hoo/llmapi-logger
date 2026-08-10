@@ -9,7 +9,7 @@
 ## 2. 安全边界
 
 - 管理面默认监听 `127.0.0.1:8081`。
-- `admin_token` 在任何 `admin_listen` 上都必填，包括 loopback；为空时启动失败。
+- `admin_token` 在任何 `admin_listen` 上都必填，包括 loopback；为空或包含空白字符时启动失败。
 - `/api/v1/*`、`/healthz`、`/readyz` 和 `/metrics` 全部要求静态 Bearer token。
 - 只有本审计代理不含数据的静态管理 UI shell 和其 CSS/JS/font 资源可以免 token 加载。
 
@@ -20,7 +20,7 @@
 
 ## 3. 配置
 
-本模块不增加独立配置。直接使用模块 01 的 `admin_listen`、`admin_token` 和 `key_path`；配置校验必须拒绝空 `admin_token`，不因监听地址是 loopback 而放宽。
+本模块不增加独立配置。直接使用模块 01 的 `admin_listen`、`admin_token` 和 `key_path`；配置校验必须拒绝空值和包含空白字符的 `admin_token`，不因监听地址是 loopback 而放宽。
 
 日志固定脱敏 Authorization、Proxy-Authorization、X-API-Key、x-goog-api-key，以及 Query 中的 key、api_key、access_token；首版不把这组规则做成可配置策略。admin_token 和主密钥不得通过普通日志或配置回显返回。
 

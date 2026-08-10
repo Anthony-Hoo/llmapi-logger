@@ -22,6 +22,7 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	configuration.NewAPIURL = upstream.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
 	configuration.Routes = []config.RouteConfig{{
 		ID:     "chat",
 		Method: http.MethodPost,

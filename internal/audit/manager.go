@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"llmapi-logger/internal/routing"
@@ -57,6 +58,9 @@ type Manager struct {
 	now    func() time.Time
 	random io.Reader
 	cause  error
+
+	notifyMu sync.RWMutex
+	notify   func(string) bool
 }
 
 // NewManager constructs a live audit manager.
@@ -113,6 +117,27 @@ func (manager *Manager) Mode() string {
 // Healthy reports whether new audit parents can currently be admitted.
 func (manager *Manager) Healthy() bool {
 	return manager != nil && manager.store != nil && manager.cipher != nil && manager.cause == nil && manager.store.Healthy()
+}
+
+// SetCompletionNotifier installs the non-blocking callback used to enqueue a
+// successfully finalized audit for asynchronous parsing. A nil callback keeps
+// capture independent from the parser subsystem.
+func (manager *Manager) SetCompletionNotifier(notify func(string) bool) {
+	if manager == nil {
+		return
+	}
+	manager.notifyMu.Lock()
+	manager.notify = notify
+	manager.notifyMu.Unlock()
+}
+
+func (manager *Manager) completionNotifier() func(string) bool {
+	if manager == nil {
+		return nil
+	}
+	manager.notifyMu.RLock()
+	defer manager.notifyMu.RUnlock()
+	return manager.notify
 }
 
 // Begin synchronously commits the audit parent, then starts the inbound stage
