@@ -10,10 +10,10 @@
 
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
-internal/storage/sqlite/migrations/{001_init.sql,002_add_index.sql,003_add_interceptor_outcome.sql}
+internal/storage/sqlite/migrations/001_init.sql
 ~~~
 
-sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制。已发布 migration 不修改，schema 变化新增数字文件。
+首个个人版尚未发布，因此用一个最终版 `001_init.sql` 建立九张表和全部索引。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；首版发布后不再修改已经发布的 migration，后续 schema 变化才新增数字文件。
 
 ~~~go
 writerDB.SetMaxOpenConns(1)
@@ -53,7 +53,7 @@ forward_status、capture_status、parse_status 和 stage state 的允许值以�
 
 拦截链不新增表。blocked_by 和 block_code 是 audit_records 上的可空 TEXT：forward_status=rejected 时二者必须同时为非空稳定标识，其他状态时必须同时为 NULL。status_code 保存代理本地返回的 4xx/503。只保存首个终止 chain 的 interceptor id 和稳定代码，不保存模块错误文本、调用栈或请求内容。
 
-003 migration 需要同时扩展既有 forward_status CHECK 和新增两列，因此采用 SQLite 标准 table-rebuild 流程：创建临时 audit_records_new、复制旧列、删除旧表、重命名并重建索引，最后执行 foreign_key_check；foreign_keys 的切换必须在事务外完成。迁移完成后的正式 schema 仍只有九张表。尚未触发的 stage 不插入 http_stages，因此 request_sent_to_newapi 行不存在就是“未调用 NewAPI”的权威证据。OpenBody 未调用时也不创建空 body_stream。
+`blocked_by`、`block_code` 和对应 CHECK 已直接包含在首版 `001_init.sql` 中。尚未触发的 stage 不插入 http_stages，因此 request_sent_to_newapi 行不存在就是“未调用 NewAPI”的权威证据。OpenBody 未调用时也不创建空 body_stream。
 
 audit_records 至少建立 started_at_ns、route_id+started_at_ns、capture_status+started_at_ns、parse_status+started_at_ns 索引。列表查询使用 started_at_ns+audit_id 游标，不使用深 OFFSET。
 
@@ -150,7 +150,7 @@ retention_days>0 时按[模块 12](12-retention-export-and-maintenance.md)的固
 - 空库执行全部 migration；重复启动不重复执行。
 - DB 版本高于程序时 storage 保持 unhealthy；available 继续代理，strict 返回 503。
 - writer batch commit/rollback。
-- 003 migration 从旧 schema 增加 blocked_by/block_code，重复启动不重复执行；rejected 与字段 NULL/非 NULL 的 CHECK 生效，表总数仍为九。
+- 首版 `001_init.sql` 重复启动不重复执行；rejected 与 blocked_by/block_code 的 NULL/非 NULL CHECK 生效，表总数仍为九。
 - interceptor 拒绝在一个事务内写 rejected、blocked_by/block_code、status_code、skipped，且不存在未触发的 NewAPI/响应 stage 或空 body_stream。
 - strict BeginAudit commit 失败返回 503。
 - available queue 满继续并产生 gap。

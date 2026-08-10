@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/routing"
 )
@@ -19,6 +20,7 @@ import (
 const (
 	requestRejectedJSON        = `{"error":{"code":"request_rejected","message":"request rejected"}}`
 	interceptorUnavailableJSON = `{"error":{"code":"interceptor_unavailable","message":"request cannot be processed"}}`
+	auditUnavailableJSON       = `{"error":{"code":"audit_unavailable","message":"request cannot be audited"}}`
 	routeNotAllowedJSON        = `{"error":{"code":"audit_route_not_allowed","message":"route is not enabled"}}`
 	newAPIUnavailableJSON      = `{"error":{"code":"newapi_unavailable","message":"upstream request failed"}}`
 	newAPITimeoutJSON          = `{"error":{"code":"newapi_timeout","message":"upstream response timed out"}}`
@@ -27,6 +29,12 @@ const (
 // New returns a handler that accepts only routes compiled into matcher,
 // evaluates their interceptor chain, and forwards allowed requests to target.
 func New(target *url.URL, matcher *routing.Matcher, engine *interceptor.Engine, logger *slog.Logger) http.Handler {
+	return NewWithAudit(target, matcher, engine, nil, logger)
+}
+
+// NewWithAudit returns the stage-one proxy with encrypted evidence capture
+// enabled for matched requests. Passing a nil sink preserves New's behavior.
+func NewWithAudit(target *url.URL, matcher *routing.Matcher, engine *interceptor.Engine, sink audit.Sink, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -34,6 +42,7 @@ func New(target *url.URL, matcher *routing.Matcher, engine *interceptor.Engine, 
 	handler := &handler{
 		matcher: matcher,
 		engine:  engine,
+		audit:   sink,
 		logger:  logger,
 	}
 	if target == nil {
@@ -50,6 +59,7 @@ type handler struct {
 	target              *url.URL
 	matcher             *routing.Matcher
 	engine              *interceptor.Engine
+	audit               audit.Sink
 	logger              *slog.Logger
 	reverseProxy        *httputil.ReverseProxy
 	initializationError error
@@ -72,41 +82,104 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		return
 	}
 
+	session, ok := h.beginAudit(request, match)
+	if !ok {
+		writeJSON(response, http.StatusServiceUnavailable, auditUnavailableJSON)
+		return
+	}
+	if session != nil {
+		request = request.WithContext(audit.ContextWithSession(request.Context(), session))
+		defer func() {
+			if err := session.Finish(); err != nil {
+				h.logger.WarnContext(
+					context.WithoutCancel(request.Context()),
+					"audit finish failed",
+					"audit_id", session.ID(),
+					"route_id", match.RouteID,
+					"error_category", "write_error",
+				)
+			}
+		}()
+	}
+
 	result := h.engine.Evaluate(request.Context(), request, match)
 	if result.Cancelled || request.Context().Err() != nil {
+		if session != nil {
+			session.MarkClientCancelled()
+		}
 		return
 	}
 	if result.Internal != nil {
+		blockedBy, blockCode := stableBlock(result.BlockedBy, result.BlockCode)
+		if session != nil {
+			session.MarkRejected(http.StatusServiceUnavailable, blockedBy, blockCode)
+		}
 		h.logger.WarnContext(
 			request.Context(),
 			"interceptor unavailable",
 			"route_id", match.RouteID,
-			"blocked_by", result.BlockedBy,
-			"block_code", result.BlockCode,
+			"blocked_by", blockedBy,
+			"block_code", blockCode,
 		)
+		closeRequestBody(request)
 		writeJSON(response, http.StatusServiceUnavailable, interceptorUnavailableJSON)
 		return
 	}
 	if !result.Allowed {
 		status := result.StatusCode
+		blockedBy, blockCode := stableBlock(result.BlockedBy, result.BlockCode)
 		if status < http.StatusBadRequest || status > 499 {
 			status = http.StatusServiceUnavailable
+			if session != nil {
+				session.MarkRejected(status, blockedBy, blockCode)
+			}
+			closeRequestBody(request)
 			writeJSON(response, status, interceptorUnavailableJSON)
 			return
+		}
+		if session != nil {
+			session.MarkRejected(status, blockedBy, blockCode)
 		}
 		h.logger.InfoContext(
 			request.Context(),
 			"request rejected",
 			"route_id", match.RouteID,
-			"blocked_by", result.BlockedBy,
-			"block_code", result.BlockCode,
+			"blocked_by", blockedBy,
+			"block_code", blockCode,
 			"status", status,
 		)
+		closeRequestBody(request)
 		writeJSON(response, status, requestRejectedJSON)
 		return
 	}
 
+	if session != nil {
+		observedResponse := session.WrapResponseWriter(response, request)
+		if observedResponse != nil {
+			response = observedResponse
+			defer observedResponse.CaptureTrailers()
+		}
+	}
 	h.reverseProxy.ServeHTTP(response, request)
+}
+
+func (h *handler) beginAudit(request *http.Request, match routing.Match) (*audit.Session, bool) {
+	if h.audit == nil {
+		return nil, true
+	}
+	if h.audit.Mode() == audit.ModeStrict && !h.audit.Healthy() {
+		h.logger.WarnContext(request.Context(), "strict audit admission failed", "route_id", match.RouteID, "error_category", "audit_unavailable")
+		return nil, false
+	}
+	session, err := h.audit.Begin(request.Context(), request, match)
+	if err == nil {
+		return session, true
+	}
+	h.logger.WarnContext(request.Context(), "audit begin failed", "route_id", match.RouteID, "error_category", "audit_unavailable")
+	if h.audit.Mode() == audit.ModeStrict {
+		return nil, false
+	}
+	return nil, true
 }
 
 func newReverseProxy(target *url.URL, logger *slog.Logger) *httputil.ReverseProxy {
@@ -134,12 +207,26 @@ func newReverseProxy(target *url.URL, logger *slog.Logger) *httputil.ReverseProx
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Real-IP")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-For")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Proto")
+			if session, ok := audit.SessionFromContext(inbound.Context()); ok {
+				session.WrapRequestSent(outbound)
+			}
+		},
+		ModifyResponse: func(response *http.Response) error {
+			if response != nil && response.Request != nil {
+				if session, ok := audit.SessionFromContext(response.Request.Context()); ok {
+					session.WrapResponseReceived(response)
+				}
+			}
+			return nil
 		},
 		Transport:     transport,
 		BufferPool:    newBufferPool(32 << 10),
 		FlushInterval: -1,
 		ErrorHandler: func(response http.ResponseWriter, request *http.Request, err error) {
 			if request.Context().Err() != nil || errors.Is(err, context.Canceled) {
+				if session, ok := audit.SessionFromContext(request.Context()); ok {
+					session.MarkClientCancelled()
+				}
 				return
 			}
 
@@ -152,10 +239,30 @@ func newReverseProxy(target *url.URL, logger *slog.Logger) *httputil.ReverseProx
 				body = newAPITimeoutJSON
 				category = "upstream_timeout"
 			}
+			if session, ok := audit.SessionFromContext(request.Context()); ok {
+				session.MarkNewAPIError(category)
+			}
 			logger.WarnContext(request.Context(), "NewAPI request failed", "status", status, "error_category", category)
 			writeJSON(response, status, body)
 		},
 	}
+}
+
+func stableBlock(blockedBy, blockCode string) (string, string) {
+	if blockedBy == "" {
+		blockedBy = "interceptor_chain"
+	}
+	if blockCode == "" {
+		blockCode = "interceptor_invalid_decision"
+	}
+	return blockedBy, blockCode
+}
+
+func closeRequestBody(request *http.Request) {
+	if request == nil || request.Body == nil || request.Body == http.NoBody {
+		return
+	}
+	_ = request.Body.Close()
 }
 
 func copyHeaderValues(destination, source http.Header, name string) {

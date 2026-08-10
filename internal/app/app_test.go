@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"llmapi-logger/internal/config"
@@ -19,6 +20,8 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 
 	configuration := config.Default()
 	configuration.NewAPIURL = upstream.URL
+	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	configuration.Routes = []config.RouteConfig{{
 		ID:     "chat",
 		Method: http.MethodPost,
@@ -30,6 +33,11 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := application.Close(); err != nil {
+			t.Errorf("close application: %v", err)
+		}
+	})
 
 	request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody)
 	response := httptest.NewRecorder()

@@ -9,20 +9,27 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
+	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/proxy"
 	"llmapi-logger/internal/routing"
+	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage/sqlite"
 )
 
 const shutdownTimeout = 30 * time.Second
 
 // App owns the stage-one data-plane HTTP server.
 type App struct {
-	server *http.Server
-	logger *slog.Logger
+	server     *http.Server
+	logger     *slog.Logger
+	auditStore *sqlite.Store
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 // Load reads, validates, and assembles one application from a config file.
@@ -41,7 +48,7 @@ func ValidateConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	_, err = New(configuration, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
+	_, _, _, err = assembleDataPlane(configuration)
 	return err
 }
 
@@ -51,27 +58,22 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		logger = slog.Default()
 	}
 
-	target, err := url.Parse(configuration.NewAPIURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse newapi_url: %w", err)
-	}
-	matcher, err := routing.Compile(configuration.Routes)
-	if err != nil {
-		return nil, err
-	}
-	engine, err := interceptor.NewEngine(configuration.Interceptors, configuration.Routes)
+	target, matcher, engine, err := assembleDataPlane(configuration)
 	if err != nil {
 		return nil, err
 	}
 
+	auditSink, auditStore := assembleAudit(configuration, logger)
+
 	return &App{
 		server: &http.Server{
 			Addr:              configuration.Listen,
-			Handler:           proxy.New(target, matcher, engine, logger),
+			Handler:           proxy.NewWithAudit(target, matcher, engine, auditSink, logger),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
-		logger: logger,
+		logger:     logger,
+		auditStore: auditStore,
 	}, nil
 }
 
@@ -84,6 +86,7 @@ func (application *App) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer application.closeAuditStore()
 
 	listener, err := net.Listen("tcp", application.server.Addr)
 	if err != nil {
@@ -115,6 +118,76 @@ func (application *App) Run(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+// Close releases the audit store for callers that assemble an App without
+// entering Run, such as tests and embedding processes.
+func (application *App) Close() error {
+	if application == nil {
+		return nil
+	}
+	return application.closeAuditStore()
+}
+
+func (application *App) closeAuditStore() error {
+	application.closeOnce.Do(func() {
+		if application.auditStore != nil {
+			application.closeErr = application.auditStore.Close()
+		}
+	})
+	return application.closeErr
+}
+
+func assembleDataPlane(configuration config.Config) (*url.URL, *routing.Matcher, *interceptor.Engine, error) {
+	target, err := url.Parse(configuration.NewAPIURL)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse newapi_url: %w", err)
+	}
+	matcher, err := routing.Compile(configuration.Routes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	engine, err := interceptor.NewEngine(configuration.Interceptors, configuration.Routes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return target, matcher, engine, nil
+}
+
+func assembleAudit(configuration config.Config, logger *slog.Logger) (audit.Sink, *sqlite.Store) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store, err := sqlite.Open(ctx, configuration.DBPath)
+	if err != nil {
+		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
+		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+	}
+	hasAudits, err := store.HasAudits(ctx)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
+		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+	}
+	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit key unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+	}
+	cipher, err := security.NewAESGCM(key)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit cipher unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+	}
+	manager, err := audit.NewManager(store, cipher, configuration.Mode, logger)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable")
+		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+	}
+	return manager, store
 }
 
 type discardWriter struct{}

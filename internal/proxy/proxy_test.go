@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/routing"
@@ -65,7 +67,71 @@ func TestCancelledRequestDoesNotReceiveJSONError(t *testing.T) {
 	}
 }
 
+func TestAuditAdmissionModes(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	t.Run("available continues after Begin failure", func(t *testing.T) {
+		upstreamCalls.Store(0)
+		sink := &failingAuditSink{mode: audit.ModeAvailable}
+		handler := newTestHandlerWithAudit(t, upstream.URL, sink)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+		}
+		if got := sink.begins.Load(); got != 1 {
+			t.Errorf("Begin calls = %d, want 1", got)
+		}
+		if got := upstreamCalls.Load(); got != 1 {
+			t.Errorf("upstream calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("strict unhealthy rejects before Begin", func(t *testing.T) {
+		upstreamCalls.Store(0)
+		sink := &failingAuditSink{mode: audit.ModeStrict}
+		handler := newTestHandlerWithAudit(t, upstream.URL, sink)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody))
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+		}
+		if got := sink.begins.Load(); got != 0 {
+			t.Errorf("Begin calls = %d, want 0", got)
+		}
+		if got := upstreamCalls.Load(); got != 0 {
+			t.Errorf("upstream calls = %d, want 0", got)
+		}
+	})
+
+	t.Run("strict Begin failure rejects", func(t *testing.T) {
+		upstreamCalls.Store(0)
+		sink := &failingAuditSink{mode: audit.ModeStrict, healthy: true}
+		handler := newTestHandlerWithAudit(t, upstream.URL, sink)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody))
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+		}
+		if got := sink.begins.Load(); got != 1 {
+			t.Errorf("Begin calls = %d, want 1", got)
+		}
+		if got := upstreamCalls.Load(); got != 0 {
+			t.Errorf("upstream calls = %d, want 0", got)
+		}
+	})
+}
+
 func newTestHandler(t *testing.T, upstreamURL string) http.Handler {
+	return newTestHandlerWithAudit(t, upstreamURL, nil)
+}
+
+func newTestHandlerWithAudit(t *testing.T, upstreamURL string, sink audit.Sink) http.Handler {
 	t.Helper()
 	routes := []config.RouteConfig{{
 		ID:     "chat",
@@ -86,7 +152,26 @@ func newTestHandler(t *testing.T, upstreamURL string) http.Handler {
 	if err != nil {
 		t.Fatalf("parse upstream URL: %v", err)
 	}
-	return New(target, matcher, engine, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewWithAudit(target, matcher, engine, sink, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+type failingAuditSink struct {
+	mode    string
+	healthy bool
+	begins  atomic.Int64
+}
+
+func (sink *failingAuditSink) Healthy() bool {
+	return sink.healthy
+}
+
+func (sink *failingAuditSink) Mode() string {
+	return sink.mode
+}
+
+func (sink *failingAuditSink) Begin(context.Context, *http.Request, routing.Match) (*audit.Session, error) {
+	sink.begins.Add(1)
+	return nil, errors.New("injected audit Begin failure")
 }
 
 func assertHeaderValues(t *testing.T, header http.Header, name string, expected []string) {
