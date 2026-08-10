@@ -1,0 +1,22 @@
+# Go build and test output
+/bin/
+*.exe
+*.test
+coverage.out
+
+# Runtime data and secrets
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.key
+
+# Frontend dependencies and local tooling
+internal/web/frontend/node_modules/
+.tools/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

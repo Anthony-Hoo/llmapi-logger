@@ -1,0 +1,154 @@
+# 模块 03：审计会话与证据采集
+
+## 1. 目标
+
+一次命中明确 LLM API 白名单并进入本代理的请求对应一个 audit。NewAPI health、login、admin、models、UI 和其他路径由 Nginx 直连，不进入本模块。会话按实际执行路径接收最多四阶段 Header/Trailer/Body，计算长度与 SHA-256，提交加密 chunk并标记完整性；只有到达可解析终态的转发请求才触发异步 parser。
+
+固定阶段名称如下，但记录按触发惰性创建：
+
+1. request_for_newapi_received_from_nginx
+2. request_sent_to_newapi
+3. response_received_from_newapi
+4. response_from_newapi_sent_to_nginx
+
+被入站 interceptor 拒绝的请求通常只有第一个阶段；未调用 NewAPI 时不得预建后三个空阶段。本模块不负责 HTTP 转发和 SQL 实现。
+
+## 2. ID 与状态
+
+audit_id 为 crypto/rand 生成的 16-byte 随机值，编码为 apx_ 加 26 位 Base32。随机源失败时 available 继续并写无 ID 日志，strict 返回 503；禁止 math/rand 或时间戳回退。
+
+audit_records 使用简化状态：
+
+| 字段 | 值 |
+| --- | --- |
+| forward_status | in_progress、completed、rejected、client_cancelled、newapi_error、proxy_error、interrupted |
+| capture_status | pending、complete、partial、failed |
+| parse_status | pending、processing、ok、partial、error、skipped |
+| stage state | not_started、streaming、complete、partial |
+
+状态只能向终态前进，Finish 用 sync.Once 保证幂等。
+
+## 3. 会话结构
+
+~~~go
+type Session struct {
+    AuditID string
+    Mode    Mode
+    RouteID string
+    Started time.Time
+    BlockedBy string
+    BlockCode string
+    Stages  map[Stage]*StageCapture
+}
+type StageCapture struct {
+    State          StageState
+    ObservedLength int64
+    StoredLength   int64
+    Hash           hash.Hash
+    HashComplete   bool
+    NextSeq        int64
+    NextOffset     int64
+}
+~~~
+
+Session 只持有小型状态与 hash，不保留完整 Body；Stages 是稀疏 map，只包含已经触发的观察点。
+
+## 4. interceptor 拒绝终态
+
+route match 后先建立 audit 并记录已看到的入站 metadata，再执行 interceptor chain。首个主动 reject、body 上限拒绝、模块 error、panic、非法 Decision 或非客户端取消的 Body 读取失败，都以一次原子 FinishAudit 写入以下结果：
+
+- forward_status=rejected。
+- blocked_by 保存配置中的 interceptor id；框架自身在无法归属模块时使用 `interceptor_chain`。
+- block_code 保存稳定、低基数代码，不保存 error 文本、Header、Query 或 Body。
+- status_code 保存代理实际返回的 4xx 或 503。
+- parse_status=skipped，不入 parser queue，也不创建 token_links。
+
+模块主动 reject 使用其约定的安全 4xx；body 超限固定为 413 和 `body_too_large`。error、panic、非法 Decision 和非客户端取消的 Body 读取失败固定为 503，并分别使用 `interceptor_error`、`interceptor_panic`、`interceptor_invalid_decision`、`interceptor_body_read_error`。这些 fail-closed 行为与 available/strict 无关。客户端取消使用 forward_status=client_cancelled，不设 blocked_by/block_code。blocked_by/block_code 只对 rejected 非空，普通 NewAPI 4xx/5xx 仍是实际转发结果，不能误标为 rejected。
+
+stage、body_stream 和 chunk 只在真实观察开始时创建。没有调用 NewAPI 时，request_sent_to_newapi 及两个响应阶段必须不存在，而不是保存 not_started 空行。metadata reject 不为审计而 drain 入站 Body；若存在未读 Body，则第一个阶段和 capture_status 标 partial。body interceptor 已预读到 EOF 且证据成功落盘时，拒绝本身不导致 capture_status=partial。未触发的后三阶段也不计为采集缺失。
+
+## 5. Body 采集
+
+Observe 顺序固定：
+
+1. 增加 observed_length 并更新 SHA-256。
+2. 切成最多 32 KiB 的 chunk。
+3. 为异步写入创建拥有型副本。
+4. 提交 writer queue。
+5. 接受后增加 stored_length；失败则 stage/capture 标 partial 并记录 gap。
+
+只有观察到 EOF 时 hash_complete=true。取消、Read/Write error 或进程退出时，hash 只代表已观察前缀。seq/offset 是应用层采集顺序，不是 TCP、HTTP chunk 或 SSE event。
+
+body interceptor 按 route 中最大的模块上限加一个判定字节有界预读，且必须通过 request_for_newapi_received_from_nginx observer，因此它仍计算入站长度/hash并保存原始字节。多个模块共享同一只读缓存；放行时 proxy 使用未修改的缓存字节重建 Body，request_sent_to_newapi observer 再记录实际 replay；两阶段差异视为实现错误。metadata-only chain 不触发预读，继续由 Transport 的正常流式读取驱动两个请求 observer。
+
+## 6. Header、Trailer 与 URI
+
+http_headers 每个值保存 audit_id、stage、kind、name、value_index、value_length、value_enc。重复值不合并；Host、Method、Status、HTTP 版本和 ContentLength 放 http_stages。
+
+Request-URI 可能包含 key，保存在 audit_records.request_uri_enc。无法保证 Header 原始大小写、全局线缆顺序或 request Trailer 经 Nginx 后仍存在。
+
+## 7. AES-256-GCM
+
+key_path 指向一个 32-byte 主密钥：存在则读取；不存在且数据库尚无审计数据时用 crypto/rand 原子生成。Unix 创建权限为 0600；Windows 使用当前用户私有数据目录的 ACL。
+
+每个 Header 值、Body chunk、Request-URI 和 parsed result 使用独立 12-byte 随机 nonce：
+
+~~~go
+ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
+~~~
+
+数据库把 `nonce || ciphertext || tag` 保存为一个 BLOB。AAD 使用 NUL 分隔的受控字段：Request-URI 绑定 audit_id/object_type，Header 再绑定 stage/kind/name/value_index，Body chunk 再绑定 stage/seq，解析结果绑定 audit_id/parser_name。调用方不得自行定义其他格式。
+
+首版只使用这个本地主密钥，不提供多层密钥、轮换或重写工具。需要更换时先导出需保留的数据，再创建新的空数据库和 key。
+
+## 8. Writer 接口与模式
+
+采集模块只提交 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit、SaveParsedResult、AddGap。queue 固定 1024 ops。
+
+available：queue/DB/key 失败时不阻塞代理，标 partial/failed，写结构化日志；DB 不可用时合并一个内存 gap，下一次成功写入时补记。
+
+strict：BeginAudit 必须同步 COMMIT；admission 时 key、DB、writer 或 writer queue 不健康返回 503，parser queue 不参与 admission。Begin 成功后的 chunk 仍批量异步写，晚到故障只标 partial/gap，不提供逐块 durable ack。
+
+## 9. audit_gaps
+
+audit_gaps 只做进程级运维提示，字段为 id、started_at_ns、ended_at_ns、reason、request_count、detail、created_at_ns，不精确关联某个 audit。reason 使用 db_unavailable、queue_full、encryption_error、write_error、process_exit；detail 只能保存稳定错误码和计数，不保存请求数据。
+
+进程内只保留一个合并 gap。DB 恢复时插入并清空；提前退出只能依赖日志，这是 available 的已知限制。
+
+## 10. Parser
+
+非 rejected 的 audit Finalize 后：
+
+1. audit_records.parse_status 设为 pending。
+2. audit_id 非阻塞放入内存 queue；满时只保留 pending。
+3. 启动时及每 30 秒扫描少量 pending 记录补入队列。
+4. worker 用条件更新把 pending 改为 processing，未抢到则跳过。
+5. worker 从 SQLite 读取、解密并解析。
+6. 在同一 writer 事务中 UPSERT parsed_results，并把 parse_status 更新为 ok、partial、error 或 skipped。
+
+rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启时先把遗留 processing 重置为 pending，再扫描已结束且 pending 的 audit 重新入队；解析结果只保留最新版本。
+
+## 11. Token 关联
+
+若配置 newapi_token_db_path，只从 request_sent_to_newapi 的最终语义提取凭据，并对[模块 11](11-newapi-token-readonly-linking.md)的只读内存 map 做精确查找。token_links 只保存 NewAPI token id、当时的 token name 和关联时间，不保存 token key。
+
+关联失败不影响转发或 strict admission；rejected audit 不做关联；首版允许 token_links 为空。
+
+## 12. 崩溃恢复
+
+启动后把 ended_at_ns 为空的 audit 改为 forward_status=interrupted、capture_status=partial、error_code=process_exit，并把仍为 streaming 的 stage/stream 改为 partial。随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk 或精确结束时间；SQLite WAL 保证已提交事务一致。
+
+## 13. 测试
+
+- audit_id 格式与随机源失败。
+- 四阶段独立 length/hash。
+- 0、1、32 KiB、32 KiB+1 chunk。
+- n>0 同时返回 EOF/error。
+- available writer queue 满继续；strict admission 503；parser queue 满不影响两种模式的转发。
+- interceptor 主动 reject、body 超限、error、panic、非法 Decision 和非取消的 Body 读取失败均写 rejected、blocked_by/block_code、实际 status_code 和 skipped；客户端取消写 client_cancelled。
+- metadata reject 未读 Body 时 capture 为 partial；body 预读完成后 reject 可完整结束入站证据。
+- 未调用 NewAPI 的 audit 不存在后三个 stage/body_stream/chunk，且不进入 parser 或 Token 关联。
+- body interceptor 放行后的两个请求阶段 length/hash 一致。
+- GCM 随机 nonce、AAD/密文篡改失败。
+- DB/WAL 无测试 token/Header/Body 明文。
+- Finish 幂等、kill 后 partial、pending parser 重启恢复。
