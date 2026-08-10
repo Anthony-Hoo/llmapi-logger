@@ -51,8 +51,8 @@ func Validate(cfg Config) error {
 	if err := validateDataPath("key_path", cfg.KeyPath); err != nil {
 		return err
 	}
-	if strings.TrimSpace(cfg.AdminToken) == "" {
-		return errors.New("admin_token must not be empty")
+	if cfg.AdminToken == "" || strings.IndexFunc(cfg.AdminToken, unicode.IsSpace) >= 0 {
+		return errors.New("admin_token must not be empty or contain whitespace")
 	}
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > 3650 {
 		return fmt.Errorf("retention_days must be 0 or between 1 and 3650, got %d", cfg.RetentionDays)

@@ -10,26 +10,39 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/interceptor"
+	"llmapi-logger/internal/parser"
+	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/proxy"
+	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/web"
 )
 
 const shutdownTimeout = 30 * time.Second
 
 // App owns the stage-one data-plane HTTP server.
 type App struct {
-	server     *http.Server
-	logger     *slog.Logger
-	auditStore *sqlite.Store
-	closeOnce  sync.Once
-	closeErr   error
+	server       *http.Server
+	adminServer  *web.Server
+	adminAddress string
+	parserWorker *parser.Worker
+	auditSink    audit.Sink
+	auditStore   *sqlite.Store
+	cipher       security.Cipher
+	mode         string
+	logger       *slog.Logger
+
+	parserHealthy atomic.Bool
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 // Load reads, validates, and assembles one application from a config file.
@@ -63,18 +76,51 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		return nil, err
 	}
 
-	auditSink, auditStore := assembleAudit(configuration, logger)
-
-	return &App{
+	runtime := assembleAudit(configuration, logger)
+	application := &App{
 		server: &http.Server{
 			Addr:              configuration.Listen,
-			Handler:           proxy.NewWithAudit(target, matcher, engine, auditSink, logger),
+			Handler:           proxy.NewWithAudit(target, matcher, engine, runtime.sink, logger),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
-		logger:     logger,
-		auditStore: auditStore,
-	}, nil
+		adminAddress: configuration.AdminListen,
+		auditSink:    runtime.sink,
+		auditStore:   runtime.store,
+		cipher:       runtime.cipher,
+		mode:         configuration.Mode,
+		logger:       logger,
+	}
+
+	var queryService *query.Service
+	if runtime.store != nil && runtime.cipher != nil {
+		queryService, err = query.New(runtime.store, runtime.cipher)
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("assemble query service: %w", err)
+		}
+		application.parserWorker, err = parser.NewWorker(runtime.store, runtime.cipher, builtin.All(), logger)
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("assemble parser worker: %w", err)
+		}
+		if runtime.manager != nil {
+			runtime.manager.SetCompletionNotifier(application.parserWorker.Notify)
+		}
+	}
+
+	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
+		AdminToken: configuration.AdminToken,
+		Query:      queryService,
+		Assets:     web.EmbeddedAssets(),
+		Readiness:  application.readiness,
+		Logger:     logger,
+	})
+	if err != nil {
+		_ = application.closeComponents()
+		return nil, fmt.Errorf("assemble admin server: %w", err)
+	}
+	return application, nil
 }
 
 // Run serves until the context is cancelled or the server fails. Cancellation
@@ -86,38 +132,73 @@ func (application *App) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer application.closeAuditStore()
+	defer application.closeComponents()
 
-	listener, err := net.Listen("tcp", application.server.Addr)
+	if application.parserWorker != nil {
+		if err := application.parserWorker.Start(ctx); err != nil {
+			application.logger.Warn("parser worker unavailable", "error_category", "parser_start_failed")
+		} else {
+			application.parserHealthy.Store(true)
+		}
+	}
+
+	dataListener, err := net.Listen("tcp", application.server.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", application.server.Addr, err)
 	}
-	application.logger.Info("audit proxy listening", "address", listener.Addr().String())
+	adminListener, err := net.Listen("tcp", application.adminAddress)
+	if err != nil {
+		_ = dataListener.Close()
+		return fmt.Errorf("listen on admin %s: %w", application.adminAddress, err)
+	}
+	application.logger.Info("audit proxy listening", "address", dataListener.Addr().String())
+	application.logger.Info("audit admin listening", "address", adminListener.Addr().String())
 
-	serveErrors := make(chan error, 1)
+	type serveResult struct {
+		name string
+		err  error
+	}
+	serveResults := make(chan serveResult, 2)
 	go func() {
-		serveErrors <- application.server.Serve(listener)
+		serveResults <- serveResult{name: "data", err: application.server.Serve(dataListener)}
+	}()
+	go func() {
+		serveResults <- serveResult{name: "admin", err: application.adminServer.Serve(adminListener)}
 	}()
 
+	received := 0
+	var runErr error
 	select {
-	case err := <-serveErrors:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+	case result := <-serveResults:
+		received++
+		if result.err != nil && !errors.Is(result.err, http.ErrServerClosed) {
+			runErr = fmt.Errorf("serve %s listener: %w", result.name, result.err)
 		}
-		return fmt.Errorf("serve data listener: %w", err)
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-
-		if err := application.server.Shutdown(shutdownContext); err != nil {
-			_ = application.server.Close()
-			return fmt.Errorf("shutdown data listener: %w", err)
-		}
-		if err := <-serveErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serve data listener: %w", err)
-		}
-		return nil
 	}
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownErr := errors.Join(
+		application.server.Shutdown(shutdownContext),
+		application.adminServer.Shutdown(shutdownContext),
+	)
+	cancel()
+	if shutdownErr != nil {
+		_ = application.server.Close()
+		_ = application.adminServer.Close()
+	}
+
+	for received < 2 {
+		result := <-serveResults
+		received++
+		if result.err != nil && !errors.Is(result.err, http.ErrServerClosed) {
+			runErr = errors.Join(runErr, fmt.Errorf("serve %s listener: %w", result.name, result.err))
+		}
+	}
+	if shutdownErr != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("shutdown listeners: %w", shutdownErr))
+	}
+	return runErr
 }
 
 // Close releases the audit store for callers that assemble an App without
@@ -126,16 +207,53 @@ func (application *App) Close() error {
 	if application == nil {
 		return nil
 	}
-	return application.closeAuditStore()
+	return application.closeComponents()
 }
 
-func (application *App) closeAuditStore() error {
+func (application *App) closeComponents() error {
 	application.closeOnce.Do(func() {
+		if application.parserWorker != nil {
+			application.parserWorker.Close()
+			application.parserHealthy.Store(false)
+		}
 		if application.auditStore != nil {
 			application.closeErr = application.auditStore.Close()
 		}
 	})
 	return application.closeErr
+}
+
+func (application *App) readiness(context.Context) web.ReadyStatus {
+	status := web.ReadyStatus{
+		Status:        "healthy",
+		Database:      "ok",
+		EncryptionKey: "ok",
+	}
+	if application.parserWorker != nil {
+		status.ParserQueue = application.parserWorker.QueueLength()
+	}
+
+	auditHealthy := application.auditSink != nil && application.auditSink.Healthy()
+	if application.auditStore == nil || !application.auditStore.Healthy() {
+		status.Database = "unavailable"
+		auditHealthy = false
+	}
+	if application.cipher == nil {
+		status.EncryptionKey = "unavailable"
+		auditHealthy = false
+	}
+	if !auditHealthy {
+		if application.mode == audit.ModeStrict {
+			status.Status = "not_ready"
+		} else {
+			status.Status = "degraded"
+		}
+		return status
+	}
+	if application.parserWorker != nil && !application.parserHealthy.Load() {
+		status.Status = "degraded"
+	}
+	return status
 }
 
 func assembleDataPlane(configuration config.Config) (*url.URL, *routing.Matcher, *interceptor.Engine, error) {
@@ -154,40 +272,47 @@ func assembleDataPlane(configuration config.Config) (*url.URL, *routing.Matcher,
 	return target, matcher, engine, nil
 }
 
-func assembleAudit(configuration config.Config, logger *slog.Logger) (audit.Sink, *sqlite.Store) {
+type auditRuntime struct {
+	sink    audit.Sink
+	manager *audit.Manager
+	store   *sqlite.Store
+	cipher  security.Cipher
+}
+
+func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntime {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	store, err := sqlite.Open(ctx, configuration.DBPath)
 	if err != nil {
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
-		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
 	}
 	hasAudits, err := store.HasAudits(ctx)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
-		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
 	}
 	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit key unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
-		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
 	}
 	cipher, err := security.NewAESGCM(key)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit cipher unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
-		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
 	}
 	manager, err := audit.NewManager(store, cipher, configuration.Mode, logger)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable")
-		return audit.NewUnavailable(configuration.Mode, err, logger), nil
+		return auditRuntime{sink: audit.NewUnavailable(configuration.Mode, err, logger)}
 	}
-	return manager, store
+	return auditRuntime{sink: manager, manager: manager, store: store, cipher: cipher}
 }
 
 type discardWriter struct{}

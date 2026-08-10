@@ -21,6 +21,7 @@ func TestValidateRejectsInvalidCoreFields(t *testing.T) {
 		{"directory db path", func(cfg *Config) { cfg.DBPath = t.TempDir() }, "must name a file"},
 		{"empty key path", func(cfg *Config) { cfg.KeyPath = " " }, "key_path"},
 		{"empty admin token", func(cfg *Config) { cfg.AdminToken = "\t" }, "admin_token"},
+		{"admin token whitespace", func(cfg *Config) { cfg.AdminToken = "token with spaces" }, "admin_token"},
 		{"negative retention", func(cfg *Config) { cfg.RetentionDays = -1 }, "retention_days"},
 		{"large retention", func(cfg *Config) { cfg.RetentionDays = 3651 }, "retention_days"},
 		{"token db directory", func(cfg *Config) { cfg.NewAPITokenDBPath = t.TempDir() }, "newapi_token_db_path"},

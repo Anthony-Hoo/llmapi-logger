@@ -18,6 +18,10 @@ const (
 	writeAddChunk
 	writeFinishStage
 	writeFinishAudit
+	writeResetProcessingParses
+	writeClaimPendingParse
+	writeReleaseProcessingParse
+	writeSaveParsedResult
 )
 
 type writeRequest struct {
@@ -213,6 +217,14 @@ func applyWrite(transaction *sql.Tx, request writeRequest) error {
 		return finishStage(transaction, request.data.(StageFinish))
 	case writeFinishAudit:
 		return finishAudit(transaction, request.data.(AuditFinish))
+	case writeResetProcessingParses:
+		return resetProcessingParses(transaction)
+	case writeClaimPendingParse:
+		return claimPendingParse(transaction, request.data.(*parseClaim))
+	case writeReleaseProcessingParse:
+		return releaseProcessingParse(transaction, request.data.(string))
+	case writeSaveParsedResult:
+		return saveParsedResult(transaction, request.data.(ParsedResult))
 	default:
 		return fmt.Errorf("sqlite writer: unknown operation %d", request.kind)
 	}

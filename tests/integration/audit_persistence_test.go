@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -63,11 +64,38 @@ type persistedBody struct {
 }
 
 type runningApp struct {
-	baseURL string
-	cancel  context.CancelFunc
-	done    chan error
-	once    sync.Once
-	stopErr error
+	baseURL  string
+	adminURL string
+	cancel   context.CancelFunc
+	done     chan error
+	once     sync.Once
+	stopErr  error
+}
+
+type adminAuditSummary struct {
+	AuditID       string  `json:"audit_id"`
+	StartedAtNS   string  `json:"started_at_ns"`
+	ParseStatus   string  `json:"parse_status"`
+	RequestModel  *string `json:"request_model"`
+	ResponseModel *string `json:"response_model"`
+}
+
+type adminListPage struct {
+	Items []adminAuditSummary `json:"items"`
+}
+
+type adminAuditDetail struct {
+	Headers []struct {
+		Name        string `json:"name"`
+		ValueLength int    `json:"value_length"`
+	} `json:"headers"`
+	ParsedResult *struct {
+		Status       string `json:"status"`
+		UsageInput   *int64 `json:"usage_input"`
+		UsageOutput  *int64 `json:"usage_output"`
+		UsageTotal   *int64 `json:"usage_total"`
+		MessageCount *int64 `json:"message_count"`
+	} `json:"parsed_result"`
 }
 
 func TestAuditPersistsFourEncryptedBodyStages(t *testing.T) {
@@ -301,17 +329,170 @@ SELECT
 	}
 }
 
+func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
+	requestBody := []byte(`{"model":"gpt-personal","stream":false,"messages":[{"role":"user","content":"admin-api-prompt-secret"}]}`)
+	responseBody := []byte(`{"id":"chatcmpl-local","model":"gpt-personal-result","choices":[{"message":{"role":"assistant","content":"admin-api-response-secret"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			http.Error(response, "read request", http.StatusInternalServerError)
+			return
+		}
+		if !bytes.Equal(body, requestBody) {
+			http.Error(response, "request body changed", http.StatusBadRequest)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(responseBody)
+	}))
+	defer upstream.Close()
+
+	cfg := loadConfig(t, upstream.URL, "/v1/chat/completions", false)
+	running := startApp(t, cfg)
+	client := &http.Client{Timeout: integrationTimeout}
+
+	request, err := http.NewRequest(http.MethodPost, running.baseURL+"/v1/chat/completions", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("new parsed request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer downstream-admin-api-secret")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("send parsed request: %v", err)
+	}
+	gotResponse, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read parsed response: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK || !bytes.Equal(gotResponse, responseBody) {
+		t.Fatalf("proxied response = %d %q", response.StatusCode, gotResponse)
+	}
+
+	unauthorized, err := client.Get(running.adminURL + "/healthz")
+	if err != nil {
+		t.Fatalf("request unauthenticated health: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, unauthorized.Body)
+	unauthorized.Body.Close()
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated health status = %d, want 401", unauthorized.StatusCode)
+	}
+
+	uiResponse, err := client.Get(running.adminURL + "/ui/")
+	if err != nil {
+		t.Fatalf("load anonymous UI shell: %v", err)
+	}
+	uiBody, uiReadErr := io.ReadAll(uiResponse.Body)
+	uiResponse.Body.Close()
+	if uiReadErr != nil {
+		t.Fatalf("read anonymous UI shell: %v", uiReadErr)
+	}
+	if uiResponse.StatusCode != http.StatusOK || !bytes.Contains(uiBody, []byte(`<div id="root"></div>`)) {
+		t.Fatalf("anonymous UI response = %d %q", uiResponse.StatusCode, uiBody)
+	}
+	for _, secret := range [][]byte{requestBody, responseBody, []byte("integration-admin-token")} {
+		if bytes.Contains(uiBody, secret) {
+			t.Fatalf("anonymous UI shell contains runtime secret %q", secret)
+		}
+	}
+
+	summary, listBody := waitForParsedAdminAudit(t, client, running.adminURL)
+	if summary.StartedAtNS == "" {
+		t.Fatal("admin list started_at_ns must be a decimal JSON string")
+	}
+	if summary.RequestModel == nil || *summary.RequestModel != "gpt-personal" {
+		t.Errorf("request model = %v, want gpt-personal", summary.RequestModel)
+	}
+	if summary.ResponseModel == nil || *summary.ResponseModel != "gpt-personal-result" {
+		t.Errorf("response model = %v, want gpt-personal-result", summary.ResponseModel)
+	}
+	for _, secret := range [][]byte{[]byte("admin-api-prompt-secret"), []byte("admin-api-response-secret"), []byte("downstream-admin-api-secret")} {
+		if bytes.Contains(listBody, secret) {
+			t.Fatalf("admin list leaked secret %q", secret)
+		}
+	}
+
+	detailBody := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID)
+	var detail adminAuditDetail
+	if err := json.Unmarshal(detailBody, &detail); err != nil {
+		t.Fatalf("decode admin detail: %v\n%s", err, detailBody)
+	}
+	if detail.ParsedResult == nil || detail.ParsedResult.Status != "ok" {
+		t.Fatalf("parsed result = %+v, want ok", detail.ParsedResult)
+	}
+	if detail.ParsedResult.UsageInput == nil || *detail.ParsedResult.UsageInput != 3 ||
+		detail.ParsedResult.UsageOutput == nil || *detail.ParsedResult.UsageOutput != 4 ||
+		detail.ParsedResult.UsageTotal == nil || *detail.ParsedResult.UsageTotal != 7 {
+		t.Errorf("parsed usage = %+v, want 3/4/7", detail.ParsedResult)
+	}
+	if detail.ParsedResult.MessageCount == nil || *detail.ParsedResult.MessageCount != 1 {
+		t.Errorf("parsed message count = %v, want 1", detail.ParsedResult.MessageCount)
+	}
+	for _, secret := range [][]byte{[]byte("admin-api-prompt-secret"), []byte("admin-api-response-secret"), []byte("downstream-admin-api-secret")} {
+		if bytes.Contains(detailBody, secret) {
+			t.Fatalf("admin detail leaked secret %q", secret)
+		}
+	}
+
+	rawRequest := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/raw/request")
+	if !bytes.Equal(rawRequest, requestBody) {
+		t.Fatal("raw request download differs from bytes sent to NewAPI")
+	}
+	rawResponse := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/raw/response")
+	if !bytes.Equal(rawResponse, responseBody) {
+		t.Fatal("raw response download differs from bytes received from NewAPI")
+	}
+}
+
+func waitForParsedAdminAudit(t *testing.T, client *http.Client, adminURL string) (adminAuditSummary, []byte) {
+	t.Helper()
+	deadline := time.Now().Add(integrationTimeout)
+	for time.Now().Before(deadline) {
+		body := authorizedAdminGET(t, client, adminURL+"/api/v1/audits?limit=50")
+		var page adminListPage
+		if err := json.Unmarshal(body, &page); err != nil {
+			t.Fatalf("decode admin list: %v\n%s", err, body)
+		}
+		if len(page.Items) != 0 && page.Items[0].ParseStatus == "ok" {
+			return page.Items[0], body
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for asynchronous parser result")
+	return adminAuditSummary{}, nil
+}
+
+func authorizedAdminGET(t *testing.T, client *http.Client, url string) []byte {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new admin request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer integration-admin-token")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("send admin request: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read admin response: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("admin response status = %d, want 200: %s", response.StatusCode, body)
+	}
+	return body
+}
+
 func startApp(t *testing.T, cfg config.Config) *runningApp {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve app address: %v", err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatalf("release app address: %v", err)
-	}
+	address := reserveAddress(t)
+	adminAddress := reserveAddress(t)
 	cfg.Listen = address
+	cfg.AdminListen = adminAddress
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	application, err := app.New(cfg, logger)
@@ -320,9 +501,10 @@ func startApp(t *testing.T, cfg config.Config) *runningApp {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	running := &runningApp{
-		baseURL: "http://" + address,
-		cancel:  cancel,
-		done:    make(chan error, 1),
+		baseURL:  "http://" + address,
+		adminURL: "http://" + adminAddress,
+		cancel:   cancel,
+		done:     make(chan error, 1),
 	}
 	go func() {
 		running.done <- application.Run(ctx)
@@ -354,6 +536,19 @@ func startApp(t *testing.T, cfg config.Config) *runningApp {
 		}
 	})
 	return running
+}
+
+func reserveAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve address: %v", err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release address: %v", err)
+	}
+	return address
 }
 
 func (running *runningApp) stop() error {

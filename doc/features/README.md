@@ -110,9 +110,9 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。worker 解密证据、解析协议并 UPSERT parsed_results，只保留最新结果。重启时直接扫描 pending 记录重新入队。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 响应生成最小摘要，并 UPSERT parsed_results。重启时扫描 pending 记录重新入队；解析不重建完整对话或全文。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health、ready 和 metrics 统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。首版提供列表、详情、原始证据读取、单条删除、同步 JSON/ZIP 导出、简单筛选、health 和可选 metrics，不增加多用户权限或后台任务系统。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health、ready，以及以后若启用的 metrics，统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。阶段 3 的数据功能只做列表、详情、原始请求/响应 Body 和简单筛选，UI 固定使用 React + TypeScript + Vite + Tailwind CSS + shadcn/ui。单条删除、ZIP/批量导出、gaps UI 和 reparse 管理端点暂不实现。
 
 ## 9. 模块索引
 
@@ -129,7 +129,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 09 | [本地加密、脱敏与管理面保护](09-security-encryption-and-redaction.md) |
 | 10 | [查询 API 与最小 Web UI](10-query-api-and-minimal-web-ui.md) |
 | 11 | [NewAPI Token 只读关联](11-newapi-token-readonly-linking.md) |
-| 12 | [保留、同步导出与维护](12-retention-export-and-maintenance.md) |
+| 12 | [保留与可选单条 JSON 导出](12-retention-export-and-maintenance.md) |
 | 13 | [日志、健康检查与生命周期](13-observability-health-and-lifecycle.md) |
 | 14 | [测试与性能检查](14-test-benchmark-and-fault-injection.md) |
 | 15 | [Nginx 与部署](15-nginx-and-deployment-integration.md) |
@@ -150,17 +150,19 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 
 退出：完整请求四阶段可比较；DB/WAL 找不到测试 secret 明文。
 
-### 阶段 3：流式、Parser 与页面
+### 阶段 3：Parser 与最小页面
 
-实现 SSE immediate flush、取消/短写状态、可选 Body 拦截与原字节回放、三协议最小 JSON/SSE parser、内存队列、pending 恢复、管理 API 和 React + shadcn/ui 页面。
+实现 OpenAI、Anthropic 和 Gemini 常见 JSON/SSE 的最小摘要解析，使用单 worker、内存队列和 pending 恢复；管理面只提供列表、详情、raw 请求/响应 Body，并使用 React + TypeScript + Vite + Tailwind CSS + shadcn/ui 构建页面。
 
-退出：parser 失败不影响响应，流式首块不等待完整 Body。
+本阶段不做单条删除、ZIP/批量导出、gaps UI、reparse 管理端点或复杂全文重建。
 
-### 阶段 4：运维收口
+退出：parser 失败不影响响应；三协议常见 JSON/SSE 能得到可查询摘要；loopback 管理 API 未带 Bearer token 时返回 401。
 
-提供 Nginx、Docker/宿主机示例、retention、健康、日志和备份说明；测试 DB 锁、磁盘满、NewAPI reset、kill/restart；发布 Linux/Windows 静态二进制。
+### 阶段 4：最小运维收口
 
-退出：透明性、strict 503、available gap、重启恢复和 retention 均有自动化覆盖。
+实现按 retention_days 清理旧审计；如果个人使用确有需要，再增加可选的单条 JSON 导出。阶段 4 不扩展 ZIP、批量导出、批量删除或后台导出任务。
+
+退出：到期且已终结的记录可小批量清理，现有透明代理、审计、解析和查询能力保持不变。
 
 ## 11. 最小验收
 
@@ -174,6 +176,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - 拦截链首个 reject 会在调用 NewAPI 前返回；记录 blocked_by/block_code，后续 NewAPI 阶段不存在。
 - 未启用 Body 拦截器时保持流式；启用后允许请求的 Body 回放字节与原请求完全一致，超限固定为 `413` 和 `block_code=body_too_large`。
 - 重启后 pending parser 恢复，未完成 audit 标 partial。
+- 管理面只暴露阶段 3 最小查询范围，loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token。
 
 ## 12. 文档优先级
 

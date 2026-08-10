@@ -45,6 +45,7 @@ type Session struct {
 	now      func() time.Time
 	request  context.Context
 	writeCtx context.Context
+	notify   func(string) bool
 
 	mu            sync.Mutex
 	stages        map[string]*stageCapture
@@ -70,6 +71,7 @@ func newSession(manager *Manager, requestContext context.Context, auditID, route
 		now:           manager.now,
 		request:       requestContext,
 		writeCtx:      context.WithoutCancel(requestContext),
+		notify:        manager.completionNotifier(),
 		stages:        make(map[string]*stageCapture, 4),
 		forwardStatus: sqlite.ForwardInProgress,
 	}
@@ -281,6 +283,8 @@ func (session *Session) finish() error {
 	if err := session.store.FinishAudit(session.writeCtx, finish); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
 		session.logCaptureFailure("", "finish_audit_failed")
+	} else if parseStatus == sqlite.ParsePending && session.notify != nil {
+		_ = session.notify(session.auditID)
 	}
 	return errors.Join(writeErrors...)
 }

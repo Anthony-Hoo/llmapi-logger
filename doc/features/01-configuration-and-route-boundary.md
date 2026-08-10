@@ -72,7 +72,7 @@ routes:
 3. mode 只能是 available 或 strict。
 4. db_path、key_path 非空，父目录可创建。
 5. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
-6. admin_token 在任何 admin_listen 下都必须非空；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
+6. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
 7. newapi_token_db_path 为空表示关闭 Token 名称关联；非空时只做只读访问。
 8. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
 9. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
@@ -142,7 +142,7 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，提供 health、audit 列表/详情、原始读取、单条删除、同步导出和可选 metrics。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，阶段 3 只提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 
