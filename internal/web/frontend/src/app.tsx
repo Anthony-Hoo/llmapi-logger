@@ -704,7 +704,7 @@ function RawHTTPMessage({
         {side === "request" ? (
           <>
             <EvidenceMeta label="Host" value={stage?.host || "—"} />
-            <EvidenceMeta label="Request-URI" value={detail.request_uri || detail.audit.path || "—"} mono />
+            <EvidenceMeta label="入站 Request-URI" value={detail.request_uri || detail.audit.path || "—"} mono />
           </>
         ) : (
           <>
