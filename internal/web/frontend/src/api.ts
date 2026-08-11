@@ -3,6 +3,7 @@ import type {
   AuditDetail,
   AuditFilters,
   AuditListPage,
+  NewAPITokenList,
   RawBodyDownload,
   RawSide,
 } from "./types";
@@ -22,6 +23,9 @@ export class ApiError extends Error {
 type FetchLike = typeof fetch;
 
 export interface ApiClient {
+  createSession: (token: string, signal?: AbortSignal) => Promise<void>;
+  deleteSession: (signal?: AbortSignal) => Promise<void>;
+  listNewAPITokens: (signal?: AbortSignal) => Promise<NewAPITokenList>;
   listAudits: (
     filters?: AuditFilters,
     cursor?: AuditCursor | null,
@@ -32,19 +36,17 @@ export interface ApiClient {
 }
 
 export function createApiClient(
-  token: string,
   onUnauthorized: () => void,
   fetchImpl: FetchLike = fetch,
 ): ApiClient {
-  async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  async function sessionFetch(path: string, init: RequestInit = {}, notifyUnauthorized = true): Promise<Response> {
     const headers = new Headers(init.headers);
-    headers.set("Authorization", `Bearer ${token}`);
     if (!headers.has("Accept")) {
       headers.set("Accept", "application/json");
     }
 
-    const response = await fetchImpl(path, { ...init, headers });
-    if (response.status === 401) {
+    const response = await fetchImpl(path, { ...init, credentials: "same-origin", headers });
+    if (notifyUnauthorized && response.status === 401) {
       onUnauthorized();
       throw new ApiError(401, "管理令牌无效或已失效，请重新输入。");
     }
@@ -52,7 +54,7 @@ export function createApiClient(
   }
 
   async function requestJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
-    const response = await authorizedFetch(path, { signal });
+    const response = await sessionFetch(path, { signal });
     if (!response.ok) {
       throw await responseError(response);
     }
@@ -60,10 +62,46 @@ export function createApiClient(
   }
 
   return {
+    async createSession(token, signal) {
+      const response = await sessionFetch(
+        `${API_BASE}/session`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token }),
+          signal,
+        },
+        false,
+      );
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+    },
+
+    async deleteSession(signal) {
+      const response = await sessionFetch(`${API_BASE}/session`, { method: "DELETE", signal }, false);
+      if (!response.ok && response.status !== 401) {
+        throw await responseError(response);
+      }
+    },
+
+    listNewAPITokens(signal) {
+      return requestJSON<NewAPITokenList>(`${API_BASE}/newapi/tokens`, signal);
+    },
+
     async listAudits(filters = {}, cursor = null, signal) {
       const query = new URLSearchParams({ limit: "50" });
       if (filters.path?.trim()) {
         query.set("path", filters.path.trim());
+      }
+      if (filters.model?.trim()) {
+        query.set("model", filters.model.trim());
+      }
+      if (filters.user_agent?.trim()) {
+        query.set("user_agent", filters.user_agent.trim());
+      }
+      if (filters.newapi_token_id?.trim()) {
+        query.set("newapi_token_id", filters.newapi_token_id.trim());
       }
       if (filters.forward_status) {
         query.set("forward_status", filters.forward_status);
@@ -80,7 +118,7 @@ export function createApiClient(
     },
 
     async getRawBody(auditID, side, signal) {
-      const response = await authorizedFetch(
+      const response = await sessionFetch(
         `${API_BASE}/audits/${encodeURIComponent(auditID)}/raw/${side}`,
         { headers: { Accept: "application/octet-stream" }, signal },
       );

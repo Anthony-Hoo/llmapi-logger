@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent,
   type ReactNode,
 } from "react";
 
@@ -42,6 +41,7 @@ import type {
   AuditHeader,
   AuditStage,
   AuditSummary,
+  NewAPIToken,
   RawBodyDownload,
   RawSide,
 } from "./types";
@@ -52,43 +52,72 @@ interface LoadedRawBody {
 }
 
 export function App() {
-  const [token, setToken] = useState<string | null>(null);
+  const [authState, setAuthState] = useState<"checking" | "authenticated" | "anonymous">("checking");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
 
-  const logOut = useCallback((message?: string) => {
-    setToken(null);
-    setAuthMessage(message ?? null);
+  const handleUnauthorized = useCallback(() => {
+    setAuthState("anonymous");
+    setAuthMessage("登录已失效，请重新输入管理令牌。");
   }, []);
+  const client = useMemo(() => createApiClient(handleUnauthorized), [handleUnauthorized]);
+  const handleAuthenticated = useCallback(() => setAuthState("authenticated"), []);
 
-  if (!token) {
+  async function createSession(token: string) {
+    await client.createSession(token);
+    setAuthMessage(null);
+    setAuthState("authenticated");
+  }
+
+  async function deleteSession() {
+    try {
+      await client.deleteSession();
+      setAuthMessage(null);
+    } catch (cause: unknown) {
+      setAuthMessage(`退出请求失败：${errorMessage(cause)}`);
+    } finally {
+      setAuthState("anonymous");
+    }
+  }
+
+  if (authState === "anonymous") {
     return (
       <TokenGate
         message={authMessage}
-        onSubmit={(nextToken) => {
-          setAuthMessage(null);
-          setToken(nextToken);
-        }}
+        onSubmit={createSession}
       />
     );
   }
 
   return (
     <Dashboard
-      token={token}
-      onUnauthorized={() => logOut("认证失败，令牌已从页面内存中清除。")}
-      onLogOut={() => logOut()}
+      client={client}
+      checkingSession={authState === "checking"}
+      onAuthenticated={handleAuthenticated}
+      onLogOut={deleteSession}
     />
   );
 }
 
-function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (token: string) => void }) {
+function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (token: string) => Promise<void> }) {
   const [draft, setDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const token = draft.trim();
-    if (token) {
-      onSubmit(token);
+    if (!token || submitting) {
+      return;
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await onSubmit(token);
+      setDraft("");
+    } catch (cause: unknown) {
+      setSubmitError(errorMessage(cause));
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -101,7 +130,7 @@ function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (t
           <div className="space-y-2">
             <CardTitle className="text-2xl">LLM API Audit</CardTitle>
             <CardDescription>
-              输入本机管理令牌以查看审计记录。令牌只保存在当前页面内存中，刷新页面后需要重新输入。
+              输入本机管理令牌建立安全会话。登录完成后页面不会继续保留令牌，也不会写入浏览器存储。
             </CardDescription>
           </div>
         </CardHeader>
@@ -110,6 +139,12 @@ function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (t
             <Alert className="mb-5 border-amber-200 bg-amber-50/90">
               <AlertTitle className="text-amber-900">需要重新认证</AlertTitle>
               <AlertDescription className="text-amber-800">{message}</AlertDescription>
+            </Alert>
+          ) : null}
+          {submitError ? (
+            <Alert className="mb-5 border-red-200 bg-red-50/90">
+              <AlertTitle className="text-red-900">登录失败</AlertTitle>
+              <AlertDescription className="text-red-800">{submitError}</AlertDescription>
             </Alert>
           ) : null}
           <form className="space-y-4" onSubmit={submit}>
@@ -126,14 +161,15 @@ function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (t
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder="输入 configs 中配置的 admin_token"
+                disabled={submitting}
               />
             </div>
-            <Button className="w-full" type="submit" disabled={!draft.trim()}>
-              进入审计页面
+            <Button className="w-full" type="submit" disabled={!draft.trim() || submitting}>
+              {submitting ? "正在登录…" : "进入审计页面"}
             </Button>
           </form>
           <p className="mt-5 text-center text-xs leading-relaxed text-muted-foreground">
-            页面不会使用 Cookie、localStorage 或 sessionStorage 保存令牌。
+            登录成功后仅使用服务端设置的 HttpOnly Cookie；页面不会使用 localStorage 或 sessionStorage 保存令牌。
           </p>
         </CardContent>
       </Card>
@@ -142,15 +178,16 @@ function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (t
 }
 
 function Dashboard({
-  token,
-  onUnauthorized,
+  client,
+  checkingSession,
+  onAuthenticated,
   onLogOut,
 }: {
-  token: string;
-  onUnauthorized: () => void;
-  onLogOut: () => void;
+  client: ApiClient;
+  checkingSession: boolean;
+  onAuthenticated: () => void;
+  onLogOut: () => Promise<void>;
 }) {
-  const client = useMemo(() => createApiClient(token, onUnauthorized), [onUnauthorized, token]);
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -159,7 +196,11 @@ function Dashboard({
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [draftPath, setDraftPath] = useState("");
+  const [draftModel, setDraftModel] = useState("");
+  const [draftUserAgent, setDraftUserAgent] = useState("");
+  const [draftNewAPITokenID, setDraftNewAPITokenID] = useState("");
   const [draftForwardStatus, setDraftForwardStatus] = useState("");
+  const [newAPITokens, setNewAPITokens] = useState<NewAPIToken[]>([]);
   const [filters, setFilters] = useState<AuditFilters>({});
   const [cursor, setCursor] = useState<AuditCursor | null>(null);
   const [cursorHistory, setCursorHistory] = useState<Array<AuditCursor | null>>([]);
@@ -173,6 +214,7 @@ function Dashboard({
     client
       .listAudits(filters, cursor, controller.signal)
       .then((result) => {
+        onAuthenticated();
         setPage(result);
         setSelectedID((current) => {
           if (current && result.items.some((item) => item.audit_id === current)) {
@@ -193,14 +235,31 @@ function Dashboard({
       });
 
     return () => controller.abort();
-  }, [client, cursor, filters, refreshKey]);
+  }, [client, cursor, filters, onAuthenticated, refreshKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    client
+      .listNewAPITokens(controller.signal)
+      .then((result) => setNewAPITokens(result.items))
+      .catch((cause: unknown) => {
+        if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
+          setNewAPITokens([]);
+        }
+      });
+    return () => controller.abort();
+  }, [client, refreshKey]);
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setError(null);
     setCursor(null);
     setCursorHistory([]);
     setFilters({
       path: draftPath.trim() || undefined,
+      model: draftModel.trim() || undefined,
+      user_agent: draftUserAgent.trim() || undefined,
+      newapi_token_id: draftNewAPITokenID || undefined,
       forward_status: draftForwardStatus || undefined,
     });
   }
@@ -238,8 +297,8 @@ function Dashboard({
               <RefreshIcon />
               <span className="ml-2 hidden sm:inline">刷新</span>
             </Button>
-            <Button variant="ghost" size="sm" onClick={onLogOut}>
-              清除令牌
+            <Button variant="ghost" size="sm" onClick={() => void onLogOut()}>
+              退出
             </Button>
           </div>
         </div>
@@ -247,32 +306,81 @@ function Dashboard({
 
       <main className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
         <Card className="bg-white/85 shadow-sm">
-          <CardContent className="p-4">
-            <form className="grid gap-3 md:grid-cols-[minmax(240px,1fr)_220px_auto]" onSubmit={applyFilters}>
-              <Input
-                aria-label="按路径筛选"
-                value={draftPath}
-                onChange={(event) => setDraftPath(event.target.value)}
-                placeholder="按 LLM API 路径筛选"
-              />
-              <select
-                aria-label="按转发状态筛选"
-                className="h-10 rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
-                value={draftForwardStatus}
-                onChange={(event) => setDraftForwardStatus(event.target.value)}
-              >
-                <option value="">全部转发状态</option>
-                <option value="completed">completed</option>
-                <option value="rejected">rejected</option>
-                <option value="client_cancelled">client_cancelled</option>
-                <option value="newapi_error">newapi_error</option>
-                <option value="proxy_error">proxy_error</option>
-                <option value="interrupted">interrupted</option>
-              </select>
-              <Button type="submit">应用筛选</Button>
+          <CardContent className="p-3">
+            <form
+              className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(160px,1.25fr)_minmax(120px,0.8fr)_minmax(150px,1fr)_minmax(150px,1fr)_170px_auto]"
+              onSubmit={applyFilters}
+            >
+              <FilterField label="路径" htmlFor="filter-path">
+                <Input
+                  id="filter-path"
+                  className="h-9"
+                  value={draftPath}
+                  onChange={(event) => setDraftPath(event.target.value)}
+                  placeholder="/v1/chat/completions"
+                />
+              </FilterField>
+              <FilterField label="模型" htmlFor="filter-model">
+                <Input
+                  id="filter-model"
+                  className="h-9"
+                  value={draftModel}
+                  onChange={(event) => setDraftModel(event.target.value)}
+                  placeholder="精确模型名，如 gpt-4o"
+                />
+              </FilterField>
+              <FilterField label="User-Agent" htmlFor="filter-user-agent">
+                <Input
+                  id="filter-user-agent"
+                  className="h-9"
+                  value={draftUserAgent}
+                  onChange={(event) => setDraftUserAgent(event.target.value)}
+                  placeholder="客户端标识"
+                />
+              </FilterField>
+              <FilterField label="API Key" htmlFor="filter-api-key">
+                <select
+                  id="filter-api-key"
+                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+                  value={draftNewAPITokenID}
+                  onChange={(event) => setDraftNewAPITokenID(event.target.value)}
+                >
+                  <option value="">全部 API Key</option>
+                  {newAPITokens.map((token) => (
+                    <option key={token.id} value={String(token.id)}>
+                      #{token.id} {token.name || "未命名"} · {token.masked_key}
+                    </option>
+                  ))}
+                </select>
+              </FilterField>
+              <FilterField label="转发状态" htmlFor="filter-forward-status">
+                <select
+                  id="filter-forward-status"
+                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+                  value={draftForwardStatus}
+                  onChange={(event) => setDraftForwardStatus(event.target.value)}
+                >
+                  <option value="">全部状态</option>
+                  <option value="completed">completed</option>
+                  <option value="rejected">rejected</option>
+                  <option value="client_cancelled">client_cancelled</option>
+                  <option value="newapi_error">newapi_error</option>
+                  <option value="proxy_error">proxy_error</option>
+                  <option value="interrupted">interrupted</option>
+                </select>
+              </FilterField>
+              <Button className="h-9" size="sm" type="submit">
+                筛选
+              </Button>
             </form>
           </CardContent>
         </Card>
+
+        {checkingSession ? (
+          <Alert className="border-blue-200 bg-blue-50/80">
+            <AlertDescription className="text-blue-800">正在检查已有管理会话…</AlertDescription>
+          </Alert>
+        ) : null}
 
         {error ? (
           <Alert className="border-red-200 bg-red-50/90">
@@ -314,7 +422,7 @@ function Dashboard({
   );
 }
 
-function AuditList({
+export function AuditList({
   items,
   loading,
   selectedID,
@@ -327,18 +435,18 @@ function AuditList({
 }) {
   return (
     <Card className="min-w-0 overflow-hidden bg-white/90 shadow-sm">
-      <CardHeader className="flex-row items-center justify-between space-y-0 border-b px-5 py-4">
-        <div>
-          <CardTitle className="text-base">审计记录</CardTitle>
-          <CardDescription className="mt-1">只包含代理白名单内的 LLM API 请求</CardDescription>
+      <CardHeader className="flex-row items-center justify-between space-y-0 border-b px-4 py-2.5">
+        <div className="min-w-0">
+          <CardTitle className="text-sm leading-5">审计记录</CardTitle>
+          <CardDescription className="mt-0.5 truncate text-[11px]">白名单内的 LLM API 请求</CardDescription>
         </div>
         {loading ? <Badge variant="secondary">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
       </CardHeader>
       <CardContent className="p-0">
         {loading ? (
-          <div className="space-y-3 p-5">
+          <div className="space-y-2 p-3">
             {Array.from({ length: 7 }, (_, index) => (
-              <Skeleton key={index} className="h-12 w-full" />
+              <Skeleton key={index} className="h-[4.5rem] w-full" />
             ))}
           </div>
         ) : items.length === 0 ? (
@@ -350,79 +458,76 @@ function AuditList({
             <p className="mt-1 text-sm text-muted-foreground">发送一条白名单内的 LLM API 请求后再刷新。</p>
           </div>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead>时间 / ID</TableHead>
-                <TableHead>请求</TableHead>
-                <TableHead>结果</TableHead>
-                <TableHead>捕获 / 解析</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((audit) => (
-                <TableRow
-                  key={audit.audit_id}
-                  tabIndex={0}
-                  aria-selected={audit.audit_id === selectedID}
-                  className={
-                    audit.audit_id === selectedID
-                      ? "cursor-pointer bg-blue-50/80 hover:bg-blue-50"
-                      : "cursor-pointer"
-                  }
-                  onClick={() => onSelect(audit.audit_id)}
-                  onKeyDown={(event) => selectOnKeyboard(event, () => onSelect(audit.audit_id))}
-                >
-                  <TableCell className="min-w-48">
-                    <div className="text-xs text-muted-foreground">{formatNanoTime(audit.started_at_ns)}</div>
-                    <div className="mt-1 max-w-48 truncate font-mono text-xs" title={audit.audit_id}>
-                      {audit.audit_id}
-                    </div>
-                  </TableCell>
-                  <TableCell className="min-w-64">
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="font-mono">
-                        {audit.method}
-                      </Badge>
-                      <span className="truncate font-medium" title={audit.path}>
-                        {audit.path}
+          <ul className="divide-y" aria-label="审计记录列表">
+            {items.map((audit) => {
+              const selected = audit.audit_id === selectedID;
+              const model = audit.response_model ?? audit.request_model;
+              return (
+                <li key={audit.audit_id}>
+                  <button
+                    type="button"
+                    aria-current={selected ? "true" : undefined}
+                    className={`grid w-full min-w-0 gap-2 px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:grid-cols-[minmax(0,1fr)_auto] ${
+                      selected ? "bg-blue-50/90 hover:bg-blue-50" : "hover:bg-slate-50"
+                    }`}
+                    onClick={() => onSelect(audit.audit_id)}
+                  >
+                    <span className="min-w-0 space-y-1.5">
+                      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
+                          {formatNanoTime(audit.started_at_ns)}
+                        </span>
+                        <span className="max-w-52 truncate font-mono text-[11px] text-muted-foreground" title={audit.audit_id}>
+                          {audit.audit_id}
+                        </span>
                       </span>
-                    </div>
-                    <div className="mt-1 flex gap-2 text-xs text-muted-foreground">
-                      <span>{audit.protocol}</span>
-                      <span>·</span>
-                      <span>{audit.route_id}</span>
-                    </div>
-                    {audit.response_model || audit.request_model ? (
-                      <div
-                        className="mt-1 max-w-64 truncate font-mono text-xs text-muted-foreground"
-                        title={audit.response_model ?? audit.request_model ?? undefined}
-                      >
-                        {audit.response_model ?? audit.request_model}
-                      </div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="min-w-40">
-                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <Badge variant="outline" className="shrink-0 font-mono">
+                          {audit.method}
+                        </Badge>
+                        <span className="min-w-0 truncate text-sm font-medium" title={audit.path}>
+                          {audit.path}
+                        </span>
+                      </span>
+                      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                        <span>{audit.protocol}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="min-w-0 truncate" title={audit.route_id}>{audit.route_id}</span>
+                        {model ? (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="max-w-56 truncate font-mono" title={model}>{model}</span>
+                          </>
+                        ) : null}
+                        {audit.masked_key ? (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span
+                              className="max-w-64 truncate font-mono"
+                              title={`#${audit.newapi_token_id ?? "?"} ${audit.token_name ?? ""} ${audit.masked_key}`}
+                            >
+                              API #{audit.newapi_token_id ?? "?"} {audit.token_name || "未命名"} · {audit.masked_key}
+                            </span>
+                          </>
+                        ) : null}
+                      </span>
+                      {audit.block_code ? (
+                        <span className="block truncate text-[11px] font-medium text-red-700" title={audit.block_code}>
+                          {audit.block_code}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="flex flex-wrap items-start gap-1.5 sm:max-w-56 sm:justify-end">
                       <StatusBadge value={audit.forward_status} />
                       {audit.status_code ? <Badge variant="outline">HTTP {audit.status_code}</Badge> : null}
-                    </div>
-                    {audit.block_code ? (
-                      <div className="mt-1.5 truncate text-xs font-medium text-red-700" title={audit.block_code}>
-                        {audit.block_code}
-                      </div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="min-w-40">
-                    <div className="flex flex-wrap gap-1.5">
                       <StatusBadge labelPrefix="capture" value={audit.capture_status} />
                       <StatusBadge labelPrefix="parse" value={audit.parse_status} />
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </CardContent>
     </Card>
@@ -598,7 +703,7 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
                   ["解析", <StatusBadge value={detail.audit.parse_status} />],
                   ["模式", detail.audit.mode ?? "—"],
                   ["Parser", detail.audit.parser_name ?? "—"],
-                  ["Token", detail.audit.token_name ?? detail.audit.newapi_token_id ?? "—"],
+                  ["NewAPI Token", tokenSummary(detail.audit)],
                 ]}
               />
             </Section>
@@ -964,6 +1069,15 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+function FilterField({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
+  return (
+    <label htmlFor={htmlFor} className="min-w-0 space-y-1">
+      <span className="block text-[11px] font-medium leading-none text-muted-foreground">{label}</span>
+      {children}
+    </label>
+  );
+}
+
 function DefinitionGrid({ items }: { items: Array<[string, ReactNode]> }) {
   if (items.length === 0) {
     return <EmptyValue>没有可展示的数据。</EmptyValue>;
@@ -978,6 +1092,15 @@ function DefinitionGrid({ items }: { items: Array<[string, ReactNode]> }) {
       ))}
     </dl>
   );
+}
+
+function tokenSummary(audit: AuditSummary): string {
+  if (!audit.newapi_token_id && !audit.token_name && !audit.masked_key) {
+    return "—";
+  }
+  return [audit.newapi_token_id ? `#${audit.newapi_token_id}` : "", audit.token_name ?? "", audit.masked_key ?? ""]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function EmptyValue({ children }: { children: ReactNode }) {
@@ -1061,13 +1184,6 @@ function DocumentIcon() {
       <path d="M14 3v5h5M10 12h5M10 16h5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
     </svg>
   );
-}
-
-function selectOnKeyboard(event: KeyboardEvent<HTMLTableRowElement>, select: () => void) {
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    select();
-  }
 }
 
 function saveDownload(download: RawBodyDownload) {

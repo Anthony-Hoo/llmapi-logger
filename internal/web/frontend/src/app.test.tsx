@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { AuditDetail } from "./types";
-import { HTTPAuditEvidence } from "./app";
+import type { AuditDetail, AuditSummary } from "./types";
+import { AuditList, HTTPAuditEvidence } from "./app";
 
 const detail: AuditDetail = {
   audit: {
@@ -55,5 +55,38 @@ describe("HTTP audit evidence", () => {
     expect(html).toContain("Content-Type");
     expect(html).toContain("<details");
     expect(html).not.toContain("<details open");
+  });
+});
+
+describe("audit list", () => {
+  it("uses compact native list buttons instead of a horizontally scrolling Table", () => {
+    const audit: AuditSummary = {
+      audit_id: "apx_selected",
+      started_at_ns: "1",
+      route_id: "openai-chat-completions",
+      protocol: "openai",
+      method: "POST",
+      path: "/v1/chat/completions",
+      status_code: 200,
+      forward_status: "completed",
+      capture_status: "complete",
+      parse_status: "ok",
+      response_model: "gpt-4o",
+      newapi_token_id: 42,
+      token_name: "personal",
+      masked_key: "abcd**********wxyz",
+    };
+
+    const html = renderToStaticMarkup(
+      <AuditList items={[audit]} loading={false} selectedID={audit.audit_id} onSelect={() => undefined} />,
+    );
+
+    expect(html).toContain("<ul");
+    expect(html).toContain("<li");
+    expect(html).toContain('<button type="button" aria-current="true"');
+    expect(html).toContain("gpt-4o");
+    expect(html).toContain("API #42 personal");
+    expect(html).toContain("abcd**********wxyz");
+    expect(html).not.toContain("<table");
   });
 });
