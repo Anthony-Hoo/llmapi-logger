@@ -2,21 +2,21 @@
 
 ## 1. 目标与边界
 
-本模块只处理已经通过 Nginx 和进程内 Matcher 两层白名单的 LLM API 请求，在请求交给 ReverseProxy 和 NewAPI 之前执行本地放行检查。
+本模块只处理进程内 Matcher 精确命中的 LLM API route，在请求交给 audited ReverseProxy 和 NewAPI 之前执行本地放行检查。
 
-NewAPI 的健康检查、登录、管理、模型列表、前端页面和其他路径由 Nginx 直接转发 NewAPI，不进入审计代理、不执行拦截器，也不创建 audit。非白名单请求误打到代理时仍返回 404，且不能通过 interceptor 配置扩大代理的路径范围。
+`/v1/models`、NewAPI 健康检查、登录、管理和前端等安全非 LLM 请求由 data-plane dispatcher 送入 passthrough，不执行拦截器，也不创建 audit。配置路径的错误 Method、编码近似、exact 子路径、template 受保护家族和危险路径 fail-closed；interceptor 配置不能扩大 route 或 passthrough 范围。
 
 首版拦截器只能检查并返回 allow/reject，不得修改 Method、URL、Header、Body 或上游地址，也不做响应拦截。
 
 ## 2. 执行顺序
 
 ~~~text
-Nginx LLM 白名单
-  -> 进程内 Matcher
-  -> BeginAudit
-  -> route interceptor chain
-       |- allow  -> ReverseProxy -> NewAPI
-       `- reject -> 本地固定 JSON
+Nginx -> data-plane dispatcher -> 进程内 Matcher
+                                  |- exact LLM route -> BeginAudit -> interceptor chain
+                                  |                                      |- allow -> audited ReverseProxy -> NewAPI
+                                  |                                      `- reject -> 本地固定 JSON
+                                  |- safe unrelated -> passthrough ReverseProxy -> NewAPI
+                                  `- protected/unsafe mismatch -> 404
 ~~~
 
 规则：
@@ -25,6 +25,7 @@ Nginx LLM 白名单
 - 第一个 reject 立即短路，后续模块和 NewAPI 都不再执行。
 - 未配置拦截器时行为与原透明代理相同。
 - available/strict 只控制审计故障；已启用拦截器的 error 或 panic 始终 fail-closed。
+- passthrough 和分发器的 404 分支都不会调用 chain。
 
 ## 3. 配置
 
@@ -151,7 +152,8 @@ max_body_bytes 是 Body interceptor，配置 max_bytes；超过时返回 `413` �
 
 ## 10. 最少测试
 
-- 只有 Nginx 选入且 Matcher 命中的 LLM API 白名单请求进入 chain；其他 NewAPI 路径由 Nginx 直连，不审计也不拦截。
+- 只有 Matcher 精确命中的 LLM API route 进入 chain；`/v1/models` 等安全非 LLM 请求 passthrough，不审计也不拦截。
+- 错误 Method、exact 子路径、template 家族未配置动作、percent/double encoding 和危险路径在 chain 之前 fail-closed，NewAPI 零调用。
 - chain 严格按配置顺序执行，第一个 reject 后调用 NewAPI 次数为零。
 - error、panic、非法 Decision 和非取消的 Body 读取失败均固定 503；客户端取消按取消结束。
 - metadata-only chain 不读取 Body。
@@ -160,10 +162,6 @@ max_body_bytes 是 Body interceptor，配置 max_bytes；超过时返回 `413` �
 - rejected audit 的 blocked_by、block_code、状态和四阶段缺失语义正确。
 - 响应、日志、SQLite 和 WAL 不泄露凭据或 Body。
 
-## 11. 实施步骤
+## 11. 实现边界
 
-1. 实现 Registry、Factory、RequestView、Decision 和 route chain 编译。
-2. 接入 metadata-only 执行、顺序短路和 panic 隔离。
-3. 实现单次有界 Body 缓冲和原字节 replay。
-4. 扩展 audit_records 与查询页面的拒绝字段。
-5. 实现 require_credential、max_body_bytes 及端到端测试。
+routing 决定哪些请求能进入 chain；app 负责三态分发；interceptor 只产生 allow/reject；proxy 负责本地拒绝响应和 NewAPI I/O；audit 记录 blocked_by/block_code。任一层都不能让 interceptor 扩大路由或把受保护路径降级为 passthrough。

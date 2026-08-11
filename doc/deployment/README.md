@@ -8,15 +8,15 @@
 
 ~~~text
 Internet/LAN -> Nginx :80
-                  |- LLM POST 白名单 -> audit-proxy :8080 -> NewAPI :3000
-                  `- 其他请求 ---------------------> NewAPI :3000
+                  `- 全部数据面 -> audit-proxy :8080 dispatcher -> NewAPI :3000
 
 localhost -> audit-proxy management :8081
 ~~~
 
 - 数据端口 `8080` 只允许 Nginx 访问。
 - 管理端口 `8081` 只发布到宿主机 `127.0.0.1`，但 `/healthz`、`/readyz` 和 `/api/v1/*` 仍全部要求 Bearer token。
-- NewAPI 的登录、管理、模型列表、页面、健康检查以及任何非白名单请求不进入 audit-proxy。
+- 配置的 LLM route 执行拦截与审计；NewAPI 登录、管理、模型列表、页面和健康检查等安全非 LLM 请求经 passthrough 转发，不创建 audit。
+- 错误 Method、受保护 LLM 路径族、编码近似和危险路径在进程内返回 404，不访问 NewAPI。
 
 ## 2. 本机构建
 
@@ -47,7 +47,7 @@ bin/audit-proxy-linux-amd64
   --validate-config
 ~~~
 
-宿主机 Nginx 使用 `configs/nginx/llmapi-logger.conf` 时，把两个 upstream 地址从 Compose 服务名改成实际地址，通常是 `127.0.0.1:8080` 和 `127.0.0.1:3000`。同时把应用配置的数据监听地址设为 `127.0.0.1:8080`。
+宿主机 Nginx 使用 `configs/nginx/llmapi-logger.conf` 时，把 `audit_proxy_backend` 从 Compose 服务名改成实际地址，通常是 `127.0.0.1:8080`。同时把应用配置的数据监听地址设为 `127.0.0.1:8080`。
 
 ## 3. Docker Compose
 
@@ -116,11 +116,11 @@ newapi_proxy_url: http://127.0.0.1:7897
 newapi_proxy_url: ""
 ~~~
 
-该代理只用于 audit-proxy 到 `newapi_url` 的白名单请求，不会接管 Nginx 直连的 NewAPI 登录、管理、模型列表或页面请求，也不会配置 NewAPI 到模型供应商的出口。首版不支持 SOCKS、PAC、代理凭据或环境变量自动发现。修改后重启 audit-proxy，再通过一条带有效上游凭据的白名单请求验证响应和 audit 记录。
+该代理用于 audit-proxy 到 `newapi_url` 的全部出站请求，包括审计分支和 passthrough；只有配置 LLM route 会创建 audit。它不会配置 NewAPI 到模型供应商的出口。首版不支持 SOCKS、PAC、代理凭据或环境变量自动发现。修改后重启 audit-proxy，再分别验证一条带有效上游凭据的 LLM 请求和一个 `/v1/models` passthrough 请求。
 
 ## 5. Nginx 路由保证
 
-`configs/nginx/llmapi-logger.conf` 只把以下大小写敏感、完整路径匹配的 `POST` 请求送进 audit-proxy：
+`configs/nginx/llmapi-logger.conf` 把全部数据面请求统一送进 audit-proxy。进程内 routes 只审计以下 Method + Path：
 
 ~~~text
 /v1/chat/completions
@@ -132,7 +132,7 @@ newapi_proxy_url: ""
 /v1beta/models/<model>:streamGenerateContent
 ~~~
 
-Gemini 的 `<model>` 只允许字母、数字、点、下划线和连字符；正则从路径开头锚定到结尾。相同路径上的非 POST 请求及所有其他路径都直连 NewAPI。
+Gemini 的 `<model>` 只允许字母、数字、点、下划线和连字符。`/v1/models` 等安全非 LLM 路径由 passthrough 转发；相同 LLM 路径的非 POST、受保护路径家族、编码近似和危险路径固定返回 404。
 
 公共代理片段明确关闭请求/响应 buffering、cache、gzip 和 upstream retry。`proxy_pass` 没有 URI 后缀，因此保留原 Path 和 Query。转发身份 Header 由边缘 Nginx 覆盖，不接受客户端伪造的 `X-Forwarded-For` 或 `Forwarded` 值。
 
@@ -144,7 +144,7 @@ nginx -t
 docker compose exec nginx nginx -t
 ~~~
 
-然后分别验证一个白名单流式请求和一个 NewAPI 非白名单请求。仓库不把未实际运行的 Docker/Nginx smoke test 记为通过。
+然后分别验证一个审计流式请求、一个 `/v1/models` passthrough 请求，以及一个错误 Method/编码近似的 fail-closed 请求。仓库不把未实际运行的 Docker/Nginx smoke test 记为通过。
 
 ## 6. 数据和备份
 

@@ -2,7 +2,7 @@
 
 ## 1. 支持范围
 
-首版只解析明确配置进 LLM API 白名单的 `/v1/messages`，支持非流式 JSON 和 Messages SSE。NewAPI health、login、admin、models、UI 和其他路径由 Nginx 直连，不进入本 parser。
+首版只解析明确配置进 LLM API 白名单的 `/v1/messages`，支持非流式 JSON 和 Messages SSE。NewAPI health、login、admin、models、UI 和其他安全非 LLM 路径走 passthrough，不进入本 parser。
 
 parser 异步读取已落盘证据，不进入 HTTP 转发链，不修改 content block 或事件。未知字段、block 和 event 忽略或保存在加密 `parsed_json`。
 

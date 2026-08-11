@@ -2,11 +2,11 @@
 
 ## 1. 目标
 
-阶段 4 只补齐个人部署需要的运行能力：一条安全的请求完成日志、存活/就绪检查、异常退出恢复和有界关闭。首版不提供指标端点、tracing、告警平台或运行时重建整套依赖。
+本模块提供个人部署需要的运行能力：一条安全的 LLM 请求完成日志、存活/就绪检查、异常退出恢复和有界关闭。首版不提供指标端点、tracing、告警平台或运行时重建整套依赖。
 
 ## 2. 请求完成日志
 
-程序输出 `slog` JSON。每个被进程内 Matcher 命中的白名单请求结束时最多记录一条 `llm request completed`，字段固定为：
+程序输出 `slog` JSON。每个被进程内 Matcher 精确命中的 LLM route 结束时最多记录一条 `llm request completed`，字段固定为：
 
 - `audit_id`（成功分配时）；
 - `route_id`、`protocol`、`method`、不含 Query 的 escaped path；
@@ -17,7 +17,7 @@
 
 日志调用不传入 `http.Request` 或原始 error 对象。禁止记录 Query、Header value、Body、解析全文、admin token、上游凭据、主密钥、密文 BLOB 或底层数据库错误文本。
 
-Nginx 直连 NewAPI 的非白名单请求不进入本程序，因此也没有本程序的请求完成日志。
+`/v1/models` 等安全非 LLM 请求即使经本程序 passthrough，也不创建 audit、不执行 interceptor，并且不写 `llm request completed`。错误 Method、受保护路径族和危险路径在分发边界 fail-closed，也不伪装成 LLM audit。
 
 ## 3. 管理面健康接口
 
@@ -29,6 +29,8 @@ GET /readyz
 ~~~
 
 两者与 `/api/v1/*` 使用同一个静态 Bearer middleware，即使监听在 loopback 也必须鉴权。静态 `/ui/` shell 可以匿名加载，但不包含状态或审计数据。
+
+health、ready、详情 JSON、错误 JSON 和 raw Body 响应统一使用 `Cache-Control: no-store`；日志不记录 Admin Token 或返回的明文证据。
 
 `/healthz` 在进程能够响应 HTTP 时返回存活，不代表审计可写。
 
@@ -81,7 +83,7 @@ DB 暂时写失败后，后续 writer 事务成功时可以补写内存中的聚
 ## 7. 最少测试
 
 - 请求完成日志字段完整，扫描不到 Query、Header value、Body、token、key 和底层 error 文本。
-- 非白名单请求没有本程序的请求完成日志。
+- 安全 passthrough 请求没有 audit/interceptor 调用或 LLM 请求完成日志；受保护/危险未匹配路径不会访问 NewAPI。
 - `/healthz`、`/readyz` 和 `/api/v1/*` 缺失或使用错误 Bearer token 时返回 `401`。
 - healthy/degraded/not_ready 的 JSON 和 HTTP 状态符合上表。
 - 启动恢复正确修正未终结 audit、streaming stage/body、长度和 parser 状态，且重复执行幂等。

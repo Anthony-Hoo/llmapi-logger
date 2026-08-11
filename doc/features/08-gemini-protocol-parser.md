@@ -7,7 +7,7 @@
 - `/v1beta/models/{model}:generateContent`
 - `/v1beta/models/{model}:streamGenerateContent`
 
-显式配置 `/v1/models/{model}:...` 时复用同一 parser，但不接管其他 Gemini API；这些是带模型参数的生成 operation，不是 NewAPI 的 models 列表接口。NewAPI health、login、admin、models 列表、UI 和其他路径由 Nginx 直连。
+显式配置 `/v1/models/{model}:...` 时复用同一 parser，但不接管其他 Gemini API；这些是带模型参数的生成 operation，不是 NewAPI 的 models 列表接口。NewAPI health、login、admin、models 列表、UI 和其他安全非 LLM 路径走 passthrough。
 
 parser 异步读取已持久化证据，不进入 HTTP 转发链。请求模型来自受控路径参数，Body 中同名字段不能覆盖路径模型。
 

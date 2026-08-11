@@ -13,7 +13,7 @@
 
 parser 异步读取已持久化证据，不参与代理转发，不修改请求或响应。兼容实现的未知字段忽略或保存在加密 `parsed_json`。
 
-NewAPI health、login、admin、`/v1/models`、UI 和其他路径由 Nginx 直连，不进入本 parser。
+NewAPI health、login、admin、`/v1/models`、UI 和其他安全非 LLM 路径走 passthrough，不进入本 parser。
 
 对应包：`internal/parser/openai`。
 

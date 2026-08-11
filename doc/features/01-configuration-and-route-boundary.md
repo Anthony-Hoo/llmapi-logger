@@ -4,7 +4,7 @@
 
 本文件是个人单机版配置 schema 的唯一来源。只暴露部署者真正需要的字段，writer、WAL、batch、checkpoint、连接池和 HTTP 超时使用代码内默认值。
 
-`routes` 只定义需要审计和拦截的 LLM API 白名单。NewAPI 的健康检查、登录、管理、模型列表、前端页面及其他路径不属于本代理配置范围，必须由 Nginx 直接转发到 NewAPI。
+`routes` 只定义需要审计和拦截的 LLM API 白名单，不用于枚举 NewAPI 的全部接口。进入数据端口的安全非 LLM 请求由 passthrough 透明转发；受保护 LLM 路径族和危险路径不能进入 passthrough。
 
 ## 2. 完整 YAML
 
@@ -96,18 +96,26 @@ type RouteMatch struct {
 
 type Matcher interface {
     Match(method, escapedPath string) (RouteMatch, bool)
+    AllowsPassthrough(escapedPath string) bool
 }
 ~~~
 
-匹配输入使用 Request.URL.EscapedPath；Query 不参与。错误 Method、尾随斜杠、encoded slash、反斜杠和 dot segment 默认拒绝。
+匹配输入使用 Request.URL.EscapedPath；Query 不参与。Matcher 同时维护“可审计 route”和“受保护路径族”：
 
-## 6. 非白名单
+- exact route 的规范路径及其后代均受保护，Method 不参与 passthrough 放行判断。
+- template route 的固定前缀家族受保护；例如配置 `/v1beta/models/{model}:generateContent` 后，同一前缀下未配置的动作也不会直通。
+- percent-encoded 和有限层数的重复编码等价路径按解码后的形式判断，不能通过编码改写逃逸。
+- 尾随斜杠、重复斜杠、反斜杠、encoded slash/backslash、dot segment、非法 escape 等非规范路径全局 fail-closed。
 
-Nginx 是第一层白名单，只有 `routes` 中的 LLM API 路径进入代理；NewAPI 的健康检查、登录、管理、模型列表、前端页面及其他路径直接到 NewAPI，不审计也不拦截。代理仍做第二层校验：
+## 6. 三态数据面分发
 
-- 命中：建立 audit，执行该 route 的 interceptor chain，通过后转发。
-- 未命中：返回 404，不创建 audit_records。
-- 响应不回显 Query、Header 或 token。
+Nginx 示例把全部 NewAPI 数据面请求交给本进程，分发器按以下顺序判断：
+
+1. `Match(method, escapedPath)` 命中：建立 audit，执行该 route 的 interceptor chain，通过后走审计代理。
+2. 未命中且 `AllowsPassthrough(escapedPath)` 为 true：走无审计 passthrough，透明转发 Method、Path、Query、Header 和 Body，不执行 interceptor、不创建 audit_records。
+3. 其余情况：交给受限代理返回固定 404，不访问 NewAPI，不创建 audit_records。
+
+第二类仅用于真正无关且路径规范的 NewAPI 请求，例如 `GET /v1/models`、登录、管理、健康检查或 NewAPI 前端资源。配置路径的错误 Method、exact 子路径、template 家族、编码等价形式和危险路径属于第三类。错误响应不回显 Query、Header 或 token。
 
 ~~~json
 {"error":{"code":"audit_route_not_allowed","message":"route is not enabled"}}
@@ -121,14 +129,15 @@ Nginx 是第一层白名单，只有 `routes` 中的 LLM API 路径进入代理�
 - Path、RawPath、RawQuery、ForceQuery 来自入站请求。
 - 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 - 请求不能通过 Header、Query 或 route 选择其他后端。
-- newapi_proxy_url 只控制 audit-proxy 到 newapi_url 的 Transport；它不改变目标 URL、Host、审计阶段或路由边界。
+- 审计代理和 passthrough 共享同一套 Rewrite 和 Transport 参数。
+- newapi_proxy_url 只控制本程序到 newapi_url 的 Transport；它不改变目标 URL、Host、审计阶段或路由边界。
 - newapi_proxy_url 为空时固定直连，不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`；非空时所有 NewAPI 请求都经过该显式 HTTP(S) 代理，HTTPS 目标使用标准 CONNECT。
 
 首版不提供 preserve/explicit Host 模式、SOCKS/PAC 或带凭据的代理 URL。
 
 ## 8. 入站拦截边界
 
-只有 Matcher 命中的 LLM API 请求才执行有序 interceptor chain。Matcher 命中后、ReverseProxy 接触 NewAPI 前运行；首个 reject 立即返回，不再运行后续模块，也不创建 request_sent_to_newapi 或响应阶段。健康检查、登录、管理、模型列表、前端页面及其他 NewAPI 请求不应到达本进程，误直连代理时仍按非白名单返回 404，且不创建 audit。
+只有 Matcher 命中的 LLM API 请求才执行有序 interceptor chain。Matcher 命中后、ReverseProxy 接触 NewAPI 前运行；首个 reject 立即返回，不再运行后续模块，也不创建 request_sent_to_newapi 或响应阶段。passthrough 请求完全绕过 interceptor 和 audit；interceptor 配置不能扩大 route 或把受保护路径改为直通。
 
 metadata interceptor 只读取克隆后的 Method、Path、Query、Header、ContentLength 和 route 参数，不读取或修改 Body。body interceptor 必须显式声明上限；引擎只预读一次，超过上限在调用 NewAPI 前返回 `413` 和 `block_code=body_too_large`，允许时用原始字节重新构造 Body。未配置 body interceptor 的路由保持原有流式行为。
 
@@ -146,12 +155,12 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，阶段 3 只提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。列表保持非敏感；详情会解密 Request-URI 和逐项 Header/Trailer 值，raw request/response Body 只按需读取。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 
-- 默认七条 route 与相邻负例。
-- 错误 Method、尾随斜杠、encoded slash。
+- 默认七条 route、`/v1/models` 等安全 passthrough 和相邻负例。
+- 错误 Method、exact 子路径、template 家族未配置动作、percent/double encoding、尾随/重复斜杠、反斜杠、encoded slash 和 dot segment 均 fail-closed，Fake NewAPI 零调用。
 - unknown YAML、重复 id、重叠模板。
 - newapi_url 带 path/query/userinfo。
 - newapi_proxy_url 的空值直连、合法 HTTP(S) 代理，以及 userinfo/path/query/fragment/非法端口负例。
@@ -161,5 +170,5 @@ admin_listen 默认 127.0.0.1:8081，阶段 3 只提供 health、ready、audit �
 - loopback 和非 loopback 的管理 API 在无 token/错误 token 时均返回 401。
 - interceptor 顺序、首个 reject 短路、模块异常 fail-closed，且 Fake NewAPI 未收到被拦截请求。
 - 未启用 body interceptor 时保持流式；启用后允许请求的 replay Body 与原字节一致。
-- health、登录、管理、模型列表和前端页面不进入代理，不产生 audit 或 interceptor 调用。
+- health、登录、管理、模型列表和前端页面通过 passthrough 到达 NewAPI，不产生 audit 或 interceptor 调用。
 - Body 超限固定返回 `413`，审计记录 `block_code=body_too_large`。

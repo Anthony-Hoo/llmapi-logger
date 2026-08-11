@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-本模块面向个人单机部署，解决三个问题：审计敏感数据落盘加密、普通日志和列表脱敏、管理面始终使用静态 token 保护数据接口。
+本模块面向个人单机部署，解决三个问题：审计敏感数据落盘加密、普通日志和列表脱敏、管理面始终使用静态 token 保护明文详情与 raw 证据接口。
 
 首版按单用户单机模型设计，只保留一套管理面访问规则和一把活动主密钥。
 
@@ -13,9 +13,9 @@
 - `/api/v1/*`、`/healthz` 和 `/readyz` 全部要求静态 Bearer token。
 - 只有本审计代理不含数据的静态管理 UI shell 和其 CSS/JS/font 资源可以免 token 加载。
 
-本节的 health、ready、API 和 UI 都属于审计代理的独立管理 listener，不是 NewAPI 自身路径。NewAPI health、login、admin、models、UI 和其他非 LLM 白名单请求由 Nginx 直连，不进入代理、拦截或审计。
+本节的 health、ready、API 和 UI 都属于审计代理的独立管理 listener，不是 NewAPI 自身路径。NewAPI health、login、admin、models、UI 和其他安全非 LLM 请求可经数据面的 passthrough 转发，但不进入 interceptor、audit 或 parser。
 - SQLite、WAL、备份中的 Request-URI、Header、Body chunk 和 parsed JSON 必须是密文。
-- 普通运行日志、错误响应和列表 API 不得包含凭据或 Body 内容。
+- 普通运行日志、错误响应和列表 API 不得包含凭据或 Body 内容；受保护详情和 raw API 是用户显式读取明文证据的唯一入口。
 - 同时取得进程权限、主密钥和数据库的本机管理员不在首版威胁模型内。
 
 ## 3. 配置
@@ -33,6 +33,8 @@ Authorization: Bearer <configured-token>
 ~~~
 
 服务使用常量时间比较 token。缺失或不匹配返回 `401`，不说明哪一部分错误。规则对 loopback 和非 loopback 完全相同。
+
+管理 JSON 与 raw Body 响应统一设置 `Cache-Control: no-store`。错误响应不能包含底层数据库/解密错误、Header、Query、Body、token 或密文。
 
 本审计代理的静态管理 UI shell 只能提供 HTML/CSS/JS/font，不能内嵌审计数据、运行状态、配置 secret 或 token。React 页面由用户输入 token，token 只保存在当前页面的 JavaScript 内存中；不得写入 localStorage、sessionStorage、Cookie、IndexedDB、URL 或 Service Worker cache。
 
@@ -92,10 +94,12 @@ type Cipher interface {
 
 调用方只把返回的完整 BLOB 写入上述四类 `*_enc` 字段。token_links 只保存 NewAPI token id/name，不保存 token key；audit_gaps 只保存非敏感时间范围、原因和计数。
 
-## 8. 脱敏规则
+## 8. 管理证据与脱敏规则
 
-- 列表和详情元数据只展示 Header 名、长度、hash 或 `[REDACTED]`，不自动解密 value。
-- 原始请求/响应属于用户显式操作，按管理面监听规则放行后才解密。
+- 列表 API 只返回非敏感摘要，不读取 Request-URI、Header 密文、Body chunk 或 parsed JSON 全文。
+- 详情 API 在 Admin Token 鉴权后解密并返回原始 Request-URI，以及每个已保存 Header/Trailer 的 `stage`、`kind`、`name`、`value_index`、`value_length` 和 `value`。同名多值不会合并。
+- 原始 request/response Body 只在用户显式请求对应 raw API 时逐块认证解密；UI 不自动加载大 Body。
+- React 页面可用详情字段重建应用层 HTTP 起始行和 Header/Trailer 视图，但不宣称恢复 TCP、TLS、HTTP/2 frame、原始 Header 大小写/顺序或 chunk framing。
 - Query 中配置为敏感的键在日志中只保留键名。
 - Token 关联只落 `newapi_token_id`、`token_name`，不落 NewAPI token key。
 - 错误日志只记录 `audit_id`、组件和错误类别，不记录明文或密文 BLOB。
@@ -104,7 +108,7 @@ type Cipher interface {
 
 - 启动阶段无法加载主密钥：不以明文降级；available 继续代理并报告审计不可用，strict 保持 not ready。
 - 随机数源或加密失败：本条证据不写入；strict 模式拒绝新请求，available 模式继续转发并记录 `audit_gaps`。
-- 解密认证失败：原始读取返回 `500`，日志记录 `decrypt_failed` 和 `audit_id`。
+- Request-URI、Header 或 Body 解密认证失败，以及 Header 明文长度不匹配：返回通用 `500 evidence_unavailable`；错误文本不包装底层密码库错误，也不返回部分详情。
 - Bearer token 配置为空：无论监听地址为何，配置校验都失败。
 - 不允许忽略 GCM tag 错误，也不返回部分解密内容。
 
@@ -118,6 +122,8 @@ type Cipher interface {
 - loopback 和非 loopback 下，空 token 都导致启动失败；正确和错误 token 分别得到成功与 `401`。
 - 未携带 token 时本审计代理的静态管理 UI shell 可加载，但 API、health 和 ready 均返回 `401`。
 - 页面刷新后 token 消失，浏览器持久化存储、Cookie、URL 和静态资源中均无 token。
+- 管理列表扫描不到测试 Request-URI、Header 或 Body 明文；正确 Token 下详情能读取逐项 Header/Trailer 值和 Request-URI，raw API 能还原请求/响应 Body。
+- 详情、错误 JSON 和 raw 响应均带 `Cache-Control: no-store`；未授权请求不返回任何明文证据。
 - 相同明文重复加密得到不同 BLOB，且都可解密。
 - 篡改 nonce、ciphertext、tag 或 AAD 后解密失败。
 - 扫描 DB、WAL、日志确认没有测试凭据和 Body 明文。
@@ -125,11 +131,6 @@ type Cipher interface {
 - available 加密失败只产生 gap，不影响已开始的字节转发。
 - 备份同时包含数据库、WAL 状态处理方式和 key 文件。
 
-## 12. 实施步骤
+## 12. 实现边界
 
-1. 实现 `admin_token` 必填校验和覆盖全部管理数据端点的 Bearer middleware。
-2. 实现 key 文件创建、权限检查与加载。
-3. 实现 AES-GCM 简单 BLOB 编解码和 AAD 构造。
-4. 接入 Header、Body chunk、parsed JSON 写入与读取。
-5. 接入日志、Query 和 Header 脱敏。
-6. 完成篡改、权限、明文扫描和故障注入测试。
+security 只提供 key 管理、AAD 和 AES-GCM；storage 只返回密文证据；query 是管理面唯一允许解密 Request-URI、Header/Trailer 和 raw Body 的层。web 只映射稳定错误，不记录或拼接敏感错误细节。

@@ -23,7 +23,7 @@ internal/web/frontend/src/*.test.ts    # 前端 API 与格式化测试
 
 ## 3. 核心覆盖
 
-- Method + Path 白名单，以及非白名单 `404` 且不创建 audit。
+- Method + Path 白名单、安全非 LLM passthrough，以及受保护/危险未匹配路径 `404` 且不创建 audit。
 - Path、RawQuery、重复 Query/Header、JSON、gzip、multipart、binary、空 Body 和大 Body 透明性。
 - SSE 首块及时 flush、字节顺序和取消释放。
 - interceptor 顺序、首个 reject、panic/error/非法结果、Body 单次预读与原字节 replay、`413 body_too_large`。
@@ -65,8 +65,8 @@ bash ./scripts/build.sh
 
 静态检查应确认：
 
-- 只有五个固定 POST 路径和锚定 Gemini POST 路径选择 audit-proxy。
-- 其他 Method/Path 选择 NewAPI。
+- Nginx 将全部数据面请求统一送入 audit-proxy，不存在 NewAPI fallback。
+- 进程内 dispatcher 对配置 LLM route 审计、安全非 LLM 路径 passthrough，并对受保护/危险路径 fail-closed。
 - buffering、cache 和 upstream retry 已关闭。
 - `proxy_pass` 没有 URI 后缀。
 - 管理端只绑定宿主机 `127.0.0.1:8081`，数据端没有 host port。
@@ -82,6 +82,6 @@ bash ./scripts/build.sh
 - strict admission 故障不会调用 Fake NewAPI；available 审计故障仍能转发并产生安全日志或 gap。
 - 重启恢复、retention 批次边界和级联删除测试通过。
 - loopback 管理 API 缺少 Bearer token 时返回 `401`。
-- 路由、parser、示例配置和 Nginx 白名单保持一致。
+- 路由、受保护路径边界、parser、示例配置和 Nginx 统一数据面入口保持一致。
 
 本阶段不验收指标、导出、手工删除、自动 VACUUM、复杂重连或长期性能基线。
