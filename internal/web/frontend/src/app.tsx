@@ -18,6 +18,7 @@ import { Input } from "./components/ui/input";
 import { Separator } from "./components/ui/separator";
 import { Skeleton } from "./components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
+import { ConversationView } from "./components/conversation-view";
 import {
   displayValue,
   formatBytes,
@@ -579,6 +580,10 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
               </Alert>
             ) : null}
 
+            <Section title="对话审计">
+              <ConversationView conversation={detail.conversation} />
+            </Section>
+
             <Section title="请求概览">
               <DefinitionGrid
                 items={[
@@ -598,50 +603,6 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
               />
             </Section>
 
-            <Section title="原始证据">
-              <Alert className="mb-3 bg-slate-50">
-                <AlertDescription>
-                  这里按审计边界保存的字段重建 HTTP 视图，不是 TCP、TLS、HTTP/2 frame 或原始大小写/顺序级别的 wire dump。
-                  Header 值只随当前详情读取；Body 不会自动加载，点击查看后才会从本机管理 API 解密到页面内存。
-                </AlertDescription>
-              </Alert>
-              <div className="space-y-3">
-                <RawHTTPMessage
-                  side="request"
-                  detail={detail}
-                  loaded={rawBodies.request}
-                  loading={rawLoading === "request"}
-                  busy={rawLoading !== null}
-                  onLoad={() => loadRawBody("request")}
-                  onDownload={() => downloadRawBody("request")}
-                  onClear={() => clearRawBody("request")}
-                />
-                <RawHTTPMessage
-                  side="response"
-                  detail={detail}
-                  loaded={rawBodies.response}
-                  loading={rawLoading === "response"}
-                  busy={rawLoading !== null}
-                  onLoad={() => loadRawBody("response")}
-                  onDownload={() => downloadRawBody("response")}
-                  onClear={() => clearRawBody("response")}
-                />
-              </div>
-              {rawNote ? <p className="mt-2 text-xs text-muted-foreground">{rawNote}</p> : null}
-            </Section>
-
-            <Section title="HTTP 阶段">
-              <StagesTable stages={detail.stages} />
-            </Section>
-
-            <Section title="Body 完整性">
-              <BodiesTable bodies={detail.bodies} />
-            </Section>
-
-            <Section title={`Header / Trailer 值（${detail.headers.length}）`}>
-              <HeadersTable headers={detail.headers} />
-            </Section>
-
             <Section title="解析摘要">
               {detail.parsed_result ? (
                 <DefinitionGrid
@@ -653,10 +614,102 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
                 <EmptyValue>当前没有解析摘要。</EmptyValue>
               )}
             </Section>
+
+            <HTTPAuditEvidence
+              detail={detail}
+              rawBodies={rawBodies}
+              rawLoading={rawLoading}
+              rawNote={rawNote}
+              onLoad={loadRawBody}
+              onDownload={downloadRawBody}
+              onClear={clearRawBody}
+            />
           </>
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+export function HTTPAuditEvidence({
+  detail,
+  rawBodies,
+  rawLoading,
+  rawNote,
+  onLoad,
+  onDownload,
+  onClear,
+}: {
+  detail: AuditDetail;
+  rawBodies: Partial<Record<RawSide, LoadedRawBody>>;
+  rawLoading: RawSide | null;
+  rawNote: string | null;
+  onLoad: (side: RawSide) => void;
+  onDownload: (side: RawSide) => void;
+  onClear: (side: RawSide) => void;
+}) {
+  return (
+    <details className="overflow-hidden rounded-lg border bg-slate-50/60">
+      <summary className="cursor-pointer px-4 py-3 text-sm font-semibold hover:bg-slate-100/80">
+        原始 HTTP 证据与完整性
+        <span className="ml-2 text-xs font-normal text-muted-foreground">辅助证据 · 默认折叠</span>
+      </summary>
+      <div className="space-y-5 border-t bg-white/80 p-4">
+        <Alert className="bg-slate-50">
+          <AlertDescription>
+            这里按审计边界保存的字段重建 HTTP 视图，不是 TCP、TLS、HTTP/2 frame 或原始大小写/顺序级别的 wire dump。
+            Header 值只随当前详情读取；Body 不会自动加载，点击查看后才会从本机管理 API 解密到页面内存。
+          </AlertDescription>
+        </Alert>
+
+        <EvidenceSubsection title="原始请求与响应">
+          <div className="space-y-3">
+            <RawHTTPMessage
+              side="request"
+              detail={detail}
+              loaded={rawBodies.request}
+              loading={rawLoading === "request"}
+              busy={rawLoading !== null}
+              onLoad={() => onLoad("request")}
+              onDownload={() => onDownload("request")}
+              onClear={() => onClear("request")}
+            />
+            <RawHTTPMessage
+              side="response"
+              detail={detail}
+              loaded={rawBodies.response}
+              loading={rawLoading === "response"}
+              busy={rawLoading !== null}
+              onLoad={() => onLoad("response")}
+              onDownload={() => onDownload("response")}
+              onClear={() => onClear("response")}
+            />
+          </div>
+          {rawNote ? <p className="mt-2 text-xs text-muted-foreground">{rawNote}</p> : null}
+        </EvidenceSubsection>
+
+        <EvidenceSubsection title="HTTP 阶段">
+          <StagesTable stages={detail.stages} />
+        </EvidenceSubsection>
+
+        <EvidenceSubsection title="Body 完整性">
+          <BodiesTable bodies={detail.bodies} />
+        </EvidenceSubsection>
+
+        <EvidenceSubsection title={`Header / Trailer 值（${detail.headers.length}）`}>
+          <HeadersTable headers={detail.headers} />
+        </EvidenceSubsection>
+      </div>
+    </details>
+  );
+}
+
+function EvidenceSubsection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section>
+      <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h4>
+      {children}
+    </section>
   );
 }
 

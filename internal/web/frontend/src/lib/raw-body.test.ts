@@ -101,6 +101,7 @@ describe("raw Body preview", () => {
         },
       ],
       bodies: [],
+      conversation: null,
       parsed_result: null,
       token_link: null,
     } satisfies AuditDetail;
@@ -139,6 +140,7 @@ describe("raw Body preview", () => {
       ],
       headers: [],
       bodies: [],
+      conversation: null,
       parsed_result: null,
       token_link: null,
     } satisfies AuditDetail;
