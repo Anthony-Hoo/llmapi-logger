@@ -85,9 +85,14 @@ type adminListPage struct {
 }
 
 type adminAuditDetail struct {
-	Headers []struct {
+	RequestURI string `json:"request_uri"`
+	Headers    []struct {
+		Stage       string `json:"stage"`
+		Kind        string `json:"kind"`
 		Name        string `json:"name"`
+		ValueIndex  int    `json:"value_index"`
 		ValueLength int    `json:"value_length"`
+		Value       string `json:"value"`
 	} `json:"headers"`
 	ParsedResult *struct {
 		Status       string `json:"status"`
@@ -96,6 +101,151 @@ type adminAuditDetail struct {
 		UsageTotal   *int64 `json:"usage_total"`
 		MessageCount *int64 `json:"message_count"`
 	} `json:"parsed_result"`
+}
+
+func TestNonLLMPassthroughDoesNotBypassAuditedRoutes(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/models":
+			if request.URL.RawQuery != "source=integration" {
+				http.Error(response, "query changed", http.StatusBadRequest)
+				return
+			}
+			if request.Header.Get("Authorization") != "Bearer models-test-token" {
+				http.Error(response, "authorization changed", http.StatusBadRequest)
+				return
+			}
+			response.Header().Set("X-NewAPI-Models", "preserved")
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"data":[{"id":"test-model"}]}`)
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/chat/completions":
+			response.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(response, `{"id":"completion"}`)
+		default:
+			http.Error(response, "unexpected upstream request", http.StatusTeapot)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := loadConfig(t, upstream.URL, "/v1/chat/completions", false)
+	cfg.Routes = append(cfg.Routes, config.RouteConfig{
+		ID:     "gemini-generate",
+		Method: http.MethodPost,
+		Path:   "/v1beta/models/{model}:generateContent",
+		Match:  "template",
+		Parser: "gemini.generate_content",
+	})
+	running := startApp(t, cfg)
+	client := &http.Client{Timeout: integrationTimeout}
+
+	modelsRequest, err := http.NewRequest(http.MethodGet, running.baseURL+"/v1/models?source=integration", http.NoBody)
+	if err != nil {
+		t.Fatalf("new models request: %v", err)
+	}
+	modelsRequest.Header.Set("Authorization", "Bearer models-test-token")
+	modelsResponse, err := client.Do(modelsRequest)
+	if err != nil {
+		t.Fatalf("send models request: %v", err)
+	}
+	modelsBody, readErr := io.ReadAll(modelsResponse.Body)
+	modelsResponse.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read models response: %v", readErr)
+	}
+	if modelsResponse.StatusCode != http.StatusOK || string(modelsBody) != `{"data":[{"id":"test-model"}]}` {
+		t.Fatalf("models response = %d %q, want transparent upstream response", modelsResponse.StatusCode, modelsBody)
+	}
+	if modelsResponse.Header.Get("X-NewAPI-Models") != "preserved" {
+		t.Fatal("models response header was not preserved")
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream calls after models request = %d, want 1", got)
+	}
+	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+		t.Fatalf("audit records after models passthrough = %d, want 0", got)
+	}
+
+	encodedRequest, err := http.NewRequest(
+		http.MethodPost,
+		running.baseURL+"/v1/chat/%63ompletions",
+		strings.NewReader(`{"model":"test-model"}`),
+	)
+	if err != nil {
+		t.Fatalf("new encoded route request: %v", err)
+	}
+	encodedResponse, err := client.Do(encodedRequest)
+	if err != nil {
+		t.Fatalf("send encoded route request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, encodedResponse.Body)
+	encodedResponse.Body.Close()
+	if encodedResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("encoded route status = %d, want %d", encodedResponse.StatusCode, http.StatusNotFound)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("encoded route reached upstream: calls = %d, want 1", got)
+	}
+	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+		t.Fatalf("encoded rejected route created %d audit records, want 0", got)
+	}
+
+	blockedVariants := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "wrong method", method: http.MethodGet, path: "/v1/chat/completions"},
+		{name: "template near miss", method: http.MethodPost, path: "/v1beta/models/a+b:generateContent"},
+	}
+	for _, blocked := range blockedVariants {
+		t.Run(blocked.name, func(t *testing.T) {
+			request, err := http.NewRequest(blocked.method, running.baseURL+blocked.path, http.NoBody)
+			if err != nil {
+				t.Fatalf("new blocked request: %v", err)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatalf("send blocked request: %v", err)
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNotFound)
+			}
+		})
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("protected route variants reached upstream: calls = %d, want 1", got)
+	}
+	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+		t.Fatalf("protected rejected routes created %d audit records, want 0", got)
+	}
+
+	auditedResponse, err := client.Post(
+		running.baseURL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"model":"test-model"}`),
+	)
+	if err != nil {
+		t.Fatalf("send audited route request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, auditedResponse.Body)
+	auditedResponse.Body.Close()
+	if auditedResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("audited route status = %d, want %d", auditedResponse.StatusCode, http.StatusCreated)
+	}
+	audit := waitForFinishedAudit(t, cfg.DBPath)
+	if audit.forwardStatus != "completed" || !audit.statusCode.Valid || audit.statusCode.Int64 != http.StatusCreated {
+		t.Fatalf("audited route record = %+v, want completed 201", audit)
+	}
+	if got := auditRecordCount(t, cfg.DBPath); got != 1 {
+		t.Fatalf("audit records after audited route = %d, want 1", got)
+	}
+	if got := upstreamCalls.Load(); got != 2 {
+		t.Fatalf("upstream calls after audited route = %d, want 2", got)
+	}
 }
 
 func TestAuditPersistsFourEncryptedBodyStages(t *testing.T) {
@@ -330,6 +480,7 @@ SELECT
 }
 
 func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
+	requestURI := "/v1/chat/completions?request_uri_secret=admin-uri-secret"
 	requestBody := []byte(`{"model":"gpt-personal","stream":false,"messages":[{"role":"user","content":"admin-api-prompt-secret"}]}`)
 	responseBody := []byte(`{"id":"chatcmpl-local","model":"gpt-personal-result","choices":[{"message":{"role":"assistant","content":"admin-api-response-secret"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
 
@@ -352,7 +503,7 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 	running := startApp(t, cfg)
 	client := &http.Client{Timeout: integrationTimeout}
 
-	request, err := http.NewRequest(http.MethodPost, running.baseURL+"/v1/chat/completions", bytes.NewReader(requestBody))
+	request, err := http.NewRequest(http.MethodPost, running.baseURL+requestURI, bytes.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("new parsed request: %v", err)
 	}
@@ -409,7 +560,7 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 	if summary.ResponseModel == nil || *summary.ResponseModel != "gpt-personal-result" {
 		t.Errorf("response model = %v, want gpt-personal-result", summary.ResponseModel)
 	}
-	for _, secret := range [][]byte{[]byte("admin-api-prompt-secret"), []byte("admin-api-response-secret"), []byte("downstream-admin-api-secret")} {
+	for _, secret := range [][]byte{[]byte("admin-api-prompt-secret"), []byte("admin-api-response-secret"), []byte("downstream-admin-api-secret"), []byte("admin-uri-secret")} {
 		if bytes.Contains(listBody, secret) {
 			t.Fatalf("admin list leaked secret %q", secret)
 		}
@@ -431,9 +582,26 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 	if detail.ParsedResult.MessageCount == nil || *detail.ParsedResult.MessageCount != 1 {
 		t.Errorf("parsed message count = %v, want 1", detail.ParsedResult.MessageCount)
 	}
-	for _, secret := range [][]byte{[]byte("admin-api-prompt-secret"), []byte("admin-api-response-secret"), []byte("downstream-admin-api-secret")} {
+	if detail.RequestURI != requestURI {
+		t.Errorf("admin detail request_uri = %q, want %q", detail.RequestURI, requestURI)
+	}
+	var authorizationValues []string
+	for _, header := range detail.Headers {
+		if strings.EqualFold(header.Name, "Authorization") {
+			authorizationValues = append(authorizationValues, header.Value)
+		}
+	}
+	if len(authorizationValues) == 0 {
+		t.Fatal("admin detail omitted saved Authorization values")
+	}
+	for _, value := range authorizationValues {
+		if value != "Bearer downstream-admin-api-secret" {
+			t.Errorf("admin detail Authorization = %q", value)
+		}
+	}
+	for _, secret := range [][]byte{[]byte("admin-api-prompt-secret"), []byte("admin-api-response-secret")} {
 		if bytes.Contains(detailBody, secret) {
-			t.Fatalf("admin detail leaked secret %q", secret)
+			t.Fatalf("admin detail included raw Body value %q", secret)
 		}
 	}
 
@@ -621,6 +789,17 @@ func openAuditDatabase(t *testing.T, path string) *sql.DB {
 		t.Fatalf("enable query-only audit database: %v", err)
 	}
 	return database
+}
+
+func auditRecordCount(t *testing.T, path string) int {
+	t.Helper()
+	database := openAuditDatabase(t, path)
+	defer database.Close()
+	var count int
+	if err := database.QueryRow("SELECT count(*) FROM audit_records").Scan(&count); err != nil {
+		t.Fatalf("count audit records: %v", err)
+	}
+	return count
 }
 
 func readStages(t *testing.T, database *sql.DB, auditID string) map[string]persistedStage {

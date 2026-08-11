@@ -109,6 +109,63 @@ func TestNewRoutesNewAPIRequestsThroughConfiguredProxy(t *testing.T) {
 	}
 }
 
+func TestNewRoutesPassthroughThroughConfiguredProxyWithoutAudit(t *testing.T) {
+	observed := make(chan *http.Request, 1)
+	upstreamProxy := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		observed <- request.Clone(request.Context())
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte(`{"data":[{"id":"model"}]}`))
+	}))
+	defer upstreamProxy.Close()
+
+	configuration := config.Default()
+	configuration.NewAPIURL = "http://newapi.invalid"
+	configuration.NewAPIProxyURL = upstreamProxy.URL
+	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
+	configuration.Routes = []config.RouteConfig{{
+		ID:     "chat",
+		Method: http.MethodPost,
+		Path:   "/v1/chat/completions",
+		Match:  "exact",
+		Parser: "openai.chat_completions",
+	}}
+	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("new application: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := application.Close(); err != nil {
+			t.Errorf("close application: %v", err)
+		}
+	})
+
+	response := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(
+		response,
+		httptest.NewRequest(http.MethodGet, "http://audit-proxy/v1/models?group=all", http.NoBody),
+	)
+	if response.Code != http.StatusOK || response.Body.String() != `{"data":[{"id":"model"}]}` {
+		t.Fatalf("response = %d %q, want models response", response.Code, response.Body.String())
+	}
+
+	request := <-observed
+	if request.URL.Scheme != "http" || request.URL.Host != "newapi.invalid" {
+		t.Fatalf("proxy request URL = %q, want NewAPI absolute URL", request.URL.String())
+	}
+	if request.Method != http.MethodGet || request.URL.Path != "/v1/models" || request.URL.RawQuery != "group=all" {
+		t.Fatalf("passthrough request = %s %q, want GET /v1/models?group=all", request.Method, request.URL.RequestURI())
+	}
+	hasAudits, err := application.auditStore.HasAudits(context.Background())
+	if err != nil {
+		t.Fatalf("check audit rows: %v", err)
+	}
+	if hasAudits {
+		t.Fatal("models passthrough unexpectedly created an audit record")
+	}
+}
+
 func TestAssembleAuditTreatsStartupRecoveryFailureAsUnavailable(t *testing.T) {
 	const recoveryErrorCanary = "recovery-error-secret-that-must-not-be-logged"
 	directory := t.TempDir()

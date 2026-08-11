@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"llmapi-logger/internal/security"
@@ -108,6 +109,16 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 		Headers: make([]Header, 0, len(storageDetail.Headers)),
 		Bodies:  make([]Body, 0, len(storageDetail.Bodies)),
 	}
+	requestURIAAD, err := security.AAD(auditID, "request_uri")
+	if err != nil {
+		return Detail{}, ErrIntegrity
+	}
+	requestURI, err := service.cipher.Decrypt(requestURIAAD, storageDetail.RequestURIEnc)
+	if err != nil {
+		return Detail{}, ErrIntegrity
+	}
+	detail.RequestURI = string(requestURI)
+	clear(requestURI)
 	for _, stage := range storageDetail.Stages {
 		detail.Stages = append(detail.Stages, Stage{
 			Stage:         stage.Stage,
@@ -123,12 +134,31 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 		})
 	}
 	for _, header := range storageDetail.Headers {
+		aad, err := security.AAD(
+			auditID,
+			"header",
+			header.Stage,
+			header.Kind,
+			header.Name,
+			strconv.Itoa(header.ValueIndex),
+		)
+		if err != nil {
+			return Detail{}, ErrIntegrity
+		}
+		plaintext, err := service.cipher.Decrypt(aad, header.ValueEnc)
+		if err != nil || len(plaintext) != header.ValueLength {
+			clear(plaintext)
+			return Detail{}, ErrIntegrity
+		}
+		value := string(plaintext)
+		clear(plaintext)
 		detail.Headers = append(detail.Headers, Header{
 			Stage:       header.Stage,
 			Kind:        header.Kind,
 			Name:        header.Name,
 			ValueIndex:  header.ValueIndex,
 			ValueLength: header.ValueLength,
+			Value:       value,
 		})
 	}
 	for _, body := range storageDetail.Bodies {

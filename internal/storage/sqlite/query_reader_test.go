@@ -93,7 +93,7 @@ VALUES (?, ?, ?, ?)`, "audit-b", 42, "personal", 102); err != nil {
 	}
 }
 
-func TestQueryAuditDetailOmitsEncryptedValues(t *testing.T) {
+func TestQueryAuditDetailLoadsEncryptedValuesForQueryService(t *testing.T) {
 	t.Parallel()
 
 	store, _ := openTestStore(t)
@@ -146,8 +146,11 @@ func TestQueryAuditDetailOmitsEncryptedValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Headers) != 1 || detail.Headers[0].Name != "authorization" || detail.Headers[0].ValueLength != 12 {
-		t.Fatalf("header metadata = %+v", detail.Headers)
+	if !bytes.Equal(detail.RequestURIEnc, record.RequestURIEnc) {
+		t.Fatalf("encrypted request URI = %x, want %x", detail.RequestURIEnc, record.RequestURIEnc)
+	}
+	if len(detail.Headers) != 1 || detail.Headers[0].Name != "authorization" || detail.Headers[0].ValueLength != 12 || !bytes.Equal(detail.Headers[0].ValueEnc, secretCiphertext) {
+		t.Fatalf("header evidence = %+v", detail.Headers)
 	}
 	if len(detail.Bodies) != 1 || !bytes.Equal(detail.Bodies[0].SHA256, digest) {
 		t.Fatalf("body metadata = %+v", detail.Bodies)

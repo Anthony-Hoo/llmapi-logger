@@ -80,13 +80,14 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	}
 
 	runtime := assembleAudit(configuration, logger)
+	auditedProxy := proxy.NewWithOptions(target, matcher, engine, proxy.Options{
+		Audit:         runtime.sink,
+		UpstreamProxy: upstreamProxy,
+	}, logger)
 	application := &App{
 		server: &http.Server{
-			Addr: configuration.Listen,
-			Handler: proxy.NewWithOptions(target, matcher, engine, proxy.Options{
-				Audit:         runtime.sink,
-				UpstreamProxy: upstreamProxy,
-			}, logger),
+			Addr:              configuration.Listen,
+			Handler:           newDataPlaneHandler(matcher, auditedProxy, proxy.NewPassthrough(target, upstreamProxy, logger)),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
