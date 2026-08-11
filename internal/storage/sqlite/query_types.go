@@ -47,6 +47,7 @@ type AuditListRow struct {
 	ResponseModel *string
 	NewAPITokenID *int64
 	TokenName     *string
+	MaskedKey     *string
 }
 
 // AuditListPage contains a keyset-paginated result. HasMore is computed by
@@ -91,11 +92,13 @@ type ParsedResultSummary struct {
 	ParsedAtNS      int64
 }
 
-// TokenLinkSummary contains only the NewAPI token identifier and display name
-// snapshot. It never contains the credential itself.
+// TokenLinkSummary contains only the NewAPI token identifier, display name,
+// and source-provided masked credential snapshot. It never contains the
+// original credential.
 type TokenLinkSummary struct {
 	NewAPITokenID int64
 	TokenName     string
+	MaskedKey     string
 	LinkedAtNS    int64
 }
 

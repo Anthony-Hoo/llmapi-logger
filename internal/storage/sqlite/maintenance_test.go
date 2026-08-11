@@ -182,8 +182,8 @@ INSERT INTO parsed_results (
 		t.Fatal(err)
 	}
 	if _, err := transaction.Exec(`
-INSERT INTO token_links (audit_id, newapi_token_id, token_name, linked_at_ns)
-VALUES (?, 1, 'personal', ?)`, auditID, *endedAt); err != nil {
+	INSERT INTO token_links (audit_id, newapi_token_id, token_name, masked_key, linked_at_ns)
+	VALUES (?, 1, 'personal', 'sk-...1234', ?)`, auditID, *endedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := transaction.Commit(); err != nil {

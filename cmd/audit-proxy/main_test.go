@@ -38,13 +38,13 @@ func writeValidConfig(t *testing.T) string {
 	tempDir := t.TempDir()
 	contents := fmt.Sprintf(`listen: 127.0.0.1:18080
 admin_listen: 127.0.0.1:18081
-newapi_url: http://127.0.0.1:3000
+newapi:
+  url: http://127.0.0.1:3000
 mode: available
 db_path: '%s'
 key_path: '%s'
 admin_token: test-admin-token
 retention_days: 0
-newapi_token_db_path: ''
 interceptors: {}
 routes:
   - id: chat

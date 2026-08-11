@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode"
 
+	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
 )
 
@@ -25,6 +26,11 @@ type AuditQuery interface {
 	StreamRaw(context.Context, string, query.Side, io.Writer) error
 }
 
+// TokenCatalog exposes only NewAPI's already-masked token metadata.
+type TokenCatalog interface {
+	Snapshot() newapi.Snapshot
+}
+
 type ReadyStatus struct {
 	Status        string `json:"status"`
 	Database      string `json:"database"`
@@ -35,6 +41,7 @@ type ReadyStatus struct {
 type Options struct {
 	AdminToken string
 	Query      AuditQuery
+	Tokens     TokenCatalog
 	Assets     fs.FS
 	Readiness  func(context.Context) ReadyStatus
 	Logger     *slog.Logger
@@ -52,23 +59,31 @@ func NewHandler(options Options) (http.Handler, error) {
 
 	handler := &managementHandler{
 		query:     options.Query,
+		tokens:    options.Tokens,
 		readiness: options.Readiness,
 		static:    newStaticHandler(options.Assets),
 		logger:    options.Logger,
 	}
-	handler.auth = newBearerAuth(options.AdminToken, handler.serveProtected)
+	handler.authenticator = newManagementAuth(options.AdminToken)
+	handler.auth = handler.authenticator.middleware(handler.serveProtected)
 	return handler, nil
 }
 
 type managementHandler struct {
-	query     AuditQuery
-	readiness func(context.Context) ReadyStatus
-	static    http.Handler
-	auth      http.Handler
-	logger    *slog.Logger
+	query         AuditQuery
+	tokens        TokenCatalog
+	readiness     func(context.Context) ReadyStatus
+	static        http.Handler
+	auth          http.Handler
+	authenticator *managementAuth
+	logger        *slog.Logger
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == "/api/v1/session" {
+		handler.serveSession(writer, request)
+		return
+	}
 	if protectedPath(request.URL.Path) {
 		handler.auth.ServeHTTP(writer, request)
 		return
@@ -101,6 +116,8 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveReady(writer, request)
 	case request.URL.Path == "/api/v1/audits":
 		handler.serveAuditList(writer, request)
+	case request.URL.Path == "/api/v1/newapi/tokens":
+		handler.serveNewAPITokens(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/audits/"):
 		handler.serveAuditResource(writer, request)
 	default:

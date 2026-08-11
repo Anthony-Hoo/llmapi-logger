@@ -16,6 +16,7 @@ import (
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/interceptor"
+	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/proxy"
@@ -27,7 +28,11 @@ import (
 	"llmapi-logger/internal/web"
 )
 
-const shutdownTimeout = 30 * time.Second
+const (
+	shutdownTimeout                   = 30 * time.Second
+	newAPITokenCatalogRefreshInterval = 5 * time.Minute
+	newAPIManagementTimeout           = 10 * time.Second
+)
 
 // App owns the stage-one data-plane HTTP server.
 type App struct {
@@ -40,8 +45,11 @@ type App struct {
 	auditManager *audit.Manager
 	auditStore   *sqlite.Store
 	cipher       security.Cipher
+	tokenCatalog *newapi.Catalog
 	mode         string
 	logger       *slog.Logger
+
+	tokenRefreshInterval time.Duration
 
 	parserHealthy atomic.Bool
 	closeOnce     sync.Once
@@ -78,6 +86,10 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	tokenCatalog, err := assembleNewAPITokenCatalog(configuration.NewAPI, upstreamProxy)
+	if err != nil {
+		return nil, fmt.Errorf("assemble NewAPI token catalog: %w", err)
+	}
 
 	runtime := assembleAudit(configuration, logger)
 	auditedProxy := proxy.NewWithOptions(target, matcher, engine, proxy.Options{
@@ -96,8 +108,14 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		auditManager: runtime.manager,
 		auditStore:   runtime.store,
 		cipher:       runtime.cipher,
+		tokenCatalog: tokenCatalog,
 		mode:         configuration.Mode,
 		logger:       logger,
+
+		tokenRefreshInterval: newAPITokenCatalogRefreshInterval,
+	}
+	if runtime.manager != nil && tokenCatalog != nil {
+		runtime.manager.SetTokenResolver(newAPITokenResolver{catalog: tokenCatalog})
 	}
 
 	var queryService *query.Service
@@ -127,6 +145,7 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
 		Query:      queryService,
+		Tokens:     tokenCatalog,
 		Assets:     web.EmbeddedAssets(),
 		Readiness:  application.readiness,
 		Logger:     logger,
@@ -148,6 +167,8 @@ func (application *App) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	defer application.closeComponents()
+	stopTokenCatalog := application.startTokenCatalog(ctx)
+	defer stopTokenCatalog()
 	if application.auditManager != nil {
 		application.auditManager.StartGapFlusher(ctx)
 	}
@@ -222,6 +243,78 @@ func (application *App) Run(ctx context.Context) error {
 	return runErr
 }
 
+type newAPITokenResolver struct {
+	catalog *newapi.Catalog
+}
+
+func (resolver newAPITokenResolver) ResolveToken(request *http.Request) (audit.TokenMetadata, bool) {
+	if resolver.catalog == nil {
+		return audit.TokenMetadata{}, false
+	}
+	token, ok := resolver.catalog.LookupRequest(request)
+	if !ok {
+		return audit.TokenMetadata{}, false
+	}
+	return audit.TokenMetadata{
+		ID:        token.ID,
+		Name:      token.Name,
+		MaskedKey: token.MaskedKey,
+	}, true
+}
+
+func (application *App) startTokenCatalog(ctx context.Context) func() {
+	if application == nil || application.tokenCatalog == nil {
+		return func() {}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workerContext, cancel := context.WithCancel(ctx)
+	application.refreshTokenCatalog(workerContext)
+
+	done := make(chan struct{})
+	interval := application.tokenRefreshInterval
+	if interval <= 0 {
+		interval = newAPITokenCatalogRefreshInterval
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workerContext.Done():
+				return
+			case <-ticker.C:
+				application.refreshTokenCatalog(workerContext)
+			}
+		}
+	}()
+
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+}
+
+func (application *App) refreshTokenCatalog(ctx context.Context) {
+	if application == nil || application.tokenCatalog == nil {
+		return
+	}
+	if err := application.tokenCatalog.Refresh(ctx); err != nil {
+		application.logger.Warn("NewAPI token catalog refresh failed",
+			"error_category", "newapi_token_catalog_refresh_failed",
+		)
+		return
+	}
+	application.logger.Info("NewAPI token catalog refreshed",
+		"token_count", len(application.tokenCatalog.List()),
+	)
+}
+
 // Close releases the audit store for callers that assemble an App without
 // entering Run, such as tests and embedding processes.
 func (application *App) Close() error {
@@ -286,15 +379,15 @@ func (application *App) readiness(context.Context) web.ReadyStatus {
 }
 
 func assembleDataPlane(configuration config.Config) (*url.URL, *url.URL, *routing.Matcher, *interceptor.Engine, error) {
-	target, err := url.Parse(configuration.NewAPIURL)
+	target, err := url.Parse(configuration.NewAPI.URL)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("parse newapi_url: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("parse newapi.url: %w", err)
 	}
 	var upstreamProxy *url.URL
-	if configuration.NewAPIProxyURL != "" {
-		upstreamProxy, err = url.Parse(configuration.NewAPIProxyURL)
+	if configuration.NewAPI.ProxyURL != "" {
+		upstreamProxy, err = url.Parse(configuration.NewAPI.ProxyURL)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("parse newapi_proxy_url: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("parse newapi.proxy_url: %w", err)
 		}
 	}
 	matcher, err := routing.Compile(configuration.Routes)
@@ -306,6 +399,29 @@ func assembleDataPlane(configuration config.Config) (*url.URL, *url.URL, *routin
 		return nil, nil, nil, nil, err
 	}
 	return target, upstreamProxy, matcher, engine, nil
+}
+
+func assembleNewAPITokenCatalog(configuration config.NewAPIConfig, upstreamProxy *url.URL) (*newapi.Catalog, error) {
+	if configuration.AccessToken == "" {
+		return nil, nil
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	if upstreamProxy != nil {
+		proxyURL := *upstreamProxy
+		transport.Proxy = http.ProxyURL(&proxyURL)
+	}
+	transport.ForceAttemptHTTP2 = true
+
+	return newapi.New(newapi.Config{
+		BaseURL:     configuration.URL,
+		AccessToken: configuration.AccessToken,
+		UserID:      configuration.UserID,
+		HTTPClient: &http.Client{
+			Transport: transport,
+			Timeout:   newAPIManagementTimeout,
+		},
+	})
 }
 
 type auditRuntime struct {

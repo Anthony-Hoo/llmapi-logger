@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
 )
 
@@ -22,7 +24,7 @@ func TestManagementEndpointsRequireBearerOnEveryRemoteAddress(t *testing.T) {
 
 	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}})
 	for _, remote := range []string{"127.0.0.1:1234", "203.0.113.10:5678"} {
-		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/audits/audit-id/raw/request", "/api/v1/unknown"} {
+		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/newapi/tokens", "/api/v1/audits/audit-id/raw/request", "/api/v1/unknown"} {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			request.RemoteAddr = remote
 			response := httptest.NewRecorder()
@@ -46,6 +48,151 @@ func TestManagementEndpointsRequireBearerOnEveryRemoteAddress(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "{\"status\":\"ok\"}\n" {
 		t.Fatalf("authorized health response: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestNewAPITokenCatalogReturnsOnlyMaskedMetadata(t *testing.T) {
+	t.Parallel()
+
+	refreshedAt := time.Date(2026, time.August, 11, 3, 4, 5, 0, time.UTC)
+	handler := newTestHandler(t, Options{
+		AdminToken: testAdminToken,
+		Query:      &fakeQuery{healthy: true},
+		Tokens: fakeTokenCatalog{snapshot: newapi.Snapshot{
+			Tokens: []newapi.Token{{
+				ID: 42, Name: "personal", MaskedKey: "abcd**********wxyz", Status: 1, Group: "default",
+			}},
+			RefreshedAt: refreshedAt,
+		}},
+	})
+
+	request := authorizedRequest(http.MethodGet, "/api/v1/newapi/tokens")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("token catalog status=%d body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"id":42`) || !strings.Contains(body, `"name":"personal"`) ||
+		!strings.Contains(body, `"masked_key":"abcd**********wxyz"`) ||
+		!strings.Contains(body, `"refreshed_at":"2026-08-11T03:04:05Z"`) {
+		t.Fatalf("token catalog body=%s", body)
+	}
+	if strings.Contains(body, `"key":`) || strings.Contains(body, testAdminToken) {
+		t.Fatalf("token catalog exposed a raw credential field: %s", body)
+	}
+
+	emptyHandler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}})
+	request = authorizedRequest(http.MethodGet, "/api/v1/newapi/tokens")
+	response = httptest.NewRecorder()
+	emptyHandler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "{\"items\":[],\"refreshed_at\":null}\n" {
+		t.Fatalf("empty token catalog response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = authorizedRequest(http.MethodPost, "/api/v1/newapi/tokens")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("token catalog POST status=%d", response.Code)
+	}
+}
+
+func TestSessionLoginAuthenticatesWithStrictSevenDayCookieAndLogoutClearsIt(t *testing.T) {
+	t.Parallel()
+
+	fixedNow := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
+	handlerValue, err := NewHandler(Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := handlerValue.(*managementHandler)
+	handler.authenticator.now = func() time.Time { return fixedNow }
+
+	login := httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(`{"token":"`+testAdminToken+`"}`))
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK || loginResponse.Header().Get("Cache-Control") != "no-store" || strings.Contains(loginResponse.Body.String(), testAdminToken) {
+		t.Fatalf("login response: status=%d headers=%v body=%q", loginResponse.Code, loginResponse.Header(), loginResponse.Body.String())
+	}
+	cookies := loginResponse.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("login cookies = %v", cookies)
+	}
+	sessionCookie := cookies[0]
+	if sessionCookie.Name != sessionCookieName || !sessionCookie.HttpOnly || sessionCookie.SameSite != http.SameSiteStrictMode ||
+		sessionCookie.Path != "/" || sessionCookie.MaxAge != int(sessionLifetime/time.Second) || !sessionCookie.Expires.Equal(fixedNow.Add(sessionLifetime)) {
+		t.Fatalf("session cookie = %+v", sessionCookie)
+	}
+
+	protected := httptest.NewRequest(http.MethodGet, "/api/v1/audits", nil)
+	protected.AddCookie(sessionCookie)
+	protectedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(protectedResponse, protected)
+	if protectedResponse.Code != http.StatusOK {
+		t.Fatalf("cookie-authenticated list status = %d body=%q", protectedResponse.Code, protectedResponse.Body.String())
+	}
+	wrongBearer := httptest.NewRequest(http.MethodGet, "/api/v1/audits", nil)
+	wrongBearer.AddCookie(sessionCookie)
+	wrongBearer.Header.Set("Authorization", "Bearer wrong-token")
+	wrongBearerResponse := httptest.NewRecorder()
+	handler.ServeHTTP(wrongBearerResponse, wrongBearer)
+	if wrongBearerResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid explicit bearer fell back to cookie: status=%d", wrongBearerResponse.Code)
+	}
+
+	logout := httptest.NewRequest(http.MethodDelete, "/api/v1/session", nil)
+	logout.AddCookie(sessionCookie)
+	logoutResponse := httptest.NewRecorder()
+	handler.ServeHTTP(logoutResponse, logout)
+	if logoutResponse.Code != http.StatusNoContent || logoutResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("logout response: status=%d headers=%v", logoutResponse.Code, logoutResponse.Header())
+	}
+	cleared := logoutResponse.Result().Cookies()
+	if len(cleared) != 1 || cleared[0].Name != sessionCookieName || cleared[0].MaxAge != -1 || !cleared[0].HttpOnly || cleared[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("cleared cookie = %v", cleared)
+	}
+}
+
+func TestSessionRejectsInvalidLoginAndExpiredOrTamperedCookie(t *testing.T) {
+	t.Parallel()
+
+	fixedNow := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
+	handlerValue, err := NewHandler(Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := handlerValue.(*managementHandler)
+	handler.authenticator.now = func() time.Time { return fixedNow }
+
+	for _, body := range []string{
+		`{"token":"wrong-token"}`,
+		`{"token":"` + testAdminToken + `","extra":true}`,
+		`{"token":"` + testAdminToken + `"}{}`,
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(body))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized && response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid login status=%d body=%q", response.Code, response.Body.String())
+		}
+		if response.Header().Get("Cache-Control") != "no-store" || strings.Contains(response.Body.String(), testAdminToken) || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("unsafe invalid login response: headers=%v body=%q", response.Header(), response.Body.String())
+		}
+	}
+
+	values := []string{
+		handler.authenticator.sessionValue(fixedNow.Add(-time.Second).Unix()),
+		handler.authenticator.sessionValue(fixedNow.Add(sessionLifetime).Unix()) + "tampered",
+	}
+	for _, value := range values {
+		request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: value})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized || response.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("invalid cookie response: status=%d headers=%v", response.Code, response.Header())
+		}
 	}
 }
 
@@ -94,7 +241,7 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 		NextCursor: &query.Cursor{BeforeStartedAtNS: started, BeforeID: "audit-list"},
 	}}
 	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: queries})
-	request := authorizedRequest(http.MethodGet, "/api/v1/audits?limit=25&protocol=openai&from_ns=9007199254740993")
+	request := authorizedRequest(http.MethodGet, "/api/v1/audits?limit=25&protocol=openai&from_ns=9007199254740993&model=gpt-5&user_agent=Codex&newapi_token_id=42")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -104,7 +251,9 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 	if !strings.Contains(body, `"started_at_ns":"9007199254740995"`) || !strings.Contains(body, `"before_started_at_ns":"9007199254740995"`) {
 		t.Fatalf("nanosecond fields were not JSON strings: %s", body)
 	}
-	if queries.gotLimit != 25 || queries.gotFilter.Protocol != "openai" || queries.gotFilter.FromNS == nil || *queries.gotFilter.FromNS != 9_007_199_254_740_993 {
+	if queries.gotLimit != 25 || queries.gotFilter.Protocol != "openai" || queries.gotFilter.Model != "gpt-5" || queries.gotFilter.UserAgent != "Codex" ||
+		queries.gotFilter.FromNS == nil || *queries.gotFilter.FromNS != 9_007_199_254_740_993 ||
+		queries.gotFilter.NewAPITokenID == nil || *queries.gotFilter.NewAPITokenID != 42 {
 		t.Fatalf("parsed list query = filter %+v limit %d", queries.gotFilter, queries.gotLimit)
 	}
 
@@ -113,6 +262,13 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "unknown") {
 		t.Fatalf("invalid query response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = authorizedRequest(http.MethodGet, "/api/v1/audits?newapi_token_id=not-an-integer")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "not-an-integer") {
+		t.Fatalf("invalid token id response: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 
@@ -253,6 +409,12 @@ type fakeQuery struct {
 	gotCursor query.Cursor
 	gotLimit  int
 }
+
+type fakeTokenCatalog struct {
+	snapshot newapi.Snapshot
+}
+
+func (catalog fakeTokenCatalog) Snapshot() newapi.Snapshot { return catalog.snapshot }
 
 func (queries *fakeQuery) Healthy() bool { return queries.healthy }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -68,8 +69,8 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 2 || version != 2 {
-		t.Fatalf("migration rows = %d max=%d, want versions 1 and 2", versionCount, version)
+	if versionCount != 3 || version != 3 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1 through 3", versionCount, version)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -83,7 +84,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 2 {
+	if versionCount != 3 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -94,7 +95,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		3,
+		4,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)
@@ -109,6 +110,68 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
 		t.Fatalf("Open error = %v, want newer-version rejection", err)
+	}
+}
+
+func TestTokenLinkMaskedKeyMigrationPreservesLegacyRows(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	database, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeWriter(context.Background(), database); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version > 2 {
+			continue
+		}
+		if err := applyMigration(context.Background(), database, item); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.Exec(`
+INSERT INTO audit_records (
+    audit_id, started_at_ns, route_id, protocol, parser_name, method, path,
+    request_uri_enc, mode, forward_status, capture_status, parse_status
+) VALUES ('legacy-audit', 1, 'route', 'openai', 'parser', 'POST', '/v1/test',
+          X'01', 'available', 'in_progress', 'pending', 'pending')`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO token_links (audit_id, newapi_token_id, token_name, linked_at_ns)
+VALUES ('legacy-audit', 42, 'legacy', 2)`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var tokenName, maskedKey string
+	if err := store.readerDB.QueryRow(`
+SELECT token_name, masked_key
+FROM token_links
+WHERE audit_id = 'legacy-audit'`).Scan(&tokenName, &maskedKey); err != nil {
+		t.Fatal(err)
+	}
+	if tokenName != "legacy" || maskedKey != "" {
+		t.Fatalf("migrated token link = name %q masked %q", tokenName, maskedKey)
 	}
 }
 

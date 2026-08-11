@@ -156,6 +156,17 @@ type AuditGap struct {
 	CreatedAtNS  int64
 }
 
+// TokenLink stores the non-secret NewAPI token snapshot associated with one
+// audit. MaskedKey must already be redacted by the source; this store never
+// accepts or derives the original credential.
+type TokenLink struct {
+	AuditID       string
+	NewAPITokenID int64
+	TokenName     string
+	MaskedKey     string
+	LinkedAtNS    int64
+}
+
 // RetentionResult reports rows removed by one bounded writer transaction.
 type RetentionResult struct {
 	DeletedAudits int
@@ -307,6 +318,18 @@ func validateAuditGap(gap AuditGap) error {
 	wantDetail, ok := gapDetailForReason(gap.Reason)
 	if !ok || gap.Detail != wantDetail {
 		return errors.New("sqlite: invalid audit gap reason or detail")
+	}
+	return nil
+}
+
+func validateTokenLink(link TokenLink) error {
+	if link.AuditID == "" || link.NewAPITokenID < 0 || link.LinkedAtNS <= 0 {
+		return errors.New("sqlite: invalid token link identity or timestamp")
+	}
+	for _, value := range []string{link.TokenName, link.MaskedKey} {
+		if len(value) > 512 || strings.ContainsRune(value, '\x00') {
+			return errors.New("sqlite: invalid token link snapshot")
+		}
 	}
 	return nil
 }

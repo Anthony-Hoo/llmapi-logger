@@ -17,11 +17,11 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Listen != DefaultListen || cfg.AdminListen != DefaultAdminListen {
 		t.Fatalf("listen defaults = %q, %q", cfg.Listen, cfg.AdminListen)
 	}
-	if cfg.NewAPIURL != DefaultNewAPIURL || cfg.Mode != DefaultMode {
-		t.Fatalf("upstream defaults = %q, %q", cfg.NewAPIURL, cfg.Mode)
+	if cfg.NewAPI.URL != DefaultNewAPIURL || cfg.Mode != DefaultMode {
+		t.Fatalf("upstream defaults = %q, %q", cfg.NewAPI.URL, cfg.Mode)
 	}
-	if cfg.NewAPIProxyURL != "" {
-		t.Fatalf("NewAPIProxyURL = %q, want direct connection", cfg.NewAPIProxyURL)
+	if cfg.NewAPI.ProxyURL != "" {
+		t.Fatalf("NewAPI.ProxyURL = %q, want direct connection", cfg.NewAPI.ProxyURL)
 	}
 	if cfg.DBPath != DefaultDBPath || cfg.KeyPath != DefaultKeyPath {
 		t.Fatalf("data path defaults = %q, %q", cfg.DBPath, cfg.KeyPath)
@@ -38,14 +38,16 @@ func TestLoadCompleteConfig(t *testing.T) {
 	path := writeConfig(t, `
 listen: 127.0.0.1:18080
 admin_listen: 127.0.0.1:18081
-newapi_url: https://newapi.example:8443
-newapi_proxy_url: http://proxy.example:7897
+newapi:
+  url: https://newapi.example:8443
+  proxy_url: http://proxy.example:7897
+  access_token: management-secret
+  user_id: 42
 mode: strict
 db_path: ./state/audit.db
 key_path: ./state/audit.key
 admin_token: secret
 retention_days: 0
-newapi_token_db_path: ./newapi/new-api.db
 interceptors:
   credential:
     type: require_credential
@@ -74,8 +76,8 @@ routes:
 	if cfg.Mode != "strict" || cfg.RetentionDays != 0 || len(cfg.Routes) != 2 {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
-	if cfg.NewAPIProxyURL != "http://proxy.example:7897" {
-		t.Fatalf("NewAPIProxyURL = %q", cfg.NewAPIProxyURL)
+	if cfg.NewAPI.ProxyURL != "http://proxy.example:7897" || cfg.NewAPI.AccessToken != "management-secret" || cfg.NewAPI.UserID != 42 {
+		t.Fatalf("NewAPI = %+v", cfg.NewAPI)
 	}
 	if got := cfg.Interceptors["body-limit"].Config["max_bytes"]; got != 1048576 {
 		t.Fatalf("max_bytes = %#v", got)

@@ -37,6 +37,7 @@ type Filter struct {
 	Protocol      string
 	Path          string
 	Model         string
+	UserAgent     string
 	StatusCode    *int
 	ForwardStatus string
 	BlockedBy     string
@@ -74,6 +75,7 @@ type AuditSummary struct {
 	ResponseModel *string `json:"response_model"`
 	NewAPITokenID *int64  `json:"newapi_token_id"`
 	TokenName     *string `json:"token_name"`
+	MaskedKey     *string `json:"masked_key"`
 }
 
 // Page is a newest-first keyset page.
@@ -138,6 +140,7 @@ type ParsedResult struct {
 type TokenLink struct {
 	NewAPITokenID int64  `json:"newapi_token_id"`
 	TokenName     string `json:"token_name"`
+	MaskedKey     string `json:"masked_key"`
 	LinkedAtNS    int64  `json:"linked_at_ns,string"`
 }
 

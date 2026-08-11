@@ -25,6 +25,7 @@ const (
 	writeRecoverInterruptedAudits
 	writeInsertAuditGaps
 	writeDeleteExpired
+	writeUpsertTokenLink
 )
 
 type writeRequest struct {
@@ -234,6 +235,8 @@ func applyWrite(transaction *sql.Tx, request writeRequest) error {
 		return insertAuditGaps(transaction, request.data.([]AuditGap))
 	case writeDeleteExpired:
 		return deleteExpired(transaction, request.data.(*retentionRequest))
+	case writeUpsertTokenLink:
+		return upsertTokenLink(transaction, request.data.(TokenLink))
 	default:
 		return fmt.Errorf("sqlite writer: unknown operation %d", request.kind)
 	}

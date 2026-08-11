@@ -1,15 +1,19 @@
 listen: 0.0.0.0:8080
 admin_listen: 0.0.0.0:8081
-newapi_url: http://newapi:3000
-# Podman/WSL host-network example for a Windows loopback proxy:
-# newapi_proxy_url: http://127.0.0.1:7897
-newapi_proxy_url: ""
+newapi:
+  url: http://newapi:3000
+  # Podman/WSL host-network example for a Windows loopback proxy:
+  # proxy_url: http://127.0.0.1:7897
+  proxy_url: ""
+  # Optional read-only NewAPI dashboard credential used to synchronize the
+  # already-masked token catalog. Set both fields or leave both empty/zero.
+  access_token: ""
+  user_id: 0
 mode: available
 db_path: /data/audit.db
 key_path: /data/audit.key
 admin_token: "replace-with-a-random-token"
 retention_days: 30
-newapi_token_db_path: ""
 
 interceptors:
   require-client-credential:

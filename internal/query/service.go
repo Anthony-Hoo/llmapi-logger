@@ -18,10 +18,13 @@ import (
 
 var stableCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
+const maxHeaderFilterScan = 2000
+
 // Store is the read-only storage surface used by Service.
 type Store interface {
 	Healthy() bool
 	ListAudits(context.Context, sqlite.AuditQueryFilter, sqlite.AuditQueryCursor, int) (sqlite.AuditListPage, error)
+	QueryRequestHeaderEvidence(context.Context, string) ([]sqlite.HeaderEvidence, error)
 	QueryAuditDetail(context.Context, string) (sqlite.AuditQueryDetail, error)
 	RawBodyMeta(context.Context, string, string) (sqlite.RawBodyMetadata, error)
 	StreamBodyChunks(context.Context, string, string, func(sqlite.BodyChunk) error) error
@@ -58,7 +61,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		return Page{}, err
 	}
 
-	storagePage, err := service.store.ListAudits(ctx, sqlite.AuditQueryFilter{
+	storageFilter := sqlite.AuditQueryFilter{
 		FromNS:        filter.FromNS,
 		ToNS:          filter.ToNS,
 		Protocol:      filter.Protocol,
@@ -71,10 +74,16 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		CaptureStatus: filter.CaptureStatus,
 		NewAPITokenID: filter.NewAPITokenID,
 		TokenName:     filter.TokenName,
-	}, sqlite.AuditQueryCursor{
+	}
+	storageCursor := sqlite.AuditQueryCursor{
 		BeforeStartedAtNS: cursor.BeforeStartedAtNS,
 		BeforeID:          cursor.BeforeID,
-	}, limit)
+	}
+	if filter.UserAgent != "" {
+		return service.listWithHeaderFilters(ctx, storageFilter, storageCursor, filter, limit)
+	}
+
+	storagePage, err := service.store.ListAudits(ctx, storageFilter, storageCursor, limit)
 	if err != nil {
 		return Page{}, fmt.Errorf("query: list audits: %w", err)
 	}
@@ -88,6 +97,85 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		page.NextCursor = &Cursor{BeforeStartedAtNS: last.StartedAtNS, BeforeID: last.AuditID}
 	}
 	return page, nil
+}
+
+func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter sqlite.AuditQueryFilter, cursor sqlite.AuditQueryCursor, filter Filter, limit int) (Page, error) {
+	page := Page{Items: make([]AuditSummary, 0, limit)}
+	scanned := 0
+	for scanned < maxHeaderFilterScan {
+		batchLimit := min(MaxLimit, maxHeaderFilterScan-scanned)
+		storagePage, err := service.store.ListAudits(ctx, storageFilter, cursor, batchLimit)
+		if err != nil {
+			return Page{}, fmt.Errorf("query: list audits for header filter: %w", err)
+		}
+		if len(storagePage.Rows) == 0 {
+			return page, nil
+		}
+		for index, row := range storagePage.Rows {
+			scanned++
+			matches, err := service.matchesHeaderFilters(ctx, row.AuditID, filter)
+			if err != nil {
+				return Page{}, err
+			}
+			if matches {
+				page.Items = append(page.Items, mapAudit(row))
+				if len(page.Items) == limit {
+					if index < len(storagePage.Rows)-1 || storagePage.HasMore {
+						page.NextCursor = cursorForRow(row)
+					}
+					return page, nil
+				}
+			}
+			cursor = sqlite.AuditQueryCursor{BeforeStartedAtNS: row.StartedAtNS, BeforeID: row.AuditID}
+		}
+		if !storagePage.HasMore {
+			return page, nil
+		}
+	}
+	if cursor.BeforeID != "" {
+		page.NextCursor = &Cursor{BeforeStartedAtNS: cursor.BeforeStartedAtNS, BeforeID: cursor.BeforeID}
+	}
+	return page, nil
+}
+
+func (service *Service) matchesHeaderFilters(ctx context.Context, auditID string, filter Filter) (bool, error) {
+	headers, err := service.store.QueryRequestHeaderEvidence(ctx, auditID)
+	if err != nil {
+		return false, fmt.Errorf("query: read request headers for filter: %w", err)
+	}
+	userAgentNeedle := strings.ToLower(filter.UserAgent)
+	for _, header := range headers {
+		if !strings.EqualFold(header.Name, "user-agent") {
+			continue
+		}
+		plaintext, err := service.decryptHeader(auditID, header)
+		if err != nil {
+			return false, err
+		}
+		matched := strings.Contains(strings.ToLower(string(plaintext)), userAgentNeedle)
+		clear(plaintext)
+		if matched {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (service *Service) decryptHeader(auditID string, header sqlite.HeaderEvidence) ([]byte, error) {
+	aad, err := security.AAD(auditID, "header", header.Stage, header.Kind, header.Name, strconv.Itoa(header.ValueIndex))
+	if err != nil {
+		return nil, ErrIntegrity
+	}
+	plaintext, err := service.cipher.Decrypt(aad, header.ValueEnc)
+	if err != nil || len(plaintext) != header.ValueLength {
+		clear(plaintext)
+		return nil, ErrIntegrity
+	}
+	return plaintext, nil
+}
+
+func cursorForRow(row sqlite.AuditListRow) *Cursor {
+	return &Cursor{BeforeStartedAtNS: row.StartedAtNS, BeforeID: row.AuditID}
 }
 
 func (service *Service) Get(ctx context.Context, auditID string) (Detail, error) {
@@ -224,6 +312,7 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 		detail.TokenLink = &TokenLink{
 			NewAPITokenID: token.NewAPITokenID,
 			TokenName:     token.TokenName,
+			MaskedKey:     token.MaskedKey,
 			LinkedAtNS:    token.LinkedAtNS,
 		}
 	}
@@ -333,6 +422,7 @@ func mapAudit(row sqlite.AuditListRow) AuditSummary {
 		ResponseModel: row.ResponseModel,
 		NewAPITokenID: row.NewAPITokenID,
 		TokenName:     row.TokenName,
+		MaskedKey:     row.MaskedKey,
 	}
 }
 
@@ -378,6 +468,7 @@ func validateList(filter Filter, cursor Cursor, limit int) error {
 	for name, value := range map[string]string{
 		"protocol":   filter.Protocol,
 		"model":      filter.Model,
+		"user_agent": filter.UserAgent,
 		"blocked_by": filter.BlockedBy,
 		"token_name": filter.TokenName,
 	} {

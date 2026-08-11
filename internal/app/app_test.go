@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -27,7 +30,7 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	defer upstream.Close()
 
 	configuration := config.Default()
-	configuration.NewAPIURL = upstream.URL
+	configuration.NewAPI.URL = upstream.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	configuration.AdminToken = "app-test-admin-token"
@@ -69,8 +72,8 @@ func TestNewRoutesNewAPIRequestsThroughConfiguredProxy(t *testing.T) {
 	defer upstreamProxy.Close()
 
 	configuration := config.Default()
-	configuration.NewAPIURL = "http://newapi.invalid"
-	configuration.NewAPIProxyURL = upstreamProxy.URL
+	configuration.NewAPI.URL = "http://newapi.invalid"
+	configuration.NewAPI.ProxyURL = upstreamProxy.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	configuration.AdminToken = "app-test-admin-token"
@@ -119,8 +122,8 @@ func TestNewRoutesPassthroughThroughConfiguredProxyWithoutAudit(t *testing.T) {
 	defer upstreamProxy.Close()
 
 	configuration := config.Default()
-	configuration.NewAPIURL = "http://newapi.invalid"
-	configuration.NewAPIProxyURL = upstreamProxy.URL
+	configuration.NewAPI.URL = "http://newapi.invalid"
+	configuration.NewAPI.ProxyURL = upstreamProxy.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	configuration.AdminToken = "app-test-admin-token"
@@ -163,6 +166,204 @@ func TestNewRoutesPassthroughThroughConfiguredProxyWithoutAudit(t *testing.T) {
 	}
 	if hasAudits {
 		t.Fatal("models passthrough unexpectedly created an audit record")
+	}
+}
+
+func TestNewAPITokenCatalogUsesConfiguredProxyAndFeedsAuditAndWeb(t *testing.T) {
+	const (
+		catalogAccessToken = "app-catalog-access-canary"
+		rawAPIKey          = "appr000000000000tail"
+	)
+	maskedAPIKey := newapi.MaskTokenKey(rawAPIKey)
+	var catalogRequests atomic.Int32
+
+	upstreamProxy := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/token/":
+			catalogRequests.Add(1)
+			if request.URL.Scheme != "http" || request.URL.Host != "newapi.invalid" {
+				t.Errorf("catalog proxy URL = %q, want NewAPI absolute URL", request.URL.String())
+			}
+			if request.URL.Query().Get("p") != "0" || request.URL.Query().Get("size") != "100" {
+				t.Errorf("catalog query = %q, want p=0&size=100", request.URL.RawQuery)
+			}
+			if request.Header.Get("Authorization") != catalogAccessToken {
+				t.Error("catalog Authorization did not contain the configured raw access token")
+			}
+			if request.Header.Get("New-Api-User") != "73" {
+				t.Errorf("catalog New-Api-User = %q, want 73", request.Header.Get("New-Api-User"))
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"total": 1,
+					"items": []map[string]any{{
+						"id":              42,
+						"name":            "personal",
+						"key":             maskedAPIKey,
+						"status":          1,
+						"group":           "default",
+						"unlimited_quota": true,
+					}},
+				},
+			})
+		case "/v1/chat/completions":
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"id":"chatcmpl-app","choices":[]}`))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer upstreamProxy.Close()
+
+	configuration := config.Default()
+	configuration.NewAPI.URL = "http://newapi.invalid"
+	configuration.NewAPI.ProxyURL = upstreamProxy.URL
+	configuration.NewAPI.AccessToken = catalogAccessToken
+	configuration.NewAPI.UserID = 73
+	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
+	configuration.Routes = []config.RouteConfig{{
+		ID:     "chat",
+		Method: http.MethodPost,
+		Path:   "/v1/chat/completions",
+		Match:  "exact",
+		Parser: "openai.chat_completions",
+	}}
+	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("new application: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := application.Close(); err != nil {
+			t.Errorf("close application: %v", err)
+		}
+	})
+	if application.tokenCatalog == nil {
+		t.Fatal("New did not assemble the configured NewAPI token catalog")
+	}
+
+	application.refreshTokenCatalog(context.Background())
+	if catalogRequests.Load() != 1 {
+		t.Fatalf("catalog requests = %d, want 1", catalogRequests.Load())
+	}
+	snapshot := application.tokenCatalog.Snapshot()
+	if len(snapshot.Tokens) != 1 || snapshot.Tokens[0].ID != 42 ||
+		snapshot.Tokens[0].Name != "personal" || snapshot.Tokens[0].MaskedKey != maskedAPIKey {
+		t.Fatalf("catalog snapshot = %#v", snapshot)
+	}
+
+	adminRequest := httptest.NewRequest(http.MethodGet, "http://admin/api/v1/newapi/tokens", nil)
+	adminRequest.Header.Set("Authorization", "Bearer "+configuration.AdminToken)
+	adminResponse := httptest.NewRecorder()
+	application.adminServer.Handler().ServeHTTP(adminResponse, adminRequest)
+	if adminResponse.Code != http.StatusOK {
+		t.Fatalf("token catalog API status = %d, body = %q", adminResponse.Code, adminResponse.Body.String())
+	}
+	var tokenResponse struct {
+		Items []newapi.Token `json:"items"`
+	}
+	if err := json.Unmarshal(adminResponse.Body.Bytes(), &tokenResponse); err != nil {
+		t.Fatalf("decode token catalog API: %v", err)
+	}
+	if len(tokenResponse.Items) != 1 || tokenResponse.Items[0].MaskedKey != maskedAPIKey {
+		t.Fatalf("token catalog API response = %#v", tokenResponse)
+	}
+	if strings.Contains(adminResponse.Body.String(), rawAPIKey) {
+		t.Fatal("token catalog API exposed the raw API key")
+	}
+
+	proxyRequest := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody)
+	proxyRequest.Header.Set("Authorization", "Bearer sk-"+rawAPIKey+"-channel-19")
+	proxyResponse := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(proxyResponse, proxyRequest)
+	if proxyResponse.Code != http.StatusOK {
+		t.Fatalf("proxied response = %d %q", proxyResponse.Code, proxyResponse.Body.String())
+	}
+
+	page, err := application.auditStore.ListAudits(
+		context.Background(),
+		sqlite.AuditQueryFilter{},
+		sqlite.AuditQueryCursor{},
+		10,
+	)
+	if err != nil {
+		t.Fatalf("list audits: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("audit count = %d, want 1", len(page.Rows))
+	}
+	row := page.Rows[0]
+	if row.NewAPITokenID == nil || *row.NewAPITokenID != 42 || row.TokenName == nil ||
+		*row.TokenName != "personal" || row.MaskedKey == nil || *row.MaskedKey != maskedAPIKey {
+		t.Fatalf("audit token link = id:%v name:%v masked:%v", row.NewAPITokenID, row.TokenName, row.MaskedKey)
+	}
+}
+
+func TestTokenCatalogRefreshLoopRetriesAfterInitialFailureAndStops(t *testing.T) {
+	maskedAPIKey := newapi.MaskTokenKey("loop000000000000tail")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		attempt := requests.Add(1)
+		response.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			_, _ = response.Write([]byte(`{"success":false,"message":"temporary"}`))
+			return
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"total": 1,
+				"items": []map[string]any{{
+					"id":     7,
+					"name":   "recovered",
+					"key":    maskedAPIKey,
+					"status": 1,
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	catalog, err := assembleNewAPITokenCatalog(config.NewAPIConfig{
+		URL:         server.URL,
+		AccessToken: "refresh-loop-access-canary",
+		UserID:      9,
+	}, nil)
+	if err != nil {
+		t.Fatalf("assemble token catalog: %v", err)
+	}
+	application := &App{
+		tokenCatalog:         catalog,
+		tokenRefreshInterval: 10 * time.Millisecond,
+		logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	stop := application.startTokenCatalog(context.Background())
+	if requests.Load() != 1 {
+		stop()
+		t.Fatalf("startup refresh requests = %d, want 1", requests.Load())
+	}
+	if len(catalog.List()) != 0 {
+		stop()
+		t.Fatal("failed startup refresh unexpectedly published a snapshot")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for len(catalog.List()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if tokens := catalog.List(); len(tokens) != 1 || tokens[0].ID != 7 {
+		stop()
+		t.Fatalf("periodic refresh did not recover: %#v", tokens)
+	}
+
+	stop()
+	requestsAfterStop := requests.Load()
+	time.Sleep(4 * application.tokenRefreshInterval)
+	if requests.Load() != requestsAfterStop {
+		t.Fatalf("refresh loop continued after stop: before=%d after=%d", requestsAfterStop, requests.Load())
 	}
 }
 
