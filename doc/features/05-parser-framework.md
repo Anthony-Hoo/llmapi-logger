@@ -43,17 +43,28 @@ type Result struct {
     MessageCount    *int
     ToolCallCount   *int
     HasToolCall     *bool
+    Conversation    *conversation.Conversation
     ParsedJSON      []byte // 只保存紧凑摘要，加密后落盘
 }
 ```
 
-公共查询字段只包含模型、流式标志、response ID、usage、错误类型/代码、消息数量和工具调用数量。阶段 3 的 `parsed_json` 也只保存这些字段的紧凑摘要，不保存或重建完整消息正文、输出全文、思维内容、工具参数和事件时间线。
+公共查询字段只包含模型、流式标志、response ID、usage、错误类型/代码、消息数量和工具调用数量。`Result.ParsedJSON` 继续只保存这些紧凑字段，不包含正文；`Result.Conversation` 是敏感派生数据，只在 worker 持久化前合并进加密 envelope，不进入列表、普通日志或明文列。
+
+协议无关 conversation 固定使用 `schema_version=1`：
+
+```text
+Conversation.messages[]
+  index; role; phase; direction; name?; tool_call_id?
+  content[] = text | reasoning | tool_call | tool_result | unknown
+```
+
+`phase` 只区分 request/response，`direction` 只区分 client_to_upstream/upstream_to_client。工具参数和结果保存为字符串，结构化 JSON 由前端格式化；unknown provider block 最多保留 4 KiB，避免图片/base64/data URL 被重复复制进派生结果。原始 Body 仍是完整证据。
 
 ## 4. 三协议最小解析范围
 
-- OpenAI 兼容接口：常见 JSON 与 SSE，提取 model、stream、response ID、usage、错误摘要和消息/工具调用计数。
-- Anthropic Messages：常见 JSON 与 SSE，提取 model、stream、message ID、usage、错误摘要和内容块/工具调用计数。
-- Gemini GenerateContent：常见 JSON 与 SSE，提取请求模型、usage、错误摘要和候选/函数调用计数。
+- OpenAI 兼容接口：提取摘要，并聚合 Chat/Completions/Responses 的消息、reasoning、工具调用和结果。
+- Anthropic Messages：提取摘要，并聚合 text、thinking、tool_use、tool_result 与 SSE 增量。
+- Gemini GenerateContent：提取摘要，并聚合 text/thought、functionCall、functionResponse 与候选流。
 
 未知字段和未知 SSE event 可以忽略。事件缺失、字段形态变化或流中途截断时，只保存仍可信的字段并标记 `partial`；没有可信摘要时标记 `error`。协议细节见模块 06–08，但阶段 3 不追求完整供应商对象映射。
 
@@ -66,7 +77,7 @@ type Result struct {
 - 进程启动时扫描 `parse_status=pending` 的记录并重新入队。
 - 启动时可把上次异常退出留下的 `processing` 重置为 `pending`。
 - 调度状态只保存在 `audit_records.parse_status`，不另建持久化任务或历史表。
-- 阶段 3 不提供 reparse 管理端点。自动恢复只处理正常产生的 pending/processing 记录；人工重跑可以留给以后需要时再设计。
+- 阶段 3 不提供 reparse 管理端点。parser v2 通过一次性 migration 把受支持 parser 的 v1 已完成结果置回 pending，随后复用同一个有界 worker 自动回填 conversation；以后版本是否回填仍由 migration 明确决定。
 
 ## 6. 证据读取
 
@@ -92,7 +103,7 @@ usage_input; usage_output; usage_total; error_type; error_code
 message_count; tool_call_count; has_tool_call; parsed_json_enc; parsed_at_ns
 ```
 
-`parsed_json_enc` 使用安全模块固定的 `nonce || ciphertext || tag` BLOB。更新 `parsed_results` 与 `audit_records.parse_status` 应在同一 SQLite writer 事务中完成。
+`parsed_json_enc` 使用安全模块固定的 `nonce || ciphertext || tag` BLOB，明文 envelope 包含紧凑摘要和可选 conversation。更新 `parsed_results` 与 `audit_records.parse_status` 应在同一 SQLite writer 事务中完成。详情查询按 `audit_id + parser_name` 重建 AAD、解密并校验 schema/index/枚举；列表查询不读取该 BLOB。
 
 模型筛选同时匹配 `request_model` 和 `response_model`；列表展示优先 `response_model`，为空时回退 `request_model`。
 
@@ -127,13 +138,15 @@ worker 必须 recover parser panic，并把 `parser_panic` 等稳定值写入 `e
 - 进程重启后 pending/processing 记录能继续解析。
 - JSON 未知字段、畸形 JSON、畸形 SSE、gzip 损坏和 16 MiB/50:1 限额。
 - OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 样例可生成最小摘要，畸形或截断输入得到 partial/error。
+- 流式文本、reasoning/thinking、工具参数分片按 choice/candidate/block 聚合，不能把每个 SSE event 渲染成独立消息。
+- tool call/result 的名称、call id、参数和结果进入加密 conversation，纯工具结果消息规范为 tool role。
 - rejected audit 保持 skipped，不进入启动扫描或周期扫描，且不创建 `parsed_results`。
-- 敏感 canary 不出现在 SQLite/WAL、日志和普通查询字段中。
+- 敏感 canary 不出现在明文列、列表、日志或 compact `ParsedJSON`；详情在正确 Admin Token 下可以从密文恢复 conversation，密文/AAD/schema 篡改返回通用完整性错误。
 
 ## 11. 实施任务
 
 1. 定义 Parser、Input、Result 和 `parsed_results` migration。
 2. 实现容量 100 的队列、单 worker、启动扫描和每 30 秒 pending 补扫。
 3. 实现证据 reader、gzip 限额、JSON decoder 和通用 SSE reader。
-4. 接入三个协议的最小 JSON/SSE parser，并加密保存紧凑 `parsed_json`。
-5. 完成队列、重启、错误隔离和敏感数据测试。
+4. 接入三个协议的 JSON/SSE parser，生成紧凑摘要与协议无关 conversation，并把后者合并进加密 `parsed_json`。
+5. 完成队列、重启回填、错误隔离、流式聚合和敏感数据测试。

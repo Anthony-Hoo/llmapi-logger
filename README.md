@@ -15,8 +15,8 @@ Client -> Nginx -> llmapi-logger
 
 - 流式保存客户端请求和 NewAPI 响应的原始 HTTP 证据。
 - 在请求发往 NewAPI 前运行可配置的本地拦截链，拒绝不符合要求的 LLM 请求。
-- 对常见 OpenAI、Anthropic、Gemini JSON/SSE 响应生成便于检索的摘要。
-- 通过本地 React + shadcn/ui 页面查看 Request-URI、每个 Header/Trailer 值，并按需预览或下载原始请求/响应 Body。
+- 对常见 OpenAI、Anthropic、Gemini JSON/SSE 生成便于检索的摘要，并聚合为协议无关的多轮对话、reasoning、工具调用和工具结果。
+- 通过本地 React + shadcn/ui 页面优先查看按角色排列的对话审计；Request-URI、每个 Header/Trailer 值和原始请求/响应 Body 作为默认折叠的辅助证据保留。
 - 在个人单机环境中辅助排查请求差异、流式中断、上游错误和审计缺口。
 
 ## 核心能力
@@ -33,7 +33,7 @@ Client -> Nginx -> llmapi-logger
 - 保存各阶段的 Header、Trailer、Body chunk、长度、SHA-256 和完整性状态。
 - 使用本地 AES-256-GCM key 加密敏感 Header、Query、Body 和解析结果。
 - SQLite WAL 存储、单 writer、有界写队列和自动 migration。
-- OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析。
+- OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析，以及统一的多轮对话和工具调用视图。
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
 - loopback 管理端同样强制使用静态 Bearer token；敏感详情和 raw 响应禁止缓存。
 - 启动异常记录恢复、简单审计 gap、按天 retention 和安全 JSON 日志。
@@ -108,7 +108,7 @@ http://127.0.0.1:8081/ui/
 
 静态页面可以加载，但读取审计数据、`/healthz`、`/readyz` 和 `/api/v1/*` 都需要配置中的 `admin_token`。
 
-详情 API 会在鉴权后解密 Request-URI 和每个已保存的 Header/Trailer 值；请求/响应 Body 仍通过单独的 raw API 按需读取。页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
+详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值，以及 parser 生成的协议无关 conversation。conversation 正文、reasoning、工具参数和结果与解析摘要一起存放在 `parsed_json_enc` 密文中，列表 API 不读取它们。请求/响应 Body 仍通过单独的 raw API 按需读取；页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
 
 如果 audit-proxy 所在环境不能直接访问远程 `newapi_url`，可设置可选的 `newapi_proxy_url`。宿主机二进制通常可使用 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。详细说明见[部署说明](doc/deployment/README.md)。
 
@@ -133,6 +133,7 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
 - 管理端即使只监听 loopback，也必须使用 Bearer token。
 - 审计列表不返回敏感值；详情和 raw Body 会返回明文证据，只能通过受 Admin Token 保护的管理接口读取。
+- 对话视图是从原始 JSON/SSE 派生的便捷展示；原始 HTTP 证据、长度、哈希和完整性状态仍是权威依据。
 - 配置文件、数据库和 key 应只允许运行账户访问。
 
 备份流程见[备份与恢复](doc/deployment/backup-and-restore.md)。

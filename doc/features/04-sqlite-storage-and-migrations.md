@@ -10,10 +10,10 @@
 
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
-internal/storage/sqlite/migrations/001_init.sql
+internal/storage/sqlite/migrations/{001_init.sql,002_reparse_conversations.sql}
 ~~~
 
-首个个人版尚未发布，因此用一个最终版 `001_init.sql` 建立九张表和全部索引。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；首版发布后不再修改已经发布的 migration，后续 schema 变化才新增数字文件。
+`001_init.sql` 建立九张表和全部索引；`002_reparse_conversations.sql` 不改表结构，只把受支持 parser 的 v1 已完成记录一次性置回 pending，以便 parser v2 从原始证据回填 conversation。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；已经提交的 migration 不再修改，后续变化新增数字文件。
 
 ~~~go
 writerDB.SetMaxOpenConns(1)
@@ -118,7 +118,7 @@ query API 只使用 readerDB：
 
 非 rejected 的请求 Finalize 成功时 audit_records.parse_status=pending，并尝试把 audit_id 放入内存 parser queue。worker 先用条件更新把 pending 改为 processing，再用 readerDB 读取证据；结果通过 writer 在同一事务中 UPSERT parsed_results，并把 parse_status 更新为 ok、partial、error 或 skipped。rejected audit 在 FinishAudit 时已是 skipped，扫描条件不得把它重新入队。
 
-parsed_results 只保留最新 parser_version。进程重启先把 processing 重置为 pending，再扫描 pending 记录重新入队；首版不提供 reparse 管理 API。
+parsed_results 只保留最新 parser_version。进程重启先把 processing 重置为 pending，再扫描 pending 记录重新入队；不提供 reparse 管理 API。需要一次性回填派生数据时，用明确的 migration 更新 parse_status，复用正常 worker，不新增任务表或控制面。
 
 ## 9. 启动恢复
 
@@ -152,7 +152,7 @@ retention_days>0 时按[模块 12](12-retention-and-maintenance.md)的固定算�
 - 空库执行全部 migration；重复启动不重复执行。
 - DB 版本高于程序时 storage 保持 unhealthy；available 继续代理，strict 返回 503。
 - writer batch commit/rollback。
-- 首版 `001_init.sql` 重复启动不重复执行；rejected 与 blocked_by/block_code 的 NULL/非 NULL CHECK 生效，表总数仍为九。
+- `001_init.sql` 与 `002_reparse_conversations.sql` 重复启动不重复执行；后者只重排 parser v1 已完成记录，表总数仍为九。
 - interceptor 拒绝在一个事务内写 rejected、blocked_by/block_code、status_code、skipped，且不存在未触发的 NewAPI/响应 stage 或空 body_stream。
 - strict BeginAudit commit 失败返回 503。
 - available queue 满继续并产生 gap。
