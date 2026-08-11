@@ -91,11 +91,24 @@ export function buildEvidenceEnvelope(detail: AuditDetail, side: RawSide): Evide
   return {
     startLine:
       side === "request"
-        ? `${stage?.method || detail.audit.method} ${detail.request_uri || detail.audit.path || "/"} ${stage?.proto || "HTTP"}`
+        ? `${stage?.method || detail.audit.method} ${requestTarget(detail)} ${stage?.proto || "HTTP"}`
         : `${stage?.proto || "HTTP"} ${stage?.status_code ?? detail.audit.status_code ?? "—"}`,
     headerLines,
     trailerLines: trailers.map(headerLine),
   };
+}
+
+function requestTarget(detail: AuditDetail): string {
+  const requestURI = detail.request_uri || detail.audit.path || "/";
+  if (requestURI.startsWith("/") || requestURI === "*") {
+    return requestURI;
+  }
+  try {
+    const absolute = new URL(requestURI);
+    return `${absolute.pathname || "/"}${absolute.search}`;
+  } catch {
+    return detail.audit.path || "/";
+  }
 }
 
 function normalizedContentType(value: string | null | undefined): string {

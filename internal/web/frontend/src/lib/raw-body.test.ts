@@ -111,4 +111,40 @@ describe("raw Body preview", () => {
       trailerLines: ["X-Checksum: done"],
     });
   });
+
+  it("uses the outbound origin-form target when the inbound request used absolute-form", () => {
+    const detail = {
+      audit: {
+        audit_id: "apx_absolute",
+        started_at_ns: "1",
+        route_id: "openai-chat-completions",
+        protocol: "openai",
+        method: "POST",
+        path: "/v1/chat/completions",
+        status_code: 200,
+        forward_status: "completed",
+        capture_status: "complete",
+        parse_status: "ok",
+      },
+      request_uri: "http://logger.example/v1/chat/completions?trace=absolute",
+      stages: [
+        {
+          stage: "request_sent_to_newapi",
+          state: "complete",
+          proto: "HTTP/1.1",
+          method: "POST",
+          host: "ai.example.test",
+          content_length: 0,
+        },
+      ],
+      headers: [],
+      bodies: [],
+      parsed_result: null,
+      token_link: null,
+    } satisfies AuditDetail;
+
+    expect(buildEvidenceEnvelope(detail, "request").startLine).toBe(
+      "POST /v1/chat/completions?trace=absolute HTTP/1.1",
+    );
+  });
 });
