@@ -68,6 +68,66 @@ export interface AuditBody {
 
 export type ParsedResult = Record<string, string | number | boolean | null>;
 
+export type ConversationPhase = "request" | "response";
+
+export type ConversationDirection = "client_to_upstream" | "upstream_to_client";
+
+export interface ConversationTextPart {
+  index: number;
+  type: "text";
+  text?: string | null;
+}
+
+export interface ConversationReasoningPart {
+  index: number;
+  type: "reasoning";
+  text?: string | null;
+}
+
+export interface ConversationToolCallPart {
+  index: number;
+  type: "tool_call";
+  id?: string | null;
+  name?: string | null;
+  arguments?: string | null;
+}
+
+export interface ConversationToolResultPart {
+  index: number;
+  type: "tool_result";
+  tool_call_id?: string | null;
+  name?: string | null;
+  result?: string | null;
+}
+
+export interface ConversationUnknownPart {
+  index: number;
+  type: "unknown";
+  data?: string | null;
+}
+
+export type ConversationPart =
+  | ConversationTextPart
+  | ConversationReasoningPart
+  | ConversationToolCallPart
+  | ConversationToolResultPart
+  | ConversationUnknownPart;
+
+export interface ConversationMessage {
+  index: number;
+  role: string;
+  phase: ConversationPhase;
+  direction: ConversationDirection;
+  name?: string | null;
+  tool_call_id?: string | null;
+  content: ConversationPart[];
+}
+
+export interface Conversation {
+  schema_version: number;
+  messages: ConversationMessage[];
+}
+
 export interface TokenLink {
   newapi_token_id?: number | string | null;
   token_name?: string | null;
@@ -80,6 +140,7 @@ export interface AuditDetail {
   stages: AuditStage[];
   headers: AuditHeader[];
   bodies: AuditBody[];
+  conversation: Conversation | null;
   parsed_result: ParsedResult | null;
   token_link: TokenLink | null;
 }
