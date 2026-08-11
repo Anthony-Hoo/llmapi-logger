@@ -10,10 +10,10 @@
 
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
-internal/storage/sqlite/migrations/{001_init.sql,002_reparse_conversations.sql}
+internal/storage/sqlite/migrations/{001_init.sql,002_reparse_conversations.sql,003_token_link_masked_key.sql}
 ~~~
 
-`001_init.sql` 建立九张表和全部索引；`002_reparse_conversations.sql` 不改表结构，只把受支持 parser 的 v1 已完成记录一次性置回 pending，以便 parser v2 从原始证据回填 conversation。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；已经提交的 migration 不再修改，后续变化新增数字文件。
+`001_init.sql` 建立九张表和全部索引；`002_reparse_conversations.sql` 不改表结构，只把受支持 parser 的 v1 已完成记录一次性置回 pending，以便 parser v2 从原始证据回填 conversation；`003_token_link_masked_key.sql` 为 `token_links` 增加非空 `masked_key` 快照列，旧记录升级后使用空字符串。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；已经提交的 migration 不再修改，后续变化新增数字文件。
 
 ~~~go
 writerDB.SetMaxOpenConns(1)
@@ -44,7 +44,7 @@ reader 额外设置 PRAGMA query_only=ON。使用 SQLite 默认自动 checkpoint
 | body_streams | audit_id+stage PK；observed/stored_length、sha256、hash_complete、eof_seen、state、error_code |
 | body_chunks | audit_id+stage+seq PK；offset、plaintext_length、observed_at_ns、data_enc |
 | parsed_results | audit_id PK；parser_name/parser_version/status；request_model/response_model；requested_stream/observed_stream；response_id；usage_input/usage_output/usage_total；error_type/error_code；message_count/tool_call_count/has_tool_call；parsed_json_enc；parsed_at_ns |
-| token_links | audit_id PK；newapi_token_id、token_name、linked_at_ns |
+| token_links | audit_id PK；newapi_token_id、token_name、masked_key、linked_at_ns |
 | audit_gaps | id INTEGER PK；started_at_ns/ended_at_ns、reason、request_count、detail、created_at_ns |
 
 stage 只允许四个固定名称。http_stages 外键指向 audit_records；http_headers 和 body_streams 外键指向同 audit_id/stage 的 http_stages；body_chunks 外键指向 body_streams；parsed_results 和 token_links 外键指向 audit_records。所有审计子表使用 ON DELETE CASCADE，schema_migrations 与 audit_gaps 独立。
@@ -152,7 +152,7 @@ retention_days>0 时按[模块 12](12-retention-and-maintenance.md)的固定算�
 - 空库执行全部 migration；重复启动不重复执行。
 - DB 版本高于程序时 storage 保持 unhealthy；available 继续代理，strict 返回 503。
 - writer batch commit/rollback。
-- `001_init.sql` 与 `002_reparse_conversations.sql` 重复启动不重复执行；后者只重排 parser v1 已完成记录，表总数仍为九。
+- `001_init.sql`、`002_reparse_conversations.sql` 与 `003_token_link_masked_key.sql` 重复启动不重复执行；v2 数据库升级后既有 Token 关联保留，`masked_key` 默认为空，表总数仍为九。
 - interceptor 拒绝在一个事务内写 rejected、blocked_by/block_code、status_code、skipped，且不存在未触发的 NewAPI/响应 stage 或空 body_stream。
 - strict BeginAudit commit 失败返回 503。
 - available queue 满继续并产生 gap。

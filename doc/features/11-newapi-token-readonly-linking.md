@@ -2,132 +2,103 @@
 
 ## 1. 目标
 
-本模块是可选增强：从 NewAPI 的 SQLite 数据库只读加载 tokens(id, key, name)，在内存中建立 token key 到名称的映射，为已通过 interceptor 并准备发往 NewAPI 的 LLM API 审计记录附加 newapi_token_id 和 token_name。
+本模块是个人部署中的可选增强：通过 NewAPI 的只读 Token 列表 API 同步服务端已经打码的 Token 元数据，并把命中的 Token ID、名称和 `masked_key` 快照关联到 LLM audit。
 
-关联结果只用于查询展示，不参与鉴权、配额、路由或流量放行。NewAPI 的实际响应始终是鉴权结果的唯一依据。
-
-首版数据源固定为 NewAPI SQLite，并使用精确 token key 的内存 map 完成关联。
+关联结果只用于审计展示和按 API Key 筛选，不参与鉴权、配额、路由、interceptor 或流量放行。NewAPI 的实际响应始终是客户端凭据是否有效的唯一依据。本项目不会从目录 API 获取、返回或持久化原始 Token。
 
 ## 2. 配置
 
-只使用[模块 01](01-configuration-and-route-boundary.md)的顶层 newapi_token_db_path。路径为空时关闭功能；非空时启动加载 goroutine。reload 固定为 5 分钟，SQLite busy timeout 固定为 2 秒，不增加调优项。
+配置统一位于[模块 01](01-configuration-and-route-boundary.md)的 `newapi` 对象：
 
-## 3. 数据源约束
-
-加载器使用只读 SQLite 连接，并执行：
-
-~~~sql
-PRAGMA query_only = ON;
-SELECT id, key, name FROM tokens
-WHERE key IS NOT NULL AND key <> '';
+~~~yaml
+newapi:
+  url: https://newapi.example.com
+  proxy_url: ""
+  access_token: ""
+  user_id: 0
 ~~~
 
-连接必须使用 `mode=ro`，不得执行 migration、写 PRAGMA、锁表或修改 NewAPI 文件。不要使用 `immutable=1`，因为运行中的 NewAPI 会更新 token。
+`access_token` 与 `user_id` 必须同时配置或同时留空/0。两项留空时功能完全关闭；配置后，access token 只能用于 NewAPI 管理 API 的只读 Token 目录同步，不能用于客户端 LLM 请求，也不能返回给前端或写入日志、审计库。
 
-启动和每次 reload 前，通过 `PRAGMA table_info(tokens)` 检查 `id`、`key`、`name` 三列存在。表或列不匹配即视为 schema 不兼容。
+目录请求复用 `newapi.url` 和可选的 `newapi.proxy_url`。未配置显式代理时固定直连，不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
 
-## 4. 内存索引
+## 3. 只读同步
 
-成功加载后构建不可变 map：
+同步器固定调用：
 
-~~~go
-type TokenInfo struct {
-    ID   int64
-    Name string
-}
-
-type Snapshot map[string]TokenInfo // key 是 NewAPI token 明文，仅存在内存
+~~~http
+GET /api/token/?p=0&size=100
+Authorization: <newapi.access_token>
+New-Api-User: <newapi.user_id>
+Accept: application/json
 ~~~
 
-新 map 完整构建后再通过 `atomic.Value` 一次替换，转发 goroutine 不等待数据库 I/O，也不持有 reload 锁。
+页码从 0 开始，每页最多 100 条，并一直读取到响应中的 total。每个请求最多等待 10 秒，单页响应体最多 1 MiB。只接受 HTTP 200、`success=true`、稳定 total、唯一正整数 ID，以及符合 NewAPI 打码格式的 key；异常响应整次刷新失败，不发布半份目录。
 
-原始 token key 不写入本项目 SQLite、日志或错误消息。旧 snapshot 被替换后不再引用，交给 Go 运行时回收。
+每个条目只保留：
 
-若数据源中同一个 key 对应多个不同 id，该 key 视为歧义并从 map 中移除，同时记录不含 key 的 warning 计数。
+- `id`。
+- `name`。
+- `masked_key`。
+- `status`。
+- `group`。
+- `unlimited_quota`。
+
+程序启动监听前尝试刷新一次，之后每五分钟刷新。刷新成功后原子替换完整快照；刷新失败只记录不含凭据的 warning，继续使用上一份成功快照并正常转发。首次刷新失败时快照为空，下一周期自动重试。
+
+## 4. 内存快照
+
+内存快照包含一份用于管理页面的 Token 列表，以及 `masked_key -> Token` 的只读索引。请求热路径只读当前快照，不访问 NewAPI、不等待刷新锁。
+
+NewAPI 的打码规则固定为：短 key 全部或部分替换为星号；长度大于 8 时保留前四位和后四位，中间使用十个星号。目录条目必须已经符合该规则。
+
+两个不同 Token ID 若得到相同 `masked_key`，该值视为歧义并从请求关联索引中排除，但两条已打码记录仍可出现在管理页面目录中。这样不会用不唯一的脱敏值错误关联历史请求。
 
 ## 5. 请求凭据选择
 
-只从 interceptor 已放行、即将创建 request_sent_to_newapi 阶段的请求快照中选择一个凭据：
+匹配逻辑复用 NewAPI v1.0.0-rc.21 的凭据优先级和归一化：
 
-1. `Authorization: Bearer <token>`。
-2. `x-api-key: <token>`。
-3. `x-goog-api-key: <token>`。
-4. Gemini 请求的 Query 参数 `key=<token>`。
+1. 默认读取 `Authorization`。
+2. Anthropic Messages/Models 路径存在 `x-api-key` 时覆盖 Authorization。
+3. Gemini 路径的 Query `key` 再覆盖前述值。
+4. Gemini 路径的 `x-goog-api-key` 最后覆盖 Query key。
 
-仅去除协议语法要求的前缀和首尾空白，不改变大小写、不 hash、不做历史兼容归一化。
+Authorization 只识别 `Bearer ` 或 `bearer ` 前缀，并对前缀后的值去除首尾空白；由 x-api-key、Query key 或 x-goog-api-key 选出的值也会去除首尾空白。随后去掉可选 `sk-` 前缀，以及 NewAPI 渠道后缀分隔符后的内容，再使用同一打码算法查询内存索引。包含星号的来访值不参与关联，避免把已打码字符串误认为真实凭据。
 
-若同一请求出现多个受支持入口，按以上顺序选择，并记录不含凭据内容的 warning。首版不尝试同时关联多个 token。
+原始请求凭据只存在于正常代理请求内存中，不会因为本模块新增落盘、日志或管理 API 暴露。
 
-forward_status=rejected 的 audit、没有 request_sent_to_newapi 阶段的请求，以及经 passthrough 的 NewAPI health/login/admin/models/UI/其他安全非 LLM 路径均不执行关联。
+## 6. Audit 快照
 
-## 6. 热路径接口
+命中配置 LLM route、成功创建 audit parent 后，审计管理器在 interceptor chain 之前做一次纯内存关联。找到唯一条目时，通过 SQLite 单 writer 幂等写入：
 
-~~~go
-type TokenLinker interface {
-    LookupFromRequest(req *http.Request) (TokenInfo, bool)
-}
+~~~text
+token_links(audit_id, newapi_token_id, token_name, masked_key, linked_at_ns)
 ~~~
 
-`LookupFromRequest` 只能读取当前内存 snapshot，目标是 O(1) map lookup；不得访问 NewAPI DB、等待 reload 或调用外部服务。
+因此后续被 interceptor 拒绝的 audit 也可能保留当时的 Token 快照；这不代表凭据已由 NewAPI 接受。passthrough、危险路径 fail-closed、目录未配置、目录为空或没有唯一匹配时不创建 `token_links`。
 
-找到匹配后，审计流水线异步写入 `token_links`：
+Token 后续改名、禁用或删除不会回写历史 audit；新快照只影响后续请求。删除 audit 时由外键级联删除对应关联行。旧数据库经 migration v3 升级后，既有行的 `masked_key` 为空字符串。
 
-- `audit_id`。
-- `newapi_token_id`。
-- `token_name`。
-- `linked_at_ns`。
+## 7. 查询与前端
 
-找不到匹配、功能关闭或 snapshot 为空时不插入行，也不把请求标记为失败。
+受保护的 `GET /api/v1/newapi/tokens` 返回当前已打码目录和最近成功刷新时间。React 筛选栏以 `#ID 名称 · masked_key` 显示 API Key 下拉项，提交时只发送 `newapi_token_id`；列表查询直接对 `token_links.newapi_token_id` 做精确匹配。
 
-## 7. Reload 生命周期
+审计列表和详情可返回 `newapi_token_id`、`token_name`、`masked_key`，不会返回原始 Token。目录未启用或尚未成功刷新时，下拉只有“全部 API Key”，其他查询功能不受影响。
 
-- 启动后立即尝试加载一次，此后每 5 分钟加载。
-- 每次使用独立短连接，查询完成后立即关闭。
-- 加载成功才替换 snapshot。
-- schema 不兼容时清空 snapshot、关闭关联能力并输出 warning。
-- 文件不存在、busy、权限错误或查询失败时清空 snapshot 并 warning；下一周期自动重试。
-- 后续 reload 恢复成功后自动重新启用，不需要重启代理。
+## 8. 故障与日志
 
-warning 只在状态变化时输出，避免每个请求或每个周期刷屏。健康信息只需展示 enabled、当前条目数和最近一次 reload 是否成功。
+- 目录刷新失败不影响 audited proxy、passthrough、available/strict admission 或 parser。
+- 关联未命中或 `token_links` 写入失败不改变请求放行结果。
+- 日志只记录稳定错误类别和成功刷新后的条目数，不记录 access token、用户 Token、完整请求 URL、响应体或目录行内容。
+- 管理 API 只暴露已打码字段，并继续使用 Admin Token/七天 HttpOnly Cookie 与 `Cache-Control: no-store`。
 
-## 8. 与主库的边界
+## 9. 最少测试
 
-本模块只向本项目的 `token_links(audit_id,newapi_token_id,token_name,linked_at_ns)` 写关联快照，不修改 audit_records，也不创建凭据索引表。
-
-当 NewAPI token 改名或删除后，既有审计记录保留当时的 newapi_token_id 和 token_name，不做历史回填。新的 snapshot 只影响后续请求。
-
-删除审计记录时，由同一事务删除对应 `token_links` 行。
-
-## 9. 故障行为
-
-- token 关联任何失败都不得阻断代理转发。
-- NewAPI schema 不匹配时功能关闭并 warning，不猜测列名或备用表。
-- NewAPI DB 长时间 busy 时每周期最多等待 2 秒，随后放弃本次加载。
-- 内存查找 panic 或异常必须被上层隔离，审计继续但不写 token link。
-- 日志不得输出 SQL 行内容、token key 或带敏感 Query 的完整 DSN。
-
-## 10. 可观测性
-
-健康信息只展示 enabled、当前条目数和最近一次 reload 是否成功；状态变化写一条 warning。首版不单独建设一组 Token 关联指标。
-
-## 11. 测试
-
-- 使用含 `id,key,name` 的 SQLite fixture 成功加载并命中内存 map。
-- 请求热路径测试中禁止出现 NewAPI DB 打开或 SQL 查询。
-- 缺表、缺列、路径错误和只读权限错误会清空 snapshot、warning 且不影响转发。
-- reload 构建期间并发 lookup 始终看到完整旧 map 或完整新 map。
-- 重复 key 不关联，且日志不包含该 key。
-- 四种凭据入口及优先级符合约定。
-- rejected audit、缺少 request_sent_to_newapi 的 audit 和 passthrough 路径均不查询内存 map、不写 token_links。
-- 搜索本项目 DB 和日志，确认没有 NewAPI token key。
-- token 改名后新请求使用新名称，历史 `token_links` 不变。
-
-## 12. 实施步骤
-
-1. 实现配置、只读连接和最小 schema 检查。
-2. 实现 `SELECT id,key,name`、歧义处理和不可变 snapshot。
-3. 实现 5 分钟 reload goroutine 与原子替换。
-4. 实现四种凭据选择和纯内存 lookup。
-5. 接入 `token_links` 异步写入与审计删除事务。
-6. 增加状态变化 warning 和健康摘要。
-7. 完成并发、schema mismatch、busy 和敏感数据泄漏测试。
+- `access_token`/`user_id` 成对校验，关闭时不创建同步器。
+- 分页从 0 开始、每页 100 条；请求 Header、超时、响应体上限和异常响应处理正确。
+- 刷新成功原子替换目录；失败保留旧快照并按五分钟周期重试。
+- 目录拒绝未打码 key、重复 ID、不稳定 total、过大响应和歧义 `masked_key` 关联。
+- Authorization、Anthropic 和 Gemini 凭据优先级与归一化符合 NewAPI 行为。
+- 请求热路径不访问网络；关联失败和写入失败不阻断 audit admission 或转发。
+- 列表、详情和 Token 目录只出现 ID、名称与 `masked_key`，数据库和日志不包含原始 Token 或目录 access token。
+- API Key 下拉提交 `newapi_token_id`，不会把原始 API Key 或哈希放进 URL。

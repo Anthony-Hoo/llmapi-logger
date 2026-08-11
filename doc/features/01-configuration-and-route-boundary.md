@@ -11,14 +11,16 @@
 ~~~yaml
 listen: 0.0.0.0:8080
 admin_listen: 127.0.0.1:8081
-newapi_url: http://127.0.0.1:3000
-newapi_proxy_url: ""
+newapi:
+  url: http://127.0.0.1:3000
+  proxy_url: ""
+  access_token: ""
+  user_id: 0
 mode: available
 db_path: ./data/audit.db
 key_path: ./data/audit.key
 admin_token: "replace-with-a-random-token"
 retention_days: 30
-newapi_token_db_path: ""
 
 interceptors:
   require-client-credential:
@@ -60,6 +62,7 @@ routes:
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | SQLite busy timeout | 5 s |
 | parser workers | 1 |
+| NewAPI Token API timeout / refresh | 10 s / 5 min |
 | graceful shutdown | 30 s |
 
 新增调优项前必须先有基准或故障测试证明需要。
@@ -69,13 +72,13 @@ routes:
 启动与 validate-config 共用以下检查：
 
 1. listen 与 admin_listen 合法且不相同。
-2. newapi_url 只有 http/https scheme、host、可选端口；禁止 userinfo、path、query、fragment。
-3. newapi_proxy_url 为空表示直接连接；非空时必须是绝对 `http://host[:port]` 或 `https://host[:port]`，禁止前后空白、userinfo、任何 path（包括 `/`）、query 和 fragment，端口必须合法。
-4. mode 只能是 available 或 strict。
-5. db_path、key_path 非空，父目录可创建。
-6. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
-7. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
-8. newapi_token_db_path 为空表示关闭 Token 名称关联；非空时只做只读访问。
+2. `newapi.url` 只有 http/https scheme、host、可选端口；禁止 userinfo、path、query、fragment。
+3. `newapi.proxy_url` 为空表示直接连接；非空时必须是绝对 `http://host[:port]` 或 `https://host[:port]`，禁止前后空白、userinfo、任何 path（包括 `/`）、query 和 fragment，端口必须合法。
+4. `newapi.access_token` 与 `newapi.user_id` 成对可选：前者为空时后者必须为 0；前者非空时不能包含空白，且 user_id 必须为正整数。
+5. mode 只能是 available 或 strict。
+6. db_path、key_path 非空，父目录可创建。
+7. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
+8. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
 9. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
 10. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
 11. match 只能是 exact 或 template，规则不得重叠。
@@ -123,15 +126,17 @@ Nginx 示例把全部 NewAPI 数据面请求交给本进程，分发器按以下
 
 ## 7. NewAPI Rewrite 与显式代理
 
-整个进程只有一个 newapi_url，以及一个可选的 newapi_proxy_url：
+整个进程只有一个 `newapi.url`，以及一个可选的 `newapi.proxy_url`：
 
-- Scheme、URL.Host 和出站 Host 来自 newapi_url。
+- Scheme、URL.Host 和出站 Host 来自 `newapi.url`。
 - Path、RawPath、RawQuery、ForceQuery 来自入站请求。
 - 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 - 请求不能通过 Header、Query 或 route 选择其他后端。
 - 审计代理和 passthrough 共享同一套 Rewrite 和 Transport 参数。
-- newapi_proxy_url 只控制本程序到 newapi_url 的 Transport；它不改变目标 URL、Host、审计阶段或路由边界。
-- newapi_proxy_url 为空时固定直连，不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`；非空时所有 NewAPI 请求都经过该显式 HTTP(S) 代理，HTTPS 目标使用标准 CONNECT。
+- `newapi.proxy_url` 只控制本程序到 `newapi.url` 的 Transport；它不改变目标 URL、Host、审计阶段或路由边界。
+- `newapi.proxy_url` 为空时固定直连，不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`；非空时所有 NewAPI 请求都经过该显式 HTTP(S) 代理，HTTPS 目标使用标准 CONNECT。
+
+`newapi.access_token` 与 `newapi.user_id` 配置后，程序使用同一 `newapi.url` 和显式代理只读同步 NewAPI 已打码的 Token 目录。启动监听前尝试刷新一次，之后每五分钟刷新；失败只记录安全 warning，并保留上一份成功快照，不影响审计代理或 passthrough。该管理凭证不参与客户端 LLM 请求鉴权，也不得返回到管理 API 或日志。两项都留空/0 时完全关闭 Token 目录同步。
 
 首版不提供 preserve/explicit Host 模式、SOCKS/PAC 或带凭据的代理 URL。
 
@@ -155,16 +160,17 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。列表保持非敏感；详情会解密 Request-URI 和逐项 Header/Trailer 值，raw request/response Body 只按需读取。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。列表保持非敏感；详情会解密 Request-URI 和逐项 Header/Trailer 值，raw request/response Body 只按需读取。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 
 - 默认七条 route、`/v1/models` 等安全 passthrough 和相邻负例。
 - 错误 Method、exact 子路径、template 家族未配置动作、percent/double encoding、尾随/重复斜杠、反斜杠、encoded slash 和 dot segment 均 fail-closed，Fake NewAPI 零调用。
 - unknown YAML、重复 id、重叠模板。
-- newapi_url 带 path/query/userinfo。
-- newapi_proxy_url 的空值直连、合法 HTTP(S) 代理，以及 userinfo/path/query/fragment/非法端口负例。
-- 环境中设置 `HTTP_PROXY`/`HTTPS_PROXY` 时，空 newapi_proxy_url 仍直连；显式配置时 Fake NewAPI 只能通过 Fake Proxy 收到请求。
+- `newapi.url` 带 path/query/userinfo。
+- `newapi.proxy_url` 的空值直连、合法 HTTP(S) 代理，以及 userinfo/path/query/fragment/非法端口负例。
+- `newapi.access_token`/`newapi.user_id` 成对校验；关闭时不创建目录同步器，启用时只读同步已打码 Token。
+- 环境中设置 `HTTP_PROXY`/`HTTPS_PROXY` 时，空 `newapi.proxy_url` 仍直连；显式配置时 Fake NewAPI 只能通过 Fake Proxy 收到请求。
 - available DB 失败仍转发。
 - strict key/DB 不健康返回 503，Fake NewAPI 未收到请求。
 - loopback 和非 loopback 的管理 API 在无 token/错误 token 时均返回 401。

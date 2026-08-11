@@ -61,7 +61,7 @@ route match 后先建立 audit 并记录已看到的入站 metadata，再执行 
 - blocked_by 保存配置中的 interceptor id；框架自身在无法归属模块时使用 `interceptor_chain`。
 - block_code 保存稳定、低基数代码，不保存 error 文本、Header、Query 或 Body。
 - status_code 保存代理实际返回的 4xx 或 503。
-- parse_status=skipped，不入 parser queue，也不创建 token_links。
+- parse_status=skipped，不入 parser queue。
 
 模块主动 reject 使用其约定的安全 4xx；body 超限固定为 413 和 `body_too_large`。error、panic、非法 Decision 和非客户端取消的 Body 读取失败固定为 503，并分别使用 `interceptor_error`、`interceptor_panic`、`interceptor_invalid_decision`、`interceptor_body_read_error`。这些 fail-closed 行为与 available/strict 无关。客户端取消使用 forward_status=client_cancelled，不设 blocked_by/block_code。blocked_by/block_code 只对 rejected 非空，普通 NewAPI 4xx/5xx 仍是实际转发结果，不能误标为 rejected。
 
@@ -130,9 +130,9 @@ rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启�
 
 ## 11. Token 关联
 
-若配置 newapi_token_db_path，只从 request_sent_to_newapi 的最终语义提取凭据，并对[模块 11](11-newapi-token-readonly-linking.md)的只读内存 map 做精确查找。token_links 只保存 NewAPI token id、当时的 token name 和关联时间，不保存 token key。
+若成对配置 `newapi.access_token` 与 `newapi.user_id`，应用会按[模块 11](11-newapi-token-readonly-linking.md)维护一个只含 NewAPI 已打码 Token 元数据的内存目录。命中 LLM route 并成功创建 audit parent 后，审计管理器按 NewAPI 的凭据选择与归一化规则对当前请求做纯内存匹配；找到唯一条目时，`token_links` 保存当时的 NewAPI token id、token name、`masked_key` 和关联时间，不保存原始 token key。
 
-关联失败不影响转发或 strict admission；rejected audit 不做关联；首版允许 token_links 为空。
+关联发生在 interceptor chain 之前，因此后续被拦截的 audit 也可能保留 Token 快照；它只用于审计展示，不参与放行判断。目录未配置、首次同步失败、没有唯一匹配或写关联失败都不影响转发或 strict admission；passthrough 和未创建 audit 的 fail-closed 请求不做关联，`token_links` 允许为空。
 
 ## 12. 崩溃恢复
 
@@ -147,7 +147,7 @@ rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启�
 - available writer queue 满继续；strict admission 503；parser queue 满不影响两种模式的转发。
 - interceptor 主动 reject、body 超限、error、panic、非法 Decision 和非取消的 Body 读取失败均写 rejected、blocked_by/block_code、实际 status_code 和 skipped；客户端取消写 client_cancelled。
 - metadata reject 未读 Body 时 capture 为 partial；body 预读完成后 reject 可完整结束入站证据。
-- 未调用 NewAPI 的 audit 不存在后三个 stage/body_stream/chunk，且不进入 parser 或 Token 关联。
+- 未调用 NewAPI 的 audit 不存在后三个 stage/body_stream/chunk，且不进入 parser；若请求在 interceptor 前已匹配到目录 Token，可以保留 `token_links` 快照。
 - body interceptor 放行后的两个请求阶段 length/hash 一致。
 - GCM 随机 nonce、AAD/密文篡改失败。
 - DB/WAL 无测试 token/Header/Body 明文。
