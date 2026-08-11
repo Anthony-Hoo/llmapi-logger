@@ -435,13 +435,13 @@ export function AuditList({
 }) {
   return (
     <Card className="min-w-0 overflow-hidden bg-white/90 shadow-sm">
-      <CardHeader className="flex-row items-center justify-between space-y-0 border-b px-4 py-2.5">
+      <div className="flex items-center justify-between gap-3 border-b px-4 py-2.5 text-left">
         <div className="min-w-0">
           <CardTitle className="text-sm leading-5">审计记录</CardTitle>
           <CardDescription className="mt-0.5 truncate text-[11px]">白名单内的 LLM API 请求</CardDescription>
         </div>
         {loading ? <Badge variant="secondary">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
-      </CardHeader>
+      </div>
       <CardContent className="p-0">
         {loading ? (
           <div className="space-y-2 p-3">
