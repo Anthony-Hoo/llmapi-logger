@@ -78,6 +78,48 @@ func TestValidateNewAPIURL(t *testing.T) {
 	}
 }
 
+func TestValidateNewAPIProxyURL(t *testing.T) {
+	valid := []string{
+		"",
+		"http://127.0.0.1:7897",
+		"https://proxy.example",
+		"http://[::1]:7897",
+	}
+	for _, value := range valid {
+		t.Run("valid "+value, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.NewAPIProxyURL = value
+			if err := Validate(cfg); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+
+	invalid := []string{
+		" ",
+		"ftp://proxy.example",
+		"http://",
+		"http://user:pass@proxy.example",
+		"http://proxy.example/",
+		"http://proxy.example/connect",
+		"http://proxy.example?x=1",
+		"http://proxy.example?",
+		"http://proxy.example#fragment",
+		"http://proxy.example:",
+		"http://proxy.example:70000",
+	}
+	for _, value := range invalid {
+		t.Run("invalid "+value, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.NewAPIProxyURL = value
+			err := Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), "newapi_proxy_url") {
+				t.Fatalf("Validate() error = %v, want newapi_proxy_url error", err)
+			}
+		})
+	}
+}
+
 func TestValidateInterceptors(t *testing.T) {
 	tests := []struct {
 		name         string

@@ -66,7 +66,7 @@ strict 只保证请求开始时 fail-closed。通过 admission 后仍可能遇�
 
 ## 5. 代理与 Trailer
 
-使用 net/http/httputil.ReverseProxy、Rewrite、自定义 RoundTripper 和 ResponseWriter wrapper。固定保留 Path、RawPath、RawQuery、ForceQuery，出站 Host 使用 newapi_url，DisableCompression=true，FlushInterval=-1。Body 只流式旁路，不使用 io.ReadAll，也不解析后重发。
+使用 net/http/httputil.ReverseProxy、Rewrite、自定义 RoundTripper 和 ResponseWriter wrapper。固定保留 Path、RawPath、RawQuery、ForceQuery，出站目标与 Host 使用 newapi_url；可选 newapi_proxy_url 只决定该 Transport 是否经过显式 HTTP(S) 代理。DisableCompression=true，FlushInterval=-1。Body 只流式旁路，不使用 io.ReadAll，也不解析后重发。
 
 非白名单请求直接打到代理时返回 404 且不建 audit。Nginx 仍是第一层白名单：只有明确列出的 LLM API 路径进入审计代理和拦截链；健康检查、登录、管理、模型列表、前端页面及其他 NewAPI 路径直接到 NewAPI，既不审计也不拦截。
 
@@ -74,7 +74,7 @@ Go 客户端直连代理时可捕获 request Trailer；经过 Nginx 后不保证
 
 ## 6. 配置与固定默认值
 
-YAML 只保留 listen、admin_listen、newapi_url、mode、db_path、key_path、必填 admin_token、retention_days、可选 newapi_token_db_path、interceptors 和 routes。完整格式见 [01](01-configuration-and-route-boundary.md)。
+YAML 只保留 listen、admin_listen、newapi_url、可选 newapi_proxy_url、mode、db_path、key_path、必填 admin_token、retention_days、可选 newapi_token_db_path、interceptors 和 routes。newapi_proxy_url 为空时强制直连，不读取环境代理。完整格式见 [01](01-configuration-and-route-boundary.md)。
 
 | 项目 | 固定默认值 |
 | --- | --- |

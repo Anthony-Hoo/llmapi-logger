@@ -42,6 +42,9 @@ func Validate(cfg Config) error {
 	if err := validateNewAPIURL(cfg.NewAPIURL); err != nil {
 		return err
 	}
+	if err := validateNewAPIProxyURL(cfg.NewAPIProxyURL); err != nil {
+		return err
+	}
 	if cfg.Mode != "available" && cfg.Mode != "strict" {
 		return fmt.Errorf("mode must be available or strict, got %q", cfg.Mode)
 	}
@@ -101,43 +104,54 @@ func validateListenAddress(name, value string) (string, error) {
 }
 
 func validateNewAPIURL(value string) error {
+	return validateHTTPURL("newapi_url", value)
+}
+
+func validateNewAPIProxyURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	return validateHTTPURL("newapi_proxy_url", value)
+}
+
+func validateHTTPURL(name, value string) error {
 	if value == "" || strings.TrimSpace(value) != value {
-		return errors.New("newapi_url must not be empty")
+		return fmt.Errorf("%s must not be empty or contain surrounding whitespace", name)
 	}
 	u, err := url.Parse(value)
 	if err != nil {
-		return fmt.Errorf("newapi_url is invalid: %w", err)
+		return fmt.Errorf("%s is invalid: %w", name, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("newapi_url scheme must be http or https, got %q", u.Scheme)
+		return fmt.Errorf("%s scheme must be http or https, got %q", name, u.Scheme)
 	}
 	if u.Opaque != "" || u.Host == "" {
-		return errors.New("newapi_url must contain an http(s) host")
+		return fmt.Errorf("%s must contain an http(s) host", name)
 	}
 	if u.User != nil {
-		return errors.New("newapi_url must not contain userinfo")
+		return fmt.Errorf("%s must not contain userinfo", name)
 	}
 	if u.Path != "" || u.RawPath != "" {
-		return errors.New("newapi_url must not contain a path")
+		return fmt.Errorf("%s must not contain a path", name)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
-		return errors.New("newapi_url must not contain a query")
+		return fmt.Errorf("%s must not contain a query", name)
 	}
 	if u.Fragment != "" {
-		return errors.New("newapi_url must not contain a fragment")
+		return fmt.Errorf("%s must not contain a fragment", name)
 	}
 
 	hostname := u.Hostname()
 	if _, err := canonicalHost(hostname, false); err != nil {
-		return fmt.Errorf("newapi_url has invalid host %q: %w", hostname, err)
+		return fmt.Errorf("%s has invalid host %q: %w", name, hostname, err)
 	}
 	if strings.HasSuffix(u.Host, ":") {
-		return errors.New("newapi_url has an empty port")
+		return fmt.Errorf("%s has an empty port", name)
 	}
 	if portText := u.Port(); portText != "" {
 		port, err := strconv.Atoi(portText)
 		if err != nil || port < 1 || port > 65535 {
-			return fmt.Errorf("newapi_url has invalid port %q", portText)
+			return fmt.Errorf("%s has invalid port %q", name, portText)
 		}
 	}
 	return nil

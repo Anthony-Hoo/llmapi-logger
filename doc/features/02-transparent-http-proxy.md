@@ -24,7 +24,7 @@ internal/audit/
 
 proxy 只依赖 routing、interceptor 与 audit 接口，不执行 SQL，不调用协议 parser。默认路径不完整缓冲 Body；只有 route 显式启用 body interceptor 时，才允许按模块声明的上限预读一次。
 
-从 http.DefaultTransport.Clone 创建 Transport，固定 Proxy=nil、DisableCompression=true、ForceAttemptHTTP2=true、MaxIdleConns=128、MaxIdleConnsPerHost=64、ResponseHeaderTimeout=5min。
+从 http.DefaultTransport.Clone 创建 Transport。newapi_proxy_url 为空时固定 `Proxy=nil`；非空时使用解析后的显式 HTTP(S) proxy URL。两种情况都不使用 ProxyFromEnvironment。其余固定 DisableCompression=true、ForceAttemptHTTP2=true、MaxIdleConns=128、MaxIdleConnsPerHost=64、ResponseHeaderTimeout=5min。
 
 ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB BufferPool 和 FlushInterval=-1。禁止 httputil.DumpRequest、DumpResponse，以及对未限长 Body 直接使用 io.ReadAll；body interceptor 只能通过统一 helper 读取 `limit+1` 的有界数据。
 
@@ -37,6 +37,8 @@ ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB
 3. 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 4. 不调用 ParseForm 或 url.Values.Encode。
 5. hop-by-hop Header 交给 ReverseProxy 处理。
+
+显式代理只改变 Transport 建立到 newapi_url 的网络路径，不参与 Rewrite，也不能扩大 LLM API 白名单。newapi_url 为 HTTPS 时由 Transport 通过 HTTP(S) 代理执行 CONNECT，目标 Scheme、Host、Path、Query 和请求 Body 仍遵循上述规则。
 
 Nginx 应覆盖 X-Real-IP、X-Forwarded-For、X-Forwarded-Proto。代理只把它们当普通加密证据，不用于鉴权。
 
@@ -143,6 +145,7 @@ FlushInterval=-1，wrapper 保持 Flush；原始 chunk 不是 SSE event，parser
 | body interceptor 超过上限 | 413，block_code=body_too_large，原 Body 不转发 |
 | interceptor error/panic/非法结果或 Body 读取失败 | 503，available/strict 均 fail-closed |
 | strict admission 失败 | 503，NewAPI 不应收到请求 |
+| 显式代理连接失败 | 按 NewAPI Transport 失败返回 502；超时仍按既有超时规则返回 504 |
 | NewAPI dial/TLS/round trip 失败 | 502 |
 | response header 超时 | 504 |
 | 客户端取消 | 取消 NewAPI context，不补错误 JSON |
@@ -176,5 +179,6 @@ listen 默认 0.0.0.0:8080，生产用防火墙、容器网络或 ACL 只允许 
 - body interceptor 在 0、limit、limit+1 和 chunked Body 下按 route 最大上限只预读一次；放行时 replay 字节完全一致，模块自身超限时 413。
 - Body 读取失败或非法 Decision 均返回 503，NewAPI 零调用；客户端取消按取消结束。
 - 多模块按配置顺序运行；首个 reject 后续模块不执行，Fake NewAPI 未收到请求。
+- newapi_proxy_url 为空时即使存在环境代理也直连；显式配置后请求通过 Fake HTTP Proxy 到达 Fake NewAPI，HTTPS CONNECT 路径可用。
 - 模块 reject、error、panic 和非法 Decision 在 available/strict 下均返回约定状态，并记录 blocked_by/block_code、parse_status=skipped；未触发阶段无空行。
 - 完整场景四阶段 length/hash 一致，取消场景准确反映前缀。

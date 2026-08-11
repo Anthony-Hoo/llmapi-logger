@@ -52,6 +52,56 @@ func TestRewriteCopiesControlledForwardingHeaders(t *testing.T) {
 	assertHeaderValues(t, headers, "X-Forwarded-Proto", []string{"https"})
 }
 
+func TestTransportUsesOnlyExplicitUpstreamProxy(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://environment-proxy.invalid:8080")
+	t.Setenv("HTTPS_PROXY", "http://environment-proxy.invalid:8080")
+	t.Setenv("NO_PROXY", "")
+
+	target, err := url.Parse("http://newapi.example")
+	if err != nil {
+		t.Fatalf("parse target URL: %v", err)
+	}
+	proxyURL, err := url.Parse("http://proxy.example:7897")
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+
+	direct := newTestHandler(t, target.String()).(*handler)
+	directTransport, ok := direct.reverseProxy.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("direct transport type = %T", direct.reverseProxy.Transport)
+	}
+	if directTransport.Proxy != nil {
+		t.Fatal("direct transport unexpectedly uses a proxy function")
+	}
+
+	matcher, err := routing.Compile(defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile matcher: %v", err)
+	}
+	engine, err := interceptor.NewEngine(nil, defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile interceptor engine: %v", err)
+	}
+	proxied := NewWithOptions(target, matcher, engine, Options{UpstreamProxy: proxyURL}, nil).(*handler)
+	proxiedTransport, ok := proxied.reverseProxy.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("proxied transport type = %T", proxied.reverseProxy.Transport)
+	}
+	if proxiedTransport.Proxy == nil {
+		t.Fatal("proxied transport has no proxy function")
+	}
+
+	proxyURL.Host = "mutated.example:9999"
+	got, err := proxiedTransport.Proxy(httptest.NewRequest(http.MethodPost, target.String()+"/v1/chat/completions", http.NoBody))
+	if err != nil {
+		t.Fatalf("resolve explicit proxy: %v", err)
+	}
+	if got.String() != "http://proxy.example:7897" {
+		t.Fatalf("proxy URL = %q, want explicit immutable URL", got)
+	}
+}
+
 func TestCancelledRequestDoesNotReceiveJSONError(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

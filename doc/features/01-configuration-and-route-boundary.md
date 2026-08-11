@@ -12,6 +12,7 @@
 listen: 0.0.0.0:8080
 admin_listen: 127.0.0.1:8081
 newapi_url: http://127.0.0.1:3000
+newapi_proxy_url: ""
 mode: available
 db_path: ./data/audit.db
 key_path: ./data/audit.key
@@ -69,14 +70,15 @@ routes:
 
 1. listen 与 admin_listen 合法且不相同。
 2. newapi_url 只有 http/https scheme、host、可选端口；禁止 userinfo、path、query、fragment。
-3. mode 只能是 available 或 strict。
-4. db_path、key_path 非空，父目录可创建。
-5. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
-6. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
-7. newapi_token_db_path 为空表示关闭 Token 名称关联；非空时只做只读访问。
-8. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
-9. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
-10. match 只能是 exact 或 template，规则不得重叠。
+3. newapi_proxy_url 为空表示直接连接；非空时必须是绝对 `http://host[:port]` 或 `https://host[:port]`，禁止前后空白、userinfo、任何 path（包括 `/`）、query 和 fragment，端口必须合法。
+4. mode 只能是 available 或 strict。
+5. db_path、key_path 非空，父目录可创建。
+6. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
+7. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
+8. newapi_token_db_path 为空表示关闭 Token 名称关联；非空时只做只读访问。
+9. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
+10. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
+11. match 只能是 exact 或 template，规则不得重叠。
 
 validate-config 只检查配置，不要求 DB 或 NewAPI 在线。
 
@@ -111,16 +113,18 @@ Nginx 是第一层白名单，只有 `routes` 中的 LLM API 路径进入代理�
 {"error":{"code":"audit_route_not_allowed","message":"route is not enabled"}}
 ~~~
 
-## 7. NewAPI Rewrite
+## 7. NewAPI Rewrite 与显式代理
 
-整个进程只有一个 newapi_url：
+整个进程只有一个 newapi_url，以及一个可选的 newapi_proxy_url：
 
 - Scheme、URL.Host 和出站 Host 来自 newapi_url。
 - Path、RawPath、RawQuery、ForceQuery 来自入站请求。
 - 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 - 请求不能通过 Header、Query 或 route 选择其他后端。
+- newapi_proxy_url 只控制 audit-proxy 到 newapi_url 的 Transport；它不改变目标 URL、Host、审计阶段或路由边界。
+- newapi_proxy_url 为空时固定直连，不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`；非空时所有 NewAPI 请求都经过该显式 HTTP(S) 代理，HTTPS 目标使用标准 CONNECT。
 
-首版不提供 preserve/explicit Host 模式。
+首版不提供 preserve/explicit Host 模式、SOCKS/PAC 或带凭据的代理 URL。
 
 ## 8. 入站拦截边界
 
@@ -150,6 +154,8 @@ admin_listen 默认 127.0.0.1:8081，阶段 3 只提供 health、ready、audit �
 - 错误 Method、尾随斜杠、encoded slash。
 - unknown YAML、重复 id、重叠模板。
 - newapi_url 带 path/query/userinfo。
+- newapi_proxy_url 的空值直连、合法 HTTP(S) 代理，以及 userinfo/path/query/fragment/非法端口负例。
+- 环境中设置 `HTTP_PROXY`/`HTTPS_PROXY` 时，空 newapi_proxy_url 仍直连；显式配置时 Fake NewAPI 只能通过 Fake Proxy 收到请求。
 - available DB 失败仍转发。
 - strict key/DB 不健康返回 503，Fake NewAPI 未收到请求。
 - loopback 和非 loopback 的管理 API 在无 token/错误 token 时均返回 401。

@@ -16,6 +16,7 @@ type Config struct {
 	Listen            string                       `yaml:"listen"`
 	AdminListen       string                       `yaml:"admin_listen"`
 	NewAPIURL         string                       `yaml:"newapi_url"`
+	NewAPIProxyURL    string                       `yaml:"newapi_proxy_url"`
 	Mode              string                       `yaml:"mode"`
 	DBPath            string                       `yaml:"db_path"`
 	KeyPath           string                       `yaml:"key_path"`
