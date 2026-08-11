@@ -274,13 +274,29 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 		result.ErrorCode = "parsed_json_aad_failed"
 	}
 	var encrypted []byte
+	plaintext := result.ParsedJSON
+	generatedPlaintext := false
+	if result.Conversation != nil {
+		var envelope map[string]any
+		if unmarshalErr := json.Unmarshal(result.ParsedJSON, &envelope); unmarshalErr != nil || envelope == nil {
+			envelope = make(map[string]any)
+		}
+		envelope["conversation"] = result.Conversation
+		if encoded, marshalErr := json.Marshal(envelope); marshalErr == nil {
+			plaintext = encoded
+			generatedPlaintext = true
+		}
+	}
 	if err == nil {
-		encrypted, err = worker.cipher.Encrypt(aad, result.ParsedJSON)
+		encrypted, err = worker.cipher.Encrypt(aad, plaintext)
 		if err != nil {
 			worker.logger.Warn("parser result encryption failed", "audit_id", audit.AuditID, "error_code", "parsed_json_encryption_failed")
 			result.Status = StatusError
 			result.ErrorCode = "parsed_json_encryption_failed"
 		}
+	}
+	if generatedPlaintext {
+		clear(plaintext)
 	}
 
 	storageResult := sqlite.ParsedResult{

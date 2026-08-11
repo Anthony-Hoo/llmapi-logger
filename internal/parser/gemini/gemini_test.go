@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 )
 
@@ -36,6 +37,10 @@ func TestParseGeminiJSONUsesPathModel(t *testing.T) {
 	if bytes.Contains(result.ParsedJSON, []byte("canary")) || bytes.Contains(result.ParsedJSON, []byte("private answer")) {
 		t.Fatalf("parsed summary contains sensitive content: %s", result.ParsedJSON)
 	}
+	if result.Conversation == nil || len(result.Conversation.Messages) != 3 || result.Conversation.Messages[1].Content[0].Type != conversation.PartToolCall ||
+		result.Conversation.Messages[1].Content[0].Arguments != `{"secret":"canary"}` || result.Conversation.Messages[2].Content[0].Text != "private answer" {
+		t.Fatalf("unexpected conversation: %+v", result.Conversation)
+	}
 }
 
 func TestParseGeminiSSEUsesLastUsageSnapshot(t *testing.T) {
@@ -57,6 +62,11 @@ func TestParseGeminiSSEUsesLastUsageSnapshot(t *testing.T) {
 	}
 	if result.ToolCallCount == nil || *result.ToolCallCount != 1 {
 		t.Fatalf("unexpected tool count: %+v", result)
+	}
+	if result.Conversation == nil || len(result.Conversation.Messages) != 1 || result.Conversation.Messages[0].Role != conversation.RoleAssistant ||
+		len(result.Conversation.Messages[0].Content) != 2 || result.Conversation.Messages[0].Content[0].Text != "private" ||
+		result.Conversation.Messages[0].Content[1].Type != conversation.PartToolCall {
+		t.Fatalf("unexpected SSE conversation: %+v", result.Conversation)
 	}
 }
 

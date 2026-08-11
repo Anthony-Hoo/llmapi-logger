@@ -6,6 +6,7 @@ package query
 import (
 	"errors"
 
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
@@ -143,13 +144,14 @@ type TokenLink struct {
 // Detail is sensitive and may only be returned by the Admin Token protected
 // endpoint. Raw Body bytes still require a separate, explicit request.
 type Detail struct {
-	Audit        AuditSummary  `json:"audit"`
-	RequestURI   string        `json:"request_uri"`
-	Stages       []Stage       `json:"stages"`
-	Headers      []Header      `json:"headers"`
-	Bodies       []Body        `json:"bodies"`
-	ParsedResult *ParsedResult `json:"parsed_result"`
-	TokenLink    *TokenLink    `json:"token_link"`
+	Audit        AuditSummary               `json:"audit"`
+	RequestURI   string                     `json:"request_uri"`
+	Stages       []Stage                    `json:"stages"`
+	Headers      []Header                   `json:"headers"`
+	Bodies       []Body                     `json:"bodies"`
+	ParsedResult *ParsedResult              `json:"parsed_result"`
+	Conversation *conversation.Conversation `json:"conversation"`
+	TokenLink    *TokenLink                 `json:"token_link"`
 }
 
 // RawMetadata is safe to expose as HTTP response headers.

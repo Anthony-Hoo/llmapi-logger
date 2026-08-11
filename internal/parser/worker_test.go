@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -62,7 +63,7 @@ func TestWorkerStartupScanDecodesGzipAndEncryptsParsedJSON(t *testing.T) {
 	if store.resetCount != 1 || saved.Status != StatusOK || saved.RequestModel == nil || *saved.RequestModel != "worker-model" {
 		t.Fatalf("unexpected worker result: reset=%d result=%+v", store.resetCount, saved)
 	}
-	if bytes.Contains(saved.ParsedJSONEnc, []byte("parsed-canary")) {
+	if bytes.Contains(saved.ParsedJSONEnc, []byte("parsed-canary")) || bytes.Contains(saved.ParsedJSONEnc, []byte("conversation-canary")) {
 		t.Fatalf("parsed JSON stored in plaintext: %q", saved.ParsedJSONEnc)
 	}
 	aad, err := security.AAD(auditID, "parsed_json", parserName)
@@ -73,7 +74,7 @@ func TestWorkerStartupScanDecodesGzipAndEncryptsParsedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(decrypted, []byte("parsed-canary")) {
+	if !bytes.Contains(decrypted, []byte("parsed-canary")) || !bytes.Contains(decrypted, []byte("conversation-canary")) {
 		t.Fatalf("unexpected decrypted parsed JSON: %s", decrypted)
 	}
 }
@@ -246,7 +247,16 @@ func (implementation *recordingParser) Parse(_ context.Context, input Input) Res
 	if implementation.result != nil {
 		return *implementation.result
 	}
-	return Result{Status: StatusOK, RequestModel: "worker-model", ParsedJSON: []byte(`{"secret":"parsed-canary"}`)}
+	view := conversation.New()
+	view.Append(conversation.Message{
+		Role: conversation.RoleUser, Phase: conversation.PhaseRequest,
+		Direction: conversation.DirectionClientToUpstream,
+		Content:   []conversation.Part{conversation.Text("conversation-canary")},
+	})
+	return Result{
+		Status: StatusOK, RequestModel: "worker-model", Conversation: view,
+		ParsedJSON: []byte(`{"secret":"parsed-canary"}`),
+	}
 }
 
 type fakeStore struct {

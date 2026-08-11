@@ -23,6 +23,7 @@ import (
 
 	"llmapi-logger/internal/app"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 
 	_ "modernc.org/sqlite"
@@ -85,8 +86,9 @@ type adminListPage struct {
 }
 
 type adminAuditDetail struct {
-	RequestURI string `json:"request_uri"`
-	Headers    []struct {
+	RequestURI   string                     `json:"request_uri"`
+	Conversation *conversation.Conversation `json:"conversation"`
+	Headers      []struct {
 		Stage       string `json:"stage"`
 		Kind        string `json:"kind"`
 		Name        string `json:"name"`
@@ -599,10 +601,12 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 			t.Errorf("admin detail Authorization = %q", value)
 		}
 	}
-	for _, secret := range [][]byte{[]byte("admin-api-prompt-secret"), []byte("admin-api-response-secret")} {
-		if bytes.Contains(detailBody, secret) {
-			t.Fatalf("admin detail included raw Body value %q", secret)
-		}
+	if detail.Conversation == nil || detail.Conversation.SchemaVersion != conversation.SchemaVersion || len(detail.Conversation.Messages) != 2 {
+		t.Fatalf("admin conversation = %+v", detail.Conversation)
+	}
+	if detail.Conversation.Messages[0].Role != conversation.RoleUser || detail.Conversation.Messages[0].Content[0].Text != "admin-api-prompt-secret" ||
+		detail.Conversation.Messages[1].Role != conversation.RoleAssistant || detail.Conversation.Messages[1].Content[0].Text != "admin-api-response-secret" {
+		t.Fatalf("admin conversation messages = %+v", detail.Conversation.Messages)
 	}
 
 	rawRequest := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/raw/request")

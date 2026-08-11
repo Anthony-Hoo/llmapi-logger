@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 )
 
@@ -38,6 +39,78 @@ func TestParseChatJSONExtractsOnlyCompactFields(t *testing.T) {
 	}
 	if bytes.Contains(result.ParsedJSON, secret) || bytes.Contains(result.ParsedJSON, []byte("private prompt")) || bytes.Contains(result.ParsedJSON, []byte("private answer")) {
 		t.Fatalf("parsed summary contains sensitive content: %s", result.ParsedJSON)
+	}
+	if result.Conversation == nil || len(result.Conversation.Messages) != 3 || result.Conversation.Messages[0].Content[0].Text != "private prompt" ||
+		result.Conversation.Messages[1].Content[0].Arguments != "secret-tool-argument" || result.Conversation.Messages[2].Role != conversation.RoleAssistant {
+		t.Fatalf("unexpected conversation: %+v", result.Conversation)
+	}
+}
+
+func TestChatSSEAggregatesReasoningTextAndToolCallIntoOneAssistantMessage(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(ChatCompletions)
+	result := implementation.Parse(context.Background(), base.Input{
+		Request: base.BodySource{Present: true, Complete: true, Data: []byte(`{"model":"gpt-stream","stream":true,"messages":[]}`)},
+		Response: base.BodySource{Present: true, Complete: true, ContentType: "text/event-stream", Data: []byte(
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"think \"}}]}\n\n" +
+				"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"carefully\",\"content\":\"Hello \"}}]}\n\n" +
+				"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"world\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n" +
+				"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Paris\\\"}\"}}]}}]}\n\n" +
+				"data: [DONE]\n\n")},
+	})
+	if result.Status != base.StatusOK || result.Conversation == nil || len(result.Conversation.Messages) != 1 {
+		t.Fatalf("unexpected result: %+v conversation=%+v", result, result.Conversation)
+	}
+	message := result.Conversation.Messages[0]
+	if message.Role != conversation.RoleAssistant || message.Phase != conversation.PhaseResponse || len(message.Content) != 3 {
+		t.Fatalf("message = %+v", message)
+	}
+	if message.Content[0].Type != conversation.PartReasoning || message.Content[0].Text != "think carefully" ||
+		message.Content[1].Type != conversation.PartText || message.Content[1].Text != "Hello world" ||
+		message.Content[2].Type != conversation.PartToolCall || message.Content[2].ID != "call-1" ||
+		message.Content[2].Name != "weather" || message.Content[2].Arguments != `{"city":"Paris"}` {
+		t.Fatalf("parts = %+v", message.Content)
+	}
+}
+
+func TestChatLegacyFunctionMessageIsToolResult(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(ChatCompletions)
+	result := implementation.Parse(context.Background(), base.Input{
+		Request: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"model":"gpt-legacy",
+			"messages":[{"role":"function","name":"weather","content":"{\"temperature\":21}"}]
+		}`)},
+	})
+	if result.Conversation == nil || len(result.Conversation.Messages) != 1 {
+		t.Fatalf("conversation = %+v", result.Conversation)
+	}
+	message := result.Conversation.Messages[0]
+	if message.Role != conversation.RoleTool || len(message.Content) != 1 ||
+		message.Content[0].Type != conversation.PartToolResult || message.Content[0].Name != "weather" ||
+		message.Content[0].Result != `{"temperature":21}` {
+		t.Fatalf("legacy function message = %+v", message)
+	}
+}
+
+func TestResponsesReasoningSummaryArrayRendersAsReasoning(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(Responses)
+	result := implementation.Parse(context.Background(), base.Input{
+		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"id":"resp-reasoning",
+			"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"checked the evidence"}]}]
+		}`)},
+	})
+	if result.Conversation == nil || len(result.Conversation.Messages) != 1 {
+		t.Fatalf("conversation = %+v", result.Conversation)
+	}
+	part := result.Conversation.Messages[0].Content[0]
+	if part.Type != conversation.PartReasoning || part.Text != "checked the evidence" {
+		t.Fatalf("reasoning summary = %+v", part)
 	}
 }
 
