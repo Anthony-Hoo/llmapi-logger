@@ -107,7 +107,7 @@ available/strict 只控制审计持久化故障是否阻止 admission。intercep
 
 query API 只使用 readerDB：
 
-- 列表读取 audit_records，并只 LEFT JOIN parsed_results 与 token_links 的窄明文字段。
+- 列表主体读取 audit_records，并只 LEFT JOIN parsed_results 与 token_links 的窄明文字段；query 层另按 audit_id 定向读取入站阶段的加密 User-Agent，认证解密后用于普通列表展示和可选子串筛选，不扫描其他 Header。
 - 详情按 audit_id 查询 stage、stream、header。
 - 列表和详情直接读取 audit_records.blocked_by/block_code；它们不需要额外 JOIN。
 - Body 按 stage+seq 分页读取并解密。

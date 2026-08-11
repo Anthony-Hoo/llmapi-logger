@@ -32,7 +32,7 @@ internal/web/frontend/src/*.test.ts    # 前端 API 与格式化测试
 - parser pending/processing 恢复、panic 隔离和加密 parsed JSON。
 - 列表、详情、raw 流式解密、Bearer/Cookie 鉴权、会话过期和匿名静态 UI shell。
 - NewAPI 已打码 Token 目录分页、五分钟刷新、失败保留旧快照、请求关联和按 Token ID 筛选。
-- 紧凑原生审计列表、模型/User-Agent/API Key 筛选，以及 assistant 安全 GFM Markdown、工具调用和多轮对话展示。
+- 只展示调用者、时间、模型和 User-Agent 的紧凑原生审计列表；普通列表解密返回 User-Agent，路径/状态留在详情或高级筛选；同时覆盖模型/User-Agent/API Key 筛选、assistant 安全 GFM Markdown、工具调用和多轮对话展示。
 - 启动 interrupted/partial 恢复、聚合 gap、retention 级联、三态 readiness 和安全 JSON 日志。
 
 ## 4. 固定验证命令

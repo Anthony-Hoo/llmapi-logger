@@ -98,7 +98,7 @@ type Cipher interface {
 
 ## 8. 管理证据与脱敏规则
 
-- 列表 API 只返回非敏感摘要，不读取 Request-URI、Header 密文、Body chunk 或 parsed JSON 全文。
+- 列表 API 返回紧凑摘要，并为每条候选记录只读取、认证解密入站 User-Agent 供展示和筛选；它不读取其他 Header、Request-URI、Body chunk、parsed JSON 或 conversation 全文。
 - 详情 API 在 Admin Token 鉴权后解密并返回原始 Request-URI、parser conversation，以及每个已保存 Header/Trailer 的 `stage`、`kind`、`name`、`value_index`、`value_length` 和 `value`。同名多值不会合并。
 - conversation 只接受当前 schema version、连续 message/part index、受控 role/phase/direction/type；密文能解密但结构非法时也视为完整性错误，不能把任意 JSON 透传给前端。
 - 原始 request/response Body 只在用户显式请求对应 raw API 时逐块认证解密；UI 不自动加载大 Body。
@@ -125,7 +125,7 @@ type Cipher interface {
 - loopback 和非 loopback 下，空 token 都导致启动失败；正确和错误 token 分别得到成功与 `401`。
 - 未携带 token 时本审计代理的静态管理 UI shell 可加载，但 API、health 和 ready 均返回 `401`。
 - 登录响应设置七天过期的 HttpOnly、SameSite=Strict Cookie；刷新后会话仍可使用，注销或到期后重新要求输入 token；Cookie 值不包含原始 admin token。
-- 管理列表扫描不到测试 Request-URI、Header、Body 或 conversation 明文；正确 Token 下详情能读取 conversation、逐项 Header/Trailer 值和 Request-URI，raw API 能还原请求/响应 Body。
+- 管理列表只允许出现预期的入站 User-Agent 明文，扫描不到测试 Request-URI、其他 Header、Body 或 conversation 明文；正确 Token 下详情能读取 conversation、逐项 Header/Trailer 值和 Request-URI，raw API 能还原请求/响应 Body。
 - 详情、错误 JSON 和 raw 响应均带 `Cache-Control: no-store`；未授权请求不返回任何明文证据。
 - 相同明文重复加密得到不同 BLOB，且都可解密。
 - 篡改 nonce、ciphertext、tag 或 AAD 后解密失败。
@@ -137,4 +137,4 @@ type Cipher interface {
 
 ## 12. 实现边界
 
-security 只提供 key 管理、AAD 和 AES-GCM；storage 只向详情路径返回所需密文证据；query 是管理面唯一允许解密 Request-URI、Header/Trailer、conversation 和 raw Body 的层。web 只映射稳定错误，不记录或拼接敏感错误细节。
+security 只提供 key 管理、AAD 和 AES-GCM；storage 为普通列表只定向返回入站 User-Agent 密文，为详情返回其余所需密文证据；query 是管理面唯一允许解密列表 User-Agent、Request-URI、Header/Trailer、conversation 和 raw Body 的层。web 只映射稳定错误，不记录或拼接敏感错误细节。

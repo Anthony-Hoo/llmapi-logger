@@ -305,76 +305,20 @@ function Dashboard({
       </header>
 
       <main className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
-        <Card className="bg-white/85 shadow-sm">
-          <CardContent className="p-3">
-            <form
-              className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(160px,1.25fr)_minmax(120px,0.8fr)_minmax(150px,1fr)_minmax(150px,1fr)_170px_auto]"
-              onSubmit={applyFilters}
-            >
-              <FilterField label="路径" htmlFor="filter-path">
-                <Input
-                  id="filter-path"
-                  className="h-9"
-                  value={draftPath}
-                  onChange={(event) => setDraftPath(event.target.value)}
-                  placeholder="/v1/chat/completions"
-                />
-              </FilterField>
-              <FilterField label="模型" htmlFor="filter-model">
-                <Input
-                  id="filter-model"
-                  className="h-9"
-                  value={draftModel}
-                  onChange={(event) => setDraftModel(event.target.value)}
-                  placeholder="精确模型名，如 gpt-4o"
-                />
-              </FilterField>
-              <FilterField label="User-Agent" htmlFor="filter-user-agent">
-                <Input
-                  id="filter-user-agent"
-                  className="h-9"
-                  value={draftUserAgent}
-                  onChange={(event) => setDraftUserAgent(event.target.value)}
-                  placeholder="客户端标识"
-                />
-              </FilterField>
-              <FilterField label="API Key" htmlFor="filter-api-key">
-                <select
-                  id="filter-api-key"
-                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
-                  value={draftNewAPITokenID}
-                  onChange={(event) => setDraftNewAPITokenID(event.target.value)}
-                >
-                  <option value="">全部 API Key</option>
-                  {newAPITokens.map((token) => (
-                    <option key={token.id} value={String(token.id)}>
-                      #{token.id} {token.name || "未命名"} · {token.masked_key}
-                    </option>
-                  ))}
-                </select>
-              </FilterField>
-              <FilterField label="转发状态" htmlFor="filter-forward-status">
-                <select
-                  id="filter-forward-status"
-                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
-                  value={draftForwardStatus}
-                  onChange={(event) => setDraftForwardStatus(event.target.value)}
-                >
-                  <option value="">全部状态</option>
-                  <option value="completed">completed</option>
-                  <option value="rejected">rejected</option>
-                  <option value="client_cancelled">client_cancelled</option>
-                  <option value="newapi_error">newapi_error</option>
-                  <option value="proxy_error">proxy_error</option>
-                  <option value="interrupted">interrupted</option>
-                </select>
-              </FilterField>
-              <Button className="h-9" size="sm" type="submit">
-                筛选
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+        <AuditFiltersPanel
+          path={draftPath}
+          model={draftModel}
+          userAgent={draftUserAgent}
+          newAPITokenID={draftNewAPITokenID}
+          forwardStatus={draftForwardStatus}
+          tokens={newAPITokens}
+          onPathChange={setDraftPath}
+          onModelChange={setDraftModel}
+          onUserAgentChange={setDraftUserAgent}
+          onNewAPITokenIDChange={setDraftNewAPITokenID}
+          onForwardStatusChange={setDraftForwardStatus}
+          onSubmit={applyFilters}
+        />
 
         {checkingSession ? (
           <Alert className="border-blue-200 bg-blue-50/80">
@@ -422,6 +366,116 @@ function Dashboard({
   );
 }
 
+export function AuditFiltersPanel({
+  path,
+  model,
+  userAgent,
+  newAPITokenID,
+  forwardStatus,
+  tokens,
+  onPathChange,
+  onModelChange,
+  onUserAgentChange,
+  onNewAPITokenIDChange,
+  onForwardStatusChange,
+  onSubmit,
+}: {
+  path: string;
+  model: string;
+  userAgent: string;
+  newAPITokenID: string;
+  forwardStatus: string;
+  tokens: NewAPIToken[];
+  onPathChange: (value: string) => void;
+  onModelChange: (value: string) => void;
+  onUserAgentChange: (value: string) => void;
+  onNewAPITokenIDChange: (value: string) => void;
+  onForwardStatusChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <Card className="bg-white/85 shadow-sm">
+      <CardContent className="p-3">
+        <form className="space-y-2" aria-label="审计筛选" onSubmit={onSubmit}>
+          <div className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1.2fr)_minmax(160px,0.8fr)_minmax(240px,1.25fr)_auto]">
+            <FilterField label="调用者" htmlFor="filter-api-key">
+              <select
+                id="filter-api-key"
+                className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+                value={newAPITokenID}
+                onChange={(event) => onNewAPITokenIDChange(event.target.value)}
+              >
+                <option value="">全部调用者</option>
+                {tokens.map((token) => (
+                  <option key={token.id} value={String(token.id)}>
+                    {token.name || "未命名"} · {token.masked_key}
+                  </option>
+                ))}
+              </select>
+            </FilterField>
+            <FilterField label="模型" htmlFor="filter-model">
+              <Input
+                id="filter-model"
+                className="h-9"
+                value={model}
+                onChange={(event) => onModelChange(event.target.value)}
+                placeholder="如 gpt-4o"
+              />
+            </FilterField>
+            <FilterField label="User-Agent" htmlFor="filter-user-agent">
+              <Input
+                id="filter-user-agent"
+                className="h-9"
+                value={userAgent}
+                onChange={(event) => onUserAgentChange(event.target.value)}
+                placeholder="客户端标识"
+              />
+            </FilterField>
+            <div className="flex h-9 items-center xl:justify-end">
+              <Button className="h-9 w-full sm:w-auto" size="sm" type="submit">
+                应用筛选
+              </Button>
+            </div>
+          </div>
+
+          <details className="rounded-md border bg-slate-50/60">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+              高级筛选（路径、转发状态）
+            </summary>
+            <div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-2">
+              <FilterField label="路径" htmlFor="filter-path">
+                <Input
+                  id="filter-path"
+                  className="h-9"
+                  value={path}
+                  onChange={(event) => onPathChange(event.target.value)}
+                  placeholder="/v1/chat/completions"
+                />
+              </FilterField>
+              <FilterField label="转发状态" htmlFor="filter-forward-status">
+                <select
+                  id="filter-forward-status"
+                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+                  value={forwardStatus}
+                  onChange={(event) => onForwardStatusChange(event.target.value)}
+                >
+                  <option value="">全部状态</option>
+                  <option value="completed">正常完成</option>
+                  <option value="rejected">已拦截</option>
+                  <option value="client_cancelled">客户端取消</option>
+                  <option value="newapi_error">上游错误</option>
+                  <option value="proxy_error">代理错误</option>
+                  <option value="interrupted">意外中断</option>
+                </select>
+              </FilterField>
+            </div>
+          </details>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AuditList({
   items,
   loading,
@@ -438,7 +492,7 @@ export function AuditList({
       <div className="flex items-center justify-between gap-3 border-b px-4 py-2.5 text-left">
         <div className="min-w-0">
           <CardTitle className="text-sm leading-5">审计记录</CardTitle>
-          <CardDescription className="mt-0.5 truncate text-[11px]">白名单内的 LLM API 请求</CardDescription>
+          <CardDescription className="mt-0.5 truncate text-[11px]">按调用者、模型和客户端查看</CardDescription>
         </div>
         {loading ? <Badge variant="secondary">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
       </div>
@@ -446,7 +500,7 @@ export function AuditList({
         {loading ? (
           <div className="space-y-2 p-3">
             {Array.from({ length: 7 }, (_, index) => (
-              <Skeleton key={index} className="h-[4.5rem] w-full" />
+              <Skeleton key={index} className="h-[5rem] w-full" />
             ))}
           </div>
         ) : items.length === 0 ? (
@@ -461,67 +515,30 @@ export function AuditList({
           <ul className="divide-y" aria-label="审计记录列表">
             {items.map((audit) => {
               const selected = audit.audit_id === selectedID;
-              const model = audit.response_model ?? audit.request_model;
+              const caller = audit.token_name?.trim() || "未关联";
+              const model = audit.response_model?.trim() || audit.request_model?.trim() || "未记录";
+              const userAgent = audit.user_agent?.trim() || "未记录";
+              const status = auditStatusSummary(audit);
               return (
                 <li key={audit.audit_id}>
                   <button
                     type="button"
                     aria-current={selected ? "true" : undefined}
-                    className={`grid w-full min-w-0 gap-2 px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:grid-cols-[minmax(0,1fr)_auto] ${
+                    className={`block w-full min-w-0 px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
                       selected ? "bg-blue-50/90 hover:bg-blue-50" : "hover:bg-slate-50"
                     }`}
                     onClick={() => onSelect(audit.audit_id)}
                   >
-                    <span className="min-w-0 space-y-1.5">
-                      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                        <span className="text-[11px] tabular-nums text-muted-foreground">
-                          {formatNanoTime(audit.started_at_ns)}
-                        </span>
-                        <span className="max-w-52 truncate font-mono text-[11px] text-muted-foreground" title={audit.audit_id}>
-                          {audit.audit_id}
-                        </span>
+                    <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        {formatNanoTime(audit.started_at_ns)}
                       </span>
-                      <span className="flex min-w-0 items-center gap-2">
-                        <Badge variant="outline" className="shrink-0 font-mono">
-                          {audit.method}
-                        </Badge>
-                        <span className="min-w-0 truncate text-sm font-medium" title={audit.path}>
-                          {audit.path}
-                        </span>
-                      </span>
-                      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-                        <span>{audit.protocol}</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="min-w-0 truncate" title={audit.route_id}>{audit.route_id}</span>
-                        {model ? (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span className="max-w-56 truncate font-mono" title={model}>{model}</span>
-                          </>
-                        ) : null}
-                        {audit.masked_key ? (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span
-                              className="max-w-64 truncate font-mono"
-                              title={`#${audit.newapi_token_id ?? "?"} ${audit.token_name ?? ""} ${audit.masked_key}`}
-                            >
-                              API #{audit.newapi_token_id ?? "?"} {audit.token_name || "未命名"} · {audit.masked_key}
-                            </span>
-                          </>
-                        ) : null}
-                      </span>
-                      {audit.block_code ? (
-                        <span className="block truncate text-[11px] font-medium text-red-700" title={audit.block_code}>
-                          {audit.block_code}
-                        </span>
-                      ) : null}
+                      {status ? <span className="text-[11px] font-medium text-amber-700">{status}</span> : null}
                     </span>
-                    <span className="flex flex-wrap items-start gap-1.5 sm:max-w-56 sm:justify-end">
-                      <StatusBadge value={audit.forward_status} />
-                      {audit.status_code ? <Badge variant="outline">HTTP {audit.status_code}</Badge> : null}
-                      <StatusBadge labelPrefix="capture" value={audit.capture_status} />
-                      <StatusBadge labelPrefix="parse" value={audit.parse_status} />
+                    <span className="mt-2 grid min-w-0 gap-x-5 gap-y-2 sm:grid-cols-[minmax(120px,0.75fr)_minmax(140px,0.9fr)_minmax(180px,1.35fr)]">
+                      <ListValue label="调用者" value={caller} />
+                      <ListValue label="模型" value={model} mono />
+                      <ListValue label="User-Agent" value={userAgent} mono />
                     </span>
                   </button>
                 </li>
@@ -532,6 +549,39 @@ export function AuditList({
       </CardContent>
     </Card>
   );
+}
+
+function ListValue({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <span className="min-w-0">
+      <span className="block text-[10px] leading-none text-muted-foreground">{label}</span>
+      <span className={`mt-1 block truncate text-sm font-medium ${mono ? "font-mono text-xs" : ""}`} title={value}>
+        {value}
+      </span>
+    </span>
+  );
+}
+
+function auditStatusSummary(audit: AuditSummary): string | null {
+  const httpFailure = typeof audit.status_code === "number" && audit.status_code >= 400;
+  const forwardFailure = audit.forward_status !== "completed";
+  if (!httpFailure && !forwardFailure) {
+    return null;
+  }
+
+  const labels: Record<string, string> = {
+    rejected: "已拦截",
+    client_cancelled: "客户端取消",
+    newapi_error: "上游错误",
+    proxy_error: "代理错误",
+    interrupted: "意外中断",
+    in_progress: "处理中",
+  };
+  const parts = forwardFailure ? [labels[audit.forward_status] ?? "转发异常"] : [];
+  if (httpFailure) {
+    parts.push(`HTTP ${audit.status_code}`);
+  }
+  return parts.join(" · ");
 }
 
 function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: string | null }) {

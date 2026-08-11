@@ -90,7 +90,13 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 
 	page := Page{Items: make([]AuditSummary, 0, len(storagePage.Rows))}
 	for _, row := range storagePage.Rows {
-		page.Items = append(page.Items, mapAudit(row))
+		userAgent, _, err := service.readUserAgent(ctx, row.AuditID, "")
+		if err != nil {
+			return Page{}, err
+		}
+		summary := mapAudit(row)
+		summary.UserAgent = userAgent
+		page.Items = append(page.Items, summary)
 	}
 	if storagePage.HasMore && len(page.Items) != 0 {
 		last := page.Items[len(page.Items)-1]
@@ -113,12 +119,14 @@ func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter
 		}
 		for index, row := range storagePage.Rows {
 			scanned++
-			matches, err := service.matchesHeaderFilters(ctx, row.AuditID, filter)
+			userAgent, matches, err := service.readUserAgent(ctx, row.AuditID, filter.UserAgent)
 			if err != nil {
 				return Page{}, err
 			}
 			if matches {
-				page.Items = append(page.Items, mapAudit(row))
+				summary := mapAudit(row)
+				summary.UserAgent = userAgent
+				page.Items = append(page.Items, summary)
 				if len(page.Items) == limit {
 					if index < len(storagePage.Rows)-1 || storagePage.HasMore {
 						page.NextCursor = cursorForRow(row)
@@ -138,27 +146,32 @@ func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter
 	return page, nil
 }
 
-func (service *Service) matchesHeaderFilters(ctx context.Context, auditID string, filter Filter) (bool, error) {
+func (service *Service) readUserAgent(ctx context.Context, auditID, needle string) (*string, bool, error) {
 	headers, err := service.store.QueryRequestHeaderEvidence(ctx, auditID)
 	if err != nil {
-		return false, fmt.Errorf("query: read request headers for filter: %w", err)
+		return nil, false, fmt.Errorf("query: read request headers: %w", err)
 	}
-	userAgentNeedle := strings.ToLower(filter.UserAgent)
+	var userAgent *string
+	matched := needle == ""
+	userAgentNeedle := strings.ToLower(needle)
 	for _, header := range headers {
 		if !strings.EqualFold(header.Name, "user-agent") {
 			continue
 		}
 		plaintext, err := service.decryptHeader(auditID, header)
 		if err != nil {
-			return false, err
+			return nil, false, err
 		}
-		matched := strings.Contains(strings.ToLower(string(plaintext)), userAgentNeedle)
+		value := string(plaintext)
 		clear(plaintext)
-		if matched {
-			return true, nil
+		if userAgent == nil {
+			userAgent = &value
+		}
+		if needle != "" && strings.Contains(strings.ToLower(value), userAgentNeedle) {
+			matched = true
 		}
 	}
-	return false, nil
+	return userAgent, matched && userAgent != nil, nil
 }
 
 func (service *Service) decryptHeader(auditID string, header sqlite.HeaderEvidence) ([]byte, error) {

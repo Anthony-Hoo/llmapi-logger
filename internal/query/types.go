@@ -73,6 +73,7 @@ type AuditSummary struct {
 	ErrorCode     *string `json:"error_code"`
 	RequestModel  *string `json:"request_model"`
 	ResponseModel *string `json:"response_model"`
+	UserAgent     *string `json:"user_agent"`
 	NewAPITokenID *int64  `json:"newapi_token_id"`
 	TokenName     *string `json:"token_name"`
 	MaskedKey     *string `json:"masked_key"`

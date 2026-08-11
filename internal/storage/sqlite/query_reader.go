@@ -171,9 +171,9 @@ WHERE audit_id = ?`, auditID).Scan(&detail.RequestURIEnc); err != nil {
 	return detail, nil
 }
 
-// QueryRequestHeaderEvidence returns only request headers used by the optional
-// audit-list User-Agent and API-key filters. Values remain encrypted until the
-// query service verifies their AAD and decrypts them in memory.
+// QueryRequestHeaderEvidence returns only the inbound User-Agent used by the
+// audit list and its optional substring filter. Values remain encrypted until
+// the query service verifies their AAD and decrypts them in memory.
 func (store *Store) QueryRequestHeaderEvidence(ctx context.Context, auditID string) ([]HeaderEvidence, error) {
 	if ctx == nil {
 		return nil, errors.New("sqlite: nil context")
@@ -190,10 +190,7 @@ FROM http_headers
 WHERE audit_id = ?
   AND stage = ?
   AND kind = 'header'
-  AND lower(name) IN (
-      'user-agent', 'authorization', 'x-api-key', 'api-key',
-      'x-goog-api-key', 'anthropic-api-key'
-  )
+  AND lower(name) = 'user-agent'
 ORDER BY lower(name), value_index`, auditID, StageRequestReceived)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query request filter headers: %w", err)

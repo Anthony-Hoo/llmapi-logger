@@ -216,7 +216,7 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
-func TestListFiltersUserAgentSubstringWithoutReturningHeaderPlaintext(t *testing.T) {
+func TestListFiltersUserAgentSubstringAndReturnsMatchingValue(t *testing.T) {
 	t.Parallel()
 
 	cipher := testCipher(t)
@@ -260,15 +260,110 @@ func TestListFiltersUserAgentSubstringWithoutReturningHeaderPlaintext(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) != 1 || page.Items[0].AuditID != "audit-match" || page.NextCursor != nil {
+	if len(page.Items) != 1 || page.Items[0].AuditID != "audit-match" || page.NextCursor != nil ||
+		page.Items[0].UserAgent == nil || *page.Items[0].UserAgent != "Codex-CLI/1.2 Windows" {
 		t.Fatalf("filtered page = %+v", page)
 	}
 	encoded, err := json.Marshal(page)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(encoded, []byte("Codex-CLI")) || bytes.Contains(encoded, []byte("secret-that-must-not-be-read")) {
-		t.Fatalf("filtered response leaked header material: %s", encoded)
+	if !bytes.Contains(encoded, []byte("Codex-CLI/1.2 Windows")) || bytes.Contains(encoded, []byte("secret-that-must-not-be-read")) {
+		t.Fatalf("filtered response has wrong header material: %s", encoded)
+	}
+}
+
+func TestListReturnsUserAgentWithoutFilterAndUsesNullWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	header := func(auditID, name, value string) sqlite.HeaderEvidence {
+		t.Helper()
+		aad, err := security.AAD(auditID, "header", sqlite.StageRequestReceived, sqlite.HeaderKindHeader, name, "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		encrypted, err := cipher.Encrypt(aad, []byte(value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sqlite.HeaderEvidence{
+			Stage: sqlite.StageRequestReceived, Kind: sqlite.HeaderKindHeader, Name: name,
+			ValueIndex: 0, ValueLength: len(value), ValueEnc: encrypted,
+		}
+	}
+	tamperedAuthorization := header("audit-with-agent", "Authorization", "Bearer secret-that-must-not-be-read")
+	tamperedAuthorization.ValueEnc[len(tamperedAuthorization.ValueEnc)-1] ^= 0xff
+	tamperedMissingAuthorization := header("audit-without-agent", "Authorization", "Bearer another-secret")
+	tamperedMissingAuthorization.ValueEnc[len(tamperedMissingAuthorization.ValueEnc)-1] ^= 0xff
+	store := &fakeStore{
+		healthy: true,
+		listPage: sqlite.AuditListPage{Rows: []sqlite.AuditListRow{
+			{AuditID: "audit-with-agent", StartedAtNS: 2, ForwardStatus: sqlite.ForwardCompleted},
+			{AuditID: "audit-without-agent", StartedAtNS: 1, ForwardStatus: sqlite.ForwardCompleted},
+		}},
+		requestHeaders: map[string][]sqlite.HeaderEvidence{
+			"audit-with-agent": {
+				header("audit-with-agent", "User-Agent", "AuditClient/2.0"),
+				tamperedAuthorization,
+			},
+			"audit-without-agent": {
+				tamperedMissingAuthorization,
+			},
+		},
+	}
+	service, err := New(store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.List(context.Background(), Filter{}, Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.Items[0].UserAgent == nil || *page.Items[0].UserAgent != "AuditClient/2.0" ||
+		page.Items[1].UserAgent != nil {
+		t.Fatalf("list user agents = %+v", page.Items)
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"user_agent":"AuditClient/2.0"`)) ||
+		!bytes.Contains(encoded, []byte(`"user_agent":null`)) ||
+		bytes.Contains(encoded, []byte("secret-that-must-not-be-read")) || bytes.Contains(encoded, []byte("another-secret")) {
+		t.Fatalf("list response has wrong header material: %s", encoded)
+	}
+}
+
+func TestListWithoutFilterRejectsTamperedUserAgentCiphertext(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	auditID := "audit-list-tamper"
+	aad, err := security.AAD(auditID, "header", sqlite.StageRequestReceived, sqlite.HeaderKindHeader, "User-Agent", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt(aad, []byte("Codex/1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted[len(encrypted)-1] ^= 0xff
+	service, err := New(&fakeStore{
+		healthy: true,
+		listPage: sqlite.AuditListPage{Rows: []sqlite.AuditListRow{{
+			AuditID: auditID, StartedAtNS: 1, ForwardStatus: sqlite.ForwardCompleted,
+		}}},
+		requestHeaders: map[string][]sqlite.HeaderEvidence{auditID: {{
+			Stage: sqlite.StageRequestReceived, Kind: sqlite.HeaderKindHeader, Name: "User-Agent",
+			ValueLength: len("Codex/1"), ValueEnc: encrypted,
+		}}},
+	}, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.List(context.Background(), Filter{}, Cursor{}, 10); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("tampered list error = %v, want ErrIntegrity", err)
 	}
 }
 
