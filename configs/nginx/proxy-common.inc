@@ -1,6 +1,6 @@
 proxy_http_version 1.1;
 
-# Do not buffer, cache, transform, or retry streamed LLM requests.
+# Do not buffer, cache, transform, or retry data-plane requests.
 proxy_request_buffering off;
 proxy_buffering off;
 proxy_cache off;
@@ -22,7 +22,7 @@ proxy_set_header X-Forwarded-Host $host;
 proxy_set_header X-Forwarded-Port $server_port;
 proxy_set_header Forwarded "";
 
-# Non-whitelisted NewAPI routes may still use WebSocket upgrades. Whitelisted
-# audit routes are POST-only and do not expand the proxy's WebSocket boundary.
+# Passthrough NewAPI routes may still use WebSocket upgrades. Configured audit
+# routes are POST-only and do not expand the proxy's WebSocket boundary.
 proxy_set_header Upgrade $http_upgrade;
 proxy_set_header Connection $connection_upgrade;

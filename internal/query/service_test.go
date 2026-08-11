@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"strconv"
+	"strings"
 	"testing"
 
 	"llmapi-logger/internal/security"
@@ -204,6 +206,158 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 	}
 	if _, err := service.List(context.Background(), Filter{Path: "not-absolute"}, Cursor{}, 1); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("invalid path error = %v", err)
+	}
+}
+
+func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	auditID := "audit-sensitive-detail"
+	requestURI := "/v1/chat/completions?trace=private-value"
+	requestURIAAD, err := security.AAD(auditID, "request_uri")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestURIEnc, err := cipher.Encrypt(requestURIAAD, []byte(requestURI))
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := func(stage, kind, name string, index int, value string) sqlite.HeaderEvidence {
+		t.Helper()
+		aad, aadErr := security.AAD(auditID, "header", stage, kind, name, strconv.Itoa(index))
+		if aadErr != nil {
+			t.Fatal(aadErr)
+		}
+		encrypted, encryptErr := cipher.Encrypt(aad, []byte(value))
+		if encryptErr != nil {
+			t.Fatal(encryptErr)
+		}
+		return sqlite.HeaderEvidence{
+			Stage: stage, Kind: kind, Name: name, ValueIndex: index,
+			ValueLength: len(value), ValueEnc: encrypted,
+		}
+	}
+	wantHeaders := []Header{
+		{Stage: sqlite.StageRequestSent, Kind: sqlite.HeaderKindHeader, Name: "X-Multi", ValueIndex: 0, ValueLength: 5, Value: "first"},
+		{Stage: sqlite.StageRequestSent, Kind: sqlite.HeaderKindHeader, Name: "X-Multi", ValueIndex: 1, ValueLength: 6, Value: "second"},
+		{Stage: sqlite.StageResponseReceived, Kind: sqlite.HeaderKindTrailer, Name: "X-Trailer", ValueIndex: 0, ValueLength: 4, Value: "done"},
+	}
+	store := &fakeStore{healthy: true, detail: sqlite.AuditQueryDetail{
+		Audit: sqlite.AuditListRow{
+			AuditID: auditID, StartedAtNS: 1, RouteID: "route", Protocol: "openai",
+			ParserName: "openai.chat_completions", Method: "POST", Path: "/v1/chat/completions",
+			Mode: "available", ForwardStatus: sqlite.ForwardCompleted,
+			CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParseOK,
+		},
+		RequestURIEnc: requestURIEnc,
+		Headers: []sqlite.HeaderEvidence{
+			header(sqlite.StageRequestSent, sqlite.HeaderKindHeader, "X-Multi", 0, "first"),
+			header(sqlite.StageRequestSent, sqlite.HeaderKindHeader, "X-Multi", 1, "second"),
+			header(sqlite.StageResponseReceived, sqlite.HeaderKindTrailer, "X-Trailer", 0, "done"),
+		},
+	}}
+	service, err := New(store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := service.Get(context.Background(), auditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.RequestURI != requestURI {
+		t.Fatalf("request_uri = %q, want %q", detail.RequestURI, requestURI)
+	}
+	if len(detail.Headers) != len(wantHeaders) {
+		t.Fatalf("headers = %+v", detail.Headers)
+	}
+	for index := range wantHeaders {
+		if detail.Headers[index] != wantHeaders[index] {
+			t.Errorf("header %d = %+v, want %+v", index, detail.Headers[index], wantHeaders[index])
+		}
+	}
+
+	pageJSON, err := json.Marshal(Page{Items: []AuditSummary{detail.Audit}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"private-value", "first", "second", "done"} {
+		if strings.Contains(string(pageJSON), secret) {
+			t.Fatalf("list projection leaked %q: %s", secret, pageJSON)
+		}
+	}
+}
+
+func TestGetRejectsInvalidEncryptedDetailWithoutLeakingEvidence(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	auditID := "audit-invalid-detail"
+	requestAAD, err := security.AAD(auditID, "request_uri")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestURIEnc, err := cipher.Encrypt(requestAAD, []byte("/v1/responses?secret=request-uri-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerAAD, err := security.AAD(auditID, "header", sqlite.StageRequestSent, sqlite.HeaderKindHeader, "Authorization", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerEnc, err := cipher.Encrypt(headerAAD, []byte("Bearer header-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*sqlite.AuditQueryDetail)
+	}{
+		{
+			name: "tampered request URI",
+			mutate: func(detail *sqlite.AuditQueryDetail) {
+				detail.RequestURIEnc[len(detail.RequestURIEnc)-1] ^= 0xff
+			},
+		},
+		{
+			name: "tampered header",
+			mutate: func(detail *sqlite.AuditQueryDetail) {
+				detail.Headers[0].ValueEnc[len(detail.Headers[0].ValueEnc)-1] ^= 0xff
+			},
+		},
+		{
+			name: "header length mismatch",
+			mutate: func(detail *sqlite.AuditQueryDetail) {
+				detail.Headers[0].ValueLength++
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			base := sqlite.AuditQueryDetail{
+				Audit:         sqlite.AuditListRow{AuditID: auditID},
+				RequestURIEnc: append([]byte(nil), requestURIEnc...),
+				Headers: []sqlite.HeaderEvidence{{
+					Stage: sqlite.StageRequestSent, Kind: sqlite.HeaderKindHeader,
+					Name: "Authorization", ValueIndex: 0,
+					ValueLength: len("Bearer header-secret"), ValueEnc: append([]byte(nil), headerEnc...),
+				}},
+			}
+			test.mutate(&base)
+			service, serviceErr := New(&fakeStore{healthy: true, detail: base}, cipher)
+			if serviceErr != nil {
+				t.Fatal(serviceErr)
+			}
+			_, getErr := service.Get(context.Background(), auditID)
+			if !errors.Is(getErr, ErrIntegrity) {
+				t.Fatalf("Get error = %v, want ErrIntegrity", getErr)
+			}
+			if getErr.Error() != ErrIntegrity.Error() || strings.Contains(getErr.Error(), "secret") {
+				t.Fatalf("unsafe integrity error = %q", getErr)
+			}
+		})
 	}
 }
 

@@ -100,6 +100,7 @@ type Header struct {
 	Name        string `json:"name"`
 	ValueIndex  int    `json:"value_index"`
 	ValueLength int    `json:"value_length"`
+	Value       string `json:"value"`
 }
 
 type Body struct {
@@ -139,10 +140,11 @@ type TokenLink struct {
 	LinkedAtNS    int64  `json:"linked_at_ns,string"`
 }
 
-// Detail intentionally contains metadata only. Raw bytes require a separate,
-// explicit request and Header values and parsed JSON are never included.
+// Detail is sensitive and may only be returned by the Admin Token protected
+// endpoint. Raw Body bytes still require a separate, explicit request.
 type Detail struct {
 	Audit        AuditSummary  `json:"audit"`
+	RequestURI   string        `json:"request_uri"`
 	Stages       []Stage       `json:"stages"`
 	Headers      []Header      `json:"headers"`
 	Bodies       []Body        `json:"bodies"`

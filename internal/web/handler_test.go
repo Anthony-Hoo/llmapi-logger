@@ -22,7 +22,7 @@ func TestManagementEndpointsRequireBearerOnEveryRemoteAddress(t *testing.T) {
 
 	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}})
 	for _, remote := range []string{"127.0.0.1:1234", "203.0.113.10:5678"} {
-		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/unknown"} {
+		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/audits/audit-id/raw/request", "/api/v1/unknown"} {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			request.RemoteAddr = remote
 			response := httptest.NewRecorder()
@@ -121,11 +121,18 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 
 	queries := &fakeQuery{
 		healthy: true,
-		detail: query.Detail{Audit: query.AuditSummary{
-			AuditID: "audit-detail", StartedAtNS: 10, RouteID: "route", Protocol: "openai",
-			ParserName: "openai.responses", Method: "POST", Path: "/v1/responses", Mode: "available",
-			ForwardStatus: "completed", CaptureStatus: "complete", ParseStatus: "pending",
-		}},
+		detail: query.Detail{
+			Audit: query.AuditSummary{
+				AuditID: "audit-detail", StartedAtNS: 10, RouteID: "route", Protocol: "openai",
+				ParserName: "openai.responses", Method: "POST", Path: "/v1/responses", Mode: "available",
+				ForwardStatus: "completed", CaptureStatus: "complete", ParseStatus: "pending",
+			},
+			RequestURI: "/v1/responses?private=query-value",
+			Headers: []query.Header{{
+				Stage: "request_sent_to_newapi", Kind: "header", Name: "Authorization",
+				ValueIndex: 0, ValueLength: 19, Value: "Bearer header-value",
+			}},
+		},
 		rawMetadata: query.RawMetadata{
 			ObservedLength: 12, StoredLength: 12, SHA256: strings.Repeat("a", 64), Complete: true, State: "complete",
 		},
@@ -139,6 +146,20 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "ciphertext") || strings.Contains(response.Body.String(), testAdminToken) {
 		t.Fatalf("detail response: status=%d body=%q", response.Code, response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), `"request_uri":"/v1/responses?private=query-value"`) ||
+		!strings.Contains(response.Body.String(), `"value":"Bearer header-value"`) {
+		t.Fatalf("detail omitted decrypted evidence: %s", response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("detail cache policy = %q, want no-store", response.Header().Get("Cache-Control"))
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/audits/audit-detail", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "query-value") || strings.Contains(response.Body.String(), "header-value") {
+		t.Fatalf("unauthorized detail leaked evidence: status=%d body=%q", response.Code, response.Body.String())
+	}
 
 	request = authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail/raw/request")
 	response = httptest.NewRecorder()
@@ -148,6 +169,9 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 	}
 	if response.Header().Get("X-Audit-Complete") != "true" || response.Header().Get("X-Audit-Stored-Length") != "12" || response.Header().Get("Content-Type") != "application/octet-stream" {
 		t.Fatalf("raw headers = %v", response.Header())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("raw cache policy = %q, want no-store", response.Header().Get("Cache-Control"))
 	}
 
 	queries.rawData = nil

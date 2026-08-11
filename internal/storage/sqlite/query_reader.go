@@ -107,9 +107,9 @@ WHERE 1 = 1`)
 	return result, nil
 }
 
-// QueryAuditDetail reads one transactionally consistent, non-secret detail
-// projection. It never loads encrypted Header values, Body chunks, request URI,
-// or parsed JSON.
+// QueryAuditDetail reads one transactionally consistent detail projection. It
+// loads the encrypted request URI and Header values for the authenticated query
+// service, but never loads Body chunks or parsed JSON.
 func (store *Store) QueryAuditDetail(ctx context.Context, auditID string) (AuditQueryDetail, error) {
 	if ctx == nil {
 		return AuditQueryDetail{}, errors.New("sqlite: nil context")
@@ -143,10 +143,17 @@ WHERE a.audit_id = ?`, auditID), &detail.Audit); err != nil {
 		}
 		return AuditQueryDetail{}, fmt.Errorf("sqlite: read query detail: %w", err)
 	}
+	if err := transaction.QueryRowContext(ctx, `
+SELECT request_uri_enc
+FROM audit_records
+WHERE audit_id = ?`, auditID).Scan(&detail.RequestURIEnc); err != nil {
+		return AuditQueryDetail{}, fmt.Errorf("sqlite: read encrypted request URI: %w", err)
+	}
+	detail.RequestURIEnc = cloneBytes(detail.RequestURIEnc)
 	if detail.Stages, err = readStages(ctx, transaction, auditID); err != nil {
 		return AuditQueryDetail{}, err
 	}
-	if detail.Headers, err = readHeaderMetadata(ctx, transaction, auditID); err != nil {
+	if detail.Headers, err = readHeaderEvidence(ctx, transaction, auditID); err != nil {
 		return AuditQueryDetail{}, err
 	}
 	if detail.Bodies, err = readBodies(ctx, transaction, auditID); err != nil {
@@ -297,27 +304,28 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	return nil
 }
 
-func readHeaderMetadata(ctx context.Context, transaction *sql.Tx, auditID string) ([]HeaderMetadata, error) {
+func readHeaderEvidence(ctx context.Context, transaction *sql.Tx, auditID string) ([]HeaderEvidence, error) {
 	rows, err := transaction.QueryContext(ctx, `
-SELECT stage, kind, name, value_index, value_length
+SELECT stage, kind, name, value_index, value_length, value_enc
 FROM http_headers
 WHERE audit_id = ?
 ORDER BY `+stageOrderSQL+`, kind, name, value_index`, auditID)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: read header metadata: %w", err)
+		return nil, fmt.Errorf("sqlite: read header evidence: %w", err)
 	}
 	defer rows.Close()
 
-	headers := make([]HeaderMetadata, 0)
+	headers := make([]HeaderEvidence, 0)
 	for rows.Next() {
-		var header HeaderMetadata
-		if err := rows.Scan(&header.Stage, &header.Kind, &header.Name, &header.ValueIndex, &header.ValueLength); err != nil {
-			return nil, fmt.Errorf("sqlite: scan header metadata: %w", err)
+		var header HeaderEvidence
+		if err := rows.Scan(&header.Stage, &header.Kind, &header.Name, &header.ValueIndex, &header.ValueLength, &header.ValueEnc); err != nil {
+			return nil, fmt.Errorf("sqlite: scan header evidence: %w", err)
 		}
+		header.ValueEnc = cloneBytes(header.ValueEnc)
 		headers = append(headers, header)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: iterate header metadata: %w", err)
+		return nil, fmt.Errorf("sqlite: iterate header evidence: %w", err)
 	}
 	return headers, nil
 }

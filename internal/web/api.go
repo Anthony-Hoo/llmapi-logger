@@ -114,6 +114,7 @@ func (handler *managementHandler) serveRaw(writer http.ResponseWriter, request *
 		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
 		return
 	}
+	writer.Header().Set("Cache-Control", "no-store")
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	metadata, err := handler.query.RawMeta(ctx, auditID, side)
@@ -265,6 +266,7 @@ func parseInt(value string) (int, error) {
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {
+	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	writer.WriteHeader(status)

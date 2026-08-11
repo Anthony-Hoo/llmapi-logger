@@ -12,6 +12,8 @@ import (
 
 const modelPlaceholder = "{model}"
 
+const maxPathUnescapeDepth = 16
+
 // Match describes the enabled route and the immutable execution metadata that
 // callers need after a successful whitelist match.
 type Match struct {
@@ -31,8 +33,10 @@ type compiledRoute struct {
 
 // Matcher is immutable after Compile and safe for concurrent use.
 type Matcher struct {
-	exact     map[string]compiledRoute
-	templates map[string][]compiledRoute
+	exact                 map[string]compiledRoute
+	templates             map[string][]compiledRoute
+	protectedExactPaths   []string
+	protectedPathPrefixes []string
 }
 
 // Compile validates and compiles an explicit route whitelist.
@@ -42,8 +46,10 @@ func Compile(routes []config.RouteConfig) (*Matcher, error) {
 	}
 
 	matcher := &Matcher{
-		exact:     make(map[string]compiledRoute, len(routes)),
-		templates: make(map[string][]compiledRoute),
+		exact:                 make(map[string]compiledRoute, len(routes)),
+		templates:             make(map[string][]compiledRoute),
+		protectedExactPaths:   make([]string, 0, len(routes)),
+		protectedPathPrefixes: make([]string, 0, len(routes)),
 	}
 	for _, route := range routes {
 		compiled := compiledRoute{
@@ -53,6 +59,7 @@ func Compile(routes []config.RouteConfig) (*Matcher, error) {
 		}
 		if route.Match == "exact" {
 			matcher.exact[routeKey(route.Method, route.Path)] = compiled
+			matcher.protectedExactPaths = append(matcher.protectedExactPaths, fullyUnescape(route.Path))
 			continue
 		}
 
@@ -60,6 +67,7 @@ func Compile(routes []config.RouteConfig) (*Matcher, error) {
 		compiled.prefix = route.Path[:placeholder]
 		compiled.suffix = route.Path[placeholder+len(modelPlaceholder):]
 		matcher.templates[route.Method] = append(matcher.templates[route.Method], compiled)
+		matcher.protectedPathPrefixes = append(matcher.protectedPathPrefixes, fullyUnescape(compiled.prefix))
 	}
 	return matcher, nil
 }
@@ -81,6 +89,37 @@ func (matcher *Matcher) Match(method, escapedPath string) (Match, bool) {
 		return makeMatch(route, map[string]string{"model": model}), true
 	}
 	return Match{}, false
+}
+
+// AllowsPassthrough reports whether a request that did not Match can safely
+// use the non-audited NewAPI fallback. Configured exact paths, descendants of
+// exact paths, template route families, and their encoded equivalents remain
+// protected regardless of method. Unsafe path forms fail closed globally.
+func (matcher *Matcher) AllowsPassthrough(escapedPath string) bool {
+	if matcher == nil || !safeEscapedPath(escapedPath) {
+		return false
+	}
+
+	forms, complete := unescapedPathForms(escapedPath)
+	if !complete {
+		return false
+	}
+	for _, candidate := range forms {
+		if unsafePathForm(candidate) {
+			return false
+		}
+		for _, protected := range matcher.protectedExactPaths {
+			if strings.EqualFold(candidate, protected) || protected != "/" && hasFoldedPrefix(candidate, protected+"/") {
+				return false
+			}
+		}
+		for _, prefix := range matcher.protectedPathPrefixes {
+			if hasFoldedPrefix(candidate, prefix) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func routeKey(method, path string) string {
@@ -138,6 +177,54 @@ func safeEscapedPath(escapedPath string) bool {
 		}
 	}
 	return true
+}
+
+func unescapedPathForms(escapedPath string) ([]string, bool) {
+	forms := []string{escapedPath}
+	current := escapedPath
+	for range maxPathUnescapeDepth {
+		decoded, err := url.PathUnescape(current)
+		if err != nil {
+			return forms, false
+		}
+		if decoded == current {
+			return forms, true
+		}
+		forms = append(forms, decoded)
+		current = decoded
+	}
+	return forms, false
+}
+
+func fullyUnescape(escapedPath string) string {
+	forms, _ := unescapedPathForms(escapedPath)
+	return forms[len(forms)-1]
+}
+
+func unsafePathForm(path string) bool {
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return true
+	}
+	if path != "/" && strings.HasSuffix(path, "/") {
+		return true
+	}
+	if strings.Contains(path, "//") || strings.ContainsRune(path, '\\') || strings.ContainsAny(path, "?#") {
+		return true
+	}
+	lower := strings.ToLower(path)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+		return true
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFoldedPrefix(value, prefix string) bool {
+	return len(value) >= len(prefix) && strings.EqualFold(value[:len(prefix)], prefix)
 }
 
 func validModel(model string) bool {

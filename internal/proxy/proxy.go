@@ -73,6 +73,39 @@ func NewWithOptions(target *url.URL, matcher *routing.Matcher, engine *intercept
 	return handler
 }
 
+// NewPassthrough returns a transparent NewAPI reverse proxy without route
+// matching, interception, audit capture, or completion logging. Callers must
+// enforce the audited route boundary before dispatching requests here.
+func NewPassthrough(target, upstreamProxy *url.URL, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	passthrough := &passthroughHandler{logger: logger}
+	if target == nil {
+		passthrough.initializationError = errors.New("proxy: nil NewAPI passthrough target")
+		return passthrough
+	}
+	passthrough.reverseProxy = newReverseProxy(cloneURL(target), upstreamProxy, logger)
+	return passthrough
+}
+
+type passthroughHandler struct {
+	logger              *slog.Logger
+	reverseProxy        *httputil.ReverseProxy
+	initializationError error
+}
+
+func (h *passthroughHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if h == nil || h.reverseProxy == nil {
+		if h != nil && h.logger != nil {
+			h.logger.Error("NewAPI passthrough unavailable", "error", h.initializationError)
+		}
+		writeJSON(response, http.StatusServiceUnavailable, newAPIUnavailableJSON)
+		return
+	}
+	h.reverseProxy.ServeHTTP(response, request)
+}
+
 type handler struct {
 	target              *url.URL
 	matcher             *routing.Matcher

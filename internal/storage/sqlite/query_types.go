@@ -56,14 +56,17 @@ type AuditListPage struct {
 	HasMore bool
 }
 
-// HeaderMetadata is safe to return from the normal detail endpoint. The
-// encrypted value is deliberately absent.
-type HeaderMetadata struct {
+// HeaderEvidence is the encrypted value and its stable identity for one saved
+// Header or Trailer entry. It is only consumed by the query service, which
+// authenticates and decrypts the value before building the protected detail
+// response.
+type HeaderEvidence struct {
 	Stage       string
 	Kind        string
 	Name        string
 	ValueIndex  int
 	ValueLength int
+	ValueEnc    []byte
 }
 
 // ParsedResultSummary is the narrow, non-secret projection of parsed_results.
@@ -95,14 +98,17 @@ type TokenLinkSummary struct {
 	LinkedAtNS    int64
 }
 
-// AuditQueryDetail is the safe detail projection used by the management API.
+// AuditQueryDetail is the encrypted evidence projection used only by the
+// authenticated management query service. RequestURIEnc and Header ValueEnc
+// must never be copied into list DTOs or returned without decryption.
 type AuditQueryDetail struct {
-	Audit        AuditListRow
-	Stages       []HTTPStage
-	Headers      []HeaderMetadata
-	Bodies       []BodyStream
-	ParsedResult *ParsedResultSummary
-	TokenLink    *TokenLinkSummary
+	Audit         AuditListRow
+	RequestURIEnc []byte
+	Stages        []HTTPStage
+	Headers       []HeaderEvidence
+	Bodies        []BodyStream
+	ParsedResult  *ParsedResultSummary
+	TokenLink     *TokenLinkSummary
 }
 
 // RawBodyMetadata describes one captured Body stream without containing Body
