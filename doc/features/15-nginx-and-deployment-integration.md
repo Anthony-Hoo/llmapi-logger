@@ -6,7 +6,7 @@ Nginx 只把明确的 LLM API POST 白名单送入 audit-proxy，其他 NewAPI �
 
 ~~~text
 Client -> Nginx
-          |- LLM POST whitelist -> audit-proxy:8080 -> NewAPI:3000
+          |- LLM POST whitelist -> audit-proxy:8080 -> [optional HTTP(S) proxy] -> NewAPI:3000
           `- everything else ----------------------> NewAPI:3000
 ~~~
 
@@ -77,7 +77,20 @@ Docker 配置使用 `0.0.0.0:8080`/`0.0.0.0:8081` 是为了容器网络和 loopb
 
 NewAPI 镜像版本由使用者按现有部署固定到验证过的 tag/digest；audit-proxy 不依赖或修改 NewAPI 的非 LLM 路由。
 
-## 6. 构建与部署材料
+## 6. Podman/WSL/Clash 显式上游代理
+
+默认 `newapi_proxy_url: ""`，audit-proxy 直接连接 newapi_url，且不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。只有运行环境确实无法直连远程 NewAPI 时才配置显式代理：
+
+~~~yaml
+newapi_url: https://newapi.example.com
+newapi_proxy_url: http://127.0.0.1:7897
+~~~
+
+上述 Podman/WSL 示例用于“单个 audit-proxy 容器 + 远程 newapi_url”，要求容器使用 host network，并在 WSL mirrored networking 下启用 host address loopback；host network 模式不再配置 `-p`/`ports`，应用自身继续监听需要的 `0.0.0.0` 端口。这样 `127.0.0.1:7897` 才能到达仅监听 Windows loopback 的 Clash mixed/HTTP 端口。默认 bridge 中的 `host.containers.internal` 可能只到 Podman bridge gateway，不能当作 Windows loopback 的等价地址。仓库三服务 Compose 保持 bridge + 本地 NewAPI 直连，不需要此设置；宿主机直接运行二进制时也通常写 `http://127.0.0.1:7897`。
+
+此配置只改变 audit-proxy 到 newapi_url 的连接路径，不代理 NewAPI 的非白名单接口，也不改变 NewAPI 自己访问模型供应商的网络。首版只支持无凭据的 HTTP(S) forward proxy，不支持 SOCKS、PAC 或环境变量自动发现。
+
+## 7. 构建与部署材料
 
 ~~~text
 Dockerfile
@@ -93,17 +106,18 @@ doc/deployment/backup-and-restore.md
 
 构建脚本生成 Windows/Linux amd64 的 CGO=0 二进制。完整启动、配置校验、Nginx 校验和管理面检查见[单机部署说明](../deployment/README.md)。
 
-## 7. 数据备份
+## 8. 数据备份
 
 数据库和 `audit.key` 必须作为一个备份集。在线数据库处于 WAL 模式时必须使用 SQLite `.backup`，不能直接复制主 DB 文件。最终镜像不为此加入 SQLite CLI；从宿主机或受控工具容器执行。详见[备份与恢复](../deployment/backup-and-restore.md)。
 
-## 8. 验收
+## 9. 验收
 
 - Nginx 白名单与进程内 routes 一致，Gemini 正则完整锚定。
 - 其他 NewAPI 请求直连且不会产生 audit/interceptor 调用。
 - SSE 首块不因 Nginx buffering 延迟，原 Path/Query 保留。
 - 模型 POST 不自动重试。
 - 管理端只发布到宿主机 loopback，并始终要求 Bearer token。
+- newapi_proxy_url 空值不受环境代理影响；配置显式代理时，白名单请求能经代理到达远程 NewAPI 并正常记录四阶段证据。
 - 最终镜像不含 Node 或源码，单一 Go 二进制提供 API 和 React UI。
 - Windows/Linux amd64 CGO=0 构建成功。
 - 实际部署环境中的 `nginx -t`、Compose 配置检查和 smoke test 有真实结果；未执行时明确记录为未验证。

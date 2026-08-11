@@ -33,12 +33,26 @@ const (
 // New returns a handler that accepts only routes compiled into matcher,
 // evaluates their interceptor chain, and forwards allowed requests to target.
 func New(target *url.URL, matcher *routing.Matcher, engine *interceptor.Engine, logger *slog.Logger) http.Handler {
-	return NewWithAudit(target, matcher, engine, nil, logger)
+	return NewWithOptions(target, matcher, engine, Options{}, logger)
 }
 
 // NewWithAudit returns the stage-one proxy with encrypted evidence capture
 // enabled for matched requests. Passing a nil sink preserves New's behavior.
 func NewWithAudit(target *url.URL, matcher *routing.Matcher, engine *interceptor.Engine, sink audit.Sink, logger *slog.Logger) http.Handler {
+	return NewWithOptions(target, matcher, engine, Options{Audit: sink}, logger)
+}
+
+// Options contains the optional data-plane dependencies. UpstreamProxy is
+// nil for direct connections and never falls back to process environment
+// proxy variables.
+type Options struct {
+	Audit         audit.Sink
+	UpstreamProxy *url.URL
+}
+
+// NewWithOptions returns the data-plane proxy with explicit optional
+// dependencies.
+func NewWithOptions(target *url.URL, matcher *routing.Matcher, engine *interceptor.Engine, options Options, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -46,7 +60,7 @@ func NewWithAudit(target *url.URL, matcher *routing.Matcher, engine *interceptor
 	handler := &handler{
 		matcher: matcher,
 		engine:  engine,
-		audit:   sink,
+		audit:   options.Audit,
 		logger:  logger,
 	}
 	if target == nil {
@@ -55,7 +69,7 @@ func NewWithAudit(target *url.URL, matcher *routing.Matcher, engine *interceptor
 	}
 
 	handler.target = cloneURL(target)
-	handler.reverseProxy = newReverseProxy(handler.target, logger)
+	handler.reverseProxy = newReverseProxy(handler.target, options.UpstreamProxy, logger)
 	return handler
 }
 
@@ -241,9 +255,12 @@ func (h *handler) beginAudit(request *http.Request, match routing.Match) (*audit
 	return nil, true
 }
 
-func newReverseProxy(target *url.URL, logger *slog.Logger) *httputil.ReverseProxy {
+func newReverseProxy(target, upstreamProxy *url.URL, logger *slog.Logger) *httputil.ReverseProxy {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	if upstreamProxy != nil {
+		transport.Proxy = http.ProxyURL(cloneURL(upstreamProxy))
+	}
 	transport.DisableCompression = true
 	transport.ForceAttemptHTTP2 = true
 	transport.MaxIdleConns = 128

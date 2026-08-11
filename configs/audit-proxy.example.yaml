@@ -3,6 +3,9 @@
 listen: 127.0.0.1:8080
 admin_listen: 127.0.0.1:8081
 newapi_url: http://127.0.0.1:3000
+# Optional explicit HTTP(S) forward proxy for newapi_url. Empty means direct;
+# HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment variables are not used.
+newapi_proxy_url: ""
 mode: available
 db_path: ./data/audit.db
 key_path: ./data/audit.key

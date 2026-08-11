@@ -64,7 +64,7 @@ func ValidateConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	_, _, _, err = assembleDataPlane(configuration)
+	_, _, _, _, err = assembleDataPlane(configuration)
 	return err
 }
 
@@ -74,7 +74,7 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		logger = slog.Default()
 	}
 
-	target, matcher, engine, err := assembleDataPlane(configuration)
+	target, upstreamProxy, matcher, engine, err := assembleDataPlane(configuration)
 	if err != nil {
 		return nil, err
 	}
@@ -82,8 +82,11 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	runtime := assembleAudit(configuration, logger)
 	application := &App{
 		server: &http.Server{
-			Addr:              configuration.Listen,
-			Handler:           proxy.NewWithAudit(target, matcher, engine, runtime.sink, logger),
+			Addr: configuration.Listen,
+			Handler: proxy.NewWithOptions(target, matcher, engine, proxy.Options{
+				Audit:         runtime.sink,
+				UpstreamProxy: upstreamProxy,
+			}, logger),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
@@ -281,20 +284,27 @@ func (application *App) readiness(context.Context) web.ReadyStatus {
 	return status
 }
 
-func assembleDataPlane(configuration config.Config) (*url.URL, *routing.Matcher, *interceptor.Engine, error) {
+func assembleDataPlane(configuration config.Config) (*url.URL, *url.URL, *routing.Matcher, *interceptor.Engine, error) {
 	target, err := url.Parse(configuration.NewAPIURL)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("parse newapi_url: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("parse newapi_url: %w", err)
+	}
+	var upstreamProxy *url.URL
+	if configuration.NewAPIProxyURL != "" {
+		upstreamProxy, err = url.Parse(configuration.NewAPIProxyURL)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("parse newapi_proxy_url: %w", err)
+		}
 	}
 	matcher, err := routing.Compile(configuration.Routes)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	engine, err := interceptor.NewEngine(configuration.Interceptors, configuration.Routes)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return target, matcher, engine, nil
+	return target, upstreamProxy, matcher, engine, nil
 }
 
 type auditRuntime struct {

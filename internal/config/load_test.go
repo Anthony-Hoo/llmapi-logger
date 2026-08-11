@@ -20,6 +20,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.NewAPIURL != DefaultNewAPIURL || cfg.Mode != DefaultMode {
 		t.Fatalf("upstream defaults = %q, %q", cfg.NewAPIURL, cfg.Mode)
 	}
+	if cfg.NewAPIProxyURL != "" {
+		t.Fatalf("NewAPIProxyURL = %q, want direct connection", cfg.NewAPIProxyURL)
+	}
 	if cfg.DBPath != DefaultDBPath || cfg.KeyPath != DefaultKeyPath {
 		t.Fatalf("data path defaults = %q, %q", cfg.DBPath, cfg.KeyPath)
 	}
@@ -36,6 +39,7 @@ func TestLoadCompleteConfig(t *testing.T) {
 listen: 127.0.0.1:18080
 admin_listen: 127.0.0.1:18081
 newapi_url: https://newapi.example:8443
+newapi_proxy_url: http://proxy.example:7897
 mode: strict
 db_path: ./state/audit.db
 key_path: ./state/audit.key
@@ -69,6 +73,9 @@ routes:
 	}
 	if cfg.Mode != "strict" || cfg.RetentionDays != 0 || len(cfg.Routes) != 2 {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if cfg.NewAPIProxyURL != "http://proxy.example:7897" {
+		t.Fatalf("NewAPIProxyURL = %q", cfg.NewAPIProxyURL)
 	}
 	if got := cfg.Interceptors["body-limit"].Config["max_bytes"]; got != 1048576 {
 		t.Fatalf("max_bytes = %#v", got)

@@ -21,7 +21,7 @@ Client -> Nginx
 ## 核心能力
 
 - 基于 Method + Path 的进程内 LLM API 白名单。
-- 基于 `net/http/httputil.ReverseProxy` 的流式转发，支持 SSE 及时 flush。
+- 基于 `net/http/httputil.ReverseProxy` 的流式转发，支持 SSE 及时 flush，并可为 NewAPI 上游显式指定 HTTP(S) 代理。
 - 可插拔入站拦截器，首个拒绝立即短路且不会访问 NewAPI。
 - 分别记录四个代理观察点：
   - Nginx 请求到达代理；
@@ -99,6 +99,8 @@ http://127.0.0.1:8081/ui/
 ```
 
 静态页面可以加载，但读取审计数据、`/healthz`、`/readyz` 和 `/api/v1/*` 都需要配置中的 `admin_token`。
+
+如果 audit-proxy 所在环境不能直接访问远程 `newapi_url`，可设置可选的 `newapi_proxy_url`。宿主机二进制通常可使用 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。详细说明见[部署说明](doc/deployment/README.md)。
 
 ## Docker Compose
 

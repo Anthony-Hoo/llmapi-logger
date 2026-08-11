@@ -1,6 +1,9 @@
 listen: 0.0.0.0:8080
 admin_listen: 0.0.0.0:8081
 newapi_url: http://newapi:3000
+# Podman/WSL host-network example for a Windows loopback proxy:
+# newapi_proxy_url: http://127.0.0.1:7897
+newapi_proxy_url: ""
 mode: available
 db_path: /data/audit.db
 key_path: /data/audit.key
