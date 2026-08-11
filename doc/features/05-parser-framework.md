@@ -7,7 +7,7 @@
 硬性边界：
 
 - parser 完全异步，不进入 HTTP 转发链。
-- parser 只处理明确 LLM API 白名单产生且未被 interceptor 拒绝的 audit；Nginx 直连 NewAPI 的其他路径没有 audit 输入。
+- parser 只处理明确 LLM API route 产生且未被 interceptor 拒绝的 audit；passthrough 和 fail-closed 路径没有 audit 输入。
 - 原始 Header、Body、chunk、长度和哈希始终是权威证据。
 - JSON/SSE 解析失败只更新 `parse_status`，不影响转发结果和原始证据。
 - 首版只支持 OpenAI、Anthropic Messages 和 Gemini GenerateContent。

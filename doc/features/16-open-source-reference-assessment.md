@@ -70,7 +70,7 @@ NewAPI 只作为外部后端契约：
 
 参考项目普遍证明代理扩展点必须与协议解析和持久化解耦，但本项目不照搬请求重写、全量 Body 缓冲或动态插件系统。首版选择一个编译期 registry 加 route 级有序 chain：模块只有只读检查权，首个 reject 终止，不能修改请求或改选上游。
 
-interceptor 只作用于 Nginx 选入代理且再次命中本地 LLM API 白名单的请求。NewAPI health、login、admin、models、UI 和其他路径由 Nginx 直连 NewAPI，不进入代理、拦截或审计；本项目不把 interceptor 扩张成 NewAPI 的全局 API gateway 或权限层。
+interceptor 只作用于进程内 Matcher 精确命中的 LLM API route。NewAPI health、login、admin、models、UI 和其他安全非 LLM 请求走 passthrough，不进入拦截或审计；本项目不把 interceptor 扩张成 NewAPI 的全局权限层。
 
 metadata 模块默认拿不到 Body，因此启用 credential、Header 或路径规则不会破坏上传和 SSE 的流式特性。确实需要 Body 的模块必须在配置中显式启用并声明 max_bytes；框架最多预读一次，允许时只把原始字节 replay 给 NewAPI，不能用模块解析或规范化后的数据替换请求。超过上限返回 413。
 
@@ -84,7 +84,7 @@ metadata 模块默认拿不到 Body，因此启用 credential、Header 或路径
 
 - Go `httputil.ReverseProxy`：负责标准 HTTP 反向代理。
 - SQLite WAL：负责单机持久化和查询。
-- Nginx：负责路径白名单和公网入口。
+- Nginx：负责公网入口并把完整数据面统一送入进程内 dispatcher。
 - Go 标准库 AES-GCM：负责本地敏感数据加密。
 
 不在在线链路引入 DuckDB、Parquet、消息队列或外部数据库。

@@ -1,19 +1,20 @@
 # AI API 审计代理：个人单机版总体设计
 
-> 状态：阶段 4 实现基线
-> 日期：2026-08-10
+> 状态：当前实现基线
+> 日期：2026-08-11
 > 上游需求：[AI_API_AUDIT_PROXY_KICKOFF.md](../../AI_API_AUDIT_PROXY_KICKOFF.md)
 
 ## 1. 目标与边界
 
 本项目是部署在 Nginx 与 NewAPI 之间的个人审计代理：单用户、单机、一个 Go 二进制、一个 NewAPI 后端、一个 SQLite WAL 数据库和一个本地主密钥文件。
 
-首版只处理同时由 Nginx 选入、且被进程内 Matcher 命中的 LLM API 白名单请求：透明转发、保存原始 HTTP 证据、在送往 NewAPI 前执行可插拔拦截链、异步解析常见 OpenAI/Anthropic/Gemini JSON/SSE，并提供本地查询页面。NewAPI 的健康检查、登录、管理、模型列表、前端页面及其他请求由 Nginx 直连 NewAPI，不进入审计代理、不执行拦截器，也不创建 audit。
+数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会保存原始 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
 
 ~~~text
-Client -> Nginx
-            |- LLM API 白名单 -> Audit Proxy -> NewAPI -> Provider
-            `- NewAPI 其他路径 -> NewAPI
+Client -> Nginx -> Data-plane dispatcher
+                         |- configured LLM route -> interceptor + audit proxy -> NewAPI
+                         |- safe unrelated route -> passthrough proxy ----------> NewAPI
+                         `- protected/unsafe mismatch -> 404
 ~~~
 
 代理只能证明 Nginx、代理和 NewAPI 三者边界上实际观察到的数据；看不到 NewAPI 后方的渠道选择、厂商原始请求/响应、内部重试或渠道密钥。首版也不承诺 TCP、TLS、HTTP/2 frame、Header 原始大小写或 chunk framing 级保真，不支持 WebSocket/Realtime。
@@ -32,17 +33,16 @@ Client -> Nginx
 ## 3. 架构
 
 ~~~text
-Nginx LLM API 白名单 -> Handler -> Matcher -> Interceptor Chain -> ReverseProxy -> NewAPI
-                                  |              |                         |
-                                  +--------------+----- Audit Session -----+
-                                                         |
-                                                   bounded queue
-                                                         |
-                                                single SQLite writer
-                                                         |
-                                                     SQLite WAL
-                                                         |
-                                                in-memory parsers
+Nginx -> Data-plane dispatcher -> Matcher
+                    |- exact LLM match -> Interceptor Chain -> Audited ReverseProxy -> NewAPI
+                    |                         |                    |
+                    |                         +---- Audit Session -+
+                    |                                  |
+                    |                         single SQLite writer -> SQLite WAL
+                    |                                  |
+                    |                            in-memory parsers
+                    |- safe unrelated path -> Passthrough ReverseProxy -----------> NewAPI
+                    `- protected/unsafe mismatch -> fixed 404
 ~~~
 
 建议目录：
@@ -64,11 +64,11 @@ strict：每个白名单请求访问 NewAPI 前，必须使用已加载的 key �
 
 strict 只保证请求开始时 fail-closed。通过 admission 后仍可能遇到崩溃、磁盘故障或最终批事务失败；首版不逐块 fsync，不宣称绝对零缺口，也不能撤回已经发送的响应。
 
-## 5. 代理与 Trailer
+## 5. 数据面分发、代理与 Trailer
 
-使用 net/http/httputil.ReverseProxy、Rewrite、自定义 RoundTripper 和 ResponseWriter wrapper。固定保留 Path、RawPath、RawQuery、ForceQuery，出站目标与 Host 使用 newapi_url；可选 newapi_proxy_url 只决定该 Transport 是否经过显式 HTTP(S) 代理。DisableCompression=true，FlushInterval=-1。Body 只流式旁路，不使用 io.ReadAll，也不解析后重发。
+审计代理和 passthrough 都使用 net/http/httputil.ReverseProxy、同一套 Rewrite 与显式 HTTP(S) 上游代理设置，固定保留 Path、RawPath、RawQuery、ForceQuery，出站目标与 Host 使用 newapi_url。审计分支额外安装 audit wrapper 和 interceptor；passthrough 不创建 audit、不解析，也不写 LLM 请求完成日志。
 
-非白名单请求直接打到代理时返回 404 且不建 audit。Nginx 仍是第一层白名单：只有明确列出的 LLM API 路径进入审计代理和拦截链；健康检查、登录、管理、模型列表、前端页面及其他 NewAPI 路径直接到 NewAPI，既不审计也不拦截。
+分发器只允许规范且与受保护 LLM 路径族无关的未匹配请求直通，例如 `GET /v1/models`。配置 exact 路径及其后代、template 路径前缀家族、错误 Method、percent/double encoding 等价路径，以及尾随斜杠、重复斜杠、反斜杠、encoded slash 和 dot segment 等危险形式统一进入 fail-closed 分支并返回 404。
 
 Go 客户端直连代理时可捕获 request Trailer；经过 Nginx 后不保证保留，作为已知限制，不设发布阻断门。Response Trailer 在链路支持时尽力转发和记录。
 
@@ -112,7 +112,7 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 响应生成最小摘要，并 UPSERT parsed_results。重启时扫描 pending 记录重新入队；解析不重建完整对话或全文。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health 和 ready 统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。数据功能只做列表、详情、原始请求/响应 Body 和简单筛选，UI 固定使用 React + TypeScript + Vite + Tailwind CSS + shadcn/ui。首版不实现 metrics、导出、DELETE、gaps UI 或 reparse 管理端点。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health 和 ready 统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。列表保持非敏感摘要；受保护的详情会解密 Request-URI 与每个 Header/Trailer 值，原始请求/响应 Body 通过独立 raw API 按需读取。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面可重建应用层 HTTP 起始行/Header 视图、预览 UTF-8 Body，并下载原始字节；这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
 
 ## 9. 模块索引
 
@@ -136,23 +136,9 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 16 | [开源项目参考取舍](16-open-source-reference-assessment.md) |
 | 17 | [入站请求拦截链](17-request-interceptor-chain.md) |
 
-## 10. 四阶段实施范围
+## 10. 当前实现范围
 
-### 阶段 1：代理与配置
-
-配置、route matcher、interceptor chain、ReverseProxy、SSE flush 和透明性测试。白名单透明转发，未知路径不产生 audit。
-
-### 阶段 2：SQLite 与证据
-
-九表 migration、单 writer、四阶段证据、AES-GCM、available/strict admission。完整请求四阶段可比较，DB/WAL 不含测试 secret 明文。
-
-### 阶段 3：Parser 与最小页面
-
-OpenAI、Anthropic、Gemini 常见 JSON/SSE 最小解析；管理面提供列表、详情、raw Body 和 React + shadcn/ui 页面。parser 失败不影响响应，loopback 管理 API 未带 Bearer token 时返回 401。
-
-### 阶段 4：最小运维收口
-
-实现启动 interrupted/partial 恢复、简单聚合 gap、retention 小批量级联清理、安全 JSON 请求日志、三态 readiness、Docker/Compose/Nginx 示例和 Windows/Linux CGO=0 构建。首版不增加 metrics、导出、DELETE、自动 VACUUM 或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React + shadcn/ui、启动恢复、聚合 gap、retention、安全日志和单机构建部署材料。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 
@@ -162,7 +148,8 @@ OpenAI、Anthropic、Gemini 常见 JSON/SSE 最小解析；管理面提供列表
 - SSE 立即 flush；记录 direct 与 proxy 的 TTFT 差异，结果作为优化参考而非发布门禁。
 - strict 在请求开始时 key/DB 不健康返回 503，Fake NewAPI 未收到请求。
 - available 记录失败仍转发，并存在日志或 audit_gaps。
-- 非白名单不建 audit；DB/WAL 无测试 secret 明文。
+- `/v1/models` 等安全非 LLM 请求透明到达 NewAPI，且不建 audit、不执行 interceptor；错误 Method、编码近似、受保护 LLM 路径族与危险路径返回 404，NewAPI 零调用。
+- DB/WAL 无测试 secret 明文。
 - 拦截链首个 reject 会在调用 NewAPI 前返回；记录 blocked_by/block_code，后续 NewAPI 阶段不存在。
 - 未启用 Body 拦截器时保持流式；启用后允许请求的 Body 回放字节与原请求完全一致，超限固定为 `413` 和 `block_code=body_too_large`。
 - 重启后 pending parser 恢复，未完成 audit 标 partial。
@@ -170,7 +157,8 @@ OpenAI、Anthropic、Gemini 常见 JSON/SSE 最小解析；管理面提供列表
 - retention 只小批量删除已终结且非 processing 的过期记录，并级联子表。
 - 请求完成日志不含 Query、Header value、Body、token、key 或底层错误文本。
 - healthy/degraded/not_ready 与 available/strict 语义一致。
-- 管理面只暴露最小查询范围，loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token。
+- 管理列表不返回敏感值；详情在 Admin Token 下返回 Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
+- loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token。
 
 ## 12. 文档优先级
 

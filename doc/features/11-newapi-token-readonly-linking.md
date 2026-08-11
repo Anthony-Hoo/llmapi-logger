@@ -58,7 +58,7 @@ type Snapshot map[string]TokenInfo // key 是 NewAPI token 明文，仅存在内
 
 若同一请求出现多个受支持入口，按以上顺序选择，并记录不含凭据内容的 warning。首版不尝试同时关联多个 token。
 
-forward_status=rejected 的 audit、没有 request_sent_to_newapi 阶段的请求，以及由 Nginx 直连的 NewAPI health/login/admin/models/UI/其他路径均不执行关联。
+forward_status=rejected 的 audit、没有 request_sent_to_newapi 阶段的请求，以及经 passthrough 的 NewAPI health/login/admin/models/UI/其他安全非 LLM 路径均不执行关联。
 
 ## 6. 热路径接口
 
@@ -118,7 +118,7 @@ warning 只在状态变化时输出，避免每个请求或每个周期刷屏。
 - reload 构建期间并发 lookup 始终看到完整旧 map 或完整新 map。
 - 重复 key 不关联，且日志不包含该 key。
 - 四种凭据入口及优先级符合约定。
-- rejected audit、缺少 request_sent_to_newapi 的 audit 和 Nginx 直连路径均不查询内存 map、不写 token_links。
+- rejected audit、缺少 request_sent_to_newapi 的 audit 和 passthrough 路径均不查询内存 map、不写 token_links。
 - 搜索本项目 DB 和日志，确认没有 NewAPI token key。
 - token 改名后新请求使用新名称，历史 `token_links` 不变。
 

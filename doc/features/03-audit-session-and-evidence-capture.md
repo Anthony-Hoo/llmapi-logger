@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-一次命中明确 LLM API 白名单并进入本代理的请求对应一个 audit。NewAPI health、login、admin、models、UI 和其他路径由 Nginx 直连，不进入本模块。会话按实际执行路径接收最多四阶段 Header/Trailer/Body，计算长度与 SHA-256，提交加密 chunk并标记完整性；只有到达可解析终态的转发请求才触发异步 parser。
+一次命中明确 LLM API route 的请求对应一个 audit。NewAPI health、login、admin、models、UI 和其他安全非 LLM 请求即使经本程序 passthrough，也不进入本模块。会话按实际执行路径接收最多四阶段 Header/Trailer/Body，计算长度与 SHA-256，提交加密 chunk并标记完整性；只有到达可解析终态的转发请求才触发异步 parser。
 
 固定阶段名称如下，但记录按触发惰性创建：
 

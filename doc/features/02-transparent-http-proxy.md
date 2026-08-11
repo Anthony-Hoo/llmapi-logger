@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-使用 net/http/httputil.ReverseProxy 把命中 LLM API 白名单的请求转发到唯一 NewAPI。被放行并实际转发的请求最多产生四阶段事件：
+使用 net/http/httputil.ReverseProxy 把数据面请求转发到唯一 NewAPI。进程内 dispatcher 先分流：配置的 LLM API route 使用审计代理；安全且无关的 NewAPI 路径使用无审计 passthrough；受保护或危险的未匹配路径返回 404。只有被放行并实际转发的 LLM route 最多产生四阶段事件：
 
 1. request_for_newapi_received_from_nginx
 2. request_sent_to_newapi
@@ -11,7 +11,7 @@
 
 透明指应用层 HTTP 语义和 Body 字节尽量不变，不代表 wire-level 抓包保真。阶段按实际触发惰性创建；拦截链在 NewAPI 前拒绝时，不创建尚未触发的 NewAPI 与响应阶段。
 
-NewAPI health、login、admin、models、UI 和其他非 LLM 白名单路径由 Nginx 直接转发到 NewAPI，不进入本代理、不执行 interceptor、也不创建 audit。若 Nginx 误把这些请求送入代理，代理自己的 matcher 仍返回 404。
+`GET /v1/models`、NewAPI health/login/admin/UI 等真正非 LLM 请求即使进入本程序，也会透明 passthrough，不执行 interceptor、不创建 audit。配置路径的错误 Method、exact 子路径、template 家族未配置动作、编码等价形式和危险路径不属于 passthrough，固定 fail-closed。
 
 ## 2. 包与组件
 
@@ -20,9 +20,10 @@ internal/routing/
 internal/interceptor/
 internal/proxy/
 internal/audit/
+internal/app/data_plane.go
 ~~~
 
-proxy 只依赖 routing、interceptor 与 audit 接口，不执行 SQL，不调用协议 parser。默认路径不完整缓冲 Body；只有 route 显式启用 body interceptor 时，才允许按模块声明的上限预读一次。
+app 的 data-plane handler 只负责三态分发。proxy 提供 audited handler 和 passthrough handler；两者共享 Rewrite、Transport、BufferPool、SSE flush 和错误处理，只有 audited handler 依赖 routing、interceptor 与 audit 接口。proxy 不执行 SQL，不调用协议 parser。默认路径不完整缓冲 Body；只有 LLM route 显式启用 body interceptor 时，才允许按模块声明的上限预读一次。
 
 从 http.DefaultTransport.Clone 创建 Transport。newapi_proxy_url 为空时固定 `Proxy=nil`；非空时使用解析后的显式 HTTP(S) proxy URL。两种情况都不使用 ProxyFromEnvironment。其余固定 DisableCompression=true、ForceAttemptHTTP2=true、MaxIdleConns=128、MaxIdleConnsPerHost=64、ResponseHeaderTimeout=5min。
 
@@ -38,7 +39,7 @@ ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB
 4. 不调用 ParseForm 或 url.Values.Encode。
 5. hop-by-hop Header 交给 ReverseProxy 处理。
 
-显式代理只改变 Transport 建立到 newapi_url 的网络路径，不参与 Rewrite，也不能扩大 LLM API 白名单。newapi_url 为 HTTPS 时由 Transport 通过 HTTP(S) 代理执行 CONNECT，目标 Scheme、Host、Path、Query 和请求 Body 仍遵循上述规则。
+显式代理只改变 Transport 建立到 newapi_url 的网络路径，不参与 Rewrite，也不能扩大 LLM API 白名单或 passthrough 范围。newapi_url 为 HTTPS 时由 Transport 通过 HTTP(S) 代理执行 CONNECT，目标 Scheme、Host、Path、Query 和请求 Body 仍遵循上述规则。
 
 Nginx 应覆盖 X-Real-IP、X-Forwarded-For、X-Forwarded-Proto。代理只把它们当普通加密证据，不用于鉴权。
 
@@ -100,17 +101,15 @@ Observe 必须复制异步持有的数据；返回后 proxy 可以立即复用�
 
 ## 6. 请求流程
 
-1. Matcher 检查 Method + EscapedPath；未命中返回 404 且不建 audit。
-2. strict 检查 Sink.Healthy 并同步 Begin，失败返回 503；available Begin 失败时写 gap 日志并继续。
-3. 创建 request_for_newapi_received_from_nginx，保存入站 metadata/Header，并安装入站 Body wrapper。
-4. 执行 route 的 interceptor chain。metadata-only 链不触碰 Body；body 链按第 4 节有界预读并准备原字节 replay。
-5. 首个 reject、body 超限、error、panic、非法 Decision 或 Body 读取失败立即关闭入站 Body、写本地错误响应并 Finish；NewAPI Transport 不得被调用，后续三个阶段不得创建。客户端取消则直接结束。
-6. 全部放行后执行 Rewrite，包装出站 Body并开始 request_sent_to_newapi。
-7. RoundTripper 请求 NewAPI。
-8. 响应 Header 到达时开始 response_received_from_newapi。
-9. 包装 Response.Body。
-10. ResponseWriter wrapper 记录成功写出的 response_from_newapi_sent_to_nginx。
-11. 结束时记录 Trailer、终态并 Finish。
+1. Matcher 检查 Method + EscapedPath。
+2. 精确命中 route 时进入 audited handler；未命中且路径可安全直通时进入 passthrough；其余进入 audited handler 的固定 404 分支。
+3. passthrough 直接执行公共 Rewrite 和 RoundTripper，不创建 audit、执行 interceptor 或写 LLM 请求完成日志。
+4. audited route 在 strict 下检查 Sink.Healthy 并同步 Begin，失败返回 503；available Begin 失败时写 gap 日志并继续。
+5. 创建 request_for_newapi_received_from_nginx，保存入站 metadata/Header，并安装入站 Body wrapper。
+6. 执行 route 的 interceptor chain。metadata-only 链不触碰 Body；body 链按第 4 节有界预读并准备原字节 replay。
+7. 首个 reject、body 超限、error、panic、非法 Decision 或 Body 读取失败立即关闭入站 Body、写本地错误响应并 Finish；NewAPI Transport 不得被调用，后续三个阶段不得创建。客户端取消则直接结束。
+8. 全部放行后执行 Rewrite，包装出站 Body 并开始 request_sent_to_newapi。
+9. RoundTripper 请求 NewAPI；响应到达后依次记录 response_received_from_newapi 和 response_from_newapi_sent_to_nginx，最后保存 Trailer 与终态。
 
 audit_id 用 crypto/rand 生成。ID 失败时 available 可继续但只写无 ID 日志，strict 返回 503；禁止回退到时间戳或 math/rand。
 
@@ -140,7 +139,8 @@ FlushInterval=-1，wrapper 保持 Flush；原始 chunk 不是 SSE event，parser
 
 | 场景 | 行为 |
 | --- | --- |
-| 非白名单 | 404 |
+| 安全且与 LLM 受保护路径族无关的非白名单 | 透明 passthrough，不审计、不拦截 |
+| 错误 Method、受保护 LLM 路径族、编码近似或危险路径 | 404，NewAPI 不收到请求 |
 | interceptor 主动 reject | 模块指定的安全 4xx，首个拒绝短路，NewAPI 不收到请求 |
 | body interceptor 超过上限 | 413，block_code=body_too_large，原 Body 不转发 |
 | interceptor error/panic/非法结果或 Body 读取失败 | 503，available/strict 均 fail-closed |
@@ -165,7 +165,7 @@ Go 客户端直连时，在 request Body EOF 后读取 Request.Trailer。请求�
 
 listen 默认 0.0.0.0:8080，生产用防火墙、容器网络或 ACL 只允许 Nginx；同机建议 127.0.0.1:8080。
 
-日志只允许 audit_id、route_id、stage、status、bytes、duration、稳定错误码；禁止 Authorization、Cookie、Query 全文、Header 值与 Body。
+审计分支日志只允许 audit_id、route_id、stage、status、bytes、duration、稳定错误码；禁止 Authorization、Cookie、Query 全文、Header 值与 Body。passthrough 不产生 `llm request completed` 日志。
 
 ## 12. 测试
 
@@ -174,7 +174,8 @@ listen 默认 0.0.0.0:8080，生产用防火墙、容器网络或 ACL 只允许 
 - SSE 每字节/随机块写入与立即 flush。
 - 上传/响应取消、NewAPI reset、ResponseWriter 短写。
 - available DB 失败继续；strict admission 503。
-- Nginx health、login、admin、models、UI 和其他非白名单路径直接到 NewAPI，interceptor 调用数和 audit_records 增量均为 0；误入代理时 matcher 返回 404。
+- Nginx 将全部数据面请求交给 dispatcher；health、login、admin、models、UI 等安全非 LLM 路径由 passthrough 到达 NewAPI，interceptor 调用数和 audit_records 增量均为 0。
+- 配置 route 的错误 Method、exact 子路径、template 家族未配置动作、percent/double encoding 和危险路径返回 404，NewAPI 调用数为 0。
 - metadata interceptor 不读取 Body，未启用 body 模块时首字节仍按流式到达 NewAPI。
 - body interceptor 在 0、limit、limit+1 和 chunked Body 下按 route 最大上限只预读一次；放行时 replay 字节完全一致，模块自身超限时 413。
 - Body 读取失败或非法 Decision 均返回 503，NewAPI 零调用；客户端取消按取消结束。

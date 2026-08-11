@@ -1,13 +1,14 @@
 # llmapi-logger
 
-`llmapi-logger` 是一个面向个人部署的 AI API 审计代理，放在 Nginx 与 NewAPI 之间，用于记录指定 LLM API 请求在代理边界上实际经过的 HTTP 数据。
+`llmapi-logger` 是一个面向个人部署的 AI API 审计代理，放在客户端/Nginx 与 NewAPI 之间，用于记录指定 LLM API 请求在代理边界上实际经过的 HTTP 数据。
 
-它只接管明确配置的 OpenAI、Anthropic 和 Gemini LLM API 白名单。NewAPI 的登录、管理、模型列表、健康检查、前端页面及其他请求仍由 Nginx 直接转发，不进入本程序，也不会被审计或拦截。
+进入数据端口的请求由进程内分发器分成三类：明确配置的 OpenAI、Anthropic 和 Gemini LLM API 路由执行拦截与审计；`/v1/models` 等真正无关的 NewAPI 请求透明直通；错误 Method、受保护 LLM 路径族、编码近似和危险路径固定拒绝，不能借直通分支绕过规则。
 
 ```text
-Client -> Nginx
-            |- LLM API whitelist -> llmapi-logger -> NewAPI -> Provider
-            `- other NewAPI paths ----------------> NewAPI
+Client -> Nginx -> llmapi-logger
+                         |- configured LLM API -> intercept + audit -> NewAPI
+                         |- safe non-LLM API --> passthrough --------> NewAPI
+                         `- protected/unsafe mismatch -> 404
 ```
 
 ## 主要用途
@@ -15,12 +16,13 @@ Client -> Nginx
 - 流式保存客户端请求和 NewAPI 响应的原始 HTTP 证据。
 - 在请求发往 NewAPI 前运行可配置的本地拦截链，拒绝不符合要求的 LLM 请求。
 - 对常见 OpenAI、Anthropic、Gemini JSON/SSE 响应生成便于检索的摘要。
-- 通过本地 React + shadcn/ui 页面查询审计记录和读取原始 Body。
+- 通过本地 React + shadcn/ui 页面查看 Request-URI、每个 Header/Trailer 值，并按需预览或下载原始请求/响应 Body。
 - 在个人单机环境中辅助排查请求差异、流式中断、上游错误和审计缺口。
 
 ## 核心能力
 
 - 基于 Method + Path 的进程内 LLM API 白名单。
+- 三态数据面分发：配置的 LLM 路由审计、安全的非 LLM 路径直通、受保护或危险的未匹配路径 fail-closed。
 - 基于 `net/http/httputil.ReverseProxy` 的流式转发，支持 SSE 及时 flush，并可为 NewAPI 上游显式指定 HTTP(S) 代理。
 - 可插拔入站拦截器，首个拒绝立即短路且不会访问 NewAPI。
 - 分别记录四个代理观察点：
@@ -33,7 +35,7 @@ Client -> Nginx
 - SQLite WAL 存储、单 writer、有界写队列和自动 migration。
 - OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析。
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
-- loopback 管理端同样强制使用静态 Bearer token。
+- loopback 管理端同样强制使用静态 Bearer token；敏感详情和 raw 响应禁止缓存。
 - 启动异常记录恢复、简单审计 gap、按天 retention 和安全 JSON 日志。
 
 ## 默认白名单
@@ -50,7 +52,13 @@ Client -> Nginx
 /v1beta/models/{model}:streamGenerateContent
 ```
 
-Nginx 白名单和程序内 routes 应保持一致。直接访问数据端口时，未命中的路径返回 `404`，不会创建 audit。
+`routes` 只列出需要审计的 LLM API，不需要枚举 NewAPI 的全部普通接口。进入数据端口后：
+
+- Method 与规范化 Path 精确命中 route：建立 audit、执行 interceptor，通过后转发。
+- `/v1/models`、登录、管理、健康检查和前端等安全且与受保护 LLM 路径族无关的请求：透明转发，不审计、不拦截。
+- 配置路径的错误 Method、exact 路径的子路径、template 前缀家族中的未配置动作、percent/double encoding 等价形式，以及尾随斜杠、重复斜杠、反斜杠、encoded slash 和 dot segment 等危险形式：返回固定 `404`，不访问 NewAPI，也不创建 audit。
+
+仓库 Nginx 示例把所有数据面请求统一送入本程序，由同一分发器落实上述边界。
 
 ## 审计模式
 
@@ -100,6 +108,8 @@ http://127.0.0.1:8081/ui/
 
 静态页面可以加载，但读取审计数据、`/healthz`、`/readyz` 和 `/api/v1/*` 都需要配置中的 `admin_token`。
 
+详情 API 会在鉴权后解密 Request-URI 和每个已保存的 Header/Trailer 值；请求/响应 Body 仍通过单独的 raw API 按需读取。页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
+
 如果 audit-proxy 所在环境不能直接访问远程 `newapi_url`，可设置可选的 `newapi_proxy_url`。宿主机二进制通常可使用 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。详细说明见[部署说明](doc/deployment/README.md)。
 
 ## Docker Compose
@@ -122,6 +132,7 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 - 在线备份必须使用 SQLite backup API，不能只复制正在使用的主 DB 文件。
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
 - 管理端即使只监听 loopback，也必须使用 Bearer token。
+- 审计列表不返回敏感值；详情和 raw Body 会返回明文证据，只能通过受 Admin Token 保护的管理接口读取。
 - 配置文件、数据库和 key 应只允许运行账户访问。
 
 备份流程见[备份与恢复](doc/deployment/backup-and-restore.md)。
