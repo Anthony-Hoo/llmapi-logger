@@ -26,6 +26,13 @@ import {
   shortHash,
   statusVariant,
 } from "./lib/format";
+import {
+  buildEvidenceEnvelope,
+  capturedContentType,
+  createRawBodyPreview,
+  evidenceStage,
+  type RawBodyPreview,
+} from "./lib/raw-body";
 import type {
   AuditBody,
   AuditCursor,
@@ -37,6 +44,11 @@ import type {
   RawBodyDownload,
   RawSide,
 } from "./types";
+
+interface LoadedRawBody {
+  download: RawBodyDownload;
+  preview: RawBodyPreview;
+}
 
 export function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -165,7 +177,7 @@ function Dashboard({
           if (current && result.items.some((item) => item.audit_id === current)) {
             return current;
           }
-          return result.items[0]?.audit_id ?? null;
+          return null;
         });
       })
       .catch((cause: unknown) => {
@@ -280,7 +292,7 @@ function Dashboard({
             selectedID={selectedID}
             onSelect={setSelectedID}
           />
-          <AuditDetailPanel client={client} auditID={selectedID} />
+          <AuditDetailPanel key={selectedID ?? "none"} client={client} auditID={selectedID} />
         </div>
 
         <div className="flex items-center justify-between pb-5">
@@ -420,12 +432,14 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
   const [detail, setDetail] = useState<AuditDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState<RawSide | null>(null);
-  const [downloadNote, setDownloadNote] = useState<string | null>(null);
-  const downloadController = useRef<AbortController | null>(null);
+  const [rawBodies, setRawBodies] = useState<Partial<Record<RawSide, LoadedRawBody>>>({});
+  const [rawLoading, setRawLoading] = useState<RawSide | null>(null);
+  const [rawNote, setRawNote] = useState<string | null>(null);
+  const rawController = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    setDownloadNote(null);
+    setRawNote(null);
+    setRawBodies({});
     if (!auditID) {
       setDetail(null);
       setError(null);
@@ -433,6 +447,7 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
     }
 
     const controller = new AbortController();
+    setDetail(null);
     setLoading(true);
     setError(null);
     client
@@ -455,39 +470,68 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
 
   useEffect(() => {
     return () => {
-      downloadController.current?.abort();
-      downloadController.current = null;
+      rawController.current?.abort();
+      rawController.current = null;
     };
   }, [auditID, client]);
 
-  async function download(side: RawSide) {
+  async function loadRawBody(side: RawSide) {
+    if (rawBodies[side]) {
+      return;
+    }
+    await fetchRawBody(side, async (result) => {
+      const preview = await createRawBodyPreview(result, capturedContentType(detail?.headers ?? [], side));
+      setRawBodies((current) => ({ ...current, [side]: { download: result, preview } }));
+    });
+  }
+
+  async function downloadRawBody(side: RawSide) {
+    const loaded = rawBodies[side];
+    if (loaded) {
+      saveDownload(loaded.download);
+      setRawNote(downloadMessage(side, loaded.download));
+      return;
+    }
+    await fetchRawBody(side, async (result) => {
+      saveDownload(result);
+      setRawNote(downloadMessage(side, result));
+    });
+  }
+
+  async function fetchRawBody(side: RawSide, consume: (result: RawBodyDownload) => Promise<void>) {
     if (!auditID) {
       return;
     }
-    downloadController.current?.abort();
+    rawController.current?.abort();
     const controller = new AbortController();
-    downloadController.current = controller;
-    setDownloading(side);
-    setDownloadNote(null);
+    rawController.current = controller;
+    setRawLoading(side);
+    setRawNote(null);
     try {
       const result = await client.getRawBody(auditID, side, controller.signal);
       if (controller.signal.aborted) {
         return;
       }
-      saveDownload(result);
-      setDownloadNote(
-        `${side === "request" ? "请求" : "响应"}原始 Body 已下载（${formatBytes(result.storedLength)}，${result.complete ? "完整" : "不完整"}）。`,
-      );
+      await consume(result);
     } catch (cause: unknown) {
       if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
-        setDownloadNote(errorMessage(cause));
+        setRawNote(errorMessage(cause));
       }
     } finally {
-      if (downloadController.current === controller) {
-        downloadController.current = null;
-        setDownloading(null);
+      if (rawController.current === controller) {
+        rawController.current = null;
+        setRawLoading(null);
       }
     }
+  }
+
+  function clearRawBody(side: RawSide) {
+    setRawBodies((current) => {
+      const next = { ...current };
+      delete next[side];
+      return next;
+    });
+    setRawNote(`${side === "request" ? "请求" : "响应"} Body 已从页面内存中清除。`);
   }
 
   if (!auditID) {
@@ -557,30 +601,33 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
             <Section title="原始证据">
               <Alert className="mb-3 bg-slate-50">
                 <AlertDescription>
-                  原始 Body 不会自动加载。只有实际捕获到对应阶段时按钮才可用；点击后才会从本机管理 API 解密并下载。
+                  这里按审计边界保存的字段重建 HTTP 视图，不是 TCP、TLS、HTTP/2 frame 或原始大小写/顺序级别的 wire dump。
+                  Header 值只随当前详情读取；Body 不会自动加载，点击查看后才会从本机管理 API 解密到页面内存。
                 </AlertDescription>
               </Alert>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <Button
-                  variant="outline"
-                  onClick={() => download("request")}
-                  disabled={downloading !== null || !hasRawBody(detail, "request")}
-                  title={hasRawBody(detail, "request") ? undefined : "没有 request_sent_to_newapi Body"}
-                >
-                  <DownloadIcon />
-                  <span className="ml-2">{downloading === "request" ? "下载中…" : "下载 raw request"}</span>
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => download("response")}
-                  disabled={downloading !== null || !hasRawBody(detail, "response")}
-                  title={hasRawBody(detail, "response") ? undefined : "没有 response_received_from_newapi Body"}
-                >
-                  <DownloadIcon />
-                  <span className="ml-2">{downloading === "response" ? "下载中…" : "下载 raw response"}</span>
-                </Button>
+              <div className="space-y-3">
+                <RawHTTPMessage
+                  side="request"
+                  detail={detail}
+                  loaded={rawBodies.request}
+                  loading={rawLoading === "request"}
+                  busy={rawLoading !== null}
+                  onLoad={() => loadRawBody("request")}
+                  onDownload={() => downloadRawBody("request")}
+                  onClear={() => clearRawBody("request")}
+                />
+                <RawHTTPMessage
+                  side="response"
+                  detail={detail}
+                  loaded={rawBodies.response}
+                  loading={rawLoading === "response"}
+                  busy={rawLoading !== null}
+                  onLoad={() => loadRawBody("response")}
+                  onDownload={() => downloadRawBody("response")}
+                  onClear={() => clearRawBody("response")}
+                />
               </div>
-              {downloadNote ? <p className="mt-2 text-xs text-muted-foreground">{downloadNote}</p> : null}
+              {rawNote ? <p className="mt-2 text-xs text-muted-foreground">{rawNote}</p> : null}
             </Section>
 
             <Section title="HTTP 阶段">
@@ -591,7 +638,7 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
               <BodiesTable bodies={detail.bodies} />
             </Section>
 
-            <Section title={`Header 名称（${detail.headers.length}）`}>
+            <Section title={`Header / Trailer 值（${detail.headers.length}）`}>
               <HeadersTable headers={detail.headers} />
             </Section>
 
@@ -610,6 +657,151 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+function RawHTTPMessage({
+  side,
+  detail,
+  loaded,
+  loading,
+  busy,
+  onLoad,
+  onDownload,
+  onClear,
+}: {
+  side: RawSide;
+  detail: AuditDetail;
+  loaded: LoadedRawBody | undefined;
+  loading: boolean;
+  busy: boolean;
+  onLoad: () => void;
+  onDownload: () => void;
+  onClear: () => void;
+}) {
+  const stageName = evidenceStage(side);
+  const stage = detail.stages.find((candidate) => candidate.stage === stageName);
+  const headers = detail.headers.filter((header) => header.stage === stageName && header.kind === "header");
+  const trailers = detail.headers.filter((header) => header.stage === stageName && header.kind === "trailer");
+  const envelope = buildEvidenceEnvelope(detail, side);
+  const available = hasRawBody(detail, side);
+  const title = side === "request" ? "发往 NewAPI 的请求" : "从 NewAPI 收到的响应";
+  const envelopeText = [envelope.startLine, ...envelope.headerLines].join("\n");
+
+  return (
+    <div className="min-w-0 rounded-lg border bg-white p-3 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold">{title}</h4>
+          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground" title={stageName}>
+            {stageName}
+          </p>
+        </div>
+        <StatusBadge value={stage?.state} />
+      </div>
+
+      <div className="mt-3 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
+        {side === "request" ? (
+          <>
+            <EvidenceMeta label="Host" value={stage?.host || "—"} />
+            <EvidenceMeta label="Request-URI" value={detail.request_uri || detail.audit.path || "—"} mono />
+          </>
+        ) : (
+          <>
+            <EvidenceMeta label="HTTP 状态" value={stage?.status_code ?? detail.audit.status_code ?? "—"} />
+            <EvidenceMeta label="协议" value={stage?.proto || "—"} mono />
+          </>
+        )}
+        <EvidenceMeta label="Content-Length" value={stage?.content_length ?? "—"} />
+        <EvidenceMeta label="捕获 Header" value={`${headers.length} 个`} />
+      </div>
+
+      <div className="mt-3">
+        <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          起始行与 Header（重建）
+        </p>
+        <pre className="max-h-64 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
+          {envelopeText}
+          {"\n\n"}
+        </pre>
+      </div>
+
+      <div className="mt-3">
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">原始 Body</p>
+          {loaded ? (
+            <div className="flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
+              <span>{formatBytes(loaded.download.storedLength)}</span>
+              <span>{loaded.preview.contentType}</span>
+              <span>{loaded.download.complete ? "完整" : "不完整"}</span>
+            </div>
+          ) : null}
+        </div>
+
+        {!available ? (
+          <EmptyValue>该审计边界没有捕获 Body。</EmptyValue>
+        ) : loaded?.preview.kind === "text" ? (
+          loaded.preview.text ? (
+            <pre
+              aria-label={`${title}原始 Body`}
+              className="max-h-96 overflow-auto rounded-md border bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100"
+            >
+              {loaded.preview.text}
+            </pre>
+          ) : (
+            <EmptyValue>已捕获空 Body（0 B）。</EmptyValue>
+          )
+        ) : loaded?.preview.kind === "binary" ? (
+          <Alert className="border-amber-200 bg-amber-50/80">
+            <AlertTitle className="text-amber-900">二进制 Body 未在页面内渲染</AlertTitle>
+            <AlertDescription className="text-amber-800">
+              {loaded.preview.reason} 可使用下方下载按钮保存原始字节。
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <div className="rounded-md border border-dashed bg-slate-50/60 px-4 py-4 text-sm text-muted-foreground">
+            Body 尚未加载。列表与详情切换不会自动请求原始 Body。
+          </div>
+        )}
+      </div>
+
+      {trailers.length > 0 ? (
+        <div className="mt-3">
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Trailer（独立捕获）
+          </p>
+          <pre className="max-h-40 overflow-auto rounded-md border bg-slate-50 p-3 font-mono text-[11px] leading-5">
+            {envelope.trailerLines.join("\n")}
+          </pre>
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {!loaded ? (
+          <Button variant="outline" size="sm" onClick={onLoad} disabled={busy || !available}>
+            <ViewIcon />
+            <span className="ml-2">{loading ? "加载中…" : "加载并查看 Body"}</span>
+          </Button>
+        ) : (
+          <Button variant="ghost" size="sm" onClick={onClear} disabled={busy}>
+            从页面清除 Body
+          </Button>
+        )}
+        <Button variant="outline" size="sm" onClick={onDownload} disabled={busy || !available}>
+          <DownloadIcon />
+          <span className="ml-2">{loading ? "读取中…" : "下载原始 Body"}</span>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function EvidenceMeta({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-muted-foreground">{label}</div>
+      <div className={`mt-0.5 break-all font-medium ${mono ? "font-mono" : ""}`}>{value}</div>
+    </div>
   );
 }
 
@@ -673,14 +865,16 @@ function BodiesTable({ bodies }: { bodies: AuditBody[] }) {
 
 function HeadersTable({ headers }: { headers: AuditHeader[] }) {
   if (headers.length === 0) {
-    return <EmptyValue>没有 Header 元数据。</EmptyValue>;
+    return <EmptyValue>没有 Header 或 Trailer。</EmptyValue>;
   }
   return (
     <Table>
       <TableHeader>
         <TableRow>
           <TableHead className="px-2">阶段</TableHead>
+          <TableHead className="px-2">类型</TableHead>
           <TableHead className="px-2">名称</TableHead>
+          <TableHead className="px-2">值</TableHead>
           <TableHead className="px-2 text-right">长度</TableHead>
         </TableRow>
       </TableHeader>
@@ -690,7 +884,15 @@ function HeadersTable({ headers }: { headers: AuditHeader[] }) {
             <TableCell className="max-w-32 truncate px-2 py-2 text-xs" title={humanizeStage(header.stage)}>
               {humanizeStage(header.stage)}
             </TableCell>
+            <TableCell className="px-2 py-2 text-xs">
+              <Badge variant="outline" className="font-mono">
+                {header.kind}
+              </Badge>
+            </TableCell>
             <TableCell className="px-2 py-2 font-mono text-xs">{header.name}</TableCell>
+            <TableCell className="min-w-64 max-w-lg whitespace-pre-wrap break-all px-2 py-2 font-mono text-xs">
+              {header.value || <span className="text-muted-foreground">（空值）</span>}
+            </TableCell>
             <TableCell className="px-2 py-2 text-right text-xs tabular-nums">{formatBytes(header.value_length)}</TableCell>
           </TableRow>
         ))}
@@ -790,6 +992,15 @@ function DownloadIcon() {
   );
 }
 
+function ViewIcon() {
+  return (
+    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none">
+      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" stroke="currentColor" strokeWidth="1.8" />
+      <circle cx="12" cy="12" r="2.5" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
 function DocumentIcon() {
   return (
     <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -816,6 +1027,10 @@ function saveDownload(download: RawBodyDownload) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+function downloadMessage(side: RawSide, download: RawBodyDownload): string {
+  return `${side === "request" ? "请求" : "响应"}原始 Body 已下载（${formatBytes(download.storedLength)}，${download.complete ? "完整" : "不完整"}）。`;
 }
 
 function hasRawBody(detail: AuditDetail, side: RawSide): boolean {
