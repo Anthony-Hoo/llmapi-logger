@@ -113,7 +113,7 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要，同时聚合协议无关的多轮消息、reasoning、工具调用和工具结果。摘要写入窄列，conversation 只合并进 `parsed_json_enc` 后加密落盘；parser v2 migration 会把 v1 结果一次性置回 pending，复用正常 worker 回填旧记录。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie，刷新页面可恢复会话。列表保持非敏感摘要，并支持模型精确筛选、User-Agent 子串筛选和按 NewAPI Token ID 的 API Key 下拉筛选；目录刷新失败会保留旧快照且不影响转发，审计只保存 Token ID、名称和 `masked_key`。受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，assistant 文本使用禁用 raw HTML、危险链接协议和远程图片加载的 GFM Markdown，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie，刷新页面可恢复会话。普通列表只定向解密入站 User-Agent，主视图只展示调用者、时间、模型和 User-Agent，并支持模型精确筛选、User-Agent 子串筛选和按 NewAPI Token ID 的 API Key 下拉筛选；路径、状态和原始 HTTP 等信息放在详情或高级筛选。目录刷新失败会保留旧快照且不影响转发，审计只保存 Token ID、名称和 `masked_key`。受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，assistant 文本使用禁用 raw HTML、危险链接协议和远程图片加载的 GFM Markdown，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
 
 ## 9. 模块索引
 
@@ -159,7 +159,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - 请求完成日志不含 Query、Header value、Body、token、key 或底层错误文本。
 - NewAPI Token 目录只同步已打码字段，每五分钟刷新；失败保留旧快照且不影响转发，关联只落 Token ID、名称和 `masked_key`。
 - healthy/degraded/not_ready 与 available/strict 语义一致。
-- 管理列表不返回敏感值；详情在 Admin Token 下返回 conversation、Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
+- 管理列表只返回紧凑摘要和解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情在 Admin Token 下返回 conversation、Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
 - loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token 或有效管理 Cookie。
 
 ## 12. 文档优先级

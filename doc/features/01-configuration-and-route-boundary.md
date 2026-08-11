@@ -160,7 +160,7 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。列表保持非敏感；详情会解密 Request-URI 和逐项 Header/Trailer 值，raw request/response Body 只按需读取。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值，raw request/response Body 只按需读取。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 

@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { AuditDetail, AuditSummary } from "./types";
-import { AuditList, HTTPAuditEvidence } from "./app";
+import type { AuditDetail, AuditSummary, NewAPIToken } from "./types";
+import { AuditFiltersPanel, AuditList, HTTPAuditEvidence } from "./app";
 
 const detail: AuditDetail = {
   audit: {
@@ -59,7 +59,7 @@ describe("HTTP audit evidence", () => {
 });
 
 describe("audit list", () => {
-  it("uses compact native list buttons instead of a horizontally scrolling Table", () => {
+  it("shows only time, caller, model, and User-Agent in compact native list buttons", () => {
     const audit: AuditSummary = {
       audit_id: "apx_selected",
       started_at_ns: "1",
@@ -75,6 +75,7 @@ describe("audit list", () => {
       newapi_token_id: 42,
       token_name: "personal",
       masked_key: "abcd**********wxyz",
+      user_agent: "codex-cli/1.0",
     };
 
     const html = renderToStaticMarkup(
@@ -84,9 +85,89 @@ describe("audit list", () => {
     expect(html).toContain("<ul");
     expect(html).toContain("<li");
     expect(html).toContain('<button type="button" aria-current="true"');
+    expect(html).toContain("调用者");
+    expect(html).toContain("personal");
+    expect(html).toContain("模型");
     expect(html).toContain("gpt-4o");
-    expect(html).toContain("API #42 personal");
-    expect(html).toContain("abcd**********wxyz");
+    expect(html).toContain("User-Agent");
+    expect(html).toContain("codex-cli/1.0");
+    expect(html).not.toContain("apx_selected");
+    expect(html).not.toContain("/v1/chat/completions");
+    expect(html).not.toContain("openai-chat-completions");
+    expect(html).not.toContain("abcd**********wxyz");
+    expect(html).not.toContain("completed");
+    expect(html).not.toContain("capture");
+    expect(html).not.toContain("parse");
     expect(html).not.toContain("<table");
+  });
+
+  it("uses fallbacks and renders one short anomaly hint", () => {
+    const audit: AuditSummary = {
+      audit_id: "apx_rejected",
+      started_at_ns: "1",
+      route_id: "anthropic-messages",
+      protocol: "anthropic",
+      method: "POST",
+      path: "/v1/messages",
+      status_code: 403,
+      forward_status: "rejected",
+      capture_status: "complete",
+      parse_status: "skipped",
+      request_model: "claude-test",
+    };
+
+    const html = renderToStaticMarkup(
+      <AuditList items={[audit]} loading={false} selectedID={null} onSelect={() => undefined} />,
+    );
+
+    expect(html).toContain("未关联");
+    expect(html).toContain("claude-test");
+    expect(html).toContain("User-Agent");
+    expect(html).toContain("未记录");
+    expect(html.match(/已拦截/g)).toHaveLength(1);
+    expect(html.match(/HTTP 403/g)).toHaveLength(1);
+    expect(html).not.toContain("skipped");
+  });
+});
+
+describe("audit filters", () => {
+  it("puts caller, model, and User-Agent first while keeping diagnostics in collapsed advanced filters", () => {
+    const tokens: NewAPIToken[] = [
+      {
+        id: 42,
+        name: "personal",
+        masked_key: "abcd**********wxyz",
+        status: 1,
+        group: "default",
+        unlimited_quota: true,
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <AuditFiltersPanel
+        path=""
+        model=""
+        userAgent=""
+        newAPITokenID=""
+        forwardStatus=""
+        tokens={tokens}
+        onPathChange={() => undefined}
+        onModelChange={() => undefined}
+        onUserAgentChange={() => undefined}
+        onNewAPITokenIDChange={() => undefined}
+        onForwardStatusChange={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    expect(html.indexOf("调用者")).toBeLessThan(html.indexOf("模型"));
+    expect(html.indexOf("模型")).toBeLessThan(html.indexOf("User-Agent"));
+    expect(html.indexOf("User-Agent")).toBeLessThan(html.indexOf("高级筛选"));
+    expect(html.indexOf("高级筛选")).toBeLessThan(html.lastIndexOf("转发状态"));
+    expect(html).toContain("personal · abcd**********wxyz");
+    expect(html).toContain("应用筛选");
+    expect(html).toContain("高级筛选");
+    expect(html).toContain("路径");
+    expect(html).toContain("<details");
+    expect(html).not.toContain("<details open");
   });
 });

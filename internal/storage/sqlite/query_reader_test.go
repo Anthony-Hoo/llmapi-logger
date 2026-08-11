@@ -236,7 +236,7 @@ func TestQueryRequestHeaderEvidenceReadsOnlyFilterHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evidence) != 2 || evidence[0].Name != "User-Agent" || evidence[1].Name != "X-Api-Key" {
+	if len(evidence) != 1 || evidence[0].Name != "User-Agent" {
 		t.Fatalf("filter header evidence = %+v", evidence)
 	}
 }

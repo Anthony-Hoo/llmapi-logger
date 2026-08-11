@@ -35,6 +35,7 @@ Client -> Nginx -> llmapi-logger
 - SQLite WAL 存储、单 writer、有界写队列和自动 migration。
 - OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析，以及统一的多轮对话和工具调用视图。
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
+- 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；路径、状态和原始 HTTP 证据留在详情或高级筛选。
 - loopback 管理端同样强制鉴权；CLI 可用静态 Bearer token，Web UI 登录后使用七天过期的 HttpOnly Cookie；敏感详情和 raw 响应禁止缓存。
 - 可选只读同步 NewAPI 已打码的 Token 目录，为审计记录保存 Token ID、名称和 `masked_key` 快照，并在页面按 API Key 下拉筛选。
 - assistant 输出使用安全的 GFM Markdown 展示；禁用原始 HTML、危险链接协议和远程图片加载。
@@ -110,7 +111,7 @@ http://127.0.0.1:8081/ui/
 
 静态页面可以加载，但读取审计数据、`/healthz`、`/readyz` 和受保护的 `/api/v1/*` 都需要配置中的 `admin_token`。Web UI 登录成功后使用带固定过期时间的 HttpOnly Cookie，刷新页面无需重复输入；Bearer 方式仍可供 curl 和其他本地客户端使用。
 
-详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值，以及 parser 生成的协议无关 conversation。conversation 正文、reasoning、工具参数和结果与解析摘要一起存放在 `parsed_json_enc` 密文中，列表 API 不读取它们。请求/响应 Body 仍通过单独的 raw API 按需读取；页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
+普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 conversation。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值，以及 parser 生成的协议无关 conversation。conversation 正文、reasoning、工具参数和结果与解析摘要一起存放在 `parsed_json_enc` 密文中。请求/响应 Body 仍通过单独的 raw API 按需读取；页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
 
 NewAPI 相关配置统一放在 `newapi` 下：`url` 是唯一上游，`proxy_url` 是可选显式 HTTP(S) 代理。若 audit-proxy 所在环境不能直接访问远程 NewAPI，宿主机二进制通常可填写 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
 
@@ -136,7 +137,7 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 - 在线备份必须使用 SQLite backup API，不能只复制正在使用的主 DB 文件。
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
 - 管理端即使只监听 loopback，也必须鉴权；支持 Bearer token 和 Web UI 的七天 HttpOnly Cookie。
-- 审计列表不返回敏感值；详情和 raw Body 会返回明文证据，只能通过受 Admin Token 保护的管理接口读取。
+- 审计列表只额外返回解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情和 raw Body 会返回更多明文证据，所有管理接口都受 Admin Token 或管理 Cookie 保护并禁止缓存。
 - 对话视图是从原始 JSON/SSE 派生的便捷展示；原始 HTTP 证据、长度、哈希和完整性状态仍是权威依据。
 - 配置文件、数据库和 key 应只允许运行账户访问。
 

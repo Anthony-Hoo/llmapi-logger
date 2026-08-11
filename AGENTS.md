@@ -68,7 +68,7 @@ tests/                          # 跨模块集成测试
 - `audit` 采集层只处理字节、长度、哈希和完整性状态；parser 在请求完成后异步生成非敏感摘要和协议无关 conversation，失败不影响转发。
 - 可选的 `newapi` 目录只读同步 NewAPI 已打码 Token 元数据；请求关联只保存 Token ID、名称和 `masked_key` 快照，刷新或关联失败不影响转发。
 - SQLite 使用单 writer goroutine，查询使用独立只读连接。启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
-- 管理 API、health 和 ready 在任何监听地址都必须鉴权：CLI 使用静态 Admin Token，Web UI 使用由该 Token 登录换取的七天 HttpOnly Cookie。列表不返回敏感值；详情可按授权返回 conversation、Request-URI 与每个 Header/Trailer 值，raw request/response Body 只按需解密读取；assistant 文本使用禁用原始 HTML 的安全 Markdown 展示。
+- 管理 API、health 和 ready 在任何监听地址都必须鉴权：CLI 使用静态 Admin Token，Web UI 使用由该 Token 登录换取的七天 HttpOnly Cookie。审计主列表只展示调用者、时间、模型和入站 User-Agent；普通列表会逐条只解密该 User-Agent 供展示和子串筛选，不读取其他 Header、Request-URI、Body 或 conversation。路径、状态和原始 HTTP 等信息留在详情或高级筛选；raw request/response Body 只按需解密读取；assistant 文本使用禁用原始 HTML 的安全 Markdown 展示。
 - 敏感 Header、Body、Query 和 conversation 全文使用一个本地 AES-256-GCM key 加密；管理 JSON 和 raw 响应使用 `Cache-Control: no-store`。
 - 普通 JSON 日志只记录稳定状态和耗时，不记录 Query、Header value、Body、Token、key、密文或底层错误文本。
 

@@ -27,6 +27,7 @@ export interface AuditSummary {
   newapi_token_id?: number | string | null;
   token_name?: string | null;
   masked_key?: string | null;
+  user_agent?: string | null;
 }
 
 export interface AuditListPage {
