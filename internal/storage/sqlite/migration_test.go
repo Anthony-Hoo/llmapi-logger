@@ -68,8 +68,8 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 1 || version != 1 {
-		t.Fatalf("migration rows = %d max=%d, want one version 1", versionCount, version)
+	if versionCount != 2 || version != 2 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1 and 2", versionCount, version)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 1 {
+	if versionCount != 2 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -94,7 +94,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		2,
+		3,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)
@@ -109,6 +109,47 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
 		t.Fatalf("Open error = %v, want newer-version rejection", err)
+	}
+}
+
+func TestConversationMigrationRequeuesVersionOneParserResults(t *testing.T) {
+	t.Parallel()
+
+	store, path := openTestStore(t)
+	record := testAudit("audit-conversation-backfill")
+	if err := store.BeginAudit(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writerDB.Exec(`
+UPDATE audit_records
+SET ended_at_ns = 2, forward_status = 'completed', capture_status = 'complete', parse_status = 'ok'
+WHERE audit_id = ?`, record.AuditID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writerDB.Exec(`
+INSERT INTO parsed_results (
+    audit_id, parser_name, parser_version, status, parsed_json_enc, parsed_at_ns
+) VALUES (?, ?, '1', 'ok', X'01', 3)`, record.AuditID, record.ParserName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writerDB.Exec("DELETE FROM schema_migrations WHERE version = 2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var parseStatus string
+	if err := reopened.readerDB.QueryRow("SELECT parse_status FROM audit_records WHERE audit_id = ?", record.AuditID).Scan(&parseStatus); err != nil {
+		t.Fatal(err)
+	}
+	if parseStatus != ParsePending {
+		t.Fatalf("parse_status = %q, want %q", parseStatus, ParsePending)
 	}
 }
 

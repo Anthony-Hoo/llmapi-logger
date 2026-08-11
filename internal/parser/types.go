@@ -5,6 +5,7 @@ package parser
 import (
 	"context"
 
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
@@ -82,6 +83,7 @@ type Result struct {
 	MessageCount    *int
 	ToolCallCount   *int
 	HasToolCall     *bool
+	Conversation    *conversation.Conversation
 	ParsedJSON      []byte
 }
 

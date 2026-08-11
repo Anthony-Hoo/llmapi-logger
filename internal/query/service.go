@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -198,6 +200,25 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 			HasToolCall:     parsed.HasToolCall,
 			ParsedAtNS:      parsed.ParsedAtNS,
 		}
+		if len(parsed.ParsedJSONEnc) != 0 {
+			aad, aadErr := security.AAD(auditID, "parsed_json", parsed.ParserName)
+			if aadErr != nil {
+				return Detail{}, ErrIntegrity
+			}
+			plaintext, decryptErr := service.cipher.Decrypt(aad, parsed.ParsedJSONEnc)
+			if decryptErr != nil {
+				return Detail{}, ErrIntegrity
+			}
+			var envelope struct {
+				Conversation *conversation.Conversation `json:"conversation"`
+			}
+			decodeErr := json.Unmarshal(plaintext, &envelope)
+			clear(plaintext)
+			if decodeErr != nil || !validConversation(envelope.Conversation) {
+				return Detail{}, ErrIntegrity
+			}
+			detail.Conversation = envelope.Conversation
+		}
 	}
 	if token := storageDetail.TokenLink; token != nil {
 		detail.TokenLink = &TokenLink{
@@ -207,6 +228,52 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 		}
 	}
 	return detail, nil
+}
+
+func validConversation(value *conversation.Conversation) bool {
+	if value == nil {
+		return true
+	}
+	if value.SchemaVersion != conversation.SchemaVersion || value.Messages == nil {
+		return false
+	}
+	for messageIndex, message := range value.Messages {
+		if message.Index != messageIndex || message.Content == nil || !validConversationRole(message.Role) ||
+			!validConversationPhase(message.Phase, message.Direction) {
+			return false
+		}
+		for partIndex, part := range message.Content {
+			if part.Index != partIndex || !validConversationPart(part.Type) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validConversationRole(role string) bool {
+	switch role {
+	case conversation.RoleSystem, conversation.RoleDeveloper, conversation.RoleUser,
+		conversation.RoleAssistant, conversation.RoleTool, conversation.RoleUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validConversationPhase(phase, direction string) bool {
+	return phase == conversation.PhaseRequest && direction == conversation.DirectionClientToUpstream ||
+		phase == conversation.PhaseResponse && direction == conversation.DirectionUpstreamToClient
+}
+
+func validConversationPart(partType string) bool {
+	switch partType {
+	case conversation.PartText, conversation.PartReasoning, conversation.PartToolCall,
+		conversation.PartToolResult, conversation.PartUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) (RawMetadata, error) {

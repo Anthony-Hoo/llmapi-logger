@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 )
 
@@ -34,6 +35,10 @@ func TestParseAnthropicJSON(t *testing.T) {
 	if bytes.Contains(result.ParsedJSON, []byte("canary")) || bytes.Contains(result.ParsedJSON, []byte("private answer")) {
 		t.Fatalf("parsed summary contains sensitive content: %s", result.ParsedJSON)
 	}
+	if result.Conversation == nil || len(result.Conversation.Messages) != 3 || result.Conversation.Messages[1].Content[0].Type != conversation.PartToolCall ||
+		result.Conversation.Messages[1].Content[0].Arguments != `{"secret":"canary"}` || result.Conversation.Messages[2].Content[0].Text != "private answer" {
+		t.Fatalf("unexpected conversation: %+v", result.Conversation)
+	}
 }
 
 func TestParseAnthropicSSEUsesLatestUsageAndTerminal(t *testing.T) {
@@ -59,6 +64,63 @@ func TestParseAnthropicSSEUsesLatestUsageAndTerminal(t *testing.T) {
 	}
 	if result.ToolCallCount == nil || *result.ToolCallCount != 1 {
 		t.Fatalf("unexpected tool count: %+v", result)
+	}
+	if result.Conversation == nil || len(result.Conversation.Messages) != 1 || result.Conversation.Messages[0].Role != conversation.RoleAssistant ||
+		len(result.Conversation.Messages[0].Content) != 1 || result.Conversation.Messages[0].Content[0].Type != conversation.PartToolCall {
+		t.Fatalf("unexpected SSE conversation: %+v", result.Conversation)
+	}
+}
+
+func TestAnthropicSSEAggregatesThinkingTextAndToolArguments(t *testing.T) {
+	t.Parallel()
+
+	data := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"check \"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"facts\"}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"Answer \"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"here\"}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"lookup\",\"input\":{}}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"x\\\"}\"}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	result := New().Parse(context.Background(), base.Input{Response: base.BodySource{Present: true, Complete: true, ContentType: "text/event-stream", Data: []byte(data)}})
+	if result.Conversation == nil || len(result.Conversation.Messages) != 1 || len(result.Conversation.Messages[0].Content) != 3 {
+		t.Fatalf("conversation = %+v", result.Conversation)
+	}
+	parts := result.Conversation.Messages[0].Content
+	if parts[0].Type != conversation.PartReasoning || parts[0].Text != "check facts" || parts[1].Text != "Answer here" ||
+		parts[2].Type != conversation.PartToolCall || parts[2].ID != "tool-1" || parts[2].Arguments != `{"q":"x"}` {
+		t.Fatalf("parts = %+v", parts)
+	}
+}
+
+func TestAnthropicRequestNormalizesPureToolResultMessage(t *testing.T) {
+	t.Parallel()
+
+	result := New().Parse(context.Background(), base.Input{Request: base.BodySource{
+		Present: true, Complete: true, Data: []byte(`{
+			"model":"claude-test",
+			"messages":[
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":{"ok":true}}]},
+				{"role":"user","content":[{"type":"text","text":"continue"},{"type":"tool_result","tool_use_id":"call-2","content":"done"}]}
+			]
+		}`),
+	}})
+	if result.Conversation == nil || len(result.Conversation.Messages) != 2 {
+		t.Fatalf("conversation = %+v", result.Conversation)
+	}
+	if result.Conversation.Messages[0].Role != conversation.RoleTool || result.Conversation.Messages[0].Content[0].Result != `{"ok":true}` {
+		t.Fatalf("pure tool result message = %+v", result.Conversation.Messages[0])
+	}
+	if result.Conversation.Messages[1].Role != conversation.RoleUser {
+		t.Fatalf("mixed message role = %q, want user", result.Conversation.Messages[1].Role)
 	}
 }
 

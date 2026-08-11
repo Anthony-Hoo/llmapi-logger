@@ -108,8 +108,8 @@ WHERE 1 = 1`)
 }
 
 // QueryAuditDetail reads one transactionally consistent detail projection. It
-// loads the encrypted request URI and Header values for the authenticated query
-// service, but never loads Body chunks or parsed JSON.
+// loads the encrypted request URI, Header values, and parsed conversation for
+// the authenticated query service, but never loads Body chunks.
 func (store *Store) QueryAuditDetail(ctx context.Context, auditID string) (AuditQueryDetail, error) {
 	if ctx == nil {
 		return AuditQueryDetail{}, errors.New("sqlite: nil context")
@@ -335,11 +335,12 @@ func readParsedResultSummary(ctx context.Context, transaction *sql.Tx, auditID s
 	var requestedStream, observedStream, hasToolCall sql.NullInt64
 	var requestModel, responseModel, responseID, errorType, errorCode sql.NullString
 	var usageInput, usageOutput, usageTotal, messageCount, toolCallCount sql.NullInt64
+	var parsedJSONEnc []byte
 	err := transaction.QueryRowContext(ctx, `
 SELECT parser_name, parser_version, status, request_model, response_model,
        requested_stream, observed_stream, response_id, usage_input,
        usage_output, usage_total, error_type, error_code, message_count,
-       tool_call_count, has_tool_call, parsed_at_ns
+       tool_call_count, has_tool_call, parsed_json_enc, parsed_at_ns
 FROM parsed_results
 WHERE audit_id = ?`, auditID).Scan(
 		&result.ParserName,
@@ -358,6 +359,7 @@ WHERE audit_id = ?`, auditID).Scan(
 		&messageCount,
 		&toolCallCount,
 		&hasToolCall,
+		&parsedJSONEnc,
 		&result.ParsedAtNS,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -379,6 +381,7 @@ WHERE audit_id = ?`, auditID).Scan(
 	result.MessageCount = nullInt64Pointer(messageCount)
 	result.ToolCallCount = nullInt64Pointer(toolCallCount)
 	result.HasToolCall = nullBoolPointer(hasToolCall)
+	result.ParsedJSONEnc = cloneBytes(parsedJSONEnc)
 	return &result, nil
 }
 

@@ -15,7 +15,7 @@ const (
 	Completions      = "openai.completions"
 	Responses        = "openai.responses"
 	ResponsesCompact = "openai.responses_compact"
-	version          = "1"
+	version          = "2"
 )
 
 type Parser struct {
@@ -51,7 +51,7 @@ func (implementation *Parser) Parse(_ context.Context, input base.Input) base.Re
 
 	if input.Response.Present {
 		if base.LooksLikeSSE(input.Response.ContentType, input.Response.Data) {
-			if err := parseStream(input.Response.Data, &result); err != nil {
+			if err := parseStream(input.Response.Data, implementation.name, &result); err != nil {
 				partial = true
 			} else {
 				parsedSides++
@@ -64,7 +64,7 @@ func (implementation *Parser) Parse(_ context.Context, input base.Input) base.Re
 				parsedSides++
 				observed := false
 				result.ObservedStream = &observed
-				parseResponse(root, &result)
+				parseResponse(root, implementation.name, &result)
 			}
 		}
 	}
@@ -109,11 +109,13 @@ func parseRequest(root map[string]any, parserName string, result *base.Result) {
 	toolCount := countRequestToolCalls(root)
 	result.ToolCallCount = protocolutil.IntPointer(toolCount)
 	result.HasToolCall = protocolutil.BoolPointer(toolCount > 0)
+	appendRequestConversation(root, parserName, result)
 }
 
-func parseResponse(root map[string]any, result *base.Result) {
+func parseResponse(root map[string]any, parserName string, result *base.Result) {
 	parseResponseFields(root, result)
 	mergeToolCount(result, countResponseToolCalls(root))
+	appendResponseConversation(root, parserName, result)
 }
 
 func parseResponseFields(root map[string]any, result *base.Result) {
@@ -130,7 +132,7 @@ func parseResponseFields(root map[string]any, result *base.Result) {
 	}
 }
 
-func parseStream(data []byte, result *base.Result) error {
+func parseStream(data []byte, parserName string, result *base.Result) error {
 	events, tailClosed := base.DecodeSSEWithStatus(data)
 	if len(events) == 0 {
 		return errors.New("openai parser: empty SSE")
@@ -187,6 +189,7 @@ func parseStream(data []byte, result *base.Result) error {
 			}
 		}
 	}
+	appendStreamConversation(events, parserName, result)
 	return nil
 }
 

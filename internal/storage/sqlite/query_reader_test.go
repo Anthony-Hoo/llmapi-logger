@@ -85,7 +85,7 @@ VALUES (?, ?, ?, ?)`, "audit-b", 42, "personal", 102); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.ParsedResult == nil || detail.ParsedResult.RequestModel == nil || *detail.ParsedResult.RequestModel != "gpt-test" || detail.ParsedResult.RequestedStream == nil || !*detail.ParsedResult.RequestedStream || detail.ParsedResult.UsageInput == nil || *detail.ParsedResult.UsageInput != 123 {
+	if detail.ParsedResult == nil || detail.ParsedResult.RequestModel == nil || *detail.ParsedResult.RequestModel != "gpt-test" || detail.ParsedResult.RequestedStream == nil || !*detail.ParsedResult.RequestedStream || detail.ParsedResult.UsageInput == nil || *detail.ParsedResult.UsageInput != 123 || !bytes.Equal(detail.ParsedResult.ParsedJSONEnc, []byte("encrypted-parsed-secret")) {
 		t.Fatalf("parsed summary = %+v", detail.ParsedResult)
 	}
 	if detail.TokenLink == nil || detail.TokenLink.NewAPITokenID != 42 || detail.TokenLink.TokenName != "personal" {

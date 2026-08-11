@@ -87,6 +87,7 @@ type ParsedResultSummary struct {
 	MessageCount    *int64
 	ToolCallCount   *int64
 	HasToolCall     *bool
+	ParsedJSONEnc   []byte
 	ParsedAtNS      int64
 }
 
@@ -100,7 +101,8 @@ type TokenLinkSummary struct {
 
 // AuditQueryDetail is the encrypted evidence projection used only by the
 // authenticated management query service. RequestURIEnc and Header ValueEnc
-// must never be copied into list DTOs or returned without decryption.
+// and ParsedResult.ParsedJSONEnc must never be copied into list DTOs or
+// returned without decryption.
 type AuditQueryDetail struct {
 	Audit         AuditListRow
 	RequestURIEnc []byte

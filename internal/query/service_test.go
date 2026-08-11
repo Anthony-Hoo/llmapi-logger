@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -285,6 +286,134 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 		if strings.Contains(string(pageJSON), secret) {
 			t.Fatalf("list projection leaked %q: %s", secret, pageJSON)
 		}
+	}
+}
+
+func TestGetDecryptsConversationWithoutAddingItToListProjection(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	auditID := "audit-conversation-detail"
+	parserName := "openai.chat_completions"
+	requestAAD, err := security.AAD(auditID, "request_uri")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestURIEnc, err := cipher.Encrypt(requestAAD, []byte("/v1/chat/completions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := conversation.New()
+	want.Append(conversation.Message{
+		Role: conversation.RoleUser, Phase: conversation.PhaseRequest,
+		Direction: conversation.DirectionClientToUpstream,
+		Content:   []conversation.Part{conversation.Text("conversation-secret")},
+	})
+	want.Append(conversation.Message{
+		Role: conversation.RoleAssistant, Phase: conversation.PhaseResponse,
+		Direction: conversation.DirectionUpstreamToClient,
+		Content: []conversation.Part{{
+			Type: conversation.PartToolCall, ID: "call-1", Name: "lookup", Arguments: `{"q":"secret"}`,
+		}},
+	})
+	plaintext, err := json.Marshal(map[string]any{"protocol": "openai", "conversation": want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedAAD, err := security.AAD(auditID, "parsed_json", parserName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedJSONEnc, err := cipher.Encrypt(parsedAAD, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeStore{healthy: true, detail: sqlite.AuditQueryDetail{
+		Audit: sqlite.AuditListRow{
+			AuditID: auditID, StartedAtNS: 1, ParserName: parserName,
+			ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParseOK,
+		},
+		RequestURIEnc: requestURIEnc,
+		ParsedResult: &sqlite.ParsedResultSummary{
+			ParserName: parserName, ParserVersion: "2", Status: sqlite.ParseOK,
+			ParsedJSONEnc: parsedJSONEnc, ParsedAtNS: 2,
+		},
+	}}
+	service, err := New(store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := service.Get(context.Background(), auditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Conversation == nil || len(detail.Conversation.Messages) != 2 ||
+		detail.Conversation.Messages[0].Content[0].Text != "conversation-secret" ||
+		detail.Conversation.Messages[1].Content[0].Arguments != `{"q":"secret"}` {
+		t.Fatalf("conversation = %+v", detail.Conversation)
+	}
+	pageJSON, err := json.Marshal(Page{Items: []AuditSummary{detail.Audit}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(pageJSON), "conversation-secret") || strings.Contains(string(pageJSON), `{"q":"secret"}`) {
+		t.Fatalf("list projection leaked conversation: %s", pageJSON)
+	}
+}
+
+func TestGetRejectsTamperedOrInvalidEncryptedConversation(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	auditID := "audit-invalid-conversation"
+	parserName := "openai.responses"
+	requestAAD, err := security.AAD(auditID, "request_uri")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestURIEnc, err := cipher.Encrypt(requestAAD, []byte("/v1/responses"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedAAD, err := security.AAD(auditID, "parsed_json", parserName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validPlaintext := []byte(`{"conversation":{"schema_version":1,"messages":[{"index":0,"role":"user","phase":"request","direction":"client_to_upstream","content":[{"index":0,"type":"text","text":"secret"}]}]}}`)
+	validCiphertext, err := cipher.Encrypt(parsedAAD, validPlaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidCiphertext, err := cipher.Encrypt(parsedAAD, []byte(`{"conversation":{"schema_version":99,"messages":[]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := append([]byte(nil), validCiphertext...)
+	tampered[len(tampered)-1] ^= 0xff
+	for _, test := range []struct {
+		name       string
+		ciphertext []byte
+	}{
+		{name: "tampered", ciphertext: tampered},
+		{name: "invalid schema", ciphertext: invalidCiphertext},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, serviceErr := New(&fakeStore{healthy: true, detail: sqlite.AuditQueryDetail{
+				Audit:         sqlite.AuditListRow{AuditID: auditID},
+				RequestURIEnc: requestURIEnc,
+				ParsedResult: &sqlite.ParsedResultSummary{
+					ParserName: parserName, ParserVersion: "2", Status: sqlite.ParseOK,
+					ParsedJSONEnc: test.ciphertext, ParsedAtNS: 2,
+				},
+			}}, cipher)
+			if serviceErr != nil {
+				t.Fatal(serviceErr)
+			}
+			_, getErr := service.Get(context.Background(), auditID)
+			if !errors.Is(getErr, ErrIntegrity) || getErr.Error() != ErrIntegrity.Error() || strings.Contains(getErr.Error(), "secret") {
+				t.Fatalf("Get error = %q, want safe ErrIntegrity", getErr)
+			}
+		})
 	}
 }
 

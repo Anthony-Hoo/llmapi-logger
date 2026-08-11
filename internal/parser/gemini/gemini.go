@@ -14,7 +14,7 @@ import (
 const (
 	GenerateContent       = "gemini.generate_content"
 	StreamGenerateContent = "gemini.stream_generate_content"
-	version               = "1"
+	version               = "2"
 )
 
 type Parser struct {
@@ -65,6 +65,7 @@ func (implementation *Parser) Parse(_ context.Context, input base.Input) base.Re
 				observed := false
 				result.ObservedStream = &observed
 				parseResponse(root, &result)
+				appendResponseConversation(root, &result)
 			}
 		}
 	}
@@ -99,6 +100,7 @@ func parseRequest(root map[string]any, result *base.Result) {
 	}
 	result.ToolCallCount = protocolutil.IntPointer(toolCount)
 	result.HasToolCall = protocolutil.BoolPointer(toolCount > 0)
+	appendRequestConversation(root, result)
 }
 
 func parseResponse(root map[string]any, result *base.Result) {
@@ -157,6 +159,7 @@ func parseStream(data []byte, result *base.Result) error {
 			}
 		}
 	}
+	appendStreamConversation(events, result)
 	return nil
 }
 
