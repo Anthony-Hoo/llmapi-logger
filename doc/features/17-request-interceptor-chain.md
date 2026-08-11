@@ -146,7 +146,7 @@ require_credential 是 metadata interceptor，只检查以下来源是否至少�
 - x-goog-api-key
 - Gemini Query key
 
-它不校验凭据真伪，不读取 NewAPI Token DB。缺失时返回 401 和 credential_required。
+它不校验凭据真伪，也不依赖或查询可选的 NewAPI Token 目录。缺失时返回 401 和 credential_required；Token 目录关联是独立的审计增强，不能改变拦截结论。
 
 max_body_bytes 是 Body interceptor，配置 max_bytes；超过时返回 `413` 和 `block_code=body_too_large`，未超过时 allow。它按原始 Body 字节计数，不解压 gzip，也不按字符数或 JSON token 数计算。
 

@@ -10,7 +10,7 @@
 
 - 管理面默认监听 `127.0.0.1:8081`。
 - `admin_token` 在任何 `admin_listen` 上都必填，包括 loopback；为空或包含空白字符时启动失败。
-- `/api/v1/*`、`/healthz` 和 `/readyz` 全部要求静态 Bearer token。
+- 受保护的 `/api/v1/*`、`/healthz` 和 `/readyz` 全部要求 Bearer token 或有效的管理 Cookie。
 - 只有本审计代理不含数据的静态管理 UI shell 和其 CSS/JS/font 资源可以免 token 加载。
 
 本节的 health、ready、API 和 UI 都属于审计代理的独立管理 listener，不是 NewAPI 自身路径。NewAPI health、login、admin、models、UI 和其他安全非 LLM 请求可经数据面的 passthrough 转发，但不进入 interceptor、audit 或 parser。
@@ -20,23 +20,25 @@
 
 ## 3. 配置
 
-本模块不增加独立配置。直接使用模块 01 的 `admin_listen`、`admin_token` 和 `key_path`；配置校验必须拒绝空值和包含空白字符的 `admin_token`，不因监听地址是 loopback 而放宽。
+本模块不增加独立配置。直接使用模块 01 的 `admin_listen`、`admin_token` 和 `key_path`；配置校验必须拒绝空值和包含空白字符的 `admin_token`，不因监听地址是 loopback 而放宽。可选的 `newapi.access_token` 与 `newapi.user_id` 只用于只读同步 NewAPI 已打码 Token 目录，必须成对配置；access token 是配置 secret，只保留在进程内存和受限配置文件中，不进入管理 API、审计库或普通日志。
 
 日志固定脱敏 Authorization、Proxy-Authorization、X-API-Key、x-goog-api-key，以及 Query 中的 key、api_key、access_token；首版不把这组规则做成可配置策略。admin_token 和主密钥不得通过普通日志或配置回显返回。
 
 ## 4. 管理面鉴权
 
-除本审计代理的静态管理 UI shell 资源外，管理 listener 上的 API、health 和 ready 请求都必须携带：
+除本审计代理的静态管理 UI shell 和登录端点外，管理 listener 上的 API、health 和 ready 请求都必须携带：
 
 ~~~text
 Authorization: Bearer <configured-token>
 ~~~
 
-服务使用常量时间比较 token。缺失或不匹配返回 `401`，不说明哪一部分错误。规则对 loopback 和非 loopback 完全相同。
+服务使用常量时间比较 token。缺失或不匹配返回 `401`，不说明哪一部分错误。规则对 loopback 和非 loopback 完全相同。Bearer 方式保留给 curl/CLI。
+
+Web UI 通过 `POST /api/v1/session` 提交一次 admin token。验证成功后，服务返回只含版本、绝对过期时间和 HMAC 的 Cookie；Cookie 不保存原始 admin token，固定七天过期，并设置 `HttpOnly`、`SameSite=Strict`、`Path=/`、`Max-Age` 和 `Expires`，HTTPS 请求额外设置 `Secure`。`DELETE /api/v1/session` 清除 Cookie。登录、注销、鉴权错误和其他管理响应均禁止缓存。
 
 管理 JSON 与 raw Body 响应统一设置 `Cache-Control: no-store`。错误响应不能包含底层数据库/解密错误、Header、Query、Body、token 或密文。
 
-本审计代理的静态管理 UI shell 只能提供 HTML/CSS/JS/font，不能内嵌审计数据、运行状态、配置 secret 或 token。React 页面由用户输入 token，token 只保存在当前页面的 JavaScript 内存中；不得写入 localStorage、sessionStorage、Cookie、IndexedDB、URL 或 Service Worker cache。
+本审计代理的静态管理 UI shell 只能提供 HTML/CSS/JS/font，不能内嵌审计数据、运行状态、配置 secret 或 token。React 页面只在登录请求的受控输入中短暂持有 admin token，不写入 localStorage、sessionStorage、IndexedDB、URL 或 Service Worker cache；后续请求只使用浏览器自动携带、JavaScript 无法读取的 HttpOnly Cookie。
 
 首版只有一个静态 token，不区分接口权限，也不记录单独的敏感访问事件。
 
@@ -92,7 +94,7 @@ type Cipher interface {
 }
 ~~~
 
-调用方只把返回的完整 BLOB 写入上述四类 `*_enc` 字段。token_links 只保存 NewAPI token id/name，不保存 token key；audit_gaps 只保存非敏感时间范围、原因和计数。
+调用方只把返回的完整 BLOB 写入上述四类 `*_enc` 字段。token_links 只保存 NewAPI token id、名称和服务端已打码的 `masked_key` 快照，不保存原始 token key；audit_gaps 只保存非敏感时间范围、原因和计数。
 
 ## 8. 管理证据与脱敏规则
 
@@ -102,7 +104,7 @@ type Cipher interface {
 - 原始 request/response Body 只在用户显式请求对应 raw API 时逐块认证解密；UI 不自动加载大 Body。
 - React 页面可用详情字段重建应用层 HTTP 起始行和 Header/Trailer 视图，但不宣称恢复 TCP、TLS、HTTP/2 frame、原始 Header 大小写/顺序或 chunk framing。
 - Query 中配置为敏感的键在日志中只保留键名。
-- Token 关联只落 `newapi_token_id`、`token_name`，不落 NewAPI token key。
+- Token 关联只落 `newapi_token_id`、`token_name`、`masked_key`，不落 NewAPI 原始 token key；Token 目录管理 access token 也不得出现在响应、数据库或日志中。
 - 错误日志只记录 `audit_id`、组件和错误类别，不记录明文或密文 BLOB。
 
 ## 9. 故障行为
@@ -110,7 +112,7 @@ type Cipher interface {
 - 启动阶段无法加载主密钥：不以明文降级；available 继续代理并报告审计不可用，strict 保持 not ready。
 - 随机数源或加密失败：本条证据不写入；strict 模式拒绝新请求，available 模式继续转发并记录 `audit_gaps`。
 - Request-URI、Header、Body 或 parsed JSON 解密认证失败，Header 明文长度不匹配，或 conversation schema 校验失败：返回通用 `500 evidence_unavailable`；错误文本不包装底层密码库错误，也不返回部分详情。
-- Bearer token 配置为空：无论监听地址为何，配置校验都失败。
+- admin token 配置为空：无论监听地址为何，配置校验都失败。
 - 不允许忽略 GCM tag 错误，也不返回部分解密内容。
 
 ## 10. Key 备份
@@ -122,12 +124,13 @@ type Cipher interface {
 - 首次启动生成 32-byte key，文件权限符合平台要求。
 - loopback 和非 loopback 下，空 token 都导致启动失败；正确和错误 token 分别得到成功与 `401`。
 - 未携带 token 时本审计代理的静态管理 UI shell 可加载，但 API、health 和 ready 均返回 `401`。
-- 页面刷新后 token 消失，浏览器持久化存储、Cookie、URL 和静态资源中均无 token。
+- 登录响应设置七天过期的 HttpOnly、SameSite=Strict Cookie；刷新后会话仍可使用，注销或到期后重新要求输入 token；Cookie 值不包含原始 admin token。
 - 管理列表扫描不到测试 Request-URI、Header、Body 或 conversation 明文；正确 Token 下详情能读取 conversation、逐项 Header/Trailer 值和 Request-URI，raw API 能还原请求/响应 Body。
 - 详情、错误 JSON 和 raw 响应均带 `Cache-Control: no-store`；未授权请求不返回任何明文证据。
 - 相同明文重复加密得到不同 BLOB，且都可解密。
 - 篡改 nonce、ciphertext、tag 或 AAD 后解密失败。
 - 扫描 DB、WAL、日志确认没有测试凭据和 Body 明文。
+- NewAPI Token 目录同步只暴露服务端已打码字段；配置 access token 不出现在管理 API、审计库、错误或日志中。
 - 删除 key 后不得生成替代 key；available 只做代理，strict 返回 `503`。
 - available 加密失败只产生 gap，不影响已开始的字节转发。
 - 备份同时包含数据库、WAL 状态处理方式和 key 文件。

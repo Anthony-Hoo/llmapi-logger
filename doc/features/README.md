@@ -66,7 +66,7 @@ strict 只保证请求开始时 fail-closed。通过 admission 后仍可能遇�
 
 ## 5. 数据面分发、代理与 Trailer
 
-审计代理和 passthrough 都使用 net/http/httputil.ReverseProxy、同一套 Rewrite 与显式 HTTP(S) 上游代理设置，固定保留 Path、RawPath、RawQuery、ForceQuery，出站目标与 Host 使用 newapi_url。审计分支额外安装 audit wrapper 和 interceptor；passthrough 不创建 audit、不解析，也不写 LLM 请求完成日志。
+审计代理和 passthrough 都使用 net/http/httputil.ReverseProxy、同一套 Rewrite 与显式 HTTP(S) 上游代理设置，固定保留 Path、RawPath、RawQuery、ForceQuery，出站目标与 Host 使用 `newapi.url`。审计分支额外安装 audit wrapper 和 interceptor；passthrough 不创建 audit、不解析，也不写 LLM 请求完成日志。
 
 分发器只允许规范且与受保护 LLM 路径族无关的未匹配请求直通，例如 `GET /v1/models`。配置 exact 路径及其后代、template 路径前缀家族、错误 Method、percent/double encoding 等价路径，以及尾随斜杠、重复斜杠、反斜杠、encoded slash 和 dot segment 等危险形式统一进入 fail-closed 分支并返回 404。
 
@@ -74,7 +74,7 @@ Go 客户端直连代理时可捕获 request Trailer；经过 Nginx 后不保证
 
 ## 6. 配置与固定默认值
 
-YAML 只保留 listen、admin_listen、newapi_url、可选 newapi_proxy_url、mode、db_path、key_path、必填 admin_token、retention_days、可选 newapi_token_db_path、interceptors 和 routes。newapi_proxy_url 为空时强制直连，不读取环境代理。完整格式见 [01](01-configuration-and-route-boundary.md)。
+YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、成对可选 access_token/user_id）、mode、db_path、key_path、必填 admin_token、retention_days、interceptors 和 routes。`newapi.proxy_url` 为空时强制直连，不读取环境代理；access_token/user_id 配置后只读同步 NewAPI 已打码 Token 目录。完整格式见 [01](01-configuration-and-route-boundary.md)。
 
 | 项目 | 固定默认值 |
 | --- | --- |
@@ -84,6 +84,7 @@ YAML 只保留 listen、admin_listen、newapi_url、可选 newapi_proxy_url、mo
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | SQLite | WAL、synchronous=FULL、busy_timeout=5000 |
 | parser workers | 1 |
+| NewAPI Token 目录 | 10 秒请求超时、每 5 分钟刷新 |
 | retention / shutdown | 30 天 / 30 秒 |
 
 宿主机同机部署建议把数据面改为 127.0.0.1:8080；容器部署用内部网络和 ACL 只允许 Nginx 访问。
@@ -112,7 +113,7 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要，同时聚合协议无关的多轮消息、reasoning、工具调用和工具结果。摘要写入窄列，conversation 只合并进 `parsed_json_enc` 后加密落盘；parser v2 migration 会把 v1 结果一次性置回 pending，复用正常 worker 回填旧记录。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health 和 ready 统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。列表保持非敏感摘要；受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie，刷新页面可恢复会话。列表保持非敏感摘要，并支持模型精确筛选、User-Agent 子串筛选和按 NewAPI Token ID 的 API Key 下拉筛选；目录刷新失败会保留旧快照且不影响转发，审计只保存 Token ID、名称和 `masked_key`。受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，assistant 文本使用禁用 raw HTML、危险链接协议和远程图片加载的 GFM Markdown，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
 
 ## 9. 模块索引
 
@@ -156,9 +157,10 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - 只有实际恢复未终结记录时增加 process_exit 聚合 gap，重复恢复幂等。
 - retention 只小批量删除已终结且非 processing 的过期记录，并级联子表。
 - 请求完成日志不含 Query、Header value、Body、token、key 或底层错误文本。
+- NewAPI Token 目录只同步已打码字段，每五分钟刷新；失败保留旧快照且不影响转发，关联只落 Token ID、名称和 `masked_key`。
 - healthy/degraded/not_ready 与 available/strict 语义一致。
 - 管理列表不返回敏感值；详情在 Admin Token 下返回 conversation、Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
-- loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token。
+- loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token 或有效管理 Cookie。
 
 ## 12. 文档优先级
 

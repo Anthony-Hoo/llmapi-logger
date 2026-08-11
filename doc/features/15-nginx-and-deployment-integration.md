@@ -11,7 +11,7 @@ Client -> Nginx -> audit-proxy:8080 dispatcher
                          `- protected/unsafe mismatch -> 404
 ~~~
 
-管理端口 `8081` 不进入公开 Nginx；即使只绑定 `127.0.0.1`，health、ready 和管理 API 也必须使用静态 Bearer token。
+管理端口 `8081` 不进入公开 Nginx；即使只绑定 `127.0.0.1`，health、ready 和管理 API 也必须鉴权。CLI 可使用静态 Bearer token，Web UI 使用七天过期的 HttpOnly Cookie。
 
 ## 2. Nginx 路由
 
@@ -82,22 +82,25 @@ Gemini 只接受从头到尾锚定的两种模板：
 - NewAPI 只 `expose` `3000`。
 - audit 与 NewAPI 使用独立 volume。
 
-Docker 配置使用 `0.0.0.0:8080`/`0.0.0.0:8081` 是为了容器网络和 loopback 端口映射；它不代表管理端公开暴露。`admin_token` 仍必填，承载 token 的只读配置文件必须限制宿主机权限。
+Docker 配置使用 `0.0.0.0:8080`/`0.0.0.0:8081` 是为了容器网络和 loopback 端口映射；它不代表管理端公开暴露。`admin_token` 仍必填；可选的 `newapi.access_token`/`newapi.user_id` 只用于只读同步已打码 Token 目录。承载这些凭证的配置文件必须限制宿主机权限。
 
 NewAPI 镜像版本由使用者按现有部署固定到验证过的 tag/digest；audit-proxy 的 passthrough 不解析或修改 NewAPI 的非 LLM 路由。
 
 ## 6. Podman/WSL/Clash 显式上游代理
 
-默认 `newapi_proxy_url: ""`，audit-proxy 直接连接 newapi_url，且不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。只有运行环境确实无法直连远程 NewAPI 时才配置显式代理：
+默认 `newapi.proxy_url: ""`，audit-proxy 直接连接 `newapi.url`，且不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。只有运行环境确实无法直连远程 NewAPI 时才配置显式代理：
 
 ~~~yaml
-newapi_url: https://newapi.example.com
-newapi_proxy_url: http://127.0.0.1:7897
+newapi:
+  url: https://newapi.example.com
+  proxy_url: http://127.0.0.1:7897
+  access_token: ""
+  user_id: 0
 ~~~
 
-上述 Podman/WSL 示例用于“单个 audit-proxy 容器 + 远程 newapi_url”，要求容器使用 host network，并在 WSL mirrored networking 下启用 host address loopback；host network 模式不再配置 `-p`/`ports`，应用自身继续监听需要的 `0.0.0.0` 端口。这样 `127.0.0.1:7897` 才能到达仅监听 Windows loopback 的 Clash mixed/HTTP 端口。默认 bridge 中的 `host.containers.internal` 可能只到 Podman bridge gateway，不能当作 Windows loopback 的等价地址。仓库三服务 Compose 保持 bridge + 本地 NewAPI 直连，不需要此设置；宿主机直接运行二进制时也通常写 `http://127.0.0.1:7897`。
+上述 Podman/WSL 示例用于“单个 audit-proxy 容器 + 远程 `newapi.url`”，要求容器使用 host network，并在 WSL mirrored networking 下启用 host address loopback；host network 模式不再配置 `-p`/`ports`，应用自身继续监听需要的 `0.0.0.0` 端口。这样 `127.0.0.1:7897` 才能到达仅监听 Windows loopback 的 Clash mixed/HTTP 端口。默认 bridge 中的 `host.containers.internal` 可能只到 Podman bridge gateway，不能当作 Windows loopback 的等价地址。仓库三服务 Compose 保持 bridge + 本地 NewAPI 直连，不需要此设置；宿主机直接运行二进制时也通常写 `http://127.0.0.1:7897`。
 
-此配置只改变 audit-proxy 到 newapi_url 的连接路径；审计分支和 passthrough 分支都使用同一显式代理设置，但只有配置 LLM route 会创建 audit。它不改变 NewAPI 自己访问模型供应商的网络。首版只支持无凭据的 HTTP(S) forward proxy，不支持 SOCKS、PAC 或环境变量自动发现。
+此配置只改变 audit-proxy 到 `newapi.url` 的连接路径；审计分支、passthrough 分支和可选 Token 目录同步都使用同一显式代理设置，但只有配置 LLM route 会创建 audit。它不改变 NewAPI 自己访问模型供应商的网络。首版只支持无凭据的 HTTP(S) forward proxy，不支持 SOCKS、PAC 或环境变量自动发现。
 
 ## 7. 构建与部署材料
 
@@ -126,8 +129,9 @@ doc/deployment/backup-and-restore.md
 - 错误 Method、受保护 LLM 路径族、编码近似与危险路径返回 404，NewAPI 零调用。
 - SSE 首块不因 Nginx buffering 延迟，原 Path/Query 保留。
 - 模型 POST 不自动重试。
-- 管理端只发布到宿主机 loopback，并始终要求 Bearer token。
-- newapi_proxy_url 空值不受环境代理影响；配置显式代理时，审计与 passthrough 请求都能经代理到达远程 NewAPI，只有 LLM route 记录四阶段证据。
+- 管理端只发布到宿主机 loopback，并始终要求 Bearer token 或有效管理 Cookie。
+- `newapi.proxy_url` 空值不受环境代理影响；配置显式代理时，审计、passthrough 和 Token 目录同步都能经代理到达远程 NewAPI，只有 LLM route 记录四阶段证据。
+- `newapi.access_token`/`newapi.user_id` 配置后每五分钟同步已打码 Token；失败保留旧快照且不影响转发，审计只保存 Token ID、名称和 `masked_key`。
 - 最终镜像不含 Node 或源码，单一 Go 二进制提供 API 和 React UI。
 - Windows/Linux amd64 CGO=0 构建成功。
 - 实际部署环境中的 `nginx -t`、Compose 配置检查和 smoke test 有真实结果；未执行时明确记录为未验证。
