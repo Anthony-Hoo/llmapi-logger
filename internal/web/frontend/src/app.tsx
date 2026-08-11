@@ -395,7 +395,7 @@ export function AuditFiltersPanel({
 }) {
   return (
     <Card className="bg-white/85 shadow-sm">
-      <CardContent className="p-3">
+      <CardContent className="!p-3">
         <form className="space-y-2" aria-label="审计筛选" onSubmit={onSubmit}>
           <div className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1.2fr)_minmax(160px,0.8fr)_minmax(240px,1.25fr)_auto]">
             <FilterField label="调用者" htmlFor="filter-api-key">
