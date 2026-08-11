@@ -39,10 +39,13 @@ func Validate(cfg Config) error {
 		return errors.New("listen and admin_listen must be different")
 	}
 
-	if err := validateNewAPIURL(cfg.NewAPIURL); err != nil {
+	if err := validateNewAPIURL(cfg.NewAPI.URL); err != nil {
 		return err
 	}
-	if err := validateNewAPIProxyURL(cfg.NewAPIProxyURL); err != nil {
+	if err := validateNewAPIProxyURL(cfg.NewAPI.ProxyURL); err != nil {
+		return err
+	}
+	if err := validateNewAPIManagement(cfg.NewAPI); err != nil {
 		return err
 	}
 	if cfg.Mode != "available" && cfg.Mode != "strict" {
@@ -59,11 +62,6 @@ func Validate(cfg Config) error {
 	}
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > 3650 {
 		return fmt.Errorf("retention_days must be 0 or between 1 and 3650, got %d", cfg.RetentionDays)
-	}
-	if cfg.NewAPITokenDBPath != "" {
-		if err := validateDataPath("newapi_token_db_path", cfg.NewAPITokenDBPath); err != nil {
-			return err
-		}
 	}
 	if err := validateInterceptors(cfg.Interceptors); err != nil {
 		return err
@@ -104,14 +102,30 @@ func validateListenAddress(name, value string) (string, error) {
 }
 
 func validateNewAPIURL(value string) error {
-	return validateHTTPURL("newapi_url", value)
+	return validateHTTPURL("newapi.url", value)
 }
 
 func validateNewAPIProxyURL(value string) error {
 	if value == "" {
 		return nil
 	}
-	return validateHTTPURL("newapi_proxy_url", value)
+	return validateHTTPURL("newapi.proxy_url", value)
+}
+
+func validateNewAPIManagement(value NewAPIConfig) error {
+	if value.AccessToken == "" {
+		if value.UserID != 0 {
+			return errors.New("newapi.user_id requires newapi.access_token")
+		}
+		return nil
+	}
+	if strings.IndexFunc(value.AccessToken, unicode.IsSpace) >= 0 {
+		return errors.New("newapi.access_token must not contain whitespace")
+	}
+	if value.UserID <= 0 {
+		return errors.New("newapi.user_id must be positive when newapi.access_token is set")
+	}
+	return nil
 }
 
 func validateHTTPURL(name, value string) error {

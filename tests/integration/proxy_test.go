@@ -357,7 +357,7 @@ func newProxyHandler(t *testing.T, upstreamURL, routePath string, requireCredent
 	if err != nil {
 		t.Fatalf("compile interceptor engine: %v", err)
 	}
-	target, err := url.Parse(cfg.NewAPIURL)
+	target, err := url.Parse(cfg.NewAPI.URL)
 	if err != nil {
 		t.Fatalf("parse upstream URL: %v", err)
 	}
@@ -378,13 +378,13 @@ func loadConfig(t *testing.T, upstreamURL, routePath string, requireCredential b
 
 	contents := fmt.Sprintf(`listen: 127.0.0.1:18080
 admin_listen: 127.0.0.1:18081
-newapi_url: '%s'
+newapi:
+  url: '%s'
 mode: available
 db_path: '%s'
 key_path: '%s'
 admin_token: integration-admin-token
 retention_days: 0
-newapi_token_db_path: ''
 %sroutes:
   - id: chat
     method: POST

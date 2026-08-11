@@ -30,7 +30,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
-       t.newapi_token_id, t.token_name
+       t.newapi_token_id, t.token_name, t.masked_key
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
 LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
@@ -133,7 +133,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
-       t.newapi_token_id, t.token_name
+       t.newapi_token_id, t.token_name, t.masked_key
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
 LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
@@ -169,6 +169,49 @@ WHERE audit_id = ?`, auditID).Scan(&detail.RequestURIEnc); err != nil {
 		return AuditQueryDetail{}, fmt.Errorf("sqlite: commit query detail: %w", err)
 	}
 	return detail, nil
+}
+
+// QueryRequestHeaderEvidence returns only request headers used by the optional
+// audit-list User-Agent and API-key filters. Values remain encrypted until the
+// query service verifies their AAD and decrypts them in memory.
+func (store *Store) QueryRequestHeaderEvidence(ctx context.Context, auditID string) ([]HeaderEvidence, error) {
+	if ctx == nil {
+		return nil, errors.New("sqlite: nil context")
+	}
+	if auditID == "" {
+		return nil, errors.New("sqlite: empty audit id")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT stage, kind, name, value_index, value_length, value_enc
+FROM http_headers
+WHERE audit_id = ?
+  AND stage = ?
+  AND kind = 'header'
+  AND lower(name) IN (
+      'user-agent', 'authorization', 'x-api-key', 'api-key',
+      'x-goog-api-key', 'anthropic-api-key'
+  )
+ORDER BY lower(name), value_index`, auditID, StageRequestReceived)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: query request filter headers: %w", err)
+	}
+	defer rows.Close()
+	result := make([]HeaderEvidence, 0)
+	for rows.Next() {
+		var header HeaderEvidence
+		if err := rows.Scan(&header.Stage, &header.Kind, &header.Name, &header.ValueIndex, &header.ValueLength, &header.ValueEnc); err != nil {
+			return nil, fmt.Errorf("sqlite: scan request filter header: %w", err)
+		}
+		header.ValueEnc = cloneBytes(header.ValueEnc)
+		result = append(result, header)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate request filter headers: %w", err)
+	}
+	return result, nil
 }
 
 // RawBodyMeta returns the aggregate metadata needed before starting an HTTP
@@ -267,7 +310,7 @@ ORDER BY seq`, auditID, stage)
 
 func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	var endedAt, statusCode, newAPITokenID sql.NullInt64
-	var blockedBy, blockCode, errorCode, requestModel, responseModel, tokenName sql.NullString
+	var blockedBy, blockCode, errorCode, requestModel, responseModel, tokenName, maskedKey sql.NullString
 	if err := row.Scan(
 		&destination.AuditID,
 		&destination.StartedAtNS,
@@ -289,6 +332,7 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 		&responseModel,
 		&newAPITokenID,
 		&tokenName,
+		&maskedKey,
 	); err != nil {
 		return err
 	}
@@ -301,6 +345,7 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	destination.ResponseModel = nullStringPointer(responseModel)
 	destination.NewAPITokenID = nullInt64Pointer(newAPITokenID)
 	destination.TokenName = nullStringPointer(tokenName)
+	destination.MaskedKey = nullStringPointer(maskedKey)
 	return nil
 }
 
@@ -388,9 +433,9 @@ WHERE audit_id = ?`, auditID).Scan(
 func readTokenLinkSummary(ctx context.Context, transaction *sql.Tx, auditID string) (*TokenLinkSummary, error) {
 	var result TokenLinkSummary
 	err := transaction.QueryRowContext(ctx, `
-SELECT newapi_token_id, token_name, linked_at_ns
+SELECT newapi_token_id, token_name, masked_key, linked_at_ns
 FROM token_links
-WHERE audit_id = ?`, auditID).Scan(&result.NewAPITokenID, &result.TokenName, &result.LinkedAtNS)
+WHERE audit_id = ?`, auditID).Scan(&result.NewAPITokenID, &result.TokenName, &result.MaskedKey, &result.LinkedAtNS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

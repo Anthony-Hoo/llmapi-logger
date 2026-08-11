@@ -13,18 +13,26 @@ const (
 // Config is the complete user-facing configuration for one audit-proxy
 // process. Operational tuning values intentionally remain internal defaults.
 type Config struct {
-	Listen            string                       `yaml:"listen"`
-	AdminListen       string                       `yaml:"admin_listen"`
-	NewAPIURL         string                       `yaml:"newapi_url"`
-	NewAPIProxyURL    string                       `yaml:"newapi_proxy_url"`
-	Mode              string                       `yaml:"mode"`
-	DBPath            string                       `yaml:"db_path"`
-	KeyPath           string                       `yaml:"key_path"`
-	AdminToken        string                       `yaml:"admin_token"`
-	RetentionDays     int                          `yaml:"retention_days"`
-	NewAPITokenDBPath string                       `yaml:"newapi_token_db_path"`
-	Interceptors      map[string]InterceptorConfig `yaml:"interceptors"`
-	Routes            []RouteConfig                `yaml:"routes"`
+	Listen        string                       `yaml:"listen"`
+	AdminListen   string                       `yaml:"admin_listen"`
+	NewAPI        NewAPIConfig                 `yaml:"newapi"`
+	Mode          string                       `yaml:"mode"`
+	DBPath        string                       `yaml:"db_path"`
+	KeyPath       string                       `yaml:"key_path"`
+	AdminToken    string                       `yaml:"admin_token"`
+	RetentionDays int                          `yaml:"retention_days"`
+	Interceptors  map[string]InterceptorConfig `yaml:"interceptors"`
+	Routes        []RouteConfig                `yaml:"routes"`
+}
+
+// NewAPIConfig contains both the data-plane upstream settings and the
+// optional read-only dashboard credential used to synchronize masked token
+// metadata. AccessToken is never returned by the management API or logs.
+type NewAPIConfig struct {
+	URL         string `yaml:"url"`
+	ProxyURL    string `yaml:"proxy_url"`
+	AccessToken string `yaml:"access_token"`
+	UserID      int64  `yaml:"user_id"`
 }
 
 // InterceptorConfig defines one named interceptor instance. Config is kept as
@@ -49,9 +57,11 @@ type RouteConfig struct {
 // interceptors remain explicit whitelist configuration.
 func Default() Config {
 	return Config{
-		Listen:        DefaultListen,
-		AdminListen:   DefaultAdminListen,
-		NewAPIURL:     DefaultNewAPIURL,
+		Listen:      DefaultListen,
+		AdminListen: DefaultAdminListen,
+		NewAPI: NewAPIConfig{
+			URL: DefaultNewAPIURL,
+		},
 		Mode:          DefaultMode,
 		DBPath:        DefaultDBPath,
 		KeyPath:       DefaultKeyPath,

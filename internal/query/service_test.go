@@ -178,6 +178,9 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 
 	cipher := testCipher(t)
 	ended := int64(9_007_199_254_740_995)
+	tokenID := int64(42)
+	tokenName := "personal"
+	maskedKey := "sk-...1234"
 	store := &fakeStore{
 		healthy: true,
 		listPage: sqlite.AuditListPage{
@@ -186,7 +189,7 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 				RouteID: "route", Protocol: "openai", ParserName: "openai.responses",
 				Method: "POST", Path: "/v1/responses", Mode: "available",
 				ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete,
-				ParseStatus: sqlite.ParseOK,
+				ParseStatus: sqlite.ParseOK, NewAPITokenID: &tokenID, TokenName: &tokenName, MaskedKey: &maskedKey,
 			}},
 			HasMore: true,
 		},
@@ -202,11 +205,170 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 	if page.NextCursor == nil || page.NextCursor.BeforeID != "audit-page" || page.NextCursor.BeforeStartedAtNS != ended-1 {
 		t.Fatalf("page cursor = %+v", page.NextCursor)
 	}
+	if len(page.Items) != 1 || page.Items[0].MaskedKey == nil || *page.Items[0].MaskedKey != maskedKey {
+		t.Fatalf("mapped token snapshot = %+v", page.Items)
+	}
 	if _, err := service.List(context.Background(), Filter{}, Cursor{BeforeID: "audit-page"}, 1); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("incomplete cursor error = %v", err)
 	}
 	if _, err := service.List(context.Background(), Filter{Path: "not-absolute"}, Cursor{}, 1); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("invalid path error = %v", err)
+	}
+}
+
+func TestListFiltersUserAgentSubstringWithoutReturningHeaderPlaintext(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	header := func(auditID, name, value string) sqlite.HeaderEvidence {
+		t.Helper()
+		aad, err := security.AAD(auditID, "header", sqlite.StageRequestReceived, sqlite.HeaderKindHeader, name, "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		encrypted, err := cipher.Encrypt(aad, []byte(value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sqlite.HeaderEvidence{
+			Stage: sqlite.StageRequestReceived, Kind: sqlite.HeaderKindHeader, Name: name,
+			ValueIndex: 0, ValueLength: len(value), ValueEnc: encrypted,
+		}
+	}
+	rows := []sqlite.AuditListRow{
+		{AuditID: "audit-match", StartedAtNS: 3, ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParseOK},
+		{AuditID: "audit-wrong-agent", StartedAtNS: 2, ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParseOK},
+	}
+	store := &fakeStore{
+		healthy:  true,
+		listPage: sqlite.AuditListPage{Rows: rows},
+		requestHeaders: map[string][]sqlite.HeaderEvidence{
+			"audit-match": {
+				header("audit-match", "User-Agent", "Codex-CLI/1.2 Windows"),
+				header("audit-match", "Authorization", "Bearer secret-that-must-not-be-read"),
+			},
+			"audit-wrong-agent": {
+				header("audit-wrong-agent", "User-Agent", "curl/8"),
+			},
+		},
+	}
+	service, err := New(store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.List(context.Background(), Filter{UserAgent: "CoDeX-cLi"}, Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].AuditID != "audit-match" || page.NextCursor != nil {
+		t.Fatalf("filtered page = %+v", page)
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("Codex-CLI")) || bytes.Contains(encoded, []byte("secret-that-must-not-be-read")) {
+		t.Fatalf("filtered response leaked header material: %s", encoded)
+	}
+}
+
+func TestListHeaderFilterRejectsTamperedCiphertext(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	auditID := "audit-filter-tamper"
+	aad, err := security.AAD(auditID, "header", sqlite.StageRequestReceived, sqlite.HeaderKindHeader, "User-Agent", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt(aad, []byte("Codex/1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted[len(encrypted)-1] ^= 0xff
+	service, err := New(&fakeStore{
+		healthy: true,
+		listPage: sqlite.AuditListPage{Rows: []sqlite.AuditListRow{{
+			AuditID: auditID, StartedAtNS: 1, ForwardStatus: sqlite.ForwardCompleted,
+		}}},
+		requestHeaders: map[string][]sqlite.HeaderEvidence{auditID: {{
+			Stage: sqlite.StageRequestReceived, Kind: sqlite.HeaderKindHeader, Name: "User-Agent",
+			ValueLength: len("Codex/1"), ValueEnc: encrypted,
+		}}},
+	}, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.List(context.Background(), Filter{UserAgent: "codex"}, Cursor{}, 10); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("tampered filter error = %v, want ErrIntegrity", err)
+	}
+}
+
+func TestListHeaderFilterPaginationDoesNotSkipOrRepeatMatches(t *testing.T) {
+	t.Parallel()
+
+	cipher := testCipher(t)
+	rows := []sqlite.AuditListRow{
+		{AuditID: "audit-5", StartedAtNS: 5, ForwardStatus: sqlite.ForwardCompleted},
+		{AuditID: "audit-4", StartedAtNS: 4, ForwardStatus: sqlite.ForwardCompleted},
+		{AuditID: "audit-3", StartedAtNS: 3, ForwardStatus: sqlite.ForwardCompleted},
+		{AuditID: "audit-2", StartedAtNS: 2, ForwardStatus: sqlite.ForwardCompleted},
+		{AuditID: "audit-1", StartedAtNS: 1, ForwardStatus: sqlite.ForwardCompleted},
+	}
+	headers := make(map[string][]sqlite.HeaderEvidence, len(rows))
+	for _, row := range rows {
+		value := "curl/8"
+		if row.AuditID == "audit-4" || row.AuditID == "audit-3" || row.AuditID == "audit-1" {
+			value = "Codex/1"
+		}
+		aad, err := security.AAD(row.AuditID, "header", sqlite.StageRequestReceived, sqlite.HeaderKindHeader, "User-Agent", "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		encrypted, err := cipher.Encrypt(aad, []byte(value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		headers[row.AuditID] = []sqlite.HeaderEvidence{{
+			Stage: sqlite.StageRequestReceived, Kind: sqlite.HeaderKindHeader, Name: "User-Agent",
+			ValueLength: len(value), ValueEnc: encrypted,
+		}}
+	}
+	store := &fakeStore{healthy: true, requestHeaders: headers}
+	store.listFunc = func(_ sqlite.AuditQueryFilter, cursor sqlite.AuditQueryCursor, limit int) (sqlite.AuditListPage, error) {
+		start := 0
+		if cursor.BeforeID != "" {
+			for index, row := range rows {
+				if row.AuditID == cursor.BeforeID && row.StartedAtNS == cursor.BeforeStartedAtNS {
+					start = index + 1
+					break
+				}
+			}
+		}
+		end := min(len(rows), start+limit)
+		return sqlite.AuditListPage{Rows: append([]sqlite.AuditListRow(nil), rows[start:end]...), HasMore: end < len(rows)}, nil
+	}
+	service, err := New(store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := Cursor{}
+	var got []string
+	for {
+		page, err := service.List(context.Background(), Filter{UserAgent: "codex"}, cursor, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			got = append(got, item.AuditID)
+		}
+		if page.NextCursor == nil {
+			break
+		}
+		cursor = *page.NextCursor
+	}
+	if strings.Join(got, ",") != "audit-4,audit-3,audit-1" {
+		t.Fatalf("paginated matches = %v", got)
 	}
 }
 
@@ -257,6 +419,9 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 			header(sqlite.StageRequestSent, sqlite.HeaderKindHeader, "X-Multi", 1, "second"),
 			header(sqlite.StageResponseReceived, sqlite.HeaderKindTrailer, "X-Trailer", 0, "done"),
 		},
+		TokenLink: &sqlite.TokenLinkSummary{
+			NewAPITokenID: 42, TokenName: "personal", MaskedKey: "sk-...1234", LinkedAtNS: 3,
+		},
 	}}
 	service, err := New(store, cipher)
 	if err != nil {
@@ -276,6 +441,9 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 		if detail.Headers[index] != wantHeaders[index] {
 			t.Errorf("header %d = %+v, want %+v", index, detail.Headers[index], wantHeaders[index])
 		}
+	}
+	if detail.TokenLink == nil || detail.TokenLink.MaskedKey != "sk-...1234" {
+		t.Fatalf("token link = %+v", detail.TokenLink)
 	}
 
 	pageJSON, err := json.Marshal(Page{Items: []AuditSummary{detail.Audit}})
@@ -506,21 +674,31 @@ func TestRawNotFoundIsNormalized(t *testing.T) {
 }
 
 type fakeStore struct {
-	healthy   bool
-	listPage  sqlite.AuditListPage
-	listErr   error
-	detail    sqlite.AuditQueryDetail
-	detailErr error
-	rawMeta   sqlite.RawBodyMetadata
-	rawErr    error
-	chunks    []sqlite.BodyChunk
-	chunkErr  error
+	healthy          bool
+	listPage         sqlite.AuditListPage
+	listErr          error
+	listFunc         func(sqlite.AuditQueryFilter, sqlite.AuditQueryCursor, int) (sqlite.AuditListPage, error)
+	detail           sqlite.AuditQueryDetail
+	detailErr        error
+	rawMeta          sqlite.RawBodyMetadata
+	rawErr           error
+	chunks           []sqlite.BodyChunk
+	chunkErr         error
+	requestHeaders   map[string][]sqlite.HeaderEvidence
+	requestHeaderErr error
 }
 
 func (store *fakeStore) Healthy() bool { return store.healthy }
 
-func (store *fakeStore) ListAudits(context.Context, sqlite.AuditQueryFilter, sqlite.AuditQueryCursor, int) (sqlite.AuditListPage, error) {
+func (store *fakeStore) ListAudits(_ context.Context, filter sqlite.AuditQueryFilter, cursor sqlite.AuditQueryCursor, limit int) (sqlite.AuditListPage, error) {
+	if store.listFunc != nil {
+		return store.listFunc(filter, cursor, limit)
+	}
 	return store.listPage, store.listErr
+}
+
+func (store *fakeStore) QueryRequestHeaderEvidence(_ context.Context, auditID string) ([]sqlite.HeaderEvidence, error) {
+	return store.requestHeaders[auditID], store.requestHeaderErr
 }
 
 func (store *fakeStore) QueryAuditDetail(context.Context, string) (sqlite.AuditQueryDetail, error) {

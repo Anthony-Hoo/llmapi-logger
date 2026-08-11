@@ -24,7 +24,9 @@ func TestValidateRejectsInvalidCoreFields(t *testing.T) {
 		{"admin token whitespace", func(cfg *Config) { cfg.AdminToken = "token with spaces" }, "admin_token"},
 		{"negative retention", func(cfg *Config) { cfg.RetentionDays = -1 }, "retention_days"},
 		{"large retention", func(cfg *Config) { cfg.RetentionDays = 3651 }, "retention_days"},
-		{"token db directory", func(cfg *Config) { cfg.NewAPITokenDBPath = t.TempDir() }, "newapi_token_db_path"},
+		{"management user without token", func(cfg *Config) { cfg.NewAPI.UserID = 1 }, "newapi.user_id"},
+		{"management token without user", func(cfg *Config) { cfg.NewAPI.AccessToken = "secret" }, "newapi.user_id"},
+		{"management token whitespace", func(cfg *Config) { cfg.NewAPI.AccessToken = "bad token"; cfg.NewAPI.UserID = 1 }, "newapi.access_token"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -47,7 +49,7 @@ func TestValidateNewAPIURL(t *testing.T) {
 	for _, value := range valid {
 		t.Run("valid "+value, func(t *testing.T) {
 			cfg := testConfig()
-			cfg.NewAPIURL = value
+			cfg.NewAPI.URL = value
 			if err := Validate(cfg); err != nil {
 				t.Fatalf("Validate() error = %v", err)
 			}
@@ -70,7 +72,7 @@ func TestValidateNewAPIURL(t *testing.T) {
 	for _, value := range invalid {
 		t.Run("invalid "+value, func(t *testing.T) {
 			cfg := testConfig()
-			cfg.NewAPIURL = value
+			cfg.NewAPI.URL = value
 			if err := Validate(cfg); err == nil {
 				t.Fatal("Validate() error = nil")
 			}
@@ -88,7 +90,7 @@ func TestValidateNewAPIProxyURL(t *testing.T) {
 	for _, value := range valid {
 		t.Run("valid "+value, func(t *testing.T) {
 			cfg := testConfig()
-			cfg.NewAPIProxyURL = value
+			cfg.NewAPI.ProxyURL = value
 			if err := Validate(cfg); err != nil {
 				t.Fatalf("Validate() error = %v", err)
 			}
@@ -111,10 +113,10 @@ func TestValidateNewAPIProxyURL(t *testing.T) {
 	for _, value := range invalid {
 		t.Run("invalid "+value, func(t *testing.T) {
 			cfg := testConfig()
-			cfg.NewAPIProxyURL = value
+			cfg.NewAPI.ProxyURL = value
 			err := Validate(cfg)
-			if err == nil || !strings.Contains(err.Error(), "newapi_proxy_url") {
-				t.Fatalf("Validate() error = %v, want newapi_proxy_url error", err)
+			if err == nil || !strings.Contains(err.Error(), "newapi.proxy_url") {
+				t.Fatalf("Validate() error = %v, want newapi.proxy_url error", err)
 			}
 		})
 	}

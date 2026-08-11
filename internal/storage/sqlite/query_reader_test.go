@@ -43,8 +43,8 @@ INSERT INTO parsed_results (
 		t.Fatal(err)
 	}
 	if _, err := store.writerDB.ExecContext(ctx, `
-INSERT INTO token_links (audit_id, newapi_token_id, token_name, linked_at_ns)
-VALUES (?, ?, ?, ?)`, "audit-b", 42, "personal", 102); err != nil {
+	INSERT INTO token_links (audit_id, newapi_token_id, token_name, masked_key, linked_at_ns)
+	VALUES (?, ?, ?, ?, ?)`, "audit-b", 42, "personal", "sk-...1234", 102); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,8 +71,29 @@ VALUES (?, ?, ?, ?)`, "audit-b", 42, "personal", 102); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(modelPage.Rows) != 1 || modelPage.Rows[0].AuditID != "audit-b" || modelPage.Rows[0].NewAPITokenID == nil || *modelPage.Rows[0].NewAPITokenID != 42 {
+	if len(modelPage.Rows) != 1 || modelPage.Rows[0].AuditID != "audit-b" || modelPage.Rows[0].NewAPITokenID == nil || *modelPage.Rows[0].NewAPITokenID != 42 || modelPage.Rows[0].MaskedKey == nil || *modelPage.Rows[0].MaskedKey != "sk-...1234" {
 		t.Fatalf("model-filtered page = %+v", modelPage)
+	}
+	tokenIDPage, err := store.ListAudits(ctx, AuditQueryFilter{NewAPITokenID: int64Pointer(42)}, AuditQueryCursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokenIDPage.Rows) != 1 || tokenIDPage.Rows[0].AuditID != "audit-b" {
+		t.Fatalf("token-id-filtered page = %+v", tokenIDPage)
+	}
+	tokenNamePage, err := store.ListAudits(ctx, AuditQueryFilter{TokenName: "personal"}, AuditQueryCursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokenNamePage.Rows) != 1 || tokenNamePage.Rows[0].AuditID != "audit-b" {
+		t.Fatalf("token-name-filtered page = %+v", tokenNamePage)
+	}
+	caseMismatch, err := store.ListAudits(ctx, AuditQueryFilter{Model: "GPT-TEST"}, AuditQueryCursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(caseMismatch.Rows) != 0 {
+		t.Fatalf("model filter must be exact and case-sensitive: %+v", caseMismatch)
 	}
 	statusPage, err := store.ListAudits(ctx, AuditQueryFilter{StatusCode: integerPointer(429)}, AuditQueryCursor{}, 10)
 	if err != nil {
@@ -88,7 +109,7 @@ VALUES (?, ?, ?, ?)`, "audit-b", 42, "personal", 102); err != nil {
 	if detail.ParsedResult == nil || detail.ParsedResult.RequestModel == nil || *detail.ParsedResult.RequestModel != "gpt-test" || detail.ParsedResult.RequestedStream == nil || !*detail.ParsedResult.RequestedStream || detail.ParsedResult.UsageInput == nil || *detail.ParsedResult.UsageInput != 123 || !bytes.Equal(detail.ParsedResult.ParsedJSONEnc, []byte("encrypted-parsed-secret")) {
 		t.Fatalf("parsed summary = %+v", detail.ParsedResult)
 	}
-	if detail.TokenLink == nil || detail.TokenLink.NewAPITokenID != 42 || detail.TokenLink.TokenName != "personal" {
+	if detail.TokenLink == nil || detail.TokenLink.NewAPITokenID != 42 || detail.TokenLink.TokenName != "personal" || detail.TokenLink.MaskedKey != "sk-...1234" {
 		t.Fatalf("token link = %+v", detail.TokenLink)
 	}
 }
@@ -175,6 +196,48 @@ func TestQueryAuditDetailLoadsEncryptedValuesForQueryService(t *testing.T) {
 	}
 	if len(chunks) != 1 || !bytes.Equal(chunks[0].DataEnc, secretCiphertext) {
 		t.Fatalf("raw chunks = %+v", chunks)
+	}
+}
+
+func TestQueryRequestHeaderEvidenceReadsOnlyFilterHeaders(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	record := testAudit("audit-filter-headers")
+	if err := store.BeginAudit(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartStage(ctx, HTTPStage{
+		AuditID: record.AuditID, Stage: StageRequestReceived, Proto: "HTTP/1.1",
+		Method: "POST", Host: "logger.local", StartedAtNS: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	headers := []HTTPHeader{
+		{AuditID: record.AuditID, Stage: StageRequestReceived, Kind: HeaderKindHeader, Name: "User-Agent", ValueIndex: 0, ValueLength: 3, ValueEnc: []byte("ua-cipher")},
+		{AuditID: record.AuditID, Stage: StageRequestReceived, Kind: HeaderKindHeader, Name: "X-Api-Key", ValueIndex: 0, ValueLength: 3, ValueEnc: []byte("key-cipher")},
+		{AuditID: record.AuditID, Stage: StageRequestReceived, Kind: HeaderKindHeader, Name: "Content-Type", ValueIndex: 0, ValueLength: 16, ValueEnc: []byte("type-cipher")},
+		{AuditID: record.AuditID, Stage: StageRequestReceived, Kind: HeaderKindTrailer, Name: "Authorization", ValueIndex: 0, ValueLength: 3, ValueEnc: []byte("trailer-cipher")},
+	}
+	if err := store.AddHeaders(ctx, headers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishStage(ctx, StageFinish{AuditID: record.AuditID, Stage: StageRequestReceived, State: StageStateComplete, EndedAtNS: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishAudit(ctx, AuditFinish{
+		AuditID: record.AuditID, EndedAtNS: 4, ForwardStatus: ForwardCompleted,
+		CaptureStatus: CaptureComplete, ParseStatus: ParsePending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := store.QueryRequestHeaderEvidence(ctx, record.AuditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 2 || evidence[0].Name != "User-Agent" || evidence[1].Name != "X-Api-Key" {
+		t.Fatalf("filter header evidence = %+v", evidence)
 	}
 }
 

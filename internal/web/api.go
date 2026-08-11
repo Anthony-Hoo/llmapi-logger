@@ -5,16 +5,58 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
 )
 
 const queryTimeout = 10 * time.Second
+
+const maxLoginBodyBytes = 4096
+
+func (handler *managementHandler) serveSession(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Cache-Control", "no-store")
+	switch request.Method {
+	case http.MethodPost:
+		request.Body = http.MaxBytesReader(writer, request.Body, maxLoginBodyBytes)
+		decoder := json.NewDecoder(request.Body)
+		decoder.DisallowUnknownFields()
+		var credentials struct {
+			Token string `json:"token"`
+		}
+		if err := decoder.Decode(&credentials); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_login", "invalid login request")
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			writeError(writer, http.StatusBadRequest, "invalid_login", "invalid login request")
+			return
+		}
+		if handler.authenticator == nil || !handler.authenticator.validAdminToken(credentials.Token) {
+			writeError(writer, http.StatusUnauthorized, "unauthorized", "invalid admin token")
+			return
+		}
+		expires := handler.authenticator.issueSessionCookie(writer, request)
+		writeJSON(writer, http.StatusOK, map[string]string{
+			"status":     "authenticated",
+			"expires_at": expires.Format(time.RFC3339),
+		})
+	case http.MethodDelete:
+		if handler.authenticator != nil {
+			handler.authenticator.clearSessionCookie(writer, request)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(writer, http.MethodPost, http.MethodDelete)
+	}
+}
 
 func (handler *managementHandler) serveHealth(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
@@ -70,6 +112,26 @@ func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, req
 		return
 	}
 	writeJSON(writer, http.StatusOK, page)
+}
+
+func (handler *managementHandler) serveNewAPITokens(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	response := struct {
+		Items       []newapi.Token `json:"items"`
+		RefreshedAt *time.Time     `json:"refreshed_at"`
+	}{Items: []newapi.Token{}}
+	if handler.tokens != nil {
+		snapshot := handler.tokens.Snapshot()
+		response.Items = snapshot.Tokens
+		if !snapshot.RefreshedAt.IsZero() {
+			refreshedAt := snapshot.RefreshedAt
+			response.RefreshedAt = &refreshedAt
+		}
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (handler *managementHandler) serveAuditResource(writer http.ResponseWriter, request *http.Request) {
@@ -176,7 +238,8 @@ func parseListQuery(values url.Values) (query.Filter, query.Cursor, int, error) 
 	allowed := map[string]bool{
 		"limit": true, "before_started_at_ns": true, "before_id": true,
 		"from_ns": true, "to_ns": true, "protocol": true, "path": true,
-		"model": true, "status_code": true, "forward_status": true,
+		"model": true, "user_agent": true,
+		"status_code": true, "forward_status": true,
 		"blocked_by": true, "block_code": true, "capture_status": true,
 		"newapi_token_id": true, "token_name": true,
 	}
@@ -224,6 +287,7 @@ func parseListQuery(values url.Values) (query.Filter, query.Cursor, int, error) 
 		Protocol:      values.Get("protocol"),
 		Path:          values.Get("path"),
 		Model:         values.Get("model"),
+		UserAgent:     values.Get("user_agent"),
 		StatusCode:    statusCode,
 		ForwardStatus: values.Get("forward_status"),
 		BlockedBy:     values.Get("blocked_by"),
