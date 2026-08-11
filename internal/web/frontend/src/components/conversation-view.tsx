@@ -1,3 +1,6 @@
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+
 import { Badge } from "./ui/badge";
 
 import type {
@@ -39,6 +42,76 @@ const rolePresentation: Record<string, { label: string; classes: string; dot: st
     classes: "border-slate-200 bg-white",
     dot: "bg-slate-400",
   },
+};
+
+const markdownPlugins = [remarkGfm];
+const allowedMarkdownProtocols = new Set(["http", "https", "mailto"]);
+
+function safeMarkdownUrl(url: string): string {
+  const transformed = defaultUrlTransform(url);
+  if (!transformed) {
+    return "";
+  }
+
+  const protocol = /^([a-z][a-z\d+.-]*):/i.exec(transformed)?.[1]?.toLowerCase();
+  return !protocol || allowedMarkdownProtocols.has(protocol) ? transformed : "";
+}
+
+const markdownComponents: Components = {
+  h1: ({ children }) => <h1 className="mb-3 mt-4 text-xl font-semibold first:mt-0">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 mt-4 text-lg font-semibold first:mt-0">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-2 mt-3 text-base font-semibold first:mt-0">{children}</h3>,
+  p: ({ children }) => <p className="mb-3 whitespace-pre-wrap break-words leading-6 last:mb-0">{children}</p>,
+  ul: ({ children }) => <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>,
+  ol: ({ children }) => <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>,
+  li: ({ children }) => <li className="break-words pl-0.5">{children}</li>,
+  blockquote: ({ children }) => (
+    <blockquote className="mb-3 border-l-4 border-slate-300 pl-3 text-muted-foreground last:mb-0">
+      {children}
+    </blockquote>
+  ),
+  table: ({ children }) => (
+    <div className="mb-3 max-w-full overflow-x-auto rounded-md border last:mb-0">
+      <table className="w-full border-collapse text-left text-xs">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => <th className="border-b bg-slate-100 px-2 py-1.5 font-semibold">{children}</th>,
+  td: ({ children }) => <td className="border-b px-2 py-1.5 align-top last:border-b-0">{children}</td>,
+  pre: ({ children }) => (
+    <pre className="mb-3 max-h-96 overflow-auto whitespace-pre rounded-md bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100 last:mb-0 [&>code]:bg-transparent [&>code]:p-0">
+      {children}
+    </pre>
+  ),
+  code: ({ className, children, node: _node, ...props }) => (
+    <code
+      className={className ? `${className} font-mono` : "rounded bg-slate-200/80 px-1 py-0.5 font-mono text-[0.9em]"}
+      {...props}
+    >
+      {children}
+    </code>
+  ),
+  a: ({ children, href, node: _node, ...props }) =>
+    href ? (
+      <a
+        {...props}
+        href={href}
+        className="break-all text-blue-700 underline underline-offset-2"
+        target="_blank"
+        rel="noreferrer noopener"
+        referrerPolicy="no-referrer"
+      >
+        {children}
+      </a>
+    ) : (
+      <span className="break-all">{children}</span>
+    ),
+  img: ({ alt, src }) => (
+    <span className="inline-flex max-w-full flex-wrap items-baseline gap-1 rounded bg-slate-200/70 px-1.5 py-0.5 text-xs text-muted-foreground">
+      <span>图片：{alt || "未命名"}</span>
+      {src ? <code className="break-all font-mono">{src}</code> : null}
+    </span>
+  ),
+  hr: () => <hr className="my-4 border-slate-300" />,
 };
 
 export function ConversationView({ conversation }: { conversation: Conversation | null | undefined }) {
@@ -120,7 +193,11 @@ function ConversationMessageView({ message, displayIndex }: { message: Conversat
         <div className="mt-3 space-y-3">
           {message.content.length > 0 ? (
             message.content.map((part, partIndex) => (
-              <ConversationPartView key={`${part.type}-${partIndex}`} part={part} />
+              <ConversationPartView
+                key={`${part.type}-${partIndex}`}
+                part={part}
+                renderMarkdown={message.role === "assistant"}
+              />
             ))
           ) : (
             <p className="text-sm italic text-muted-foreground">（空消息）</p>
@@ -131,11 +208,24 @@ function ConversationMessageView({ message, displayIndex }: { message: Conversat
   );
 }
 
-function ConversationPartView({ part }: { part: ConversationPart }) {
+function ConversationPartView({ part, renderMarkdown }: { part: ConversationPart; renderMarkdown: boolean }) {
   switch (part.type) {
     case "text":
       return part.text ? (
-        <div className="whitespace-pre-wrap break-words text-sm leading-6">{part.text}</div>
+        renderMarkdown ? (
+          <div className="min-w-0 text-sm">
+            <ReactMarkdown
+              remarkPlugins={markdownPlugins}
+              skipHtml
+              urlTransform={safeMarkdownUrl}
+              components={markdownComponents}
+            >
+              {part.text}
+            </ReactMarkdown>
+          </div>
+        ) : (
+          <div className="whitespace-pre-wrap break-words text-sm leading-6">{part.text}</div>
+        )
       ) : (
         <p className="text-sm italic text-muted-foreground">（空文本块）</p>
       );

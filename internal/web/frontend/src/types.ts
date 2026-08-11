@@ -26,6 +26,7 @@ export interface AuditSummary {
   response_model?: string | null;
   newapi_token_id?: number | string | null;
   token_name?: string | null;
+  masked_key?: string | null;
 }
 
 export interface AuditListPage {
@@ -131,7 +132,22 @@ export interface Conversation {
 export interface TokenLink {
   newapi_token_id?: number | string | null;
   token_name?: string | null;
+  masked_key?: string | null;
   linked_at_ns?: NanoTime | null;
+}
+
+export interface NewAPIToken {
+  id: number;
+  name: string;
+  masked_key: string;
+  status: number;
+  group: string;
+  unlimited_quota: boolean;
+}
+
+export interface NewAPITokenList {
+  items: NewAPIToken[];
+  refreshed_at: string | null;
 }
 
 export interface AuditDetail {
@@ -147,6 +163,9 @@ export interface AuditDetail {
 
 export interface AuditFilters {
   path?: string;
+  model?: string;
+  user_agent?: string;
+  newapi_token_id?: string;
   forward_status?: string;
 }
 
