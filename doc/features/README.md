@@ -49,7 +49,7 @@ Nginx -> Data-plane dispatcher -> Matcher
 
 ~~~text
 cmd/audit-proxy/
-internal/{config,routing,proxy,audit,storage/sqlite,parser,query,web}/
+internal/{config,routing,proxy,audit,conversation,storage/sqlite,parser,query,web}/
 internal/storage/sqlite/migrations/
 configs/
 ~~~
@@ -110,9 +110,9 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 响应生成最小摘要，并 UPSERT parsed_results。重启时扫描 pending 记录重新入队；解析不重建完整对话或全文。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要，同时聚合协议无关的多轮消息、reasoning、工具调用和工具结果。摘要写入窄列，conversation 只合并进 `parsed_json_enc` 后加密落盘；parser v2 migration 会把 v1 结果一次性置回 pending，复用正常 worker 回填旧记录。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health 和 ready 统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。列表保持非敏感摘要；受保护的详情会解密 Request-URI 与每个 Header/Trailer 值，原始请求/响应 Body 通过独立 raw API 按需读取。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面可重建应用层 HTTP 起始行/Header 视图、预览 UTF-8 Body，并下载原始字节；这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。API、health 和 ready 统一校验静态 Bearer token；React 静态 shell 不含数据，可先加载再由用户输入 token。列表保持非敏感摘要；受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
 
 ## 9. 模块索引
 
@@ -138,7 +138,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React + shadcn/ui、启动恢复、聚合 gap、retention、安全日志和单机构建部署材料。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、SQLite 单 writer、异步 parser、加密 conversation、受 Token 保护的查询与 React + shadcn/ui 对话审计、启动恢复、聚合 gap、retention、安全日志和单机构建部署材料。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 
@@ -152,12 +152,12 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - DB/WAL 无测试 secret 明文。
 - 拦截链首个 reject 会在调用 NewAPI 前返回；记录 blocked_by/block_code，后续 NewAPI 阶段不存在。
 - 未启用 Body 拦截器时保持流式；启用后允许请求的 Body 回放字节与原请求完全一致，超限固定为 `413` 和 `block_code=body_too_large`。
-- 重启后 pending parser 恢复，未完成 audit 标 partial。
+- 重启后 pending parser 恢复，parser v1 结果可由 migration 一次性回填 conversation，未完成 audit 标 partial。
 - 只有实际恢复未终结记录时增加 process_exit 聚合 gap，重复恢复幂等。
 - retention 只小批量删除已终结且非 processing 的过期记录，并级联子表。
 - 请求完成日志不含 Query、Header value、Body、token、key 或底层错误文本。
 - healthy/degraded/not_ready 与 available/strict 语义一致。
-- 管理列表不返回敏感值；详情在 Admin Token 下返回 Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
+- 管理列表不返回敏感值；详情在 Admin Token 下返回 conversation、Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
 - loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token。
 
 ## 12. 文档优先级

@@ -23,7 +23,7 @@ parser 异步读取已持久化证据，不进入 HTTP 转发链。请求模型�
 - `requested_stream`、`observed_stream`、`response_id`、input/output/total usage
 - `error_type`、`error_code`、消息和工具调用数量
 
-contents、system instruction、输出文本、文件/图片数据、工具/函数名称与参数、safety/grounding 详情和完整错误消息只进入加密 `parsed_json_enc`。
+contents、system instruction、输出文本/thought、函数名称/call id/参数/结果会规范化到 conversation，并只随加密 `parsed_json_enc` 落盘。文件/图片数据、safety/grounding 详情和完整错误消息不进入公共列；未知大块最多复制 4 KiB 到 conversation，完整内容保留在 raw Body。
 
 ## 3. 请求解析
 
@@ -31,12 +31,12 @@ contents、system instruction、输出文本、文件/图片数据、工具/函�
 
 首版识别常见 Part：
 
-- `text`
+- `text`，`thought=true` 时映射为 reasoning
 - `inlineData`、`fileData`
 - `functionCall`、`functionResponse`
 - `executableCode`、`codeExecutionResult`
 
-未知 Part 忽略或保存在加密 JSON。inline/base64 数据不复制到公共摘要，也不下载 file URI 指向的内容。
+未知 Part 以有界 unknown part 保存。inline/base64 数据不复制到公共摘要或完整 conversation，也不下载 file URI 指向的内容。纯 functionResponse 的 user content 在 conversation 中规范为 tool role。
 
 `streamGenerateContent` 的 `requested_stream=true`；`generateContent=false`。Query 中的 `alt=sse` 只影响响应表示方式。
 
@@ -57,7 +57,7 @@ usage 映射：
 - output = `candidatesTokenCount`
 - total = `totalTokenCount`
 
-缓存、thinking 和 tool-use token 字段保存在加密 JSON。多个 candidate 不合并成一段输出；公共 finish/error 只保存安全摘要。
+thought 文本进入 conversation reasoning；缓存和细分 token 字段不映射时只存在于加密 raw Body。多个 candidate 不合并成一段输出；公共 finish/error 只保存安全摘要。
 
 没有 candidates 但存在 prompt block reason 时仍是有效解析结果，不应误记为 parser error。
 
@@ -77,8 +77,8 @@ SSE event*
 
 - 有 candidate index 时按 index 聚合。
 - 没有 index 且每个事件只有一个 candidate 时按单候选顺序追加。
-- text part 只与同一 candidate 的 text 拼接。
-- function call/response 仅解析结构，不执行。
+- text/thought part 只与同一 candidate 聚合，thought 单独形成 reasoning。
+- function call/response 仅解析结构、不执行，并按 candidate 去重后形成 tool_call/tool_result part。
 - usage 使用最后一个有效 snapshot，不累加多个事件。
 - Gemini 流没有强制 `[DONE]` 或 `message_stop`；证据完整且最后事件闭合的 clean EOF 即正常完成。
 - Body 截断、SSE 最后事件未闭合或客户端取消时设 `partial`。
@@ -94,7 +94,7 @@ SSE event*
 {"error":{"code":400,"status":"INVALID_ARGUMENT","message":"..."}}
 ```
 
-status/code 可进入公共字段，message/details 必须加密。非 JSON 错误只保留 HTTP 状态和安全错误码。
+status/code 可进入公共字段，message/details 只存在于加密 raw Body，不进入 compact 摘要或 conversation。非 JSON 错误只保留 HTTP 状态和安全错误码。
 
 统一限额：
 
@@ -107,8 +107,8 @@ status/code 可进入公共字段，message/details 必须加密。非 JSON 错�
 ## 7. parsed_results 写入
 
 ```text
-parser_name = gemini
-parser_version = <当前实现版本>
+parser_name = gemini.generate_content | gemini.stream_generate_content
+parser_version = 2
 status = ok | partial | error | skipped
 公共字段 = 模型、流式、ID、usage、错误、消息/工具数量
 parsed_json_enc = nonce || ciphertext || tag
@@ -119,7 +119,7 @@ reparse 覆盖当前结果并更新 `audit_records.parse_status`，数据库只�
 ## 8. 最少测试
 
 - generateContent 文本、多个 candidates、prompt blocked 和 usage。
-- streamGenerateContent 文本 SSE、function call、最后 usage snapshot 和 clean EOF。
+- streamGenerateContent 文本/thought SSE、function call/result、最后 usage snapshot 和 clean EOF。
 - 缺 candidate index、未知 Part、单事件畸形和截断 EOF。
 - Body 中 model 不覆盖路径模型。
 - Google error JSON、gzip、16 MiB/50:1 限额。
@@ -130,7 +130,7 @@ reparse 覆盖当前结果并更新 `audit_records.parse_status`，数据库只�
 1. 定义两个 operation、route model 和精简 Content/Part DTO。
 2. 实现请求、非流式响应、usage 和 error 解析。
 3. 实现 GenerateContentResponse SSE 聚合与 clean EOF 规则。
-4. 写入公共字段和加密 `parsed_json`。
+4. 写入公共字段与 conversation，并加密 `parsed_json` envelope。
 5. 完成正常、流式、blocked、function 和异常 fixtures。
 
 ## 10. 官方参考

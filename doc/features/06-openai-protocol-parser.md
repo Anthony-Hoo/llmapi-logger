@@ -11,7 +11,7 @@
 | Responses | `/v1/responses` |
 | Responses Compact | `/v1/responses/compact` |
 
-parser 异步读取已持久化证据，不参与代理转发，不修改请求或响应。兼容实现的未知字段忽略或保存在加密 `parsed_json`。
+parser 异步读取已持久化证据，不参与代理转发，不修改请求或响应。兼容实现的未知普通字段忽略；未知内容块只在 conversation 中保存有界占位，完整供应商对象始终可从加密 raw Body 读取。
 
 NewAPI health、login、admin、`/v1/models`、UI 和其他安全非 LLM 路径走 passthrough，不进入本 parser。
 
@@ -26,19 +26,19 @@ NewAPI health、login、admin、`/v1/models`、UI 和其他安全非 LLM 路径�
 - `request_model`、`response_model`、`requested_stream`、`observed_stream`、`response_id`
 - input/output/total usage、`error_type`、`error_code`、消息和工具调用数量
 
-消息、prompt、input、instructions、输出文本、工具/函数名称与参数、metadata 和完整错误消息保存到加密 `parsed_json_enc`。
+消息、prompt、input、instructions、输出文本、reasoning、工具/函数名称、call id、参数和结果会规范化到 conversation，并与其他敏感解析数据一起保存到加密 `parsed_json_enc`。compact `ParsedJSON` 和公共列仍不包含这些正文。
 
 ## 3. 请求解析
 
 ### Chat Completions
 
-读取 `model`、`stream`、messages 数量/role、tools/tool call 数量；`tool_choice`、`response_format` 等结构放入加密 JSON。
+读取 `model`、`stream`、messages 数量/role、tools/tool call 数量；conversation 保留 system/developer/user/assistant/tool 顺序。旧式 `role=function` 规范为工具结果，`function_call` 与 `tool_calls` 统一为 tool_call part。
 
-`messages[].content` 可以是字符串或数组，不做强制扁平化。
+`messages[].content` 可以是字符串或数组；已知 text/reasoning/tool block 转为对应 part，图片或其他未知 block 最多保存 4 KiB 占位数据，完整内容仍在 raw Body。
 
 ### Completions
 
-读取 `model`、`stream` 和 prompt 数量摘要。`prompt`、suffix、stop、logprobs 等内容只保存在加密结果中。
+读取 `model`、`stream` 和 prompt 数量摘要；prompt 转为 user conversation message。suffix、stop、logprobs 等未映射配置只存在于加密 raw Body。
 
 ### Responses / Responses Compact
 
@@ -46,9 +46,9 @@ NewAPI health、login、admin、`/v1/models`、UI 和其他安全非 LLM 路径�
 
 ## 4. 非流式响应
 
-Chat/Completions 读取 `id`、`model`、choices 数量、`finish_reason`、message/text/tool call 摘要和 usage。
+Chat/Completions 读取 `id`、`model`、choices 数量、`finish_reason`、message/text/tool call 摘要和 usage，并为每个 choice 生成 assistant conversation message。
 
-Responses 读取 `id`、`model`、`status`、output item/工具调用数量、usage、error 和 incomplete details。
+Responses 读取 `id`、`model`、`status`、output item/工具调用数量、usage、error 和 incomplete details。message、function_call、function_call_output 和 reasoning summary 分别映射为 text/tool_call/tool_result/reasoning。
 
 Compact 只读取明确存在的 ID、model、status 和对象类型；其余内容进入加密 `parsed_json`。
 
@@ -64,16 +64,16 @@ data: <JSON chunk>
 data: [DONE]
 ```
 
-- 按 choice index 累积文本和 finish reason。
-- tool-call arguments 只拼接原始片段，完成后可尝试 JSON decode。
+- 按 choice index 累积文本与 reasoning，最终每个 choice 只产生一个 assistant message。
+- tool-call id/name/arguments 按 tool index 聚合，arguments 保留原始拼接字符串，由 UI 尝试 JSON 格式化。
 - 最后一个 usage chunk 可更新 usage；不能丢弃 choices 为空的 usage chunk。
 - EOF 前没有 `[DONE]` 时记为 `partial`。
 
 Responses 使用 JSON 事件中的 `type`：
 
-- 识别 response 生命周期、文本 delta、output item、函数参数、completed/failed/incomplete。
+- 识别 response 生命周期、文本/reasoning delta、output item、函数参数、completed/failed/incomplete。
 - 未知 event type 保存到加密 JSON 或忽略，不中止后续事件。
-- terminal event 中的 response/usage 优先作为最终值。
+- terminal event 中的 response/output/usage 优先作为最终快照，不能和此前 delta 重复生成消息。
 - clean EOF 没有 terminal event 时记为 `partial`。
 
 Compact 若返回 SSE，只按 Responses 风格事件解析；不能误当 Chat chunk。
@@ -86,7 +86,7 @@ Compact 若返回 SSE，只按 Responses 风格事件解析；不能误当 Chat 
 {"error":{"message":"...","type":"...","code":"..."}}
 ```
 
-`type` 和 `code` 可进入公共字段，message 必须加密。非 JSON 错误只保留 HTTP 状态和安全错误码。
+`type` 和 `code` 可进入公共字段，message 只存在于加密 raw Body，不进入 compact 摘要或 conversation。非 JSON 错误只保留 HTTP 状态和安全错误码。
 
 统一限额：
 
@@ -99,8 +99,8 @@ Compact 若返回 SSE，只按 Responses 风格事件解析；不能误当 Chat 
 ## 7. parsed_results 写入
 
 ```text
-parser_name = openai
-parser_version = <当前实现版本>
+parser_name = openai.chat_completions | openai.completions | openai.responses | openai.responses_compact
+parser_version = 2
 status = ok | partial | error | skipped
 公共字段 = 模型、流式、ID、usage、错误、消息/工具数量
 parsed_json_enc = nonce || ciphertext || tag
@@ -112,7 +112,8 @@ reparse 直接覆盖该 audit 的最新行，并同步更新 `audit_records.pars
 
 - 四个端点各一个正常请求/响应 fixture。
 - Chat SSE 文本、tool call、usage-only final chunk 和缺少 `[DONE]`。
-- Responses typed SSE 的 completed、failed 和未知事件。
+- Chat SSE reasoning 与 tool arguments 分片聚合；旧式 role=function 工具结果。
+- Responses typed SSE 的 completed、failed、reasoning summary、terminal 去重和未知事件。
 - 未知 JSON 字段、畸形 JSON、单个畸形 SSE 事件。
 - gzip 正常/损坏、16 MiB 和 50:1 限额。
 - error envelope、工具名称/参数和正文不出现在明文列。
@@ -122,7 +123,7 @@ reparse 直接覆盖该 audit 的最新行，并同步更新 `audit_records.pars
 1. 定义四个 endpoint 分发和精简 DTO。
 2. 实现请求、非流式响应和 error envelope 解析。
 3. 实现 Chat/Completions `[DONE]` 与 Responses typed SSE。
-4. 映射公共字段并加密 `parsed_json`。
+4. 映射公共字段与 conversation，并加密 `parsed_json` envelope。
 5. 完成四端点 fixtures 和异常测试。
 
 ## 10. 官方参考
