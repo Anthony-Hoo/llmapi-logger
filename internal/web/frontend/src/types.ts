@@ -52,6 +52,7 @@ export interface AuditHeader {
   name: string;
   value_index: number;
   value_length: number;
+  value: string;
 }
 
 export interface AuditBody {
@@ -75,6 +76,7 @@ export interface TokenLink {
 
 export interface AuditDetail {
   audit: AuditSummary;
+  request_uri?: string | null;
   stages: AuditStage[];
   headers: AuditHeader[];
   bodies: AuditBody[];
