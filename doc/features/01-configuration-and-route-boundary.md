@@ -14,12 +14,15 @@ admin_listen: 127.0.0.1:8081
 newapi:
   url: http://127.0.0.1:3000
   proxy_url: ""
+  response_header_timeout_seconds: 300
+  preserve_host: false
   access_token: ""
   user_id: 0
 mode: available
 db_path: ./data/audit.db
 key_path: ./data/audit.key
 admin_token: "replace-with-a-random-token"
+shutdown_timeout_seconds: 30
 retention_days: 30
 
 interceptors:
@@ -57,13 +60,14 @@ routes:
 | 项目 | 默认值 |
 | --- | --- |
 | read header / idle timeout | 10 s / 120 s |
-| NewAPI dial / response header | 10 s / 5 min |
+| NewAPI dial | 10 s |
+| NewAPI response header | 300 s，可配置 1–86400 s |
 | Body chunk | 32 KiB |
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | SQLite busy timeout | 5 s |
 | parser workers | 1 |
 | NewAPI 管理请求 / 用户目录刷新 | 10 s / 5 min |
-| graceful shutdown | 30 s |
+| graceful shutdown | 30 s，可配置 1–86400 s |
 
 新增调优项前必须先有基准或故障测试证明需要。
 
@@ -74,14 +78,16 @@ routes:
 1. listen 与 admin_listen 合法且不相同。
 2. `newapi.url` 只有 http/https scheme、host、可选端口；禁止 userinfo、path、query、fragment。
 3. `newapi.proxy_url` 为空表示直接连接；非空时必须是绝对 `http://host[:port]` 或 `https://host[:port]`，禁止前后空白、userinfo、任何 path（包括 `/`）、query 和 fragment，端口必须合法。
-4. `newapi.access_token` 与 `newapi.user_id` 成对可选：前者为空时后者必须为 0；前者非空时不能包含空白，且 user_id 必须为正整数。
-5. mode 只能是 available 或 strict。
-6. db_path、key_path 非空，父目录可创建。
-7. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
-8. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
-9. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
-10. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
-11. match 只能是 exact 或 template，规则不得重叠。
+4. `newapi.response_header_timeout_seconds` 为 1–86400；默认 300 秒。
+5. `newapi.access_token` 与 `newapi.user_id` 成对可选：前者为空时后者必须为 0；前者非空时不能包含空白，且 user_id 必须为正整数。
+6. mode 只能是 available 或 strict。
+7. db_path、key_path 非空，父目录可创建。
+8. `shutdown_timeout_seconds` 为 1–86400；默认 30 秒。
+9. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
+10. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
+11. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
+12. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
+13. match 只能是 exact 或 template，规则不得重叠。
 
 validate-config 只检查配置，不要求 DB 或 NewAPI 在线。
 
@@ -128,17 +134,18 @@ Nginx 示例把全部 NewAPI 数据面请求交给本进程，分发器按以下
 
 整个进程只有一个 `newapi.url`，以及一个可选的 `newapi.proxy_url`：
 
-- Scheme、URL.Host 和出站 Host 来自 `newapi.url`。
+- Scheme 与 URL.Host 来自 `newapi.url`。出站 Host 默认也来自该 URL；`newapi.preserve_host: true` 时改为保留入站 Host。
 - Path、RawPath、RawQuery、ForceQuery 来自入站请求。
 - 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 - 请求不能通过 Header、Query 或 route 选择其他后端。
 - 审计代理和 passthrough 共享同一套 Rewrite 和 Transport 参数。
+- `newapi.response_header_timeout_seconds` 同时应用于两个分支，限制等待上游响应头/流式首包的时间。
 - `newapi.proxy_url` 只控制本程序到 `newapi.url` 的 Transport；它不改变目标 URL、Host、审计阶段或路由边界。
 - `newapi.proxy_url` 为空时固定直连，不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`；非空时所有 NewAPI 请求都经过该显式 HTTP(S) 代理，HTTPS 目标使用标准 CONNECT。
 
 `newapi.access_token` 与 `newapi.user_id` 配置后，程序使用同一 `newapi.url` 和显式代理执行两类只读管理请求：每五分钟同步全站用户的安全字段，以及按 LLM 响应中的 `X-Oneapi-Request-Id` 查询全站日志并回填调用者身份。失败只记录安全 warning，不影响审计代理、passthrough 或已完成的响应。该管理凭证不参与客户端 LLM 请求鉴权，也不得返回到管理 API、数据库或日志。两项都留空/0 时完全关闭 NewAPI 调用者识别。
 
-首版不提供 preserve/explicit Host 模式、SOCKS/PAC 或带凭据的代理 URL。
+`newapi.preserve_host` 只改变出站 Host，不改变连接目标；可信边缘建立的 `X-Forwarded-Host`、`X-Forwarded-Port` 与其他 `X-Forwarded-*` 一并透传。首版不提供任意 explicit Host 值、SOCKS/PAC 或带凭据的代理 URL。
 
 ## 8. 入站拦截边界
 

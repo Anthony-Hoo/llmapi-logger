@@ -8,8 +8,8 @@ gzip off;
 proxy_next_upstream off;
 
 proxy_connect_timeout 5s;
-proxy_send_timeout 1h;
-proxy_read_timeout 1h;
+proxy_send_timeout 65m;
+proxy_read_timeout 65m;
 
 # Preserve ordinary request headers, but replace forwarding identity with
 # values established by this trusted edge. Configure real_ip separately if a

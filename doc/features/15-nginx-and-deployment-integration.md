@@ -56,7 +56,7 @@ Gemini 只接受从头到尾锚定的两种模板：
 - HTTP/1.1；
 - `proxy_request_buffering off`、`proxy_buffering off`、`proxy_cache off`、`gzip off`；
 - `proxy_next_upstream off`，避免 POST 重试和重复计费；
-- 一小时 send/read timeout，五秒 connect timeout；
+- 65 分钟 send/read timeout，五秒 connect timeout；该值覆盖可部署的 `3900s` 上游首包等待；
 - `proxy_pass` 只含 upstream，没有 URI 后缀，保留原 Path 与 Query；
 - 覆盖 `X-Real-IP`、`X-Forwarded-*` 并清空客户端 `Forwarded`，只信任当前边缘 Nginx 建立的转发身份。
 
@@ -94,6 +94,8 @@ NewAPI 镜像版本由使用者按现有部署固定到验证过的 tag/digest�
 newapi:
   url: https://newapi.example.com
   proxy_url: http://127.0.0.1:7897
+  response_header_timeout_seconds: 300
+  preserve_host: false
   access_token: ""
   user_id: 0
 ~~~

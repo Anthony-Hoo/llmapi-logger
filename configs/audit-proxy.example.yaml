@@ -7,6 +7,11 @@ newapi:
   # Optional explicit HTTP(S) forward proxy. Empty means direct;
   # HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment variables are not used.
   proxy_url: ""
+  # Time allowed for NewAPI to produce response headers / the first stream
+  # byte. Increase this above NewAPI's own long-running response timeout.
+  response_header_timeout_seconds: 300
+  # Keep the client-facing Host when NewAPI must observe the original domain.
+  preserve_host: false
   # Optional NewAPI administrator credential used only for read-only global
   # user and request-log queries. Set both fields or leave both empty/zero.
   access_token: ""
@@ -15,6 +20,7 @@ mode: available
 db_path: ./data/audit.db
 key_path: ./data/audit.key
 admin_token: "replace-with-a-random-token"
+shutdown_timeout_seconds: 30
 retention_days: 30
 
 interceptors:

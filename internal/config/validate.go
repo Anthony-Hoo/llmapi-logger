@@ -48,6 +48,9 @@ func Validate(cfg Config) error {
 	if err := validateNewAPIManagement(cfg.NewAPI); err != nil {
 		return err
 	}
+	if err := validateTimeoutSeconds("newapi.response_header_timeout_seconds", cfg.NewAPI.ResponseHeaderTimeoutSeconds); err != nil {
+		return err
+	}
 	if cfg.Mode != "available" && cfg.Mode != "strict" {
 		return fmt.Errorf("mode must be available or strict, got %q", cfg.Mode)
 	}
@@ -60,6 +63,9 @@ func Validate(cfg Config) error {
 	if cfg.AdminToken == "" || strings.IndexFunc(cfg.AdminToken, unicode.IsSpace) >= 0 {
 		return errors.New("admin_token must not be empty or contain whitespace")
 	}
+	if err := validateTimeoutSeconds("shutdown_timeout_seconds", cfg.ShutdownTimeoutSeconds); err != nil {
+		return err
+	}
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > 3650 {
 		return fmt.Errorf("retention_days must be 0 or between 1 and 3650, got %d", cfg.RetentionDays)
 	}
@@ -68,6 +74,13 @@ func Validate(cfg Config) error {
 	}
 	if err := validateRoutes(cfg.Routes, cfg.Interceptors, true); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateTimeoutSeconds(name string, value int) error {
+	if value < 1 || value > 86400 {
+		return fmt.Errorf("%s must be between 1 and 86400, got %d", name, value)
 	}
 	return nil
 }

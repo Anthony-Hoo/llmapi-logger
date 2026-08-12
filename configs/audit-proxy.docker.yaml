@@ -5,6 +5,8 @@ newapi:
   # Podman/WSL host-network example for a Windows loopback proxy:
   # proxy_url: http://127.0.0.1:7897
   proxy_url: ""
+  response_header_timeout_seconds: 300
+  preserve_host: false
   # Optional NewAPI administrator credential used only for read-only global
   # user and request-log queries. Set both fields or leave both empty/zero.
   access_token: ""
@@ -13,6 +15,7 @@ mode: available
 db_path: /data/audit.db
 key_path: /data/audit.key
 admin_token: "replace-with-a-random-token"
+shutdown_timeout_seconds: 30
 retention_days: 30
 
 interceptors:
