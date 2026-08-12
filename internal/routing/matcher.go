@@ -154,9 +154,6 @@ func safeEscapedPath(escapedPath string) bool {
 	if escapedPath == "" || !strings.HasPrefix(escapedPath, "/") {
 		return false
 	}
-	if escapedPath != "/" && strings.HasSuffix(escapedPath, "/") {
-		return false
-	}
 	if strings.Contains(escapedPath, "//") || strings.ContainsRune(escapedPath, '\\') {
 		return false
 	}
@@ -203,9 +200,6 @@ func fullyUnescape(escapedPath string) string {
 
 func unsafePathForm(path string) bool {
 	if path == "" || !strings.HasPrefix(path, "/") {
-		return true
-	}
-	if path != "/" && strings.HasSuffix(path, "/") {
 		return true
 	}
 	if strings.Contains(path, "//") || strings.ContainsRune(path, '\\') || strings.ContainsAny(path, "?#") {
