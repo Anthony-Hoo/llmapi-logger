@@ -27,6 +27,12 @@ func TestValidateRejectsInvalidCoreFields(t *testing.T) {
 		{"management user without token", func(cfg *Config) { cfg.NewAPI.UserID = 1 }, "newapi.user_id"},
 		{"management token without user", func(cfg *Config) { cfg.NewAPI.AccessToken = "secret" }, "newapi.user_id"},
 		{"management token whitespace", func(cfg *Config) { cfg.NewAPI.AccessToken = "bad token"; cfg.NewAPI.UserID = 1 }, "newapi.access_token"},
+		{"zero response header timeout", func(cfg *Config) { cfg.NewAPI.ResponseHeaderTimeoutSeconds = 0 }, "newapi.response_header_timeout_seconds"},
+		{"negative response header timeout", func(cfg *Config) { cfg.NewAPI.ResponseHeaderTimeoutSeconds = -1 }, "newapi.response_header_timeout_seconds"},
+		{"large response header timeout", func(cfg *Config) { cfg.NewAPI.ResponseHeaderTimeoutSeconds = 86401 }, "newapi.response_header_timeout_seconds"},
+		{"zero shutdown timeout", func(cfg *Config) { cfg.ShutdownTimeoutSeconds = 0 }, "shutdown_timeout_seconds"},
+		{"negative shutdown timeout", func(cfg *Config) { cfg.ShutdownTimeoutSeconds = -1 }, "shutdown_timeout_seconds"},
+		{"large shutdown timeout", func(cfg *Config) { cfg.ShutdownTimeoutSeconds = 86401 }, "shutdown_timeout_seconds"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

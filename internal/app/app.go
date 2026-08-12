@@ -29,26 +29,26 @@ import (
 )
 
 const (
-	shutdownTimeout                  = 30 * time.Second
 	newAPIUserCatalogRefreshInterval = 5 * time.Minute
 	newAPIManagementTimeout          = 10 * time.Second
 )
 
 // App owns the stage-one data-plane HTTP server.
 type App struct {
-	server       *http.Server
-	adminServer  *web.Server
-	adminAddress string
-	parserWorker *parser.Worker
-	callerWorker *newapi.Worker
-	retention    *retention.Runner
-	auditSink    audit.Sink
-	auditManager *audit.Manager
-	auditStore   *sqlite.Store
-	cipher       security.Cipher
-	newAPIClient *newapi.Client
-	mode         string
-	logger       *slog.Logger
+	server          *http.Server
+	adminServer     *web.Server
+	adminAddress    string
+	parserWorker    *parser.Worker
+	callerWorker    *newapi.Worker
+	retention       *retention.Runner
+	auditSink       audit.Sink
+	auditManager    *audit.Manager
+	auditStore      *sqlite.Store
+	cipher          security.Cipher
+	newAPIClient    *newapi.Client
+	mode            string
+	logger          *slog.Logger
+	shutdownTimeout time.Duration
 
 	userRefreshInterval time.Duration
 
@@ -94,25 +94,31 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	}
 
 	runtime := assembleAudit(configuration, logger)
-	auditedProxy := proxy.NewWithOptions(target, matcher, engine, proxy.Options{
-		Audit:         runtime.sink,
-		UpstreamProxy: upstreamProxy,
-	}, logger)
+	proxyOptions := proxy.Options{
+		Audit:                 runtime.sink,
+		UpstreamProxy:         upstreamProxy,
+		ResponseHeaderTimeout: time.Duration(configuration.NewAPI.ResponseHeaderTimeoutSeconds) * time.Second,
+		PreserveHost:          configuration.NewAPI.PreserveHost,
+	}
+	auditedProxy := proxy.NewWithOptions(target, matcher, engine, proxyOptions, logger)
+	passthroughOptions := proxyOptions
+	passthroughOptions.Audit = nil
 	application := &App{
 		server: &http.Server{
 			Addr:              configuration.Listen,
-			Handler:           newDataPlaneHandler(matcher, auditedProxy, proxy.NewPassthrough(target, upstreamProxy, logger)),
+			Handler:           newDataPlaneHandler(matcher, auditedProxy, proxy.NewPassthroughWithOptions(target, passthroughOptions, logger)),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
-		adminAddress: configuration.AdminListen,
-		auditSink:    runtime.sink,
-		auditManager: runtime.manager,
-		auditStore:   runtime.store,
-		cipher:       runtime.cipher,
-		newAPIClient: newAPIClient,
-		mode:         configuration.Mode,
-		logger:       logger,
+		adminAddress:    configuration.AdminListen,
+		auditSink:       runtime.sink,
+		auditManager:    runtime.manager,
+		auditStore:      runtime.store,
+		cipher:          runtime.cipher,
+		newAPIClient:    newAPIClient,
+		mode:            configuration.Mode,
+		logger:          logger,
+		shutdownTimeout: time.Duration(configuration.ShutdownTimeoutSeconds) * time.Second,
 
 		userRefreshInterval: newAPIUserCatalogRefreshInterval,
 	}
@@ -235,6 +241,10 @@ func (application *App) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
+	shutdownTimeout := application.shutdownTimeout
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = time.Duration(config.DefaultShutdownTimeoutSecs) * time.Second
+	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	shutdownErr := errors.Join(
 		application.server.Shutdown(shutdownContext),

@@ -114,7 +114,9 @@ http://127.0.0.1:8081/ui/
 
 普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 conversation。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值，以及 parser 生成的协议无关 conversation。conversation 正文、reasoning、工具参数和结果与解析摘要一起存放在 `parsed_json_enc` 密文中。请求/响应 Body 仍通过单独的 raw API 按需读取；页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
 
-NewAPI 相关配置统一放在 `newapi` 下：`url` 是唯一上游，`proxy_url` 是可选显式 HTTP(S) 代理。若 audit-proxy 所在环境不能直接访问远程 NewAPI，宿主机二进制通常可填写 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
+NewAPI 相关配置统一放在 `newapi` 下：`url` 是唯一上游，`proxy_url` 是可选显式 HTTP(S) 代理。`response_header_timeout_seconds` 控制等待 NewAPI 响应头/流式首包的时间，默认 `300` 秒；超长推理部署应设置为高于 NewAPI 自身超时。`preserve_host` 默认关闭，启用后审计与 passthrough 分支都会保留客户端面向的 Host，同时仍使用 `newapi.url` 建立上游连接。若 audit-proxy 所在环境不能直接访问远程 NewAPI，宿主机二进制通常可填写 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
+
+`shutdown_timeout_seconds` 控制收到 SIGINT/SIGTERM 后等待在途请求优雅结束的时间，默认 `30` 秒。承载长流式请求时应与上游响应头超时和容器的 stop grace period 一起增大。
 
 `newapi.access_token` 与 `newapi.user_id` 必须同时配置或同时留空。配置后，程序使用只读管理请求同步 NewAPI 全站用户的安全字段，并在每条已转发 LLM 响应返回 `X-Oneapi-Request-Id` 后异步查询 NewAPI 全站日志。查询成功只回填 `user_id`、`username`、`token_id` 和 `token_name`；日志暂未生成或请求失败时会有限重试，失败不影响原请求转发和响应。完整用户 API Key 从不进入该流程。详细说明见[部署说明](doc/deployment/README.md)和 [NewAPI 请求身份解析](doc/features/11-newapi-request-identity.md)。
 
