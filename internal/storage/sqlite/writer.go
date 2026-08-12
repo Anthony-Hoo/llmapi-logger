@@ -26,6 +26,7 @@ const (
 	writeInsertAuditGaps
 	writeDeleteExpired
 	writeUpsertTokenLink
+	writeRetryCallerLookup
 )
 
 type writeRequest struct {
@@ -237,6 +238,8 @@ func applyWrite(transaction *sql.Tx, request writeRequest) error {
 		return deleteExpired(transaction, request.data.(*retentionRequest))
 	case writeUpsertTokenLink:
 		return upsertTokenLink(transaction, request.data.(TokenLink))
+	case writeRetryCallerLookup:
+		return retryCallerLookup(transaction, request.data.(CallerRetry))
 	default:
 		return fmt.Errorf("sqlite writer: unknown operation %d", request.kind)
 	}
@@ -247,8 +250,10 @@ func insertAudit(transaction *sql.Tx, record AuditRecord) error {
 INSERT INTO audit_records (
     audit_id, started_at_ns, ended_at_ns, route_id, protocol, parser_name,
     method, path, request_uri_enc, mode, status_code, forward_status,
-    capture_status, parse_status, blocked_by, block_code, error_code
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    capture_status, parse_status, blocked_by, block_code, error_code,
+    newapi_request_id, caller_status, caller_attempts, caller_next_at_ns,
+    caller_updated_at_ns
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.AuditID,
 		record.StartedAtNS,
 		record.EndedAtNS,
@@ -266,6 +271,11 @@ INSERT INTO audit_records (
 		record.BlockedBy,
 		record.BlockCode,
 		record.ErrorCode,
+		record.NewAPIRequestID,
+		record.CallerStatus,
+		record.CallerAttempts,
+		record.CallerNextAtNS,
+		record.CallerUpdatedAtNS,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite writer: begin audit: %w", err)
@@ -407,7 +417,12 @@ func finishAudit(transaction *sql.Tx, finish AuditFinish) error {
 	result, err := transaction.Exec(`
 UPDATE audit_records
 SET ended_at_ns = ?, status_code = ?, forward_status = ?, capture_status = ?,
-    parse_status = ?, blocked_by = ?, block_code = ?, error_code = ?
+    parse_status = ?, blocked_by = ?, block_code = ?, error_code = ?,
+    newapi_request_id = ?,
+    caller_status = CASE WHEN ? IS NULL THEN 'none' ELSE 'pending' END,
+    caller_attempts = 0,
+    caller_next_at_ns = CASE WHEN ? IS NULL THEN NULL ELSE ? END,
+    caller_updated_at_ns = ?
 WHERE audit_id = ?`,
 		finish.EndedAtNS,
 		finish.StatusCode,
@@ -417,6 +432,11 @@ WHERE audit_id = ?`,
 		finish.BlockedBy,
 		finish.BlockCode,
 		finish.ErrorCode,
+		finish.NewAPIRequestID,
+		finish.NewAPIRequestID,
+		finish.NewAPIRequestID,
+		finish.EndedAtNS,
+		finish.EndedAtNS,
 		finish.AuditID,
 	)
 	if err != nil {
@@ -457,6 +477,9 @@ func cloneAuditRecord(record AuditRecord) AuditRecord {
 	record.BlockedBy = cloneString(record.BlockedBy)
 	record.BlockCode = cloneString(record.BlockCode)
 	record.ErrorCode = cloneString(record.ErrorCode)
+	record.NewAPIRequestID = cloneString(record.NewAPIRequestID)
+	record.CallerNextAtNS = cloneInt64(record.CallerNextAtNS)
+	record.CallerUpdatedAtNS = cloneInt64(record.CallerUpdatedAtNS)
 	return record
 }
 
@@ -502,6 +525,7 @@ func cloneAuditFinish(finish AuditFinish) AuditFinish {
 	finish.BlockedBy = cloneString(finish.BlockedBy)
 	finish.BlockCode = cloneString(finish.BlockCode)
 	finish.ErrorCode = cloneString(finish.ErrorCode)
+	finish.NewAPIRequestID = cloneString(finish.NewAPIRequestID)
 	return finish
 }
 

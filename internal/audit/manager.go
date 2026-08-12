@@ -38,21 +38,7 @@ type Store interface {
 	AddChunk(context.Context, sqlite.BodyChunk) error
 	FinishStage(context.Context, sqlite.StageFinish) error
 	FinishAudit(context.Context, sqlite.AuditFinish) error
-	UpsertTokenLink(context.Context, sqlite.TokenLink) error
 	InsertAuditGaps(context.Context, []sqlite.AuditGap) error
-}
-
-// TokenMetadata is the non-secret NewAPI token snapshot attached to an audit.
-type TokenMetadata struct {
-	ID        int64
-	Name      string
-	MaskedKey string
-}
-
-// TokenResolver performs an in-memory lookup only; it must never contact
-// NewAPI or persist raw credentials on the request path.
-type TokenResolver interface {
-	ResolveToken(*http.Request) (TokenMetadata, bool)
 }
 
 // Sink is the proxy-facing audit admission interface. A nil Session always
@@ -75,10 +61,9 @@ type Manager struct {
 	cause  error
 	gaps   *gapBuffer
 
-	notifyMu sync.RWMutex
-	notify   func(string) bool
-
-	tokenResolver TokenResolver
+	notifyMu     sync.RWMutex
+	notify       func(string) bool
+	callerNotify func(string) bool
 }
 
 // NewManager constructs a live audit manager.
@@ -175,6 +160,17 @@ func (manager *Manager) SetCompletionNotifier(notify func(string) bool) {
 	manager.notifyMu.Unlock()
 }
 
+// SetCallerNotifier installs the non-blocking callback used to wake the
+// request-id based NewAPI caller worker after an audit commits.
+func (manager *Manager) SetCallerNotifier(notify func(string) bool) {
+	if manager == nil {
+		return
+	}
+	manager.notifyMu.Lock()
+	manager.callerNotify = notify
+	manager.notifyMu.Unlock()
+}
+
 func (manager *Manager) completionNotifier() func(string) bool {
 	if manager == nil {
 		return nil
@@ -184,12 +180,13 @@ func (manager *Manager) completionNotifier() func(string) bool {
 	return manager.notify
 }
 
-// SetTokenResolver installs the optional in-memory NewAPI token catalog.
-// Application assembly calls this before any request is served.
-func (manager *Manager) SetTokenResolver(resolver TokenResolver) {
-	if manager != nil {
-		manager.tokenResolver = resolver
+func (manager *Manager) callerNotifier() func(string) bool {
+	if manager == nil {
+		return nil
 	}
+	manager.notifyMu.RLock()
+	defer manager.notifyMu.RUnlock()
+	return manager.callerNotify
 }
 
 // Begin synchronously commits the audit parent, then starts the inbound stage
@@ -253,33 +250,9 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 	if manager.gaps != nil {
 		manager.gaps.trigger()
 	}
-	manager.linkNewAPIToken(ctx, request, auditID, started)
-
 	session := newSession(manager, ctx, auditID, match.RouteID, started)
 	session.WrapRequestReceived(request)
 	return session, nil
-}
-
-func (manager *Manager) linkNewAPIToken(ctx context.Context, request *http.Request, auditID string, linkedAt time.Time) {
-	if manager == nil || manager.store == nil || manager.tokenResolver == nil {
-		return
-	}
-	metadata, ok := manager.tokenResolver.ResolveToken(request)
-	if !ok {
-		return
-	}
-	if err := manager.store.UpsertTokenLink(ctx, sqlite.TokenLink{
-		AuditID:       auditID,
-		NewAPITokenID: metadata.ID,
-		TokenName:     metadata.Name,
-		MaskedKey:     metadata.MaskedKey,
-		LinkedAtNS:    linkedAt.UnixNano(),
-	}); err != nil {
-		manager.logger.Warn("NewAPI token link unavailable",
-			"audit_id", auditID,
-			"error_category", "token_link_write_failed",
-		)
-	}
 }
 
 func gapReasonForWrite(err error) string {

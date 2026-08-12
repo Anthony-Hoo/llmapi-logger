@@ -26,9 +26,9 @@ type AuditQuery interface {
 	StreamRaw(context.Context, string, query.Side, io.Writer) error
 }
 
-// TokenCatalog exposes only NewAPI's already-masked token metadata.
-type TokenCatalog interface {
-	Snapshot() newapi.Snapshot
+// UserCatalog exposes only the safe subset of NewAPI's global user directory.
+type UserCatalog interface {
+	Snapshot() newapi.UserSnapshot
 }
 
 type ReadyStatus struct {
@@ -36,12 +36,13 @@ type ReadyStatus struct {
 	Database      string `json:"database"`
 	EncryptionKey string `json:"encryption_key"`
 	ParserQueue   int    `json:"parser_queue"`
+	CallerQueue   int    `json:"caller_queue"`
 }
 
 type Options struct {
 	AdminToken string
 	Query      AuditQuery
-	Tokens     TokenCatalog
+	Users      UserCatalog
 	Assets     fs.FS
 	Readiness  func(context.Context) ReadyStatus
 	Logger     *slog.Logger
@@ -59,7 +60,7 @@ func NewHandler(options Options) (http.Handler, error) {
 
 	handler := &managementHandler{
 		query:     options.Query,
-		tokens:    options.Tokens,
+		users:     options.Users,
 		readiness: options.Readiness,
 		static:    newStaticHandler(options.Assets),
 		logger:    options.Logger,
@@ -71,7 +72,7 @@ func NewHandler(options Options) (http.Handler, error) {
 
 type managementHandler struct {
 	query         AuditQuery
-	tokens        TokenCatalog
+	users         UserCatalog
 	readiness     func(context.Context) ReadyStatus
 	static        http.Handler
 	auth          http.Handler
@@ -116,8 +117,8 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveReady(writer, request)
 	case request.URL.Path == "/api/v1/audits":
 		handler.serveAuditList(writer, request)
-	case request.URL.Path == "/api/v1/newapi/tokens":
-		handler.serveNewAPITokens(writer, request)
+	case request.URL.Path == "/api/v1/newapi/callers":
+		handler.serveNewAPICallers(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/audits/"):
 		handler.serveAuditResource(writer, request)
 	default:

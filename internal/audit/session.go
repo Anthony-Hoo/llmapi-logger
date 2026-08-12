@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 )
 
 const bodyChunkSize = 32 << 10
+
+const newAPIRequestIDHeader = "X-Oneapi-Request-Id"
 
 type stageCapture struct {
 	name          string
@@ -51,28 +54,30 @@ type TerminalSummary struct {
 // Session owns the small, concurrency-safe state for one audit. It never
 // retains complete request or response bodies.
 type Session struct {
-	auditID  string
-	routeID  string
-	started  time.Time
-	store    Store
-	cipher   security.Cipher
-	logger   *slog.Logger
-	now      func() time.Time
-	request  context.Context
-	writeCtx context.Context
-	notify   func(string) bool
-	gaps     *gapBuffer
+	auditID      string
+	routeID      string
+	started      time.Time
+	store        Store
+	cipher       security.Cipher
+	logger       *slog.Logger
+	now          func() time.Time
+	request      context.Context
+	writeCtx     context.Context
+	notify       func(string) bool
+	callerNotify func(string) bool
+	gaps         *gapBuffer
 
-	mu            sync.Mutex
-	stages        map[string]*stageCapture
-	captureFault  bool
-	statusCode    *int
-	forwardStatus string
-	blockedBy     *string
-	blockCode     *string
-	errorCode     *string
-	terminal      *TerminalSummary
-	gapRecorded   bool
+	mu              sync.Mutex
+	stages          map[string]*stageCapture
+	captureFault    bool
+	statusCode      *int
+	forwardStatus   string
+	blockedBy       *string
+	blockCode       *string
+	errorCode       *string
+	terminal        *TerminalSummary
+	gapRecorded     bool
+	newAPIRequestID *string
 
 	finishOnce sync.Once
 	finishErr  error
@@ -90,6 +95,7 @@ func newSession(manager *Manager, requestContext context.Context, auditID, route
 		request:       requestContext,
 		writeCtx:      context.WithoutCancel(requestContext),
 		notify:        manager.completionNotifier(),
+		callerNotify:  manager.callerNotifier(),
 		stages:        make(map[string]*stageCapture, 4),
 		forwardStatus: sqlite.ForwardInProgress,
 	}
@@ -156,6 +162,11 @@ func (session *Session) WrapResponseReceived(response *http.Response) {
 	if response.Request != nil {
 		host = response.Request.Host
 		method = response.Request.Method
+	}
+	if requestID := strings.TrimSpace(response.Header.Get(newAPIRequestIDHeader)); validNewAPIRequestID(requestID) {
+		session.mu.Lock()
+		session.newAPIRequestID = stringPointer(requestID)
+		session.mu.Unlock()
 	}
 	stage := session.startStage(sqlite.StageResponseReceived, response.Proto, method, host, intPointer(response.StatusCode), contentLengthPointer(response.ContentLength), response.Header, hasBody(response.Body))
 	if stage != nil && hasBody(response.Body) {
@@ -286,6 +297,7 @@ func (session *Session) finish() error {
 	blockedBy := cloneString(session.blockedBy)
 	blockCode := cloneString(session.blockCode)
 	errorCode := cloneString(session.errorCode)
+	newAPIRequestID := cloneString(session.newAPIRequestID)
 	captureStatus := sqlite.CaptureComplete
 	if session.captureFault {
 		captureStatus = sqlite.CapturePartial
@@ -307,15 +319,16 @@ func (session *Session) finish() error {
 		}
 	}
 	finish := sqlite.AuditFinish{
-		AuditID:       session.auditID,
-		EndedAtNS:     endedAtNS,
-		StatusCode:    statusCode,
-		ForwardStatus: forwardStatus,
-		CaptureStatus: captureStatus,
-		ParseStatus:   parseStatus,
-		BlockedBy:     blockedBy,
-		BlockCode:     blockCode,
-		ErrorCode:     errorCode,
+		AuditID:         session.auditID,
+		EndedAtNS:       endedAtNS,
+		StatusCode:      statusCode,
+		ForwardStatus:   forwardStatus,
+		CaptureStatus:   captureStatus,
+		ParseStatus:     parseStatus,
+		BlockedBy:       blockedBy,
+		BlockCode:       blockCode,
+		ErrorCode:       errorCode,
+		NewAPIRequestID: newAPIRequestID,
 	}
 	if err := session.store.FinishAudit(session.writeCtx, finish); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
@@ -324,6 +337,9 @@ func (session *Session) finish() error {
 		session.logCaptureFailure("", "finish_audit_failed")
 	} else if parseStatus == sqlite.ParsePending && session.notify != nil {
 		_ = session.notify(session.auditID)
+	}
+	if newAPIRequestID != nil && session.callerNotify != nil && len(writeErrors) == 0 {
+		_ = session.callerNotify(session.auditID)
 	}
 	terminalErrorCode := valueOrEmpty(errorCode)
 	if len(writeErrors) != 0 && terminalErrorCode == "" {
@@ -605,4 +621,9 @@ func valueOrEmpty(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func validNewAPIRequestID(value string) bool {
+	return value != "" && len(value) <= 128 && strings.TrimSpace(value) == value &&
+		!strings.ContainsAny(value, "\x00\r\n")
 }

@@ -29,9 +29,9 @@ import (
 )
 
 const (
-	shutdownTimeout                   = 30 * time.Second
-	newAPITokenCatalogRefreshInterval = 5 * time.Minute
-	newAPIManagementTimeout           = 10 * time.Second
+	shutdownTimeout                  = 30 * time.Second
+	newAPIUserCatalogRefreshInterval = 5 * time.Minute
+	newAPIManagementTimeout          = 10 * time.Second
 )
 
 // App owns the stage-one data-plane HTTP server.
@@ -40,18 +40,20 @@ type App struct {
 	adminServer  *web.Server
 	adminAddress string
 	parserWorker *parser.Worker
+	callerWorker *newapi.Worker
 	retention    *retention.Runner
 	auditSink    audit.Sink
 	auditManager *audit.Manager
 	auditStore   *sqlite.Store
 	cipher       security.Cipher
-	tokenCatalog *newapi.Catalog
+	newAPIClient *newapi.Client
 	mode         string
 	logger       *slog.Logger
 
-	tokenRefreshInterval time.Duration
+	userRefreshInterval time.Duration
 
 	parserHealthy atomic.Bool
+	callerHealthy atomic.Bool
 	closeOnce     sync.Once
 	closeErr      error
 }
@@ -86,9 +88,9 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	tokenCatalog, err := assembleNewAPITokenCatalog(configuration.NewAPI, upstreamProxy)
+	newAPIClient, err := assembleNewAPIClient(configuration.NewAPI, upstreamProxy)
 	if err != nil {
-		return nil, fmt.Errorf("assemble NewAPI token catalog: %w", err)
+		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)
 	}
 
 	runtime := assembleAudit(configuration, logger)
@@ -108,14 +110,11 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		auditManager: runtime.manager,
 		auditStore:   runtime.store,
 		cipher:       runtime.cipher,
-		tokenCatalog: tokenCatalog,
+		newAPIClient: newAPIClient,
 		mode:         configuration.Mode,
 		logger:       logger,
 
-		tokenRefreshInterval: newAPITokenCatalogRefreshInterval,
-	}
-	if runtime.manager != nil && tokenCatalog != nil {
-		runtime.manager.SetTokenResolver(newAPITokenResolver{catalog: tokenCatalog})
+		userRefreshInterval: newAPIUserCatalogRefreshInterval,
 	}
 
 	var queryService *query.Service
@@ -133,6 +132,16 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		if runtime.manager != nil {
 			runtime.manager.SetCompletionNotifier(application.parserWorker.Notify)
 		}
+		if newAPIClient != nil {
+			application.callerWorker, err = newapi.NewWorker(runtime.store, newAPIClient, logger)
+			if err != nil {
+				_ = runtime.store.Close()
+				return nil, fmt.Errorf("assemble NewAPI caller worker: %w", err)
+			}
+			if runtime.manager != nil {
+				runtime.manager.SetCallerNotifier(application.callerWorker.Notify)
+			}
+		}
 	}
 	if runtime.store != nil && configuration.RetentionDays > 0 {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
@@ -145,7 +154,7 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
 		Query:      queryService,
-		Tokens:     tokenCatalog,
+		Users:      newAPIClient,
 		Assets:     web.EmbeddedAssets(),
 		Readiness:  application.readiness,
 		Logger:     logger,
@@ -167,8 +176,8 @@ func (application *App) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	defer application.closeComponents()
-	stopTokenCatalog := application.startTokenCatalog(ctx)
-	defer stopTokenCatalog()
+	stopUserCatalog := application.startUserCatalog(ctx)
+	defer stopUserCatalog()
 	if application.auditManager != nil {
 		application.auditManager.StartGapFlusher(ctx)
 	}
@@ -181,6 +190,13 @@ func (application *App) Run(ctx context.Context) error {
 			application.logger.Warn("parser worker unavailable", "error_category", "parser_start_failed")
 		} else {
 			application.parserHealthy.Store(true)
+		}
+	}
+	if application.callerWorker != nil {
+		if err := application.callerWorker.Start(ctx); err != nil {
+			application.logger.Warn("NewAPI caller worker unavailable", "error_category", "caller_worker_start_failed")
+		} else {
+			application.callerHealthy.Store(true)
 		}
 	}
 
@@ -243,39 +259,20 @@ func (application *App) Run(ctx context.Context) error {
 	return runErr
 }
 
-type newAPITokenResolver struct {
-	catalog *newapi.Catalog
-}
-
-func (resolver newAPITokenResolver) ResolveToken(request *http.Request) (audit.TokenMetadata, bool) {
-	if resolver.catalog == nil {
-		return audit.TokenMetadata{}, false
-	}
-	token, ok := resolver.catalog.LookupRequest(request)
-	if !ok {
-		return audit.TokenMetadata{}, false
-	}
-	return audit.TokenMetadata{
-		ID:        token.ID,
-		Name:      token.Name,
-		MaskedKey: token.MaskedKey,
-	}, true
-}
-
-func (application *App) startTokenCatalog(ctx context.Context) func() {
-	if application == nil || application.tokenCatalog == nil {
+func (application *App) startUserCatalog(ctx context.Context) func() {
+	if application == nil || application.newAPIClient == nil {
 		return func() {}
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	workerContext, cancel := context.WithCancel(ctx)
-	application.refreshTokenCatalog(workerContext)
+	application.refreshUserCatalog(workerContext)
 
 	done := make(chan struct{})
-	interval := application.tokenRefreshInterval
+	interval := application.userRefreshInterval
 	if interval <= 0 {
-		interval = newAPITokenCatalogRefreshInterval
+		interval = newAPIUserCatalogRefreshInterval
 	}
 	go func() {
 		defer close(done)
@@ -286,7 +283,7 @@ func (application *App) startTokenCatalog(ctx context.Context) func() {
 			case <-workerContext.Done():
 				return
 			case <-ticker.C:
-				application.refreshTokenCatalog(workerContext)
+				application.refreshUserCatalog(workerContext)
 			}
 		}
 	}()
@@ -300,18 +297,18 @@ func (application *App) startTokenCatalog(ctx context.Context) func() {
 	}
 }
 
-func (application *App) refreshTokenCatalog(ctx context.Context) {
-	if application == nil || application.tokenCatalog == nil {
+func (application *App) refreshUserCatalog(ctx context.Context) {
+	if application == nil || application.newAPIClient == nil {
 		return
 	}
-	if err := application.tokenCatalog.Refresh(ctx); err != nil {
-		application.logger.Warn("NewAPI token catalog refresh failed",
-			"error_category", "newapi_token_catalog_refresh_failed",
+	if err := application.newAPIClient.RefreshUsers(ctx); err != nil {
+		application.logger.Warn("NewAPI user catalog refresh failed",
+			"error_category", "newapi_user_catalog_refresh_failed",
 		)
 		return
 	}
-	application.logger.Info("NewAPI token catalog refreshed",
-		"token_count", len(application.tokenCatalog.List()),
+	application.logger.Info("NewAPI user catalog refreshed",
+		"user_count", len(application.newAPIClient.Snapshot().Users),
 	)
 }
 
@@ -332,6 +329,10 @@ func (application *App) closeComponents() error {
 		if application.parserWorker != nil {
 			application.parserWorker.Close()
 			application.parserHealthy.Store(false)
+		}
+		if application.callerWorker != nil {
+			application.callerWorker.Close()
+			application.callerHealthy.Store(false)
 		}
 		if application.auditManager != nil {
 			flushContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -354,6 +355,9 @@ func (application *App) readiness(context.Context) web.ReadyStatus {
 	if application.parserWorker != nil {
 		status.ParserQueue = application.parserWorker.QueueLength()
 	}
+	if application.callerWorker != nil {
+		status.CallerQueue = application.callerWorker.QueueLength()
+	}
 
 	auditHealthy := application.auditSink != nil && application.auditSink.Healthy()
 	if application.auditStore == nil || !application.auditStore.Healthy() {
@@ -373,6 +377,9 @@ func (application *App) readiness(context.Context) web.ReadyStatus {
 		return status
 	}
 	if application.parserWorker != nil && !application.parserHealthy.Load() {
+		status.Status = "degraded"
+	}
+	if application.callerWorker != nil && !application.callerHealthy.Load() {
 		status.Status = "degraded"
 	}
 	return status
@@ -401,7 +408,7 @@ func assembleDataPlane(configuration config.Config) (*url.URL, *url.URL, *routin
 	return target, upstreamProxy, matcher, engine, nil
 }
 
-func assembleNewAPITokenCatalog(configuration config.NewAPIConfig, upstreamProxy *url.URL) (*newapi.Catalog, error) {
+func assembleNewAPIClient(configuration config.NewAPIConfig, upstreamProxy *url.URL) (*newapi.Client, error) {
 	if configuration.AccessToken == "" {
 		return nil, nil
 	}
@@ -413,7 +420,7 @@ func assembleNewAPITokenCatalog(configuration config.NewAPIConfig, upstreamProxy
 	}
 	transport.ForceAttemptHTTP2 = true
 
-	return newapi.New(newapi.Config{
+	return newapi.NewClient(newapi.Config{
 		BaseURL:     configuration.URL,
 		AccessToken: configuration.AccessToken,
 		UserID:      configuration.UserID,

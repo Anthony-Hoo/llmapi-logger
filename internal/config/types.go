@@ -26,8 +26,8 @@ type Config struct {
 }
 
 // NewAPIConfig contains both the data-plane upstream settings and the
-// optional read-only dashboard credential used to synchronize masked token
-// metadata. AccessToken is never returned by the management API or logs.
+// optional administrator credential used for read-only global users and logs.
+// AccessToken is never returned by the management API, persisted, or logged.
 type NewAPIConfig struct {
 	URL         string `yaml:"url"`
 	ProxyURL    string `yaml:"proxy_url"`

@@ -40,6 +40,11 @@ const (
 	ParseError      = "error"
 	ParseSkipped    = "skipped"
 
+	CallerNone       = "none"
+	CallerPending    = "pending"
+	CallerResolved   = "resolved"
+	CallerUnresolved = "unresolved"
+
 	HeaderKindHeader  = "header"
 	HeaderKindTrailer = "trailer"
 
@@ -74,23 +79,28 @@ var stableBlockCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // AuditRecord is the parent row created before interceptor evaluation.
 type AuditRecord struct {
-	AuditID       string
-	StartedAtNS   int64
-	EndedAtNS     *int64
-	RouteID       string
-	Protocol      string
-	ParserName    string
-	Method        string
-	Path          string
-	RequestURIEnc []byte
-	Mode          string
-	StatusCode    *int
-	ForwardStatus string
-	CaptureStatus string
-	ParseStatus   string
-	BlockedBy     *string
-	BlockCode     *string
-	ErrorCode     *string
+	AuditID           string
+	StartedAtNS       int64
+	EndedAtNS         *int64
+	RouteID           string
+	Protocol          string
+	ParserName        string
+	Method            string
+	Path              string
+	RequestURIEnc     []byte
+	Mode              string
+	StatusCode        *int
+	ForwardStatus     string
+	CaptureStatus     string
+	ParseStatus       string
+	BlockedBy         *string
+	BlockCode         *string
+	ErrorCode         *string
+	NewAPIRequestID   *string
+	CallerStatus      string
+	CallerAttempts    int
+	CallerNextAtNS    *int64
+	CallerUpdatedAtNS *int64
 }
 
 // HTTPStage represents one actually observed proxy boundary. Missing stages
@@ -156,15 +166,33 @@ type AuditGap struct {
 	CreatedAtNS  int64
 }
 
-// TokenLink stores the non-secret NewAPI token snapshot associated with one
-// audit. MaskedKey must already be redacted by the source; this store never
-// accepts or derives the original credential.
+// TokenLink stores the non-secret NewAPI caller snapshot associated with one
+// audit. It contains identifiers and names from the system log, never a key.
 type TokenLink struct {
-	AuditID       string
-	NewAPITokenID int64
-	TokenName     string
-	MaskedKey     string
-	LinkedAtNS    int64
+	AuditID         string
+	NewAPIRequestID string
+	NewAPIUserID    int64
+	Username        string
+	NewAPITokenID   int64
+	TokenName       string
+	LinkedAtNS      int64
+	Attempts        int
+}
+
+// CallerLookup is one due caller-identification job read by the NewAPI worker.
+type CallerLookup struct {
+	AuditID   string
+	RequestID string
+	Attempts  int
+}
+
+// CallerRetry reschedules or terminates one caller lookup attempt.
+type CallerRetry struct {
+	AuditID         string
+	RequestID       string
+	Attempts        int
+	NextAttemptAtNS *int64
+	UpdatedAtNS     int64
 }
 
 // RetentionResult reports rows removed by one bounded writer transaction.
@@ -201,15 +229,16 @@ type StageFinish struct {
 // AuditFinish contains the terminal audit outcome. Rejected audits must carry
 // both BlockedBy and BlockCode and use ParseSkipped.
 type AuditFinish struct {
-	AuditID       string
-	EndedAtNS     int64
-	StatusCode    *int
-	ForwardStatus string
-	CaptureStatus string
-	ParseStatus   string
-	BlockedBy     *string
-	BlockCode     *string
-	ErrorCode     *string
+	AuditID         string
+	EndedAtNS       int64
+	StatusCode      *int
+	ForwardStatus   string
+	CaptureStatus   string
+	ParseStatus     string
+	BlockedBy       *string
+	BlockCode       *string
+	ErrorCode       *string
+	NewAPIRequestID *string
 }
 
 // Snapshot is a consistent encrypted evidence view used by integration and
@@ -231,6 +260,9 @@ func (record *AuditRecord) defaults() {
 	}
 	if record.ParseStatus == "" {
 		record.ParseStatus = ParsePending
+	}
+	if record.CallerStatus == "" {
+		record.CallerStatus = CallerNone
 	}
 }
 
@@ -265,7 +297,8 @@ func validateAuditRecord(record AuditRecord) error {
 	if record.Mode != "available" && record.Mode != "strict" {
 		return fmt.Errorf("sqlite: invalid audit mode %q", record.Mode)
 	}
-	if record.ForwardStatus != ForwardInProgress || record.BlockedBy != nil || record.BlockCode != nil || record.EndedAtNS != nil || record.StatusCode != nil || record.ErrorCode != nil {
+	if record.ForwardStatus != ForwardInProgress || record.BlockedBy != nil || record.BlockCode != nil || record.EndedAtNS != nil || record.StatusCode != nil || record.ErrorCode != nil ||
+		record.NewAPIRequestID != nil || record.CallerStatus != CallerNone || record.CallerAttempts != 0 || record.CallerNextAtNS != nil || record.CallerUpdatedAtNS != nil {
 		return errors.New("sqlite: BeginAudit requires an in-progress unblocked record")
 	}
 	if record.CaptureStatus != CapturePending || record.ParseStatus != ParsePending {
@@ -323,10 +356,11 @@ func validateAuditGap(gap AuditGap) error {
 }
 
 func validateTokenLink(link TokenLink) error {
-	if link.AuditID == "" || link.NewAPITokenID < 0 || link.LinkedAtNS <= 0 {
+	if link.AuditID == "" || !validRequestID(link.NewAPIRequestID) || link.NewAPIUserID <= 0 ||
+		link.NewAPITokenID < 0 || link.LinkedAtNS <= 0 || link.Attempts <= 0 {
 		return errors.New("sqlite: invalid token link identity or timestamp")
 	}
-	for _, value := range []string{link.TokenName, link.MaskedKey} {
+	for _, value := range []string{link.Username, link.TokenName} {
 		if len(value) > 512 || strings.ContainsRune(value, '\x00') {
 			return errors.New("sqlite: invalid token link snapshot")
 		}
@@ -386,6 +420,9 @@ func validateAuditFinish(finish AuditFinish) error {
 	if err := validateStatusCode(finish.StatusCode); err != nil {
 		return err
 	}
+	if finish.NewAPIRequestID != nil && !validRequestID(*finish.NewAPIRequestID) {
+		return errors.New("sqlite: invalid NewAPI request id")
+	}
 	if finish.ForwardStatus == ForwardRejected {
 		if finish.BlockedBy == nil || strings.TrimSpace(*finish.BlockedBy) == "" || finish.BlockCode == nil || !stableBlockCode.MatchString(*finish.BlockCode) {
 			return errors.New("sqlite: rejected audit requires stable blocked_by and block_code")
@@ -399,6 +436,21 @@ func validateAuditFinish(finish AuditFinish) error {
 		return errors.New("sqlite: non-rejected audit cannot contain block fields")
 	}
 	return nil
+}
+
+func validateCallerRetry(retry CallerRetry) error {
+	if retry.AuditID == "" || !validRequestID(retry.RequestID) || retry.Attempts <= 0 || retry.UpdatedAtNS <= 0 {
+		return errors.New("sqlite: invalid caller retry")
+	}
+	if retry.NextAttemptAtNS != nil && *retry.NextAttemptAtNS <= retry.UpdatedAtNS {
+		return errors.New("sqlite: caller retry must be scheduled in the future")
+	}
+	return nil
+}
+
+func validRequestID(value string) bool {
+	return value != "" && len(value) <= 128 && strings.TrimSpace(value) == value &&
+		!strings.ContainsAny(value, "\x00\r\n")
 }
 
 func validateBodyAggregate(observed, stored int64, digest []byte, hashComplete, eofSeen bool) error {
