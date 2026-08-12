@@ -46,8 +46,10 @@ func NewWithAudit(target *url.URL, matcher *routing.Matcher, engine *interceptor
 // nil for direct connections and never falls back to process environment
 // proxy variables.
 type Options struct {
-	Audit         audit.Sink
-	UpstreamProxy *url.URL
+	Audit                 audit.Sink
+	UpstreamProxy         *url.URL
+	ResponseHeaderTimeout time.Duration
+	PreserveHost          bool
 }
 
 // NewWithOptions returns the data-plane proxy with explicit optional
@@ -69,7 +71,7 @@ func NewWithOptions(target *url.URL, matcher *routing.Matcher, engine *intercept
 	}
 
 	handler.target = cloneURL(target)
-	handler.reverseProxy = newReverseProxy(handler.target, options.UpstreamProxy, logger)
+	handler.reverseProxy = newReverseProxy(handler.target, options, logger)
 	return handler
 }
 
@@ -77,6 +79,13 @@ func NewWithOptions(target *url.URL, matcher *routing.Matcher, engine *intercept
 // matching, interception, audit capture, or completion logging. Callers must
 // enforce the audited route boundary before dispatching requests here.
 func NewPassthrough(target, upstreamProxy *url.URL, logger *slog.Logger) http.Handler {
+	return NewPassthroughWithOptions(target, Options{UpstreamProxy: upstreamProxy}, logger)
+}
+
+// NewPassthroughWithOptions returns a transparent NewAPI reverse proxy that
+// shares the same upstream transport and Host rewrite settings as the audited
+// proxy while omitting audit-only dependencies.
+func NewPassthroughWithOptions(target *url.URL, options Options, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -85,7 +94,7 @@ func NewPassthrough(target, upstreamProxy *url.URL, logger *slog.Logger) http.Ha
 		passthrough.initializationError = errors.New("proxy: nil NewAPI passthrough target")
 		return passthrough
 	}
-	passthrough.reverseProxy = newReverseProxy(cloneURL(target), upstreamProxy, logger)
+	passthrough.reverseProxy = newReverseProxy(cloneURL(target), options, logger)
 	return passthrough
 }
 
@@ -288,17 +297,20 @@ func (h *handler) beginAudit(request *http.Request, match routing.Match) (*audit
 	return nil, true
 }
 
-func newReverseProxy(target, upstreamProxy *url.URL, logger *slog.Logger) *httputil.ReverseProxy {
+func newReverseProxy(target *url.URL, options Options, logger *slog.Logger) *httputil.ReverseProxy {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	if upstreamProxy != nil {
-		transport.Proxy = http.ProxyURL(cloneURL(upstreamProxy))
+	if options.UpstreamProxy != nil {
+		transport.Proxy = http.ProxyURL(cloneURL(options.UpstreamProxy))
 	}
 	transport.DisableCompression = true
 	transport.ForceAttemptHTTP2 = true
 	transport.MaxIdleConns = 128
 	transport.MaxIdleConnsPerHost = 64
-	transport.ResponseHeaderTimeout = 5 * time.Minute
+	transport.ResponseHeaderTimeout = options.ResponseHeaderTimeout
+	if transport.ResponseHeaderTimeout <= 0 {
+		transport.ResponseHeaderTimeout = 5 * time.Minute
+	}
 
 	return &httputil.ReverseProxy{
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
@@ -308,6 +320,9 @@ func newReverseProxy(target, upstreamProxy *url.URL, logger *slog.Logger) *httpu
 			outbound.URL.Scheme = target.Scheme
 			outbound.URL.Host = target.Host
 			outbound.Host = target.Host
+			if options.PreserveHost {
+				outbound.Host = inbound.Host
+			}
 			outbound.Method = inbound.Method
 			outbound.URL.Path = inbound.URL.Path
 			outbound.URL.RawPath = inbound.URL.RawPath
@@ -316,6 +331,8 @@ func newReverseProxy(target, upstreamProxy *url.URL, logger *slog.Logger) *httpu
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Real-IP")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-For")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Proto")
+			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Host")
+			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Port")
 			if session, ok := audit.SessionFromContext(inbound.Context()); ok {
 				session.WrapRequestSent(outbound)
 			}

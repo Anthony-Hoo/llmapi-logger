@@ -23,11 +23,17 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.NewAPI.ProxyURL != "" {
 		t.Fatalf("NewAPI.ProxyURL = %q, want direct connection", cfg.NewAPI.ProxyURL)
 	}
+	if cfg.NewAPI.ResponseHeaderTimeoutSeconds != DefaultNewAPIResponseHeaderTimeoutSecs || cfg.NewAPI.PreserveHost {
+		t.Fatalf("NewAPI transport defaults = timeout:%d preserve_host:%v", cfg.NewAPI.ResponseHeaderTimeoutSeconds, cfg.NewAPI.PreserveHost)
+	}
 	if cfg.DBPath != DefaultDBPath || cfg.KeyPath != DefaultKeyPath {
 		t.Fatalf("data path defaults = %q, %q", cfg.DBPath, cfg.KeyPath)
 	}
 	if cfg.RetentionDays != DefaultRetentionDays {
 		t.Fatalf("RetentionDays = %d, want %d", cfg.RetentionDays, DefaultRetentionDays)
+	}
+	if cfg.ShutdownTimeoutSeconds != DefaultShutdownTimeoutSecs {
+		t.Fatalf("ShutdownTimeoutSeconds = %d, want %d", cfg.ShutdownTimeoutSeconds, DefaultShutdownTimeoutSecs)
 	}
 	if cfg.Interceptors == nil || cfg.Routes == nil {
 		t.Fatal("map and slice defaults must be non-nil")
@@ -41,12 +47,15 @@ admin_listen: 127.0.0.1:18081
 newapi:
   url: https://newapi.example:8443
   proxy_url: http://proxy.example:7897
+  response_header_timeout_seconds: 3900
+  preserve_host: true
   access_token: management-secret
   user_id: 42
 mode: strict
 db_path: ./state/audit.db
 key_path: ./state/audit.key
 admin_token: secret
+shutdown_timeout_seconds: 3900
 retention_days: 0
 interceptors:
   credential:
@@ -78,6 +87,9 @@ routes:
 	}
 	if cfg.NewAPI.ProxyURL != "http://proxy.example:7897" || cfg.NewAPI.AccessToken != "management-secret" || cfg.NewAPI.UserID != 42 {
 		t.Fatalf("NewAPI = %+v", cfg.NewAPI)
+	}
+	if cfg.NewAPI.ResponseHeaderTimeoutSeconds != 3900 || !cfg.NewAPI.PreserveHost || cfg.ShutdownTimeoutSeconds != 3900 {
+		t.Fatalf("timeouts/Host = upstream:%d preserve:%v shutdown:%d", cfg.NewAPI.ResponseHeaderTimeoutSeconds, cfg.NewAPI.PreserveHost, cfg.ShutdownTimeoutSeconds)
 	}
 	if got := cfg.Interceptors["body-limit"].Config["max_bytes"]; got != 1048576 {
 		t.Fatalf("max_bytes = %#v", got)

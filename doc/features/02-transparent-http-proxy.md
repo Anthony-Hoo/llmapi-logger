@@ -25,7 +25,7 @@ internal/app/data_plane.go
 
 app 的 data-plane handler 只负责三态分发。proxy 提供 audited handler 和 passthrough handler；两者共享 Rewrite、Transport、BufferPool、SSE flush 和错误处理，只有 audited handler 依赖 routing、interceptor 与 audit 接口。proxy 不执行 SQL，不调用协议 parser。默认路径不完整缓冲 Body；只有 LLM route 显式启用 body interceptor 时，才允许按模块声明的上限预读一次。
 
-从 http.DefaultTransport.Clone 创建 Transport。`newapi.proxy_url` 为空时固定 `Proxy=nil`；非空时使用解析后的显式 HTTP(S) proxy URL。两种情况都不使用 ProxyFromEnvironment。其余固定 DisableCompression=true、ForceAttemptHTTP2=true、MaxIdleConns=128、MaxIdleConnsPerHost=64、ResponseHeaderTimeout=5min。
+从 http.DefaultTransport.Clone 创建 Transport。`newapi.proxy_url` 为空时固定 `Proxy=nil`；非空时使用解析后的显式 HTTP(S) proxy URL。两种情况都不使用 ProxyFromEnvironment。其余固定 DisableCompression=true、ForceAttemptHTTP2=true、MaxIdleConns=128、MaxIdleConnsPerHost=64；ResponseHeaderTimeout 来自 `newapi.response_header_timeout_seconds`，默认 300 秒。
 
 ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB BufferPool 和 FlushInterval=-1。禁止 httputil.DumpRequest、DumpResponse，以及对未限长 Body 直接使用 io.ReadAll；body interceptor 只能通过统一 helper 读取 `limit+1` 的有界数据。
 
@@ -33,7 +33,7 @@ ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB
 
 按顺序执行：
 
-1. Scheme、URL.Host 和 Out.Host 设置为配置的 `newapi.url`。
+1. Scheme 与 URL.Host 设置为配置的 `newapi.url`；Out.Host 默认使用上游 Host，`preserve_host=true` 时保留入站 Host。
 2. Path、RawPath、RawQuery、ForceQuery 从入站请求原样复制。
 3. 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 4. 不调用 ParseForm 或 url.Values.Encode。
@@ -41,7 +41,7 @@ ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB
 
 显式代理只改变 Transport 建立到 `newapi.url` 的网络路径，不参与 Rewrite，也不能扩大 LLM API 白名单或 passthrough 范围。`newapi.url` 为 HTTPS 时由 Transport 通过 HTTP(S) 代理执行 CONNECT，目标 Scheme、Host、Path、Query 和请求 Body 仍遵循上述规则。
 
-Nginx 应覆盖 X-Real-IP、X-Forwarded-For、X-Forwarded-Proto。代理只把它们当普通加密证据，不用于鉴权。
+Nginx 应覆盖 X-Real-IP、X-Forwarded-For、X-Forwarded-Proto、X-Forwarded-Host、X-Forwarded-Port。代理只把它们当普通加密证据，不用于鉴权。
 
 ## 4. 入站 interceptor chain
 
@@ -135,7 +135,7 @@ Unwrap 返回真实 writer，使 http.ResponseController 能发现 Flusher。不
 
 ## 9. SSE、错误与取消
 
-FlushInterval=-1，wrapper 保持 Flush；原始 chunk 不是 SSE event，parser 只能异步拼接。默认不设置 WriteTimeout，关闭服务时使用 30 秒 graceful shutdown。
+FlushInterval=-1，wrapper 保持 Flush；原始 chunk 不是 SSE event，parser 只能异步拼接。默认不设置 WriteTimeout，关闭服务时使用 `shutdown_timeout_seconds` 控制的 graceful shutdown，默认 30 秒。
 
 | 场景 | 行为 |
 | --- | --- |

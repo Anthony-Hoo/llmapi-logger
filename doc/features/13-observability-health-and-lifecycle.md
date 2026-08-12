@@ -83,7 +83,7 @@ DB 暂时写失败后，后续 writer 事务成功时可以补写内存中的聚
 
 NewAPI 管理集成包含两个轻量后台任务：用户目录在监听前刷新一次，之后每五分钟刷新；caller worker 单 goroutine 扫描 SQLite pending 行，按 request ID 做有限重试。目录失败保留旧快照，pending 任务可跨重启恢复；两者都不重建数据面组件，也不改变已完成请求的结果。
 
-收到 SIGINT/SIGTERM 后停止接收新请求，在固定关闭窗口内尽量完成在途代理、parser 和 writer 队列，然后关闭 HTTP server 与 SQLite。超时退出留下的记录由下次启动恢复为 interrupted/partial。
+收到 SIGINT/SIGTERM 后停止接收新请求，在 `shutdown_timeout_seconds` 配置的关闭窗口内尽量完成在途代理、parser 和 writer 队列，然后关闭 HTTP server 与 SQLite；默认 30 秒，长流部署可提高到与最长请求策略一致。超时退出留下的记录由下次启动恢复为 interrupted/partial。
 
 ## 7. 最少测试
 

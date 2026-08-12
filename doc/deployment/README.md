@@ -37,7 +37,7 @@ bin/audit-proxy-windows-amd64.exe
 bin/audit-proxy-linux-amd64
 ~~~
 
-宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
+宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。若 NewAPI 允许长时间等待首包，将 `newapi.response_header_timeout_seconds` 设置为高于 NewAPI 自身超时，并同步提高 `shutdown_timeout_seconds`、Nginx read/send timeout 与容器 stop grace period。只有需要让 NewAPI 继续观察公网域名时才启用 `newapi.preserve_host`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
 
 启动前可以只校验配置：
 
@@ -88,6 +88,8 @@ audit-proxy 默认直接连接 `newapi.url`，不会读取 `HTTP_PROXY`、`HTTPS
 newapi:
   url: https://newapi.example.com
   proxy_url: http://127.0.0.1:7897
+  response_header_timeout_seconds: 300
+  preserve_host: false
   access_token: ""
   user_id: 0
 ~~~
@@ -119,6 +121,8 @@ newapi:
 newapi:
   url: https://newapi.example.com
   proxy_url: ""
+  response_header_timeout_seconds: 300
+  preserve_host: false
   access_token: ""
   user_id: 0
 ~~~
@@ -147,7 +151,7 @@ newapi:
 
 Gemini 的 `<model>` 只允许字母、数字、点、下划线和连字符。`/v1/models` 等安全非 LLM 路径由 passthrough 转发；相同 LLM 路径的非 POST、受保护路径家族、编码近似和危险路径固定返回 404。
 
-公共代理片段明确关闭请求/响应 buffering、cache、gzip 和 upstream retry。`proxy_pass` 没有 URI 后缀，因此保留原 Path 和 Query。转发身份 Header 由边缘 Nginx 覆盖，不接受客户端伪造的 `X-Forwarded-For` 或 `Forwarded` 值。
+公共代理片段明确关闭请求/响应 buffering、cache、gzip 和 upstream retry。`proxy_pass` 没有 URI 后缀，因此保留原 Path 和 Query。转发身份 Header 由边缘 Nginx 覆盖，不接受客户端伪造的 `X-Forwarded-For` 或 `Forwarded` 值。示例 read/send timeout 为 `65m`，用于覆盖最高 `3900s` 的长流部署；实际值必须不短于应用的响应头等待策略。
 
 配置变更后应在实际部署环境执行：
 

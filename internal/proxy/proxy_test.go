@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
@@ -39,6 +41,8 @@ func TestRewriteCopiesControlledForwardingHeaders(t *testing.T) {
 	request.Header.Add("X-Forwarded-For", "192.0.2.10")
 	request.Header.Add("X-Forwarded-For", "198.51.100.20")
 	request.Header.Add("X-Forwarded-Proto", "https")
+	request.Header.Add("X-Forwarded-Host", "api.example.com")
+	request.Header.Add("X-Forwarded-Port", "443")
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -50,6 +54,54 @@ func TestRewriteCopiesControlledForwardingHeaders(t *testing.T) {
 	assertHeaderValues(t, headers, "X-Real-IP", []string{"192.0.2.10"})
 	assertHeaderValues(t, headers, "X-Forwarded-For", []string{"192.0.2.10", "198.51.100.20"})
 	assertHeaderValues(t, headers, "X-Forwarded-Proto", []string{"https"})
+	assertHeaderValues(t, headers, "X-Forwarded-Host", []string{"api.example.com"})
+	assertHeaderValues(t, headers, "X-Forwarded-Port", []string{"443"})
+}
+
+func TestPreserveHostAppliesToAuditedAndPassthrough(t *testing.T) {
+	observedHosts := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		observedHosts <- request.Host
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse target URL: %v", err)
+	}
+	matcher, err := routing.Compile(defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile matcher: %v", err)
+	}
+	engine, err := interceptor.NewEngine(nil, defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile interceptor engine: %v", err)
+	}
+	options := Options{PreserveHost: true}
+	handlers := []struct {
+		name    string
+		handler http.Handler
+		method  string
+		path    string
+	}{
+		{name: "audited", handler: NewWithOptions(target, matcher, engine, options, nil), method: http.MethodPost, path: "/v1/chat/completions"},
+		{name: "passthrough", handler: NewPassthroughWithOptions(target, options, nil), method: http.MethodGet, path: "/v1/models"},
+	}
+	for _, test := range handlers {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, "http://audit-proxy"+test.path, http.NoBody)
+			request.Host = "api.example.com"
+			response := httptest.NewRecorder()
+			test.handler.ServeHTTP(response, request)
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+			}
+			if got := <-observedHosts; got != "api.example.com" {
+				t.Fatalf("upstream Host = %q, want preserved public Host", got)
+			}
+		})
+	}
 }
 
 func TestTransportUsesOnlyExplicitUpstreamProxy(t *testing.T) {
@@ -73,6 +125,9 @@ func TestTransportUsesOnlyExplicitUpstreamProxy(t *testing.T) {
 	}
 	if directTransport.Proxy != nil {
 		t.Fatal("direct transport unexpectedly uses a proxy function")
+	}
+	if directTransport.ResponseHeaderTimeout != 5*time.Minute {
+		t.Fatalf("default response header timeout = %s, want 5m", directTransport.ResponseHeaderTimeout)
 	}
 
 	matcher, err := routing.Compile(defaultTestRoutes())
@@ -99,6 +154,68 @@ func TestTransportUsesOnlyExplicitUpstreamProxy(t *testing.T) {
 	}
 	if got.String() != "http://proxy.example:7897" {
 		t.Fatalf("proxy URL = %q, want explicit immutable URL", got)
+	}
+}
+
+func TestConfiguredTransportOptionsAreSharedByAuditedAndPassthrough(t *testing.T) {
+	target, err := url.Parse("http://newapi.example")
+	if err != nil {
+		t.Fatalf("parse target URL: %v", err)
+	}
+	matcher, err := routing.Compile(defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile matcher: %v", err)
+	}
+	engine, err := interceptor.NewEngine(nil, defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile interceptor engine: %v", err)
+	}
+	options := Options{ResponseHeaderTimeout: 65 * time.Minute, PreserveHost: true}
+	audited := NewWithOptions(target, matcher, engine, options, nil).(*handler)
+	passthrough := NewPassthroughWithOptions(target, options, nil).(*passthroughHandler)
+
+	for name, reverseProxy := range map[string]*httputil.ReverseProxy{
+		"audited":     audited.reverseProxy,
+		"passthrough": passthrough.reverseProxy,
+	} {
+		transport, ok := reverseProxy.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("%s transport type = %T", name, reverseProxy.Transport)
+		}
+		if transport.ResponseHeaderTimeout != 65*time.Minute {
+			t.Errorf("%s response header timeout = %s, want 65m", name, transport.ResponseHeaderTimeout)
+		}
+	}
+}
+
+func TestConfiguredResponseHeaderTimeoutReturnsGatewayTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse target URL: %v", err)
+	}
+	matcher, err := routing.Compile(defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile matcher: %v", err)
+	}
+	engine, err := interceptor.NewEngine(nil, defaultTestRoutes())
+	if err != nil {
+		t.Fatalf("compile interceptor engine: %v", err)
+	}
+	handler := NewWithOptions(target, matcher, engine, Options{ResponseHeaderTimeout: 20 * time.Millisecond}, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody))
+
+	if response.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want %d; body=%q", response.Code, http.StatusGatewayTimeout, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"code":"newapi_timeout"`) {
+		t.Fatalf("body = %q, want stable timeout JSON", response.Body.String())
 	}
 }
 

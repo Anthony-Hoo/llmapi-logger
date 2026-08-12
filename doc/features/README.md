@@ -66,7 +66,7 @@ strict 只保证请求开始时 fail-closed。通过 admission 后仍可能遇�
 
 ## 5. 数据面分发、代理与 Trailer
 
-审计代理和 passthrough 都使用 net/http/httputil.ReverseProxy、同一套 Rewrite 与显式 HTTP(S) 上游代理设置，固定保留 Path、RawPath、RawQuery、ForceQuery，出站目标与 Host 使用 `newapi.url`。审计分支额外安装 audit wrapper 和 interceptor；passthrough 不创建 audit、不解析，也不写 LLM 请求完成日志。
+审计代理和 passthrough 都使用 net/http/httputil.ReverseProxy、同一套 Rewrite、响应头超时、Host 策略与显式 HTTP(S) 上游代理设置，固定保留 Path、RawPath、RawQuery、ForceQuery。出站连接目标使用 `newapi.url`，Host 默认使用该 URL，也可由 `preserve_host` 保留入站值。审计分支额外安装 audit wrapper 和 interceptor；passthrough 不创建 audit、不解析，也不写 LLM 请求完成日志。
 
 分发器只允许规范且与受保护 LLM 路径族无关的未匹配请求直通，例如 `GET /v1/models`。配置 exact 路径及其后代、template 路径前缀家族、错误 Method、percent/double encoding 等价路径，以及尾随斜杠、重复斜杠、反斜杠、encoded slash 和 dot segment 等危险形式统一进入 fail-closed 分支并返回 404。
 
@@ -74,7 +74,7 @@ Go 客户端直连代理时可捕获 request Trailer；经过 Nginx 后不保证
 
 ## 6. 配置与固定默认值
 
-YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、成对可选 access_token/user_id）、mode、db_path、key_path、必填 admin_token、retention_days、interceptors 和 routes。`newapi.proxy_url` 为空时强制直连，不读取环境代理；access_token/user_id 配置后只读同步全站安全用户字段，并按上游 request ID 查询全站日志。完整格式见 [01](01-configuration-and-route-boundary.md)。
+YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、response_header_timeout_seconds、preserve_host、成对可选 access_token/user_id）、mode、db_path、key_path、必填 admin_token、shutdown_timeout_seconds、retention_days、interceptors 和 routes。`newapi.proxy_url` 为空时强制直连，不读取环境代理；access_token/user_id 配置后只读同步全站安全用户字段，并按上游 request ID 查询全站日志。完整格式见 [01](01-configuration-and-route-boundary.md)。
 
 | 项目 | 固定默认值 |
 | --- | --- |
@@ -85,7 +85,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、成�
 | SQLite | WAL、synchronous=FULL、busy_timeout=5000 |
 | parser workers | 1 |
 | NewAPI 管理读取 | 10 秒请求超时；用户目录每 5 分钟刷新；调用者单 worker 有限重试 |
-| retention / shutdown | 30 天 / 30 秒 |
+| retention / shutdown | 30 天 / 30 秒（关闭时长可配置） |
 
 宿主机同机部署建议把数据面改为 127.0.0.1:8080；容器部署用内部网络和 ACL 只允许 Nginx 访问。
 

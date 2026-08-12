@@ -62,6 +62,58 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	}
 }
 
+func TestNewUsesConfiguredHostAndTimeoutOptions(t *testing.T) {
+	observedHosts := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		observedHosts <- request.Host
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	configuration := config.Default()
+	configuration.NewAPI.URL = upstream.URL
+	configuration.NewAPI.ResponseHeaderTimeoutSeconds = 3900
+	configuration.NewAPI.PreserveHost = true
+	configuration.ShutdownTimeoutSeconds = 3900
+	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
+	configuration.Routes = []config.RouteConfig{{
+		ID:     "chat",
+		Method: http.MethodPost,
+		Path:   "/v1/chat/completions",
+		Match:  "exact",
+		Parser: "openai.chat_completions",
+	}}
+	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("new application: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := application.Close(); err != nil {
+			t.Errorf("close application: %v", err)
+		}
+	})
+	if application.shutdownTimeout != 65*time.Minute {
+		t.Fatalf("shutdown timeout = %s, want 65m", application.shutdownTimeout)
+	}
+
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody),
+		httptest.NewRequest(http.MethodGet, "http://audit-proxy/v1/models", http.NoBody),
+	} {
+		request.Host = "api.example.com"
+		response := httptest.NewRecorder()
+		application.server.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+		}
+		if got := <-observedHosts; got != "api.example.com" {
+			t.Fatalf("upstream Host = %q, want preserved public Host", got)
+		}
+	}
+}
+
 func TestNewRoutesNewAPIRequestsThroughConfiguredProxy(t *testing.T) {
 	observed := make(chan *http.Request, 1)
 	upstreamProxy := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
