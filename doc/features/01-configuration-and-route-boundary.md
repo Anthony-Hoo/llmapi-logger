@@ -62,7 +62,7 @@ routes:
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | SQLite busy timeout | 5 s |
 | parser workers | 1 |
-| NewAPI Token API timeout / refresh | 10 s / 5 min |
+| NewAPI 管理请求 / 用户目录刷新 | 10 s / 5 min |
 | graceful shutdown | 30 s |
 
 新增调优项前必须先有基准或故障测试证明需要。
@@ -136,7 +136,7 @@ Nginx 示例把全部 NewAPI 数据面请求交给本进程，分发器按以下
 - `newapi.proxy_url` 只控制本程序到 `newapi.url` 的 Transport；它不改变目标 URL、Host、审计阶段或路由边界。
 - `newapi.proxy_url` 为空时固定直连，不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`；非空时所有 NewAPI 请求都经过该显式 HTTP(S) 代理，HTTPS 目标使用标准 CONNECT。
 
-`newapi.access_token` 与 `newapi.user_id` 配置后，程序使用同一 `newapi.url` 和显式代理只读同步 NewAPI 已打码的 Token 目录。启动监听前尝试刷新一次，之后每五分钟刷新；失败只记录安全 warning，并保留上一份成功快照，不影响审计代理或 passthrough。该管理凭证不参与客户端 LLM 请求鉴权，也不得返回到管理 API 或日志。两项都留空/0 时完全关闭 Token 目录同步。
+`newapi.access_token` 与 `newapi.user_id` 配置后，程序使用同一 `newapi.url` 和显式代理执行两类只读管理请求：每五分钟同步全站用户的安全字段，以及按 LLM 响应中的 `X-Oneapi-Request-Id` 查询全站日志并回填调用者身份。失败只记录安全 warning，不影响审计代理、passthrough 或已完成的响应。该管理凭证不参与客户端 LLM 请求鉴权，也不得返回到管理 API、数据库或日志。两项都留空/0 时完全关闭 NewAPI 调用者识别。
 
 首版不提供 preserve/explicit Host 模式、SOCKS/PAC 或带凭据的代理 URL。
 
@@ -169,7 +169,7 @@ admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情
 - unknown YAML、重复 id、重叠模板。
 - `newapi.url` 带 path/query/userinfo。
 - `newapi.proxy_url` 的空值直连、合法 HTTP(S) 代理，以及 userinfo/path/query/fragment/非法端口负例。
-- `newapi.access_token`/`newapi.user_id` 成对校验；关闭时不创建目录同步器，启用时只读同步已打码 Token。
+- `newapi.access_token`/`newapi.user_id` 成对校验；关闭时不创建管理客户端，启用时只能读取安全用户目录和精确 request-id 日志。
 - 环境中设置 `HTTP_PROXY`/`HTTPS_PROXY` 时，空 `newapi.proxy_url` 仍直连；显式配置时 Fake NewAPI 只能通过 Fake Proxy 收到请求。
 - available DB 失败仍转发。
 - strict key/DB 不健康返回 503，Fake NewAPI 未收到请求。

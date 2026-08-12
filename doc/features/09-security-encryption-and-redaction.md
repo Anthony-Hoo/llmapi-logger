@@ -20,7 +20,7 @@
 
 ## 3. 配置
 
-本模块不增加独立配置。直接使用模块 01 的 `admin_listen`、`admin_token` 和 `key_path`；配置校验必须拒绝空值和包含空白字符的 `admin_token`，不因监听地址是 loopback 而放宽。可选的 `newapi.access_token` 与 `newapi.user_id` 只用于只读同步 NewAPI 已打码 Token 目录，必须成对配置；access token 是配置 secret，只保留在进程内存和受限配置文件中，不进入管理 API、审计库或普通日志。
+本模块不增加独立配置。直接使用模块 01 的 `admin_listen`、`admin_token` 和 `key_path`；配置校验必须拒绝空值和包含空白字符的 `admin_token`，不因监听地址是 loopback 而放宽。可选的 `newapi.access_token` 与 `newapi.user_id` 只用于读取 NewAPI 全站安全用户目录和按 request ID 查询全站日志，必须成对配置；access token 是配置 secret，只保留在进程内存和受限配置文件中，不进入管理 API、审计库或普通日志。
 
 日志固定脱敏 Authorization、Proxy-Authorization、X-API-Key、x-goog-api-key，以及 Query 中的 key、api_key、access_token；首版不把这组规则做成可配置策略。admin_token 和主密钥不得通过普通日志或配置回显返回。
 
@@ -94,7 +94,7 @@ type Cipher interface {
 }
 ~~~
 
-调用方只把返回的完整 BLOB 写入上述四类 `*_enc` 字段。token_links 只保存 NewAPI token id、名称和服务端已打码的 `masked_key` 快照，不保存原始 token key；audit_gaps 只保存非敏感时间范围、原因和计数。
+调用方只把返回的完整 BLOB 写入上述四类 `*_enc` 字段。`audit_records` 和 `token_links` 只保存 NewAPI request ID、用户 ID/用户名、Token ID/名称和重试状态，不保存用户 API Key；旧 `masked_key` 列仅用于数据库迁移兼容且新写入恒为空。audit_gaps 只保存非敏感时间范围、原因和计数。
 
 ## 8. 管理证据与脱敏规则
 
@@ -104,7 +104,7 @@ type Cipher interface {
 - 原始 request/response Body 只在用户显式请求对应 raw API 时逐块认证解密；UI 不自动加载大 Body。
 - React 页面可用详情字段重建应用层 HTTP 起始行和 Header/Trailer 视图，但不宣称恢复 TCP、TLS、HTTP/2 frame、原始 Header 大小写/顺序或 chunk framing。
 - Query 中配置为敏感的键在日志中只保留键名。
-- Token 关联只落 `newapi_token_id`、`token_name`、`masked_key`，不落 NewAPI 原始 token key；Token 目录管理 access token 也不得出现在响应、数据库或日志中。
+- 调用者关联只落 `newapi_request_id`、`newapi_user_id`、`username`、`newapi_token_id`、`token_name` 和状态/时间；用户 API Key 与 NewAPI 管理 access token 均不得出现在响应、数据库或日志中。
 - 错误日志只记录 `audit_id`、组件和错误类别，不记录明文或密文 BLOB。
 
 ## 9. 故障行为
@@ -130,7 +130,7 @@ type Cipher interface {
 - 相同明文重复加密得到不同 BLOB，且都可解密。
 - 篡改 nonce、ciphertext、tag 或 AAD 后解密失败。
 - 扫描 DB、WAL、日志确认没有测试凭据和 Body 明文。
-- NewAPI Token 目录同步只暴露服务端已打码字段；配置 access token 不出现在管理 API、审计库、错误或日志中。
+- NewAPI 用户目录只暴露安全用户字段，调用者解析只暴露 request ID 与用户/Token 元数据；配置 access token 和用户 API Key 不出现在管理 API、审计库、错误或日志中。
 - 删除 key 后不得生成替代 key；available 只做代理，strict 返回 `503`。
 - available 加密失败只产生 gap，不影响已开始的字节转发。
 - 备份同时包含数据库、WAL 状态处理方式和 key 文件。

@@ -5,8 +5,8 @@ newapi:
   # Podman/WSL host-network example for a Windows loopback proxy:
   # proxy_url: http://127.0.0.1:7897
   proxy_url: ""
-  # Optional read-only NewAPI dashboard credential used to synchronize the
-  # already-masked token catalog. Set both fields or leave both empty/zero.
+  # Optional NewAPI administrator credential used only for read-only global
+  # user and request-log queries. Set both fields or leave both empty/zero.
   access_token: ""
   user_id: 0
 mode: available

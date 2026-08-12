@@ -37,7 +37,7 @@ bin/audit-proxy-windows-amd64.exe
 bin/audit-proxy-linux-amd64
 ~~~
 
-宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。如需按 API Key 展示和筛选审计记录，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于只读同步 NewAPI 已打码 Token 目录。配置文件和 `audit.key` 只应允许运行账户读取。
+宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
 
 启动前可以只校验配置：
 
@@ -58,7 +58,7 @@ bin/audit-proxy-linux-amd64
 - audit-proxy 数据端和 NewAPI 只存在于 Compose 私有 bridge 网络，没有 host 端口；NewAPI 仍可访问外部模型供应商。
 - audit 数据和 NewAPI 数据使用不同 volume。
 
-首次启动前编辑 `configs/audit-proxy.docker.yaml`，把示例 `admin_token` 替换为随机长 token，并限制文件权限。需要 Token 目录时同时填写 `newapi.access_token` 和正整数 `newapi.user_id`；两项都留空/0 时关闭该功能。正式使用时也应把 `compose.yaml` 中的 NewAPI 镜像固定到自己验证过的 tag 或 digest。
+首次启动前编辑 `configs/audit-proxy.docker.yaml`，把示例 `admin_token` 替换为随机长 token，并限制文件权限。需要 NewAPI 调用者识别时同时填写 `newapi.access_token` 和正整数 `newapi.user_id`；两项都留空/0 时关闭该功能。正式使用时也应把 `compose.yaml` 中的 NewAPI 镜像固定到自己验证过的 tag 或 digest。
 
 ~~~bash
 docker compose build audit-proxy
@@ -123,13 +123,13 @@ newapi:
   user_id: 0
 ~~~
 
-该代理用于 audit-proxy 到 `newapi.url` 的全部出站请求，包括审计分支、passthrough 和可选的 Token 目录同步；只有配置 LLM route 会创建 audit。它不会配置 NewAPI 到模型供应商的出口。首版不支持 SOCKS、PAC、代理凭据或环境变量自动发现。修改后重启 audit-proxy，再分别验证一条带有效上游凭据的 LLM 请求和一个 `/v1/models` passthrough 请求。
+该代理用于 audit-proxy 到 `newapi.url` 的全部出站请求，包括审计分支、passthrough、安全用户目录和 request-id 日志查询；只有配置 LLM route 会创建 audit。它不会配置 NewAPI 到模型供应商的出口。首版不支持 SOCKS、PAC、代理凭据或环境变量自动发现。修改后重启 audit-proxy，再分别验证一条带有效上游凭据的 LLM 请求和一个 `/v1/models` passthrough 请求。
 
-## 5. NewAPI 已打码 Token 目录
+## 5. NewAPI 调用者身份
 
-`newapi.access_token` 和 `newapi.user_id` 是一对可选的 NewAPI 管理凭证。配置后，audit-proxy 启动时读取一次 `/api/token/`，之后每五分钟刷新，只保留 NewAPI 返回的 Token ID、名称、`masked_key`、状态和分组等已打码元数据。刷新失败不影响 LLM 转发，并继续使用上一份成功快照。
+`newapi.access_token` 和 `newapi.user_id` 是一对可选的 NewAPI 管理凭证。配置后，audit-proxy 启动时读取一次 `/api/user/`，之后每五分钟刷新，只保留用户 ID、用户名、显示名、状态和分组等安全字段。刷新失败不影响 LLM 转发，并继续使用上一份成功快照。
 
-审计记录只保存请求匹配时的 Token ID、名称和 `masked_key`，原始 API Key 与目录 access token 都不会写入审计库或日志。Web UI 的 API Key 筛选使用 Token ID 下拉，不要求在浏览器输入原始 API Key。若不需要此功能，将 access_token 留空且 user_id 设为 0。
+当 LLM 响应包含 `X-Oneapi-Request-Id` 时，后台 worker 通过 `/api/log/?request_id=...` 精确查询并回填用户 ID、用户名、Token ID 和 Token 名称。NewAPI 日志可能延迟，因此任务会有限重试并把状态保存在 SQLite；失败或最终未识别都不影响原请求。Web UI 按用户筛选，Token ID 放在高级筛选；系统不会读取、保存或展示用户完整 API Key。若不需要此功能，将 access_token 留空且 user_id 设为 0。
 
 ## 6. Nginx 路由保证
 

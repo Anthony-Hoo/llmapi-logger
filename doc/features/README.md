@@ -1,7 +1,7 @@
 # AI API 审计代理：个人单机版总体设计
 
 > 状态：当前实现基线
-> 日期：2026-08-11
+> 日期：2026-08-12
 > 上游需求：[AI_API_AUDIT_PROXY_KICKOFF.md](../../AI_API_AUDIT_PROXY_KICKOFF.md)
 
 ## 1. 目标与边界
@@ -74,7 +74,7 @@ Go 客户端直连代理时可捕获 request Trailer；经过 Nginx 后不保证
 
 ## 6. 配置与固定默认值
 
-YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、成对可选 access_token/user_id）、mode、db_path、key_path、必填 admin_token、retention_days、interceptors 和 routes。`newapi.proxy_url` 为空时强制直连，不读取环境代理；access_token/user_id 配置后只读同步 NewAPI 已打码 Token 目录。完整格式见 [01](01-configuration-and-route-boundary.md)。
+YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、成对可选 access_token/user_id）、mode、db_path、key_path、必填 admin_token、retention_days、interceptors 和 routes。`newapi.proxy_url` 为空时强制直连，不读取环境代理；access_token/user_id 配置后只读同步全站安全用户字段，并按上游 request ID 查询全站日志。完整格式见 [01](01-configuration-and-route-boundary.md)。
 
 | 项目 | 固定默认值 |
 | --- | --- |
@@ -84,7 +84,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、成�
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | SQLite | WAL、synchronous=FULL、busy_timeout=5000 |
 | parser workers | 1 |
-| NewAPI Token 目录 | 10 秒请求超时、每 5 分钟刷新 |
+| NewAPI 管理读取 | 10 秒请求超时；用户目录每 5 分钟刷新；调用者单 worker 有限重试 |
 | retention / shutdown | 30 天 / 30 秒 |
 
 宿主机同机部署建议把数据面改为 127.0.0.1:8080；容器部署用内部网络和 ACL 只允许 Nginx 访问。
@@ -113,7 +113,7 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要，同时聚合协议无关的多轮消息、reasoning、工具调用和工具结果。摘要写入窄列，conversation 只合并进 `parsed_json_enc` 后加密落盘；parser v2 migration 会把 v1 结果一次性置回 pending，复用正常 worker 回填旧记录。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie，刷新页面可恢复会话。普通列表只定向解密入站 User-Agent，主视图只展示调用者、时间、模型和 User-Agent，并支持模型精确筛选、User-Agent 子串筛选和按 NewAPI Token ID 的 API Key 下拉筛选；路径、状态和原始 HTTP 等信息放在详情或高级筛选。目录刷新失败会保留旧快照且不影响转发，审计只保存 Token ID、名称和 `masked_key`。受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，assistant 文本使用禁用 raw HTML、危险链接协议和远程图片加载的 GFM Markdown，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie，刷新页面可恢复会话。普通列表只定向解密入站 User-Agent，主视图只展示调用者、时间、模型和 User-Agent，并支持按 NewAPI 用户、模型和 User-Agent 筛选；Token ID、路径和状态属于高级筛选。上游响应中的 `X-Oneapi-Request-Id` 会触发后台日志查询，成功后只回填用户 ID、用户名、Token ID 和 Token 名称；pending、unresolved 与本地未关联状态会明确展示，完整 API Key 不进入存储或管理响应。受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，assistant 文本使用禁用 raw HTML、危险链接协议和远程图片加载的 GFM Markdown，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
 
 ## 9. 模块索引
 
@@ -129,7 +129,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 08 | [Gemini GenerateContent 协议解析器](08-gemini-protocol-parser.md) |
 | 09 | [本地加密、脱敏与管理面保护](09-security-encryption-and-redaction.md) |
 | 10 | [查询 API 与最小 Web UI](10-query-api-and-minimal-web-ui.md) |
-| 11 | [NewAPI Token 只读关联](11-newapi-token-readonly-linking.md) |
+| 11 | [NewAPI 请求身份解析](11-newapi-request-identity.md) |
 | 12 | [保留清理](12-retention-and-maintenance.md) |
 | 13 | [日志、健康检查与生命周期](13-observability-health-and-lifecycle.md) |
 | 14 | [测试与发布检查](14-test-benchmark-and-fault-injection.md) |
@@ -157,7 +157,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - 只有实际恢复未终结记录时增加 process_exit 聚合 gap，重复恢复幂等。
 - retention 只小批量删除已终结且非 processing 的过期记录，并级联子表。
 - 请求完成日志不含 Query、Header value、Body、token、key 或底层错误文本。
-- NewAPI Token 目录只同步已打码字段，每五分钟刷新；失败保留旧快照且不影响转发，关联只落 Token ID、名称和 `masked_key`。
+- NewAPI 安全用户目录每五分钟只读刷新；已转发 LLM 响应按 request ID 异步查询全站日志并回填用户/Token 身份，失败不影响转发且不会读取完整 API Key。
 - healthy/degraded/not_ready 与 available/strict 语义一致。
 - 管理列表只返回紧凑摘要和解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情在 Admin Token 下返回 conversation、Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
 - loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token 或有效管理 Cookie。
