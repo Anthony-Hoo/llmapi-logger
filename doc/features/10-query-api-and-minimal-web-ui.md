@@ -142,7 +142,7 @@ type AuditQuery interface {
 - loopback 和非 loopback 的 API、health、ready 均要求 Bearer token 或有效管理 Cookie；只有静态 UI shell 和登录端点可匿名访问。
 - 登录 Cookie 属性和固定过期时间正确；刷新可恢复会话，注销、过期或 `401` 后回到登录页；前端存储和 URL 中没有 admin token。
 - NewAPI 用户、模型、User-Agent 和 Token ID 筛选语义正确；管理 API、URL、日志和审计库均不接收用户 API Key。
-- `newapi/callers` 只返回安全用户目录；列表和详情正确展示 request ID、caller status、用户与 Token 元数据，且不含 `masked_key`。
+- `newapi/callers` 只返回安全用户目录；列表和详情正确展示 request ID、caller status、用户与 Token 元数据，且不含任何用户 API Key 字段。
 - 审计列表主行只包含调用者、时间、模型和 User-Agent；conversation 是详情默认主视图，assistant 文本支持 GFM Markdown 且原始 HTML 不执行，其他角色、reasoning 和工具内容保持原始展示；路径、状态、raw/Header 辅助证据默认折叠，raw Body 按需预览和下载。
 - Vite 构建产物可由 Go embed 提供，生产运行不依赖 Node。
 - 未授权响应、静态 UI shell 和日志不泄露 Header value、Body、admin token 或主密钥；已授权列表只允许返回入站 User-Agent 这一项 Header 明文，详情和 raw 是其余敏感证据的明确读取入口。

@@ -73,7 +73,7 @@ token_links(
 
 并把 `caller_status` 改为 `resolved`。NewAPI 日志可能晚于响应落库，因此首次未找到或临时错误后，最多再按 500ms、1s、2s、5s、10s、30s 重试六次；尝试次数和下次时间保存在 SQLite，进程重启后继续。最后仍失败则标为 `unresolved`，不无限请求 NewAPI。
 
-`token_links.masked_key` 只因旧版 migration 兼容而保留；新链路始终写空，查询 API 和 UI 不再暴露该字段。升级前留下、没有 resolved request-id 身份的旧 `token_links` 行也不会进入新调用者投影。
+schema 中不定义用户 API Key 或打码 Key 字段；调用者关联只能由 request ID 日志查询产生。旧数据库不做兼容迁移，部署此基线时直接创建空库。
 
 ## 6. 查询与前端
 

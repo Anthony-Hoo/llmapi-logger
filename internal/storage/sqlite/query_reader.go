@@ -34,8 +34,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        t.newapi_user_id, t.username, t.newapi_token_id, t.token_name
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
-LEFT JOIN token_links AS t
-       ON t.audit_id = a.audit_id AND a.caller_status = 'resolved'
+LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
 WHERE 1 = 1`)
 	arguments := make([]any, 0, 16)
 	appendCondition := func(condition string, values ...any) {
@@ -145,8 +144,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        t.newapi_user_id, t.username, t.newapi_token_id, t.token_name
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
-LEFT JOIN token_links AS t
-       ON t.audit_id = a.audit_id AND a.caller_status = 'resolved'
+LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
 WHERE a.audit_id = ?`, auditID), &detail.Audit); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AuditQueryDetail{}, sql.ErrNoRows
@@ -449,9 +447,7 @@ SELECT a.newapi_request_id, t.newapi_user_id, t.username,
        t.newapi_token_id, t.token_name, t.linked_at_ns
 FROM token_links AS t
 JOIN audit_records AS a ON a.audit_id = t.audit_id
-WHERE t.audit_id = ?
-  AND a.caller_status = 'resolved'
-  AND a.newapi_request_id IS NOT NULL`, auditID).Scan(
+WHERE t.audit_id = ?`, auditID).Scan(
 		&result.NewAPIRequestID,
 		&result.NewAPIUserID,
 		&result.Username,

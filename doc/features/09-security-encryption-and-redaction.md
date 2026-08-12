@@ -94,7 +94,7 @@ type Cipher interface {
 }
 ~~~
 
-调用方只把返回的完整 BLOB 写入上述四类 `*_enc` 字段。`audit_records` 和 `token_links` 只保存 NewAPI request ID、用户 ID/用户名、Token ID/名称和重试状态，不保存用户 API Key；旧 `masked_key` 列仅用于数据库迁移兼容且新写入恒为空。audit_gaps 只保存非敏感时间范围、原因和计数。
+调用方只把返回的完整 BLOB 写入上述四类 `*_enc` 字段。`audit_records` 和 `token_links` 只保存 NewAPI request ID、用户 ID/用户名、Token ID/名称和重试状态，不存在用户 API Key 字段。audit_gaps 只保存非敏感时间范围、原因和计数。
 
 ## 8. 管理证据与脱敏规则
 

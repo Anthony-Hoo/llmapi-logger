@@ -10,10 +10,12 @@
 
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
-internal/storage/sqlite/migrations/{001_init.sql,002_reparse_conversations.sql,003_token_link_masked_key.sql,004_newapi_request_identity.sql}
+internal/storage/sqlite/migrations/001_init.sql
 ~~~
 
-`001_init.sql` 建立九张表和全部索引；`002_reparse_conversations.sql` 把受支持 parser 的 v1 已完成记录一次性置回 pending；`003_token_link_masked_key.sql` 是旧版兼容 migration；`004_newapi_request_identity.sql` 为 `audit_records` 增加 request ID、调用者状态与持久化重试字段，并为 `token_links` 增加 NewAPI 用户字段。`masked_key` 旧列继续存在但新链路始终写空且不对外暴露。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；已经提交的 migration 不再修改，后续变化新增数字文件。
+`001_init.sql` 是当前唯一数据库基线，直接建立九张表、全部索引、request ID 调用者状态和 NewAPI 用户/Token 身份字段。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制。
+
+这个个人项目不提供旧数据库原地升级兼容。schema 基线发生不兼容变化时，停机删除 `audit.db`、`audit.db-wal`、`audit.db-shm` 和旧 `audit.key`，再启动生成空库；旧审计数据不迁移。
 
 ~~~go
 writerDB.SetMaxOpenConns(1)
@@ -44,7 +46,7 @@ reader 额外设置 PRAGMA query_only=ON。使用 SQLite 默认自动 checkpoint
 | body_streams | audit_id+stage PK；observed/stored_length、sha256、hash_complete、eof_seen、state、error_code |
 | body_chunks | audit_id+stage+seq PK；offset、plaintext_length、observed_at_ns、data_enc |
 | parsed_results | audit_id PK；parser_name/parser_version/status；request_model/response_model；requested_stream/observed_stream；response_id；usage_input/usage_output/usage_total；error_type/error_code；message_count/tool_call_count/has_tool_call；parsed_json_enc；parsed_at_ns |
-| token_links | audit_id PK；newapi_user_id、username、newapi_token_id、token_name、linked_at_ns；旧 masked_key 列仅供兼容 |
+| token_links | audit_id PK；newapi_user_id、username、newapi_token_id、token_name、linked_at_ns |
 | audit_gaps | id INTEGER PK；started_at_ns/ended_at_ns、reason、request_count、detail、created_at_ns |
 
 stage 只允许四个固定名称。http_stages 外键指向 audit_records；http_headers 和 body_streams 外键指向同 audit_id/stage 的 http_stages；body_chunks 外键指向 body_streams；parsed_results 和 token_links 外键指向 audit_records。所有审计子表使用 ON DELETE CASCADE，schema_migrations 与 audit_gaps 独立。
@@ -69,7 +71,7 @@ audit_records 至少建立 started_at_ns、route_id+started_at_ns、capture_stat
 6. migration 失败则 storage 标记 unhealthy；available 仍可转发并写日志，strict 请求返回 503。
 7. 数据库版本高于程序支持版本时 storage 保持 unhealthy；available 仍可只做代理，strict 请求返回 503。
 
-不提供自动 downgrade。migration 日志只输出版本与错误，不输出业务数据。
+不提供自动 upgrade/downgrade。程序遇到高于当前基线的数据库版本时拒绝使用该库；migration 日志只输出版本与错误，不输出业务数据。
 
 ## 5. 单 writer
 
@@ -150,10 +152,10 @@ retention_days>0 时按[模块 12](12-retention-and-maintenance.md)的固定算�
 
 ## 12. 测试
 
-- 空库执行全部 migration；重复启动不重复执行。
+- 空库执行 `001_init.sql`；重复启动不重复执行。
 - DB 版本高于程序时 storage 保持 unhealthy；available 继续代理，strict 返回 503。
 - writer batch commit/rollback。
-- `001` 至 `004` migration 重复启动不重复执行；旧数据库升级后表总数仍为九，既有 Token 行保留，新 request-id 字段使用安全默认值。
+- schema 只有基线版本 1，表总数为九；`audit_records` 和 `token_links` 从建库起就包含 request-id 调用者身份所需字段，且不存在 API Key 列。
 - request ID 终态写入、pending 扫描、退避重试、resolved 原子回填和 terminal unresolved 均可恢复且幂等。
 - interceptor 拒绝在一个事务内写 rejected、blocked_by/block_code、status_code、skipped，且不存在未触发的 NewAPI/响应 stage 或空 body_stream。
 - strict BeginAudit commit 失败返回 503。

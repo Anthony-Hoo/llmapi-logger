@@ -4,14 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 )
 
-func TestOpenAppliesFinalMigrationAndPragmas(t *testing.T) {
+func TestOpenAppliesBaselineMigrationAndPragmas(t *testing.T) {
 	t.Parallel()
 
 	store, path := openTestStore(t)
@@ -65,12 +64,25 @@ ORDER BY name`)
 		t.Fatalf("tables = %v, want %v", tables, wantTables)
 	}
 
+	tokenLinkColumns := readTableColumns(t, store.readerDB, "token_links")
+	wantTokenLinkColumns := []string{
+		"audit_id",
+		"newapi_user_id",
+		"username",
+		"newapi_token_id",
+		"token_name",
+		"linked_at_ns",
+	}
+	if !reflect.DeepEqual(tokenLinkColumns, wantTokenLinkColumns) {
+		t.Fatalf("token_links columns = %v, want %v", tokenLinkColumns, wantTokenLinkColumns)
+	}
+
 	var versionCount, version int
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 4 || version != 4 {
-		t.Fatalf("migration rows = %d max=%d, want versions 1 through 4", versionCount, version)
+	if versionCount != 1 || version != 1 {
+		t.Fatalf("migration rows = %d max=%d, want baseline version 1", versionCount, version)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -84,7 +96,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 4 {
+	if versionCount != 1 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -95,7 +107,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		5,
+		2,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)
@@ -110,109 +122,6 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
 		t.Fatalf("Open error = %v, want newer-version rejection", err)
-	}
-}
-
-func TestTokenLinkMaskedKeyMigrationPreservesLegacyRows(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	database, err := sql.Open("sqlite", sqliteDSN(path, false))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := initializeWriter(context.Background(), database); err != nil {
-		_ = database.Close()
-		t.Fatal(err)
-	}
-	migrations, err := loadMigrations()
-	if err != nil {
-		_ = database.Close()
-		t.Fatal(err)
-	}
-	for _, item := range migrations {
-		if item.version > 2 {
-			continue
-		}
-		if err := applyMigration(context.Background(), database, item); err != nil {
-			_ = database.Close()
-			t.Fatal(err)
-		}
-	}
-	if _, err := database.Exec(`
-INSERT INTO audit_records (
-    audit_id, started_at_ns, route_id, protocol, parser_name, method, path,
-    request_uri_enc, mode, forward_status, capture_status, parse_status
-) VALUES ('legacy-audit', 1, 'route', 'openai', 'parser', 'POST', '/v1/test',
-          X'01', 'available', 'in_progress', 'pending', 'pending')`); err != nil {
-		_ = database.Close()
-		t.Fatal(err)
-	}
-	if _, err := database.Exec(`
-INSERT INTO token_links (audit_id, newapi_token_id, token_name, linked_at_ns)
-VALUES ('legacy-audit', 42, 'legacy', 2)`); err != nil {
-		_ = database.Close()
-		t.Fatal(err)
-	}
-	if err := database.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	store, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	var tokenName, maskedKey string
-	if err := store.readerDB.QueryRow(`
-SELECT token_name, masked_key
-FROM token_links
-WHERE audit_id = 'legacy-audit'`).Scan(&tokenName, &maskedKey); err != nil {
-		t.Fatal(err)
-	}
-	if tokenName != "legacy" || maskedKey != "" {
-		t.Fatalf("migrated token link = name %q masked %q", tokenName, maskedKey)
-	}
-}
-
-func TestConversationMigrationRequeuesVersionOneParserResults(t *testing.T) {
-	t.Parallel()
-
-	store, path := openTestStore(t)
-	record := testAudit("audit-conversation-backfill")
-	if err := store.BeginAudit(context.Background(), record); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writerDB.Exec(`
-UPDATE audit_records
-SET ended_at_ns = 2, forward_status = 'completed', capture_status = 'complete', parse_status = 'ok'
-WHERE audit_id = ?`, record.AuditID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writerDB.Exec(`
-INSERT INTO parsed_results (
-    audit_id, parser_name, parser_version, status, parsed_json_enc, parsed_at_ns
-) VALUES (?, ?, '1', 'ok', X'01', 3)`, record.AuditID, record.ParserName); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.writerDB.Exec("DELETE FROM schema_migrations WHERE version = 2"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reopened.Close() })
-	var parseStatus string
-	if err := reopened.readerDB.QueryRow("SELECT parse_status FROM audit_records WHERE audit_id = ?", record.AuditID).Scan(&parseStatus); err != nil {
-		t.Fatal(err)
-	}
-	if parseStatus != ParsePending {
-		t.Fatalf("parse_status = %q, want %q", parseStatus, ParsePending)
 	}
 }
 
@@ -287,4 +196,27 @@ func assertPragmaInt(t *testing.T, database *sql.DB, name string, want int) {
 	if got != want {
 		t.Fatalf("PRAGMA %s = %d, want %d", name, got, want)
 	}
+}
+
+func readTableColumns(t *testing.T, database *sql.DB, table string) []string {
+	t.Helper()
+	rows, err := database.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
 }
