@@ -97,7 +97,7 @@ describe("audit list", () => {
     expect(html).not.toContain("apx_selected");
     expect(html).not.toContain("/v1/chat/completions");
     expect(html).not.toContain("openai-chat-completions");
-	expect(html).not.toContain("masked_key");
+	expect(html).not.toContain("api_key");
     expect(html).not.toContain("completed");
     expect(html).not.toContain("capture");
     expect(html).not.toContain("parse");

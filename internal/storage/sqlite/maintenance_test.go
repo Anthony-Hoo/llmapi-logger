@@ -182,8 +182,16 @@ INSERT INTO parsed_results (
 		t.Fatal(err)
 	}
 	if _, err := transaction.Exec(`
-	INSERT INTO token_links (audit_id, newapi_token_id, token_name, masked_key, linked_at_ns)
-	VALUES (?, 1, 'personal', 'sk-...1234', ?)`, auditID, *endedAt); err != nil {
+	UPDATE audit_records
+	SET newapi_request_id = ?, caller_status = 'resolved', caller_attempts = 1,
+	    caller_updated_at_ns = ?
+	WHERE audit_id = ?`, "retention-"+auditID, *endedAt, auditID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transaction.Exec(`
+	INSERT INTO token_links (
+	    audit_id, newapi_user_id, username, newapi_token_id, token_name, linked_at_ns
+	) VALUES (?, 1, 'owner', 1, 'personal', ?)`, auditID, *endedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := transaction.Commit(); err != nil {

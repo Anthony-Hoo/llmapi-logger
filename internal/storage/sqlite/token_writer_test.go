@@ -53,22 +53,22 @@ func TestCallerLookupRetriesAndResolvesIdentity(t *testing.T) {
 	}
 
 	var got TokenLink
-	var maskedKey, callerStatus string
+	var callerStatus string
 	if err := store.readerDB.QueryRow(`
 SELECT t.audit_id, a.newapi_request_id, t.newapi_user_id, t.username,
-       t.newapi_token_id, t.token_name, t.masked_key, t.linked_at_ns,
+       t.newapi_token_id, t.token_name, t.linked_at_ns,
        a.caller_attempts, a.caller_status
 FROM token_links AS t
 JOIN audit_records AS a ON a.audit_id = t.audit_id
 WHERE t.audit_id = ?`, record.AuditID).Scan(
 		&got.AuditID, &got.NewAPIRequestID, &got.NewAPIUserID, &got.Username,
-		&got.NewAPITokenID, &got.TokenName, &maskedKey, &got.LinkedAtNS,
+		&got.NewAPITokenID, &got.TokenName, &got.LinkedAtNS,
 		&got.Attempts, &callerStatus,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if got != link || maskedKey != "" || callerStatus != CallerResolved {
-		t.Fatalf("resolved link = %+v masked=%q status=%q", got, maskedKey, callerStatus)
+	if got != link || callerStatus != CallerResolved {
+		t.Fatalf("resolved link = %+v status=%q", got, callerStatus)
 	}
 	if due, err = store.ListDueCallerLookups(ctx, 100, 10); err != nil || len(due) != 0 {
 		t.Fatalf("resolved due = %+v, err=%v", due, err)

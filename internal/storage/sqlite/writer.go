@@ -422,7 +422,7 @@ SET ended_at_ns = ?, status_code = ?, forward_status = ?, capture_status = ?,
     caller_status = CASE WHEN ? IS NULL THEN 'none' ELSE 'pending' END,
     caller_attempts = 0,
     caller_next_at_ns = CASE WHEN ? IS NULL THEN NULL ELSE ? END,
-    caller_updated_at_ns = ?
+    caller_updated_at_ns = CASE WHEN ? IS NULL THEN NULL ELSE ? END
 WHERE audit_id = ?`,
 		finish.EndedAtNS,
 		finish.StatusCode,
@@ -436,6 +436,7 @@ WHERE audit_id = ?`,
 		finish.NewAPIRequestID,
 		finish.NewAPIRequestID,
 		finish.EndedAtNS,
+		finish.NewAPIRequestID,
 		finish.EndedAtNS,
 		finish.AuditID,
 	)

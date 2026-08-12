@@ -24,6 +24,20 @@ CREATE TABLE audit_records (
     blocked_by TEXT,
     block_code TEXT,
     error_code TEXT,
+    newapi_request_id TEXT CHECK (
+        newapi_request_id IS NULL OR (
+            length(newapi_request_id) BETWEEN 1 AND 128
+            AND trim(newapi_request_id) = newapi_request_id
+            AND instr(newapi_request_id, char(0)) = 0
+            AND instr(newapi_request_id, char(10)) = 0
+            AND instr(newapi_request_id, char(13)) = 0
+        )
+    ),
+    caller_status TEXT NOT NULL DEFAULT 'none'
+        CHECK (caller_status IN ('none', 'pending', 'resolved', 'unresolved')),
+    caller_attempts INTEGER NOT NULL DEFAULT 0 CHECK (caller_attempts >= 0),
+    caller_next_at_ns INTEGER,
+    caller_updated_at_ns INTEGER,
     CHECK (
         (
             forward_status = 'rejected'
@@ -38,6 +52,30 @@ CREATE TABLE audit_records (
             AND blocked_by IS NULL
             AND block_code IS NULL
         )
+    ),
+    CHECK (
+        (
+            caller_status = 'none'
+            AND newapi_request_id IS NULL
+            AND caller_attempts = 0
+            AND caller_next_at_ns IS NULL
+            AND caller_updated_at_ns IS NULL
+        )
+        OR
+        (
+            caller_status = 'pending'
+            AND newapi_request_id IS NOT NULL
+            AND caller_next_at_ns IS NOT NULL
+            AND caller_updated_at_ns IS NOT NULL
+        )
+        OR
+        (
+            caller_status IN ('resolved', 'unresolved')
+            AND newapi_request_id IS NOT NULL
+            AND caller_attempts > 0
+            AND caller_next_at_ns IS NULL
+            AND caller_updated_at_ns IS NOT NULL
+        )
     )
 );
 
@@ -49,6 +87,10 @@ CREATE INDEX audit_records_capture_started_idx
     ON audit_records(capture_status, started_at_ns, audit_id);
 CREATE INDEX audit_records_parse_started_idx
     ON audit_records(parse_status, started_at_ns, audit_id);
+CREATE INDEX audit_records_caller_due_idx
+    ON audit_records(caller_status, caller_next_at_ns, started_at_ns, audit_id);
+CREATE INDEX audit_records_newapi_request_idx
+    ON audit_records(newapi_request_id);
 
 CREATE TABLE http_stages (
     audit_id TEXT NOT NULL,
@@ -135,9 +177,11 @@ CREATE TABLE parsed_results (
 
 CREATE TABLE token_links (
     audit_id TEXT PRIMARY KEY,
-    newapi_token_id INTEGER NOT NULL,
+    newapi_user_id INTEGER NOT NULL CHECK (newapi_user_id > 0),
+    username TEXT NOT NULL,
+    newapi_token_id INTEGER NOT NULL CHECK (newapi_token_id >= 0),
     token_name TEXT NOT NULL,
-    linked_at_ns INTEGER NOT NULL,
+    linked_at_ns INTEGER NOT NULL CHECK (linked_at_ns > 0),
     FOREIGN KEY (audit_id) REFERENCES audit_records(audit_id) ON DELETE CASCADE
 );
 

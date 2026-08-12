@@ -19,22 +19,20 @@ func (store *Store) UpsertTokenLink(ctx context.Context, link TokenLink) error {
 func upsertTokenLink(transaction *sql.Tx, link TokenLink) error {
 	_, err := transaction.Exec(`
 INSERT INTO token_links (
-    audit_id, newapi_token_id, token_name, masked_key, linked_at_ns,
-    newapi_user_id, username
-) VALUES (?, ?, ?, '', ?, ?, ?)
+    audit_id, newapi_user_id, username, newapi_token_id, token_name, linked_at_ns
+) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(audit_id) DO UPDATE SET
+    newapi_user_id = excluded.newapi_user_id,
+    username = excluded.username,
     newapi_token_id = excluded.newapi_token_id,
     token_name = excluded.token_name,
-    masked_key = '',
-    linked_at_ns = excluded.linked_at_ns,
-    newapi_user_id = excluded.newapi_user_id,
-    username = excluded.username`,
+    linked_at_ns = excluded.linked_at_ns`,
 		link.AuditID,
+		link.NewAPIUserID,
+		link.Username,
 		link.NewAPITokenID,
 		link.TokenName,
 		link.LinkedAtNS,
-		link.NewAPIUserID,
-		link.Username,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite writer: upsert token link: %w", err)
