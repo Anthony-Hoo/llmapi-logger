@@ -30,7 +30,8 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
-       t.newapi_token_id, t.token_name, t.masked_key
+       a.newapi_request_id, a.caller_status,
+       t.newapi_user_id, t.username, t.newapi_token_id, t.token_name
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
 LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
@@ -70,6 +71,12 @@ WHERE 1 = 1`)
 	}
 	if filter.CaptureStatus != "" {
 		appendCondition("a.capture_status = ?", filter.CaptureStatus)
+	}
+	if filter.NewAPIUserID != nil {
+		appendCondition("t.newapi_user_id = ?", *filter.NewAPIUserID)
+	}
+	if filter.Username != "" {
+		appendCondition("t.username = ?", filter.Username)
 	}
 	if filter.NewAPITokenID != nil {
 		appendCondition("t.newapi_token_id = ?", *filter.NewAPITokenID)
@@ -133,7 +140,8 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
-       t.newapi_token_id, t.token_name, t.masked_key
+       a.newapi_request_id, a.caller_status,
+       t.newapi_user_id, t.username, t.newapi_token_id, t.token_name
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
 LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
@@ -306,8 +314,8 @@ ORDER BY seq`, auditID, stage)
 }
 
 func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
-	var endedAt, statusCode, newAPITokenID sql.NullInt64
-	var blockedBy, blockCode, errorCode, requestModel, responseModel, tokenName, maskedKey sql.NullString
+	var endedAt, statusCode, newAPIUserID, newAPITokenID sql.NullInt64
+	var blockedBy, blockCode, errorCode, requestModel, responseModel, requestID, username, tokenName sql.NullString
 	if err := row.Scan(
 		&destination.AuditID,
 		&destination.StartedAtNS,
@@ -327,9 +335,12 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 		&errorCode,
 		&requestModel,
 		&responseModel,
+		&requestID,
+		&destination.CallerStatus,
+		&newAPIUserID,
+		&username,
 		&newAPITokenID,
 		&tokenName,
-		&maskedKey,
 	); err != nil {
 		return err
 	}
@@ -340,9 +351,11 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	destination.ErrorCode = nullStringPointer(errorCode)
 	destination.RequestModel = nullStringPointer(requestModel)
 	destination.ResponseModel = nullStringPointer(responseModel)
+	destination.NewAPIRequestID = nullStringPointer(requestID)
+	destination.NewAPIUserID = nullInt64Pointer(newAPIUserID)
+	destination.Username = nullStringPointer(username)
 	destination.NewAPITokenID = nullInt64Pointer(newAPITokenID)
 	destination.TokenName = nullStringPointer(tokenName)
-	destination.MaskedKey = nullStringPointer(maskedKey)
 	return nil
 }
 
@@ -430,9 +443,18 @@ WHERE audit_id = ?`, auditID).Scan(
 func readTokenLinkSummary(ctx context.Context, transaction *sql.Tx, auditID string) (*TokenLinkSummary, error) {
 	var result TokenLinkSummary
 	err := transaction.QueryRowContext(ctx, `
-SELECT newapi_token_id, token_name, masked_key, linked_at_ns
-FROM token_links
-WHERE audit_id = ?`, auditID).Scan(&result.NewAPITokenID, &result.TokenName, &result.MaskedKey, &result.LinkedAtNS)
+SELECT a.newapi_request_id, t.newapi_user_id, t.username,
+       t.newapi_token_id, t.token_name, t.linked_at_ns
+FROM token_links AS t
+JOIN audit_records AS a ON a.audit_id = t.audit_id
+WHERE t.audit_id = ?`, auditID).Scan(
+		&result.NewAPIRequestID,
+		&result.NewAPIUserID,
+		&result.Username,
+		&result.NewAPITokenID,
+		&result.TokenName,
+		&result.LinkedAtNS,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

@@ -241,7 +241,7 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 		NextCursor: &query.Cursor{BeforeStartedAtNS: started, BeforeID: "audit-list"},
 	}}
 	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: queries})
-	request := authorizedRequest(http.MethodGet, "/api/v1/audits?limit=25&protocol=openai&from_ns=9007199254740993&model=gpt-5&user_agent=Codex&newapi_token_id=42")
+	request := authorizedRequest(http.MethodGet, "/api/v1/audits?limit=25&protocol=openai&from_ns=9007199254740993&model=gpt-5&user_agent=Codex&newapi_user_id=7&newapi_token_id=42")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -253,6 +253,7 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 	}
 	if queries.gotLimit != 25 || queries.gotFilter.Protocol != "openai" || queries.gotFilter.Model != "gpt-5" || queries.gotFilter.UserAgent != "Codex" ||
 		queries.gotFilter.FromNS == nil || *queries.gotFilter.FromNS != 9_007_199_254_740_993 ||
+		queries.gotFilter.NewAPIUserID == nil || *queries.gotFilter.NewAPIUserID != 7 ||
 		queries.gotFilter.NewAPITokenID == nil || *queries.gotFilter.NewAPITokenID != 42 {
 		t.Fatalf("parsed list query = filter %+v limit %d", queries.gotFilter, queries.gotLimit)
 	}

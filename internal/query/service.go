@@ -72,6 +72,8 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		BlockedBy:     filter.BlockedBy,
 		BlockCode:     filter.BlockCode,
 		CaptureStatus: filter.CaptureStatus,
+		NewAPIUserID:  filter.NewAPIUserID,
+		Username:      filter.Username,
 		NewAPITokenID: filter.NewAPITokenID,
 		TokenName:     filter.TokenName,
 	}
@@ -323,10 +325,12 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 	}
 	if token := storageDetail.TokenLink; token != nil {
 		detail.TokenLink = &TokenLink{
-			NewAPITokenID: token.NewAPITokenID,
-			TokenName:     token.TokenName,
-			MaskedKey:     token.MaskedKey,
-			LinkedAtNS:    token.LinkedAtNS,
+			NewAPIRequestID: token.NewAPIRequestID,
+			NewAPIUserID:    token.NewAPIUserID,
+			Username:        token.Username,
+			NewAPITokenID:   token.NewAPITokenID,
+			TokenName:       token.TokenName,
+			LinkedAtNS:      token.LinkedAtNS,
 		}
 	}
 	return detail, nil
@@ -415,27 +419,30 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 
 func mapAudit(row sqlite.AuditListRow) AuditSummary {
 	return AuditSummary{
-		AuditID:       row.AuditID,
-		StartedAtNS:   row.StartedAtNS,
-		EndedAtNS:     row.EndedAtNS,
-		RouteID:       row.RouteID,
-		Protocol:      row.Protocol,
-		ParserName:    row.ParserName,
-		Method:        row.Method,
-		Path:          row.Path,
-		Mode:          row.Mode,
-		StatusCode:    row.StatusCode,
-		ForwardStatus: row.ForwardStatus,
-		CaptureStatus: row.CaptureStatus,
-		ParseStatus:   row.ParseStatus,
-		BlockedBy:     row.BlockedBy,
-		BlockCode:     row.BlockCode,
-		ErrorCode:     row.ErrorCode,
-		RequestModel:  row.RequestModel,
-		ResponseModel: row.ResponseModel,
-		NewAPITokenID: row.NewAPITokenID,
-		TokenName:     row.TokenName,
-		MaskedKey:     row.MaskedKey,
+		AuditID:         row.AuditID,
+		StartedAtNS:     row.StartedAtNS,
+		EndedAtNS:       row.EndedAtNS,
+		RouteID:         row.RouteID,
+		Protocol:        row.Protocol,
+		ParserName:      row.ParserName,
+		Method:          row.Method,
+		Path:            row.Path,
+		Mode:            row.Mode,
+		StatusCode:      row.StatusCode,
+		ForwardStatus:   row.ForwardStatus,
+		CaptureStatus:   row.CaptureStatus,
+		ParseStatus:     row.ParseStatus,
+		BlockedBy:       row.BlockedBy,
+		BlockCode:       row.BlockCode,
+		ErrorCode:       row.ErrorCode,
+		RequestModel:    row.RequestModel,
+		ResponseModel:   row.ResponseModel,
+		NewAPIRequestID: row.NewAPIRequestID,
+		CallerStatus:    row.CallerStatus,
+		NewAPIUserID:    row.NewAPIUserID,
+		Username:        row.Username,
+		NewAPITokenID:   row.NewAPITokenID,
+		TokenName:       row.TokenName,
 	}
 }
 
@@ -466,6 +473,9 @@ func validateList(filter Filter, cursor Cursor, limit int) error {
 	if filter.NewAPITokenID != nil && *filter.NewAPITokenID < 0 {
 		return invalid("newapi_token_id must not be negative")
 	}
+	if filter.NewAPIUserID != nil && *filter.NewAPIUserID <= 0 {
+		return invalid("newapi_user_id must be positive")
+	}
 	if filter.ForwardStatus != "" && !validForwardStatus(filter.ForwardStatus) {
 		return invalid("invalid forward_status")
 	}
@@ -483,6 +493,7 @@ func validateList(filter Filter, cursor Cursor, limit int) error {
 		"model":      filter.Model,
 		"user_agent": filter.UserAgent,
 		"blocked_by": filter.BlockedBy,
+		"username":   filter.Username,
 		"token_name": filter.TokenName,
 	} {
 		if len(value) > 512 || strings.ContainsRune(value, '\x00') || strings.TrimSpace(value) != value {

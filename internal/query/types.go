@@ -43,6 +43,8 @@ type Filter struct {
 	BlockedBy     string
 	BlockCode     string
 	CaptureStatus string
+	NewAPIUserID  *int64
+	Username      string
 	NewAPITokenID *int64
 	TokenName     string
 }
@@ -55,28 +57,31 @@ type Cursor struct {
 
 // AuditSummary is the non-secret list projection.
 type AuditSummary struct {
-	AuditID       string  `json:"audit_id"`
-	StartedAtNS   int64   `json:"started_at_ns,string"`
-	EndedAtNS     *int64  `json:"ended_at_ns,string"`
-	RouteID       string  `json:"route_id"`
-	Protocol      string  `json:"protocol"`
-	ParserName    string  `json:"parser_name"`
-	Method        string  `json:"method"`
-	Path          string  `json:"path"`
-	Mode          string  `json:"mode"`
-	StatusCode    *int    `json:"status_code"`
-	ForwardStatus string  `json:"forward_status"`
-	CaptureStatus string  `json:"capture_status"`
-	ParseStatus   string  `json:"parse_status"`
-	BlockedBy     *string `json:"blocked_by"`
-	BlockCode     *string `json:"block_code"`
-	ErrorCode     *string `json:"error_code"`
-	RequestModel  *string `json:"request_model"`
-	ResponseModel *string `json:"response_model"`
-	UserAgent     *string `json:"user_agent"`
-	NewAPITokenID *int64  `json:"newapi_token_id"`
-	TokenName     *string `json:"token_name"`
-	MaskedKey     *string `json:"masked_key"`
+	AuditID         string  `json:"audit_id"`
+	StartedAtNS     int64   `json:"started_at_ns,string"`
+	EndedAtNS       *int64  `json:"ended_at_ns,string"`
+	RouteID         string  `json:"route_id"`
+	Protocol        string  `json:"protocol"`
+	ParserName      string  `json:"parser_name"`
+	Method          string  `json:"method"`
+	Path            string  `json:"path"`
+	Mode            string  `json:"mode"`
+	StatusCode      *int    `json:"status_code"`
+	ForwardStatus   string  `json:"forward_status"`
+	CaptureStatus   string  `json:"capture_status"`
+	ParseStatus     string  `json:"parse_status"`
+	BlockedBy       *string `json:"blocked_by"`
+	BlockCode       *string `json:"block_code"`
+	ErrorCode       *string `json:"error_code"`
+	RequestModel    *string `json:"request_model"`
+	ResponseModel   *string `json:"response_model"`
+	UserAgent       *string `json:"user_agent"`
+	NewAPIRequestID *string `json:"newapi_request_id"`
+	CallerStatus    string  `json:"caller_status"`
+	NewAPIUserID    *int64  `json:"newapi_user_id"`
+	Username        *string `json:"username"`
+	NewAPITokenID   *int64  `json:"newapi_token_id"`
+	TokenName       *string `json:"token_name"`
 }
 
 // Page is a newest-first keyset page.
@@ -139,10 +144,12 @@ type ParsedResult struct {
 }
 
 type TokenLink struct {
-	NewAPITokenID int64  `json:"newapi_token_id"`
-	TokenName     string `json:"token_name"`
-	MaskedKey     string `json:"masked_key"`
-	LinkedAtNS    int64  `json:"linked_at_ns,string"`
+	NewAPIRequestID string `json:"newapi_request_id"`
+	NewAPIUserID    int64  `json:"newapi_user_id"`
+	Username        string `json:"username"`
+	NewAPITokenID   int64  `json:"newapi_token_id"`
+	TokenName       string `json:"token_name"`
+	LinkedAtNS      int64  `json:"linked_at_ns,string"`
 }
 
 // Detail is sensitive and may only be returned by the Admin Token protected

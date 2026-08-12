@@ -241,6 +241,7 @@ func parseListQuery(values url.Values) (query.Filter, query.Cursor, int, error) 
 		"model": true, "user_agent": true,
 		"status_code": true, "forward_status": true,
 		"blocked_by": true, "block_code": true, "capture_status": true,
+		"newapi_user_id": true, "username": true,
 		"newapi_token_id": true, "token_name": true,
 	}
 	for key, entries := range values {
@@ -273,6 +274,10 @@ func parseListQuery(values url.Values) (query.Filter, query.Cursor, int, error) 
 	if err != nil {
 		return query.Filter{}, query.Cursor{}, 0, err
 	}
+	newAPIUserID, err := optionalInt64(values, "newapi_user_id")
+	if err != nil {
+		return query.Filter{}, query.Cursor{}, 0, err
+	}
 	beforeNS, err := optionalInt64(values, "before_started_at_ns")
 	if err != nil {
 		return query.Filter{}, query.Cursor{}, 0, err
@@ -293,6 +298,8 @@ func parseListQuery(values url.Values) (query.Filter, query.Cursor, int, error) 
 		BlockedBy:     values.Get("blocked_by"),
 		BlockCode:     values.Get("block_code"),
 		CaptureStatus: values.Get("capture_status"),
+		NewAPIUserID:  newAPIUserID,
+		Username:      values.Get("username"),
 		NewAPITokenID: newAPITokenID,
 		TokenName:     values.Get("token_name"),
 	}

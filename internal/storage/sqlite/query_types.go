@@ -13,6 +13,8 @@ type AuditQueryFilter struct {
 	BlockedBy     string
 	BlockCode     string
 	CaptureStatus string
+	NewAPIUserID  *int64
+	Username      string
 	NewAPITokenID *int64
 	TokenName     string
 }
@@ -27,27 +29,30 @@ type AuditQueryCursor struct {
 // AuditListRow is one non-secret audit summary. It intentionally excludes the
 // encrypted request URI, Header values, Body chunks, and parsed JSON.
 type AuditListRow struct {
-	AuditID       string
-	StartedAtNS   int64
-	EndedAtNS     *int64
-	RouteID       string
-	Protocol      string
-	ParserName    string
-	Method        string
-	Path          string
-	Mode          string
-	StatusCode    *int
-	ForwardStatus string
-	CaptureStatus string
-	ParseStatus   string
-	BlockedBy     *string
-	BlockCode     *string
-	ErrorCode     *string
-	RequestModel  *string
-	ResponseModel *string
-	NewAPITokenID *int64
-	TokenName     *string
-	MaskedKey     *string
+	AuditID         string
+	StartedAtNS     int64
+	EndedAtNS       *int64
+	RouteID         string
+	Protocol        string
+	ParserName      string
+	Method          string
+	Path            string
+	Mode            string
+	StatusCode      *int
+	ForwardStatus   string
+	CaptureStatus   string
+	ParseStatus     string
+	BlockedBy       *string
+	BlockCode       *string
+	ErrorCode       *string
+	RequestModel    *string
+	ResponseModel   *string
+	NewAPIRequestID *string
+	CallerStatus    string
+	NewAPIUserID    *int64
+	Username        *string
+	NewAPITokenID   *int64
+	TokenName       *string
 }
 
 // AuditListPage contains a keyset-paginated result. HasMore is computed by
@@ -92,14 +97,15 @@ type ParsedResultSummary struct {
 	ParsedAtNS      int64
 }
 
-// TokenLinkSummary contains only the NewAPI token identifier, display name,
-// and source-provided masked credential snapshot. It never contains the
-// original credential.
+// TokenLinkSummary contains only the NewAPI request, user, and token identity
+// copied from the global system log.
 type TokenLinkSummary struct {
-	NewAPITokenID int64
-	TokenName     string
-	MaskedKey     string
-	LinkedAtNS    int64
+	NewAPIRequestID string
+	NewAPIUserID    int64
+	Username        string
+	NewAPITokenID   int64
+	TokenName       string
+	LinkedAtNS      int64
 }
 
 // AuditQueryDetail is the encrypted evidence projection used only by the

@@ -19,22 +19,24 @@ describe("API client", () => {
     await client.listAudits({
       path: "/v1/messages",
       model: "gpt-test",
-      user_agent: "audit-client/1.0",
-      newapi_token_id: "42",
+	  user_agent: "audit-client/1.0",
+	  newapi_user_id: "7",
+	  newapi_token_id: "42",
       forward_status: "rejected",
     });
 
     expect(calledURL).toContain("limit=50");
     expect(calledURL).toContain("path=%2Fv1%2Fmessages");
     expect(calledURL).toContain("model=gpt-test");
-    expect(calledURL).toContain("user_agent=audit-client%2F1.0");
+	expect(calledURL).toContain("user_agent=audit-client%2F1.0");
+	expect(calledURL).toContain("newapi_user_id=7");
     expect(calledURL).toContain("newapi_token_id=42");
     expect(calledURL).toContain("forward_status=rejected");
     expect(calledInit?.credentials).toBe("same-origin");
     expect(new Headers(calledInit?.headers).has("Authorization")).toBe(false);
   });
 
-  it("loads the masked NewAPI token catalog through the Cookie session", async () => {
+  it("loads the safe NewAPI caller catalog through the Cookie session", async () => {
     let calledURL = "";
     const fetcher = (async (input: RequestInfo | URL) => {
       calledURL = String(input);
@@ -45,8 +47,8 @@ describe("API client", () => {
     }) as typeof fetch;
     const client = createApiClient(vi.fn(), fetcher);
 
-    await expect(client.listNewAPITokens()).resolves.toEqual({ items: [], refreshed_at: null });
-    expect(calledURL).toBe("/api/v1/newapi/tokens");
+	await expect(client.listNewAPICallers()).resolves.toEqual({ items: [], refreshed_at: null });
+	expect(calledURL).toBe("/api/v1/newapi/callers");
   });
 
   it("creates a session with a one-shot token POST and no Authorization Header", async () => {
