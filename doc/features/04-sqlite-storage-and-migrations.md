@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-个人单机版使用一个 SQLite WAL 数据库，保存四阶段证据、最新解析结果、可选 Token 关联和简单 gap。写入由单 writer goroutine 串行完成，查询使用独立只读连接池。
+个人单机版使用一个 SQLite WAL 数据库，保存四阶段证据、最新解析结果、可选 NewAPI 调用者身份和简单 gap。写入由单 writer goroutine 串行完成，查询使用独立只读连接池。
 
 不实现多节点、ORM或额外存储控制面；WAL 使用 SQLite 默认自动 checkpoint，迁移只记录数字版本，解析结果只保留最新一份。
 
@@ -10,10 +10,10 @@
 
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
-internal/storage/sqlite/migrations/{001_init.sql,002_reparse_conversations.sql,003_token_link_masked_key.sql}
+internal/storage/sqlite/migrations/{001_init.sql,002_reparse_conversations.sql,003_token_link_masked_key.sql,004_newapi_request_identity.sql}
 ~~~
 
-`001_init.sql` 建立九张表和全部索引；`002_reparse_conversations.sql` 不改表结构，只把受支持 parser 的 v1 已完成记录一次性置回 pending，以便 parser v2 从原始证据回填 conversation；`003_token_link_masked_key.sql` 为 `token_links` 增加非空 `masked_key` 快照列，旧记录升级后使用空字符串。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；已经提交的 migration 不再修改，后续变化新增数字文件。
+`001_init.sql` 建立九张表和全部索引；`002_reparse_conversations.sql` 把受支持 parser 的 v1 已完成记录一次性置回 pending；`003_token_link_masked_key.sql` 是旧版兼容 migration；`004_newapi_request_identity.sql` 为 `audit_records` 增加 request ID、调用者状态与持久化重试字段，并为 `token_links` 增加 NewAPI 用户字段。`masked_key` 旧列继续存在但新链路始终写空且不对外暴露。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制；已经提交的 migration 不再修改，后续变化新增数字文件。
 
 ~~~go
 writerDB.SetMaxOpenConns(1)
@@ -38,13 +38,13 @@ reader 额外设置 PRAGMA query_only=ON。使用 SQLite 默认自动 checkpoint
 | 表 | 关键字段与约束 |
 | --- | --- |
 | schema_migrations | version INTEGER PRIMARY KEY、applied_at_ns |
-| audit_records | audit_id PK；started_at_ns/ended_at_ns；route_id/protocol/parser_name；method/path；request_uri_enc；mode；status_code；forward_status/capture_status/parse_status；blocked_by/block_code；error_code |
+| audit_records | audit_id PK；started_at_ns/ended_at_ns；route_id/protocol/parser_name；method/path；request_uri_enc；mode；status_code；forward_status/capture_status/parse_status；blocked_by/block_code；error_code；newapi_request_id；caller_status/attempts/next_at/updated_at |
 | http_stages | audit_id+stage PK；state、proto、method、host、status_code、content_length、started_at_ns/ended_at_ns、error_code |
 | http_headers | audit_id+stage+kind+name+value_index PK；value_length、value_enc |
 | body_streams | audit_id+stage PK；observed/stored_length、sha256、hash_complete、eof_seen、state、error_code |
 | body_chunks | audit_id+stage+seq PK；offset、plaintext_length、observed_at_ns、data_enc |
 | parsed_results | audit_id PK；parser_name/parser_version/status；request_model/response_model；requested_stream/observed_stream；response_id；usage_input/usage_output/usage_total；error_type/error_code；message_count/tool_call_count/has_tool_call；parsed_json_enc；parsed_at_ns |
-| token_links | audit_id PK；newapi_token_id、token_name、masked_key、linked_at_ns |
+| token_links | audit_id PK；newapi_user_id、username、newapi_token_id、token_name、linked_at_ns；旧 masked_key 列仅供兼容 |
 | audit_gaps | id INTEGER PK；started_at_ns/ended_at_ns、reason、request_count、detail、created_at_ns |
 
 stage 只允许四个固定名称。http_stages 外键指向 audit_records；http_headers 和 body_streams 外键指向同 audit_id/stage 的 http_stages；body_chunks 外键指向 body_streams；parsed_results 和 token_links 外键指向 audit_records。所有审计子表使用 ON DELETE CASCADE，schema_migrations 与 audit_gaps 独立。
@@ -81,7 +81,7 @@ type WriteOp struct {
 }
 ~~~
 
-容量固定 1024 ops。支持 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit、SaveParsedResult、AddGap。拦截拒绝不增加 WriteOp 类型，由 FinishAudit 在同一事务写 forward_status=rejected、blocked_by、block_code、status_code 和 parse_status=skipped。
+容量固定 1024 ops。支持 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit、SaveParsedResult、AddGap、UpsertTokenLink 和 RetryCallerLookup。拦截拒绝不增加 WriteOp 类型，由 FinishAudit 在同一事务写 forward_status=rejected、blocked_by、block_code、status_code 和 parse_status=skipped。FinishAudit 同时保存可选 request ID 并初始化 caller pending 状态。
 
 writer 最多聚合 64 ops 或等待 5 ms，然后在一个事务中执行。BeginAudit 和 strict admission 带 Ack，调用方等待 COMMIT；普通 chunk 异步。
 
@@ -107,7 +107,8 @@ available/strict 只控制审计持久化故障是否阻止 admission。intercep
 
 query API 只使用 readerDB：
 
-- 列表主体读取 audit_records，并只 LEFT JOIN parsed_results 与 token_links 的窄明文字段；query 层另按 audit_id 定向读取入站阶段的加密 User-Agent，认证解密后用于普通列表展示和可选子串筛选，不扫描其他 Header。
+- 列表主体读取 audit_records，并只 LEFT JOIN parsed_results 与 token_links 的窄明文字段，包括 request ID、caller status、用户 ID/用户名和 Token ID/名称；query 层另按 audit_id 定向读取入站阶段的加密 User-Agent，认证解密后用于普通列表展示和可选子串筛选，不扫描其他 Header。
+- caller worker 只扫描 `caller_status=pending` 且到期的行；重试次数和下次时间均在 SQLite 中，进程重启后可继续。
 - 详情按 audit_id 查询 stage、stream、header。
 - 列表和详情直接读取 audit_records.blocked_by/block_code；它们不需要额外 JOIN。
 - Body 按 stage+seq 分页读取并解密。
@@ -152,7 +153,8 @@ retention_days>0 时按[模块 12](12-retention-and-maintenance.md)的固定算�
 - 空库执行全部 migration；重复启动不重复执行。
 - DB 版本高于程序时 storage 保持 unhealthy；available 继续代理，strict 返回 503。
 - writer batch commit/rollback。
-- `001_init.sql`、`002_reparse_conversations.sql` 与 `003_token_link_masked_key.sql` 重复启动不重复执行；v2 数据库升级后既有 Token 关联保留，`masked_key` 默认为空，表总数仍为九。
+- `001` 至 `004` migration 重复启动不重复执行；旧数据库升级后表总数仍为九，既有 Token 行保留，新 request-id 字段使用安全默认值。
+- request ID 终态写入、pending 扫描、退避重试、resolved 原子回填和 terminal unresolved 均可恢复且幂等。
 - interceptor 拒绝在一个事务内写 rejected、blocked_by/block_code、status_code、skipped，且不存在未触发的 NewAPI/响应 stage 或空 body_stream。
 - strict BeginAudit commit 失败返回 503。
 - available queue 满继续并产生 gap。

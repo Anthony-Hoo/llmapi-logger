@@ -37,7 +37,8 @@ Client -> Nginx -> llmapi-logger
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
 - 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；路径、状态和原始 HTTP 证据留在详情或高级筛选。
 - loopback 管理端同样强制鉴权；CLI 可用静态 Bearer token，Web UI 登录后使用七天过期的 HttpOnly Cookie；敏感详情和 raw 响应禁止缓存。
-- 可选只读同步 NewAPI 已打码的 Token 目录，为审计记录保存 Token ID、名称和 `masked_key` 快照，并在页面按 API Key 下拉筛选。
+- 可选使用 NewAPI 全局管理凭证同步安全用户目录；对响应中的 `X-Oneapi-Request-Id` 异步查询全站日志，回填用户名、用户 ID、Token ID 和 Token 名称。
+- 调用者识别不读取、不匹配、不保存也不展示用户完整 API Key；主筛选按 NewAPI 用户，Token ID 只作为高级筛选。
 - assistant 输出使用安全的 GFM Markdown 展示；禁用原始 HTML、危险链接协议和远程图片加载。
 - 启动异常记录恢复、简单审计 gap、按天 retention 和安全 JSON 日志。
 
@@ -115,7 +116,7 @@ http://127.0.0.1:8081/ui/
 
 NewAPI 相关配置统一放在 `newapi` 下：`url` 是唯一上游，`proxy_url` 是可选显式 HTTP(S) 代理。若 audit-proxy 所在环境不能直接访问远程 NewAPI，宿主机二进制通常可填写 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
 
-`newapi.access_token` 与 `newapi.user_id` 必须同时配置或同时留空。配置后，程序只读调用 NewAPI Token 列表接口，同步服务端已经打码的 Token 元数据；启动时刷新一次，之后每五分钟刷新。刷新失败不影响 LLM 转发，并保留上一份成功快照。审计库只保存匹配时的 Token ID、名称和 `masked_key`，不保存 NewAPI 原始 Token。详细说明见[部署说明](doc/deployment/README.md)和 [Token 只读关联](doc/features/11-newapi-token-readonly-linking.md)。
+`newapi.access_token` 与 `newapi.user_id` 必须同时配置或同时留空。配置后，程序使用只读管理请求同步 NewAPI 全站用户的安全字段，并在每条已转发 LLM 响应返回 `X-Oneapi-Request-Id` 后异步查询 NewAPI 全站日志。查询成功只回填 `user_id`、`username`、`token_id` 和 `token_name`；日志暂未生成或请求失败时会有限重试，失败不影响原请求转发和响应。完整用户 API Key 从不进入该流程。详细说明见[部署说明](doc/deployment/README.md)和 [NewAPI 请求身份解析](doc/features/11-newapi-request-identity.md)。
 
 ## Docker Compose
 

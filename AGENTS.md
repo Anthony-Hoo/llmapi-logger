@@ -41,7 +41,7 @@ internal/
   interceptor/                  # 入站拦截器、注册表和执行链
   proxy/                        # 审计代理与无审计 passthrough 代理
   audit/                        # 审计会话、阶段与 Body 采集
-  newapi/                       # NewAPI 已打码 Token 目录同步与请求关联
+  newapi/                       # NewAPI 安全用户目录与 request-id 调用者解析
   conversation/                 # 协议无关的消息、reasoning、工具调用与结果 DTO
   storage/sqlite/               # SQLite 读写和内嵌 migration
   parser/                       # OpenAI/Anthropic/Gemini 摘要与 conversation 聚合
@@ -66,7 +66,7 @@ tests/                          # 跨模块集成测试
 - 默认拦截器只读请求元数据；需要 Body 的模块必须声明上限，由框架统一预读并原字节回放，超限固定为 `413` 和 `block_code=body_too_large`。
 - passthrough 与审计代理共享 NewAPI rewrite 和显式上游代理设置，但 passthrough 不创建 audit、不解析、不执行 interceptor，也不写 LLM 请求完成日志。
 - `audit` 采集层只处理字节、长度、哈希和完整性状态；parser 在请求完成后异步生成非敏感摘要和协议无关 conversation，失败不影响转发。
-- 可选的 `newapi` 目录只读同步 NewAPI 已打码 Token 元数据；请求关联只保存 Token ID、名称和 `masked_key` 快照，刷新或关联失败不影响转发。
+- 可选的 `newapi` 集成只读同步安全用户目录，并用上游 `X-Oneapi-Request-Id` 查询全站日志回填用户与 Token 身份；不读取或保存完整 API Key，解析失败不影响转发。
 - SQLite 使用单 writer goroutine，查询使用独立只读连接。启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
 - 管理 API、health 和 ready 在任何监听地址都必须鉴权：CLI 使用静态 Admin Token，Web UI 使用由该 Token 登录换取的七天 HttpOnly Cookie。审计主列表只展示调用者、时间、模型和入站 User-Agent；普通列表会逐条只解密该 User-Agent 供展示和子串筛选，不读取其他 Header、Request-URI、Body 或 conversation。路径、状态和原始 HTTP 等信息留在详情或高级筛选；raw request/response Body 只按需解密读取；assistant 文本使用禁用原始 HTML 的安全 Markdown 展示。
 - 敏感 Header、Body、Query 和 conversation 全文使用一个本地 AES-256-GCM key 加密；管理 JSON 和 raw 响应使用 `Cache-Control: no-store`。

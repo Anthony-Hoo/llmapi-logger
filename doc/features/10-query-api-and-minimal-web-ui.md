@@ -28,7 +28,7 @@ retention 只在后台删除过期审计，不扩展本模块的只读查询接�
 
 查询只会看到被进程内 Matcher 精确命中的 LLM API route。`/v1/models`、NewAPI 健康检查、登录、管理和前端等安全非 LLM 请求即使经本程序 passthrough，也不会创建 audit，因此不会出现在列表、详情或 raw 接口中。受保护或危险的未匹配路径 fail-closed，同样不创建 audit。
 
-列表主体读取 `audit_records`，并可关联 `parsed_results` 和 `token_links` 的窄摘要字段；Token 摘要只有 ID、名称和服务端已打码的 `masked_key`。此外，query 层会为每条候选记录定向读取并认证解密 `request_for_newapi_received_from_nginx` 阶段的入站 `User-Agent`，把首个值放入列表 DTO；不会借此加载其他 Header。详情由 query 层读取并认证解密 `request_uri_enc`、每条 `http_headers.value_enc` 和 `parsed_results.parsed_json_enc`；后者只提取并校验 conversation。Body bytes 仍不随详情返回。
+列表主体读取 `audit_records`，并可关联 `parsed_results` 和 `token_links` 的窄摘要字段；调用者摘要只包含 NewAPI request ID、识别状态、用户 ID/用户名和 Token ID/名称。此外，query 层会为每条候选记录定向读取并认证解密 `request_for_newapi_received_from_nginx` 阶段的入站 `User-Agent`，把首个值放入列表 DTO；不会借此加载其他 Header。详情由 query 层读取并认证解密 `request_uri_enc`、每条 `http_headers.value_enc` 和 `parsed_results.parsed_json_enc`；后者只提取并校验 conversation。Body bytes 仍不随详情返回。
 
 ## 4. 列表 API
 
@@ -36,11 +36,11 @@ retention 只在后台删除过期审计，不扩展本模块的只读查询接�
 GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 ~~~
 
-最小范围支持时间、协议、路径、模型、User-Agent、API Key、状态码、转发状态、阻断组件/代码、捕获状态和 Token 名称等简单筛选。主筛选聚焦调用者 API Key、模型和 User-Agent；路径、状态及其他诊断条件属于高级筛选。模型保持精确匹配；普通列表无论是否设置筛选都会解密并返回入站 User-Agent，设置筛选后使用不区分大小写的子串匹配，每次最多扫描 2000 条候选记录，达到上限时通过下一页 cursor 继续。API Key 由页面从只读 Token 目录选择一个 `newapi_token_id`，列表 SQL 对 `token_links.newapi_token_id` 做精确筛选。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `before_started_at_ns + before_id` 做 keyset 分页；默认 50 条，最大 200 条。
+最小范围支持时间、协议、路径、模型、User-Agent、NewAPI 用户、用户名、Token ID/名称、状态码、转发状态、阻断组件/代码和捕获状态等简单筛选。主筛选聚焦调用者用户、模型和 User-Agent；Token ID、路径、状态及其他诊断条件属于高级筛选。模型保持精确匹配；普通列表无论是否设置筛选都会解密并返回入站 User-Agent，设置筛选后使用不区分大小写的子串匹配，每次最多扫描 2000 条候选记录，达到上限时通过下一页 cursor 继续。页面从安全用户目录选择 `newapi_user_id`，列表 SQL 对 `token_links.newapi_user_id` 做精确筛选；Token ID 高级筛选同样是窄列精确匹配。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `before_started_at_ns + before_id` 做 keyset 分页；默认 50 条，最大 200 条。
 
-列表返回紧凑摘要、解密后的入站 `user_agent`，以及可选的 `newapi_token_id`、`token_name`、`masked_key`；底层 DTO 仍保留路径和状态等窄字段供详情选择与高级筛选使用，但主列表行不展示这些诊断字段。非法参数返回 `400`。
+列表返回紧凑摘要、解密后的入站 `user_agent`，以及 `newapi_request_id`、`caller_status` 和可选的用户/Token 身份字段；不返回完整或打码 API Key。底层 DTO 仍保留路径和状态等窄字段供详情选择与高级筛选使用，但主列表行不展示这些诊断字段。非法参数返回 `400`。
 
-受保护的 `GET /api/v1/newapi/tokens` 返回最近一次成功同步的 Token 目录和 `refreshed_at`。每项只包含 NewAPI 返回的 ID、名称、`masked_key`、状态、分组和是否无限额度；绝不返回原始 Token。目录功能未配置或尚未成功刷新时返回空数组，页面仍可使用其他筛选。
+受保护的 `GET /api/v1/newapi/callers` 返回最近一次成功同步的安全用户目录和 `refreshed_at`。每项只包含 ID、用户名、显示名、状态和分组；管理集成未配置或尚未成功刷新时返回空数组，页面仍可使用其他筛选。
 
 ## 5. 详情 API
 
@@ -48,7 +48,7 @@ GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 GET /api/v1/audits/{audit_id}
 ~~~
 
-详情返回审计元数据、原始 `request_uri`、实际存在的 HTTP 阶段、每个 Header/Trailer 值、Body 长度/hash/完整性、parser 最小摘要、conversation 和可选 Token ID/名称/`masked_key` 快照。Header 数组逐项返回，不合并同名多值：
+详情返回审计元数据、原始 `request_uri`、实际存在的 HTTP 阶段、每个 Header/Trailer 值、Body 长度/hash/完整性、parser 最小摘要、conversation，以及可选的 NewAPI request ID、识别状态和用户/Token 身份。Header 数组逐项返回，不合并同名多值：
 
 ~~~json
 {
@@ -101,7 +101,7 @@ request 读取 `request_sent_to_newapi`，response 读取 `response_received_fro
 
 详情页面保持三个层次：
 
-- 列表与筛选：使用紧凑的原生 `ul/li/button` 列表，主行只展示调用者、时间、模型和 User-Agent，避免表格横向滚动；调用者优先使用关联的 NewAPI Token 名称，缺失时显示未关联。主筛选提供调用者 API Key、模型和 User-Agent，路径、状态及其他诊断条件收进默认折叠的高级筛选。
+- 列表与筛选：使用紧凑的原生 `ul/li/button` 列表，主行只展示调用者、时间、模型和 User-Agent，避免表格横向滚动；resolved 调用者显示用户名、Token 名称和 Token ID，pending/unresolved/none 分别显示识别中、未识别和未关联。主筛选提供 NewAPI 用户、模型和 User-Agent，Token ID、路径、状态及其他诊断条件收进默认折叠的高级筛选。
 - 对话审计主视图：按 parser 给出的顺序展示 system/developer/user/assistant/tool；标明 request/response 和数据方向；assistant 的 text part 使用 `react-markdown` + `remark-gfm` 安全渲染，不启用 raw HTML，只允许 HTTP、HTTPS、mailto 和相对链接，远程图片降级为文字；system/user/tool/reasoning 保持原始文本或 JSON。reasoning 默认折叠；tool call 显示名称、call id、arguments，tool result 显示关联 id 和结果。JSON 字符串只在前端格式化，不改写存储值。
 - 辅助证据折叠区：包含 Request-URI、四阶段、每个 Header/Trailer 值、Body 完整性和应用层原始 HTTP 重建。Body 只有用户点击查看后才加载到页面内存；有效 UTF-8 且不含明显二进制控制字节时内联预览，否则提示下载原始字节。
 
@@ -141,11 +141,12 @@ type AuditQuery interface {
 - raw 按 chunk 顺序输出，并正确报告长度、hash 和完整性；大 Body 输出内存有界。
 - loopback 和非 loopback 的 API、health、ready 均要求 Bearer token 或有效管理 Cookie；只有静态 UI shell 和登录端点可匿名访问。
 - 登录 Cookie 属性和固定过期时间正确；刷新可恢复会话，注销、过期或 `401` 后回到登录页；前端存储和 URL 中没有 admin token。
-- 模型和 User-Agent 筛选语义正确；API Key 下拉只提交 `newapi_token_id`，管理 API、URL、日志和审计库均不接收原始 API Key。
+- NewAPI 用户、模型、User-Agent 和 Token ID 筛选语义正确；管理 API、URL、日志和审计库均不接收用户 API Key。
+- `newapi/callers` 只返回安全用户目录；列表和详情正确展示 request ID、caller status、用户与 Token 元数据，且不含 `masked_key`。
 - 审计列表主行只包含调用者、时间、模型和 User-Agent；conversation 是详情默认主视图，assistant 文本支持 GFM Markdown 且原始 HTML 不执行，其他角色、reasoning 和工具内容保持原始展示；路径、状态、raw/Header 辅助证据默认折叠，raw Body 按需预览和下载。
 - Vite 构建产物可由 Go embed 提供，生产运行不依赖 Node。
 - 未授权响应、静态 UI shell 和日志不泄露 Header value、Body、admin token 或主密钥；已授权列表只允许返回入站 User-Agent 这一项 Header 明文，详情和 raw 是其余敏感证据的明确读取入口。
 
 ## 11. 实现边界
 
-storage 的普通列表主体查询不加载敏感密文，但会按每个候选 audit 定向返回入站 User-Agent 密文；query 层始终认证解密其首个值用于列表展示，启用 User-Agent 筛选时再在固定扫描上限内执行不区分大小写的子串匹配。API Key 筛选直接使用 `token_links.newapi_token_id` 窄列，不解密凭据 Header。详情查询只加载所需密文；query 层负责 AAD 重建、认证解密、conversation 校验和 DTO 映射；web 层负责 Admin Token、七天 Cookie、`no-store`、稳定错误、只读 Token 目录和 raw streaming；React 页面不持久化 token 或 Body，并只在用户动作后读取 raw Body。
+storage 的普通列表主体查询不加载敏感密文，但会按每个候选 audit 定向返回入站 User-Agent 密文；query 层始终认证解密其首个值用于列表展示，启用 User-Agent 筛选时再在固定扫描上限内执行不区分大小写的子串匹配。调用者筛选直接使用 `token_links` 的用户/Token 窄列，不解密凭据 Header。详情查询只加载所需密文；query 层负责 AAD 重建、认证解密、conversation 校验和 DTO 映射；web 层负责 Admin Token、七天 Cookie、`no-store`、稳定错误、安全用户目录和 raw streaming；React 页面不持久化 token 或 Body，并只在用户动作后读取 raw Body。

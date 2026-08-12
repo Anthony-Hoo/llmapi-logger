@@ -7,8 +7,8 @@ newapi:
   # Optional explicit HTTP(S) forward proxy. Empty means direct;
   # HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment variables are not used.
   proxy_url: ""
-  # Optional read-only dashboard credential used to synchronize masked token
-  # metadata. Set both fields or leave both empty/zero.
+  # Optional NewAPI administrator credential used only for read-only global
+  # user and request-log queries. Set both fields or leave both empty/zero.
   access_token: ""
   user_id: 0
 mode: available

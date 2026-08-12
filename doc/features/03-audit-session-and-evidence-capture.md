@@ -128,11 +128,11 @@ audit_gaps 只做进程级运维提示，字段为 id、started_at_ns、ended_at
 
 rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启时先把遗留 processing 重置为 pending，再扫描已结束且 pending 的 audit 重新入队；解析结果只保留最新版本。
 
-## 11. Token 关联
+## 11. NewAPI 调用者身份
 
-若成对配置 `newapi.access_token` 与 `newapi.user_id`，应用会按[模块 11](11-newapi-token-readonly-linking.md)维护一个只含 NewAPI 已打码 Token 元数据的内存目录。命中 LLM route 并成功创建 audit parent 后，审计管理器按 NewAPI 的凭据选择与归一化规则对当前请求做纯内存匹配；找到唯一条目时，`token_links` 保存当时的 NewAPI token id、token name、`masked_key` 和关联时间，不保存原始 token key。
+若成对配置 `newapi.access_token` 与 `newapi.user_id`，应用按[模块 11](11-newapi-request-identity.md)启用只读 NewAPI 管理集成。审计会话在 `response_received_from_newapi` 开始时读取合法的 `X-Oneapi-Request-Id`，并在 `FinishAudit` 中与终态一起持久化；存在 request ID 时将 `caller_status` 设为 `pending`，再唤醒单个后台 worker。
 
-关联发生在 interceptor chain 之前，因此后续被拦截的 audit 也可能保留 Token 快照；它只用于审计展示，不参与放行判断。目录未配置、首次同步失败、没有唯一匹配或写关联失败都不影响转发或 strict admission；passthrough 和未创建 audit 的 fail-closed 请求不做关联，`token_links` 允许为空。
+worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存 `newapi_user_id`、`username`、`newapi_token_id`、`token_name` 和关联时间。没有访问 NewAPI 的 interceptor 拒绝、本地 fail-closed、passthrough、无上游响应或无 request ID 的记录不会进入身份解析。识别结果只用于审计展示和筛选，不参与放行；管理接口延迟、失败或最终未识别均不改变已完成的转发结果。
 
 ## 12. 崩溃恢复
 
@@ -147,7 +147,8 @@ rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启�
 - available writer queue 满继续；strict admission 503；parser queue 满不影响两种模式的转发。
 - interceptor 主动 reject、body 超限、error、panic、非法 Decision 和非取消的 Body 读取失败均写 rejected、blocked_by/block_code、实际 status_code 和 skipped；客户端取消写 client_cancelled。
 - metadata reject 未读 Body 时 capture 为 partial；body 预读完成后 reject 可完整结束入站证据。
-- 未调用 NewAPI 的 audit 不存在后三个 stage/body_stream/chunk，且不进入 parser；若请求在 interceptor 前已匹配到目录 Token，可以保留 `token_links` 快照。
+- 未调用 NewAPI 的 audit 不存在后三个 stage/body_stream/chunk，不进入 parser，也没有 request ID 或调用者关联。
+- 上游 response Header 中合法的 `X-Oneapi-Request-Id` 随终态保存并触发 caller worker；无效、多余或缺失值不会创建 pending 任务。
 - body interceptor 放行后的两个请求阶段 length/hash 一致。
 - GCM 随机 nonce、AAD/密文篡改失败。
 - DB/WAL 无测试 token/Header/Body 明文。

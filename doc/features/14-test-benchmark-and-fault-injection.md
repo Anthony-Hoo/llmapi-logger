@@ -31,8 +31,8 @@ internal/web/frontend/src/*.test.ts    # 前端 API 与格式化测试
 - OpenAI、Anthropic、Gemini 常见 JSON/SSE 与 gzip 限额。
 - parser pending/processing 恢复、panic 隔离和加密 parsed JSON。
 - 列表、详情、raw 流式解密、Bearer/Cookie 鉴权、会话过期和匿名静态 UI shell。
-- NewAPI 已打码 Token 目录分页、五分钟刷新、失败保留旧快照、请求关联和按 Token ID 筛选。
-- 只展示调用者、时间、模型和 User-Agent 的紧凑原生审计列表；普通列表解密返回 User-Agent，路径/状态留在详情或高级筛选；同时覆盖模型/User-Agent/API Key 筛选、assistant 安全 GFM Markdown、工具调用和多轮对话展示。
+- NewAPI 安全用户目录分页、五分钟刷新、失败保留旧快照；response request ID 捕获、全站日志精确查询、持久化有限重试、用户/Token 身份回填和按用户/Token ID 筛选。
+- 只展示调用者、时间、模型和 User-Agent 的紧凑原生审计列表；普通列表解密返回 User-Agent，路径/状态留在详情或高级筛选；同时覆盖用户/模型/User-Agent/Token ID 筛选、caller 四种状态、assistant 安全 GFM Markdown、工具调用和多轮对话展示。
 - 启动 interrupted/partial 恢复、聚合 gap、retention 级联、三态 readiness 和安全 JSON 日志。
 
 ## 4. 固定验证命令
@@ -84,8 +84,8 @@ bash ./scripts/build.sh
 - strict admission 故障不会调用 Fake NewAPI；available 审计故障仍能转发并产生安全日志或 gap。
 - 重启恢复、retention 批次边界和级联删除测试通过。
 - loopback 管理 API 缺少 Bearer token 或有效 Cookie 时返回 `401`。
-- Cookie 固定七天过期；API Key 下拉只提交 Token ID；assistant Markdown 不执行原始 HTML、危险协议或远程图片。
-- Token 目录失败不阻断转发，审计与管理响应只出现 Token ID、名称和 `masked_key`，不出现原始 Token 或目录 access token。
+- Cookie 固定七天过期；调用者下拉只提交 NewAPI 用户 ID，Token ID 留在高级筛选；assistant Markdown 不执行原始 HTML、危险协议或远程图片。
+- 用户目录或 caller 查询失败不阻断转发；审计与管理响应只出现 request ID 和用户/Token 元数据，不出现完整/打码用户 API Key 或管理 access token。
 - 路由、受保护路径边界、parser、示例配置和 Nginx 统一数据面入口保持一致。
 
 本阶段不验收指标、导出、手工删除、自动 VACUUM、复杂重连或长期性能基线。

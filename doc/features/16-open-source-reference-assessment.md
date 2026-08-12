@@ -8,7 +8,7 @@
 
 | 项目 | 借鉴 | 不采用 |
 | --- | --- | --- |
-| `newapi-logger` | Nginx 前置部署、NewAPI Token 名称缓存 | catch-all 全路径代理、完整缓冲 Body、明文日志 |
+| `newapi-logger` | Nginx 前置部署、简洁审计页面 | catch-all 全路径代理、完整缓冲 Body、明文日志 |
 | `claude-tap` | 协议 parser、SSE 状态机、简单 viewer | 修改请求内容、自动解压重写、多种代理模式 |
 | `HttpProxyMcp` | 多值 Header、二进制 Body、列表/详情分离 | HTTPS MITM、完整读取 Body、复杂桌面集成 |
 | `NewAPI` | 路由和 Token 规范化事实 | channel、计费、重试和厂商 adapter 代码 |
@@ -18,7 +18,7 @@
 可借鉴：
 
 - 在 Nginx 和 NewAPI 之间独立部署。
-- 后台缓存 Token ID/名称。
+- 用最小后台任务补充调用者显示信息。
 - 用简单管理页查看最近请求。
 
 不采用：
@@ -61,7 +61,7 @@
 NewAPI 只作为外部后端契约：
 
 - 确认需要代理的模型路径。
-- 确认 Token 常见来源和 `tokens` 表结构。
+- 确认响应 request ID、全站日志和用户目录的管理接口契约。
 - 确认审计代理看不到其内部渠道选择和厂商请求。
 
 不复制 NewAPI 的鉴权、路由、计费、重试或 adapter 实现。
@@ -104,7 +104,7 @@ metadata 模块默认拿不到 Body，因此启用 credential、Header 或路径
 2. SQLite 原始证据记录。
 3. 三个协议的基础解析。
 4. 本地查询页面。
-5. 可选 Token 名称关联。
+5. 可选 request-id 调用者身份回填。
 6. 仅面向 LLM 白名单请求的有序入站 interceptor chain；Body 检查必须有界且原字节回放。
 
 不因参考项目已有某项功能就自动加入本项目。
