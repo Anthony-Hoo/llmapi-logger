@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"llmapi-logger/internal/uaguard"
 )
 
 type writeKind uint8
@@ -27,6 +29,9 @@ const (
 	writeDeleteExpired
 	writeUpsertTokenLink
 	writeRetryCallerLookup
+	writeCreateUserAgentRule
+	writeUpdateUserAgentRule
+	writeDeleteUserAgentRule
 )
 
 type writeRequest struct {
@@ -240,6 +245,12 @@ func applyWrite(transaction *sql.Tx, request writeRequest) error {
 		return upsertTokenLink(transaction, request.data.(TokenLink))
 	case writeRetryCallerLookup:
 		return retryCallerLookup(transaction, request.data.(CallerRetry))
+	case writeCreateUserAgentRule:
+		return createUserAgentRule(transaction, request.data.(uaguard.Rule))
+	case writeUpdateUserAgentRule:
+		return updateUserAgentRule(transaction, request.data.(uaguard.Rule))
+	case writeDeleteUserAgentRule:
+		return deleteUserAgentRule(transaction, request.data.(int64))
 	default:
 		return fmt.Errorf("sqlite writer: unknown operation %d", request.kind)
 	}

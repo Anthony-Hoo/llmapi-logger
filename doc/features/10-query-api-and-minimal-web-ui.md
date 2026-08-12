@@ -2,11 +2,11 @@
 
 ## 1. 目标与范围
 
-本模块只为个人单机部署提供三个查询入口：包含最小摘要和入站 User-Agent 的紧凑审计列表、包含 conversation/Request-URI/Header/Trailer 明文的单条详情，以及按需读取的原始请求/响应 Body。页面默认把 parser 结果渲染成便于审计的多轮对话，同时保留原始 HTTP 证据，不承担通用日志平台或运维控制台职责。
+本模块为个人单机部署提供三个审计查询入口，并提供一个受保护的动态 User-Agent 规则控制面：包含最小摘要和入站 User-Agent 的紧凑审计列表、包含 conversation/Request-URI/Header/Trailer 明文的单条详情，以及按需读取的原始请求/响应 Body。页面默认把 parser 结果渲染成便于审计的多轮对话，同时保留原始 HTTP 证据，不承担通用日志平台职责。
 
 首版明确不做：
 
-- 单条或批量删除 API。
+- 单条或批量删除审计 API。UA 规则删除属于明确的配置操作。
 - 在线导出。
 - `audit_gaps` 查询页面和 gaps UI。
 - reparse 管理端点。
@@ -41,6 +41,8 @@ GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 列表返回紧凑摘要、解密后的入站 `user_agent`，以及 `newapi_request_id`、`caller_status` 和可选的用户/Token 身份字段；不返回完整或打码 API Key。底层 DTO 仍保留路径和状态等窄字段供详情选择与高级筛选使用，但主列表行不展示这些诊断字段。非法参数返回 `400`。
 
 受保护的 `GET /api/v1/newapi/callers` 返回最近一次成功同步的安全用户目录和 `refreshed_at`。每项只包含 ID、用户名、显示名、状态和分组；管理集成未配置或尚未成功刷新时返回空数组，页面仍可使用其他筛选。
+
+受保护的 `/api/v1/user-agent-rules` 支持 `GET`、`POST`，`/api/v1/user-agent-rules/{id}` 支持 `PUT`、`DELETE`。请求体只接收名称、启用状态、模型正则和 User-Agent 正则；无效 JSON、未知字段或无效 RE2 正则返回通用 `400`，不得回显请求值或底层错误。持久化成功后规则立即生效。
 
 ## 5. 详情 API
 
@@ -104,6 +106,7 @@ request 读取 `request_sent_to_newapi`，response 读取 `response_received_fro
 - 列表与筛选：使用紧凑的原生 `ul/li/button` 列表，主行只展示调用者、时间、模型和 User-Agent，避免表格横向滚动；resolved 调用者显示用户名、Token 名称和 Token ID，pending/unresolved/none 分别显示识别中、未识别和未关联。主筛选提供 NewAPI 用户、模型和 User-Agent，Token ID、路径、状态及其他诊断条件收进默认折叠的高级筛选。
 - 对话审计主视图：按 parser 给出的顺序展示 system/developer/user/assistant/tool；标明 request/response 和数据方向；assistant 的 text part 使用 `react-markdown` + `remark-gfm` 安全渲染，不启用 raw HTML，只允许 HTTP、HTTPS、mailto 和相对链接，远程图片降级为文字；system/user/tool/reasoning 保持原始文本或 JSON。reasoning 默认折叠；tool call 显示名称、call id、arguments，tool result 显示关联 id 和结果。JSON 字符串只在前端格式化，不改写存储值。
 - 辅助证据折叠区：包含 Request-URI、四阶段、每个 Header/Trailer 值、Body 完整性和应用层原始 HTTP 重建。Body 只有用户点击查看后才加载到页面内存；有效 UTF-8 且不含明显二进制控制字节时内联预览，否则提示下载原始字节。
+- UA 拦截规则页：列出状态、名称、模型正则和 User-Agent 正则，支持新增、编辑、启停和删除；说明 Go RE2、默认区分大小写、重叠规则全部需要通过及热生效语义。
 
 重建视图用于排查应用层输入/输出，不是 wire dump：不恢复 TCP/TLS、HTTP/2 frame、Header 原始大小写/顺序或传输 chunk framing。下载始终保存 raw API 返回的原始 Body 字节，不使用页面渲染文本重新编码。
 

@@ -51,6 +51,43 @@ describe("API client", () => {
 	expect(calledURL).toBe("/api/v1/newapi/callers");
   });
 
+  it("manages authenticated User-Agent rules without Authorization headers", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      if (!init?.method || init.method === "GET") {
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ id: 1, name: "rule" }), {
+        status: init.method === "POST" ? 201 : 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const client = createApiClient(vi.fn(), fetcher);
+    const input = { name: "rule", enabled: true, model_pattern: "^gpt", user_agent_pattern: "Desktop" };
+
+    await client.listUserAgentRules();
+    await client.createUserAgentRule(input);
+    await client.updateUserAgentRule(1, { ...input, enabled: false });
+    await client.deleteUserAgentRule(1);
+
+    expect(calls.map((call) => [call.url, call.init?.method ?? "GET"])).toEqual([
+      ["/api/v1/user-agent-rules", "GET"],
+      ["/api/v1/user-agent-rules", "POST"],
+      ["/api/v1/user-agent-rules/1", "PUT"],
+      ["/api/v1/user-agent-rules/1", "DELETE"],
+    ]);
+    for (const call of calls) {
+      expect(call.init?.credentials).toBe("same-origin");
+      expect(new Headers(call.init?.headers).has("Authorization")).toBe(false);
+    }
+  });
+
   it("creates a session with a one-shot token POST and no Authorization Header", async () => {
     let calledURL = "";
     let calledInit: RequestInit | undefined;

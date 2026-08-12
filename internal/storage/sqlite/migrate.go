@@ -61,9 +61,16 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	}
 
 	latestSupported := migrations[len(migrations)-1].version
+	supported := make(map[int]struct{}, len(migrations))
+	for _, item := range migrations {
+		supported[item.version] = struct{}{}
+	}
 	for version := range applied {
 		if version > latestSupported {
 			return fmt.Errorf("sqlite: database version %d is newer than supported version %d", version, latestSupported)
+		}
+		if _, exists := supported[version]; !exists {
+			return fmt.Errorf("sqlite: database migration version %d is not supported by this program", version)
 		}
 	}
 

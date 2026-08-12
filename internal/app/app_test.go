@@ -62,6 +62,72 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	}
 }
 
+func TestUserAgentRuleBlocksGPTBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
+	var upstreamRequests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		upstreamRequests.Add(1)
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	configuration := config.Default()
+	configuration.NewAPI.URL = upstream.URL
+	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
+	configuration.Routes = []config.RouteConfig{{
+		ID: "chat", Method: http.MethodPost, Path: "/v1/chat/completions", Match: "exact", Parser: "openai.chat_completions",
+	}}
+	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("new application: %v", err)
+	}
+	t.Cleanup(func() { _ = application.Close() })
+
+	send := func(model, userAgent string) *httptest.ResponseRecorder {
+		body := `{"model":"` + model + `","stream":true}`
+		request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		if userAgent != "" {
+			request.Header.Set("User-Agent", userAgent)
+		}
+		response := httptest.NewRecorder()
+		application.server.Handler.ServeHTTP(response, request)
+		return response
+	}
+
+	response := send("gpt-test", "wrong-client")
+	if response.Code != http.StatusUnauthorized || upstreamRequests.Load() != 0 || !strings.Contains(response.Body.String(), "request_rejected") {
+		t.Fatalf("blocked request: status=%d upstream=%d body=%q", response.Code, upstreamRequests.Load(), response.Body.String())
+	}
+	response = send("gpt-test", "tool Codex Desktop/1.0")
+	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 1 {
+		t.Fatalf("allowed GPT request: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+	response = send("deepseek-test", "wrong-client")
+	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 2 {
+		t.Fatalf("non-GPT request: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+
+	update := httptest.NewRequest(http.MethodPut, "http://admin/api/v1/user-agent-rules/1", strings.NewReader(`{"name":"updated","enabled":true,"model_pattern":"^gpt","user_agent_pattern":"Approved Client"}`))
+	update.Header.Set("Authorization", "Bearer "+configuration.AdminToken)
+	update.Header.Set("Content-Type", "application/json")
+	updateResponse := httptest.NewRecorder()
+	application.adminServer.Handler().ServeHTTP(updateResponse, update)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("rule update: status=%d body=%q", updateResponse.Code, updateResponse.Body.String())
+	}
+
+	response = send("gpt-test", "tool Codex Desktop/1.0")
+	if response.Code != http.StatusUnauthorized || upstreamRequests.Load() != 2 {
+		t.Fatalf("old UA after update: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+	response = send("gpt-test", "Approved Client/2.0")
+	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 3 {
+		t.Fatalf("new UA after update: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+}
+
 func TestNewUsesConfiguredHostAndTimeoutOptions(t *testing.T) {
 	observedHosts := make(chan string, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

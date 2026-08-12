@@ -58,6 +58,7 @@ ORDER BY name`)
 		"parsed_results",
 		"schema_migrations",
 		"token_links",
+		"user_agent_rules",
 	}
 	sort.Strings(wantTables)
 	if !reflect.DeepEqual(tables, wantTables) {
@@ -81,8 +82,8 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 1 || version != 1 {
-		t.Fatalf("migration rows = %d max=%d, want baseline version 1", versionCount, version)
+	if versionCount != 2 || version != 4 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1 and 4", versionCount, version)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -96,12 +97,36 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 1 {
+	if versionCount != 2 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
 
 func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
+	t.Parallel()
+
+	store, path := openTestStore(t)
+	if _, err := store.writerDB.Exec(
+		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
+		5,
+		int64(2),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(context.Background(), path)
+	if reopened != nil {
+		_ = reopened.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("Open error = %v, want newer-version rejection", err)
+	}
+}
+
+func TestOpenRejectsAppliedMigrationNotEmbeddedByProgram(t *testing.T) {
 	t.Parallel()
 
 	store, path := openTestStore(t)
@@ -120,8 +145,8 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	if reopened != nil {
 		_ = reopened.Close()
 	}
-	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
-		t.Fatalf("Open error = %v, want newer-version rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "not supported by this program") {
+		t.Fatalf("Open error = %v, want unsupported-version rejection", err)
 	}
 }
 
