@@ -173,3 +173,7 @@ pnpm build
 - [查询 API 与管理页面](doc/features/10-query-api-and-minimal-web-ui.md)
 - [Nginx 与部署](doc/features/15-nginx-and-deployment-integration.md)
 - [仓库架构说明](AGENTS.md)
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
