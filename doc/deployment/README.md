@@ -60,6 +60,16 @@ bin/audit-proxy-linux-amd64
 
 首次启动前编辑 `configs/audit-proxy.docker.yaml`，把示例 `admin_token` 替换为随机长 token，并限制文件权限。需要 NewAPI 调用者识别时同时填写 `newapi.access_token` 和正整数 `newapi.user_id`；两项都留空/0 时关闭该功能。正式使用时也应把 `compose.yaml` 中的 NewAPI 镜像固定到自己验证过的 tag 或 digest。
 
+### 3.1 敏感配置与环境变量注入
+
+仓库中的 YAML 只能保存占位符。真实生产域名、主机信息、API Key、NewAPI 管理凭据和 Admin Token 不得进入本仓库的 Git 历史、GitHub 分支、PR、Issue 或 CI 日志。
+
+本地自动化可以从根目录 `.env.example` 复制出 `.env.local` 作为私密数据源；`.env.local` 已由 `.gitignore` 排除。建议只保存部署脚本需要的变量，例如 `LLMAPI_DEPLOY_HOST`、`LLMAPI_PUBLIC_BASE_URL`、`LLMAPI_VALIDATION_API_KEY`、`LLMAPI_VALIDATION_MODEL`、`LLMAPI_NEWAPI_ACCESS_TOKEN` 和 `LLMAPI_NEWAPI_USER_ID`，并把文件权限限制为当前维护账户可读。
+
+audit-proxy 当前只读取 YAML，不直接读取上述环境变量。部署脚本必须在仓库外生成权限受限的运行时配置，例如 `/etc/audit-proxy/config.yaml`，再以只读方式挂载或传给进程；本地渲染文件可使用 `configs/*.local.yaml`、`configs/*.private.yaml` 或 `configs/*.runtime.yaml` 命名，这些名称也已被忽略。不要提交渲染结果，也不要在日志中输出完整环境变量或完整渲染配置。
+
+私有运维知识库可以在得到维护负责人授权后保存真实资料；从私有知识库派生到本仓库的任何内容仍必须先脱敏。
+
 ~~~bash
 docker compose build audit-proxy
 docker compose up -d
