@@ -40,9 +40,26 @@ func TestCallerWorkerStopsAfterBoundedAttempts(t *testing.T) {
 	store := &fakeCallerStore{}
 	worker, _ := NewWorker(store, &fakeIdentityLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	worker.now = func() time.Time { return time.Unix(20, 0) }
-	worker.process(context.Background(), sqlite.CallerLookup{AuditID: "audit", RequestID: "req", Attempts: maxLookupAttempts - 1})
-	if len(store.retries) != 1 || store.retries[0].Attempts != maxLookupAttempts || store.retries[0].NextAttemptAtNS != nil {
+	worker.process(context.Background(), sqlite.CallerLookup{AuditID: "audit", RequestID: "req", Attempts: len(retryDelays)})
+	if len(store.retries) != 1 || store.retries[0].Attempts != len(retryDelays)+1 || store.retries[0].NextAttemptAtNS != nil {
 		t.Fatalf("terminal retry = %+v", store.retries)
+	}
+}
+
+func TestCallerWorkerUsesFinalThirtySecondRetry(t *testing.T) {
+	store := &fakeCallerStore{}
+	worker, _ := NewWorker(store, &fakeIdentityLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	base := time.Unix(25, 0)
+	worker.now = func() time.Time { return base }
+	worker.process(context.Background(), sqlite.CallerLookup{
+		AuditID: "audit", RequestID: "req", Attempts: len(retryDelays) - 1,
+	})
+	if len(store.retries) != 1 || store.retries[0].Attempts != len(retryDelays) || store.retries[0].NextAttemptAtNS == nil {
+		t.Fatalf("final scheduled retry = %+v", store.retries)
+	}
+	want := base.Add(30 * time.Second).UnixNano()
+	if *store.retries[0].NextAttemptAtNS != want {
+		t.Fatalf("next attempt = %d, want %d", *store.retries[0].NextAttemptAtNS, want)
 	}
 }
 

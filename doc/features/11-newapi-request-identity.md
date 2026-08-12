@@ -71,7 +71,7 @@ token_links(
 )
 ~~~
 
-并把 `caller_status` 改为 `resolved`。NewAPI 日志可能晚于响应落库，因此未找到或临时错误会进行有限退避重试；尝试次数和下次时间保存在 SQLite，进程重启后继续。达到上限后标为 `unresolved`，不无限请求 NewAPI。
+并把 `caller_status` 改为 `resolved`。NewAPI 日志可能晚于响应落库，因此首次未找到或临时错误后，最多再按 500ms、1s、2s、5s、10s、30s 重试六次；尝试次数和下次时间保存在 SQLite，进程重启后继续。最后仍失败则标为 `unresolved`，不无限请求 NewAPI。
 
 `token_links.masked_key` 只因旧版 migration 兼容而保留；新链路始终写空，查询 API 和 UI 不再暴露该字段。
 

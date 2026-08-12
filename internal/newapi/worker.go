@@ -16,7 +16,6 @@ const (
 	callerScanLimit     = 128
 	defaultScanInterval = time.Second
 	lookupTimeout       = 10 * time.Second
-	maxLookupAttempts   = 6
 )
 
 var retryDelays = [...]time.Duration{
@@ -201,7 +200,7 @@ func (worker *Worker) process(ctx context.Context, item sqlite.CallerLookup) {
 	}
 
 	var nextAt *int64
-	if attempts < maxLookupAttempts {
+	if attempts <= len(retryDelays) {
 		next := now.Add(retryDelays[attempts-1]).UnixNano()
 		nextAt = &next
 	}
