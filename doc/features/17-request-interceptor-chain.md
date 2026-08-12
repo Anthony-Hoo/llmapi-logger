@@ -22,6 +22,7 @@ Nginx -> data-plane dispatcher -> 进程内 Matcher
 规则：
 
 - 每个 route 配置一条有序 chain，数组顺序就是执行顺序。
+- 应用在每条已匹配 route 的配置 chain 末尾追加动态 UA 策略；它不修改 matcher 返回的配置 ID，也不能扩大路由范围。
 - 第一个 reject 立即短路，后续模块和 NewAPI 都不再执行。
 - 未配置拦截器时行为与原透明代理相同。
 - available/strict 只控制审计故障；已启用拦截器的 error 或 panic 始终 fail-closed。
@@ -49,7 +50,7 @@ routes:
     interceptors: [require-client-credential]
 ~~~
 
-启动时必须拒绝重复 id、未知 type、未知配置字段、非法 Body 上限和 route 对不存在实例的引用。配置成功后 registry 与 chain 不再变化。
+启动时必须拒绝重复 id、未知 type、未知配置字段、非法 Body 上限和 route 对不存在实例的引用。YAML 配置成功后 registry 与 route chain 不再变化；动态 UA 策略的规则内容由管理面更新，但拦截器实例与路由边界保持不变。
 
 ## 4. 扩展接口
 
@@ -90,7 +91,7 @@ metadata interceptor 返回 NeedsBody=false，只能读取这些元数据。需�
 
 BodyView 只提供 Len 和 Open() io.Reader，不暴露可修改的底层字节。未声明 NeedsBody 的模块始终看不到 Body。
 
-拦截器不得持有 RequestView、启动后台 goroutine、访问网络、数据库、文件或子进程。`Check` 直接使用请求 context，不额外引入远程调用、任务队列或独立超时机制。
+普通可插拔拦截器不得持有 RequestView、启动后台 goroutine、访问网络、数据库、文件或子进程。动态 UA 策略是应用内置例外：请求热路径只读取已编译的原子快照，数据库访问仅发生在启动加载和管理面更新。`Check` 直接使用请求 context，不额外引入远程调用、任务队列或独立超时机制。
 
 ## 6. Body 拦截
 
@@ -150,6 +151,8 @@ require_credential 是 metadata interceptor，只检查以下来源是否至少�
 
 max_body_bytes 是 Body interceptor，配置 max_bytes；超过时返回 `413` 和 `block_code=body_too_large`，未超过时 allow。它按原始 Body 字节计数，不解压 gzip，也不按字符数或 JSON token 数计算。
 
+user_agent_policy 是所有匹配 LLM route 末尾的动态 Body interceptor。它从 JSON 顶层 `model` 提取模型，模板路由可回退到 `{model}` PathParams；模型缺失或 JSON 无法解析时不自行扩大阻断范围。每条启用规则包含模型 RE2 正则和 User-Agent RE2 正则：模型命中后 UA 必须命中，否则返回 `401` 和 `user_agent_not_allowed`；多条模型规则命中时全部需要通过。默认规则为 `^gpt` / `Codex Desktop`，区分大小写。
+
 ## 10. 最少测试
 
 - 只有 Matcher 精确命中的 LLM API route 进入 chain；`/v1/models` 等安全非 LLM 请求 passthrough，不审计也不拦截。
@@ -160,6 +163,8 @@ max_body_bytes 是 Body interceptor，配置 max_bytes；超过时返回 `413` �
 - Body chain 对 JSON、gzip、multipart、binary 和未知长度 Body 只缓冲一次，allow 后逐字节 replay。
 - 上限、上限加一和客户端取消行为正确；超限统一返回 `413` 并记录 `block_code=body_too_large`。
 - rejected audit 的 blocked_by、block_code、状态和四阶段缺失语义正确。
+- 默认 `^gpt` 规则只允许 UA 命中 `Codex Desktop`；缺失/错误 UA 返回 401 且 NewAPI 零调用，非 gpt 模型不受该规则影响。
+- 管理 CRUD 受 Admin Token/Cookie 保护；有效规则热更新、无效正则不替换当前快照，重启后规则仍存在。
 - 响应、日志、SQLite 和 WAL 不泄露凭据或 Body。
 
 ## 11. 实现边界

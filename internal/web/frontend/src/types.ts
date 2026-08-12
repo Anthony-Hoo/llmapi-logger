@@ -155,6 +155,27 @@ export interface NewAPIUserList {
   refreshed_at: string | null;
 }
 
+export interface UserAgentRule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  model_pattern: string;
+  user_agent_pattern: string;
+  created_at_ns: NanoTime;
+  updated_at_ns: NanoTime;
+}
+
+export interface UserAgentRuleInput {
+  name: string;
+  enabled: boolean;
+  model_pattern: string;
+  user_agent_pattern: string;
+}
+
+export interface UserAgentRuleList {
+  items: UserAgentRule[];
+}
+
 export interface AuditDetail {
   audit: AuditSummary;
   request_uri?: string | null;

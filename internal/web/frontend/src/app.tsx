@@ -44,6 +44,8 @@ import type {
   NewAPIUser,
   RawBodyDownload,
   RawSide,
+  UserAgentRule,
+  UserAgentRuleInput,
 } from "./types";
 
 interface LoadedRawBody {
@@ -188,6 +190,7 @@ function Dashboard({
   onAuthenticated: () => void;
   onLogOut: () => Promise<void>;
 }) {
+  const [view, setView] = useState<"audits" | "rules">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -295,6 +298,12 @@ function Dashboard({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant={view === "audits" ? "secondary" : "ghost"} size="sm" onClick={() => setView("audits")}>
+              审计记录
+            </Button>
+            <Button variant={view === "rules" ? "secondary" : "ghost"} size="sm" onClick={() => setView("rules")}>
+              UA 拦截规则
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
               <span className="ml-2 hidden sm:inline">刷新</span>
@@ -307,6 +316,10 @@ function Dashboard({
       </header>
 
       <main className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
+        {view === "rules" ? (
+          <UserAgentRulesPanel client={client} onAuthenticated={onAuthenticated} />
+        ) : (
+          <>
         <AuditFiltersPanel
           path={draftPath}
           model={draftModel}
@@ -365,7 +378,268 @@ function Dashboard({
             </Button>
           </div>
         </div>
+          </>
+        )}
       </main>
+    </div>
+  );
+}
+
+const emptyRuleInput: UserAgentRuleInput = {
+  name: "",
+  enabled: true,
+  model_pattern: "",
+  user_agent_pattern: "",
+};
+
+export function UserAgentRulesPanel({
+  client,
+  onAuthenticated,
+}: {
+  client: ApiClient;
+  onAuthenticated: () => void;
+}) {
+  const [rules, setRules] = useState<UserAgentRule[]>([]);
+  const [draft, setDraft] = useState<UserAgentRuleInput>(emptyRuleInput);
+  const [editingID, setEditingID] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    client
+      .listUserAgentRules(controller.signal)
+      .then((result) => {
+        setRules(result.items);
+        onAuthenticated();
+      })
+      .catch((cause: unknown) => {
+        if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
+          setError(errorMessage(cause));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [client, onAuthenticated, reloadKey]);
+
+  function edit(rule: UserAgentRule) {
+    setEditingID(rule.id);
+    setDraft({
+      name: rule.name,
+      enabled: rule.enabled,
+      model_pattern: rule.model_pattern,
+      user_agent_pattern: rule.user_agent_pattern,
+    });
+    setError(null);
+    setNotice(null);
+  }
+
+  function resetForm() {
+    setEditingID(null);
+    setDraft(emptyRuleInput);
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving) {
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (editingID === null) {
+        await client.createUserAgentRule(draft);
+        setNotice("规则已创建并立即生效。");
+      } else {
+        await client.updateUserAgentRule(editingID, draft);
+        setNotice("规则已保存并立即生效。");
+      }
+      resetForm();
+      setReloadKey((value) => value + 1);
+    } catch (cause: unknown) {
+      if (!(cause instanceof ApiError && cause.status === 401)) {
+        setError(errorMessage(cause));
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggle(rule: UserAgentRule) {
+    setError(null);
+    setNotice(null);
+    try {
+      await client.updateUserAgentRule(rule.id, {
+        name: rule.name,
+        enabled: !rule.enabled,
+        model_pattern: rule.model_pattern,
+        user_agent_pattern: rule.user_agent_pattern,
+      });
+      setNotice(rule.enabled ? "规则已停用。" : "规则已启用并立即生效。");
+      setReloadKey((value) => value + 1);
+    } catch (cause: unknown) {
+      if (!(cause instanceof ApiError && cause.status === 401)) {
+        setError(errorMessage(cause));
+      }
+    }
+  }
+
+  async function remove(rule: UserAgentRule) {
+    if (!window.confirm(`确认删除规则“${rule.name}”？删除后立即停止执行。`)) {
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    try {
+      await client.deleteUserAgentRule(rule.id);
+      if (editingID === rule.id) {
+        resetForm();
+      }
+      setNotice("规则已删除。");
+      setReloadKey((value) => value + 1);
+    } catch (cause: unknown) {
+      if (!(cause instanceof ApiError && cause.status === 401)) {
+        setError(errorMessage(cause));
+      }
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <CardTitle>UA 拦截规则</CardTitle>
+          <CardDescription>
+            当模型正则命中时，请求的 User-Agent 必须命中对应正则，否则返回 HTTP 401。多条命中规则全部需要通过。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Alert className="border-blue-200 bg-blue-50/80">
+            <AlertDescription className="text-blue-800">
+              正则使用 Go RE2 语法，默认区分大小写；修改成功后无需重启。无效正则会被拒绝，当前生效规则保持不变。
+            </AlertDescription>
+          </Alert>
+          {error ? (
+            <Alert className="border-red-200 bg-red-50/90">
+              <AlertTitle className="text-red-900">操作失败</AlertTitle>
+              <AlertDescription className="text-red-800">{error}</AlertDescription>
+            </Alert>
+          ) : null}
+          {notice ? (
+            <Alert className="border-emerald-200 bg-emerald-50/90">
+              <AlertDescription className="text-emerald-800">{notice}</AlertDescription>
+            </Alert>
+          ) : null}
+          <form className="grid gap-4 lg:grid-cols-[minmax(180px,0.8fr)_minmax(220px,1fr)_minmax(220px,1fr)_auto]" onSubmit={save}>
+            <FilterField label="规则名称" htmlFor="rule-name">
+              <Input
+                id="rule-name"
+                value={draft.name}
+                onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+                maxLength={128}
+                required
+                placeholder="例如：GPT 桌面客户端限定"
+              />
+            </FilterField>
+            <FilterField label="模型正则" htmlFor="model-pattern">
+              <Input
+                id="model-pattern"
+                className="font-mono"
+                value={draft.model_pattern}
+                onChange={(event) => setDraft((current) => ({ ...current, model_pattern: event.target.value }))}
+                maxLength={2048}
+                required
+                placeholder="^gpt"
+              />
+            </FilterField>
+            <FilterField label="User-Agent 正则" htmlFor="ua-pattern">
+              <Input
+                id="ua-pattern"
+                className="font-mono"
+                value={draft.user_agent_pattern}
+                onChange={(event) => setDraft((current) => ({ ...current, user_agent_pattern: event.target.value }))}
+                maxLength={2048}
+                required
+                placeholder="Codex Desktop"
+              />
+            </FilterField>
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex h-10 items-center gap-2 rounded-md border bg-white/90 px-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={draft.enabled}
+                  onChange={(event) => setDraft((current) => ({ ...current, enabled: event.target.checked }))}
+                />
+                启用
+              </label>
+              <Button type="submit" disabled={saving || !draft.name.trim() || !draft.model_pattern.trim() || !draft.user_agent_pattern.trim()}>
+                {saving ? "保存中…" : editingID === null ? "新增规则" : "保存修改"}
+              </Button>
+              {editingID !== null ? (
+                <Button variant="outline" onClick={resetForm}>取消</Button>
+              ) : null}
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle className="text-base">当前规则</CardTitle>
+            <CardDescription>{rules.length} 条 · 启用的规则即时参与请求判断</CardDescription>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => setReloadKey((value) => value + 1)} disabled={loading}>刷新</Button>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <Skeleton className="h-32 w-full" />
+          ) : rules.length === 0 ? (
+            <EmptyValue>当前没有 UA 拦截规则。</EmptyValue>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>状态</TableHead>
+                    <TableHead>名称</TableHead>
+                    <TableHead>模型正则</TableHead>
+                    <TableHead>User-Agent 正则</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rules.map((rule) => (
+                    <TableRow key={rule.id}>
+                      <TableCell><Badge variant={rule.enabled ? "success" : "outline"}>{rule.enabled ? "启用" : "停用"}</Badge></TableCell>
+                      <TableCell className="font-medium">{rule.name}</TableCell>
+                      <TableCell className="font-mono text-xs">{rule.model_pattern}</TableCell>
+                      <TableCell className="font-mono text-xs">{rule.user_agent_pattern}</TableCell>
+                      <TableCell>
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" size="sm" onClick={() => edit(rule)}>编辑</Button>
+                          <Button variant="outline" size="sm" onClick={() => void toggle(rule)}>{rule.enabled ? "停用" : "启用"}</Button>
+                          <Button variant="destructive" size="sm" onClick={() => void remove(rule)}>删除</Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
