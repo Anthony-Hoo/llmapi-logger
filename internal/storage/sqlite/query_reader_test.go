@@ -229,6 +229,43 @@ func TestQueryAuditDetailLoadsEncryptedValuesForQueryService(t *testing.T) {
 	}
 }
 
+func TestLegacyTokenLinkIsNotExposedAsResolvedCaller(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	record := testAudit("audit-legacy-token-link")
+	if err := store.BeginAudit(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writerDB.ExecContext(ctx, `
+INSERT INTO token_links (audit_id, newapi_token_id, token_name, masked_key, linked_at_ns)
+VALUES (?, 42, 'legacy-token', 'lega**********mask', 2)`, record.AuditID); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.ListAudits(ctx, AuditQueryFilter{}, AuditQueryCursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("rows = %+v", page.Rows)
+	}
+	row := page.Rows[0]
+	if row.CallerStatus != CallerNone || row.NewAPIUserID != nil || row.Username != nil ||
+		row.NewAPITokenID != nil || row.TokenName != nil {
+		t.Fatalf("legacy link leaked into caller projection: %+v", row)
+	}
+
+	detail, err := store.QueryAuditDetail(ctx, record.AuditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.TokenLink != nil {
+		t.Fatalf("legacy token link exposed as resolved caller: %+v", detail.TokenLink)
+	}
+}
+
 func TestQueryRequestHeaderEvidenceReadsOnlyFilterHeaders(t *testing.T) {
 	t.Parallel()
 
