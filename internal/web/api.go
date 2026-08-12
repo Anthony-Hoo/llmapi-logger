@@ -114,18 +114,18 @@ func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, req
 	writeJSON(writer, http.StatusOK, page)
 }
 
-func (handler *managementHandler) serveNewAPITokens(writer http.ResponseWriter, request *http.Request) {
+func (handler *managementHandler) serveNewAPICallers(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		methodNotAllowed(writer, http.MethodGet)
 		return
 	}
 	response := struct {
-		Items       []newapi.Token `json:"items"`
-		RefreshedAt *time.Time     `json:"refreshed_at"`
-	}{Items: []newapi.Token{}}
-	if handler.tokens != nil {
-		snapshot := handler.tokens.Snapshot()
-		response.Items = snapshot.Tokens
+		Items       []newapi.User `json:"items"`
+		RefreshedAt *time.Time    `json:"refreshed_at"`
+	}{Items: []newapi.User{}}
+	if handler.users != nil {
+		snapshot := handler.users.Snapshot()
+		response.Items = snapshot.Users
 		if !snapshot.RefreshedAt.IsZero() {
 			refreshedAt := snapshot.RefreshedAt
 			response.RefreshedAt = &refreshedAt

@@ -53,7 +53,9 @@ func (store *Store) Snapshot(ctx context.Context, auditID string) (Snapshot, err
 	if err := scanAudit(transaction.QueryRowContext(ctx, `
 SELECT audit_id, started_at_ns, ended_at_ns, route_id, protocol, parser_name,
        method, path, request_uri_enc, mode, status_code, forward_status,
-       capture_status, parse_status, blocked_by, block_code, error_code
+       capture_status, parse_status, blocked_by, block_code, error_code,
+       newapi_request_id, caller_status, caller_attempts, caller_next_at_ns,
+       caller_updated_at_ns
 FROM audit_records
 WHERE audit_id = ?`, auditID), &snapshot.Audit); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -90,6 +92,8 @@ func scanAudit(row rowScanner, destination *AuditRecord) error {
 	var blockedBy sql.NullString
 	var blockCode sql.NullString
 	var errorCode sql.NullString
+	var requestID sql.NullString
+	var callerNextAt, callerUpdatedAt sql.NullInt64
 	if err := row.Scan(
 		&destination.AuditID,
 		&destination.StartedAtNS,
@@ -108,6 +112,11 @@ func scanAudit(row rowScanner, destination *AuditRecord) error {
 		&blockedBy,
 		&blockCode,
 		&errorCode,
+		&requestID,
+		&destination.CallerStatus,
+		&destination.CallerAttempts,
+		&callerNextAt,
+		&callerUpdatedAt,
 	); err != nil {
 		return err
 	}
@@ -117,6 +126,9 @@ func scanAudit(row rowScanner, destination *AuditRecord) error {
 	destination.BlockedBy = nullStringPointer(blockedBy)
 	destination.BlockCode = nullStringPointer(blockCode)
 	destination.ErrorCode = nullStringPointer(errorCode)
+	destination.NewAPIRequestID = nullStringPointer(requestID)
+	destination.CallerNextAtNS = nullInt64Pointer(callerNextAt)
+	destination.CallerUpdatedAtNS = nullInt64Pointer(callerUpdatedAt)
 	return nil
 }
 

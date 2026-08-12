@@ -24,7 +24,7 @@ func TestManagementEndpointsRequireBearerOnEveryRemoteAddress(t *testing.T) {
 
 	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}})
 	for _, remote := range []string{"127.0.0.1:1234", "203.0.113.10:5678"} {
-		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/newapi/tokens", "/api/v1/audits/audit-id/raw/request", "/api/v1/unknown"} {
+		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/newapi/callers", "/api/v1/audits/audit-id/raw/request", "/api/v1/unknown"} {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			request.RemoteAddr = remote
 			response := httptest.NewRecorder()
@@ -51,50 +51,50 @@ func TestManagementEndpointsRequireBearerOnEveryRemoteAddress(t *testing.T) {
 	}
 }
 
-func TestNewAPITokenCatalogReturnsOnlyMaskedMetadata(t *testing.T) {
+func TestNewAPIUserCatalogReturnsOnlySafeMetadata(t *testing.T) {
 	t.Parallel()
 
 	refreshedAt := time.Date(2026, time.August, 11, 3, 4, 5, 0, time.UTC)
 	handler := newTestHandler(t, Options{
 		AdminToken: testAdminToken,
 		Query:      &fakeQuery{healthy: true},
-		Tokens: fakeTokenCatalog{snapshot: newapi.Snapshot{
-			Tokens: []newapi.Token{{
-				ID: 42, Name: "personal", MaskedKey: "abcd**********wxyz", Status: 1, Group: "default",
+		Users: fakeUserCatalog{snapshot: newapi.UserSnapshot{
+			Users: []newapi.User{{
+				ID: 42, Username: "alice", DisplayName: "Alice", Status: 1, Group: "default",
 			}},
 			RefreshedAt: refreshedAt,
 		}},
 	})
 
-	request := authorizedRequest(http.MethodGet, "/api/v1/newapi/tokens")
+	request := authorizedRequest(http.MethodGet, "/api/v1/newapi/callers")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
-		t.Fatalf("token catalog status=%d body=%q", response.Code, response.Body.String())
+		t.Fatalf("user catalog status=%d body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, `"id":42`) || !strings.Contains(body, `"name":"personal"`) ||
-		!strings.Contains(body, `"masked_key":"abcd**********wxyz"`) ||
+	if !strings.Contains(body, `"id":42`) || !strings.Contains(body, `"username":"alice"`) ||
+		!strings.Contains(body, `"display_name":"Alice"`) ||
 		!strings.Contains(body, `"refreshed_at":"2026-08-11T03:04:05Z"`) {
-		t.Fatalf("token catalog body=%s", body)
+		t.Fatalf("user catalog body=%s", body)
 	}
-	if strings.Contains(body, `"key":`) || strings.Contains(body, testAdminToken) {
-		t.Fatalf("token catalog exposed a raw credential field: %s", body)
+	if strings.Contains(body, `"key":`) || strings.Contains(body, `"password":`) || strings.Contains(body, testAdminToken) {
+		t.Fatalf("user catalog exposed a sensitive field: %s", body)
 	}
 
 	emptyHandler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}})
-	request = authorizedRequest(http.MethodGet, "/api/v1/newapi/tokens")
+	request = authorizedRequest(http.MethodGet, "/api/v1/newapi/callers")
 	response = httptest.NewRecorder()
 	emptyHandler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "{\"items\":[],\"refreshed_at\":null}\n" {
-		t.Fatalf("empty token catalog response: status=%d body=%q", response.Code, response.Body.String())
+		t.Fatalf("empty user catalog response: status=%d body=%q", response.Code, response.Body.String())
 	}
 
-	request = authorizedRequest(http.MethodPost, "/api/v1/newapi/tokens")
+	request = authorizedRequest(http.MethodPost, "/api/v1/newapi/callers")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("token catalog POST status=%d", response.Code)
+		t.Fatalf("user catalog POST status=%d", response.Code)
 	}
 }
 
@@ -410,11 +410,11 @@ type fakeQuery struct {
 	gotLimit  int
 }
 
-type fakeTokenCatalog struct {
-	snapshot newapi.Snapshot
+type fakeUserCatalog struct {
+	snapshot newapi.UserSnapshot
 }
 
-func (catalog fakeTokenCatalog) Snapshot() newapi.Snapshot { return catalog.snapshot }
+func (catalog fakeUserCatalog) Snapshot() newapi.UserSnapshot { return catalog.snapshot }
 
 func (queries *fakeQuery) Healthy() bool { return queries.healthy }
 
