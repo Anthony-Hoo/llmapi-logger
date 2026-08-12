@@ -180,7 +180,9 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 	ended := int64(9_007_199_254_740_995)
 	tokenID := int64(42)
 	tokenName := "personal"
-	maskedKey := "sk-...1234"
+	userID := int64(7)
+	username := "alice"
+	requestID := "req-page"
 	store := &fakeStore{
 		healthy: true,
 		listPage: sqlite.AuditListPage{
@@ -189,7 +191,8 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 				RouteID: "route", Protocol: "openai", ParserName: "openai.responses",
 				Method: "POST", Path: "/v1/responses", Mode: "available",
 				ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete,
-				ParseStatus: sqlite.ParseOK, NewAPITokenID: &tokenID, TokenName: &tokenName, MaskedKey: &maskedKey,
+				ParseStatus: sqlite.ParseOK, NewAPIRequestID: &requestID, CallerStatus: sqlite.CallerResolved,
+				NewAPIUserID: &userID, Username: &username, NewAPITokenID: &tokenID, TokenName: &tokenName,
 			}},
 			HasMore: true,
 		},
@@ -205,7 +208,10 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 	if page.NextCursor == nil || page.NextCursor.BeforeID != "audit-page" || page.NextCursor.BeforeStartedAtNS != ended-1 {
 		t.Fatalf("page cursor = %+v", page.NextCursor)
 	}
-	if len(page.Items) != 1 || page.Items[0].MaskedKey == nil || *page.Items[0].MaskedKey != maskedKey {
+	if len(page.Items) != 1 || page.Items[0].NewAPIUserID == nil || *page.Items[0].NewAPIUserID != userID ||
+		page.Items[0].Username == nil || *page.Items[0].Username != username ||
+		page.Items[0].NewAPIRequestID == nil || *page.Items[0].NewAPIRequestID != requestID ||
+		page.Items[0].CallerStatus != sqlite.CallerResolved {
 		t.Fatalf("mapped token snapshot = %+v", page.Items)
 	}
 	if _, err := service.List(context.Background(), Filter{}, Cursor{BeforeID: "audit-page"}, 1); !errors.Is(err, ErrInvalidQuery) {
@@ -515,7 +521,8 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 			header(sqlite.StageResponseReceived, sqlite.HeaderKindTrailer, "X-Trailer", 0, "done"),
 		},
 		TokenLink: &sqlite.TokenLinkSummary{
-			NewAPITokenID: 42, TokenName: "personal", MaskedKey: "sk-...1234", LinkedAtNS: 3,
+			NewAPIRequestID: "req-detail", NewAPIUserID: 7, Username: "alice",
+			NewAPITokenID: 42, TokenName: "personal", LinkedAtNS: 3,
 		},
 	}}
 	service, err := New(store, cipher)
@@ -537,7 +544,9 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 			t.Errorf("header %d = %+v, want %+v", index, detail.Headers[index], wantHeaders[index])
 		}
 	}
-	if detail.TokenLink == nil || detail.TokenLink.MaskedKey != "sk-...1234" {
+	if detail.TokenLink == nil || detail.TokenLink.NewAPIRequestID != "req-detail" ||
+		detail.TokenLink.NewAPIUserID != 7 || detail.TokenLink.Username != "alice" ||
+		detail.TokenLink.NewAPITokenID != 42 || detail.TokenLink.TokenName != "personal" {
 		t.Fatalf("token link = %+v", detail.TokenLink)
 	}
 

@@ -3,7 +3,7 @@ import type {
   AuditDetail,
   AuditFilters,
   AuditListPage,
-  NewAPITokenList,
+  NewAPIUserList,
   RawBodyDownload,
   RawSide,
 } from "./types";
@@ -25,7 +25,7 @@ type FetchLike = typeof fetch;
 export interface ApiClient {
   createSession: (token: string, signal?: AbortSignal) => Promise<void>;
   deleteSession: (signal?: AbortSignal) => Promise<void>;
-  listNewAPITokens: (signal?: AbortSignal) => Promise<NewAPITokenList>;
+  listNewAPICallers: (signal?: AbortSignal) => Promise<NewAPIUserList>;
   listAudits: (
     filters?: AuditFilters,
     cursor?: AuditCursor | null,
@@ -85,8 +85,8 @@ export function createApiClient(
       }
     },
 
-    listNewAPITokens(signal) {
-      return requestJSON<NewAPITokenList>(`${API_BASE}/newapi/tokens`, signal);
+    listNewAPICallers(signal) {
+      return requestJSON<NewAPIUserList>(`${API_BASE}/newapi/callers`, signal);
     },
 
     async listAudits(filters = {}, cursor = null, signal) {
@@ -100,6 +100,9 @@ export function createApiClient(
       if (filters.user_agent?.trim()) {
         query.set("user_agent", filters.user_agent.trim());
       }
+      if (filters.newapi_user_id?.trim()) {
+		query.set("newapi_user_id", filters.newapi_user_id.trim());
+	  }
       if (filters.newapi_token_id?.trim()) {
         query.set("newapi_token_id", filters.newapi_token_id.trim());
       }

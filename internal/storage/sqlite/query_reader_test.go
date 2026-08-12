@@ -43,8 +43,17 @@ INSERT INTO parsed_results (
 		t.Fatal(err)
 	}
 	if _, err := store.writerDB.ExecContext(ctx, `
-	INSERT INTO token_links (audit_id, newapi_token_id, token_name, masked_key, linked_at_ns)
-	VALUES (?, ?, ?, ?, ?)`, "audit-b", 42, "personal", "sk-...1234", 102); err != nil {
+	UPDATE audit_records
+	SET newapi_request_id = 'req-b', caller_status = 'resolved', caller_attempts = 1,
+	    caller_updated_at_ns = 102
+	WHERE audit_id = 'audit-b'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writerDB.ExecContext(ctx, `
+	INSERT INTO token_links (
+	    audit_id, newapi_token_id, token_name, masked_key, linked_at_ns,
+	    newapi_user_id, username
+	) VALUES (?, ?, ?, '', ?, ?, ?)`, "audit-b", 42, "personal", 102, 7, "alice"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,8 +80,27 @@ INSERT INTO parsed_results (
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(modelPage.Rows) != 1 || modelPage.Rows[0].AuditID != "audit-b" || modelPage.Rows[0].NewAPITokenID == nil || *modelPage.Rows[0].NewAPITokenID != 42 || modelPage.Rows[0].MaskedKey == nil || *modelPage.Rows[0].MaskedKey != "sk-...1234" {
+	if len(modelPage.Rows) != 1 || modelPage.Rows[0].AuditID != "audit-b" ||
+		modelPage.Rows[0].NewAPIUserID == nil || *modelPage.Rows[0].NewAPIUserID != 7 ||
+		modelPage.Rows[0].Username == nil || *modelPage.Rows[0].Username != "alice" ||
+		modelPage.Rows[0].NewAPITokenID == nil || *modelPage.Rows[0].NewAPITokenID != 42 ||
+		modelPage.Rows[0].NewAPIRequestID == nil || *modelPage.Rows[0].NewAPIRequestID != "req-b" ||
+		modelPage.Rows[0].CallerStatus != CallerResolved {
 		t.Fatalf("model-filtered page = %+v", modelPage)
+	}
+	userIDPage, err := store.ListAudits(ctx, AuditQueryFilter{NewAPIUserID: int64Pointer(7)}, AuditQueryCursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(userIDPage.Rows) != 1 || userIDPage.Rows[0].AuditID != "audit-b" {
+		t.Fatalf("user-id-filtered page = %+v", userIDPage)
+	}
+	usernamePage, err := store.ListAudits(ctx, AuditQueryFilter{Username: "alice"}, AuditQueryCursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usernamePage.Rows) != 1 || usernamePage.Rows[0].AuditID != "audit-b" {
+		t.Fatalf("username-filtered page = %+v", usernamePage)
 	}
 	tokenIDPage, err := store.ListAudits(ctx, AuditQueryFilter{NewAPITokenID: int64Pointer(42)}, AuditQueryCursor{}, 10)
 	if err != nil {
@@ -109,7 +137,9 @@ INSERT INTO parsed_results (
 	if detail.ParsedResult == nil || detail.ParsedResult.RequestModel == nil || *detail.ParsedResult.RequestModel != "gpt-test" || detail.ParsedResult.RequestedStream == nil || !*detail.ParsedResult.RequestedStream || detail.ParsedResult.UsageInput == nil || *detail.ParsedResult.UsageInput != 123 || !bytes.Equal(detail.ParsedResult.ParsedJSONEnc, []byte("encrypted-parsed-secret")) {
 		t.Fatalf("parsed summary = %+v", detail.ParsedResult)
 	}
-	if detail.TokenLink == nil || detail.TokenLink.NewAPITokenID != 42 || detail.TokenLink.TokenName != "personal" || detail.TokenLink.MaskedKey != "sk-...1234" {
+	if detail.TokenLink == nil || detail.TokenLink.NewAPIRequestID != "req-b" ||
+		detail.TokenLink.NewAPIUserID != 7 || detail.TokenLink.Username != "alice" ||
+		detail.TokenLink.NewAPITokenID != 42 || detail.TokenLink.TokenName != "personal" {
 		t.Fatalf("token link = %+v", detail.TokenLink)
 	}
 }

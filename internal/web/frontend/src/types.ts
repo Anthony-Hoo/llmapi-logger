@@ -24,9 +24,12 @@ export interface AuditSummary {
   error_code?: string | null;
   request_model?: string | null;
   response_model?: string | null;
+  newapi_request_id?: string | null;
+  caller_status?: "none" | "pending" | "resolved" | "unresolved" | string;
+  newapi_user_id?: number | string | null;
+  username?: string | null;
   newapi_token_id?: number | string | null;
   token_name?: string | null;
-  masked_key?: string | null;
   user_agent?: string | null;
 }
 
@@ -131,23 +134,24 @@ export interface Conversation {
 }
 
 export interface TokenLink {
+  newapi_request_id?: string | null;
+  newapi_user_id?: number | string | null;
+  username?: string | null;
   newapi_token_id?: number | string | null;
   token_name?: string | null;
-  masked_key?: string | null;
   linked_at_ns?: NanoTime | null;
 }
 
-export interface NewAPIToken {
+export interface NewAPIUser {
   id: number;
-  name: string;
-  masked_key: string;
+  username: string;
+  display_name: string;
   status: number;
   group: string;
-  unlimited_quota: boolean;
 }
 
-export interface NewAPITokenList {
-  items: NewAPIToken[];
+export interface NewAPIUserList {
+  items: NewAPIUser[];
   refreshed_at: string | null;
 }
 
@@ -166,6 +170,7 @@ export interface AuditFilters {
   path?: string;
   model?: string;
   user_agent?: string;
+  newapi_user_id?: string;
   newapi_token_id?: string;
   forward_status?: string;
 }

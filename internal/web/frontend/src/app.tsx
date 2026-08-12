@@ -41,7 +41,7 @@ import type {
   AuditHeader,
   AuditStage,
   AuditSummary,
-  NewAPIToken,
+  NewAPIUser,
   RawBodyDownload,
   RawSide,
 } from "./types";
@@ -198,9 +198,10 @@ function Dashboard({
   const [draftPath, setDraftPath] = useState("");
   const [draftModel, setDraftModel] = useState("");
   const [draftUserAgent, setDraftUserAgent] = useState("");
+	const [draftNewAPIUserID, setDraftNewAPIUserID] = useState("");
   const [draftNewAPITokenID, setDraftNewAPITokenID] = useState("");
   const [draftForwardStatus, setDraftForwardStatus] = useState("");
-  const [newAPITokens, setNewAPITokens] = useState<NewAPIToken[]>([]);
+  const [newAPIUsers, setNewAPIUsers] = useState<NewAPIUser[]>([]);
   const [filters, setFilters] = useState<AuditFilters>({});
   const [cursor, setCursor] = useState<AuditCursor | null>(null);
   const [cursorHistory, setCursorHistory] = useState<Array<AuditCursor | null>>([]);
@@ -240,11 +241,11 @@ function Dashboard({
   useEffect(() => {
     const controller = new AbortController();
     client
-      .listNewAPITokens(controller.signal)
-      .then((result) => setNewAPITokens(result.items))
+      .listNewAPICallers(controller.signal)
+	  .then((result) => setNewAPIUsers(result.items))
       .catch((cause: unknown) => {
         if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
-          setNewAPITokens([]);
+		  setNewAPIUsers([]);
         }
       });
     return () => controller.abort();
@@ -259,6 +260,7 @@ function Dashboard({
       path: draftPath.trim() || undefined,
       model: draftModel.trim() || undefined,
       user_agent: draftUserAgent.trim() || undefined,
+	  newapi_user_id: draftNewAPIUserID || undefined,
       newapi_token_id: draftNewAPITokenID || undefined,
       forward_status: draftForwardStatus || undefined,
     });
@@ -309,12 +311,14 @@ function Dashboard({
           path={draftPath}
           model={draftModel}
           userAgent={draftUserAgent}
+		  newAPIUserID={draftNewAPIUserID}
           newAPITokenID={draftNewAPITokenID}
           forwardStatus={draftForwardStatus}
-          tokens={newAPITokens}
+		  users={newAPIUsers}
           onPathChange={setDraftPath}
           onModelChange={setDraftModel}
           onUserAgentChange={setDraftUserAgent}
+		  onNewAPIUserIDChange={setDraftNewAPIUserID}
           onNewAPITokenIDChange={setDraftNewAPITokenID}
           onForwardStatusChange={setDraftForwardStatus}
           onSubmit={applyFilters}
@@ -370,12 +374,14 @@ export function AuditFiltersPanel({
   path,
   model,
   userAgent,
+	newAPIUserID,
   newAPITokenID,
   forwardStatus,
-  tokens,
+	users,
   onPathChange,
   onModelChange,
   onUserAgentChange,
+	onNewAPIUserIDChange,
   onNewAPITokenIDChange,
   onForwardStatusChange,
   onSubmit,
@@ -383,12 +389,14 @@ export function AuditFiltersPanel({
   path: string;
   model: string;
   userAgent: string;
+	newAPIUserID: string;
   newAPITokenID: string;
   forwardStatus: string;
-  tokens: NewAPIToken[];
+	users: NewAPIUser[];
   onPathChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onUserAgentChange: (value: string) => void;
+	onNewAPIUserIDChange: (value: string) => void;
   onNewAPITokenIDChange: (value: string) => void;
   onForwardStatusChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -398,17 +406,17 @@ export function AuditFiltersPanel({
       <CardContent className="!p-3">
         <form className="space-y-2" aria-label="审计筛选" onSubmit={onSubmit}>
           <div className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1.2fr)_minmax(160px,0.8fr)_minmax(240px,1.25fr)_auto]">
-            <FilterField label="调用者" htmlFor="filter-api-key">
+			<FilterField label="调用者" htmlFor="filter-caller">
               <select
-                id="filter-api-key"
+				id="filter-caller"
                 className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
-                value={newAPITokenID}
-                onChange={(event) => onNewAPITokenIDChange(event.target.value)}
+				value={newAPIUserID}
+				onChange={(event) => onNewAPIUserIDChange(event.target.value)}
               >
                 <option value="">全部调用者</option>
-                {tokens.map((token) => (
-                  <option key={token.id} value={String(token.id)}>
-                    {token.name || "未命名"} · {token.masked_key}
+				{users.map((user) => (
+				  <option key={user.id} value={String(user.id)}>
+					{user.display_name?.trim() || user.username} · @{user.username}
                   </option>
                 ))}
               </select>
@@ -440,9 +448,9 @@ export function AuditFiltersPanel({
 
           <details className="rounded-md border bg-slate-50/60">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-              高级筛选（路径、转发状态）
+			  高级筛选（路径、Token ID、转发状态）
             </summary>
-            <div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-2">
+			<div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-3">
               <FilterField label="路径" htmlFor="filter-path">
                 <Input
                   id="filter-path"
@@ -452,6 +460,16 @@ export function AuditFiltersPanel({
                   placeholder="/v1/chat/completions"
                 />
               </FilterField>
+			  <FilterField label="NewAPI Token ID" htmlFor="filter-token-id">
+				<Input
+				  id="filter-token-id"
+				  className="h-9"
+				  inputMode="numeric"
+				  value={newAPITokenID}
+				  onChange={(event) => onNewAPITokenIDChange(event.target.value)}
+				  placeholder="如 42"
+				/>
+			  </FilterField>
               <FilterField label="转发状态" htmlFor="filter-forward-status">
                 <select
                   id="filter-forward-status"
@@ -515,7 +533,7 @@ export function AuditList({
           <ul className="divide-y" aria-label="审计记录列表">
             {items.map((audit) => {
               const selected = audit.audit_id === selectedID;
-              const caller = audit.token_name?.trim() || "未关联";
+			  const caller = callerSummary(audit);
               const model = audit.response_model?.trim() || audit.request_model?.trim() || "未记录";
               const userAgent = audit.user_agent?.trim() || "未记录";
               const status = auditStatusSummary(audit);
@@ -753,7 +771,9 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
                   ["解析", <StatusBadge value={detail.audit.parse_status} />],
                   ["模式", detail.audit.mode ?? "—"],
                   ["Parser", detail.audit.parser_name ?? "—"],
-                  ["NewAPI Token", tokenSummary(detail.audit)],
+				  ["调用者", callerSummary(detail.audit)],
+				  ["NewAPI Request ID", detail.audit.newapi_request_id ?? "—"],
+				  ["身份关联", callerStatusLabel(detail.audit.caller_status)],
                 ]}
               />
             </Section>
@@ -1144,13 +1164,22 @@ function DefinitionGrid({ items }: { items: Array<[string, ReactNode]> }) {
   );
 }
 
-function tokenSummary(audit: AuditSummary): string {
-  if (!audit.newapi_token_id && !audit.token_name && !audit.masked_key) {
-    return "—";
+function callerSummary(audit: AuditSummary): string {
+  if (audit.caller_status === "pending") {
+	return "识别中";
   }
-  return [audit.newapi_token_id ? `#${audit.newapi_token_id}` : "", audit.token_name ?? "", audit.masked_key ?? ""]
-    .filter(Boolean)
-    .join(" · ");
+  const username = audit.username?.trim();
+  const token = audit.token_name?.trim();
+  if (!username && !token) {
+	return audit.caller_status === "unresolved" ? "未识别" : "未关联";
+  }
+  return [username ? `@${username}` : "", token || "", audit.newapi_token_id ? `#${audit.newapi_token_id}` : ""]
+	.filter(Boolean)
+	.join(" · ");
+}
+
+function callerStatusLabel(status: string | null | undefined): string {
+  return ({ none: "未关联", pending: "识别中", resolved: "已关联", unresolved: "未识别" } as Record<string, string>)[status ?? "none"] ?? status ?? "未关联";
 }
 
 function EmptyValue({ children }: { children: ReactNode }) {
