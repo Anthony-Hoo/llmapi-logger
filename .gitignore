@@ -11,6 +11,18 @@ coverage.out
 *.db-wal
 *.key
 
+# Local deployment values and rendered private configuration
+/.env
+/.env.*
+!/.env.example
+/configs/*.local.yaml
+/configs/*.local.yml
+/configs/*.private.yaml
+/configs/*.private.yml
+/configs/*.runtime.yaml
+/configs/*.runtime.yml
+/secrets/
+
 # Frontend dependencies and local tooling
 internal/web/frontend/node_modules/
 .tools/

@@ -68,7 +68,7 @@ chain entry 另外保存配置中的 interceptor id，并把它作为审计字�
 Body 规则固定如下：
 
 1. 未配置 body interceptor 时不预读，ReverseProxy 保持原有流式读取。
-2. body 模块必须声明 1–16 MiB 的 MaxBodyBytes。chain 编译时计算该 route 的最大上限；执行到第一个 body 模块时，入站审计 wrapper 使用 `io.LimitReader(routeMax+1)` 有界读到 EOF。ContentLength 已超过 routeMax 时可直接拒绝。
+2. body 模块必须声明 1–512 MiB 的 MaxBodyBytes。chain 编译时计算该 route 的最大上限；执行到第一个 body 模块时，已知 ContentLength 超过 routeMax 会直接拒绝，否则入站审计 wrapper 使用 `io.LimitReader(routeMax+1)` 有界读到 EOF。
 3. 原始字节只缓存一次并通过只提供 Len/Open 的 BodyView 共享。执行每个 body 模块前检查其自身上限；超过时返回 413，blocked_by 为该模块 id，block_code 固定为 `body_too_large`，不调用模块或 NewAPI。
 4. 全部模块放行后，关闭原始 Body，并用缓存的原始字节重建 ReadCloser；Method、Header、ContentLength、TransferEncoding、Trailer 和字节顺序不变。模块看到的解析结果或副本不得替代这份 replay 数据。
 5. Body 读取失败时 fail-closed，不能把已读前缀发送给 NewAPI；如果是请求 context 已取消，则按客户端取消结束，不再尝试写 503 JSON。

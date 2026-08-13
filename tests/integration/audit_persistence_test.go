@@ -199,7 +199,9 @@ func TestNonLLMPassthroughDoesNotBypassAuditedRoutes(t *testing.T) {
 		path   string
 	}{
 		{name: "wrong method", method: http.MethodGet, path: "/v1/chat/completions"},
+		{name: "exact trailing slash", method: http.MethodPost, path: "/v1/chat/completions/"},
 		{name: "template near miss", method: http.MethodPost, path: "/v1beta/models/a+b:generateContent"},
+		{name: "template trailing slash", method: http.MethodPost, path: "/v1beta/models/gemini:generateContent/"},
 	}
 	for _, blocked := range blockedVariants {
 		t.Run(blocked.name, func(t *testing.T) {
@@ -247,6 +249,44 @@ func TestNonLLMPassthroughDoesNotBypassAuditedRoutes(t *testing.T) {
 	}
 	if got := upstreamCalls.Load(); got != 2 {
 		t.Fatalf("upstream calls after audited route = %d, want 2", got)
+	}
+}
+
+func TestTrailingSlashNonLLMPathUsesPassthrough(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		if request.Method != http.MethodGet || request.URL.EscapedPath() != "/api/user/" {
+			http.Error(response, "unexpected upstream request", http.StatusTeapot)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(response, `{"message":"authentication required","success":false}`)
+	}))
+	defer upstream.Close()
+
+	cfg := loadConfig(t, upstream.URL, "/v1/chat/completions", false)
+	running := startApp(t, cfg)
+	client := &http.Client{Timeout: integrationTimeout}
+
+	response, err := client.Get(running.baseURL + "/api/user/")
+	if err != nil {
+		t.Fatalf("send trailing-slash passthrough request: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read trailing-slash passthrough response: %v", readErr)
+	}
+	if response.StatusCode != http.StatusUnauthorized || string(body) != `{"message":"authentication required","success":false}` {
+		t.Fatalf("response = %d %q, want transparent upstream 401", response.StatusCode, body)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+		t.Fatalf("trailing-slash passthrough created %d audit records, want 0", got)
 	}
 }
 
@@ -511,6 +551,7 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer downstream-admin-api-secret")
+	request.Header.Set("User-Agent", "integration Codex Desktop")
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("send parsed request: %v", err)

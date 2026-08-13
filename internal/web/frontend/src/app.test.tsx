@@ -2,7 +2,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { AuditDetail, AuditSummary, NewAPIUser } from "./types";
-import { AuditFiltersPanel, AuditList, HTTPAuditEvidence } from "./app";
+import type { ApiClient } from "./api";
+import { AuditFiltersPanel, AuditList, HTTPAuditEvidence, UserAgentRulesPanel } from "./app";
 
 const detail: AuditDetail = {
   audit: {
@@ -174,5 +175,30 @@ describe("audit filters", () => {
     expect(html).toContain("路径");
     expect(html).toContain("<details");
     expect(html).not.toContain("<details open");
+  });
+});
+
+describe("User-Agent rule configuration", () => {
+  it("renders regex semantics and the default active rule", () => {
+    const client = {
+      listUserAgentRules: async () => ({
+        items: [{
+          id: 1,
+          name: "GPT models require Codex Desktop",
+          enabled: true,
+          model_pattern: "^gpt",
+          user_agent_pattern: "Codex Desktop",
+          created_at_ns: "1",
+          updated_at_ns: "1",
+        }],
+      }),
+    } as ApiClient;
+    const html = renderToStaticMarkup(<UserAgentRulesPanel client={client} onAuthenticated={() => undefined} />);
+
+    expect(html).toContain("UA 拦截规则");
+    expect(html).toContain("Go RE2");
+    expect(html).toContain("模型正则");
+    expect(html).toContain("User-Agent 正则");
+    expect(html).toContain("多条命中规则全部需要通过");
   });
 });

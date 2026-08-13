@@ -56,6 +56,41 @@ type Engine struct {
 	routes map[string]compiledRoute
 }
 
+// WithGlobal returns a cloned engine with one interceptor appended to every
+// matched route. It does not change the route's configured interceptor IDs,
+// so the matcher remains authoritative for the public route boundary.
+func (e *Engine) WithGlobal(id string, instance Interceptor) (*Engine, error) {
+	if e == nil {
+		return nil, errors.New("interceptor: nil engine")
+	}
+	if id == "" || instance == nil {
+		return nil, errors.New("interceptor: global interceptor requires id and instance")
+	}
+	requirements, err := readRequirements(instance)
+	if err != nil {
+		return nil, fmt.Errorf("interceptor %q: %w", id, err)
+	}
+
+	cloned := &Engine{routes: make(map[string]compiledRoute, len(e.routes))}
+	for routeID, route := range e.routes {
+		copyRoute := compiledRoute{
+			interceptorIDs: append([]string(nil), route.interceptorIDs...),
+			chain:          append([]compiledInterceptor(nil), route.chain...),
+			maxBodyBytes:   route.maxBodyBytes,
+		}
+		copyRoute.chain = append(copyRoute.chain, compiledInterceptor{
+			id:           id,
+			interceptor:  instance,
+			requirements: requirements,
+		})
+		if requirements.MaxBodyBytes > copyRoute.maxBodyBytes {
+			copyRoute.maxBodyBytes = requirements.MaxBodyBytes
+		}
+		cloned.routes[routeID] = copyRoute
+	}
+	return cloned, nil
+}
+
 // NewEngine builds an engine with the first-party registry.
 func NewEngine(definitions map[string]config.InterceptorConfig, routes []config.RouteConfig) (*Engine, error) {
 	return NewEngineWithRegistry(NewDefaultRegistry(), definitions, routes)
@@ -165,6 +200,13 @@ func (e *Engine) Evaluate(ctx context.Context, req *http.Request, match routing.
 		}
 
 		if item.requirements.NeedsBody && !bodyRead {
+			if req.ContentLength > route.maxBodyBytes {
+				return Result{
+					StatusCode: http.StatusRequestEntityTooLarge,
+					BlockedBy:  item.id,
+					BlockCode:  "body_too_large",
+				}
+			}
 			buffered, err := readAndReplayBody(req, route.maxBodyBytes)
 			if err != nil {
 				if isCancellation(ctx, err) {

@@ -40,6 +40,11 @@ func TestDataPlaneHandlerAdversarialPathDispatch(t *testing.T) {
 			wantStatus: http.StatusNoContent,
 		},
 		{
+			name:       "trailing slash API passthrough",
+			request:    httptest.NewRequest(http.MethodGet, "http://audit-proxy/api/user/", http.NoBody),
+			wantStatus: http.StatusNoContent,
+		},
+		{
 			name:       "absolute form models passthrough",
 			request:    httptest.NewRequest(http.MethodGet, "http://client.example/v1/models?group=all", http.NoBody),
 			wantStatus: http.StatusNoContent,
@@ -65,6 +70,11 @@ func TestDataPlaneHandlerAdversarialPathDispatch(t *testing.T) {
 			wantStatus: http.StatusTeapot,
 		},
 		{
+			name:       "exact route trailing slash",
+			request:    httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions/", http.NoBody),
+			wantStatus: http.StatusTeapot,
+		},
+		{
 			name:       "consistent encoded RawPath",
 			request:    &http.Request{Method: http.MethodPost, URL: &url.URL{Path: "/v1/chat/completions", RawPath: "/v1/chat/%63ompletions"}},
 			wantStatus: http.StatusTeapot,
@@ -77,6 +87,11 @@ func TestDataPlaneHandlerAdversarialPathDispatch(t *testing.T) {
 		{
 			name:       "template family near miss",
 			request:    httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1beta/models/a+b:generateContent", http.NoBody),
+			wantStatus: http.StatusTeapot,
+		},
+		{
+			name:       "template route trailing slash",
+			request:    httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1beta/models/gemini:generateContent/", http.NoBody),
 			wantStatus: http.StatusTeapot,
 		},
 		{

@@ -15,6 +15,7 @@ import (
 
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/uaguard"
 )
 
 // AuditQuery is the safe query surface consumed by the HTTP handlers.
@@ -31,6 +32,14 @@ type UserCatalog interface {
 	Snapshot() newapi.UserSnapshot
 }
 
+// UserAgentRules is the authenticated dynamic policy surface.
+type UserAgentRules interface {
+	List() []uaguard.Rule
+	Create(context.Context, uaguard.RuleInput) (uaguard.Rule, error)
+	Update(context.Context, int64, uaguard.RuleInput) (uaguard.Rule, error)
+	Delete(context.Context, int64) error
+}
+
 type ReadyStatus struct {
 	Status        string `json:"status"`
 	Database      string `json:"database"`
@@ -43,6 +52,7 @@ type Options struct {
 	AdminToken string
 	Query      AuditQuery
 	Users      UserCatalog
+	Rules      UserAgentRules
 	Assets     fs.FS
 	Readiness  func(context.Context) ReadyStatus
 	Logger     *slog.Logger
@@ -61,6 +71,7 @@ func NewHandler(options Options) (http.Handler, error) {
 	handler := &managementHandler{
 		query:     options.Query,
 		users:     options.Users,
+		rules:     options.Rules,
 		readiness: options.Readiness,
 		static:    newStaticHandler(options.Assets),
 		logger:    options.Logger,
@@ -73,6 +84,7 @@ func NewHandler(options Options) (http.Handler, error) {
 type managementHandler struct {
 	query         AuditQuery
 	users         UserCatalog
+	rules         UserAgentRules
 	readiness     func(context.Context) ReadyStatus
 	static        http.Handler
 	auth          http.Handler
@@ -119,6 +131,10 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveAuditList(writer, request)
 	case request.URL.Path == "/api/v1/newapi/callers":
 		handler.serveNewAPICallers(writer, request)
+	case request.URL.Path == "/api/v1/user-agent-rules":
+		handler.serveUserAgentRuleCollection(writer, request)
+	case strings.HasPrefix(request.URL.Path, "/api/v1/user-agent-rules/"):
+		handler.serveUserAgentRuleResource(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/audits/"):
 		handler.serveAuditResource(writer, request)
 	default:

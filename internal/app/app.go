@@ -25,6 +25,7 @@ import (
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/uaguard"
 	"llmapi-logger/internal/web"
 )
 
@@ -40,6 +41,7 @@ type App struct {
 	adminAddress    string
 	parserWorker    *parser.Worker
 	callerWorker    *newapi.Worker
+	userAgentRules  uaguard.RuleSet
 	retention       *retention.Runner
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
@@ -94,6 +96,22 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 	}
 
 	runtime := assembleAudit(configuration, logger)
+	rulesContext, cancelRules := context.WithTimeout(context.Background(), 10*time.Second)
+	userAgentRules, err := uaguard.New(rulesContext, runtime.store)
+	cancelRules()
+	if err != nil {
+		if runtime.store != nil {
+			_ = runtime.store.Close()
+		}
+		return nil, fmt.Errorf("assemble user agent rules: %w", err)
+	}
+	engine, err = engine.WithGlobal(uaguard.InterceptorID, userAgentRules)
+	if err != nil {
+		if runtime.store != nil {
+			_ = runtime.store.Close()
+		}
+		return nil, fmt.Errorf("assemble user agent interceptor: %w", err)
+	}
 	proxyOptions := proxy.Options{
 		Audit:                 runtime.sink,
 		UpstreamProxy:         upstreamProxy,
@@ -116,6 +134,7 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		auditStore:      runtime.store,
 		cipher:          runtime.cipher,
 		newAPIClient:    newAPIClient,
+		userAgentRules:  userAgentRules,
 		mode:            configuration.Mode,
 		logger:          logger,
 		shutdownTimeout: time.Duration(configuration.ShutdownTimeoutSeconds) * time.Second,
@@ -161,6 +180,7 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		AdminToken: configuration.AdminToken,
 		Query:      queryService,
 		Users:      newAPIClient,
+		Rules:      userAgentRules,
 		Assets:     web.EmbeddedAssets(),
 		Readiness:  application.readiness,
 		Logger:     logger,

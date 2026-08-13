@@ -6,6 +6,9 @@ import type {
   NewAPIUserList,
   RawBodyDownload,
   RawSide,
+  UserAgentRule,
+  UserAgentRuleInput,
+  UserAgentRuleList,
 } from "./types";
 
 const API_BASE = "/api/v1";
@@ -33,6 +36,10 @@ export interface ApiClient {
   ) => Promise<AuditListPage>;
   getAudit: (auditID: string, signal?: AbortSignal) => Promise<AuditDetail>;
   getRawBody: (auditID: string, side: RawSide, signal?: AbortSignal) => Promise<RawBodyDownload>;
+  listUserAgentRules: (signal?: AbortSignal) => Promise<UserAgentRuleList>;
+  createUserAgentRule: (input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
+  updateUserAgentRule: (id: number, input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
+  deleteUserAgentRule: (id: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export function createApiClient(
@@ -55,6 +62,19 @@ export function createApiClient(
 
   async function requestJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
     const response = await sessionFetch(path, { signal });
+    if (!response.ok) {
+      throw await responseError(response);
+    }
+    return (await response.json()) as T;
+  }
+
+  async function mutateJSON<T>(path: string, method: string, body: unknown, signal?: AbortSignal): Promise<T> {
+    const response = await sessionFetch(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
     if (!response.ok) {
       throw await responseError(response);
     }
@@ -87,6 +107,28 @@ export function createApiClient(
 
     listNewAPICallers(signal) {
       return requestJSON<NewAPIUserList>(`${API_BASE}/newapi/callers`, signal);
+    },
+
+    listUserAgentRules(signal) {
+      return requestJSON<UserAgentRuleList>(`${API_BASE}/user-agent-rules`, signal);
+    },
+
+    createUserAgentRule(input, signal) {
+      return mutateJSON<UserAgentRule>(`${API_BASE}/user-agent-rules`, "POST", input, signal);
+    },
+
+    updateUserAgentRule(id, input, signal) {
+      return mutateJSON<UserAgentRule>(`${API_BASE}/user-agent-rules/${encodeURIComponent(String(id))}`, "PUT", input, signal);
+    },
+
+    async deleteUserAgentRule(id, signal) {
+      const response = await sessionFetch(
+        `${API_BASE}/user-agent-rules/${encodeURIComponent(String(id))}`,
+        { method: "DELETE", signal },
+      );
+      if (!response.ok) {
+        throw await responseError(response);
+      }
     },
 
     async listAudits(filters = {}, cursor = null, signal) {

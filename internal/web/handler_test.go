@@ -15,6 +15,7 @@ import (
 
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/uaguard"
 )
 
 const testAdminToken = "admin-token-that-must-stay-secret"
@@ -24,7 +25,7 @@ func TestManagementEndpointsRequireBearerOnEveryRemoteAddress(t *testing.T) {
 
 	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}})
 	for _, remote := range []string{"127.0.0.1:1234", "203.0.113.10:5678"} {
-		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/newapi/callers", "/api/v1/audits/audit-id/raw/request", "/api/v1/unknown"} {
+		for _, path := range []string{"/healthz", "/readyz", "/metrics", "/api/v1/audits", "/api/v1/newapi/callers", "/api/v1/user-agent-rules", "/api/v1/user-agent-rules/1", "/api/v1/audits/audit-id/raw/request", "/api/v1/unknown"} {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			request.RemoteAddr = remote
 			response := httptest.NewRecorder()
@@ -95,6 +96,66 @@ func TestNewAPIUserCatalogReturnsOnlySafeMetadata(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("user catalog POST status=%d", response.Code)
+	}
+}
+
+func TestUserAgentRuleCRUDRequiresAuthAndRejectsInvalidRegex(t *testing.T) {
+	t.Parallel()
+
+	service, err := uaguard.New(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandler(t, Options{
+		AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}, Rules: service,
+	})
+
+	request := authorizedRequest(http.MethodGet, "/api/v1/user-agent-rules")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"model_pattern":"^gpt"`) || !strings.Contains(response.Body.String(), `"user_agent_pattern":"Codex Desktop"`) {
+		t.Fatalf("list response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = authorizedJSONRequest(http.MethodPost, "/api/v1/user-agent-rules", `{"name":"other","enabled":true,"model_pattern":"^other","user_agent_pattern":"Approved"}`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"name":"other"`) {
+		t.Fatalf("create response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = authorizedJSONRequest(http.MethodPut, "/api/v1/user-agent-rules/1", `{"name":"updated","enabled":false,"model_pattern":"(?i)^gpt","user_agent_pattern":"Desktop"}`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"enabled":false`) {
+		t.Fatalf("update response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = authorizedJSONRequest(http.MethodPut, "/api/v1/user-agent-rules/1", `{"name":"bad","enabled":true,"model_pattern":"[","user_agent_pattern":"Desktop"}`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), `"["`) {
+		t.Fatalf("invalid regex response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = authorizedRequest(http.MethodDelete, "/api/v1/user-agent-rules/2")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("delete response: status=%d body=%q", response.Code, response.Body.String())
+	}
+	request = authorizedRequest(http.MethodDelete, "/api/v1/user-agent-rules/2")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("second delete response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/user-agent-rules", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "Codex Desktop") {
+		t.Fatalf("unauthorized response: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 
@@ -461,5 +522,13 @@ func newTestHandler(t *testing.T, options Options) http.Handler {
 func authorizedRequest(method, target string) *http.Request {
 	request := httptest.NewRequest(method, target, nil)
 	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	return request
+}
+
+func authorizedJSONRequest(method, target, body string) *http.Request {
+	request := authorizedRequest(method, target)
+	request.Body = io.NopCloser(strings.NewReader(body))
+	request.ContentLength = int64(len(body))
+	request.Header.Set("Content-Type", "application/json")
 	return request
 }

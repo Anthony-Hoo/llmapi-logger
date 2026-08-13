@@ -25,6 +25,7 @@ Client -> Nginx -> llmapi-logger
 - 三态数据面分发：配置的 LLM 路由审计、安全的非 LLM 路径直通、受保护或危险的未匹配路径 fail-closed。
 - 基于 `net/http/httputil.ReverseProxy` 的流式转发，支持 SSE 及时 flush，并可为 NewAPI 上游显式指定 HTTP(S) 代理。
 - 可插拔入站拦截器，首个拒绝立即短路且不会访问 NewAPI。
+- 可在受保护管理页面动态配置“模型正则 + User-Agent 正则”规则；规则持久化到 SQLite，保存后立即生效。初始启用规则要求 `^gpt` 模型的 User-Agent 命中 `Codex Desktop`，否则返回 `401`。
 - 分别记录四个代理观察点：
   - Nginx 请求到达代理；
   - 代理请求发往 NewAPI；
@@ -111,6 +112,8 @@ http://127.0.0.1:8081/ui/
 ```
 
 静态页面可以加载，但读取审计数据、`/healthz`、`/readyz` 和受保护的 `/api/v1/*` 都需要配置中的 `admin_token`。Web UI 登录成功后使用带固定过期时间的 HttpOnly Cookie，刷新页面无需重复输入；Bearer 方式仍可供 curl 和其他本地客户端使用。
+
+管理页面中的“UA 拦截规则”支持新增、编辑、启停和删除。模型与 User-Agent 均使用 Go RE2 正则并默认区分大小写；一条规则的模型正则命中后，请求 User-Agent 必须命中该规则，多条命中规则全部需要通过。无效正则不会保存，也不会替换当前运行中的有效规则。
 
 普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 conversation。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值，以及 parser 生成的协议无关 conversation。conversation 正文、reasoning、工具参数和结果与解析摘要一起存放在 `parsed_json_enc` 密文中。请求/响应 Body 仍通过单独的 raw API 按需读取；页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
 

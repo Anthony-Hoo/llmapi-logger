@@ -14,11 +14,14 @@ import (
 
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/uaguard"
 )
 
 const queryTimeout = 10 * time.Second
 
 const maxLoginBodyBytes = 4096
+
+const maxRuleBodyBytes = 16 << 10
 
 func (handler *managementHandler) serveSession(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
@@ -132,6 +135,104 @@ func (handler *managementHandler) serveNewAPICallers(writer http.ResponseWriter,
 		}
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (handler *managementHandler) serveUserAgentRuleCollection(writer http.ResponseWriter, request *http.Request) {
+	if handler.rules == nil {
+		writeError(writer, http.StatusServiceUnavailable, "rules_unavailable", "user agent rules are unavailable")
+		return
+	}
+	switch request.Method {
+	case http.MethodGet:
+		writeJSON(writer, http.StatusOK, map[string]any{"items": handler.rules.List()})
+	case http.MethodPost:
+		input, ok := decodeRuleInput(writer, request)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+		defer cancel()
+		rule, err := handler.rules.Create(ctx, input)
+		if err != nil {
+			handler.writeRuleError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusCreated, rule)
+	default:
+		methodNotAllowed(writer, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (handler *managementHandler) serveUserAgentRuleResource(writer http.ResponseWriter, request *http.Request) {
+	if handler.rules == nil {
+		writeError(writer, http.StatusServiceUnavailable, "rules_unavailable", "user agent rules are unavailable")
+		return
+	}
+	remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/user-agent-rules/")
+	if remainder == "" || strings.Contains(remainder, "/") {
+		http.NotFound(writer, request)
+		return
+	}
+	id, err := strconv.ParseInt(remainder, 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(writer, request)
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
+	switch request.Method {
+	case http.MethodPut:
+		input, ok := decodeRuleInput(writer, request)
+		if !ok {
+			return
+		}
+		rule, err := handler.rules.Update(ctx, id, input)
+		if err != nil {
+			handler.writeRuleError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, rule)
+	case http.MethodDelete:
+		if err := handler.rules.Delete(ctx, id); err != nil {
+			handler.writeRuleError(writer, err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(writer, http.MethodPut, http.MethodDelete)
+	}
+}
+
+func decodeRuleInput(writer http.ResponseWriter, request *http.Request) (uaguard.RuleInput, bool) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRuleBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var input uaguard.RuleInput
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_rule", "invalid user agent rule")
+		return uaguard.RuleInput{}, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeError(writer, http.StatusBadRequest, "invalid_rule", "invalid user agent rule")
+		return uaguard.RuleInput{}, false
+	}
+	return input, true
+}
+
+func (handler *managementHandler) writeRuleError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, uaguard.ErrInvalidRule):
+		writeError(writer, http.StatusBadRequest, "invalid_rule", "invalid name or regular expression")
+	case errors.Is(err, uaguard.ErrNotFound):
+		writeError(writer, http.StatusNotFound, "not_found", "user agent rule not found")
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(writer, http.StatusServiceUnavailable, "rules_timeout", "user agent rule update timed out")
+	case errors.Is(err, context.Canceled):
+		return
+	default:
+		writeError(writer, http.StatusServiceUnavailable, "rules_unavailable", "user agent rules are unavailable")
+	}
 }
 
 func (handler *managementHandler) serveAuditResource(writer http.ResponseWriter, request *http.Request) {

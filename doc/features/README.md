@@ -91,7 +91,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 ## 7. 数据与加密
 
-SQLite 只保留九张表：
+SQLite 只保留十张表：
 
 1. schema_migrations
 2. audit_records
@@ -102,6 +102,7 @@ SQLite 只保留九张表：
 7. parsed_results
 8. token_links
 9. audit_gaps
+10. user_agent_rules
 
 采用单 writer goroutine + 简单批事务，查询使用独立只读连接池。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。
 
@@ -114,6 +115,8 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要，同时聚合协议无关的多轮消息、reasoning、工具调用和工具结果。摘要写入窄列，conversation 只合并进 `parsed_json_enc` 后加密落盘；parser v2 migration 会把 v1 结果一次性置回 pending，复用正常 worker 回填旧记录。
 
 管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie，刷新页面可恢复会话。普通列表只定向解密入站 User-Agent，主视图只展示调用者、时间、模型和 User-Agent，并支持按 NewAPI 用户、模型和 User-Agent 筛选；Token ID、路径和状态属于高级筛选。上游响应中的 `X-Oneapi-Request-Id` 会触发后台日志查询，成功后只回填用户 ID、用户名、Token ID 和 Token 名称；pending、unresolved 与本地未关联状态会明确展示，完整 API Key 不进入存储或管理响应。受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，assistant 文本使用禁用 raw HTML、危险链接协议和远程图片加载的 GFM Markdown，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
+
+受保护页面另提供动态 User-Agent 规则管理：模型与 User-Agent 使用 Go RE2 正则，保存时编译校验，持久化成功后以原子快照立即替换；初始启用规则要求 `^gpt` 模型的 User-Agent 命中 `Codex Desktop`，否则在访问 NewAPI 前返回 `401`。规则不会扩大 Matcher 的 LLM 路由范围。
 
 ## 9. 模块索引
 

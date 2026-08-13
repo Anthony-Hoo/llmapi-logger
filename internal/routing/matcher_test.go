@@ -114,8 +114,12 @@ func TestMatcherAllowsOnlyUnrelatedPathsToUsePassthrough(t *testing.T) {
 
 	allowed := []string{
 		"/v1/models",
+		"/v1/models/",
 		"/v1beta/models",
 		"/api/status",
+		"/api/user/",
+		"/api/log/",
+		"/api/option/",
 		"/v1/responses-old",
 	}
 	for _, path := range allowed {

@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-个人单机版使用一个 SQLite WAL 数据库，保存四阶段证据、最新解析结果、可选 NewAPI 调用者身份和简单 gap。写入由单 writer goroutine 串行完成，查询使用独立只读连接池。
+个人单机版使用一个 SQLite WAL 数据库，保存四阶段证据、最新解析结果、可选 NewAPI 调用者身份、简单 gap 和动态 User-Agent 规则。写入由单 writer goroutine 串行完成，查询使用独立只读连接池。
 
 不实现多节点、ORM或额外存储控制面；WAL 使用 SQLite 默认自动 checkpoint，迁移只记录数字版本，解析结果只保留最新一份。
 
@@ -10,10 +10,10 @@
 
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
-internal/storage/sqlite/migrations/001_init.sql
+internal/storage/sqlite/migrations/{001_init.sql,004_user_agent_rules.sql}
 ~~~
 
-`001_init.sql` 是当前唯一数据库基线，直接建立九张表、全部索引、request ID 调用者状态和 NewAPI 用户/Token 身份字段。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制。
+`001_init.sql` 建立审计基线表、全部索引、request ID 调用者状态和 NewAPI 用户/Token 身份字段。`004_user_agent_rules.sql` 追加动态 UA 规则表，并创建首条默认启用规则；保留版本 2、3 是为了让仍使用旧审计基线的既有部署可以安全追加同一功能。sqlite 包内的 migrations/ 是唯一来源，并通过 go:embed 编译进单个二进制。
 
 这个个人项目不提供旧数据库原地升级兼容。schema 基线发生不兼容变化时，停机删除 `audit.db`、`audit.db-wal`、`audit.db-shm` 和旧 `audit.key`，再启动生成空库；旧审计数据不迁移。
 
@@ -35,7 +35,7 @@ PRAGMA foreign_keys=ON;
 
 reader 额外设置 PRAGMA query_only=ON。使用 SQLite 默认自动 checkpoint；关闭时 best-effort 执行 PASSIVE checkpoint。
 
-## 3. 九张表
+## 3. 十张表
 
 | 表 | 关键字段与约束 |
 | --- | --- |
@@ -48,6 +48,7 @@ reader 额外设置 PRAGMA query_only=ON。使用 SQLite 默认自动 checkpoint
 | parsed_results | audit_id PK；parser_name/parser_version/status；request_model/response_model；requested_stream/observed_stream；response_id；usage_input/usage_output/usage_total；error_type/error_code；message_count/tool_call_count/has_tool_call；parsed_json_enc；parsed_at_ns |
 | token_links | audit_id PK；newapi_user_id、username、newapi_token_id、token_name、linked_at_ns |
 | audit_gaps | id INTEGER PK；started_at_ns/ended_at_ns、reason、request_count、detail、created_at_ns |
+| user_agent_rules | id INTEGER PK；name；enabled；model_pattern；user_agent_pattern；created_at_ns/updated_at_ns |
 
 stage 只允许四个固定名称。http_stages 外键指向 audit_records；http_headers 和 body_streams 外键指向同 audit_id/stage 的 http_stages；body_chunks 外键指向 body_streams；parsed_results 和 token_links 外键指向 audit_records。所有审计子表使用 ON DELETE CASCADE，schema_migrations 与 audit_gaps 独立。
 
@@ -70,6 +71,7 @@ audit_records 至少建立 started_at_ns、route_id+started_at_ns、capture_stat
 5. 对每个未执行版本开启事务、执行 SQL、插入版本、COMMIT。
 6. migration 失败则 storage 标记 unhealthy；available 仍可转发并写日志，strict 请求返回 503。
 7. 数据库版本高于程序支持版本时 storage 保持 unhealthy；available 仍可只做代理，strict 请求返回 503。
+8. 数据库已应用的每个版本都必须存在于当前二进制内嵌 migration 集合；允许文件编号留空，但不允许把其他架构使用过的未知版本仅因数字较小而视为兼容。
 
 不提供自动 upgrade/downgrade。程序遇到高于当前基线的数据库版本时拒绝使用该库；migration 日志只输出版本与错误，不输出业务数据。
 
@@ -83,7 +85,7 @@ type WriteOp struct {
 }
 ~~~
 
-容量固定 1024 ops。支持 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit、SaveParsedResult、AddGap、UpsertTokenLink 和 RetryCallerLookup。拦截拒绝不增加 WriteOp 类型，由 FinishAudit 在同一事务写 forward_status=rejected、blocked_by、block_code、status_code 和 parse_status=skipped。FinishAudit 同时保存可选 request ID 并初始化 caller pending 状态。
+容量固定 1024 ops。支持 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit、SaveParsedResult、AddGap、UpsertTokenLink、RetryCallerLookup 和 UA 规则 CRUD。拦截拒绝不增加额外审计 WriteOp 类型，由 FinishAudit 在同一事务写 forward_status=rejected、blocked_by、block_code、status_code 和 parse_status=skipped。FinishAudit 同时保存可选 request ID 并初始化 caller pending 状态。
 
 writer 最多聚合 64 ops 或等待 5 ms，然后在一个事务中执行。BeginAudit 和 strict admission 带 Ack，调用方等待 COMMIT；普通 chunk 异步。
 
@@ -152,10 +154,10 @@ retention_days>0 时按[模块 12](12-retention-and-maintenance.md)的固定算�
 
 ## 12. 测试
 
-- 空库执行 `001_init.sql`；重复启动不重复执行。
+- 空库执行 `001_init.sql` 和 `004_user_agent_rules.sql`；重复启动不重复执行。
 - DB 版本高于程序时 storage 保持 unhealthy；available 继续代理，strict 返回 503。
 - writer batch commit/rollback。
-- schema 只有基线版本 1，表总数为九；`audit_records` 和 `token_links` 从建库起就包含 request-id 调用者身份所需字段，且不存在 API Key 列。
+- 新库应用版本 1 和 4，表总数为十；版本 4 默认创建 `^gpt` / `Codex Desktop` 启用规则，既有版本 1/2/3 数据库可追加版本 4；`audit_records` 和 `token_links` 从建库起就包含 request-id 调用者身份所需字段，且不存在 API Key 列。
 - request ID 终态写入、pending 扫描、退避重试、resolved 原子回填和 terminal unresolved 均可恢复且幂等。
 - interceptor 拒绝在一个事务内写 rejected、blocked_by/block_code、status_code、skipped，且不存在未触发的 NewAPI/响应 stage 或空 body_stream。
 - strict BeginAudit commit 失败返回 503。
