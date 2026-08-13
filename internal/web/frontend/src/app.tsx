@@ -807,7 +807,6 @@ export function AuditList({
           <ul className="divide-y" aria-label="审计记录列表">
             {items.map((audit) => {
               const selected = audit.audit_id === selectedID;
-			  const caller = callerSummary(audit);
               const model = audit.response_model?.trim() || audit.request_model?.trim() || "未记录";
               const userAgent = audit.user_agent?.trim() || "未记录";
               const status = auditStatusSummary(audit);
@@ -827,10 +826,10 @@ export function AuditList({
                       </span>
                       {status ? <span className="text-[11px] font-medium text-amber-700">{status}</span> : null}
                     </span>
-                    <span className="mt-2 grid min-w-0 gap-x-5 gap-y-2 sm:grid-cols-[minmax(120px,0.75fr)_minmax(140px,0.9fr)_minmax(180px,1.35fr)]">
-                      <ListValue label="调用者" value={caller} />
+                    <span className="mt-2 grid min-w-0 gap-x-5 gap-y-2 sm:grid-cols-[minmax(10rem,0.85fr)_minmax(6.5rem,0.4fr)_minmax(16rem,2fr)]">
+                      <CallerValue audit={audit} />
                       <ListValue label="模型" value={model} mono />
-                      <ListValue label="User-Agent" value={userAgent} mono />
+                      <ListValue label="User-Agent" value={userAgent} mono wrap />
                     </span>
                   </button>
                 </li>
@@ -843,11 +842,55 @@ export function AuditList({
   );
 }
 
-function ListValue({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function CallerValue({ audit }: { audit: AuditSummary }) {
+  const name = audit.display_name?.trim() || audit.username?.trim();
+  const tokenName = audit.token_name?.trim();
+  const tokenID = audit.newapi_token_id;
+  const hasTokenID = tokenID !== null && tokenID !== undefined && String(tokenID).trim() !== "";
+  const fallback = audit.caller_status === "pending"
+    ? "识别中"
+    : audit.caller_status === "unresolved"
+      ? "未识别"
+      : "未关联";
+
+  return (
+    <span className="min-w-0">
+      <span className="block text-[10px] leading-none text-muted-foreground">调用者</span>
+      <span className="mt-1 block truncate text-sm font-medium" title={name || fallback}>
+        {name || fallback}
+      </span>
+      {tokenName ? (
+        <span className="mt-1 block break-words text-xs leading-4 text-slate-600" title={tokenName}>
+          {tokenName}
+        </span>
+      ) : null}
+      {hasTokenID ? (
+        <span className="block font-mono text-[11px] leading-4 text-muted-foreground">ID: {tokenID}</span>
+      ) : null}
+    </span>
+  );
+}
+
+function ListValue({
+  label,
+  value,
+  mono = false,
+  wrap = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  wrap?: boolean;
+}) {
   return (
     <span className="min-w-0">
       <span className="block text-[10px] leading-none text-muted-foreground">{label}</span>
-      <span className={`mt-1 block truncate text-sm font-medium ${mono ? "font-mono text-xs" : ""}`} title={value}>
+      <span
+        className={`mt-1 block text-sm font-medium ${wrap ? "whitespace-normal break-words leading-5" : "truncate"} ${
+          mono ? "font-mono text-xs" : ""
+        }`}
+        title={value}
+      >
         {value}
       </span>
     </span>
@@ -1442,12 +1485,14 @@ function callerSummary(audit: AuditSummary): string {
   if (audit.caller_status === "pending") {
 	return "识别中";
   }
-  const username = audit.username?.trim();
+  const callerName = audit.display_name?.trim() || audit.username?.trim();
   const token = audit.token_name?.trim();
-  if (!username && !token) {
+  if (!callerName && !token) {
 	return audit.caller_status === "unresolved" ? "未识别" : "未关联";
   }
-  return [username ? `@${username}` : "", token || "", audit.newapi_token_id ? `#${audit.newapi_token_id}` : ""]
+	const tokenID = audit.newapi_token_id;
+	const hasTokenID = tokenID !== null && tokenID !== undefined && String(tokenID).trim() !== "";
+  return [callerName || "", token || "", hasTokenID ? `ID: ${tokenID}` : ""]
 	.filter(Boolean)
 	.join(" · ");
 }

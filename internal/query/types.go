@@ -80,6 +80,7 @@ type AuditSummary struct {
 	CallerStatus    string  `json:"caller_status"`
 	NewAPIUserID    *int64  `json:"newapi_user_id"`
 	Username        *string `json:"username"`
+	DisplayName     *string `json:"display_name"`
 	NewAPITokenID   *int64  `json:"newapi_token_id"`
 	TokenName       *string `json:"token_name"`
 }

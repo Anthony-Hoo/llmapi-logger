@@ -28,6 +28,7 @@ export interface AuditSummary {
   caller_status?: "none" | "pending" | "resolved" | "unresolved" | string;
   newapi_user_id?: number | string | null;
   username?: string | null;
+  display_name?: string | null;
   newapi_token_id?: number | string | null;
   token_name?: string | null;
   user_agent?: string | null;

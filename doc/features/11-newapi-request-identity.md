@@ -77,9 +77,9 @@ schema 中不定义用户 API Key 或打码 Key 字段；调用者关联只能�
 
 ## 6. 查询与前端
 
-列表和详情可返回 `newapi_request_id`、`caller_status`、`newapi_user_id`、`username`、`newapi_token_id` 和 `token_name`。主列表调用者显示规则：
+列表和详情可返回 `newapi_request_id`、`caller_status`、`newapi_user_id`、`username`、`display_name`、`newapi_token_id` 和 `token_name`。其中 `display_name` 不写入数据库，而是管理 Web 层在响应前按 `newapi_user_id` 从最近一次成功的安全用户目录快照动态补充；目录缺失、显示名为空或用户不存在时回退到已保存的 `username`。主列表调用者显示规则：
 
-- `resolved`：`@username · token_name · #token_id`。
+- `resolved`：第一行显示 `display_name`（缺失时为 `username`），第二行显示 `token_name`，第三行显示 `ID: token_id`。
 - `pending`：识别中。
 - `unresolved`：未识别。
 - `none`：未关联。

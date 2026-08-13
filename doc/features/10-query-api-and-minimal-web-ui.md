@@ -28,7 +28,7 @@ retention 只在后台删除过期审计，不扩展本模块的只读查询接�
 
 查询只会看到被进程内 Matcher 精确命中的 LLM API route。`/v1/models`、NewAPI 健康检查、登录、管理和前端等安全非 LLM 请求即使经本程序 passthrough，也不会创建 audit，因此不会出现在列表、详情或 raw 接口中。受保护或危险的未匹配路径 fail-closed，同样不创建 audit。
 
-列表主体读取 `audit_records`，并可关联 `parsed_results` 和 `token_links` 的窄摘要字段；调用者摘要只包含 NewAPI request ID、识别状态、用户 ID/用户名和 Token ID/名称。此外，query 层会为每条候选记录定向读取并认证解密 `request_for_newapi_received_from_nginx` 阶段的入站 `User-Agent`，把首个值放入列表 DTO；不会借此加载其他 Header。详情由 query 层读取并认证解密 `request_uri_enc`、每条 `http_headers.value_enc` 和 `parsed_results.parsed_json_enc`；后者只提取并校验 conversation。Body bytes 仍不随详情返回。
+列表主体读取 `audit_records`，并可关联 `parsed_results` 和 `token_links` 的窄摘要字段；调用者摘要只包含 NewAPI request ID、识别状态、用户 ID/用户名和 Token ID/名称。Web 层会按用户 ID 使用内存中的安全用户目录动态补充 `display_name`，不改变 SQLite schema；目录中没有对应显示名时前端回退到已保存的用户名。此外，query 层会为每条候选记录定向读取并认证解密 `request_for_newapi_received_from_nginx` 阶段的入站 `User-Agent`，把首个值放入列表 DTO；不会借此加载其他 Header。详情由 query 层读取并认证解密 `request_uri_enc`、每条 `http_headers.value_enc` 和 `parsed_results.parsed_json_enc`；后者只提取并校验 conversation。Body bytes 仍不随详情返回。
 
 ## 4. 列表 API
 
@@ -103,7 +103,7 @@ request 读取 `request_sent_to_newapi`，response 读取 `response_received_fro
 
 详情页面保持三个层次：
 
-- 列表与筛选：使用紧凑的原生 `ul/li/button` 列表，主行只展示调用者、时间、模型和 User-Agent，避免表格横向滚动；resolved 调用者显示用户名、Token 名称和 Token ID，pending/unresolved/none 分别显示识别中、未识别和未关联。主筛选提供 NewAPI 用户、模型和 User-Agent，Token ID、路径、状态及其他诊断条件收进默认折叠的高级筛选。
+- 列表与筛选：使用紧凑的原生 `ul/li/button` 列表，主行只展示调用者、时间、模型和 User-Agent，避免表格横向滚动；resolved 调用者优先显示当前安全用户目录中的显示名，缺失时回退用户名，Token 名称和 `ID` 各占一行。模型列保持窄宽度和单行省略，User-Agent 获得主要剩余宽度并允许自然换行。pending/unresolved/none 分别显示识别中、未识别和未关联。主筛选提供 NewAPI 用户、模型和 User-Agent，Token ID、路径、状态及其他诊断条件收进默认折叠的高级筛选。
 - 对话审计主视图：按 parser 给出的顺序展示 system/developer/user/assistant/tool；标明 request/response 和数据方向；assistant 的 text part 使用 `react-markdown` + `remark-gfm` 安全渲染，不启用 raw HTML，只允许 HTTP、HTTPS、mailto 和相对链接，远程图片降级为文字；system/user/tool/reasoning 保持原始文本或 JSON。reasoning 默认折叠；tool call 显示名称、call id、arguments，tool result 显示关联 id 和结果。JSON 字符串只在前端格式化，不改写存储值。
 - 辅助证据折叠区：包含 Request-URI、四阶段、每个 Header/Trailer 值、Body 完整性和应用层原始 HTTP 重建。Body 只有用户点击查看后才加载到页面内存；有效 UTF-8 且不含明显二进制控制字节时内联预览，否则提示下载原始字节。
 - UA 拦截规则页：列出状态、名称、模型正则和 User-Agent 正则，支持新增、编辑、启停和删除；说明 Go RE2、默认区分大小写、重叠规则全部需要通过及热生效语义。

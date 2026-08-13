@@ -75,7 +75,8 @@ describe("audit list", () => {
 	  response_model: "gpt-4o",
 	  caller_status: "resolved",
 	  newapi_user_id: 7,
-	  username: "alice",
+	  username: "alice-long-username",
+	  display_name: "Alice",
 	  newapi_token_id: 42,
 	  token_name: "personal",
       user_agent: "codex-cli/1.0",
@@ -90,11 +91,14 @@ describe("audit list", () => {
     expect(html).toContain('<button type="button" aria-current="true"');
     expect(html).toContain("调用者");
 	expect(html).toContain("personal");
-	expect(html).toContain("@alice");
+	expect(html).toContain("Alice");
+	expect(html).toContain("ID: 42");
+	expect(html).not.toContain("alice-long-username");
     expect(html).toContain("模型");
     expect(html).toContain("gpt-4o");
     expect(html).toContain("User-Agent");
     expect(html).toContain("codex-cli/1.0");
+    expect(html).toContain("whitespace-normal break-words");
     expect(html).not.toContain("apx_selected");
     expect(html).not.toContain("/v1/chat/completions");
     expect(html).not.toContain("openai-chat-completions");

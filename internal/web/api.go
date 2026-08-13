@@ -114,6 +114,7 @@ func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, req
 		handler.writeQueryError(writer, err)
 		return
 	}
+	handler.addCallerDisplayNames(page.Items)
 	writeJSON(writer, http.StatusOK, page)
 }
 
@@ -265,7 +266,43 @@ func (handler *managementHandler) serveAuditDetail(writer http.ResponseWriter, r
 		handler.writeQueryError(writer, err)
 		return
 	}
+	addCallerDisplayName(&detail.Audit, handler.callerDisplayNames())
 	writeJSON(writer, http.StatusOK, detail)
+}
+
+func (handler *managementHandler) addCallerDisplayNames(audits []query.AuditSummary) {
+	names := handler.callerDisplayNames()
+	if len(names) == 0 {
+		return
+	}
+	for index := range audits {
+		addCallerDisplayName(&audits[index], names)
+	}
+}
+
+func (handler *managementHandler) callerDisplayNames() map[int64]string {
+	if handler.users == nil {
+		return nil
+	}
+	users := handler.users.Snapshot().Users
+	names := make(map[int64]string, len(users))
+	for _, user := range users {
+		if displayName := strings.TrimSpace(user.DisplayName); displayName != "" {
+			names[user.ID] = displayName
+		}
+	}
+	return names
+}
+
+func addCallerDisplayName(audit *query.AuditSummary, names map[int64]string) {
+	if audit == nil || audit.NewAPIUserID == nil {
+		return
+	}
+	displayName, ok := names[*audit.NewAPIUserID]
+	if !ok {
+		return
+	}
+	audit.DisplayName = &displayName
 }
 
 func (handler *managementHandler) serveRaw(writer http.ResponseWriter, request *http.Request, auditID string, side query.Side) {

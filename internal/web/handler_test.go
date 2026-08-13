@@ -298,10 +298,17 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 			RouteID: "openai", Protocol: "openai", ParserName: "openai.responses",
 			Method: "POST", Path: "/v1/responses", Mode: "available",
 			ForwardStatus: "completed", CaptureStatus: "complete", ParseStatus: "ok",
+			NewAPIUserID: int64Pointer(7),
 		}},
 		NextCursor: &query.Cursor{BeforeStartedAtNS: started, BeforeID: "audit-list"},
 	}}
-	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: queries})
+	handler := newTestHandler(t, Options{
+		AdminToken: testAdminToken,
+		Query:      queries,
+		Users: fakeUserCatalog{snapshot: newapi.UserSnapshot{Users: []newapi.User{{
+			ID: 7, Username: "alice", DisplayName: "Alice", Status: 1, Group: "default",
+		}}}},
+	})
 	request := authorizedRequest(http.MethodGet, "/api/v1/audits?limit=25&protocol=openai&from_ns=9007199254740993&model=gpt-5&user_agent=Codex&newapi_user_id=7&newapi_token_id=42")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -311,6 +318,9 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, `"started_at_ns":"9007199254740995"`) || !strings.Contains(body, `"before_started_at_ns":"9007199254740995"`) {
 		t.Fatalf("nanosecond fields were not JSON strings: %s", body)
+	}
+	if !strings.Contains(body, `"display_name":"Alice"`) {
+		t.Fatalf("list omitted caller display name: %s", body)
 	}
 	if queries.gotLimit != 25 || queries.gotFilter.Protocol != "openai" || queries.gotFilter.Model != "gpt-5" || queries.gotFilter.UserAgent != "Codex" ||
 		queries.gotFilter.FromNS == nil || *queries.gotFilter.FromNS != 9_007_199_254_740_993 ||
@@ -344,6 +354,7 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 				AuditID: "audit-detail", StartedAtNS: 10, RouteID: "route", Protocol: "openai",
 				ParserName: "openai.responses", Method: "POST", Path: "/v1/responses", Mode: "available",
 				ForwardStatus: "completed", CaptureStatus: "complete", ParseStatus: "pending",
+				NewAPIUserID: int64Pointer(7),
 			},
 			RequestURI: "/v1/responses?private=query-value",
 			Headers: []query.Header{{
@@ -356,7 +367,13 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 		},
 		rawData: []byte("raw evidence"),
 	}
-	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: queries})
+	handler := newTestHandler(t, Options{
+		AdminToken: testAdminToken,
+		Query:      queries,
+		Users: fakeUserCatalog{snapshot: newapi.UserSnapshot{Users: []newapi.User{{
+			ID: 7, Username: "alice", DisplayName: "Alice", Status: 1, Group: "default",
+		}}}},
+	})
 
 	request := authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail")
 	response := httptest.NewRecorder()
@@ -367,6 +384,9 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"request_uri":"/v1/responses?private=query-value"`) ||
 		!strings.Contains(response.Body.String(), `"value":"Bearer header-value"`) {
 		t.Fatalf("detail omitted decrypted evidence: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"display_name":"Alice"`) {
+		t.Fatalf("detail omitted caller display name: %s", response.Body.String())
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("detail cache policy = %q, want no-store", response.Header().Get("Cache-Control"))
@@ -477,6 +497,8 @@ type fakeUserCatalog struct {
 }
 
 func (catalog fakeUserCatalog) Snapshot() newapi.UserSnapshot { return catalog.snapshot }
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func (queries *fakeQuery) Healthy() bool { return queries.healthy }
 

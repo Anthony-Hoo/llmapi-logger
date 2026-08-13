@@ -36,7 +36,7 @@ Client -> Nginx -> llmapi-logger
 - SQLite WAL 存储、单 writer、有界写队列和自动 migration。
 - OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析，以及统一的多轮对话和工具调用视图。
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
-- 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；路径、状态和原始 HTTP 证据留在详情或高级筛选。
+- 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；调用者优先使用安全用户目录中的显示名，Token 名称与 ID 分行展示，长 User-Agent 自动换行；路径、状态和原始 HTTP 证据留在详情或高级筛选。
 - loopback 管理端同样强制鉴权；CLI 可用静态 Bearer token，Web UI 登录后使用七天过期的 HttpOnly Cookie；敏感详情和 raw 响应禁止缓存。
 - 可选使用 NewAPI 全局管理凭证同步安全用户目录；对响应中的 `X-Oneapi-Request-Id` 异步查询全站日志，回填用户名、用户 ID、Token ID 和 Token 名称。
 - 调用者识别不读取、不匹配、不保存也不展示用户完整 API Key；主筛选按 NewAPI 用户，Token ID 只作为高级筛选。
