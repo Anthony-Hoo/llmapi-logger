@@ -200,6 +200,13 @@ func (e *Engine) Evaluate(ctx context.Context, req *http.Request, match routing.
 		}
 
 		if item.requirements.NeedsBody && !bodyRead {
+			if req.ContentLength > route.maxBodyBytes {
+				return Result{
+					StatusCode: http.StatusRequestEntityTooLarge,
+					BlockedBy:  item.id,
+					BlockCode:  "body_too_large",
+				}
+			}
 			buffered, err := readAndReplayBody(req, route.maxBodyBytes)
 			if err != nil {
 				if isCancellation(ctx, err) {

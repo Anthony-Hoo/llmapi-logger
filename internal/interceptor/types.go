@@ -11,7 +11,7 @@ const (
 	// MinBodyBytes and MaxBodyBytes bound the per-request buffering an
 	// interceptor may request.
 	MinBodyBytes int64 = 1 << 20
-	MaxBodyBytes int64 = 16 << 20
+	MaxBodyBytes int64 = 512 << 20
 )
 
 // Requirements describe which parts of a request an Interceptor needs.

@@ -265,13 +265,14 @@ func TestBodyLimitBoundaryAndBoundedRead(t *testing.T) {
 	tests := []struct {
 		name           string
 		size           int
+		contentLength  int64
 		wantAllowed    bool
 		wantReadBytes  int
 		wantStatusCode int
 	}{
-		{name: "at-limit", size: int(MinBodyBytes), wantAllowed: true, wantReadBytes: int(MinBodyBytes)},
-		{name: "limit-plus-one", size: int(MinBodyBytes + 1), wantReadBytes: int(MinBodyBytes + 1), wantStatusCode: http.StatusRequestEntityTooLarge},
-		{name: "bounded-prefix", size: int(MinBodyBytes + 4096), wantReadBytes: int(MinBodyBytes + 1), wantStatusCode: http.StatusRequestEntityTooLarge},
+		{name: "at-limit", size: int(MinBodyBytes), contentLength: MinBodyBytes, wantAllowed: true, wantReadBytes: int(MinBodyBytes)},
+		{name: "limit-plus-one-unknown-length", size: int(MinBodyBytes + 1), contentLength: -1, wantReadBytes: int(MinBodyBytes + 1), wantStatusCode: http.StatusRequestEntityTooLarge},
+		{name: "bounded-prefix-unknown-length", size: int(MinBodyBytes + 4096), contentLength: -1, wantReadBytes: int(MinBodyBytes + 1), wantStatusCode: http.StatusRequestEntityTooLarge},
 	}
 
 	for _, test := range tests {
@@ -288,7 +289,7 @@ func TestBodyLimitBoundaryAndBoundedRead(t *testing.T) {
 			}
 			originalBytes := bytes.Repeat([]byte{0xa5}, test.size)
 			original := &trackingReadCloser{reader: bytes.NewReader(originalBytes)}
-			request := newRequestWithBody(t, original, int64(test.size))
+			request := newRequestWithBody(t, original, test.contentLength)
 
 			result := engine.Evaluate(request.Context(), request, testMatch("route", "limit"))
 			if result.Allowed != test.wantAllowed || result.StatusCode != test.wantStatusCode {
@@ -300,10 +301,32 @@ func TestBodyLimitBoundaryAndBoundedRead(t *testing.T) {
 			if original.bytesRead != test.wantReadBytes || original.closeCalls != 1 {
 				t.Fatalf("original read=%d close=%d, want read=%d close=1", original.bytesRead, original.closeCalls, test.wantReadBytes)
 			}
-			if request.ContentLength != int64(test.size) {
-				t.Fatalf("ContentLength = %d, want %d", request.ContentLength, test.size)
+			if request.ContentLength != test.contentLength {
+				t.Fatalf("ContentLength = %d, want %d", request.ContentLength, test.contentLength)
 			}
 		})
+	}
+}
+
+func TestBodyAboveGlobalLimitIsRejectedWithoutReading(t *testing.T) {
+	t.Parallel()
+
+	definitions := map[string]config.InterceptorConfig{
+		"limit": {Type: "max_body_bytes", Config: map[string]any{"max_bytes": MaxBodyBytes}},
+	}
+	engine, err := NewEngine(definitions, []config.RouteConfig{testRoute("route", "limit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := &trackingReadCloser{reader: strings.NewReader("not read")}
+	request := newRequestWithBody(t, original, MaxBodyBytes+1)
+
+	result := engine.Evaluate(request.Context(), request, testMatch("route", "limit"))
+	if result.StatusCode != http.StatusRequestEntityTooLarge || result.BlockedBy != "limit" || result.BlockCode != "body_too_large" || result.Internal != nil {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if original.bytesRead != 0 {
+		t.Fatalf("oversized body read %d bytes, want 0", original.bytesRead)
 	}
 }
 

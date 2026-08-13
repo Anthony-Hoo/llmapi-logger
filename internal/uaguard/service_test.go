@@ -51,6 +51,46 @@ func TestDefaultRuleBlocksGPTWithoutMatchingUserAgent(t *testing.T) {
 	}
 }
 
+func TestRequirementsUse512MiBBodyLimit(t *testing.T) {
+	t.Parallel()
+
+	const wantMaxBodyBytes int64 = 512 << 20
+	if interceptor.MaxBodyBytes != wantMaxBodyBytes {
+		t.Fatalf("interceptor.MaxBodyBytes = %d, want %d", interceptor.MaxBodyBytes, wantMaxBodyBytes)
+	}
+	requirements := (&Service{}).Requirements()
+	if !requirements.NeedsBody || requirements.MaxBodyBytes != wantMaxBodyBytes {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+}
+
+func TestBodyLargerThanLegacy16MiBLimitIsAllowed(t *testing.T) {
+	_, engine, matcher := newTestEngine(t)
+
+	const legacyLimit int64 = 16 << 20
+	prefix := `{"model":"gpt-large"}`
+	bodySize := legacyLimit + 1
+	body := io.MultiReader(
+		strings.NewReader(prefix),
+		io.LimitReader(fillReader(' '), bodySize-int64(len(prefix))),
+	)
+	request := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions", body)
+	request.ContentLength = bodySize
+	request.Header.Set("User-Agent", "Codex Desktop test")
+	match, ok := matcher.Match(request.Method, request.URL.EscapedPath())
+	if !ok {
+		t.Fatal("route did not match")
+	}
+
+	result := engine.Evaluate(request.Context(), request, match)
+	if !result.Allowed {
+		t.Fatalf("result = %+v", result)
+	}
+	if replayed, err := io.Copy(io.Discard, request.Body); err != nil || replayed != bodySize {
+		t.Fatalf("replayed body bytes = %d, err = %v, want %d", replayed, err, bodySize)
+	}
+}
+
 func TestRuleUpdatesAreImmediateAndInvalidRegexKeepsLastSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -144,4 +184,13 @@ func evaluate(t *testing.T, engine *interceptor.Engine, matcher *routing.Matcher
 		t.Fatal(err)
 	}
 	return result, string(replayed)
+}
+
+type fillReader byte
+
+func (reader fillReader) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = byte(reader)
+	}
+	return len(buffer), nil
 }
