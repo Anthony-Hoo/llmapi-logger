@@ -87,7 +87,7 @@ type Decision struct {
 
 RequestView 提供 route id、Method、EscapedPath、Host、ContentLength、PathParams，以及 Header/Query 的只读副本。
 
-metadata interceptor 返回 NeedsBody=false，只能读取这些元数据。需要 Body 的模块必须返回 NeedsBody=true 和 1–16 MiB 的 MaxBodyBytes。
+metadata interceptor 返回 NeedsBody=false，只能读取这些元数据。需要 Body 的模块必须返回 NeedsBody=true 和 1–512 MiB 的 MaxBodyBytes。
 
 BodyView 只提供 Len 和 Open() io.Reader，不暴露可修改的底层字节。未声明 NeedsBody 的模块始终看不到 Body。
 
