@@ -97,15 +97,22 @@ func TestUserAgentRuleBlocksGPTBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
 	}
 
 	response := send("gpt-test", "wrong-client")
-	if response.Code != http.StatusUnauthorized || upstreamRequests.Load() != 0 || !strings.Contains(response.Body.String(), "request_rejected") {
+	if response.Code != http.StatusUnauthorized || upstreamRequests.Load() != 0 || response.Body.String() != `{"error":{"code":"unauthorized","message":"unauthorized"}}` {
 		t.Fatalf("blocked request: status=%d upstream=%d body=%q", response.Code, upstreamRequests.Load(), response.Body.String())
 	}
-	response = send("gpt-test", "tool Codex Desktop/1.0")
+	if strings.Contains(response.Body.String(), "user_agent_not_allowed") {
+		t.Fatalf("blocked response leaked internal UA code: %q", response.Body.String())
+	}
+	response = send("gpt-test", "Codex Desktop/1.0")
 	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 1 {
 		t.Fatalf("allowed GPT request: status=%d upstream=%d", response.Code, upstreamRequests.Load())
 	}
-	response = send("deepseek-test", "wrong-client")
+	response = send("gpt-test", "codex-tui/1.0")
 	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 2 {
+		t.Fatalf("allowed codex-tui request: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+	response = send("deepseek-test", "wrong-client")
+	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 3 {
 		t.Fatalf("non-GPT request: status=%d upstream=%d", response.Code, upstreamRequests.Load())
 	}
 
@@ -118,12 +125,12 @@ func TestUserAgentRuleBlocksGPTBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
 		t.Fatalf("rule update: status=%d body=%q", updateResponse.Code, updateResponse.Body.String())
 	}
 
-	response = send("gpt-test", "tool Codex Desktop/1.0")
-	if response.Code != http.StatusUnauthorized || upstreamRequests.Load() != 2 {
+	response = send("gpt-test", "Codex Desktop/1.0")
+	if response.Code != http.StatusUnauthorized || upstreamRequests.Load() != 3 {
 		t.Fatalf("old UA after update: status=%d upstream=%d", response.Code, upstreamRequests.Load())
 	}
 	response = send("gpt-test", "Approved Client/2.0")
-	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 3 {
+	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 4 {
 		t.Fatalf("new UA after update: status=%d upstream=%d", response.Code, upstreamRequests.Load())
 	}
 }

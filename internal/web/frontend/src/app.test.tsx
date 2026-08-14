@@ -188,10 +188,10 @@ describe("User-Agent rule configuration", () => {
       listUserAgentRules: async () => ({
         items: [{
           id: 1,
-          name: "GPT models require Codex Desktop",
+          name: "GPT models require Codex clients",
           enabled: true,
           model_pattern: "^gpt",
-          user_agent_pattern: "Codex Desktop",
+          user_agent_pattern: "^(codex-tui|Codex Desktop)",
           created_at_ns: "1",
           updated_at_ns: "1",
         }],

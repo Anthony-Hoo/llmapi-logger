@@ -118,10 +118,10 @@ func DefaultRule(timestamp int64) Rule {
 	}
 	return Rule{
 		ID:               1,
-		Name:             "GPT models require Codex Desktop",
+		Name:             "GPT models require Codex clients",
 		Enabled:          true,
 		ModelPattern:     "^gpt",
-		UserAgentPattern: "Codex Desktop",
+		UserAgentPattern: "^(codex-tui|Codex Desktop)",
 		CreatedAtNS:      timestamp,
 		UpdatedAtNS:      timestamp,
 	}

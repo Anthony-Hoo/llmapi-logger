@@ -221,7 +221,7 @@ func TestProxyReturnsFixedJSONWhenInterceptorRejects(t *testing.T) {
 	} else if mediaType != "application/json" {
 		t.Errorf("Content-Type media type = %q, want application/json", mediaType)
 	}
-	want := []byte(`{"error":{"code":"request_rejected","message":"request rejected"}}`)
+	want := []byte(`{"error":{"code":"unauthorized","message":"unauthorized"}}`)
 	if got := bytes.TrimSuffix(body, []byte("\n")); !bytes.Equal(got, want) {
 		t.Errorf("response body = %q, want fixed JSON %q", body, want)
 	}

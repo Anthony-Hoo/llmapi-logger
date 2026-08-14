@@ -25,7 +25,7 @@ Client -> Nginx -> llmapi-logger
 - 三态数据面分发：配置的 LLM 路由审计、安全的非 LLM 路径直通、受保护或危险的未匹配路径 fail-closed。
 - 基于 `net/http/httputil.ReverseProxy` 的流式转发，支持 SSE 及时 flush，并可为 NewAPI 上游显式指定 HTTP(S) 代理。
 - 可插拔入站拦截器，首个拒绝立即短路且不会访问 NewAPI。
-- 可在受保护管理页面动态配置“模型正则 + User-Agent 正则”规则；规则持久化到 SQLite，保存后立即生效。初始启用规则要求 `^gpt` 模型的 User-Agent 命中 `Codex Desktop`，否则返回 `401`。
+- 可在受保护管理页面动态配置“模型正则 + User-Agent 正则”规则；规则持久化到 SQLite，保存后立即生效。初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则返回通用 `401 unauthorized`，具体原因仅保留在审计数据中。
 - 分别记录四个代理观察点：
   - Nginx 请求到达代理；
   - 代理请求发往 NewAPI；

@@ -157,7 +157,7 @@ retention_days>0 时按[模块 12](12-retention-and-maintenance.md)的固定算�
 - 空库执行 `001_init.sql` 和 `004_user_agent_rules.sql`；重复启动不重复执行。
 - DB 版本高于程序时 storage 保持 unhealthy；available 继续代理，strict 返回 503。
 - writer batch commit/rollback。
-- 新库应用版本 1 和 4，表总数为十；版本 4 默认创建 `^gpt` / `Codex Desktop` 启用规则，既有版本 1/2/3 数据库可追加版本 4；`audit_records` 和 `token_links` 从建库起就包含 request-id 调用者身份所需字段，且不存在 API Key 列。
+- 新库应用版本 1 和 4，表总数为十；版本 4 默认创建 `^gpt` / `^(codex-tui|Codex Desktop)` 启用规则，既有版本 1/2/3 数据库可追加版本 4；`audit_records` 和 `token_links` 从建库起就包含 request-id 调用者身份所需字段，且不存在 API Key 列。
 - request ID 终态写入、pending 扫描、退避重试、resolved 原子回填和 terminal unresolved 均可恢复且幂等。
 - interceptor 拒绝在一个事务内写 rejected、blocked_by/block_code、status_code、skipped，且不存在未触发的 NewAPI/响应 stage 或空 body_stream。
 - strict BeginAudit commit 失败返回 503。

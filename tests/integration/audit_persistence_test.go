@@ -551,7 +551,7 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer downstream-admin-api-secret")
-	request.Header.Set("User-Agent", "integration Codex Desktop")
+	request.Header.Set("User-Agent", "Codex Desktop integration")
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("send parsed request: %v", err)

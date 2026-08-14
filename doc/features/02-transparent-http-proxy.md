@@ -75,7 +75,7 @@ Body 规则固定如下：
 
 有效 allow 必须是 Allow=true 且 StatusCode/BlockCode 为空；有效 reject 必须是 Allow=false、StatusCode 在 400–499 且 BlockCode 非空。第一个 reject 立即短路，后续模块不执行。模块直接使用请求 context，首版不另设每模块超时；调用边界只做 recover。error、panic 或非法 Decision 分别归一为 `interceptor_error`、`interceptor_panic`、`interceptor_invalid_decision`，非客户端取消的 Body 读取失败使用 `interceptor_body_read_error`。这些场景统一返回 503，且对 available 与 strict 完全相同。
 
-主动 reject/Body 超限固定返回 `request_rejected` JSON，执行异常固定返回 `interceptor_unavailable` JSON；响应不回显 interceptor id、BlockCode、模块错误、Header、Query 或 Body。审计可用时以 forward_status=rejected、blocked_by、block_code、status_code 和 parse_status=skipped 结束；request_sent_to_newapi、response_received_from_newapi、response_from_newapi_sent_to_nginx 均不创建。
+主动 reject 中的 `401` 固定返回通用 `unauthorized` JSON，其他 4xx（含 Body 超限 `413`）固定返回 `request_rejected` JSON，执行异常固定返回 `interceptor_unavailable` JSON；响应不回显 interceptor id、BlockCode、模块错误、Header、Query 或 Body。审计可用时仍以 forward_status=rejected、blocked_by、block_code、status_code 和 parse_status=skipped 结束；request_sent_to_newapi、response_received_from_newapi、response_from_newapi_sent_to_nginx 均不创建。
 
 ## 5. 审计接口
 

@@ -15,7 +15,7 @@ func TestUserAgentRulesPersistAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := service.List()
-	if len(rules) != 1 || rules[0].ID != 1 || !rules[0].Enabled || rules[0].ModelPattern != "^gpt" || rules[0].UserAgentPattern != "Codex Desktop" {
+	if len(rules) != 1 || rules[0].ID != 1 || !rules[0].Enabled || rules[0].ModelPattern != "^gpt" || rules[0].UserAgentPattern != "^(codex-tui|Codex Desktop)" {
 		t.Fatalf("default rules = %+v", rules)
 	}
 

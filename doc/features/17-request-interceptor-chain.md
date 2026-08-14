@@ -109,7 +109,13 @@ BodyView 只提供 Len 和 Open() io.Reader，不暴露可修改的底层字节�
 
 ## 7. 决策与拒绝响应
 
-显式 reject 只允许 400–499 状态码和稳定的 BlockCode。响应正文由框架固定生成，模块不能自定义 Header 或正文：
+显式 reject 只允许 400–499 状态码和稳定的 BlockCode。响应正文由框架固定生成，模块不能自定义 Header 或正文。所有 `401` 统一返回通用未认证错误，避免暴露具体拦截原因：
+
+~~~json
+{"error":{"code":"unauthorized","message":"unauthorized"}}
+~~~
+
+其他显式 4xx（包括 `413`）固定返回：
 
 ~~~json
 {"error":{"code":"request_rejected","message":"request rejected"}}
@@ -151,7 +157,7 @@ require_credential 是 metadata interceptor，只检查以下来源是否至少�
 
 max_body_bytes 是 Body interceptor，配置 max_bytes；超过时返回 `413` 和 `block_code=body_too_large`，未超过时 allow。它按原始 Body 字节计数，不解压 gzip，也不按字符数或 JSON token 数计算。
 
-user_agent_policy 是所有匹配 LLM route 末尾的动态 Body interceptor。它从 JSON 顶层 `model` 提取模型，模板路由可回退到 `{model}` PathParams；模型缺失或 JSON 无法解析时不自行扩大阻断范围。每条启用规则包含模型 RE2 正则和 User-Agent RE2 正则：模型命中后 UA 必须命中，否则返回 `401` 和 `user_agent_not_allowed`；多条模型规则命中时全部需要通过。默认规则为 `^gpt` / `Codex Desktop`，区分大小写。
+user_agent_policy 是所有匹配 LLM route 末尾的动态 Body interceptor。它从 JSON 顶层 `model` 提取模型，模板路由可回退到 `{model}` PathParams；模型缺失或 JSON 无法解析时不自行扩大阻断范围。每条启用规则包含模型 RE2 正则和 User-Agent RE2 正则：模型命中后 UA 必须命中，否则内部记录 `401` 和 `user_agent_not_allowed`，对外只返回通用 `unauthorized`；多条模型规则命中时全部需要通过。默认规则为 `^gpt` / `^(codex-tui|Codex Desktop)`，区分大小写并要求 UA 前缀匹配。
 
 ## 10. 最少测试
 
@@ -163,7 +169,7 @@ user_agent_policy 是所有匹配 LLM route 末尾的动态 Body interceptor。�
 - Body chain 对 JSON、gzip、multipart、binary 和未知长度 Body 只缓冲一次，allow 后逐字节 replay。
 - 上限、上限加一和客户端取消行为正确；超限统一返回 `413` 并记录 `block_code=body_too_large`。
 - rejected audit 的 blocked_by、block_code、状态和四阶段缺失语义正确。
-- 默认 `^gpt` 规则只允许 UA 命中 `Codex Desktop`；缺失/错误 UA 返回 401 且 NewAPI 零调用，非 gpt 模型不受该规则影响。
+- 默认 `^gpt` 规则只允许 UA 以 `codex-tui` 或 `Codex Desktop` 开头；缺失/错误 UA 对外返回通用 401、内部保存精确 BlockCode 且 NewAPI 零调用，非 gpt 模型不受该规则影响。
 - 管理 CRUD 受 Admin Token/Cookie 保护；有效规则热更新、无效正则不替换当前快照，重启后规则仍存在。
 - 响应、日志、SQLite 和 WAL 不泄露凭据或 Body。
 

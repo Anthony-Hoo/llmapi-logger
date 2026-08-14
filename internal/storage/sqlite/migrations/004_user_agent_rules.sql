@@ -12,10 +12,10 @@ INSERT INTO user_agent_rules (
     id, name, enabled, model_pattern, user_agent_pattern, created_at_ns, updated_at_ns
 ) VALUES (
     1,
-    'GPT models require Codex Desktop',
+    'GPT models require Codex clients',
     1,
     '^gpt',
-    'Codex Desktop',
+    '^(codex-tui|Codex Desktop)',
     CAST(strftime('%s', 'now') AS INTEGER) * 1000000000,
     CAST(strftime('%s', 'now') AS INTEGER) * 1000000000
 );

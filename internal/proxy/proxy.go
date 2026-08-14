@@ -22,6 +22,7 @@ import (
 )
 
 const (
+	unauthorizedJSON           = `{"error":{"code":"unauthorized","message":"unauthorized"}}`
 	requestRejectedJSON        = `{"error":{"code":"request_rejected","message":"request rejected"}}`
 	interceptorUnavailableJSON = `{"error":{"code":"interceptor_unavailable","message":"request cannot be processed"}}`
 	auditUnavailableJSON       = `{"error":{"code":"audit_unavailable","message":"request cannot be audited"}}`
@@ -267,7 +268,11 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 			"status", status,
 		)
 		closeRequestBody(request)
-		writeJSON(response, status, requestRejectedJSON)
+		body := requestRejectedJSON
+		if status == http.StatusUnauthorized {
+			body = unauthorizedJSON
+		}
+		writeJSON(response, status, body)
 		return
 	}
 

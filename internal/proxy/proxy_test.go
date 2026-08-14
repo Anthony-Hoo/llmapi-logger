@@ -394,6 +394,12 @@ func TestInterceptorRejectCompletionLogHasTerminalFields(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
+	if response.Body.String() != unauthorizedJSON {
+		t.Fatalf("body = %q, want generic unauthorized response", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "credential_required") {
+		t.Fatalf("response leaked internal block code: %q", response.Body.String())
+	}
 	if upstreamCalls.Load() != 0 {
 		t.Fatalf("upstream calls = %d, want 0", upstreamCalls.Load())
 	}

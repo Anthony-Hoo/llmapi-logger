@@ -113,7 +113,7 @@ func TestUserAgentRuleCRUDRequiresAuthAndRejectsInvalidRegex(t *testing.T) {
 	request := authorizedRequest(http.MethodGet, "/api/v1/user-agent-rules")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"model_pattern":"^gpt"`) || !strings.Contains(response.Body.String(), `"user_agent_pattern":"Codex Desktop"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"model_pattern":"^gpt"`) || !strings.Contains(response.Body.String(), `"user_agent_pattern":"^(codex-tui|Codex Desktop)"`) {
 		t.Fatalf("list response: status=%d body=%q", response.Code, response.Body.String())
 	}
 

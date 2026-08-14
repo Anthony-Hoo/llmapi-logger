@@ -18,7 +18,7 @@ func TestDefaultRuleBlocksGPTWithoutMatchingUserAgent(t *testing.T) {
 	t.Parallel()
 
 	service, engine, matcher := newTestEngine(t)
-	if rules := service.List(); len(rules) != 1 || rules[0].ModelPattern != "^gpt" || rules[0].UserAgentPattern != "Codex Desktop" || !rules[0].Enabled {
+	if rules := service.List(); len(rules) != 1 || rules[0].ModelPattern != "^gpt" || rules[0].UserAgentPattern != "^(codex-tui|Codex Desktop)" || !rules[0].Enabled {
 		t.Fatalf("default rules = %+v", rules)
 	}
 
@@ -28,7 +28,9 @@ func TestDefaultRuleBlocksGPTWithoutMatchingUserAgent(t *testing.T) {
 		userAgent string
 		allowed   bool
 	}{
-		{name: "matching desktop UA", body: `{"model":"gpt-5"}`, userAgent: "client Codex Desktop/1.0", allowed: true},
+		{name: "matching desktop UA", body: `{"model":"gpt-5"}`, userAgent: "Codex Desktop/1.0", allowed: true},
+		{name: "matching terminal UA", body: `{"model":"gpt-5"}`, userAgent: "codex-tui/1.0", allowed: true},
+		{name: "desktop text not at prefix", body: `{"model":"gpt-5"}`, userAgent: "client Codex Desktop/1.0", allowed: false},
 		{name: "missing UA", body: `{"model":"gpt-5"}`, allowed: false},
 		{name: "wrong UA", body: `{"model":"gpt-5"}`, userAgent: "codex desktop", allowed: false},
 		{name: "non GPT model", body: `{"model":"deepseek-test"}`, allowed: true},
