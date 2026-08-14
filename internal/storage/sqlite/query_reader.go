@@ -27,7 +27,7 @@ func (store *Store) ListAudits(ctx context.Context, filter AuditQueryFilter, cur
 	var statement strings.Builder
 	statement.WriteString(`
 SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
-       a.parser_name, a.method, a.path, a.mode, a.status_code,
+       a.parser_name, a.method, a.path, a.mode, a.status_code, a.ttft_ns,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
        a.newapi_request_id, a.caller_status,
@@ -137,7 +137,7 @@ func (store *Store) QueryAuditDetail(ctx context.Context, auditID string) (Audit
 	detail := AuditQueryDetail{}
 	if err := scanAuditListRow(transaction.QueryRowContext(ctx, `
 SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
-       a.parser_name, a.method, a.path, a.mode, a.status_code,
+       a.parser_name, a.method, a.path, a.mode, a.status_code, a.ttft_ns,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
        a.newapi_request_id, a.caller_status,
@@ -168,6 +168,9 @@ WHERE audit_id = ?`, auditID).Scan(&detail.RequestURIEnc); err != nil {
 		return AuditQueryDetail{}, err
 	}
 	if detail.ParsedResult, err = readParsedResultSummary(ctx, transaction, auditID); err != nil {
+		return AuditQueryDetail{}, err
+	}
+	if detail.TurnGraph, err = readTurnGraph(ctx, transaction, auditID); err != nil {
 		return AuditQueryDetail{}, err
 	}
 	if detail.TokenLink, err = readTokenLinkSummary(ctx, transaction, auditID); err != nil {
@@ -237,12 +240,15 @@ func (store *Store) RawBodyMeta(ctx context.Context, auditID, stage string) (Raw
 	var hashComplete, eofSeen int
 	var errorCode sql.NullString
 	err := store.readerDB.QueryRowContext(ctx, `
-SELECT audit_id, stage, observed_length, stored_length, sha256,
+SELECT audit_id, stage, source_stage, retention_state,
+       observed_length, stored_length, sha256,
        hash_complete, eof_seen, state, error_code
 FROM body_streams
 WHERE audit_id = ? AND stage = ?`, auditID, stage).Scan(
 		&metadata.AuditID,
 		&metadata.Stage,
+		&metadata.SourceStage,
+		&metadata.RetentionState,
 		&metadata.ObservedLength,
 		&metadata.StoredLength,
 		&digest,
@@ -281,11 +287,16 @@ func (store *Store) StreamBodyChunks(ctx context.Context, auditID, stage string,
 		return ErrClosed
 	}
 
+	var sourceStage string
+	if err := store.readerDB.QueryRowContext(ctx, `SELECT source_stage FROM body_streams WHERE audit_id = ? AND stage = ?`, auditID, stage).Scan(&sourceStage); err != nil {
+		return fmt.Errorf("sqlite: resolve raw chunk source: %w", err)
+	}
 	rows, err := store.readerDB.QueryContext(ctx, `
-SELECT audit_id, stage, seq, "offset", plaintext_length, observed_at_ns, data_enc
+SELECT audit_id, stage, seq, "offset", plaintext_length, encoded_length,
+       observed_at_ns, compression, data_enc
 FROM body_chunks
 WHERE audit_id = ? AND stage = ?
-ORDER BY seq`, auditID, stage)
+ORDER BY seq`, auditID, sourceStage)
 	if err != nil {
 		return fmt.Errorf("sqlite: stream body chunks: %w", err)
 	}
@@ -298,7 +309,9 @@ ORDER BY seq`, auditID, stage)
 			&chunk.Seq,
 			&chunk.Offset,
 			&chunk.PlaintextLength,
+			&chunk.EncodedLength,
 			&chunk.ObservedAtNS,
+			&chunk.Compression,
 			&chunk.DataEnc,
 		); err != nil {
 			return fmt.Errorf("sqlite: scan body chunk: %w", err)
@@ -314,7 +327,7 @@ ORDER BY seq`, auditID, stage)
 }
 
 func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
-	var endedAt, statusCode, newAPIUserID, newAPITokenID sql.NullInt64
+	var endedAt, statusCode, ttftNS, newAPIUserID, newAPITokenID sql.NullInt64
 	var blockedBy, blockCode, errorCode, requestModel, responseModel, requestID, username, tokenName sql.NullString
 	if err := row.Scan(
 		&destination.AuditID,
@@ -327,6 +340,7 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 		&destination.Path,
 		&destination.Mode,
 		&statusCode,
+		&ttftNS,
 		&destination.ForwardStatus,
 		&destination.CaptureStatus,
 		&destination.ParseStatus,
@@ -346,6 +360,7 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	}
 	destination.EndedAtNS = nullInt64Pointer(endedAt)
 	destination.StatusCode = nullIntPointer(statusCode)
+	destination.TTFTNS = nullInt64Pointer(ttftNS)
 	destination.BlockedBy = nullStringPointer(blockedBy)
 	destination.BlockCode = nullStringPointer(blockCode)
 	destination.ErrorCode = nullStringPointer(errorCode)

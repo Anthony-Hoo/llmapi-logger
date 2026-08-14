@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"llmapi-logger/internal/security"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -25,9 +27,10 @@ type Store struct {
 	queue    chan writeRequest
 	done     chan struct{}
 
-	submitMu sync.RWMutex
-	closed   bool
-	healthy  atomic.Bool
+	submitMu  sync.RWMutex
+	closed    bool
+	healthy   atomic.Bool
+	integrity atomic.Pointer[security.IntegritySigner]
 
 	closeOnce sync.Once
 	closeErr  error

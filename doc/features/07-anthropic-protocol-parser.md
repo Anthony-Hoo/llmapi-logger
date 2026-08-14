@@ -86,8 +86,8 @@ message_start
 
 ## 6. 限额与错误行为
 
-- 请求侧解码后最多 16 MiB。
-- 响应侧解码后最多 16 MiB。
+- 请求侧解码后最多 64 MiB。
+- 响应侧解码后最多 64 MiB。
 - gzip 最大解压比 50:1。
 
 顶层 JSON 无法解析时设 `error`。单个 block/event 畸形时跳过该项并尽量产生 `partial`。证据截断、缺少终止事件或达到限额时设 `partial`。
@@ -113,7 +113,7 @@ reparse 直接覆盖当前结果并更新 `audit_records.parse_status`，数据�
 - tool `input_json_delta` 任意分块与最终非法 JSON。
 - thinking 独立 reasoning、纯 tool_result role、HTTP 200 中的 error event、缺少 message_stop。
 - usage snapshot 不被错误累加。
-- gzip、16 MiB/50:1 限额和敏感字段明文泄漏扫描。
+- gzip、64 MiB/50:1 限额和敏感字段明文泄漏扫描。
 
 ## 9. 实施任务
 

@@ -79,6 +79,30 @@ func TestWorkerStartupScanDecodesGzipAndEncryptsParsedJSON(t *testing.T) {
 	}
 }
 
+func TestParsedResultPlaintextOmitsConversationWhenTurnGraphOwnsIt(t *testing.T) {
+	t.Parallel()
+	view := conversation.New()
+	view.Append(conversation.Message{
+		Role: conversation.RoleUser, Phase: conversation.PhaseRequest,
+		Direction: conversation.DirectionClientToUpstream,
+		Content:   []conversation.Part{conversation.Text("conversation-canary")},
+	})
+	result := Result{
+		Status: StatusOK, Conversation: view,
+		ParsedJSON: []byte(`{"status":"ok","model":"model-example"}`),
+	}
+
+	fallback, generated := parsedResultPlaintext(result, true)
+	if !generated || !bytes.Contains(fallback, []byte("conversation-canary")) {
+		t.Fatalf("fallback plaintext = %s generated=%v", fallback, generated)
+	}
+	clear(fallback)
+	compacted, generated := parsedResultPlaintext(result, false)
+	if generated || bytes.Contains(compacted, []byte("conversation-canary")) {
+		t.Fatalf("content-addressed plaintext = %s generated=%v", compacted, generated)
+	}
+}
+
 func TestWorkerNotifyIsBoundedAndNonBlocking(t *testing.T) {
 	t.Parallel()
 
@@ -360,6 +384,14 @@ func (store *fakeStore) ReadParserChunks(_ context.Context, auditID, stage strin
 }
 
 func (store *fakeStore) SaveParsedResult(_ context.Context, result sqlite.ParsedResult) error {
+	return store.saveParsed(result)
+}
+
+func (store *fakeStore) SaveParsedAudit(_ context.Context, value sqlite.ParsedAudit) error {
+	return store.saveParsed(value.Result)
+}
+
+func (store *fakeStore) saveParsed(result sqlite.ParsedResult) error {
 	store.mu.Lock()
 	store.saveAttempts++
 	if store.saveFailures > 0 {

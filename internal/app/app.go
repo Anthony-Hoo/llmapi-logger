@@ -489,6 +489,27 @@ func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntim
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
+	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit key unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
+	defer clear(key)
+	cipher, err := security.NewAESGCM(key)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit cipher unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
+	if err := store.EnableIntegrity(ctx, key); err != nil {
+		_ = store.Close()
+		logger.Warn("audit integrity chain unavailable", "mode", configuration.Mode, "error_category", "integrity_unavailable")
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
 	recovered, recoveryErr := store.RecoverInterruptedAudits(ctx, time.Now().UnixNano())
 	if recoveryErr != nil {
 		_ = store.Close()
@@ -497,20 +518,6 @@ func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntim
 		return auditRuntime{sink: manager, manager: manager}
 	} else if recovered > 0 {
 		logger.Info("interrupted audits recovered", "recovered_audits", recovered)
-	}
-	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits)
-	if err != nil {
-		_ = store.Close()
-		logger.Warn("audit key unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
-		manager := audit.NewUnavailable(configuration.Mode, err, logger)
-		return auditRuntime{sink: manager, manager: manager}
-	}
-	cipher, err := security.NewAESGCM(key)
-	if err != nil {
-		_ = store.Close()
-		logger.Warn("audit cipher unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
-		manager := audit.NewUnavailable(configuration.Mode, err, logger)
-		return auditRuntime{sink: manager, manager: manager}
 	}
 	manager, err := audit.NewManager(store, cipher, configuration.Mode, logger)
 	if err != nil {

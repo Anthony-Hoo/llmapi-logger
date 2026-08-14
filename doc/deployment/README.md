@@ -39,6 +39,8 @@ bin/audit-proxy-linux-amd64
 
 宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。若 NewAPI 允许长时间等待首包，将 `newapi.response_header_timeout_seconds` 设置为高于 NewAPI 自身超时，并同步提高 `shutdown_timeout_seconds`、Nginx read/send timeout 与容器 stop grace period。只有需要让 NewAPI 继续观察公网域名时才启用 `newapi.preserve_host`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
 
+代理和 Body interceptor 的传输上限为 512 MiB；异步 parser 为限制单 worker 内存，当前请求侧和响应侧各最多解码 64 MiB。超过 parser 上限的请求仍按原字节转发并保留 `full` raw，但不会生成 verified turn，也不会获得 item/binary 内容寻址压缩。部署前应根据真实请求分布确认 64 MiB 是否覆盖正常流量，不能把 512 MiB 传输上限当成 normalizer 上限。
+
 启动前可以只校验配置：
 
 ~~~bash
@@ -48,6 +50,22 @@ bin/audit-proxy-linux-amd64
 ~~~
 
 宿主机 Nginx 使用 `configs/nginx/llmapi-logger.conf` 时，把 `audit_proxy_backend` 从 Compose 服务名改成实际地址，通常是 `127.0.0.1:8080`。同时把应用配置的数据监听地址设为 `127.0.0.1:8080`。
+
+### 2.1 schema generation 2 的破坏性切换
+
+内容寻址存储是不可兼容的新审计 schema，不迁移旧 audit。若直接让 migration 005 作用于旧数据库，旧审计表会被重建，但 SQLite 主文件通常不会自动缩小；因此需要真正释放旧空间时，应在停机窗口创建新的空 `audit.db`，而不是只依赖 `DROP TABLE`。
+
+通用切换顺序：
+
+1. 在独立临时数据目录用候选二进制执行 `--validate-config`，再用 fake upstream 完成非流式、SSE、拦截、reconstructed、metadata/full raw smoke。
+2. 记录当前 UA 规则的非敏感配置；如果需要保留自定义规则，在新库启动后通过管理 API 重新写入。全新数据库会由 migration 创建默认规则。
+3. 预先放置候选二进制或镜像，但不要覆盖仍在运行的可执行文件。
+4. 停止入口流量并正常停止旧进程，确认进程已退出且没有连接继续打开数据库。
+5. 只处理精确的数据文件 `audit.db`、`audit.db-wal`、`audit.db-shm`；不要删除或替换 `audit.key`、运行时配置和凭据文件。需要回滚能力时，将旧数据库三件套与旧二进制作为同一回滚点保存。
+6. 原子替换二进制/镜像并启动。启动会创建 generation 2 schema、验证主密钥和空完整性链，再恢复后台 worker。
+7. 依次验证带凭证的 `/readyz`、schema generation/表集合、UA 规则、一个安全 passthrough、一个受审计 JSON 请求、一个 SSE 请求、reconstructed JSON、metadata raw 410、异常 full raw 和 NewAPI 调用者回填。
+
+旧二进制不得直接打开 generation 2 数据库；回滚必须同时恢复旧二进制及其匹配的旧数据库/主密钥备份集。若维护者明确接受无历史回滚，可省略旧审计库备份，但仍不得删除唯一的 `audit.key` 或运行时配置。
 
 ## 3. Docker Compose
 
@@ -123,7 +141,7 @@ newapi:
 
 这套步骤用于“单个 audit-proxy 容器 + 远程 NewAPI”。仓库默认的 Nginx/audit-proxy/NewAPI 三服务 Compose 继续使用 bridge，让 audit-proxy 直连 Compose 内的 NewAPI，不需要为了本功能改成 host network。
 
-默认 Podman bridge 中的 `host.containers.internal` 可能只解析到 bridge gateway（例如 `10.88.0.1`），无法连接只监听 Windows loopback 的 Clash，因此不要把它当作本场景的替代方案。host network 会让容器监听直接进入 Podman/WSL 网络边界，只应在可信开发机上使用并配合主机防火墙。
+默认 Podman bridge 中的 `host.containers.internal` 可能只解析到容器 bridge gateway，而无法连接只监听 Windows loopback 的本地代理，因此不要把它当作本场景的替代方案。host network 会让容器监听直接进入 Podman/WSL 网络边界，只应在可信开发机上使用并配合主机防火墙。
 
 配置为空字符串时强制直连：
 
@@ -173,8 +191,10 @@ docker compose exec nginx nginx -t
 
 然后分别验证一个审计流式请求、一个 `/v1/models` passthrough 请求，以及一个错误 Method/编码近似的 fail-closed 请求。仓库不把未实际运行的 Docker/Nginx smoke test 记为通过。
 
-## 7. 数据和备份
+## 7. 数据、保留状态和备份
 
 SQLite 数据库与 `audit.key` 必须作为一个备份集保存。运行中不能直接复制 `audit.db`；在线备份必须使用 SQLite `.backup`。具体流程见 [备份与恢复](backup-and-restore.md)。
+
+普通 OpenAI 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、4xx/5xx、采集不完整、解析/normalization/重建失败和其他异常保持 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw 返回 410 误判为丢失。
 
 最终镜像只包含 distroless 运行环境、Go 二进制和空的数据/配置挂载目录，不包含 Node、pnpm、前端源码、Go 源码或构建工具。

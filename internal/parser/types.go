@@ -5,6 +5,7 @@ package parser
 import (
 	"context"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -15,7 +16,7 @@ const (
 	StatusError   = sqlite.ParseError
 	StatusSkipped = sqlite.ParseSkipped
 
-	MaxDecodedBodyBytes = 16 << 20
+	MaxDecodedBodyBytes = 64 << 20
 	MaxGzipRatio        = 50
 	QueueCapacity       = 100
 )
@@ -25,6 +26,12 @@ type Parser interface {
 	Name() string
 	Version() string
 	Parse(context.Context, Input) Result
+}
+
+// AuditNormalizer is implemented by parsers that can losslessly split a
+// decoded provider request/response into envelopes and content-addressed items.
+type AuditNormalizer interface {
+	NormalizeAudit(context.Context, Input, Result) (auditmodel.Turn, error)
 }
 
 // Store is the narrow persistence surface used by Worker.
@@ -37,6 +44,7 @@ type Store interface {
 	LoadParserStage(context.Context, string, string) (sqlite.ParserStage, error)
 	ReadParserChunks(context.Context, string, string, int64, int) ([]sqlite.BodyChunk, error)
 	SaveParsedResult(context.Context, sqlite.ParsedResult) error
+	SaveParsedAudit(context.Context, sqlite.ParsedAudit) error
 }
 
 // BodySource is one decoded request or response body. Complete reports that

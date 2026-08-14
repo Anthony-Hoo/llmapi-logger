@@ -17,7 +17,9 @@ import (
 	"llmapi-logger/internal/storage/sqlite"
 )
 
-const bodyChunkSize = 32 << 10
+const bodyChunkSize = 1 << 20
+
+const maxStreamTimelineEvents = 100_000
 
 const newAPIRequestIDHeader = "X-Oneapi-Request-Id"
 
@@ -30,6 +32,7 @@ type stageCapture struct {
 	host          string
 	statusCode    *int
 	contentLength *int64
+	contentType   string
 	expectsBody   bool
 	body          *bodyCapture
 	faulted       bool
@@ -330,6 +333,13 @@ func (session *Session) finish() error {
 		ErrorCode:       errorCode,
 		NewAPIRequestID: newAPIRequestID,
 	}
+	if responseStage := session.stages[sqlite.StageResponseSent]; responseStage != nil {
+		ttft := responseStage.startedAtNS - session.started.UnixNano()
+		if ttft < 0 {
+			ttft = 0
+		}
+		finish.TTFTNS = &ttft
+	}
 	if err := session.store.FinishAudit(session.writeCtx, finish); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
 		captureStatus = sqlite.CapturePartial
@@ -375,13 +385,40 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 	var bodyFinish *sqlite.BodyFinish
 	if stage.body != nil {
 		body := stage.body
+		session.flushBodyLocked(stage, body, true)
 		if stage.name == sqlite.StageResponseSent && !body.closed && !stage.faulted && session.forwardStatus == sqlite.ForwardCompleted {
 			body.eofSeen = true
 			body.hashComplete = true
 			body.closed = true
 		}
+		storedLength := body.storedLength
+		chunkCount := body.chunkCount
+		streamEventCount := body.streamEvents
+		streamTimelineComplete := true
+		var timeline *sqlite.StreamTimeline
+		if body.sourceStage == stage.name && body.streamEvents > 0 {
+			var timelineErr error
+			timeline, timelineErr = session.sealStreamTimelineLocked(stage, body)
+			if timelineErr != nil {
+				body.faulted = true
+				body.errorCode = "stream_timeline_failed"
+				session.markStageFaultLocked(stage, body.errorCode)
+			} else if timeline != nil {
+				streamTimelineComplete = timeline.Complete
+			}
+		}
+		if sourceStage := pairedBodySourceStage(stage.name); sourceStage != "" {
+			if source := session.stages[sourceStage]; source != nil && source.body != nil &&
+				body.hashComplete && body.eofSeen && source.body.hashComplete && source.body.eofSeen &&
+				(body.observedLength != source.body.observedLength || !bytesEqual(body.digest.Sum(nil), source.body.digest.Sum(nil))) {
+				body.faulted = true
+				body.errorCode = "body_stage_mismatch"
+				session.markStageFaultLocked(stage, body.errorCode)
+			}
+		}
+		errorCode = stage.errorCode
 		bodyState := sqlite.StageStateComplete
-		if body.faulted || !body.eofSeen || body.storedLength != body.observedLength {
+		if body.faulted || !body.eofSeen || storedLength != body.observedLength {
 			bodyState = sqlite.StageStatePartial
 			state = sqlite.StageStatePartial
 			session.captureFault = true
@@ -391,13 +428,20 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 			bodyError = errorCode
 		}
 		bodyFinish = &sqlite.BodyFinish{
-			ObservedLength: body.observedLength,
-			StoredLength:   body.storedLength,
-			SHA256:         body.digest.Sum(nil),
-			HashComplete:   body.hashComplete,
-			EOFSeen:        body.eofSeen,
-			State:          bodyState,
-			ErrorCode:      optionalString(bodyError),
+			ObservedLength:         body.observedLength,
+			StoredLength:           storedLength,
+			SHA256:                 body.digest.Sum(nil),
+			HashComplete:           body.hashComplete,
+			EOFSeen:                body.eofSeen,
+			State:                  bodyState,
+			RetentionState:         sqlite.RetentionPending,
+			FirstObservedAtNS:      optionalInt64(body.firstAtNS),
+			LastObservedAtNS:       optionalInt64(body.lastAtNS),
+			ChunkCount:             chunkCount,
+			StreamEventCount:       streamEventCount,
+			StreamTimelineComplete: streamTimelineComplete,
+			Timeline:               timeline,
+			ErrorCode:              optionalString(bodyError),
 		}
 	}
 	return sqlite.StageFinish{
@@ -409,6 +453,35 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 		EndedAtNS:     session.now().UnixNano(),
 		ErrorCode:     optionalString(errorCode),
 		Body:          bodyFinish,
+	}
+}
+
+func optionalInt64(value int64) *int64 {
+	if value == 0 {
+		return nil
+	}
+	return &value
+}
+
+func bytesEqual(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	var difference byte
+	for index := range left {
+		difference |= left[index] ^ right[index]
+	}
+	return difference == 0
+}
+
+func pairedBodySourceStage(stage string) string {
+	switch stage {
+	case sqlite.StageRequestSent:
+		return sqlite.StageRequestReceived
+	case sqlite.StageResponseSent:
+		return sqlite.StageResponseReceived
+	default:
+		return ""
 	}
 }
 
@@ -430,6 +503,7 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 		host:          host,
 		statusCode:    cloneInt(statusCode),
 		contentLength: cloneInt64(contentLength),
+		contentType:   headers.Get("Content-Type"),
 		expectsBody:   expectsBody,
 	}
 	session.stages[name] = stage

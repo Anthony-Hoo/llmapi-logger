@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -121,16 +122,32 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 			if chunk.Seq != expectedSeq || chunk.Offset != expectedOffset {
 				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk sequence or offset mismatch")
 			}
-			aad, err := security.AAD(auditID, "body_chunk", stageName, strconv.FormatInt(chunk.Seq, 10))
+			compression := chunk.Compression
+			if compression == "" {
+				compression = bodycodec.CompressionNone
+			}
+			aad, err := security.AAD(auditID, "body_chunk_v2", chunk.Stage, strconv.FormatInt(chunk.Seq, 10), compression)
 			if err != nil {
 				return buffer.Bytes(), false, "capture_integrity_error", fmt.Errorf("parser: body chunk AAD: %w", err)
 			}
-			plaintext, err := worker.cipher.Decrypt(aad, chunk.DataEnc)
+			encoded, err := worker.cipher.Decrypt(aad, chunk.DataEnc)
+			if err != nil && compression == bodycodec.CompressionNone {
+				legacyAAD, legacyErr := security.AAD(auditID, "body_chunk", chunk.Stage, strconv.FormatInt(chunk.Seq, 10))
+				if legacyErr == nil {
+					encoded, err = worker.cipher.Decrypt(legacyAAD, chunk.DataEnc)
+				}
+			}
 			if err != nil {
 				return buffer.Bytes(), false, "capture_integrity_error", fmt.Errorf("parser: decrypt body chunk: %w", err)
 			}
-			if len(plaintext) != chunk.PlaintextLength {
-				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk length mismatch")
+			if chunk.EncodedLength > 0 && len(encoded) != chunk.EncodedLength {
+				clear(encoded)
+				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk encoded length mismatch")
+			}
+			plaintext, decodeErr := bodycodec.Decode(encoded, compression, chunk.PlaintextLength)
+			clear(encoded)
+			if decodeErr != nil {
+				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk decompression failed")
 			}
 			if buffer.Len()+len(plaintext) > maxEncodedBodySize {
 				remaining := maxEncodedBodySize - buffer.Len()

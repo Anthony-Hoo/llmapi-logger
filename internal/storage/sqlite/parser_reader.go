@@ -136,21 +136,31 @@ WHERE audit_id = ? AND stage = ?`, auditID, stageName).Scan(
 
 	var body BodyStream
 	var digest []byte
-	var hashComplete, eofSeen int
+	var hashComplete, eofSeen, timelineComplete int
+	var firstObserved, lastObserved sql.NullInt64
 	var bodyError sql.NullString
 	err = transaction.QueryRowContext(ctx, `
-SELECT audit_id, stage, observed_length, stored_length, sha256,
-       hash_complete, eof_seen, state, error_code
+SELECT audit_id, stage, source_stage, observed_length, stored_length, sha256,
+	   hash_complete, eof_seen, state, retention_state,
+	   first_observed_at_ns, last_observed_at_ns, chunk_count,
+	   stream_event_count, stream_timeline_complete, error_code
 FROM body_streams
 WHERE audit_id = ? AND stage = ?`, auditID, stageName).Scan(
 		&body.AuditID,
 		&body.Stage,
+		&body.SourceStage,
 		&body.ObservedLength,
 		&body.StoredLength,
 		&digest,
 		&hashComplete,
 		&eofSeen,
 		&body.State,
+		&body.RetentionState,
+		&firstObserved,
+		&lastObserved,
+		&body.ChunkCount,
+		&body.StreamEventCount,
+		&timelineComplete,
 		&bodyError,
 	)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -160,6 +170,9 @@ WHERE audit_id = ? AND stage = ?`, auditID, stageName).Scan(
 		body.SHA256 = cloneBytes(digest)
 		body.HashComplete = hashComplete != 0
 		body.EOFSeen = eofSeen != 0
+		body.FirstObservedAtNS = nullInt64Pointer(firstObserved)
+		body.LastObservedAtNS = nullInt64Pointer(lastObserved)
+		body.StreamTimelineComplete = timelineComplete != 0
 		body.ErrorCode = nullStringPointer(bodyError)
 		result.Body = &body
 	}
@@ -215,12 +228,17 @@ func (store *Store) ReadParserChunks(ctx context.Context, auditID, stageName str
 		return nil, ErrClosed
 	}
 
+	var sourceStage string
+	if err := store.readerDB.QueryRowContext(ctx, `SELECT source_stage FROM body_streams WHERE audit_id = ? AND stage = ?`, auditID, stageName).Scan(&sourceStage); err != nil {
+		return nil, fmt.Errorf("sqlite: resolve parser chunk source: %w", err)
+	}
 	rows, err := store.readerDB.QueryContext(ctx, `
-SELECT audit_id, stage, seq, "offset", plaintext_length, observed_at_ns, data_enc
+SELECT audit_id, stage, seq, "offset", plaintext_length, encoded_length,
+       observed_at_ns, compression, data_enc
 FROM body_chunks
 WHERE audit_id = ? AND stage = ? AND seq > ?
 ORDER BY seq
-LIMIT ?`, auditID, stageName, afterSeq, limit)
+LIMIT ?`, auditID, sourceStage, afterSeq, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: read parser chunks: %w", err)
 	}
@@ -235,7 +253,9 @@ LIMIT ?`, auditID, stageName, afterSeq, limit)
 			&chunk.Seq,
 			&chunk.Offset,
 			&chunk.PlaintextLength,
+			&chunk.EncodedLength,
 			&chunk.ObservedAtNS,
+			&chunk.Compression,
 			&chunk.DataEnc,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: scan parser chunk: %w", err)

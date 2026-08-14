@@ -16,6 +16,7 @@ export interface AuditSummary {
   path: string;
   mode?: string;
   status_code?: number | null;
+  ttft_ns?: NanoTime | null;
   forward_status: string;
   capture_status: string;
   parse_status: string;
@@ -63,12 +64,19 @@ export interface AuditHeader {
 
 export interface AuditBody {
   stage: string;
+  source_stage: string;
   observed_length: number;
   stored_length: number;
   sha256?: string | null;
   hash_complete: boolean;
   eof_seen: boolean;
   state: string;
+  retention_state: "pending" | "metadata" | "full" | string;
+  first_observed_at_ns?: NanoTime | null;
+  last_observed_at_ns?: NanoTime | null;
+  chunk_count: number;
+  stream_event_count: number;
+  stream_timeline_complete: boolean;
   error_code?: string | null;
 }
 
@@ -143,6 +151,42 @@ export interface TokenLink {
   linked_at_ns?: NanoTime | null;
 }
 
+export interface AuditTurn {
+  turn_id: string;
+  conversation_id: string;
+  parent_turn_id?: string | null;
+  parent_base: string;
+  link_reason: string;
+  link_confidence: number;
+  request_layout: string;
+  response_layout: string;
+  request_item_count: number;
+  response_item_count: number;
+  request_sequence_sha256: string;
+  response_sequence_sha256: string;
+  request_reconstruction_sha256: string;
+  response_reconstruction_sha256: string;
+  reconstruction_status: string;
+  previous_response_id?: string | null;
+  response_id?: string | null;
+  created_at_ns: NanoTime;
+}
+
+export interface TimelinePoint {
+  offset: number;
+  at_ns: NanoTime;
+}
+
+export interface StreamTimeline {
+  stage: string;
+  observed_length: number;
+  event_count: number;
+  first_event_at_ns?: NanoTime | null;
+  last_event_at_ns?: NanoTime | null;
+  complete: boolean;
+  points: TimelinePoint[];
+}
+
 export interface NewAPIUser {
   id: number;
   username: string;
@@ -185,6 +229,7 @@ export interface AuditDetail {
   bodies: AuditBody[];
   conversation: Conversation | null;
   parsed_result: ParsedResult | null;
+  turn: AuditTurn | null;
   token_link: TokenLink | null;
 }
 
@@ -207,4 +252,10 @@ export interface RawBodyDownload {
   storedLength: string | null;
   sha256: string | null;
   complete: boolean;
+}
+
+export interface ReconstructedBodyDownload {
+  blob: Blob;
+  filename: string;
+  contentType: string;
 }

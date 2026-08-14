@@ -48,6 +48,13 @@ const (
 	HeaderKindHeader  = "header"
 	HeaderKindTrailer = "trailer"
 
+	RetentionPending  = "pending"
+	RetentionMetadata = "metadata"
+	RetentionFull     = "full"
+
+	ChunkCompressionNone = "none"
+	ChunkCompressionGZIP = "gzip"
+
 	GapReasonDBUnavailable = "db_unavailable"
 	GapReasonQueueFull     = "queue_full"
 	GapReasonEncryption    = "encryption_error"
@@ -90,6 +97,7 @@ type AuditRecord struct {
 	RequestURIEnc     []byte
 	Mode              string
 	StatusCode        *int
+	TTFTNS            *int64
 	ForwardStatus     string
 	CaptureStatus     string
 	ParseStatus       string
@@ -132,15 +140,22 @@ type HTTPHeader struct {
 
 // BodyStream stores aggregate integrity state for one observed stage body.
 type BodyStream struct {
-	AuditID        string
-	Stage          string
-	ObservedLength int64
-	StoredLength   int64
-	SHA256         []byte
-	HashComplete   bool
-	EOFSeen        bool
-	State          string
-	ErrorCode      *string
+	AuditID                string
+	Stage                  string
+	SourceStage            string
+	ObservedLength         int64
+	StoredLength           int64
+	SHA256                 []byte
+	HashComplete           bool
+	EOFSeen                bool
+	State                  string
+	RetentionState         string
+	FirstObservedAtNS      *int64
+	LastObservedAtNS       *int64
+	ChunkCount             int64
+	StreamEventCount       int64
+	StreamTimelineComplete bool
+	ErrorCode              *string
 }
 
 // BodyChunk stores one independently encrypted owning chunk.
@@ -150,7 +165,9 @@ type BodyChunk struct {
 	Seq             int64
 	Offset          int64
 	PlaintextLength int
+	EncodedLength   int
 	ObservedAtNS    int64
+	Compression     string
 	DataEnc         []byte
 }
 
@@ -204,13 +221,32 @@ type RetentionResult struct {
 // BodyFinish is optionally included in StageFinish when a body stream was
 // actually opened for the stage.
 type BodyFinish struct {
-	ObservedLength int64
-	StoredLength   int64
-	SHA256         []byte
-	HashComplete   bool
-	EOFSeen        bool
-	State          string
-	ErrorCode      *string
+	ObservedLength         int64
+	StoredLength           int64
+	SHA256                 []byte
+	HashComplete           bool
+	EOFSeen                bool
+	State                  string
+	RetentionState         string
+	FirstObservedAtNS      *int64
+	LastObservedAtNS       *int64
+	ChunkCount             int64
+	StreamEventCount       int64
+	StreamTimelineComplete bool
+	Timeline               *StreamTimeline
+	ErrorCode              *string
+}
+
+// StreamTimeline is one compressed and encrypted delta sequence of logical
+// SSE event completion offsets and observation times.
+type StreamTimeline struct {
+	EventCount      int64
+	FirstEventAtNS  *int64
+	LastEventAtNS   *int64
+	Complete        bool
+	Compression     string
+	PlaintextLength int64
+	DataEnc         []byte
 }
 
 // StageFinish atomically finalizes stage metadata and, when non-nil, its body
@@ -232,6 +268,7 @@ type AuditFinish struct {
 	AuditID         string
 	EndedAtNS       int64
 	StatusCode      *int
+	TTFTNS          *int64
 	ForwardStatus   string
 	CaptureStatus   string
 	ParseStatus     string
@@ -276,11 +313,41 @@ func (body *BodyStream) defaults() {
 	if body.State == "" {
 		body.State = StageStateStreaming
 	}
+	if body.SourceStage == "" {
+		body.SourceStage = body.Stage
+	}
+	if body.RetentionState == "" {
+		body.RetentionState = RetentionPending
+	}
+	if !body.StreamTimelineComplete && body.StreamEventCount == 0 {
+		body.StreamTimelineComplete = true
+	}
+}
+
+func (chunk *BodyChunk) defaults() {
+	if chunk.Compression == "" {
+		chunk.Compression = ChunkCompressionNone
+	}
+	if chunk.EncodedLength == 0 && chunk.PlaintextLength > 0 {
+		chunk.EncodedLength = chunk.PlaintextLength
+	}
 }
 
 func (finish *AuditFinish) defaults() {
 	if finish.ForwardStatus == ForwardRejected && finish.ParseStatus == "" {
 		finish.ParseStatus = ParseSkipped
+	}
+}
+
+func (finish *StageFinish) defaults() {
+	if finish.Body == nil {
+		return
+	}
+	if finish.Body.RetentionState == "" {
+		finish.Body.RetentionState = RetentionPending
+	}
+	if !finish.Body.StreamTimelineComplete && finish.Body.StreamEventCount == 0 && finish.Body.Timeline == nil {
+		finish.Body.StreamTimelineComplete = true
 	}
 }
 
@@ -331,14 +398,18 @@ func validateHeader(header HTTPHeader) error {
 }
 
 func validateBodyStream(body BodyStream) error {
-	if body.AuditID == "" || !validStage(body.Stage) || body.State != StageStateStreaming {
+	if body.AuditID == "" || !validStage(body.Stage) || !validStage(body.SourceStage) || body.State != StageStateStreaming || !validRetentionState(body.RetentionState) {
 		return errors.New("sqlite: invalid body stream identity or state")
+	}
+	if body.ChunkCount < 0 || body.StreamEventCount < 0 || !validObservedRange(body.FirstObservedAtNS, body.LastObservedAtNS) {
+		return errors.New("sqlite: invalid body stream counters")
 	}
 	return validateBodyAggregate(body.ObservedLength, body.StoredLength, body.SHA256, body.HashComplete, body.EOFSeen)
 }
 
 func validateChunk(chunk BodyChunk) error {
-	if chunk.AuditID == "" || !validStage(chunk.Stage) || chunk.Seq < 0 || chunk.Offset < 0 || chunk.PlaintextLength < 0 || chunk.ObservedAtNS == 0 || len(chunk.DataEnc) == 0 {
+	if chunk.AuditID == "" || !validStage(chunk.Stage) || chunk.Seq < 0 || chunk.Offset < 0 || chunk.PlaintextLength < 0 || chunk.EncodedLength < 0 || chunk.ObservedAtNS == 0 || len(chunk.DataEnc) == 0 ||
+		(chunk.Compression != ChunkCompressionNone && chunk.Compression != ChunkCompressionGZIP) {
 		return errors.New("sqlite: invalid body chunk")
 	}
 	return nil
@@ -401,6 +472,19 @@ func validateStageFinish(finish StageFinish) error {
 	if !terminalStageState(finish.Body.State) {
 		return errors.New("sqlite: invalid body finish state")
 	}
+	if !validRetentionState(finish.Body.RetentionState) || finish.Body.ChunkCount < 0 || finish.Body.StreamEventCount < 0 ||
+		!validObservedRange(finish.Body.FirstObservedAtNS, finish.Body.LastObservedAtNS) {
+		return errors.New("sqlite: invalid body finish metadata")
+	}
+	if finish.Body.Timeline != nil {
+		timeline := finish.Body.Timeline
+		if timeline.EventCount != finish.Body.StreamEventCount || timeline.EventCount <= 0 ||
+			!validObservedRange(timeline.FirstEventAtNS, timeline.LastEventAtNS) ||
+			timeline.Complete != finish.Body.StreamTimelineComplete || timeline.PlaintextLength <= 0 || len(timeline.DataEnc) == 0 ||
+			(timeline.Compression != ChunkCompressionNone && timeline.Compression != ChunkCompressionGZIP) {
+			return errors.New("sqlite: invalid stream timeline")
+		}
+	}
 	return validateBodyAggregate(
 		finish.Body.ObservedLength,
 		finish.Body.StoredLength,
@@ -419,6 +503,9 @@ func validateAuditFinish(finish AuditFinish) error {
 	}
 	if err := validateStatusCode(finish.StatusCode); err != nil {
 		return err
+	}
+	if finish.TTFTNS != nil && *finish.TTFTNS < 0 {
+		return errors.New("sqlite: invalid TTFT")
 	}
 	if finish.NewAPIRequestID != nil && !validRequestID(*finish.NewAPIRequestID) {
 		return errors.New("sqlite: invalid NewAPI request id")
@@ -458,6 +545,14 @@ func validateBodyAggregate(observed, stored int64, digest []byte, hashComplete, 
 		return errors.New("sqlite: invalid body aggregate")
 	}
 	return nil
+}
+
+func validRetentionState(value string) bool {
+	return value == RetentionPending || value == RetentionMetadata || value == RetentionFull
+}
+
+func validObservedRange(first, last *int64) bool {
+	return first == nil && last == nil || first != nil && last != nil && *first > 0 && *last >= *first
 }
 
 func validateStatusCode(status *int) error {

@@ -247,6 +247,14 @@ func (handler *managementHandler) serveAuditResource(writer http.ResponseWriter,
 		handler.serveRaw(writer, request, parts[0], query.Side(parts[2]))
 		return
 	}
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "reconstructed" {
+		handler.serveReconstructed(writer, request, parts[0], query.Side(parts[2]))
+		return
+	}
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "timeline" {
+		handler.serveTimeline(writer, request, parts[0], query.Side(parts[2]))
+		return
+	}
 	http.NotFound(writer, request)
 }
 
@@ -268,6 +276,58 @@ func (handler *managementHandler) serveAuditDetail(writer http.ResponseWriter, r
 	}
 	addCallerDisplayName(&detail.Audit, handler.callerDisplayNames())
 	writeJSON(writer, http.StatusOK, detail)
+}
+
+func (handler *managementHandler) serveReconstructed(writer http.ResponseWriter, request *http.Request, auditID string, side query.Side) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if handler.query == nil {
+		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
+		return
+	}
+	if side != query.SideRequest && side != query.SideResponse {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid reconstruction side")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
+	reconstructed, err := handler.query.ReconstructTurn(ctx, auditID)
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	if side == query.SideRequest {
+		writeJSON(writer, http.StatusOK, reconstructed.Request)
+		return
+	}
+	writeJSON(writer, http.StatusOK, reconstructed.Response)
+}
+
+func (handler *managementHandler) serveTimeline(writer http.ResponseWriter, request *http.Request, auditID string, side query.Side) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if handler.query == nil {
+		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
+		return
+	}
+	if side != query.SideRequest && side != query.SideResponse {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid timeline side")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
+	timeline, err := handler.query.Timeline(ctx, auditID, side)
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writeJSON(writer, http.StatusOK, timeline)
 }
 
 func (handler *managementHandler) addCallerDisplayNames(audits []query.AuditSummary) {
@@ -361,6 +421,10 @@ func (handler *managementHandler) writeQueryError(writer http.ResponseWriter, er
 		writeError(writer, http.StatusNotFound, "not_found", "audit evidence not found")
 	case errors.Is(err, query.ErrNotReady):
 		writeError(writer, http.StatusConflict, "raw_not_finalized", "audit evidence is still being captured")
+	case errors.Is(err, query.ErrNotRetained):
+		writeError(writer, http.StatusGone, "raw_not_retained", "raw body was compacted after verified reconstruction")
+	case errors.Is(err, query.ErrNoTurnGraph):
+		writeError(writer, http.StatusConflict, "reconstruction_unavailable", "verified turn reconstruction is unavailable")
 	case errors.Is(err, query.ErrIntegrity):
 		writeError(writer, http.StatusInternalServerError, "evidence_unavailable", "audit evidence could not be verified")
 	case errors.Is(err, context.DeadlineExceeded):

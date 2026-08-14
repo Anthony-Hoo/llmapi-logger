@@ -1,37 +1,57 @@
-# 模块 05：协议解析框架
+# 模块 05：协议解析与审计 normalizer
 
 ## 1. 目标与边界
 
-解析器把已经落盘的请求和响应证据转换为便于查询的派生结果。
+parser 在 HTTP 请求完成后异步读取已落盘证据，生成模型、usage、错误和工具调用数量等窄摘要。实现 `AuditNormalizer` 的协议还会把 provider request/response 拆成可复用的 envelope、context item、response item 和 binary object，并在保存前完成精确重建校验。
 
 硬性边界：
 
-- parser 完全异步，不进入 HTTP 转发链。
-- parser 只处理明确 LLM API route 产生且未被 interceptor 拒绝的 audit；passthrough 和 fail-closed 路径没有 audit 输入。
-- 原始 Header、Body、chunk、长度和哈希始终是权威证据。
-- JSON/SSE 解析失败只更新 `parse_status`，不影响转发结果和原始证据。
-- 首版只支持 OpenAI、Anthropic Messages 和 Gemini GenerateContent。
-- 不推断 NewAPI 后方渠道、厂商请求、厂商响应或重试。
+- parser/normalizer 不进入 HTTP 转发链；
+- passthrough、fail-closed 和 interceptor rejected 不进入普通 parser；
+- normalizer 失败不能修改已经返回给客户端的字节；
+- 只有重建验证通过的普通成功请求才能删除长期 raw chunks；
+- 不推断 NewAPI 后方的供应商请求、渠道选择、内部重试或渠道密钥。
 
-## 2. 精简结构
+## 2. 接口
 
-阶段 3 的最小范围都放在 `internal/parser`：公共接口、JSON/SSE 解码、一个内存队列、一个 worker，以及三个协议的少量实现文件。只有单个文件明显过大时才拆子包，不预先建立插件系统或持久化任务系统。
-
-`proxy`、`audit` 和证据采集不依赖 parser。parser 只读取已经落盘的证据，通过存储接口更新 `parsed_results` 和 `parse_status`。
-
-## 3. 接口与公共输出
-
-```go
+~~~go
 type Parser interface {
     Name() string
     Version() string
-    Parse(ctx context.Context, in Input) Result
+    Parse(context.Context, Input) Result
 }
 
-type Input struct { AuditID, Protocol, Endpoint string; Request, Response BodySource }
+type AuditNormalizer interface {
+    NormalizeAudit(context.Context, Input, Result) (auditmodel.Turn, error)
+}
+~~~
 
+`Parser` 负责安全摘要和协议无关 conversation；`AuditNormalizer` 负责无损 provider 对象拆分。worker 先执行 Parse，只有以下条件全部满足才执行 NormalizeAudit：
+
+- parser status 为 `ok`；
+- request 证据完整；
+- response 若存在也完整；
+- parser 实现了 `AuditNormalizer`。
+
+normalizer 返回的 plaintext 只存在于 worker 内存。`auditmodel.Prepare` 会 canonicalize、提取多模态二进制、压缩、加密并本地重建验证，输出不含 provider 明文的 `PreparedTurn`。
+
+## 3. 当前协议范围
+
+| 协议 | 摘要 / conversation | 内容寻址 normalizer | raw 保留 |
+| --- | --- | --- | --- |
+| OpenAI Chat Completions | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
+| OpenAI Completions | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
+| OpenAI Responses / Compact | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
+| Anthropic Messages | 保持既有 JSON/SSE 解析和对话展示 | 尚未实现 | full |
+| Gemini GenerateContent | 保持既有 JSON/SSE 解析和对话展示 | 尚未实现 | full |
+
+当前生产容量优化重点覆盖 OpenAI Responses 和 Chat Completions。Anthropic/Gemini 仍保持代理协议兼容和审计可读性，但在没有 normalizer 前不会删除 raw evidence，也不宣称获得 item/binary 级 O(n) 增长。
+
+## 4. Result 与敏感数据
+
+~~~go
 type Result struct {
-    Status          string // ok、partial、error、skipped
+    Status          string
     RequestModel    string
     ResponseModel   string
     RequestedStream *bool
@@ -44,109 +64,86 @@ type Result struct {
     ToolCallCount   *int
     HasToolCall     *bool
     Conversation    *conversation.Conversation
-    ParsedJSON      []byte // 只保存紧凑摘要，加密后落盘
+    ParsedJSON      []byte
 }
-```
+~~~
 
-公共查询字段只包含模型、流式标志、response ID、usage、错误类型/代码、消息数量和工具调用数量。`Result.ParsedJSON` 继续只保存这些紧凑字段，不包含正文；`Result.Conversation` 是敏感派生数据，只在 worker 持久化前合并进加密 envelope，不进入列表、普通日志或明文列。
+明文列只保存窄摘要。`Conversation` 只在 worker 内存使用：
 
-协议无关 conversation 固定使用 `schema_version=1`：
-
-```text
-Conversation.messages[]
-  index; role; phase; direction; name?; tool_call_id?
-  content[] = text | reasoning | tool_call | tool_result | unknown
-```
-
-`phase` 只区分 request/response，`direction` 只区分 client_to_upstream/upstream_to_client。工具参数和结果保存为字符串，结构化 JSON 由前端格式化；unknown provider block 最多保留 4 KiB，避免图片/base64/data URL 被重复复制进派生结果。原始 Body 仍是完整证据。
-
-## 4. 三协议最小解析范围
-
-- OpenAI 兼容接口：提取摘要，并聚合 Chat/Completions/Responses 的消息、reasoning、工具调用和结果。
-- Anthropic Messages：提取摘要，并聚合 text、thinking、tool_use、tool_result 与 SSE 增量。
-- Gemini GenerateContent：提取摘要，并聚合 text/thought、functionCall、functionResponse 与候选流。
-
-未知字段和未知 SSE event 可以忽略。事件缺失、字段形态变化或流中途截断时，只保存仍可信的字段并标记 `partial`；没有可信摘要时标记 `error`。协议细节见模块 06–08，但阶段 3 不追求完整供应商对象映射。
+- OpenAI verified turn 的详情 conversation 从内容对象重建，不再写第二份 conversation；
+- 没有 normalizer 的协议或 normalization/reconstruction 异常，raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化；
+- 列表、普通日志和明文 SQLite 列永远不包含消息正文、reasoning、工具参数或结果。
 
 ## 5. 队列与 worker
 
-- 使用一个容量约 100 的 Go channel。
-- 固定启动 1 个 worker；个人单机首版不提供并发调优项。
-- 非 rejected audit 完成落盘后，把 `audit_id` 尝试放入队列；rejected 已是 `parse_status=skipped`，不得入队。
-- 队列满时不阻塞转发，只保留 `audit_records.parse_status=pending`，由后台扫描稍后重试。
-- 进程启动时扫描 `parse_status=pending` 的记录并重新入队。
-- 启动时可把上次异常退出留下的 `processing` 重置为 `pending`。
-- 调度状态只保存在 `audit_records.parse_status`，不另建持久化任务或历史表。
-- 阶段 3 不提供 reparse 管理端点。parser v2 通过一次性 migration 把受支持 parser 的 v1 已完成结果置回 pending，随后复用同一个有界 worker 自动回填 conversation；以后版本是否回填仍由 migration 明确决定。
+- 一个容量 100 的内存 channel；
+- 固定一个 worker，避免多个大 JSON normalizer 同时放大内存；
+- audit 完成后非阻塞 Notify；队列满时 DB 行保持 pending；
+- 每 30 秒扫描 pending；
+- 启动时把 processing 重置为 pending，再扫描恢复；
+- claim 使用条件更新，重复通知不会重复处理同一完成状态；
+- parser panic 被 recover，并写稳定 `parser_panic`。
+
+保存使用 `SaveParsedAudit` 单事务写 parsed summary、turn graph、对象、raw retention 和完整性事件。保存失败后 processing 被释放回 pending，等待后续重试。
 
 ## 6. 证据读取
 
-转发链最多产生四个 canonical HTTP 阶段：
+parser 读取：
 
-1. `request_for_newapi_received_from_nginx`
-2. `request_sent_to_newapi`
-3. `response_received_from_newapi`
-4. `response_from_newapi_sent_to_nginx`
+1. `request_for_newapi_received_from_nginx`；
+2. `response_received_from_newapi`。
 
-parser 的最小范围读取第一阶段请求 Body 和第三阶段响应 Body。阶段行按实际触发存在，不能把缺失行当成空 Body；rejected audit 不进入 parser。
+阶段缺失不能解释为空 Body。reader 会按 `source_stage` 读取 owning chunks，逐块验证 seq、offset、compression、GCM、明文长度和最终 SHA-256，再处理 HTTP `Content-Encoding`。
 
-Body 由 `body_streams` 和按序排列的 `body_chunks` 重建。缺块、顺序错误或解密失败返回 `capture_integrity_error`，结果记为 `error` 或 `partial`，不得跳过坏块拼接。
+当前单 worker 对每侧最多保留 64 MiB 解码后数据，encoded 上限为 128 MiB，gzip 最大解压比为 50:1。超过限额会得到稳定 `body_too_large`，parse 变为 partial/error，保留 full raw；不会截断后仍标记 verified。512 MiB 入站限制是代理/interceptor 的传输上限，不等同于 normalizer 内存上限。
 
-## 7. parsed_results
+## 7. OpenAI normalizer
 
-每个 audit 最多一行：
+OpenAI 请求拆分规则：
 
-```text
-audit_id PK; parser_name; parser_version; status
-request_model; response_model; requested_stream; observed_stream; response_id
-usage_input; usage_output; usage_total; error_type; error_code
-message_count; tool_call_count; has_tool_call; parsed_json_enc; parsed_at_ns
-```
+- Chat：envelope 移除 `messages`，每条 message 成为一个有序 item；
+- Responses：`instructions` 与 `input` item 分离，保留 single/array/none 原布局；
+- Completions：`prompt` 单值或数组分离；
+- `previous_response_id`、conversation/thread/cache key 作为父轮次关联证据；
+- `metadata` 中可能的 conversation/session 标识只用于域分离 hash，不进入普通日志。
 
-`parsed_json_enc` 使用安全模块固定的 `nonce || ciphertext || tag` BLOB，明文 envelope 包含紧凑摘要和可选 conversation。更新 `parsed_results` 与 `audit_records.parse_status` 应在同一 SQLite writer 事务中完成。详情查询按 `audit_id + parser_name` 重建 AAD、解密并校验 schema/index/枚举；列表查询不读取该 BLOB。
+非流式响应把 choices message/text 或 Responses output item 替换为受控 marker。SSE 响应保存 event 类型、data 长度与 SHA-256 描述，以及 parser 聚合后的 assistant/reasoning/tool output items；不复制每个网络 chunk。
 
-模型筛选同时匹配 `request_model` 和 `response_model`；列表展示优先 `response_model`，为空时回退 `request_model`。
+provider 输入若包含保留 marker 名、畸形 JSON、错误 data URL/Base64、未知重建布局或重建 hash 不一致，normalizer 必须失败并保留 full raw。
 
-## 8. JSON、SSE 与限额
+## 8. 状态语义
 
-- 请求侧解码后最多读取 16 MiB。
-- 响应侧解码后最多读取 16 MiB。
-- gzip 最大解压比为 50:1。
-- 超限时停止继续解析，已有可信字段可保存为 `partial`；没有可信结果则为 `error`。
-- JSON 使用 decoder 和 `UseNumber`，未知字段直接忽略。
-- SSE reader 支持 LF/CRLF、跨 chunk 行、多条 `data:` 和正常 EOF。
-- parser 可以在固定 16 MiB 上限内重建一次待解析 Body；超过上限立即停止，不实现面向任意大 Body 的全文重建。
-- parser 不修改、重新编码或覆盖原始证据。
+`audit_records.parse_status`：
 
-## 9. 状态与错误
+- `pending`：等待处理；
+- `processing`：worker 已 claim；
+- `ok`：摘要可信；若有 normalizer，turn 也已 verified；
+- `partial`：证据、协议或 normalization/reconstruction 只完成一部分；
+- `error`：无法得到可信结果；
+- `skipped`：被拦截、无 Body、未注册 parser 或不支持的编码。
 
-`audit_records.parse_status` 使用：
+`normalization_failed` 和 `reconstruction_failed` 都是稳定错误码；它们会清除可能不一致的 parsed payload、保留 full raw，并写 `reconstruction_failed` 完整性事件。parser 错误文本不得包含 Body、Header value、工具参数、文件引用或密钥。
 
-- `pending`：等待入队。
-- `processing`：worker 正在解析。
-- `ok`：核心字段解析完成。
-- `partial`：证据截断、个别事件错误或达到限额。
-- `error`：无法得到可信协议结果。
-- `skipped`：interceptor 已拒绝、无 Body、未注册协议或不支持的编码；rejected 的 skipped 由审计终态直接写入，不调用 parser。
+## 9. 查询派生
 
-worker 必须 recover parser panic，并把 `parser_panic` 等稳定值写入 `error_code`。错误文本不得包含 Body、Header value、工具参数或密钥。
+OpenAI verified turn 的管理 conversation 由 query 层执行以下步骤后生成：
+
+1. 恢复 request/response refs；
+2. 解密并验证 content/binary objects；
+3. 按原布局重建 provider JSON；
+4. 比较 sequence/reconstruction SHA-256；
+5. 再从重建 provider 值生成协议无关 conversation。
+
+这样列表和详情不需要保存第二份消息正文。Anthropic/Gemini 在当前版本从加密 parsed fallback 读取 conversation，同时 full raw 仍是权威证据。
 
 ## 10. 最少测试
 
-- audit 完成后异步解析，证明 HTTP 响应不等待 parser。
-- 队列满时转发不阻塞，pending 记录能被扫描补入队。
-- 进程重启后 pending/processing 记录能继续解析。
-- JSON 未知字段、畸形 JSON、畸形 SSE、gzip 损坏和 16 MiB/50:1 限额。
-- OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 样例可生成最小摘要，畸形或截断输入得到 partial/error。
-- 流式文本、reasoning/thinking、工具参数分片按 choice/candidate/block 聚合，不能把每个 SSE event 渲染成独立消息。
-- tool call/result 的名称、call id、参数和结果进入加密 conversation，纯工具结果消息规范为 tool role。
-- rejected audit 保持 skipped，不进入启动扫描或周期扫描，且不创建 `parsed_results`。
-- 敏感 canary 不出现在明文列、列表、日志或 compact `ParsedJSON`；详情在正确 Admin Token 下可以从密文恢复 conversation，密文/AAD/schema 篡改返回通用完整性错误。
-
-## 11. 实施任务
-
-1. 定义 Parser、Input、Result 和 `parsed_results` migration。
-2. 实现容量 100 的队列、单 worker、启动扫描和每 30 秒 pending 补扫。
-3. 实现证据 reader、gzip 限额、JSON decoder 和通用 SSE reader。
-4. 接入三个协议的 JSON/SSE parser，生成紧凑摘要与协议无关 conversation，并把后者合并进加密 `parsed_json`。
-5. 完成队列、重启回填、错误隔离、流式聚合和敏感数据测试。
+- queue 满、pending scan、processing 恢复、panic 隔离和保存失败重试。
+- chunk 顺序、offset、压缩、GCM、SHA-256、gzip ratio 和 64 MiB 限额。
+- OpenAI Chat/Responses/Completions JSON 与 SSE 摘要。
+- developer/system/user/assistant/tool/reasoning/tool result 的顺序和 call id。
+- provider JSON 请求与响应精确重建。
+- data URL 解码字节去重、inline file data、`file_id` 外部引用。
+- normalization/reconstruction 失败时四阶段 raw 保持 full 且可完整下载。
+- verified OpenAI parsed JSON 不含第二份 conversation；无 normalizer 的协议仍能从加密 fallback 展示 conversation。
+- parser/query/UI 不把敏感正文写入列表、日志或明文列。

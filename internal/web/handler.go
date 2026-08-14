@@ -23,6 +23,8 @@ type AuditQuery interface {
 	Healthy() bool
 	List(context.Context, query.Filter, query.Cursor, int) (query.Page, error)
 	Get(context.Context, string) (query.Detail, error)
+	ReconstructTurn(context.Context, string) (query.ReconstructedTurn, error)
+	Timeline(context.Context, string, query.Side) (query.StreamTimeline, error)
 	RawMeta(context.Context, string, query.Side) (query.RawMetadata, error)
 	StreamRaw(context.Context, string, query.Side, io.Writer) error
 }

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"llmapi-logger/internal/security"
 )
 
 type recoveryRequest struct {
@@ -26,7 +28,7 @@ func (store *Store) RecoverInterruptedAudits(ctx context.Context, nowNS int64) (
 	return request.Recovered, nil
 }
 
-func recoverInterruptedAudits(transaction *sql.Tx, request *recoveryRequest) error {
+func recoverInterruptedAudits(transaction *sql.Tx, request *recoveryRequest, signer *security.IntegritySigner) error {
 	if request == nil || request.NowNS <= 0 {
 		return errors.New("sqlite writer: invalid recovery request")
 	}
@@ -43,12 +45,33 @@ WHERE ended_at_ns IS NULL`).Scan(&count, &startedAtNS); err != nil {
 		request.Recovered = 0
 		return nil
 	}
+	interruptedRows, err := transaction.Query(`
+SELECT audit_id
+FROM audit_records
+WHERE ended_at_ns IS NULL
+ORDER BY started_at_ns, audit_id`)
+	if err != nil {
+		return fmt.Errorf("sqlite writer: list interrupted audits: %w", err)
+	}
+	auditIDs := make([]string, 0, count)
+	for interruptedRows.Next() {
+		var auditID string
+		if err := interruptedRows.Scan(&auditID); err != nil {
+			_ = interruptedRows.Close()
+			return fmt.Errorf("sqlite writer: scan interrupted audit: %w", err)
+		}
+		auditIDs = append(auditIDs, auditID)
+	}
+	if err := closeRows(interruptedRows); err != nil {
+		return fmt.Errorf("sqlite writer: close interrupted audits: %w", err)
+	}
 
 	if _, err := transaction.Exec(`
 WITH chunk_lengths AS (
     SELECT audit_id, stage,
            SUM(plaintext_length) AS stored_length,
-           MAX("offset" + plaintext_length) AS observed_length
+           MAX("offset" + plaintext_length) AS observed_length,
+           COUNT(*) AS chunk_count
     FROM body_chunks
     GROUP BY audit_id, stage
 )
@@ -57,26 +80,34 @@ SET stored_length = COALESCE((
         SELECT lengths.stored_length
         FROM chunk_lengths AS lengths
         WHERE lengths.audit_id = body_streams.audit_id
-          AND lengths.stage = body_streams.stage
+          AND lengths.stage = body_streams.source_stage
     ), 0),
     observed_length = MAX(
         COALESCE((
             SELECT lengths.stored_length
             FROM chunk_lengths AS lengths
             WHERE lengths.audit_id = body_streams.audit_id
-              AND lengths.stage = body_streams.stage
+              AND lengths.stage = body_streams.source_stage
         ), 0),
         COALESCE((
             SELECT lengths.observed_length
             FROM chunk_lengths AS lengths
             WHERE lengths.audit_id = body_streams.audit_id
-              AND lengths.stage = body_streams.stage
+              AND lengths.stage = body_streams.source_stage
         ), 0)
     ),
     sha256 = NULL,
     hash_complete = 0,
     eof_seen = 0,
     state = 'partial',
+    retention_state = 'full',
+    chunk_count = COALESCE((
+        SELECT lengths.chunk_count
+        FROM chunk_lengths AS lengths
+        WHERE lengths.audit_id = body_streams.audit_id
+          AND lengths.stage = body_streams.source_stage
+    ), 0),
+    stream_timeline_complete = 0,
     error_code = 'process_exit'
 WHERE state = 'streaming'
   AND EXISTS (
@@ -131,6 +162,15 @@ WHERE ended_at_ns IS NULL`, request.NowNS)
 	}
 	if err := insertAuditGaps(transaction, []AuditGap{gap}); err != nil {
 		return fmt.Errorf("sqlite writer: record recovery gap: %w", err)
+	}
+	for _, auditID := range auditIDs {
+		payloadDigest, err := capturePayloadDigest(context.Background(), transaction, auditID)
+		if err != nil {
+			return err
+		}
+		if err := appendIntegrityEvent(transaction, signer, auditID, integrityCaptureFinalized, payloadDigest, request.NowNS); err != nil {
+			return err
+		}
 	}
 	request.Recovered = count
 	return nil

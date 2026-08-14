@@ -1,5 +1,7 @@
 package sqlite
 
+import "llmapi-logger/internal/auditmodel"
+
 // AuditQueryFilter contains the narrow, non-secret fields supported by the
 // local audit browser. Empty values mean that the filter is not applied.
 type AuditQueryFilter struct {
@@ -39,6 +41,7 @@ type AuditListRow struct {
 	Path            string
 	Mode            string
 	StatusCode      *int
+	TTFTNS          *int64
 	ForwardStatus   string
 	CaptureStatus   string
 	ParseStatus     string
@@ -119,7 +122,37 @@ type AuditQueryDetail struct {
 	Headers       []HeaderEvidence
 	Bodies        []BodyStream
 	ParsedResult  *ParsedResultSummary
+	TurnGraph     *TurnGraph
 	TokenLink     *TokenLinkSummary
+}
+
+// TurnGraph is a transactionally consistent encrypted projection of one
+// content-addressed turn. RequestRefs has already been reconstructed by
+// applying the complete parent/delta chain, but object plaintext remains
+// encrypted for the query service to authenticate and open.
+type TurnGraph struct {
+	TurnID                     string
+	ConversationID             string
+	ParentTurnID               *string
+	ParentBase                 string
+	LinkReason                 string
+	LinkConfidence             int
+	RequestLayout              string
+	ResponseLayout             string
+	RequestEnvelopeHash        []byte
+	ResponseEnvelopeHash       []byte
+	RequestRefs                []auditmodel.ObjectRef
+	ResponseRefs               []auditmodel.ObjectRef
+	RequestSequenceHash        []byte
+	ResponseSequenceHash       []byte
+	RequestReconstructionHash  []byte
+	ResponseReconstructionHash []byte
+	ReconstructionStatus       string
+	PreviousResponseID         *string
+	ResponseID                 *string
+	CreatedAtNS                int64
+	Objects                    []auditmodel.StoredContent
+	Binaries                   []auditmodel.StoredBinary
 }
 
 // RawBodyMetadata describes one captured Body stream without containing Body
@@ -127,6 +160,8 @@ type AuditQueryDetail struct {
 type RawBodyMetadata struct {
 	AuditID        string
 	Stage          string
+	SourceStage    string
+	RetentionState string
 	ObservedLength int64
 	StoredLength   int64
 	SHA256         []byte
@@ -134,4 +169,19 @@ type RawBodyMetadata struct {
 	EOFSeen        bool
 	State          string
 	ErrorCode      *string
+}
+
+// StoredStreamTimeline is the encrypted logical SSE timing sequence for one
+// stage together with the observed body bound used during verification.
+type StoredStreamTimeline struct {
+	AuditID         string
+	Stage           string
+	ObservedLength  int64
+	EventCount      int64
+	FirstEventAtNS  *int64
+	LastEventAtNS   *int64
+	Complete        bool
+	Compression     string
+	PlaintextLength int64
+	DataEnc         []byte
 }

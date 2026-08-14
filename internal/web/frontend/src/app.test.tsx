@@ -3,7 +3,14 @@ import { describe, expect, it } from "vitest";
 
 import type { AuditDetail, AuditSummary, NewAPIUser } from "./types";
 import type { ApiClient } from "./api";
-import { AuditFiltersPanel, AuditList, HTTPAuditEvidence, UserAgentRulesPanel } from "./app";
+import {
+  AuditFiltersPanel,
+  AuditList,
+  HTTPAuditEvidence,
+  StreamTimingPanel,
+  TurnStoragePanel,
+  UserAgentRulesPanel,
+} from "./app";
 
 const detail: AuditDetail = {
   audit: {
@@ -33,6 +40,7 @@ const detail: AuditDetail = {
   bodies: [],
   conversation: null,
   parsed_result: null,
+  turn: null,
   token_link: null,
 };
 
@@ -56,6 +64,125 @@ describe("HTTP audit evidence", () => {
     expect(html).toContain("Content-Type");
     expect(html).toContain("<details");
     expect(html).not.toContain("<details open");
+  });
+
+  it("explains metadata-only retention without offering a raw download that would return 410", () => {
+    const metadataDetail: AuditDetail = {
+      ...detail,
+      bodies: [{
+        stage: "request_sent_to_newapi",
+        source_stage: "request_for_newapi_received_from_nginx",
+        observed_length: 4096,
+        stored_length: 0,
+        sha256: "a".repeat(64),
+        hash_complete: true,
+        eof_seen: true,
+        state: "complete",
+        retention_state: "metadata",
+        first_observed_at_ns: "10",
+        last_observed_at_ns: "20",
+        chunk_count: 0,
+        stream_event_count: 0,
+        stream_timeline_complete: true,
+      }],
+    };
+    const html = renderToStaticMarkup(
+      <HTTPAuditEvidence
+        detail={metadataDetail}
+        rawBodies={{}}
+        rawLoading={null}
+        rawNote={null}
+        onLoad={() => undefined}
+        onDownload={() => undefined}
+        onClear={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("原始 Body 已完成校验并释放");
+    expect(html).toContain("仅元数据 + 可重建对象");
+    expect(html).not.toContain("下载原始 Body");
+    expect(html).not.toContain("加载并查看 Body");
+  });
+});
+
+describe("content-addressed turn evidence", () => {
+  const turnDetail: AuditDetail = {
+    ...detail,
+    audit: { ...detail.audit, ttft_ns: "125000000" },
+    turn: {
+      turn_id: "turn-example",
+      conversation_id: "conversation-example",
+      parent_turn_id: "turn-parent",
+      parent_base: "post_turn",
+      link_reason: "branch",
+      link_confidence: 85,
+      request_layout: "responses",
+      response_layout: "responses",
+      request_item_count: 12,
+      response_item_count: 3,
+      request_sequence_sha256: "1".repeat(64),
+      response_sequence_sha256: "2".repeat(64),
+      request_reconstruction_sha256: "3".repeat(64),
+      response_reconstruction_sha256: "4".repeat(64),
+      reconstruction_status: "verified",
+      previous_response_id: "resp-parent",
+      response_id: "resp-current",
+      created_at_ns: "30",
+    },
+    bodies: [{
+      stage: "response_received_from_newapi",
+      source_stage: "response_received_from_newapi",
+      observed_length: 100,
+      stored_length: 0,
+      sha256: "5".repeat(64),
+      hash_complete: true,
+      eof_seen: true,
+      state: "complete",
+      retention_state: "metadata",
+      first_observed_at_ns: "10",
+      last_observed_at_ns: "20",
+      chunk_count: 0,
+      stream_event_count: 2,
+      stream_timeline_complete: true,
+    }],
+  };
+
+  it("shows graph linkage and reconstructed JSON download actions", () => {
+    const html = renderToStaticMarkup(
+      <TurnStoragePanel detail={turnDetail} loading={null} note={null} onDownload={() => undefined} />,
+    );
+
+    expect(html).toContain("轮次已通过精确重建校验");
+    expect(html).toContain("conversation-example");
+    expect(html).toContain("分支");
+    expect(html).toContain("下载重建请求 JSON");
+    expect(html).toContain("下载重建响应 JSON");
+  });
+
+  it("shows TTFT and verifies first/last logical SSE event times", () => {
+    const html = renderToStaticMarkup(
+      <StreamTimingPanel
+        detail={turnDetail}
+        timelines={{ response: {
+          stage: "response_received_from_newapi",
+          observed_length: 100,
+          event_count: 2,
+          first_event_at_ns: "10",
+          last_event_at_ns: "20",
+          complete: true,
+          points: [{ offset: 40, at_ns: "10" }, { offset: 100, at_ns: "20" }],
+        } }}
+        loading={null}
+        note={null}
+        onLoad={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("125 ms");
+    expect(html).toContain("逻辑事件");
+    expect(html).toContain("已保存时间点");
+    expect(html).toContain("首事件");
+    expect(html).toContain("末事件");
   });
 });
 

@@ -19,6 +19,8 @@ var (
 	ErrInvalidQuery = errors.New("query: invalid request")
 	ErrNotFound     = errors.New("query: audit evidence not found")
 	ErrNotReady     = errors.New("query: audit evidence is still being captured")
+	ErrNotRetained  = errors.New("query: raw body was compacted after verified reconstruction")
+	ErrNoTurnGraph  = errors.New("query: verified turn reconstruction is unavailable")
 	ErrIntegrity    = errors.New("query: encrypted evidence failed integrity checks")
 )
 
@@ -67,6 +69,7 @@ type AuditSummary struct {
 	Path            string  `json:"path"`
 	Mode            string  `json:"mode"`
 	StatusCode      *int    `json:"status_code"`
+	TTFTNS          *int64  `json:"ttft_ns,string"`
 	ForwardStatus   string  `json:"forward_status"`
 	CaptureStatus   string  `json:"capture_status"`
 	ParseStatus     string  `json:"parse_status"`
@@ -114,14 +117,21 @@ type Header struct {
 }
 
 type Body struct {
-	Stage          string  `json:"stage"`
-	ObservedLength int64   `json:"observed_length"`
-	StoredLength   int64   `json:"stored_length"`
-	SHA256         *string `json:"sha256"`
-	HashComplete   bool    `json:"hash_complete"`
-	EOFSeen        bool    `json:"eof_seen"`
-	State          string  `json:"state"`
-	ErrorCode      *string `json:"error_code"`
+	Stage                  string  `json:"stage"`
+	SourceStage            string  `json:"source_stage"`
+	ObservedLength         int64   `json:"observed_length"`
+	StoredLength           int64   `json:"stored_length"`
+	SHA256                 *string `json:"sha256"`
+	HashComplete           bool    `json:"hash_complete"`
+	EOFSeen                bool    `json:"eof_seen"`
+	State                  string  `json:"state"`
+	RetentionState         string  `json:"retention_state"`
+	FirstObservedAtNS      *int64  `json:"first_observed_at_ns,string"`
+	LastObservedAtNS       *int64  `json:"last_observed_at_ns,string"`
+	ChunkCount             int64   `json:"chunk_count"`
+	StreamEventCount       int64   `json:"stream_event_count"`
+	StreamTimelineComplete bool    `json:"stream_timeline_complete"`
+	ErrorCode              *string `json:"error_code"`
 }
 
 type ParsedResult struct {
@@ -153,6 +163,38 @@ type TokenLink struct {
 	LinkedAtNS      int64  `json:"linked_at_ns,string"`
 }
 
+// Turn describes the graph relationship and verification hashes for one
+// audited Agent round without exposing encrypted object bytes.
+type Turn struct {
+	TurnID                       string  `json:"turn_id"`
+	ConversationID               string  `json:"conversation_id"`
+	ParentTurnID                 *string `json:"parent_turn_id"`
+	ParentBase                   string  `json:"parent_base"`
+	LinkReason                   string  `json:"link_reason"`
+	LinkConfidence               int     `json:"link_confidence"`
+	RequestLayout                string  `json:"request_layout"`
+	ResponseLayout               string  `json:"response_layout"`
+	RequestItemCount             int     `json:"request_item_count"`
+	ResponseItemCount            int     `json:"response_item_count"`
+	RequestSequenceSHA256        string  `json:"request_sequence_sha256"`
+	ResponseSequenceSHA256       string  `json:"response_sequence_sha256"`
+	RequestReconstructionSHA256  string  `json:"request_reconstruction_sha256"`
+	ResponseReconstructionSHA256 string  `json:"response_reconstruction_sha256"`
+	ReconstructionStatus         string  `json:"reconstruction_status"`
+	PreviousResponseID           *string `json:"previous_response_id"`
+	ResponseID                   *string `json:"response_id"`
+	CreatedAtNS                  int64   `json:"created_at_ns,string"`
+}
+
+// ReconstructedTurn is the exact provider-level request and response rebuilt
+// from envelopes, ordered item references, and decoded binary objects.
+type ReconstructedTurn struct {
+	Turn         Turn                       `json:"turn"`
+	Request      any                        `json:"request"`
+	Response     any                        `json:"response"`
+	Conversation *conversation.Conversation `json:"conversation"`
+}
+
 // Detail is sensitive and may only be returned by the Admin Token protected
 // endpoint. Raw Body bytes still require a separate, explicit request.
 type Detail struct {
@@ -162,6 +204,7 @@ type Detail struct {
 	Headers      []Header                   `json:"headers"`
 	Bodies       []Body                     `json:"bodies"`
 	ParsedResult *ParsedResult              `json:"parsed_result"`
+	Turn         *Turn                      `json:"turn"`
 	Conversation *conversation.Conversation `json:"conversation"`
 	TokenLink    *TokenLink                 `json:"token_link"`
 }
@@ -173,6 +216,21 @@ type RawMetadata struct {
 	SHA256         string
 	Complete       bool
 	State          string
+}
+
+type TimelinePoint struct {
+	Offset int64 `json:"offset"`
+	AtNS   int64 `json:"at_ns,string"`
+}
+
+type StreamTimeline struct {
+	Stage          string          `json:"stage"`
+	ObservedLength int64           `json:"observed_length"`
+	EventCount     int64           `json:"event_count"`
+	FirstEventAtNS *int64          `json:"first_event_at_ns,string"`
+	LastEventAtNS  *int64          `json:"last_event_at_ns,string"`
+	Complete       bool            `json:"complete"`
+	Points         []TimelinePoint `json:"points"`
 }
 
 func stageForSide(side Side) (string, error) {

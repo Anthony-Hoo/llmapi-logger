@@ -1,12 +1,14 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
+	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/uaguard"
 )
 
@@ -24,6 +26,7 @@ const (
 	writeClaimPendingParse
 	writeReleaseProcessingParse
 	writeSaveParsedResult
+	writeSaveParsedAudit
 	writeRecoverInterruptedAudits
 	writeInsertAuditGaps
 	writeDeleteExpired
@@ -86,6 +89,7 @@ func (store *Store) AddHeaders(ctx context.Context, headers []HTTPHeader) error 
 
 // AddChunk non-blockingly appends one encrypted owning body chunk.
 func (store *Store) AddChunk(ctx context.Context, chunk BodyChunk) error {
+	chunk.defaults()
 	if err := validateChunk(chunk); err != nil {
 		return err
 	}
@@ -94,6 +98,7 @@ func (store *Store) AddChunk(ctx context.Context, chunk BodyChunk) error {
 
 // FinishStage non-blockingly appends a stage and optional body finalization.
 func (store *Store) FinishStage(ctx context.Context, finish StageFinish) error {
+	finish.defaults()
 	if err := validateStageFinish(finish); err != nil {
 		return err
 	}
@@ -200,7 +205,7 @@ func (store *Store) commitBatch(batch []writeRequest) error {
 		return fmt.Errorf("sqlite writer: begin batch: %w", err)
 	}
 	for _, request := range batch {
-		if err := applyWrite(transaction, request); err != nil {
+		if err := store.applyWrite(transaction, request); err != nil {
 			_ = transaction.Rollback()
 			return err
 		}
@@ -211,7 +216,8 @@ func (store *Store) commitBatch(batch []writeRequest) error {
 	return nil
 }
 
-func applyWrite(transaction *sql.Tx, request writeRequest) error {
+func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error {
+	signer := store.integrity.Load()
 	switch request.kind {
 	case writeBeginAudit:
 		return insertAudit(transaction, request.data.(AuditRecord))
@@ -226,7 +232,7 @@ func applyWrite(transaction *sql.Tx, request writeRequest) error {
 	case writeFinishStage:
 		return finishStage(transaction, request.data.(StageFinish))
 	case writeFinishAudit:
-		return finishAudit(transaction, request.data.(AuditFinish))
+		return finishAudit(transaction, request.data.(AuditFinish), signer)
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
 	case writeClaimPendingParse:
@@ -234,9 +240,11 @@ func applyWrite(transaction *sql.Tx, request writeRequest) error {
 	case writeReleaseProcessingParse:
 		return releaseProcessingParse(transaction, request.data.(string))
 	case writeSaveParsedResult:
-		return saveParsedResult(transaction, request.data.(ParsedResult))
+		return saveParsedResult(transaction, request.data.(ParsedResult), signer)
+	case writeSaveParsedAudit:
+		return saveParsedAudit(transaction, request.data.(ParsedAudit), signer)
 	case writeRecoverInterruptedAudits:
-		return recoverInterruptedAudits(transaction, request.data.(*recoveryRequest))
+		return recoverInterruptedAudits(transaction, request.data.(*recoveryRequest), signer)
 	case writeInsertAuditGaps:
 		return insertAuditGaps(transaction, request.data.([]AuditGap))
 	case writeDeleteExpired:
@@ -260,11 +268,11 @@ func insertAudit(transaction *sql.Tx, record AuditRecord) error {
 	_, err := transaction.Exec(`
 INSERT INTO audit_records (
     audit_id, started_at_ns, ended_at_ns, route_id, protocol, parser_name,
-    method, path, request_uri_enc, mode, status_code, forward_status,
+    method, path, request_uri_enc, mode, status_code, ttft_ns, forward_status,
     capture_status, parse_status, blocked_by, block_code, error_code,
     newapi_request_id, caller_status, caller_attempts, caller_next_at_ns,
     caller_updated_at_ns
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.AuditID,
 		record.StartedAtNS,
 		record.EndedAtNS,
@@ -276,6 +284,7 @@ INSERT INTO audit_records (
 		record.RequestURIEnc,
 		record.Mode,
 		record.StatusCode,
+		record.TTFTNS,
 		record.ForwardStatus,
 		record.CaptureStatus,
 		record.ParseStatus,
@@ -321,17 +330,26 @@ INSERT INTO http_stages (
 func insertBody(transaction *sql.Tx, body BodyStream) error {
 	_, err := transaction.Exec(`
 INSERT INTO body_streams (
-    audit_id, stage, observed_length, stored_length, sha256,
-    hash_complete, eof_seen, state, error_code
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    audit_id, stage, source_stage, observed_length, stored_length, sha256,
+    hash_complete, eof_seen, state, retention_state,
+    first_observed_at_ns, last_observed_at_ns, chunk_count,
+    stream_event_count, stream_timeline_complete, error_code
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		body.AuditID,
 		body.Stage,
+		body.SourceStage,
 		body.ObservedLength,
 		body.StoredLength,
 		nullableBytes(body.SHA256),
 		boolInteger(body.HashComplete),
 		boolInteger(body.EOFSeen),
 		body.State,
+		body.RetentionState,
+		body.FirstObservedAtNS,
+		body.LastObservedAtNS,
+		body.ChunkCount,
+		body.StreamEventCount,
+		boolInteger(body.StreamTimelineComplete),
 		body.ErrorCode,
 	)
 	if err != nil {
@@ -364,14 +382,17 @@ INSERT INTO http_headers (
 func insertChunk(transaction *sql.Tx, chunk BodyChunk) error {
 	_, err := transaction.Exec(`
 INSERT INTO body_chunks (
-    audit_id, stage, seq, "offset", plaintext_length, observed_at_ns, data_enc
-) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    audit_id, stage, seq, "offset", plaintext_length, encoded_length,
+    observed_at_ns, compression, data_enc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		chunk.AuditID,
 		chunk.Stage,
 		chunk.Seq,
 		chunk.Offset,
 		chunk.PlaintextLength,
+		chunk.EncodedLength,
 		chunk.ObservedAtNS,
+		chunk.Compression,
 		chunk.DataEnc,
 	)
 	if err != nil {
@@ -406,7 +427,9 @@ WHERE audit_id = ? AND stage = ?`,
 	result, err = transaction.Exec(`
 UPDATE body_streams
 SET observed_length = ?, stored_length = ?, sha256 = ?, hash_complete = ?,
-    eof_seen = ?, state = ?, error_code = ?
+    eof_seen = ?, state = ?, retention_state = ?,
+    first_observed_at_ns = ?, last_observed_at_ns = ?, chunk_count = ?,
+    stream_event_count = ?, stream_timeline_complete = ?, error_code = ?
 WHERE audit_id = ? AND stage = ?`,
 		finish.Body.ObservedLength,
 		finish.Body.StoredLength,
@@ -414,6 +437,12 @@ WHERE audit_id = ? AND stage = ?`,
 		boolInteger(finish.Body.HashComplete),
 		boolInteger(finish.Body.EOFSeen),
 		finish.Body.State,
+		finish.Body.RetentionState,
+		finish.Body.FirstObservedAtNS,
+		finish.Body.LastObservedAtNS,
+		finish.Body.ChunkCount,
+		finish.Body.StreamEventCount,
+		boolInteger(finish.Body.StreamTimelineComplete),
 		finish.Body.ErrorCode,
 		finish.AuditID,
 		finish.Stage,
@@ -421,13 +450,42 @@ WHERE audit_id = ? AND stage = ?`,
 	if err != nil {
 		return fmt.Errorf("sqlite writer: finish body: %w", err)
 	}
-	return requireOneRow(result, "finish body")
+	if err := requireOneRow(result, "finish body"); err != nil {
+		return err
+	}
+	if finish.Body.Timeline != nil {
+		timeline := finish.Body.Timeline
+		if _, err := transaction.Exec(`
+INSERT INTO stream_timelines (
+    audit_id, stage, event_count, first_event_at_ns, last_event_at_ns,
+    timeline_complete, compression, plaintext_length, timeline_enc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(audit_id, stage) DO UPDATE SET
+    event_count = excluded.event_count,
+    first_event_at_ns = excluded.first_event_at_ns,
+    last_event_at_ns = excluded.last_event_at_ns,
+    timeline_complete = excluded.timeline_complete,
+    compression = excluded.compression,
+    plaintext_length = excluded.plaintext_length,
+    timeline_enc = excluded.timeline_enc`,
+			finish.AuditID, finish.Stage, timeline.EventCount,
+			timeline.FirstEventAtNS, timeline.LastEventAtNS,
+			boolInteger(timeline.Complete), timeline.Compression,
+			timeline.PlaintextLength, timeline.DataEnc,
+		); err != nil {
+			return fmt.Errorf("sqlite writer: save stream timeline: %w", err)
+		}
+	}
+	return nil
 }
 
-func finishAudit(transaction *sql.Tx, finish AuditFinish) error {
+func finishAudit(transaction *sql.Tx, finish AuditFinish, signer *security.IntegritySigner) error {
+	if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
+		return err
+	}
 	result, err := transaction.Exec(`
 UPDATE audit_records
-SET ended_at_ns = ?, status_code = ?, forward_status = ?, capture_status = ?,
+SET ended_at_ns = ?, status_code = ?, ttft_ns = ?, forward_status = ?, capture_status = ?,
     parse_status = ?, blocked_by = ?, block_code = ?, error_code = ?,
     newapi_request_id = ?,
     caller_status = CASE WHEN ? IS NULL THEN 'none' ELSE 'pending' END,
@@ -437,6 +495,7 @@ SET ended_at_ns = ?, status_code = ?, forward_status = ?, capture_status = ?,
 WHERE audit_id = ?`,
 		finish.EndedAtNS,
 		finish.StatusCode,
+		finish.TTFTNS,
 		finish.ForwardStatus,
 		finish.CaptureStatus,
 		finish.ParseStatus,
@@ -454,7 +513,137 @@ WHERE audit_id = ?`,
 	if err != nil {
 		return fmt.Errorf("sqlite writer: finish audit: %w", err)
 	}
-	return requireOneRow(result, "finish audit")
+	if err := requireOneRow(result, "finish audit"); err != nil {
+		return err
+	}
+	if finish.ForwardStatus != ForwardCompleted || finish.CaptureStatus != CaptureComplete ||
+		finish.StatusCode == nil || *finish.StatusCode < 200 || *finish.StatusCode >= 400 ||
+		finish.ParseStatus == ParseSkipped {
+		if _, err := transaction.Exec(`
+UPDATE body_streams
+SET retention_state = 'full'
+WHERE audit_id = ?`, finish.AuditID); err != nil {
+			return fmt.Errorf("sqlite writer: retain terminal raw evidence: %w", err)
+		}
+	}
+	payloadDigest, err := capturePayloadDigest(context.Background(), transaction, finish.AuditID)
+	if err != nil {
+		return err
+	}
+	if err := appendIntegrityEvent(transaction, signer, finish.AuditID, integrityCaptureFinalized, payloadDigest, finish.EndedAtNS); err != nil {
+		return err
+	}
+	return nil
+}
+
+type bodyDedupState struct {
+	SourceStage      string
+	ObservedLength   int64
+	StoredLength     int64
+	Digest           []byte
+	HashComplete     int
+	EOFSeen          int
+	State            string
+	ChunkCount       int64
+	StreamEventCount int64
+	TimelineComplete int
+}
+
+func deduplicateEquivalentBodyStages(transaction *sql.Tx, auditID string) error {
+	for _, pair := range [][2]string{
+		{StageRequestReceived, StageRequestSent},
+		{StageResponseReceived, StageResponseSent},
+	} {
+		if err := deduplicateEquivalentBodyPair(transaction, auditID, pair[0], pair[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deduplicateEquivalentBodyPair(transaction *sql.Tx, auditID, sourceStage, duplicateStage string) error {
+	source, found, err := readBodyDedupState(transaction, auditID, sourceStage)
+	if err != nil || !found {
+		return err
+	}
+	duplicate, found, err := readBodyDedupState(transaction, auditID, duplicateStage)
+	if err != nil || !found {
+		return err
+	}
+	if source.SourceStage != sourceStage || duplicate.SourceStage != duplicateStage ||
+		source.State != StageStateComplete || duplicate.State != StageStateComplete ||
+		source.HashComplete == 0 || duplicate.HashComplete == 0 || source.EOFSeen == 0 || duplicate.EOFSeen == 0 ||
+		source.StoredLength != source.ObservedLength || duplicate.StoredLength != duplicate.ObservedLength ||
+		source.ObservedLength != duplicate.ObservedLength || len(source.Digest) != 32 || !bytes.Equal(source.Digest, duplicate.Digest) {
+		return nil
+	}
+	sourceChunkCount, sourceChunkLength, err := bodyChunkAggregate(transaction, auditID, sourceStage)
+	if err != nil {
+		return err
+	}
+	duplicateChunkCount, duplicateChunkLength, err := bodyChunkAggregate(transaction, auditID, duplicateStage)
+	if err != nil {
+		return err
+	}
+	if sourceChunkCount != source.ChunkCount || sourceChunkLength != source.StoredLength ||
+		duplicateChunkCount != duplicate.ChunkCount || duplicateChunkLength != duplicate.StoredLength {
+		return nil
+	}
+	if _, err := transaction.Exec(`DELETE FROM body_chunks WHERE audit_id = ? AND stage = ?`, auditID, duplicateStage); err != nil {
+		return fmt.Errorf("sqlite writer: delete duplicate body chunks: %w", err)
+	}
+	result, err := transaction.Exec(`
+UPDATE body_streams
+SET source_stage = ?, stored_length = ?, chunk_count = ?,
+    stream_event_count = ?, stream_timeline_complete = ?
+WHERE audit_id = ? AND stage = ? AND source_stage = ?`,
+		sourceStage, source.StoredLength, source.ChunkCount,
+		source.StreamEventCount, source.TimelineComplete,
+		auditID, duplicateStage, duplicateStage,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite writer: link duplicate body stream: %w", err)
+	}
+	return requireOneRow(result, "link duplicate body stream")
+}
+
+func readBodyDedupState(transaction *sql.Tx, auditID, stage string) (bodyDedupState, bool, error) {
+	var result bodyDedupState
+	err := transaction.QueryRow(`
+SELECT source_stage, observed_length, stored_length, sha256,
+       hash_complete, eof_seen, state, chunk_count,
+       stream_event_count, stream_timeline_complete
+FROM body_streams
+WHERE audit_id = ? AND stage = ?`, auditID, stage).Scan(
+		&result.SourceStage,
+		&result.ObservedLength,
+		&result.StoredLength,
+		&result.Digest,
+		&result.HashComplete,
+		&result.EOFSeen,
+		&result.State,
+		&result.ChunkCount,
+		&result.StreamEventCount,
+		&result.TimelineComplete,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return bodyDedupState{}, false, nil
+	}
+	if err != nil {
+		return bodyDedupState{}, false, fmt.Errorf("sqlite writer: read body dedup state: %w", err)
+	}
+	return result, true, nil
+}
+
+func bodyChunkAggregate(transaction *sql.Tx, auditID, stage string) (int64, int64, error) {
+	var count, length int64
+	if err := transaction.QueryRow(`
+SELECT COUNT(*), COALESCE(SUM(plaintext_length), 0)
+FROM body_chunks
+WHERE audit_id = ? AND stage = ?`, auditID, stage).Scan(&count, &length); err != nil {
+		return 0, 0, fmt.Errorf("sqlite writer: read body chunk aggregate: %w", err)
+	}
+	return count, length, nil
 }
 
 func requireOneRow(result sql.Result, operation string) error {
@@ -486,6 +675,7 @@ func cloneAuditRecord(record AuditRecord) AuditRecord {
 	record.RequestURIEnc = cloneBytes(record.RequestURIEnc)
 	record.EndedAtNS = cloneInt64(record.EndedAtNS)
 	record.StatusCode = cloneInt(record.StatusCode)
+	record.TTFTNS = cloneInt64(record.TTFTNS)
 	record.BlockedBy = cloneString(record.BlockedBy)
 	record.BlockCode = cloneString(record.BlockCode)
 	record.ErrorCode = cloneString(record.ErrorCode)
@@ -510,6 +700,8 @@ func cloneHTTPHeader(header HTTPHeader) HTTPHeader {
 
 func cloneBodyStream(body BodyStream) BodyStream {
 	body.SHA256 = cloneBytes(body.SHA256)
+	body.FirstObservedAtNS = cloneInt64(body.FirstObservedAtNS)
+	body.LastObservedAtNS = cloneInt64(body.LastObservedAtNS)
 	body.ErrorCode = cloneString(body.ErrorCode)
 	return body
 }
@@ -526,6 +718,15 @@ func cloneStageFinish(finish StageFinish) StageFinish {
 	if finish.Body != nil {
 		body := *finish.Body
 		body.SHA256 = cloneBytes(body.SHA256)
+		body.FirstObservedAtNS = cloneInt64(body.FirstObservedAtNS)
+		body.LastObservedAtNS = cloneInt64(body.LastObservedAtNS)
+		if body.Timeline != nil {
+			timeline := *body.Timeline
+			timeline.FirstEventAtNS = cloneInt64(timeline.FirstEventAtNS)
+			timeline.LastEventAtNS = cloneInt64(timeline.LastEventAtNS)
+			timeline.DataEnc = cloneBytes(timeline.DataEnc)
+			body.Timeline = &timeline
+		}
 		body.ErrorCode = cloneString(body.ErrorCode)
 		finish.Body = &body
 	}
@@ -534,6 +735,7 @@ func cloneStageFinish(finish StageFinish) StageFinish {
 
 func cloneAuditFinish(finish AuditFinish) AuditFinish {
 	finish.StatusCode = cloneInt(finish.StatusCode)
+	finish.TTFTNS = cloneInt64(finish.TTFTNS)
 	finish.BlockedBy = cloneString(finish.BlockedBy)
 	finish.BlockCode = cloneString(finish.BlockCode)
 	finish.ErrorCode = cloneString(finish.ErrorCode)

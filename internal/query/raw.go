@@ -9,6 +9,7 @@ import (
 	"io"
 	"strconv"
 
+	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -25,11 +26,7 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 	if err := validateAuditID(auditID); err != nil {
 		return err
 	}
-	stage, err := stageForSide(side)
-	if err != nil {
-		return err
-	}
-	metadata, err := service.store.RawBodyMeta(ctx, auditID, stage)
+	stage, metadata, err := service.selectRawBody(ctx, auditID, side)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -38,6 +35,12 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 	}
 	if metadata.State == sqlite.StageStateStreaming {
 		return ErrNotReady
+	}
+	if metadata.RetentionState == sqlite.RetentionPending {
+		return ErrNotReady
+	}
+	if metadata.RetentionState == sqlite.RetentionMetadata {
+		return ErrNotRetained
 	}
 
 	digest := sha256.New()
@@ -52,12 +55,28 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 		if chunk.Seq != expectedSequence || chunk.Offset != expectedOffset {
 			return ErrIntegrity
 		}
-		aad, err := security.AAD(auditID, "body_chunk", stage, strconv.FormatInt(chunk.Seq, 10))
+		compression := chunk.Compression
+		if compression == "" {
+			compression = bodycodec.CompressionNone
+		}
+		aad, err := security.AAD(auditID, "body_chunk_v2", chunk.Stage, strconv.FormatInt(chunk.Seq, 10), compression)
 		if err != nil {
 			return ErrIntegrity
 		}
-		plaintext, err := service.cipher.Decrypt(aad, chunk.DataEnc)
-		if err != nil || len(plaintext) != chunk.PlaintextLength {
+		encoded, err := service.cipher.Decrypt(aad, chunk.DataEnc)
+		if err != nil && compression == bodycodec.CompressionNone {
+			legacyAAD, legacyErr := security.AAD(auditID, "body_chunk", chunk.Stage, strconv.FormatInt(chunk.Seq, 10))
+			if legacyErr == nil {
+				encoded, err = service.cipher.Decrypt(legacyAAD, chunk.DataEnc)
+			}
+		}
+		if err != nil || chunk.EncodedLength > 0 && len(encoded) != chunk.EncodedLength {
+			clear(encoded)
+			return ErrIntegrity
+		}
+		plaintext, decodeErr := bodycodec.Decode(encoded, compression, chunk.PlaintextLength)
+		clear(encoded)
+		if decodeErr != nil {
 			return ErrIntegrity
 		}
 		if complete {
@@ -87,6 +106,39 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 		}
 	}
 	return nil
+}
+
+// selectRawBody prefers the provider-side stage used for ordinary request and
+// response evidence. Locally rejected requests and locally generated proxy
+// responses never reach that stage, so raw evidence falls back to the matching
+// client-facing observation point when the preferred stage does not exist.
+func (service *Service) selectRawBody(ctx context.Context, auditID string, side Side) (string, sqlite.RawBodyMetadata, error) {
+	stages, err := rawStagesForSide(side)
+	if err != nil {
+		return "", sqlite.RawBodyMetadata{}, err
+	}
+	for _, stage := range stages {
+		metadata, err := service.store.RawBodyMeta(ctx, auditID, stage)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return "", sqlite.RawBodyMetadata{}, err
+		}
+		return stage, metadata, nil
+	}
+	return "", sqlite.RawBodyMetadata{}, sql.ErrNoRows
+}
+
+func rawStagesForSide(side Side) ([]string, error) {
+	switch side {
+	case SideRequest:
+		return []string{sqlite.StageRequestSent, sqlite.StageRequestReceived}, nil
+	case SideResponse:
+		return []string{sqlite.StageResponseReceived, sqlite.StageResponseSent}, nil
+	default:
+		return nil, ErrInvalidQuery
+	}
 }
 
 func equalBytes(left, right []byte) bool {

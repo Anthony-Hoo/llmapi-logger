@@ -18,10 +18,11 @@ func TestListAuditsUsesStableKeysetAndNarrowFilters(t *testing.T) {
 		id      string
 		started int64
 		status  int
+		ttftNS  int64
 	}{
-		{id: "audit-a", started: 100, status: 200},
-		{id: "audit-b", started: 100, status: 429},
-		{id: "audit-c", started: 90, status: 200},
+		{id: "audit-a", started: 100, status: 200, ttftNS: 10},
+		{id: "audit-b", started: 100, status: 429, ttftNS: 20},
+		{id: "audit-c", started: 90, status: 200, ttftNS: 30},
 	} {
 		record := testAudit(item.id)
 		record.StartedAtNS = item.started
@@ -30,6 +31,7 @@ func TestListAuditsUsesStableKeysetAndNarrowFilters(t *testing.T) {
 		}
 		if err := store.FinishAudit(ctx, AuditFinish{
 			AuditID: item.id, EndedAtNS: item.started + 1, StatusCode: &item.status,
+			TTFTNS:        &item.ttftNS,
 			ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParseOK,
 		}); err != nil {
 			t.Fatal(err)
@@ -84,6 +86,7 @@ INSERT INTO parsed_results (
 		modelPage.Rows[0].Username == nil || *modelPage.Rows[0].Username != "alice" ||
 		modelPage.Rows[0].NewAPITokenID == nil || *modelPage.Rows[0].NewAPITokenID != 42 ||
 		modelPage.Rows[0].NewAPIRequestID == nil || *modelPage.Rows[0].NewAPIRequestID != "req-b" ||
+		modelPage.Rows[0].TTFTNS == nil || *modelPage.Rows[0].TTFTNS != 20 ||
 		modelPage.Rows[0].CallerStatus != CallerResolved {
 		t.Fatalf("model-filtered page = %+v", modelPage)
 	}

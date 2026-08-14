@@ -1,14 +1,14 @@
 # AI API 审计代理：个人单机版总体设计
 
 > 状态：当前实现基线
-> 日期：2026-08-12
+> 日期：2026-08-14
 > 上游需求：[AI_API_AUDIT_PROXY_KICKOFF.md](../../AI_API_AUDIT_PROXY_KICKOFF.md)
 
 ## 1. 目标与边界
 
 本项目是部署在 Nginx 与 NewAPI 之间的个人审计代理：单用户、单机、一个 Go 二进制、一个 NewAPI 后端、一个 SQLite WAL 数据库和一个本地主密钥文件。
 
-数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会保存原始 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
+数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI 成功记录经重建验证后释放长期 raw；异常记录保留 full 原字节。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
 
 ~~~text
 Client -> Nginx -> Data-plane dispatcher
@@ -28,7 +28,7 @@ Client -> Nginx -> Data-plane dispatcher
 | response_received_from_newapi | ReverseProxy 读取 NewAPI 响应 Body |
 | response_from_newapi_sent_to_nginx | ResponseWriter 成功接受响应字节 |
 
-每阶段独立保存元数据、Header/Trailer、observed length、stored length、SHA-256、完整性状态和 Body chunk。取消、短写或网络错误可能让相邻阶段不同，不能共用一个 summary。
+每阶段独立保存元数据、Header/Trailer、observed length、SHA-256 和完整性状态；完整且相同的 request 接收/转发阶段、response 接收/发送阶段通过 `source_stage` 共享同一份 owning Body chunks。取消、短写或网络错误仍会让相邻阶段独立标记，不能共用一个完整性 summary。
 
 ## 3. 架构
 
@@ -54,7 +54,7 @@ internal/storage/sqlite/migrations/
 configs/
 ~~~
 
-热路径只做路由、入站拦截、流式 wrapper、长度/hash、32 KiB 字节复制和队列提交。默认 metadata 拦截器不读取 Body；只有路由显式启用 body 拦截器时才有界预读一次并原字节回放。JSON/SSE/gzip 解析仍在请求结束并落库后异步运行。启动恢复、retention 和安全日志属于后台运维能力，不改变代理字节路径。
+热路径只做路由、入站拦截、流式 wrapper、长度/hash、约 1 MiB 聚合块、逻辑 SSE 时间点和队列提交。默认 metadata 拦截器不读取 Body；只有路由显式启用 body 拦截器时才有界预读一次并原字节回放。JSON/SSE 解析、item/binary 内容寻址、重建验证和 raw compaction 都在请求结束并落库后异步运行。启动恢复、retention 和安全日志属于后台运维能力，不改变代理字节路径。
 
 ## 4. 运行模式
 
@@ -80,7 +80,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 | --- | --- |
 | 数据面 / 管理面 | 0.0.0.0:8080 / 127.0.0.1:8081 |
 | mode | available |
-| Body chunk | 32 KiB |
+| Body chunk | 约 1 MiB 聚合后自适应压缩、独立加密 |
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | SQLite | WAL、synchronous=FULL、busy_timeout=5000 |
 | parser workers | 1 |
@@ -91,30 +91,19 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 ## 7. 数据与加密
 
-SQLite 只保留十张表：
-
-1. schema_migrations
-2. audit_records
-3. http_stages
-4. http_headers
-5. body_streams
-6. body_chunks
-7. parsed_results
-8. token_links
-9. audit_gaps
-10. user_agent_rules
+SQLite schema generation 2 共 20 张表。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines 和 integrity events。完整表定义以[模块 04](04-sqlite-storage-and-migrations.md)为准。
 
 采用单 writer goroutine + 简单批事务，查询使用独立只读连接池。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。
 
-key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值、Body chunk、原始 Request-URI 和解析结果用 AES-256-GCM 独立随机 nonce 加密，数据库保存固定格式的 `nonce || ciphertext || tag` BLOB；首版不提供密钥轮换工具。
+key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 
 详细设计见 [03](03-audit-session-and-evidence-capture.md) 与 [04](04-sqlite-storage-and-migrations.md)。
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要，同时聚合协议无关的多轮消息、reasoning、工具调用和工具结果。摘要写入窄列，conversation 只合并进 `parsed_json_enc` 后加密落盘；parser v2 migration 会把 v1 结果一次性置回 pending，复用正常 worker 回填旧记录。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建。Anthropic/Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie，刷新页面可恢复会话。普通列表只定向解密入站 User-Agent，主视图只展示调用者、时间、模型和 User-Agent，并支持按 NewAPI 用户、模型和 User-Agent 筛选；Token ID、路径和状态属于高级筛选。上游响应中的 `X-Oneapi-Request-Id` 会触发后台日志查询，成功后只回填用户 ID、用户名、Token ID 和 Token 名称；pending、unresolved 与本地未关联状态会明确展示，完整 API Key 不进入存储或管理响应。受保护的详情会解密 conversation、Request-URI 与每个 Header/Trailer 值。React + TypeScript + Vite + Tailwind CSS + shadcn/ui 页面默认按角色顺序展示对话，assistant 文本使用禁用 raw HTML、危险链接协议和远程图片加载的 GFM Markdown，reasoning 折叠，工具调用/结果单独展示；原始 HTTP、Header 和完整性信息默认折叠，Body 仍通过独立 raw API 按需读取。这不是 wire dump。管理 JSON 与 raw 响应均禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。只有 `retention_state=full` 的异常记录提供 raw Body；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。所有管理证据响应禁止缓存。
 
 受保护页面另提供动态 User-Agent 规则管理：模型与 User-Agent 使用 Go RE2 正则，保存时编译校验，持久化成功后以原子快照立即替换；初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则在访问 NewAPI 前返回通用 `401 unauthorized`，精确拦截码仅保留在审计数据中。规则不会扩大 Matcher 的 LLM 路由范围。
 
@@ -139,30 +128,34 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 15 | [Nginx 与部署](15-nginx-and-deployment-integration.md) |
 | 16 | [开源项目参考取舍](16-open-source-reference-assessment.md) |
 | 17 | [入站请求拦截链](17-request-interceptor-chain.md) |
+| 18 | [内容寻址的对话、轮次与多模态审计存储](18-content-addressed-conversation-storage.md) |
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、SQLite 单 writer、异步 parser、加密 conversation、受 Token 保护的查询与 React + shadcn/ui 对话审计、启动恢复、聚合 gap、retention、安全日志和单机构建部署材料。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 
 - OpenAI、Anthropic、Gemini 常见流式/非流式请求正常转发。
 - JSON、gzip、multipart、binary、empty、large Body 不被改写。
-- 四阶段名称、length、hash 和完整性状态正确。
+- 四阶段名称、length、hash、source stage、retention 和完整性状态正确；相同成对 Body 在终结校验后合并，不一致时保留各自证据并标记异常。
 - SSE 立即 flush；记录 direct 与 proxy 的 TTFT 差异，结果作为优化参考而非发布门禁。
 - strict 在请求开始时 key/DB 不健康返回 503，Fake NewAPI 未收到请求。
 - available 记录失败仍转发，并存在日志或 audit_gaps。
 - `/v1/models` 等安全非 LLM 请求透明到达 NewAPI，且不建 audit、不执行 interceptor；错误 Method、编码近似、受保护 LLM 路径族与危险路径返回 404，NewAPI 零调用。
-- DB/WAL 无测试 secret 明文。
+- OpenAI Responses/Chat/Completions 可从 envelope、有序 item 和 binary object 精确重建；重复历史和 PNG 复用，turn delta 随轮次近似线性增长。
+- 普通成功 verified 后 raw chunks 删除；拦截、解析、上游、采集或重建异常保留 full raw。
+- SSE 网络小块不逐行长期保存；TTFT、逻辑 event count、首末事件和最多 100,000 个时间点可校验。
+- DB/WAL 无测试 secret、Body、图片或主密钥明文。
 - 拦截链首个 reject 会在调用 NewAPI 前返回；记录 blocked_by/block_code，后续 NewAPI 阶段不存在。
 - 未启用 Body 拦截器时保持流式；启用后允许请求的 Body 回放字节与原请求完全一致，超限固定为 `413` 和 `block_code=body_too_large`。
 - 重启后 pending parser 恢复，parser v1 结果可由 migration 一次性回填 conversation，未完成 audit 标 partial。
 - 只有实际恢复未终结记录时增加 process_exit 聚合 gap，重复恢复幂等。
-- retention 只小批量删除已终结且非 processing 的过期记录，并级联子表。
+- retention 小批量删除已终结且非 processing 的过期记录；删除父轮次前把保留子轮次物化为 root checkpoint，并 GC 不可达 content/binary objects。
 - 请求完成日志不含 Query、Header value、Body、token、key 或底层错误文本。
 - NewAPI 安全用户目录每五分钟只读刷新；已转发 LLM 响应按 request ID 异步查询全站日志并回填用户/Token 身份，失败不影响转发且不会读取完整 API Key。
 - healthy/degraded/not_ready 与 available/strict 语义一致。
-- 管理列表只返回紧凑摘要和解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情在 Admin Token 下返回 conversation、Request-URI 与逐项 Header/Trailer 值，raw request/response Body 只按需读取，所有管理证据响应禁止缓存。
+- 管理列表只返回紧凑摘要、TTFT 和解密后的入站 User-Agent；详情在 Admin Token 下返回 turn/conversation、Request-URI、Body retention 与逐项 Header/Trailer，reconstructed/timeline/raw 按各自状态按需读取，所有管理证据响应禁止缓存。
 - loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token 或有效管理 Cookie。
 
 ## 12. 文档优先级

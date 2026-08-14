@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"testing"
+
+	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/security"
 )
 
 func TestDeleteExpiredHonorsEligibilityAndCascades(t *testing.T) {
@@ -118,6 +122,141 @@ VALUES (?, ?, ?, 1, ?, ?)`, int64(index+1), int64(index+2), GapReasonWrite, GapD
 	}
 }
 
+func TestDeleteExpiredCheckpointsRetainedChildAndCollectsUnreachableObjects(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	cipher, err := security.NewAESGCM(bytes.Repeat([]byte{0x36}, security.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parentEnded := int64(200)
+	childEnded := int64(2200)
+	insertRetentionAudit(t, store, "parent-turn", 100, &parentEnded, ParseProcessing, false)
+	insertRetentionAudit(t, store, "child-turn", 2000, &childEnded, ParseProcessing, false)
+
+	userMessage := map[string]any{"role": "user", "content": "first question"}
+	assistantMessage := map[string]any{"role": "assistant", "content": "first answer"}
+	orphanBinary := map[string]any{
+		"type": "output_image",
+		"data": "data:image/png;base64," + base64.StdEncoding.EncodeToString(append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x73}, 256)...)),
+	}
+	parentResponse := map[string]any{
+		"id":     "response-parent",
+		"output": []any{assistantMessage, orphanBinary},
+	}
+	parent, err := auditmodel.Prepare(auditmodel.Turn{
+		AuditID: "parent-turn", Protocol: "openai", ParserName: "parser",
+		RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope,
+		RequestEnvelope: map[string]any{"model": "model-example"},
+		ResponseEnvelope: map[string]any{
+			"id":     "response-parent",
+			"output": []any{auditmodel.ItemMarker(0), auditmodel.ItemMarker(1)},
+		},
+		RequestItems: []auditmodel.Item{
+			{Slot: auditmodel.SlotMessages, Kind: "user_message", Value: userMessage},
+		},
+		ResponseItems: []auditmodel.Item{
+			{Slot: auditmodel.SlotOutput, Kind: "assistant_message", Value: assistantMessage},
+			{Slot: auditmodel.SlotOutput, Kind: "output_image", Value: orphanBinary},
+		},
+		RequestOriginal:  map[string]any{"model": "model-example", "messages": []any{userMessage}},
+		ResponseOriginal: parentResponse, ResponseID: "response-parent", CreatedAtNS: 100,
+	}, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveParsedAudit(ctx, ParsedAudit{
+		Result: ParsedResult{AuditID: "parent-turn", ParserName: "parser", ParserVersion: "2", Status: ParseOK, ParsedAtNS: 300},
+		Turn:   &parent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	secondUserMessage := map[string]any{"role": "user", "content": "second question"}
+	secondAssistantMessage := map[string]any{"role": "assistant", "content": "second answer"}
+	childRequest := map[string]any{
+		"model":    "model-example",
+		"messages": []any{userMessage, assistantMessage, secondUserMessage},
+	}
+	childResponse := map[string]any{
+		"id":      "response-child",
+		"choices": []any{map[string]any{"message": secondAssistantMessage}},
+	}
+	child, err := auditmodel.Prepare(auditmodel.Turn{
+		AuditID: "child-turn", Protocol: "openai", ParserName: "parser",
+		RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope,
+		RequestEnvelope:  map[string]any{"model": "model-example"},
+		ResponseEnvelope: map[string]any{"id": "response-child", "choices": []any{map[string]any{"message": auditmodel.ItemMarker(0)}}},
+		RequestItems: []auditmodel.Item{
+			{Slot: auditmodel.SlotMessages, Kind: "user_message", Value: userMessage},
+			{Slot: auditmodel.SlotMessages, Kind: "assistant_message", Value: assistantMessage},
+			{Slot: auditmodel.SlotMessages, Kind: "user_message", Value: secondUserMessage},
+		},
+		ResponseItems: []auditmodel.Item{
+			{Slot: auditmodel.SlotChoice, Kind: "assistant_message", Value: secondAssistantMessage},
+		},
+		RequestOriginal: childRequest, ResponseOriginal: childResponse,
+		PreviousResponseID: "response-parent", ResponseID: "response-child", CreatedAtNS: 2000,
+	}, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveParsedAudit(ctx, ParsedAudit{
+		Result: ParsedResult{AuditID: "child-turn", ParserName: "parser", ParserVersion: "2", Status: ParseOK, ParsedAtNS: 2300},
+		Turn:   &child,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var parentTurnID string
+	if err := store.readerDB.QueryRow(`SELECT parent_turn_id FROM turns WHERE turn_id = 'child-turn'`).Scan(&parentTurnID); err != nil {
+		t.Fatal(err)
+	}
+	if parentTurnID != "parent-turn" {
+		t.Fatalf("child parent = %q", parentTurnID)
+	}
+	if len(parent.Binaries) != 1 {
+		t.Fatalf("parent binary objects = %d, want 1", len(parent.Binaries))
+	}
+
+	result, err := store.DeleteExpired(ctx, 1000, RetentionBatchLimit, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedAudits != 1 {
+		t.Fatalf("delete result = %+v", result)
+	}
+	detail, err := store.QueryAuditDetail(ctx, "child-turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.TurnGraph == nil || detail.TurnGraph.ParentTurnID != nil ||
+		detail.TurnGraph.ParentBase != "root" || detail.TurnGraph.LinkReason != "retention_checkpoint" ||
+		!auditmodel.EqualHash(auditmodel.SequenceHash(detail.TurnGraph.RequestRefs), child.RequestSequenceHash) {
+		t.Fatalf("checkpointed graph = %+v", detail.TurnGraph)
+	}
+
+	assertTableCount(t, store.readerDB, "audit_records", 1)
+	assertTableCount(t, store.readerDB, "turns", 1)
+	assertTableCount(t, store.readerDB, "conversations", 1)
+	assertTableCount(t, store.readerDB, "binary_objects", 0)
+	var orphanContent int
+	if err := store.readerDB.QueryRow(`
+SELECT COUNT(*)
+FROM content_objects AS c
+WHERE NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.request_envelope_hash = c.object_hash)
+  AND NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.response_envelope_hash = c.object_hash)
+  AND NOT EXISTS (SELECT 1 FROM turn_context_ops AS o WHERE o.object_hash = c.object_hash)
+  AND NOT EXISTS (SELECT 1 FROM turn_response_items AS r WHERE r.object_hash = c.object_hash)`).Scan(&orphanContent); err != nil {
+		t.Fatal(err)
+	}
+	if orphanContent != 0 {
+		t.Fatalf("unreachable content objects = %d", orphanContent)
+	}
+}
+
 func insertRetentionAudit(t *testing.T, store *Store, auditID string, startedAt int64, endedAt *int64, parseStatus string, withChildren bool) {
 	t.Helper()
 	forwardStatus := ForwardInProgress
@@ -164,15 +303,16 @@ INSERT INTO http_headers (
 	digest := bytes.Repeat([]byte{0x44}, 32)
 	if _, err := transaction.Exec(`
 INSERT INTO body_streams (
-    audit_id, stage, observed_length, stored_length, sha256,
-    hash_complete, eof_seen, state
-) VALUES (?, ?, 1, 1, ?, 1, 1, 'complete')`, auditID, StageRequestReceived, digest); err != nil {
+    audit_id, stage, source_stage, observed_length, stored_length, sha256,
+    hash_complete, eof_seen, state, retention_state
+) VALUES (?, ?, ?, 1, 1, ?, 1, 1, 'complete', 'full')`, auditID, StageRequestReceived, StageRequestReceived, digest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := transaction.Exec(`
 INSERT INTO body_chunks (
-    audit_id, stage, seq, "offset", plaintext_length, observed_at_ns, data_enc
-) VALUES (?, ?, 0, 0, 1, ?, X'01')`, auditID, StageRequestReceived, startedAt); err != nil {
+    audit_id, stage, seq, "offset", plaintext_length, encoded_length,
+    observed_at_ns, compression, data_enc
+) VALUES (?, ?, 0, 0, 1, 1, ?, 'none', X'01')`, auditID, StageRequestReceived, startedAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := transaction.Exec(`

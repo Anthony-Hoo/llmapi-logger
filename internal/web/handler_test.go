@@ -366,6 +366,15 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 			ObservedLength: 12, StoredLength: 12, SHA256: strings.Repeat("a", 64), Complete: true, State: "complete",
 		},
 		rawData: []byte("raw evidence"),
+		reconstructed: query.ReconstructedTurn{
+			Request:  map[string]any{"model": "model-example"},
+			Response: map[string]any{"id": "response-example"},
+		},
+		timeline: query.StreamTimeline{
+			Stage: "response_received_from_newapi", ObservedLength: 100,
+			EventCount: 2, Complete: true,
+			Points: []query.TimelinePoint{{Offset: 40, AtNS: 10}, {Offset: 100, AtNS: 20}},
+		},
 	}
 	handler := newTestHandler(t, Options{
 		AdminToken: testAdminToken,
@@ -390,6 +399,25 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("detail cache policy = %q, want no-store", response.Header().Get("Cache-Control"))
+	}
+
+	request = authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail/reconstructed/request")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"model":"model-example"`) {
+		t.Fatalf("reconstructed request: status=%d body=%q", response.Code, response.Body.String())
+	}
+	request = authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail/reconstructed/response")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"response-example"`) {
+		t.Fatalf("reconstructed response: status=%d body=%q", response.Code, response.Body.String())
+	}
+	request = authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail/timeline/response")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"event_count":2`) {
+		t.Fatalf("stream timeline: status=%d body=%q", response.Code, response.Body.String())
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/api/v1/audits/audit-detail", nil)
@@ -428,6 +456,14 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "raw_not_finalized") {
 		t.Fatalf("streaming raw response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	queries.rawMetaErr = query.ErrNotRetained
+	request = authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail/raw/request")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusGone || !strings.Contains(response.Body.String(), "raw_not_retained") {
+		t.Fatalf("compacted raw response: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 
@@ -477,15 +513,19 @@ func TestReadinessAndHandlerValidation(t *testing.T) {
 }
 
 type fakeQuery struct {
-	healthy     bool
-	page        query.Page
-	listErr     error
-	detail      query.Detail
-	detailErr   error
-	rawMetadata query.RawMetadata
-	rawMetaErr  error
-	rawData     []byte
-	rawErr      error
+	healthy        bool
+	page           query.Page
+	listErr        error
+	detail         query.Detail
+	detailErr      error
+	reconstructed  query.ReconstructedTurn
+	reconstructErr error
+	timeline       query.StreamTimeline
+	timelineErr    error
+	rawMetadata    query.RawMetadata
+	rawMetaErr     error
+	rawData        []byte
+	rawErr         error
 
 	gotFilter query.Filter
 	gotCursor query.Cursor
@@ -511,6 +551,14 @@ func (queries *fakeQuery) List(_ context.Context, filter query.Filter, cursor qu
 
 func (queries *fakeQuery) Get(context.Context, string) (query.Detail, error) {
 	return queries.detail, queries.detailErr
+}
+
+func (queries *fakeQuery) ReconstructTurn(context.Context, string) (query.ReconstructedTurn, error) {
+	return queries.reconstructed, queries.reconstructErr
+}
+
+func (queries *fakeQuery) Timeline(context.Context, string, query.Side) (query.StreamTimeline, error) {
+	return queries.timeline, queries.timelineErr
 }
 
 func (queries *fakeQuery) RawMeta(_ context.Context, _ string, side query.Side) (query.RawMetadata, error) {

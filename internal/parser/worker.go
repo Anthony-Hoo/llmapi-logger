@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -206,7 +207,8 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 		result = parseSafely(ctx, implementation, input)
 	}
 	worker.normalizeResult(&result, input, evidenceErr)
-	if err := worker.persistResult(ctx, audit, implementation, result); err != nil {
+	prepared := worker.prepareTurn(ctx, audit, implementation, input, &result)
+	if err := worker.persistResult(ctx, audit, implementation, result, prepared); err != nil {
 		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed")
 		releaseContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
@@ -214,6 +216,36 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 			worker.logger.Warn("parser retry release failed", "audit_id", audit.AuditID, "error_code", "parse_release_failed")
 		}
 	}
+}
+
+func (worker *Worker) prepareTurn(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, input Input, result *Result) *auditmodel.PreparedTurn {
+	if implementation == nil || result == nil || result.Status != StatusOK || !input.Request.Complete || (input.Response.Present && !input.Response.Complete) {
+		return nil
+	}
+	normalizer, ok := implementation.(AuditNormalizer)
+	if !ok {
+		return nil
+	}
+	turn, err := normalizer.NormalizeAudit(ctx, input, *result)
+	if err != nil {
+		result.Status = StatusPartial
+		result.ErrorCode = "normalization_failed"
+		result.ParsedJSON = nil
+		return nil
+	}
+	turn.AuditID = audit.AuditID
+	turn.Protocol = audit.Protocol
+	turn.ParserName = audit.ParserName
+	turn.ResponseID = result.ResponseID
+	turn.CreatedAtNS = worker.now().UnixNano()
+	prepared, err := auditmodel.Prepare(turn, worker.cipher)
+	if err != nil {
+		result.Status = StatusPartial
+		result.ErrorCode = "reconstruction_failed"
+		result.ParsedJSON = nil
+		return nil
+	}
+	return &prepared
 }
 
 func parseSafely(ctx context.Context, implementation Parser, input Input) (result Result) {
@@ -262,7 +294,7 @@ func (worker *Worker) normalizeResult(result *Result, input Input, evidenceErr e
 	}
 }
 
-func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, result Result) error {
+func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, result Result, prepared *auditmodel.PreparedTurn) error {
 	parserVersion := "1"
 	if implementation != nil {
 		parserVersion = implementation.Version()
@@ -274,19 +306,7 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 		result.ErrorCode = "parsed_json_aad_failed"
 	}
 	var encrypted []byte
-	plaintext := result.ParsedJSON
-	generatedPlaintext := false
-	if result.Conversation != nil {
-		var envelope map[string]any
-		if unmarshalErr := json.Unmarshal(result.ParsedJSON, &envelope); unmarshalErr != nil || envelope == nil {
-			envelope = make(map[string]any)
-		}
-		envelope["conversation"] = result.Conversation
-		if encoded, marshalErr := json.Marshal(envelope); marshalErr == nil {
-			plaintext = encoded
-			generatedPlaintext = true
-		}
-	}
+	plaintext, generatedPlaintext := parsedResultPlaintext(result, prepared == nil)
 	if err == nil {
 		encrypted, err = worker.cipher.Encrypt(aad, plaintext)
 		if err != nil {
@@ -298,7 +318,6 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 	if generatedPlaintext {
 		clear(plaintext)
 	}
-
 	storageResult := sqlite.ParsedResult{
 		AuditID:         audit.AuditID,
 		ParserName:      audit.ParserName,
@@ -320,7 +339,32 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 		ParsedJSONEnc:   encrypted,
 		ParsedAtNS:      worker.now().UnixNano(),
 	}
-	return worker.store.SaveParsedResult(ctx, storageResult)
+	return worker.store.SaveParsedAudit(ctx, sqlite.ParsedAudit{Result: storageResult, Turn: prepared})
+}
+
+func parsedResultPlaintext(result Result, includeConversation bool) ([]byte, bool) {
+	plaintext := result.ParsedJSON
+	generated := false
+	if len(plaintext) == 0 {
+		plaintext, _ = json.Marshal(compactResultJSON(result))
+		generated = true
+	}
+	if !includeConversation || result.Conversation == nil {
+		return plaintext, generated
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(plaintext, &envelope); err != nil || envelope == nil {
+		envelope = make(map[string]any)
+	}
+	envelope["conversation"] = result.Conversation
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return plaintext, generated
+	}
+	if generated {
+		clear(plaintext)
+	}
+	return encoded, true
 }
 
 func onlyUnsupportedEncoding(input Input) bool {

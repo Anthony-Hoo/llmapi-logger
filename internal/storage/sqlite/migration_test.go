@@ -51,13 +51,23 @@ ORDER BY name`)
 	wantTables := []string{
 		"audit_gaps",
 		"audit_records",
+		"binary_objects",
 		"body_chunks",
 		"body_streams",
+		"content_binary_refs",
+		"content_external_refs",
+		"content_objects",
+		"conversations",
 		"http_headers",
 		"http_stages",
+		"integrity_events",
 		"parsed_results",
 		"schema_migrations",
+		"stream_timelines",
 		"token_links",
+		"turn_context_ops",
+		"turn_response_items",
+		"turns",
 		"user_agent_rules",
 	}
 	sort.Strings(wantTables)
@@ -82,8 +92,15 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 2 || version != 4 {
-		t.Fatalf("migration rows = %d max=%d, want versions 1 and 4", versionCount, version)
+	if versionCount != 3 || version != 5 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1, 4 and 5", versionCount, version)
+	}
+	var quickCheck string
+	if err := store.readerDB.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil {
+		t.Fatalf("PRAGMA quick_check: %v", err)
+	}
+	if quickCheck != "ok" {
+		t.Fatalf("PRAGMA quick_check = %q, want ok", quickCheck)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -97,7 +114,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 2 {
+	if versionCount != 3 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -108,7 +125,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		5,
+		6,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)

@@ -6,6 +6,8 @@ import type {
   NewAPIUserList,
   RawBodyDownload,
   RawSide,
+  ReconstructedBodyDownload,
+  StreamTimeline,
   UserAgentRule,
   UserAgentRuleInput,
   UserAgentRuleList,
@@ -36,6 +38,8 @@ export interface ApiClient {
   ) => Promise<AuditListPage>;
   getAudit: (auditID: string, signal?: AbortSignal) => Promise<AuditDetail>;
   getRawBody: (auditID: string, side: RawSide, signal?: AbortSignal) => Promise<RawBodyDownload>;
+  getReconstructedBody: (auditID: string, side: RawSide, signal?: AbortSignal) => Promise<ReconstructedBodyDownload>;
+  getStreamTimeline: (auditID: string, side: RawSide, signal?: AbortSignal) => Promise<StreamTimeline>;
   listUserAgentRules: (signal?: AbortSignal) => Promise<UserAgentRuleList>;
   createUserAgentRule: (input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
   updateUserAgentRule: (id: number, input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
@@ -180,6 +184,28 @@ export function createApiClient(
         sha256: response.headers.get("X-Audit-SHA256"),
         complete: response.headers.get("X-Audit-Complete")?.toLowerCase() === "true",
       };
+    },
+
+    async getReconstructedBody(auditID, side, signal) {
+      const response = await sessionFetch(
+        `${API_BASE}/audits/${encodeURIComponent(auditID)}/reconstructed/${side}`,
+        { headers: { Accept: "application/json" }, signal },
+      );
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+      return {
+        blob: await response.blob(),
+        filename: filenameFromResponse(response, `${auditID}-reconstructed-${side}.json`),
+        contentType: response.headers.get("Content-Type") ?? "application/json",
+      };
+    },
+
+    getStreamTimeline(auditID, side, signal) {
+      return requestJSON<StreamTimeline>(
+        `${API_BASE}/audits/${encodeURIComponent(auditID)}/timeline/${side}`,
+        signal,
+      );
     },
   };
 }

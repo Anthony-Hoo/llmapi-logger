@@ -28,6 +28,7 @@ type Store interface {
 	QueryAuditDetail(context.Context, string) (sqlite.AuditQueryDetail, error)
 	RawBodyMeta(context.Context, string, string) (sqlite.RawBodyMetadata, error)
 	StreamBodyChunks(context.Context, string, string, func(sqlite.BodyChunk) error) error
+	QueryStreamTimeline(context.Context, string, string) (sqlite.StoredStreamTimeline, error)
 }
 
 // Service validates management queries and keeps ciphertext out of API DTOs.
@@ -273,14 +274,21 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 			digest = &encoded
 		}
 		detail.Bodies = append(detail.Bodies, Body{
-			Stage:          body.Stage,
-			ObservedLength: body.ObservedLength,
-			StoredLength:   body.StoredLength,
-			SHA256:         digest,
-			HashComplete:   body.HashComplete,
-			EOFSeen:        body.EOFSeen,
-			State:          body.State,
-			ErrorCode:      body.ErrorCode,
+			Stage:                  body.Stage,
+			SourceStage:            body.SourceStage,
+			ObservedLength:         body.ObservedLength,
+			StoredLength:           body.StoredLength,
+			SHA256:                 digest,
+			HashComplete:           body.HashComplete,
+			EOFSeen:                body.EOFSeen,
+			State:                  body.State,
+			RetentionState:         body.RetentionState,
+			FirstObservedAtNS:      body.FirstObservedAtNS,
+			LastObservedAtNS:       body.LastObservedAtNS,
+			ChunkCount:             body.ChunkCount,
+			StreamEventCount:       body.StreamEventCount,
+			StreamTimelineComplete: body.StreamTimelineComplete,
+			ErrorCode:              body.ErrorCode,
 		})
 	}
 	if parsed := storageDetail.ParsedResult; parsed != nil {
@@ -322,6 +330,14 @@ func (service *Service) Get(ctx context.Context, auditID string) (Detail, error)
 			}
 			detail.Conversation = envelope.Conversation
 		}
+	}
+	if storageDetail.TurnGraph != nil {
+		reconstructed, reconstructErr := reconstructTurnGraph(service.cipher, storageDetail.Audit.ParserName, storageDetail.TurnGraph)
+		if reconstructErr != nil {
+			return Detail{}, ErrIntegrity
+		}
+		detail.Turn = &reconstructed.Turn
+		detail.Conversation = reconstructed.Conversation
 	}
 	if token := storageDetail.TokenLink; token != nil {
 		detail.TokenLink = &TokenLink{
@@ -389,11 +405,7 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 	if err := validateAuditID(auditID); err != nil {
 		return RawMetadata{}, err
 	}
-	stage, err := stageForSide(side)
-	if err != nil {
-		return RawMetadata{}, err
-	}
-	metadata, err := service.store.RawBodyMeta(ctx, auditID, stage)
+	_, metadata, err := service.selectRawBody(ctx, auditID, side)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RawMetadata{}, ErrNotFound
 	}
@@ -402,6 +414,12 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 	}
 	if metadata.State == sqlite.StageStateStreaming {
 		return RawMetadata{}, ErrNotReady
+	}
+	if metadata.RetentionState == sqlite.RetentionPending {
+		return RawMetadata{}, ErrNotReady
+	}
+	if metadata.RetentionState == sqlite.RetentionMetadata {
+		return RawMetadata{}, ErrNotRetained
 	}
 	encodedDigest := ""
 	if len(metadata.SHA256) != 0 {
@@ -429,6 +447,7 @@ func mapAudit(row sqlite.AuditListRow) AuditSummary {
 		Path:            row.Path,
 		Mode:            row.Mode,
 		StatusCode:      row.StatusCode,
+		TTFTNS:          row.TTFTNS,
 		ForwardStatus:   row.ForwardStatus,
 		CaptureStatus:   row.CaptureStatus,
 		ParseStatus:     row.ParseStatus,

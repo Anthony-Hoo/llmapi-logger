@@ -21,6 +21,7 @@ import { ConversationView } from "./components/conversation-view";
 import {
   displayValue,
   formatBytes,
+  formatDurationNS,
   formatNanoTime,
   humanizeStage,
   shortHash,
@@ -44,6 +45,8 @@ import type {
   NewAPIUser,
   RawBodyDownload,
   RawSide,
+  ReconstructedBodyDownload,
+  StreamTimeline,
   UserAgentRule,
   UserAgentRuleInput,
 } from "./types";
@@ -926,11 +929,24 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
   const [rawBodies, setRawBodies] = useState<Partial<Record<RawSide, LoadedRawBody>>>({});
   const [rawLoading, setRawLoading] = useState<RawSide | null>(null);
   const [rawNote, setRawNote] = useState<string | null>(null);
+  const [reconstructedLoading, setReconstructedLoading] = useState<RawSide | null>(null);
+  const [reconstructedNote, setReconstructedNote] = useState<string | null>(null);
+  const [timelines, setTimelines] = useState<Partial<Record<RawSide, StreamTimeline>>>({});
+  const [timelineLoading, setTimelineLoading] = useState<RawSide | null>(null);
+  const [timelineNote, setTimelineNote] = useState<string | null>(null);
   const rawController = useRef<AbortController | null>(null);
+  const reconstructedController = useRef<AbortController | null>(null);
+  const timelineController = useRef<AbortController | null>(null);
 
   useEffect(() => {
     setRawNote(null);
     setRawBodies({});
+    setRawLoading(null);
+    setReconstructedNote(null);
+    setReconstructedLoading(null);
+    setTimelines({});
+    setTimelineNote(null);
+    setTimelineLoading(null);
     if (!auditID) {
       setDetail(null);
       setError(null);
@@ -963,6 +979,10 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
     return () => {
       rawController.current?.abort();
       rawController.current = null;
+      reconstructedController.current?.abort();
+      reconstructedController.current = null;
+      timelineController.current?.abort();
+      timelineController.current = null;
     };
   }, [auditID, client]);
 
@@ -1025,6 +1045,61 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
     setRawNote(`${side === "request" ? "请求" : "响应"} Body 已从页面内存中清除。`);
   }
 
+  async function downloadReconstructed(side: RawSide) {
+    if (!auditID) {
+      return;
+    }
+    reconstructedController.current?.abort();
+    const controller = new AbortController();
+    reconstructedController.current = controller;
+    setReconstructedLoading(side);
+    setReconstructedNote(null);
+    try {
+      const result = await client.getReconstructedBody(auditID, side, controller.signal);
+      if (controller.signal.aborted) {
+        return;
+      }
+      saveReconstructedDownload(result);
+      setReconstructedNote(`${side === "request" ? "请求" : "响应"}已按内容对象和有序引用重建并下载。`);
+    } catch (cause: unknown) {
+      if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
+        setReconstructedNote(errorMessage(cause));
+      }
+    } finally {
+      if (reconstructedController.current === controller) {
+        reconstructedController.current = null;
+        setReconstructedLoading(null);
+      }
+    }
+  }
+
+  async function loadTimeline(side: RawSide) {
+    if (!auditID || timelines[side]) {
+      return;
+    }
+    timelineController.current?.abort();
+    const controller = new AbortController();
+    timelineController.current = controller;
+    setTimelineLoading(side);
+    setTimelineNote(null);
+    try {
+      const result = await client.getStreamTimeline(auditID, side, controller.signal);
+      if (controller.signal.aborted) {
+        return;
+      }
+      setTimelines((current) => ({ ...current, [side]: result }));
+    } catch (cause: unknown) {
+      if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
+        setTimelineNote(errorMessage(cause));
+      }
+    } finally {
+      if (timelineController.current === controller) {
+        timelineController.current = null;
+        setTimelineLoading(null);
+      }
+    }
+  }
+
   if (!auditID) {
     return (
       <Card className="bg-white/90 shadow-sm xl:sticky xl:top-24">
@@ -1070,6 +1145,15 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
               </Alert>
             ) : null}
 
+            <Section title="轮次与内容存储">
+              <TurnStoragePanel
+                detail={detail}
+                loading={reconstructedLoading}
+                note={reconstructedNote}
+                onDownload={downloadReconstructed}
+              />
+            </Section>
+
             <Section title="对话审计">
               <ConversationView conversation={detail.conversation} />
             </Section>
@@ -1081,9 +1165,10 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
                   ["路由", detail.audit.route_id],
                   ["协议", detail.audit.protocol],
                   ["方法", detail.audit.method],
-                  ["路径", detail.audit.path],
-                  ["HTTP 状态", detail.audit.status_code ?? "—"],
-                  ["转发", <StatusBadge value={detail.audit.forward_status} />],
+                   ["路径", detail.audit.path],
+                   ["HTTP 状态", detail.audit.status_code ?? "—"],
+                   ["TTFT", formatDurationNS(detail.audit.ttft_ns)],
+                   ["转发", <StatusBadge value={detail.audit.forward_status} />],
                   ["捕获", <StatusBadge value={detail.audit.capture_status} />],
                   ["解析", <StatusBadge value={detail.audit.parse_status} />],
                   ["模式", detail.audit.mode ?? "—"],
@@ -1107,6 +1192,16 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
               )}
             </Section>
 
+            <Section title="流式响应时序">
+              <StreamTimingPanel
+                detail={detail}
+                timelines={timelines}
+                loading={timelineLoading}
+                note={timelineNote}
+                onLoad={loadTimeline}
+              />
+            </Section>
+
             <HTTPAuditEvidence
               detail={detail}
               rawBodies={rawBodies}
@@ -1120,6 +1215,139 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+export function TurnStoragePanel({
+  detail,
+  loading,
+  note,
+  onDownload,
+}: {
+  detail: AuditDetail;
+  loading: RawSide | null;
+  note: string | null;
+  onDownload: (side: RawSide) => void;
+}) {
+  const turn = detail.turn;
+  if (!turn) {
+    return <EmptyValue>当前请求没有可用的内容寻址轮次；异常或暂不支持的协议会继续保留完整原始证据。</EmptyValue>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <Alert className={turn.reconstruction_status === "verified" ? "border-emerald-200 bg-emerald-50/70" : "border-red-200 bg-red-50"}>
+        <AlertTitle>{turn.reconstruction_status === "verified" ? "轮次已通过精确重建校验" : "轮次重建校验失败"}</AlertTitle>
+        <AlertDescription>
+          请求与响应由有序内容引用、二进制对象和协议 envelope 重建；哈希用于验证重建结果与当时的 HTTP Body 一致。
+        </AlertDescription>
+      </Alert>
+      <DefinitionGrid
+        items={[
+          ["Conversation ID", monoValue(turn.conversation_id)],
+          ["Turn ID", monoValue(turn.turn_id)],
+          ["父轮次", turn.parent_turn_id ? monoValue(turn.parent_turn_id) : "根轮次"],
+          ["父上下文基准", turn.parent_base],
+          ["关联原因", turnLinkLabel(turn.link_reason)],
+          ["关联置信度", `${turn.link_confidence}%`],
+          ["请求 / 响应 item", `${turn.request_item_count} / ${turn.response_item_count}`],
+          ["请求 / 响应布局", `${turn.request_layout} / ${turn.response_layout}`],
+          ["Previous Response ID", turn.previous_response_id ? monoValue(turn.previous_response_id) : "—"],
+          ["Response ID", turn.response_id ? monoValue(turn.response_id) : "—"],
+          ["请求序列 SHA-256", hashValue(turn.request_sequence_sha256)],
+          ["响应序列 SHA-256", hashValue(turn.response_sequence_sha256)],
+          ["请求重建 SHA-256", hashValue(turn.request_reconstruction_sha256)],
+          ["响应重建 SHA-256", hashValue(turn.response_reconstruction_sha256)],
+        ]}
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onDownload("request")}
+          disabled={loading !== null || turn.reconstruction_status !== "verified"}
+        >
+          <DownloadIcon />
+          <span className="ml-2">{loading === "request" ? "重建中…" : "下载重建请求 JSON"}</span>
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onDownload("response")}
+          disabled={loading !== null || turn.reconstruction_status !== "verified"}
+        >
+          <DownloadIcon />
+          <span className="ml-2">{loading === "response" ? "重建中…" : "下载重建响应 JSON"}</span>
+        </Button>
+      </div>
+      {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
+    </div>
+  );
+}
+
+export function StreamTimingPanel({
+  detail,
+  timelines,
+  loading,
+  note,
+  onLoad,
+}: {
+  detail: AuditDetail;
+  timelines: Partial<Record<RawSide, StreamTimeline>>;
+  loading: RawSide | null;
+  note: string | null;
+  onLoad: (side: RawSide) => void;
+}) {
+  const streams = (["request", "response"] as RawSide[])
+    .map((side) => ({ side, body: bodyForSide(detail, side) }))
+    .filter((entry): entry is { side: RawSide; body: AuditBody } => Boolean(entry.body && entry.body.stream_event_count > 0));
+
+  return (
+    <div className="space-y-3">
+      <DefinitionGrid items={[["首字节时间（TTFT）", formatDurationNS(detail.audit.ttft_ns)]]} />
+      {streams.length === 0 ? (
+        <EmptyValue>该记录没有逻辑 SSE 事件时间线。</EmptyValue>
+      ) : (
+        streams.map(({ side, body }) => {
+          const timeline = timelines[side];
+          return (
+            <div key={side} className="rounded-lg border bg-slate-50/60 p-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold">{side === "request" ? "请求流" : "响应流"}</span>
+                <Badge variant={body.stream_timeline_complete ? "success" : "warning"}>
+                  {body.stream_timeline_complete ? "时间线完整" : "时间点已截断"}
+                </Badge>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground sm:grid-cols-4">
+                <span>逻辑事件</span>
+                <span className="text-right tabular-nums text-foreground">{body.stream_event_count}</span>
+                <span>已保存时间点</span>
+                <span className="text-right tabular-nums text-foreground">{timeline?.points.length ?? "按需读取"}</span>
+                <span>Body 首次观测</span>
+                <span className="text-right text-foreground">{formatNanoTime(body.first_observed_at_ns)}</span>
+                <span>Body 最后观测</span>
+                <span className="text-right text-foreground">{formatNanoTime(body.last_observed_at_ns)}</span>
+                {timeline ? (
+                  <>
+                    <span>首事件</span>
+                    <span className="text-right text-foreground">{formatNanoTime(timeline.first_event_at_ns)}</span>
+                    <span>末事件</span>
+                    <span className="text-right text-foreground">{formatNanoTime(timeline.last_event_at_ns)}</span>
+                  </>
+                ) : null}
+              </div>
+              {!timeline ? (
+                <Button variant="outline" size="sm" className="mt-3" onClick={() => onLoad(side)} disabled={loading !== null}>
+                  <ViewIcon />
+                  <span className="ml-2">{loading === side ? "读取中…" : "读取并校验事件时间线"}</span>
+                </Button>
+              ) : null}
+            </div>
+          );
+        })
+      )}
+      {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
+    </div>
   );
 }
 
@@ -1229,7 +1457,8 @@ function RawHTTPMessage({
   const headers = detail.headers.filter((header) => header.stage === stageName && header.kind === "header");
   const trailers = detail.headers.filter((header) => header.stage === stageName && header.kind === "trailer");
   const envelope = buildEvidenceEnvelope(detail, side);
-  const available = hasRawBody(detail, side);
+  const body = bodyForSide(detail, side);
+  const available = body?.retention_state === "full" && body.state !== "streaming";
   const title = side === "request" ? "发往 NewAPI 的请求" : "从 NewAPI 收到的响应";
   const envelopeText = [envelope.startLine, ...envelope.headerLines].join("\n");
 
@@ -1242,7 +1471,10 @@ function RawHTTPMessage({
             {stageName}
           </p>
         </div>
-        <StatusBadge value={stage?.state} />
+        <div className="flex flex-wrap gap-2">
+          {body ? <Badge variant="outline">{retentionLabel(body.retention_state)}</Badge> : null}
+          <StatusBadge value={stage?.state} />
+        </div>
       </div>
 
       <div className="mt-3 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
@@ -1283,8 +1515,20 @@ function RawHTTPMessage({
           ) : null}
         </div>
 
-        {!available ? (
+        {!body ? (
           <EmptyValue>该审计边界没有捕获 Body。</EmptyValue>
+        ) : body.retention_state === "metadata" ? (
+          <Alert className="border-emerald-200 bg-emerald-50/70">
+            <AlertTitle>原始 Body 已完成校验并释放</AlertTitle>
+            <AlertDescription>
+              长期保留原始长度、SHA-256、Content-Type 和完整性链；请求与响应可从内容对象精确重建，因此不再提供会返回 410 的 raw 下载。
+            </AlertDescription>
+          </Alert>
+        ) : body.retention_state === "pending" || body.state === "streaming" ? (
+          <Alert className="bg-slate-50">
+            <AlertTitle>Body 正在处理</AlertTitle>
+            <AlertDescription>解析、重建验证和保留策略尚未完成，稍后刷新后再查看证据状态。</AlertDescription>
+          </Alert>
         ) : loaded?.preview.kind === "text" ? (
           loaded.preview.text ? (
             <pre
@@ -1321,9 +1565,9 @@ function RawHTTPMessage({
         </div>
       ) : null}
 
-      <div className="mt-3 flex flex-wrap gap-2">
+      {available ? <div className="mt-3 flex flex-wrap gap-2">
         {!loaded ? (
-          <Button variant="outline" size="sm" onClick={onLoad} disabled={busy || !available}>
+          <Button variant="outline" size="sm" onClick={onLoad} disabled={busy}>
             <ViewIcon />
             <span className="ml-2">{loading ? "加载中…" : "加载并查看 Body"}</span>
           </Button>
@@ -1332,11 +1576,11 @@ function RawHTTPMessage({
             从页面清除 Body
           </Button>
         )}
-        <Button variant="outline" size="sm" onClick={onDownload} disabled={busy || !available}>
+        <Button variant="outline" size="sm" onClick={onDownload} disabled={busy}>
           <DownloadIcon />
           <span className="ml-2">{loading ? "读取中…" : "下载原始 Body"}</span>
         </Button>
-      </div>
+      </div> : null}
     </div>
   );
 }
@@ -1388,19 +1632,32 @@ function BodiesTable({ bodies }: { bodies: AuditBody[] }) {
         <div key={body.stage} className="rounded-md border bg-slate-50/60 p-3 text-xs">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <span className="font-medium">{humanizeStage(body.stage)}</span>
-            <StatusBadge value={body.state} />
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline">{retentionLabel(body.retention_state)}</Badge>
+              <StatusBadge value={body.state} />
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+            <span>字节来源阶段</span>
+            <span className="text-right text-foreground">{humanizeStage(body.source_stage)}</span>
             <span>观察长度</span>
             <span className="text-right tabular-nums text-foreground">{formatBytes(body.observed_length)}</span>
-            <span>保存长度</span>
+            <span>长期 raw 字节</span>
             <span className="text-right tabular-nums text-foreground">{formatBytes(body.stored_length)}</span>
+            <span>raw 分块</span>
+            <span className="text-right tabular-nums text-foreground">{body.chunk_count}</span>
+            <span>SSE 逻辑事件</span>
+            <span className="text-right tabular-nums text-foreground">{body.stream_event_count}</span>
             <span>SHA-256</span>
             <span className="truncate text-right font-mono text-foreground" title={body.sha256 ?? undefined}>
               {shortHash(body.sha256)}
             </span>
             <span>完整</span>
             <span className="text-right text-foreground">{body.hash_complete && body.eof_seen ? "是" : "否"}</span>
+            <span>首次 / 最后观测</span>
+            <span className="text-right text-foreground">
+              {formatNanoTime(body.first_observed_at_ns)} / {formatNanoTime(body.last_observed_at_ns)}
+            </span>
           </div>
         </div>
       ))}
@@ -1479,6 +1736,33 @@ function DefinitionGrid({ items }: { items: Array<[string, ReactNode]> }) {
       ))}
     </dl>
   );
+}
+
+function monoValue(value: string): ReactNode {
+  return <span className="break-all font-mono text-xs" title={value}>{value}</span>;
+}
+
+function hashValue(value: string): ReactNode {
+  return <span className="font-mono text-xs" title={value}>{shortHash(value)}</span>;
+}
+
+function turnLinkLabel(reason: string): string {
+  return ({
+    root: "根轮次",
+    continuation: "连续对话",
+    retry: "重试",
+    branch: "分支",
+    context_edit: "上下文编辑 / 截断",
+    retention_checkpoint: "保留期独立检查点",
+  } as Record<string, string>)[reason] ?? reason;
+}
+
+function retentionLabel(state: string): string {
+  return ({
+    pending: "保留策略处理中",
+    metadata: "仅元数据 + 可重建对象",
+    full: "完整原始证据",
+  } as Record<string, string>)[state] ?? state;
 }
 
 function callerSummary(audit: AuditSummary): string {
@@ -1585,10 +1869,18 @@ function DocumentIcon() {
 }
 
 function saveDownload(download: RawBodyDownload) {
-  const url = URL.createObjectURL(download.blob);
+  saveBlob(download.blob, download.filename);
+}
+
+function saveReconstructedDownload(download: ReconstructedBodyDownload) {
+  saveBlob(download.blob, download.filename);
+}
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = download.filename;
+  anchor.download = filename;
   anchor.hidden = true;
   document.body.append(anchor);
   anchor.click();
@@ -1600,9 +1892,9 @@ function downloadMessage(side: RawSide, download: RawBodyDownload): string {
   return `${side === "request" ? "请求" : "响应"}原始 Body 已下载（${formatBytes(download.storedLength)}，${download.complete ? "完整" : "不完整"}）。`;
 }
 
-function hasRawBody(detail: AuditDetail, side: RawSide): boolean {
+function bodyForSide(detail: AuditDetail, side: RawSide): AuditBody | undefined {
   const expectedStage = side === "request" ? "request_sent_to_newapi" : "response_received_from_newapi";
-  return detail.bodies.some((body) => body.stage === expectedStage);
+  return detail.bodies.find((body) => body.stage === expectedStage);
 }
 
 function isAbortError(cause: unknown): boolean {

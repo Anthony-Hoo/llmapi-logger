@@ -13,10 +13,10 @@ Client -> Nginx -> llmapi-logger
 
 ## 主要用途
 
-- 流式保存客户端请求和 NewAPI 响应的原始 HTTP 证据。
+- 在四个代理观察点流式采集客户端请求和 NewAPI 响应；普通成功请求经重建验证后只长期保留对象图、长度、SHA-256、时间和完整性链，异常请求保留完整 raw 证据。
 - 在请求发往 NewAPI 前运行可配置的本地拦截链，拒绝不符合要求的 LLM 请求。
-- 对常见 OpenAI、Anthropic、Gemini JSON/SSE 生成便于检索的摘要，并聚合为协议无关的多轮对话、reasoning、工具调用和工具结果。
-- 通过本地 React + shadcn/ui 页面优先查看按角色排列的对话审计；Request-URI、每个 Header/Trailer 值和原始请求/响应 Body 作为默认折叠的辅助证据保留。
+- 对常见 OpenAI、Anthropic、Gemini JSON/SSE 生成便于检索的摘要和协议无关对话；OpenAI Chat/Completions/Responses 进一步使用可分支 turn 图和内容寻址的文本、JSON、图片、文件对象。
+- 通过本地 React + shadcn/ui 页面查看对话、轮次、重建 JSON、SSE 时序和 HTTP 元数据；只有异常 `full` 记录提供原始请求/响应 Body。
 - 在个人单机环境中辅助排查请求差异、流式中断、上游错误和审计缺口。
 
 ## 核心能力
@@ -31,17 +31,17 @@ Client -> Nginx -> llmapi-logger
   - 代理请求发往 NewAPI；
   - NewAPI 响应到达代理；
   - 代理响应写回 Nginx。
-- 保存各阶段的 Header、Trailer、Body chunk、长度、SHA-256 和完整性状态。
-- 使用本地 AES-256-GCM key 加密敏感 Header、Query、Body 和解析结果。
-- SQLite WAL 存储、单 writer、有界写队列和自动 migration。
-- OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析，以及统一的多轮对话和工具调用视图。
+- 保存各阶段的 Header、Trailer、长度、SHA-256、时间和完整性状态；约 1 MiB raw 聚合块先各阶段采集，终结时只对长度/hash 完全一致的成对阶段合并 `source_stage`。
+- 使用本地 AES-256-GCM key 加密敏感 Header、Query、raw Body、解析结果、content/binary object 和 SSE timeline。
+- SQLite WAL、单 writer、有界写队列、schema generation 2 和自动 migration。
+- OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析；OpenAI verified turn 支持内容对象复用、provider JSON 重建、分支上下文增量和多模态二进制去重。
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
 - 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；调用者优先使用安全用户目录中的显示名，Token 名称与 ID 分行展示，长 User-Agent 自动换行；路径、状态和原始 HTTP 证据留在详情或高级筛选。
 - loopback 管理端同样强制鉴权；CLI 可用静态 Bearer token，Web UI 登录后使用七天过期的 HttpOnly Cookie；敏感详情和 raw 响应禁止缓存。
 - 可选使用 NewAPI 全局管理凭证同步安全用户目录；对响应中的 `X-Oneapi-Request-Id` 异步查询全站日志，回填用户名、用户 ID、Token ID 和 Token 名称。
 - 调用者识别不读取、不匹配、不保存也不展示用户完整 API Key；主筛选按 NewAPI 用户，Token ID 只作为高级筛选。
 - assistant 输出使用安全的 GFM Markdown 展示；禁用原始 HTML、危险链接协议和远程图片加载。
-- 启动异常记录恢复、简单审计 gap、按天 retention 和安全 JSON 日志。
+- 启动异常记录恢复、完整性事件链、retention checkpoint/对象 GC、简单审计 gap 和安全 JSON 日志。
 
 ## 默认白名单
 
@@ -115,7 +115,7 @@ http://127.0.0.1:8081/ui/
 
 管理页面中的“UA 拦截规则”支持新增、编辑、启停和删除。模型与 User-Agent 均使用 Go RE2 正则并默认区分大小写；一条规则的模型正则命中后，请求 User-Agent 必须命中该规则，多条命中规则全部需要通过。无效正则不会保存，也不会替换当前运行中的有效规则。
 
-普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 conversation。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值，以及 parser 生成的协议无关 conversation。conversation 正文、reasoning、工具参数和结果与解析摘要一起存放在 `parsed_json_enc` 密文中。请求/响应 Body 仍通过单独的 raw API 按需读取；页面只在用户点击后加载 Body，有效 UTF-8 可直接预览，二进制内容保留下载；这些管理响应均带 `Cache-Control: no-store`。
+普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 content object。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值和窄解析摘要。OpenAI verified conversation 从 turn graph、content object 和 binary object 重建，不再复制进 `parsed_json_enc`；没有内容寻址 normalizer 的协议或异常记录仍可在该密文中保存 conversation 回退副本。verified provider request/response 通过 reconstructed API 下载；raw API 仅对 `retention_state=full` 开放，`metadata` 返回 `410 raw_not_retained`。所有管理证据响应均带 `Cache-Control: no-store`。
 
 NewAPI 相关配置统一放在 `newapi` 下：`url` 是唯一上游，`proxy_url` 是可选显式 HTTP(S) 代理。`response_header_timeout_seconds` 控制等待 NewAPI 响应头/流式首包的时间，默认 `300` 秒；超长推理部署应设置为高于 NewAPI 自身超时。`preserve_host` 默认关闭，启用后审计与 passthrough 分支都会保留客户端面向的 Host，同时仍使用 `newapi.url` 建立上游连接。若 audit-proxy 所在环境不能直接访问远程 NewAPI，宿主机二进制通常可填写 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
 
@@ -141,10 +141,11 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 
 - 默认数据库为 SQLite WAL，数据库和 `audit.key` 必须作为同一个备份集保存。
 - 在线备份必须使用 SQLite backup API，不能只复制正在使用的主 DB 文件。
+- OpenAI verified 2xx/3xx 请求在对象重建校验和语义完整性事件写入成功后删除 raw chunks；拦截、4xx/5xx、采集、解析、上游或重建异常保留 `full` raw。
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
 - 管理端即使只监听 loopback，也必须鉴权；支持 Bearer token 和 Web UI 的七天 HttpOnly Cookie。
-- 审计列表只额外返回解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情和 raw Body 会返回更多明文证据，所有管理接口都受 Admin Token 或管理 Cookie 保护并禁止缓存。
-- 对话视图是从原始 JSON/SSE 派生的便捷展示；原始 HTTP 证据、长度、哈希和完整性状态仍是权威依据。
+- 审计列表只额外返回解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情、reconstructed、timeline 和 full raw 都受 Admin Token 或管理 Cookie 保护并禁止缓存。
+- metadata 记录的权威校验依据是四阶段长度/SHA-256、有序对象引用、provider reconstruction hash 和 HMAC 完整性链；full 异常记录另保留可认证解密的原始字节。
 - 配置文件、数据库和 key 应只允许运行账户访问。
 
 备份流程见[备份与恢复](doc/deployment/backup-and-restore.md)。
@@ -154,6 +155,7 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 - 本项目只能记录 Nginx、audit-proxy 和 NewAPI 边界上实际观察到的数据。
 - 它看不到 NewAPI 后方的渠道选择、厂商请求、厂商原始响应、内部重试或渠道密钥。
 - 它不提供 TCP、TLS、HTTP/2 frame、Header 原始大小写或 chunk framing 级别的取证保真。
+- 代理与 body interceptor 最多允许 512 MiB；当前异步 parser 为控制单 worker 内存，单侧解码上限为 64 MiB。超限请求仍透明转发并保留 full raw，但不会获得内容寻址重建和 item 级压缩。
 - 当前不支持 WebSocket/Realtime、多租户、高可用、在线导出、DELETE API 或自动 VACUUM。
 - 这是个人单机项目，不以企业级审计平台为目标。
 

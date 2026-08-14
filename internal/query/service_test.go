@@ -66,6 +66,71 @@ func TestStreamRawDecryptsAndVerifiesCompleteBody(t *testing.T) {
 	}
 }
 
+func TestRawFallsBackToClientFacingStageWhenProviderStageIsMissing(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name  string
+		side  Side
+		stage string
+	}{
+		{name: "rejected request", side: SideRequest, stage: sqlite.StageRequestReceived},
+		{name: "local response", side: SideResponse, stage: sqlite.StageResponseSent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			cipher := testCipher(t)
+			auditID := "audit-fallback-" + strings.ReplaceAll(test.name, " ", "-")
+			plaintext := []byte("fallback evidence")
+			digest := sha256.Sum256(plaintext)
+			aad, err := security.AAD(auditID, "body_chunk", test.stage, "0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			encrypted, err := cipher.Encrypt(aad, plaintext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &fakeStore{
+				healthy: true,
+				rawMetaByStage: map[string]sqlite.RawBodyMetadata{
+					test.stage: {
+						AuditID: auditID, Stage: test.stage, SourceStage: test.stage,
+						RetentionState: sqlite.RetentionFull,
+						ObservedLength: int64(len(plaintext)), StoredLength: int64(len(plaintext)),
+						SHA256: digest[:], HashComplete: true, EOFSeen: true, State: sqlite.StageStateComplete,
+					},
+				},
+				chunksByStage: map[string][]sqlite.BodyChunk{
+					test.stage: {{
+						AuditID: auditID, Stage: test.stage, Seq: 0, Offset: 0,
+						PlaintextLength: len(plaintext), DataEnc: encrypted,
+					}},
+				},
+			}
+			service, err := New(store, cipher)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := service.RawMeta(context.Background(), auditID, test.side)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !metadata.Complete || metadata.StoredLength != int64(len(plaintext)) {
+				t.Fatalf("raw metadata = %+v", metadata)
+			}
+			var output bytes.Buffer
+			if err := service.StreamRaw(context.Background(), auditID, test.side, &output); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(output.Bytes(), plaintext) {
+				t.Fatalf("raw output = %q", output.Bytes())
+			}
+		})
+	}
+}
+
 func TestStreamRawRejectsTamperedCiphertextWithoutPlaintext(t *testing.T) {
 	t.Parallel()
 
@@ -178,6 +243,7 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 
 	cipher := testCipher(t)
 	ended := int64(9_007_199_254_740_995)
+	ttftNS := int64(123_456_789)
 	tokenID := int64(42)
 	tokenName := "personal"
 	userID := int64(7)
@@ -190,6 +256,7 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 				AuditID: "audit-page", StartedAtNS: ended - 1, EndedAtNS: &ended,
 				RouteID: "route", Protocol: "openai", ParserName: "openai.responses",
 				Method: "POST", Path: "/v1/responses", Mode: "available",
+				TTFTNS:        &ttftNS,
 				ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete,
 				ParseStatus: sqlite.ParseOK, NewAPIRequestID: &requestID, CallerStatus: sqlite.CallerResolved,
 				NewAPIUserID: &userID, Username: &username, NewAPITokenID: &tokenID, TokenName: &tokenName,
@@ -211,7 +278,7 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 	if len(page.Items) != 1 || page.Items[0].NewAPIUserID == nil || *page.Items[0].NewAPIUserID != userID ||
 		page.Items[0].Username == nil || *page.Items[0].Username != username ||
 		page.Items[0].NewAPIRequestID == nil || *page.Items[0].NewAPIRequestID != requestID ||
-		page.Items[0].CallerStatus != sqlite.CallerResolved {
+		page.Items[0].CallerStatus != sqlite.CallerResolved || page.Items[0].TTFTNS == nil || *page.Items[0].TTFTNS != ttftNS {
 		t.Fatalf("mapped token snapshot = %+v", page.Items)
 	}
 	if _, err := service.List(context.Background(), Filter{}, Cursor{BeforeID: "audit-page"}, 1); !errors.Is(err, ErrInvalidQuery) {
@@ -785,11 +852,15 @@ type fakeStore struct {
 	detail           sqlite.AuditQueryDetail
 	detailErr        error
 	rawMeta          sqlite.RawBodyMetadata
+	rawMetaByStage   map[string]sqlite.RawBodyMetadata
 	rawErr           error
 	chunks           []sqlite.BodyChunk
+	chunksByStage    map[string][]sqlite.BodyChunk
 	chunkErr         error
 	requestHeaders   map[string][]sqlite.HeaderEvidence
 	requestHeaderErr error
+	timeline         sqlite.StoredStreamTimeline
+	timelineErr      error
 }
 
 func (store *fakeStore) Healthy() bool { return store.healthy }
@@ -809,17 +880,32 @@ func (store *fakeStore) QueryAuditDetail(context.Context, string) (sqlite.AuditQ
 	return store.detail, store.detailErr
 }
 
-func (store *fakeStore) RawBodyMeta(context.Context, string, string) (sqlite.RawBodyMetadata, error) {
+func (store *fakeStore) RawBodyMeta(_ context.Context, _, stage string) (sqlite.RawBodyMetadata, error) {
+	if store.rawMetaByStage != nil {
+		metadata, ok := store.rawMetaByStage[stage]
+		if !ok {
+			return sqlite.RawBodyMetadata{}, sql.ErrNoRows
+		}
+		return metadata, store.rawErr
+	}
 	return store.rawMeta, store.rawErr
 }
 
-func (store *fakeStore) StreamBodyChunks(_ context.Context, _, _ string, visit func(sqlite.BodyChunk) error) error {
-	for _, chunk := range store.chunks {
+func (store *fakeStore) StreamBodyChunks(_ context.Context, _, stage string, visit func(sqlite.BodyChunk) error) error {
+	chunks := store.chunks
+	if store.chunksByStage != nil {
+		chunks = store.chunksByStage[stage]
+	}
+	for _, chunk := range chunks {
 		if err := visit(chunk); err != nil {
 			return err
 		}
 	}
 	return store.chunkErr
+}
+
+func (store *fakeStore) QueryStreamTimeline(context.Context, string, string) (sqlite.StoredStreamTimeline, error) {
+	return store.timeline, store.timelineErr
 }
 
 func testCipher(t *testing.T) *security.AESGCM {

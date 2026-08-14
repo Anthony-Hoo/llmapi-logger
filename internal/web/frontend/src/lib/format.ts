@@ -54,6 +54,26 @@ export function formatBytes(value: number | string | null | undefined): string {
   return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${units[unit]}`;
 }
 
+export function formatDurationNS(value: NanoTime | null | undefined): string {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  const nanoseconds = Number(value);
+  if (!Number.isFinite(nanoseconds) || nanoseconds < 0) {
+    return "—";
+  }
+  if (nanoseconds < 1_000) {
+    return `${Math.round(nanoseconds)} ns`;
+  }
+  if (nanoseconds < 1_000_000) {
+    return `${formatAmount(nanoseconds / 1_000)} µs`;
+  }
+  if (nanoseconds < 1_000_000_000) {
+    return `${formatAmount(nanoseconds / 1_000_000)} ms`;
+  }
+  return `${formatAmount(nanoseconds / 1_000_000_000)} s`;
+}
+
 export function humanizeStage(stage: string): string {
   return stageLabels[stage] ?? stage;
 }
@@ -98,4 +118,14 @@ export function displayValue(value: unknown): string {
     return value ? "是" : "否";
   }
   return String(value);
+}
+
+function formatAmount(value: number): string {
+  if (value >= 100) {
+    return value.toFixed(0);
+  }
+  if (value >= 10) {
+    return value.toFixed(1);
+  }
+  return value.toFixed(2);
 }

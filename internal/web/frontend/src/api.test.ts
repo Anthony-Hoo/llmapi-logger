@@ -51,6 +51,42 @@ describe("API client", () => {
 	expect(calledURL).toBe("/api/v1/newapi/callers");
   });
 
+  it("downloads reconstructed JSON and reads a verified stream timeline", async () => {
+    const calls: string[] = [];
+    const fetcher = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/timeline/response")) {
+        return new Response(JSON.stringify({
+          stage: "response_received_from_newapi",
+          observed_length: 100,
+          event_count: 2,
+          first_event_at_ns: "10",
+          last_event_at_ns: "20",
+          complete: true,
+          points: [{ offset: 40, at_ns: "10" }, { offset: 100, at_ns: "20" }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ model: "model-example" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const client = createApiClient(vi.fn(), fetcher);
+
+    const reconstructed = await client.getReconstructedBody("audit-example", "request");
+    const timeline = await client.getStreamTimeline("audit-example", "response");
+
+    expect(calls).toEqual([
+      "/api/v1/audits/audit-example/reconstructed/request",
+      "/api/v1/audits/audit-example/timeline/response",
+    ]);
+    expect(reconstructed.filename).toBe("audit-example-reconstructed-request.json");
+    expect(await reconstructed.blob.text()).toContain("model-example");
+    expect(timeline.event_count).toBe(2);
+    expect(timeline.points).toHaveLength(2);
+  });
+
   it("manages authenticated User-Agent rules without Authorization headers", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {

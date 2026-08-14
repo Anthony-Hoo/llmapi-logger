@@ -2,40 +2,52 @@
 
 ## 1. 目标
 
-个人项目的测试集中验证四件事：
+发布门禁验证五类结果：
 
-1. 白名单请求和响应没有被代理改写。
-2. interceptor 在 NewAPI 前 fail-closed，审计故障遵循 available/strict 语义。
-3. 加密证据、异步 parser、查询和管理鉴权能够串成完整链路。
-4. 阶段 4 的恢复、gap、retention、安全日志和 readiness 行为稳定。
+1. 代理协议与路由没有被审计功能改写；
+2. interceptor、available/strict 和调用者关联语义不回退；
+3. OpenAI 多轮/多模态内容按对象复用且任意轮可准确重建；
+4. raw retention、SSE timeline、recovery、retention checkpoint 和完整性链可靠；
+5. 数据库、构建产物和 Git 变更不包含敏感明文或真实部署资料。
 
-不建设独立故障平台、复杂性能门禁或多环境 CI 矩阵。
+测试只使用临时 SQLite、`httptest`、fake NewAPI 和脱敏 fixture，不连接真实生产。
 
-## 2. 现有测试布局
+## 2. 测试布局
 
 ~~~text
-internal/**/**_test.go                  # 模块单元测试
-tests/integration/                     # 代理、持久化和管理 API 端到端测试
-internal/web/frontend/src/*.test.ts    # 前端 API 与格式化测试
+internal/auditmodel/*_test.go            # canonical/hash/binary/delta/rebuild
+internal/storage/sqlite/*_test.go         # schema/writer/graph/integrity/recovery/retention
+internal/parser/**/*_test.go              # JSON/SSE/normalizer/evidence limits
+internal/query/*_test.go                  # detail/reconstruction/timeline/capacity
+internal/web/*_test.go                    # 管理 API、鉴权和 no-store
+tests/integration/*_test.go               # 代理到 SQLite/API 的端到端链路
+internal/web/frontend/src/*.test.*        # API client、UI、格式化和安全 Markdown
 ~~~
 
-测试使用 Go 标准库、`httptest`、临时 SQLite、fake NewAPI 和 Vitest；不依赖外部 NewAPI 服务。
+## 3. 内容寻址专项覆盖
 
-## 3. 核心覆盖
+- OpenAI Chat、Completions、Responses/Compact 的 JSON 与 SSE。
+- developer/system/user/assistant/tool、reasoning、并行 tool call/result、客户端 metadata。
+- Responses 完整历史重复发送、`previous_response_id` 和 conversation key。
+- root、continuation、retry、branch、truncate、middle edit、rollback、summary compression。
+- data URL 按解码字节 hash；不同 Base64 padding/header/MIME 的同一 PNG 只保存一个 binary object。
+- `file_id` 外部引用、inline `file_data` 和实际附件字节。
+- provider request/response canonical 重建 hash、sequence hash 和 object conflict 校验。
+- 24 轮重复完整历史容量回归：context ops 近似线性，content object 数显著低于 item occurrence，SQLite 体积显著低于重复 wire Body。
 
-- Method + Path 白名单、安全非 LLM passthrough，以及受保护/危险未匹配路径 `404` 且不创建 audit。
-- Path、RawQuery、重复 Query/Header、JSON、gzip、multipart、binary、空 Body 和大 Body 透明性。
-- SSE 首块及时 flush、字节顺序和取消释放。
-- interceptor 顺序、首个 reject、panic/error/非法结果、Body 单次预读与原字节 replay、`413 body_too_large`。
-- 四阶段 length/hash/完整性、AES-GCM 篡改检测、DB/WAL 明文扫描。
-- OpenAI、Anthropic、Gemini 常见 JSON/SSE 与 gzip 限额。
-- parser pending/processing 恢复、panic 隔离和加密 parsed JSON。
-- 列表、详情、raw 流式解密、Bearer/Cookie 鉴权、会话过期和匿名静态 UI shell。
-- NewAPI 安全用户目录分页、五分钟刷新、失败保留旧快照；response request ID 捕获、全站日志精确查询、持久化有限重试、用户/Token 身份回填和按用户/Token ID 筛选。
-- 只展示调用者、时间、模型和 User-Agent 的紧凑原生审计列表；普通列表解密返回 User-Agent，路径/状态留在详情或高级筛选；同时覆盖用户/模型/User-Agent/Token ID 筛选、caller 四种状态、assistant 安全 GFM Markdown、工具调用和多轮对话展示。
-- 启动 interrupted/partial 恢复、聚合 gap、retention 级联、三态 readiness 和安全 JSON 日志。
+## 4. 证据与故障覆盖
 
-## 4. 固定验证命令
+- 四阶段 length/hash/source stage，约 1 MiB raw chunk 聚合和双阶段字节复用。
+- 正常 2xx/3xx verified 后 raw 为 metadata；拦截、4xx/5xx、采集不完整、parser/normalizer/rebuild 失败保留 full。
+- malformed inline binary 时四阶段 raw 可完整下载，不能误删。
+- SSE 网络 read 分块不会产生百万小行；逻辑 event count、TTFT、首末 event、100,000 点截断语义正确。
+- AES-GCM/AAD、content/binary hash、length/compression、HMAC event chain 篡改失败。
+- process-exit recovery 把未终结记录和 timeline 标 partial/full，重复执行幂等。
+- retention 删除父轮次前生成 root checkpoint；保留子轮次继续重建，孤立对象被 GC。
+- 成对 HTTP Body 只在终结时确认完整长度/hash 一致后合并；人为制造长度或字节差异时保留两份 owning chunks 并标记 `body_stage_mismatch`。
+- writer 事务失败、queue 满、parser panic、caller 延迟与客户端取消不泄露底层错误或敏感数据。
+
+## 5. 固定验证命令
 
 ~~~bash
 cd internal/web/frontend
@@ -49,43 +61,55 @@ go vet ./...
 CGO_ENABLED=0 go build -trimpath -o ./bin/audit-proxy ./cmd/audit-proxy
 ~~~
 
-跨平台发布二进制使用：
+跨平台发布构建：
 
 ~~~powershell
 .\scripts\build.ps1
 ~~~
 
-或：
-
 ~~~bash
 bash ./scripts/build.sh
 ~~~
 
-两个脚本都生成 Windows/Linux amd64、`CGO_ENABLED=0` 的二进制。
+Windows 脚本输出 Windows/Linux amd64，均使用 `CGO_ENABLED=0`。若本机 PATH 没有 Node，可以直接使用受控工具链中的 Node 调用本地 `node_modules`；这不改变源码或锁文件。
 
-## 5. Nginx 与容器检查
+## 6. 本地容器与服务 smoke
 
-静态检查应确认：
+具备 Docker/Podman 时至少验证：
 
-- Nginx 将全部数据面请求统一送入 audit-proxy，不存在 NewAPI fallback。
-- 进程内 dispatcher 对配置 LLM route 审计、安全非 LLM 路径 passthrough，并对受保护/危险路径 fail-closed。
-- buffering、cache 和 upstream retry 已关闭。
-- `proxy_pass` 没有 URI 后缀。
-- 管理端只绑定宿主机 `127.0.0.1:8081`，数据端没有 host port。
-- 最终镜像没有 Node、前端源码、Go 源码或构建工具。
+- 镜像构建和 `docker compose config`；
+- 最终镜像不含 Node、pnpm、Go 源码或构建工具；
+- fake/upstream 环境下一个非流式请求、一个 SSE 请求、一个 `/v1/models` passthrough 和一个 fail-closed 路径；
+- 管理 API 缺凭证为 401，登录 Cookie 可读取列表；
+- verified 请求 reconstructed JSON 可下载、raw 返回 410；异常请求 raw 可下载；
+- 重启后数据库 quick check、integrity chain 和历史重建正常。
 
-实际有 Docker/Nginx 的环境再执行 `docker compose config`、镜像构建、`nginx -t` 和流式 smoke test。未运行的外部工具检查不得写成已通过。
+没有可用容器运行时或 Nginx 时，应明确记录“未执行”，不能写成已通过。
 
-## 6. 发布前清单
+## 7. 脱敏与明文扫描
 
-- `pnpm test`、`pnpm build`、`go test -count=1 ./...` 和 `go vet ./...` 通过。
-- Windows/Linux amd64 的 CGO=0 构建通过。
-- DB/WAL 与普通日志中找不到测试凭据、Body 或主密钥明文。
-- strict admission 故障不会调用 Fake NewAPI；available 审计故障仍能转发并产生安全日志或 gap。
-- 重启恢复、retention 批次边界和级联删除测试通过。
-- loopback 管理 API 缺少 Bearer token 或有效 Cookie 时返回 `401`。
-- Cookie 固定七天过期；调用者下拉只提交 NewAPI 用户 ID，Token ID 留在高级筛选；assistant Markdown 不执行原始 HTML、危险协议或远程图片。
-- 用户目录或 caller 查询失败不阻断转发；审计与管理响应只出现 request ID 和用户/Token 元数据，不出现完整/打码用户 API Key 或管理 access token。
-- 路由、受保护路径边界、parser、示例配置和 Nginx 统一数据面入口保持一致。
+发布前扫描以下范围：
 
-本阶段不验收指标、导出、手工删除、自动 VACUUM、复杂重连或长期性能基线。
+- 临时测试 DB、WAL 和 SHM；
+- 普通 JSON 日志；
+- `git diff`、暂存区和最终提交范围；
+- `internal/web/dist` 与跨平台二进制可搜索字符串；
+- README、doc、configs、scripts 和测试 fixture。
+
+禁止出现真实公司/组织名称、生产域名、服务器地址或账号、本地绝对路径、API Key、Access/Admin Token、密码、私钥、完整 DSN、客户消息或多模态数据。公开示例只使用 `example.com`、占位符和文档保留地址。
+
+`.env.local`、`configs/*.local.yaml`、`*.private.yaml`、`*.runtime.yaml` 必须保持 Git ignored；扫描工具不得把这些真实值回显到可公开日志。
+
+## 8. 发布前清单
+
+- 当前分支为 `main`，没有额外特性分支。
+- 前端 test、TypeScript、Vite build、Go full test、vet、Windows/Linux CGO=0 构建全部通过。
+- `git diff --check` 通过，生成的 `internal/web/dist` 与源码一致。
+- schema 20 表、generation 2、破坏性 migration 和默认 UA 规则测试通过。
+- provider JSON 重建、随机轮次抽查、容量回归和 full/metadata retention 测试通过。
+- 512 MiB 代理/拦截上限与 64 MiB parser 单侧解码上限已分别验证和记录，验收报告不得混淆两者。
+- recovery、retention checkpoint/GC 和 integrity chain 测试通过。
+- DB/WAL/日志/构建产物/Git diff 脱敏扫描通过。
+- loopback 管理 API 仍要求 Bearer/Cookie，Cookie 与 Markdown 安全测试通过。
+- Nginx/容器 smoke 若环境可用则通过；否则在验收报告中列为未执行。
+- 生产清库、部署、Git commit 和 push 必须在本地验收报告提交后取得维护者明确批准。

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/app"
+	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
@@ -34,7 +36,7 @@ const (
 	stageRequestSent      = "request_sent_to_newapi"
 	stageResponseReceived = "response_received_from_newapi"
 	stageResponseSent     = "response_from_newapi_sent_to_nginx"
-	bodyChunkSize         = 32 << 10
+	bodyChunkSize         = 1 << 20
 )
 
 type persistedAudit struct {
@@ -56,6 +58,7 @@ type persistedStage struct {
 
 type persistedBody struct {
 	stage          string
+	sourceStage    string
 	observedLength int64
 	storedLength   int64
 	digest         []byte
@@ -408,6 +411,24 @@ func TestAuditPersistsFourEncryptedBodyStages(t *testing.T) {
 		assertBodyAggregate(t, body, plaintext)
 		assertEncryptedChunks(t, database, cipher, audit.auditID, stageName, plaintext)
 	}
+	wantSources := map[string]string{
+		stageRequestReceived:  stageRequestReceived,
+		stageRequestSent:      stageRequestReceived,
+		stageResponseReceived: stageResponseReceived,
+		stageResponseSent:     stageResponseReceived,
+	}
+	for stageName, wantSource := range wantSources {
+		if got := bodies[stageName].sourceStage; got != wantSource {
+			t.Errorf("stage %s source_stage = %q, want %q", stageName, got, wantSource)
+		}
+	}
+	var owningStages int
+	if err := database.QueryRow(`SELECT COUNT(DISTINCT stage) FROM body_chunks WHERE audit_id = ?`, audit.auditID).Scan(&owningStages); err != nil {
+		t.Fatal(err)
+	}
+	if owningStages != 2 {
+		t.Fatalf("owning body chunk stages = %d, want request and response sources only", owningStages)
+	}
 
 	uriAAD, err := security.AAD(audit.auditID, "request_uri")
 	if err != nil {
@@ -608,7 +629,6 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 			t.Fatalf("admin list leaked secret %q", secret)
 		}
 	}
-
 	detailBody := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID)
 	var detail adminAuditDetail
 	if err := json.Unmarshal(detailBody, &detail); err != nil {
@@ -650,13 +670,144 @@ func TestAdminAPIRequiresBearerAndServesParsedAudit(t *testing.T) {
 		t.Fatalf("admin conversation messages = %+v", detail.Conversation.Messages)
 	}
 
-	rawRequest := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/raw/request")
-	if !bytes.Equal(rawRequest, requestBody) {
-		t.Fatal("raw request download differs from bytes sent to NewAPI")
+	for _, side := range []string{"request", "response"} {
+		status, body := authorizedAdminResponse(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/raw/"+side)
+		if status != http.StatusGone || !bytes.Contains(body, []byte("raw_not_retained")) {
+			t.Fatalf("compacted raw %s = %d %s, want 410 raw_not_retained", side, status, body)
+		}
 	}
-	rawResponse := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/raw/response")
-	if !bytes.Equal(rawResponse, responseBody) {
-		t.Fatal("raw response download differs from bytes received from NewAPI")
+	reconstructedRequest := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/reconstructed/request")
+	assertJSONEquivalent(t, reconstructedRequest, requestBody)
+	reconstructedResponse := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/reconstructed/response")
+	assertJSONEquivalent(t, reconstructedResponse, responseBody)
+}
+
+func TestMalformedInlineBinaryRetainsCompleteRawEvidence(t *testing.T) {
+	requestBody := []byte(`{"model":"model-example","messages":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,%%%invalid%%%"}]}]}`)
+	responseBody := []byte(`{"id":"response-example","model":"model-result","choices":[{"message":{"role":"assistant","content":"request reached upstream"},"finish_reason":"stop"}]}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil || !bytes.Equal(body, requestBody) {
+			http.Error(response, "invalid request", http.StatusBadRequest)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(responseBody)
+	}))
+	defer upstream.Close()
+
+	cfg := loadConfig(t, upstream.URL, "/v1/chat/completions", false)
+	running := startApp(t, cfg)
+	client := &http.Client{Timeout: integrationTimeout}
+	request, err := http.NewRequest(http.MethodPost, running.baseURL+"/v1/chat/completions", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "Codex Desktop integration")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotResponse, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK || !bytes.Equal(gotResponse, responseBody) {
+		t.Fatalf("response = %d %q err=%v", response.StatusCode, gotResponse, err)
+	}
+
+	audit := waitForFinishedAudit(t, cfg.DBPath)
+	errorCode := waitForParserError(t, cfg.DBPath, audit.auditID)
+	if errorCode != "normalization_failed" && errorCode != "reconstruction_failed" {
+		t.Fatalf("parser error_code = %q", errorCode)
+	}
+	database := openAuditDatabase(t, cfg.DBPath)
+	defer database.Close()
+	var nonFullBodies, chunkCount int
+	if err := database.QueryRow(`
+SELECT
+    (SELECT COUNT(*) FROM body_streams WHERE audit_id = ? AND retention_state <> 'full'),
+    (SELECT COUNT(*) FROM body_chunks WHERE audit_id = ?)
+`, audit.auditID, audit.auditID).Scan(&nonFullBodies, &chunkCount); err != nil {
+		t.Fatal(err)
+	}
+	if nonFullBodies != 0 || chunkCount < 2 {
+		t.Fatalf("non-full bodies/chunks = %d/%d", nonFullBodies, chunkCount)
+	}
+	for side, want := range map[string][]byte{"request": requestBody, "response": responseBody} {
+		status, body := authorizedAdminResponse(t, client, running.adminURL+"/api/v1/audits/"+audit.auditID+"/raw/"+side)
+		if status != http.StatusOK || !bytes.Equal(body, want) {
+			t.Fatalf("raw %s = %d %q", side, status, body)
+		}
+	}
+}
+
+func TestSSEStoresLogicalTimelineAndReconstructedOutput(t *testing.T) {
+	requestBody := []byte(`{"model":"gpt-stream-example","stream":true,"messages":[{"role":"user","content":"timeline prompt"}]}`)
+	events := []string{
+		`data: {"id":"chatcmpl-stream","model":"gpt-stream-example","choices":[{"index":0,"delta":{"role":"assistant","content":"hello "}}]}` + "\n\n",
+		`data: {"id":"chatcmpl-stream","choices":[{"index":0,"delta":{"content":"world"},"finish_reason":"stop"}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil || !bytes.Equal(body, requestBody) {
+			http.Error(response, "invalid request", http.StatusBadRequest)
+			return
+		}
+		response.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := response.(http.Flusher)
+		for _, event := range events {
+			_, _ = io.WriteString(response, event)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := loadConfig(t, upstream.URL, "/v1/chat/completions", false)
+	running := startApp(t, cfg)
+	client := &http.Client{Timeout: integrationTimeout}
+	request, err := http.NewRequest(http.MethodPost, running.baseURL+"/v1/chat/completions", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "Codex Desktop integration")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseBytes, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK || !bytes.Equal(responseBytes, []byte(strings.Join(events, ""))) {
+		t.Fatalf("stream response = %d %q err=%v", response.StatusCode, responseBytes, err)
+	}
+	summary, _ := waitForParsedAdminAudit(t, client, running.adminURL)
+	timelineBody := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/timeline/response")
+	var timeline struct {
+		EventCount int64 `json:"event_count"`
+		Complete   bool  `json:"complete"`
+		Points     []struct {
+			Offset int64  `json:"offset"`
+			AtNS   string `json:"at_ns"`
+		} `json:"points"`
+	}
+	if err := json.Unmarshal(timelineBody, &timeline); err != nil {
+		t.Fatal(err)
+	}
+	if timeline.EventCount != int64(len(events)) || !timeline.Complete || len(timeline.Points) != len(events) {
+		t.Fatalf("timeline = %s", timelineBody)
+	}
+	for index := 1; index < len(timeline.Points); index++ {
+		if timeline.Points[index].Offset <= timeline.Points[index-1].Offset {
+			t.Fatalf("timeline offsets are not ordered: %s", timelineBody)
+		}
+	}
+	reconstructed := authorizedAdminGET(t, client, running.adminURL+"/api/v1/audits/"+summary.AuditID+"/reconstructed/response")
+	if !bytes.Contains(reconstructed, []byte("hello world")) || !bytes.Contains(reconstructed, []byte(`"format":"sse"`)) {
+		t.Fatalf("reconstructed stream = %s", reconstructed)
 	}
 }
 
@@ -678,7 +829,38 @@ func waitForParsedAdminAudit(t *testing.T, client *http.Client, adminURL string)
 	return adminAuditSummary{}, nil
 }
 
+func waitForParserError(t *testing.T, path, auditID string) string {
+	t.Helper()
+	database := openAuditDatabase(t, path)
+	defer database.Close()
+	deadline := time.Now().Add(integrationTimeout)
+	var lastStatus string
+	for time.Now().Before(deadline) {
+		var errorCode sql.NullString
+		err := database.QueryRow(`
+SELECT a.parse_status, p.error_code
+FROM audit_records AS a
+LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
+WHERE a.audit_id = ?`, auditID).Scan(&lastStatus, &errorCode)
+		if err == nil && (lastStatus == "partial" || lastStatus == "error") && errorCode.Valid {
+			return errorCode.String
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for parser failure; last status %q", lastStatus)
+	return ""
+}
+
 func authorizedAdminGET(t *testing.T, client *http.Client, url string) []byte {
+	t.Helper()
+	status, body := authorizedAdminResponse(t, client, url)
+	if status != http.StatusOK {
+		t.Fatalf("admin response status = %d, want 200: %s", status, body)
+	}
+	return body
+}
+
+func authorizedAdminResponse(t *testing.T, client *http.Client, url string) (int, []byte) {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -694,10 +876,21 @@ func authorizedAdminGET(t *testing.T, client *http.Client, url string) []byte {
 	if readErr != nil {
 		t.Fatalf("read admin response: %v", readErr)
 	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("admin response status = %d, want 200: %s", response.StatusCode, body)
+	return response.StatusCode, body
+}
+
+func assertJSONEquivalent(t *testing.T, got, want []byte) {
+	t.Helper()
+	var gotValue, wantValue any
+	if err := json.Unmarshal(got, &gotValue); err != nil {
+		t.Fatalf("decode reconstructed JSON: %v\n%s", err, got)
 	}
-	return body
+	if err := json.Unmarshal(want, &wantValue); err != nil {
+		t.Fatalf("decode expected JSON: %v\n%s", err, want)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("reconstructed JSON differs\ngot:  %s\nwant: %s", got, want)
+	}
 }
 
 func startApp(t *testing.T, cfg config.Config) *runningApp {
@@ -875,7 +1068,7 @@ WHERE audit_id = ?
 func readBodies(t *testing.T, database *sql.DB, auditID string) map[string]persistedBody {
 	t.Helper()
 	rows, err := database.Query(`
-SELECT stage, observed_length, stored_length, sha256, hash_complete, eof_seen, state
+SELECT stage, source_stage, observed_length, stored_length, sha256, hash_complete, eof_seen, state
 FROM body_streams
 WHERE audit_id = ?
 `, auditID)
@@ -888,6 +1081,7 @@ WHERE audit_id = ?
 		var body persistedBody
 		if err := rows.Scan(
 			&body.stage,
+			&body.sourceStage,
 			&body.observedLength,
 			&body.storedLength,
 			&body.digest,
@@ -941,12 +1135,18 @@ func assertEncryptedChunks(
 	want []byte,
 ) {
 	t.Helper()
+	var sourceStage string
+	if err := database.QueryRow(`
+SELECT source_stage FROM body_streams WHERE audit_id = ? AND stage = ?
+`, auditID, stage).Scan(&sourceStage); err != nil {
+		t.Fatalf("resolve %s chunk source: %v", stage, err)
+	}
 	rows, err := database.Query(`
-SELECT seq, "offset", plaintext_length, data_enc
+SELECT seq, "offset", plaintext_length, encoded_length, compression, data_enc
 FROM body_chunks
 WHERE audit_id = ? AND stage = ?
 ORDER BY seq
-`, auditID, stage)
+`, auditID, sourceStage)
 	if err != nil {
 		t.Fatalf("query %s chunks: %v", stage, err)
 	}
@@ -956,9 +1156,10 @@ ORDER BY seq
 	var chunkCount int
 	for rows.Next() {
 		var seq, offset int64
-		var plaintextLength int
+		var plaintextLength, encodedLength int
+		var compression string
 		var encrypted []byte
-		if err := rows.Scan(&seq, &offset, &plaintextLength, &encrypted); err != nil {
+		if err := rows.Scan(&seq, &offset, &plaintextLength, &encodedLength, &compression, &encrypted); err != nil {
 			t.Fatalf("scan %s chunk: %v", stage, err)
 		}
 		if seq != int64(chunkCount) {
@@ -970,21 +1171,29 @@ ORDER BY seq
 		if plaintextLength <= 0 || plaintextLength > bodyChunkSize {
 			t.Errorf("stage %s chunk plaintext length = %d, want 1..%d", stage, plaintextLength, bodyChunkSize)
 		}
-		if len(encrypted) != plaintextLength+security.NonceSize+16 {
+		if len(encrypted) != encodedLength+security.NonceSize+16 {
 			t.Errorf(
 				"stage %s encrypted chunk length = %d, want %d",
 				stage,
 				len(encrypted),
-				plaintextLength+security.NonceSize+16,
+				encodedLength+security.NonceSize+16,
 			)
 		}
-		aad, err := security.AAD(auditID, "body_chunk", stage, strconv.FormatInt(seq, 10))
+		aad, err := security.AAD(auditID, "body_chunk_v2", sourceStage, strconv.FormatInt(seq, 10), compression)
 		if err != nil {
 			t.Fatalf("build %s chunk AAD: %v", stage, err)
 		}
-		plaintext, err := cipher.Decrypt(aad, encrypted)
+		encoded, err := cipher.Decrypt(aad, encrypted)
 		if err != nil {
 			t.Fatalf("decrypt %s chunk %d: %v", stage, seq, err)
+		}
+		if len(encoded) != encodedLength {
+			t.Fatalf("stage %s chunk %d encoded length = %d, want %d", stage, seq, len(encoded), encodedLength)
+		}
+		plaintext, err := bodycodec.Decode(encoded, compression, plaintextLength)
+		clear(encoded)
+		if err != nil {
+			t.Fatalf("decode %s chunk %d: %v", stage, seq, err)
 		}
 		if len(plaintext) != plaintextLength {
 			t.Errorf("stage %s chunk %d decrypted length = %d, want %d", stage, seq, len(plaintext), plaintextLength)
@@ -996,7 +1205,7 @@ ORDER BY seq
 		t.Fatalf("iterate %s chunks: %v", stage, err)
 	}
 	if chunkCount < 2 {
-		t.Errorf("stage %s chunk count = %d, want at least 2 for a >32 KiB body", stage, chunkCount)
+		t.Errorf("stage %s chunk count = %d, want at least 2 for a >1 MiB body", stage, chunkCount)
 	}
 	if !bytes.Equal(reconstructed, want) {
 		t.Errorf("stage %s decrypted chunks do not reconstruct the observed body", stage)

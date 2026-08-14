@@ -212,8 +212,10 @@ ORDER BY `+stageOrderSQL+`, kind, name, value_index`, auditID)
 
 func readBodies(ctx context.Context, transaction *sql.Tx, auditID string) ([]BodyStream, error) {
 	rows, err := transaction.QueryContext(ctx, `
-SELECT audit_id, stage, observed_length, stored_length, sha256,
-       hash_complete, eof_seen, state, error_code
+SELECT audit_id, stage, source_stage, observed_length, stored_length, sha256,
+	   hash_complete, eof_seen, state, retention_state,
+	   first_observed_at_ns, last_observed_at_ns, chunk_count,
+	   stream_event_count, stream_timeline_complete, error_code
 FROM body_streams
 WHERE audit_id = ?
 ORDER BY `+stageOrderSQL, auditID)
@@ -226,17 +228,25 @@ ORDER BY `+stageOrderSQL, auditID)
 	for rows.Next() {
 		var body BodyStream
 		var digest []byte
-		var hashComplete, eofSeen int
+		var hashComplete, eofSeen, timelineComplete int
+		var firstObserved, lastObserved sql.NullInt64
 		var errorCode sql.NullString
 		if err := rows.Scan(
 			&body.AuditID,
 			&body.Stage,
+			&body.SourceStage,
 			&body.ObservedLength,
 			&body.StoredLength,
 			&digest,
 			&hashComplete,
 			&eofSeen,
 			&body.State,
+			&body.RetentionState,
+			&firstObserved,
+			&lastObserved,
+			&body.ChunkCount,
+			&body.StreamEventCount,
+			&timelineComplete,
 			&errorCode,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: scan body: %w", err)
@@ -244,6 +254,9 @@ ORDER BY `+stageOrderSQL, auditID)
 		body.SHA256 = cloneBytes(digest)
 		body.HashComplete = hashComplete != 0
 		body.EOFSeen = eofSeen != 0
+		body.FirstObservedAtNS = nullInt64Pointer(firstObserved)
+		body.LastObservedAtNS = nullInt64Pointer(lastObserved)
+		body.StreamTimelineComplete = timelineComplete != 0
 		body.ErrorCode = nullStringPointer(errorCode)
 		bodies = append(bodies, body)
 	}
@@ -255,7 +268,8 @@ ORDER BY `+stageOrderSQL, auditID)
 
 func readChunks(ctx context.Context, transaction *sql.Tx, auditID string) ([]BodyChunk, error) {
 	rows, err := transaction.QueryContext(ctx, `
-SELECT audit_id, stage, seq, "offset", plaintext_length, observed_at_ns, data_enc
+SELECT audit_id, stage, seq, "offset", plaintext_length, encoded_length,
+       observed_at_ns, compression, data_enc
 FROM body_chunks
 WHERE audit_id = ?
 ORDER BY `+stageOrderSQL+`, seq`, auditID)
@@ -273,7 +287,9 @@ ORDER BY `+stageOrderSQL+`, seq`, auditID)
 			&chunk.Seq,
 			&chunk.Offset,
 			&chunk.PlaintextLength,
+			&chunk.EncodedLength,
 			&chunk.ObservedAtNS,
+			&chunk.Compression,
 			&chunk.DataEnc,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: scan chunk: %w", err)

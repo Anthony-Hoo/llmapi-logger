@@ -27,7 +27,7 @@ app 的 data-plane handler 只负责三态分发。proxy 提供 audited handler 
 
 从 http.DefaultTransport.Clone 创建 Transport。`newapi.proxy_url` 为空时固定 `Proxy=nil`；非空时使用解析后的显式 HTTP(S) proxy URL。两种情况都不使用 ProxyFromEnvironment。其余固定 DisableCompression=true、ForceAttemptHTTP2=true、MaxIdleConns=128、MaxIdleConnsPerHost=64；ResponseHeaderTimeout 来自 `newapi.response_header_timeout_seconds`，默认 300 秒。
 
-ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB BufferPool 和 FlushInterval=-1。禁止 httputil.DumpRequest、DumpResponse，以及对未限长 Body 直接使用 io.ReadAll；body interceptor 只能通过统一 helper 读取 `limit+1` 的有界数据。
+ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB 传输 BufferPool 和 FlushInterval=-1；该 BufferPool 与审计落库的约 1 MiB 聚合块不是同一概念。禁止 httputil.DumpRequest、DumpResponse，以及对未限长 Body 直接使用 io.ReadAll；body interceptor 只能通过统一 helper 读取 `limit+1` 的有界数据。
 
 ## 3. Rewrite
 
@@ -125,7 +125,7 @@ ReadCloser 规则：
 - body interceptor 的有界预读必须经过入站 wrapper；放行后的原字节 replay 再经过出站 wrapper。两阶段应得到相同 length/hash。
 - metadata reject 不为记录证据而额外 drain Body；关闭未读 Body，并按模块 03 的完整性规则结束入站阶段。
 
-每个 observer 同步更新 length/hash，再把最多 32 KiB 的拥有型 chunk 提交给 writer queue。
+每个 observer 同步更新 length/hash，并把字节聚合到约 1 MiB 后自适应压缩、独立加密，再提交 owning chunk。四阶段先各自采集；只有终结事务确认成对阶段的完整长度和 SHA-256 完全一致时，才删除后一阶段的重复 chunks 并通过 `source_stage` 复用前一阶段。短写或字节不一致会保留各自 chunks，并以 `body_stage_mismatch`/partial 进入异常证据路径。
 
 ## 8. ResponseWriter
 

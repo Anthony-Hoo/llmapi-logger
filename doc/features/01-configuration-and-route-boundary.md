@@ -62,7 +62,7 @@ routes:
 | read header / idle timeout | 10 s / 120 s |
 | NewAPI dial | 10 s |
 | NewAPI response header | 300 s，可配置 1–86400 s |
-| Body chunk | 32 KiB |
+| 审计 Body 聚合块 | 约 1 MiB，自适应压缩后独立加密 |
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | SQLite busy timeout | 5 s |
 | parser workers | 1 |
@@ -167,7 +167,7 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情和原始 Body 读取。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值，raw request/response Body 只按需读取。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情、verified reconstructed JSON、SSE timeline 和异常 raw Body。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值；raw request/response Body 只对 `retention_state=full` 按需读取，metadata 使用 reconstructed API。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 

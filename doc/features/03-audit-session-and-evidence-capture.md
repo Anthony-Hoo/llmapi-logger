@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-一次命中明确 LLM API route 的请求对应一个 audit。NewAPI health、login、admin、models、UI 和其他安全非 LLM 请求即使经本程序 passthrough，也不进入本模块。会话按实际执行路径接收最多四阶段 Header/Trailer/Body，计算长度与 SHA-256，提交加密 chunk并标记完整性；只有到达可解析终态的转发请求才触发异步 parser。
+一次命中明确 LLM API route 的请求对应一个 audit。NewAPI health、login、admin、models、UI 和其他安全非 LLM 请求即使经本程序 passthrough，也不进入本模块。会话按实际执行路径接收最多四阶段 Header/Trailer/Body，计算长度与 SHA-256，聚合大块原始证据并记录逻辑 SSE 时间；只有到达可解析终态的转发请求才触发异步 parser/normalizer。
 
 固定阶段名称如下，但记录按触发惰性创建：
 
@@ -51,7 +51,7 @@ type StageCapture struct {
 }
 ~~~
 
-Session 只持有小型状态与 hash，不保留完整 Body；Stages 是稀疏 map，只包含已经触发的观察点。
+Session 只持有阶段状态、hash、约 1 MiB 的当前采集缓冲和最多 100,000 个逻辑 SSE 时间点，不保留完整 Body；Stages 是稀疏 map，只包含已经触发的观察点。
 
 ## 4. interceptor 拒绝终态
 
@@ -72,12 +72,14 @@ stage、body_stream 和 chunk 只在真实观察开始时创建。没有调用 N
 Observe 顺序固定：
 
 1. 增加 observed_length 并更新 SHA-256。
-2. 切成最多 32 KiB 的 chunk。
-3. 为异步写入创建拥有型副本。
-4. 提交 writer queue。
-5. 接受后增加 stored_length；失败则 stage/capture 标 partial 并记录 gap。
+2. 追加到约 1 MiB 聚合缓冲；Body 终结时立即 flush 尾块。
+3. 按 Content-Type 和 magic 自适应 gzip；已压缩二进制保持 `none`。
+4. 为异步写入创建拥有型副本并独立 AES-GCM 加密。
+5. 提交 writer queue；失败则 stage/capture 标 partial 并记录 gap。
 
-只有观察到 EOF 时 hash_complete=true。取消、Read/Write error 或进程退出时，hash 只代表已观察前缀。seq/offset 是应用层采集顺序，不是 TCP、HTTP chunk 或 SSE event。
+只有观察到 EOF 时 hash_complete=true。取消、Read/Write error 或进程退出时，hash 只代表已观察前缀。seq/offset 是应用层采集顺序，不是 TCP 或 HTTP chunk。SSE 另外按完整逻辑 event 记录结束 offset 和时间；总事件超过 100,000 时停止追加时间点，但继续统计实际 event count。
+
+四个观察阶段在流式采集期间先各自保存 owning chunks。`FinishAudit` 的 writer 事务只有在成对阶段都完整、各自 chunk 聚合自洽、observed/stored length 相等且 SHA-256 完全一致时，才删除后一阶段的重复 chunks，并把其 `body_streams.source_stage` 改为前一阶段。若长度或 hash 不一致，后一阶段标记 `body_stage_mismatch`/partial，两个阶段的原始字节都保留，不能因预先共享掩盖短写、取消或代理改写错误。
 
 body interceptor 按 route 中最大的模块上限加一个判定字节有界预读，且必须通过 request_for_newapi_received_from_nginx observer，因此它仍计算入站长度/hash并保存原始字节。多个模块共享同一只读缓存；放行时 proxy 使用未修改的缓存字节重建 Body，request_sent_to_newapi observer 再记录实际 replay；两阶段差异视为实现错误。metadata-only chain 不触发预读，继续由 Transport 的正常流式读取驱动两个请求 observer。
 
@@ -91,19 +93,19 @@ Request-URI 可能包含 key，保存在 audit_records.request_uri_enc。无法�
 
 key_path 指向一个 32-byte 主密钥：存在则读取；不存在且数据库尚无审计数据时用 crypto/rand 原子生成。Unix 创建权限为 0600；Windows 使用当前用户私有数据目录的 ACL。
 
-每个 Header 值、Body chunk、Request-URI 和 parsed result 使用独立 12-byte 随机 nonce：
+每个 Header 值、压缩后的 Body chunk、Request-URI、parsed result、content/binary object 和 stream timeline 使用独立 12-byte 随机 nonce：
 
 ~~~go
 ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
 ~~~
 
-数据库把 `nonce || ciphertext || tag` 保存为一个 BLOB。AAD 使用 NUL 分隔的受控字段：Request-URI 绑定 audit_id/object_type，Header 再绑定 stage/kind/name/value_index，Body chunk 再绑定 stage/seq，解析结果绑定 audit_id/parser_name。调用方不得自行定义其他格式。
+数据库把 `nonce || ciphertext || tag` 保存为一个 BLOB。AAD 使用 NUL 分隔的受控字段：Request-URI 绑定 audit id/object type；Header 再绑定 stage/kind/name/value index；Body chunk v2 再绑定 owning stage/seq/compression；解析结果绑定 audit id/parser name。内容对象、二进制对象和 timeline 使用各自域分离 AAD。调用方不得自行定义其他格式。
 
 首版只使用这个本地主密钥，不提供多层密钥、轮换或重写工具。需要更换时先完整备份旧数据库和旧 key，再创建新的空数据库和 key。
 
 ## 8. Writer 接口与模式
 
-采集模块只提交 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit、SaveParsedResult、AddGap。queue 固定 1024 ops。
+采集模块提交 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit 和 AddGap；parser 使用 SaveParsedAudit 原子写摘要、turn graph、对象、raw retention 和完整性事件。queue 固定 1024 ops。
 
 available：queue/DB/key 失败时不阻塞代理，标 partial/failed，写结构化日志；DB 不可用时合并一个内存 gap，下一次成功写入时补记。
 
@@ -124,7 +126,7 @@ audit_gaps 只做进程级运维提示，字段为 id、started_at_ns、ended_at
 3. 启动时及每 30 秒扫描少量 pending 记录补入队列。
 4. worker 用条件更新把 pending 改为 processing，未抢到则跳过。
 5. worker 从 SQLite 读取、解密并解析。
-6. 在同一 writer 事务中 UPSERT parsed_results，并把 parse_status 更新为 ok、partial、error 或 skipped。
+6. 在同一 writer 事务中 UPSERT parsed_results；若 normalizer 可用则保存 verified turn graph，并按结果把 raw retention 更新为 metadata/full，再更新 parse_status。
 
 rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启时先把遗留 processing 重置为 pending，再扫描已结束且 pending 的 audit 重新入队；解析结果只保留最新版本。
 
@@ -136,20 +138,22 @@ worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存
 
 ## 12. 崩溃恢复
 
-启动后把 ended_at_ns 为空的 audit 改为 forward_status=interrupted、capture_status=partial、error_code=process_exit，并把仍为 streaming 的 stage/stream 改为 partial。随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk 或精确结束时间；SQLite WAL 保证已提交事务一致。
+启动后先验证 HMAC integrity event chain，再把 ended_at_ns 为空的 audit 改为 forward_status=interrupted、capture_status=partial、error_code=process_exit；仍为 streaming 的 stage/stream 改为 partial，raw retention 强制为 full，并按 owning chunks 修复可证明长度。每条恢复记录写 capture event，随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk、SHA-256 或精确结束时间；SQLite WAL 只保证已提交事务一致。
 
 ## 13. 测试
 
 - audit_id 格式与随机源失败。
 - 四阶段独立 length/hash。
-- 0、1、32 KiB、32 KiB+1 chunk。
+- 0、1、约 1 MiB 边界和尾块 flush。
 - n>0 同时返回 EOF/error。
 - available writer queue 满继续；strict admission 503；parser queue 满不影响两种模式的转发。
 - interceptor 主动 reject、body 超限、error、panic、非法 Decision 和非取消的 Body 读取失败均写 rejected、blocked_by/block_code、实际 status_code 和 skipped；客户端取消写 client_cancelled。
 - metadata reject 未读 Body 时 capture 为 partial；body 预读完成后 reject 可完整结束入站证据。
 - 未调用 NewAPI 的 audit 不存在后三个 stage/body_stream/chunk，不进入 parser，也没有 request ID 或调用者关联。
 - 上游 response Header 中合法的 `X-Oneapi-Request-Id` 随终态保存并触发 caller worker；无效、多余或缺失值不会创建 pending 任务。
-- body interceptor 放行后的两个请求阶段 length/hash 一致。
+- body interceptor 放行后的两个请求阶段 length/hash 一致；不一致时标记 `body_stage_mismatch` 并保留各自证据。
+- 相同 request/response Body 只在终结校验后合并为一份 owning chunks，source_stage 可正确 raw 读取；不相同的成对阶段不会误合并。
+- SSE 网络分块合并为逻辑 event timeline，超过 100,000 事件时保留实际总数和截断标志。
 - GCM 随机 nonce、AAD/密文篡改失败。
 - DB/WAL 无测试 token/Header/Body 明文。
 - Finish 幂等、kill 后 partial、pending parser 重启恢复。

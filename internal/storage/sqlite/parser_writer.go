@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"llmapi-logger/internal/security"
 )
 
 var errInvalidParsedResult = errors.New("sqlite: invalid parsed result")
@@ -45,6 +47,15 @@ func (store *Store) SaveParsedResult(ctx context.Context, result ParsedResult) e
 		return err
 	}
 	return store.submitSync(ctx, writeRequest{kind: writeSaveParsedResult, data: cloneParsedResult(result)})
+}
+
+// SaveParsedAudit atomically stores the parser summary, the verified turn
+// graph, and the final raw-evidence retention decision.
+func (store *Store) SaveParsedAudit(ctx context.Context, value ParsedAudit) error {
+	if err := validateParsedAudit(value); err != nil {
+		return err
+	}
+	return store.submitSync(ctx, writeRequest{kind: writeSaveParsedAudit, data: cloneParsedAudit(value)})
 }
 
 func resetProcessingParses(transaction *sql.Tx) error {
@@ -107,69 +118,8 @@ WHERE audit_id = ?
 	return nil
 }
 
-func saveParsedResult(transaction *sql.Tx, result ParsedResult) error {
-	_, err := transaction.Exec(`
-INSERT INTO parsed_results (
-    audit_id, parser_name, parser_version, status,
-    request_model, response_model, requested_stream, observed_stream,
-    response_id, usage_input, usage_output, usage_total,
-    error_type, error_code, message_count, tool_call_count, has_tool_call,
-    parsed_json_enc, parsed_at_ns
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(audit_id) DO UPDATE SET
-    parser_name = excluded.parser_name,
-    parser_version = excluded.parser_version,
-    status = excluded.status,
-    request_model = excluded.request_model,
-    response_model = excluded.response_model,
-    requested_stream = excluded.requested_stream,
-    observed_stream = excluded.observed_stream,
-    response_id = excluded.response_id,
-    usage_input = excluded.usage_input,
-    usage_output = excluded.usage_output,
-    usage_total = excluded.usage_total,
-    error_type = excluded.error_type,
-    error_code = excluded.error_code,
-    message_count = excluded.message_count,
-    tool_call_count = excluded.tool_call_count,
-    has_tool_call = excluded.has_tool_call,
-    parsed_json_enc = excluded.parsed_json_enc,
-    parsed_at_ns = excluded.parsed_at_ns`,
-		result.AuditID,
-		result.ParserName,
-		result.ParserVersion,
-		result.Status,
-		result.RequestModel,
-		result.ResponseModel,
-		boolDatabaseValue(result.RequestedStream),
-		boolDatabaseValue(result.ObservedStream),
-		result.ResponseID,
-		result.UsageInput,
-		result.UsageOutput,
-		result.UsageTotal,
-		result.ErrorType,
-		result.ErrorCode,
-		result.MessageCount,
-		result.ToolCallCount,
-		boolDatabaseValue(result.HasToolCall),
-		nullableBytes(result.ParsedJSONEnc),
-		result.ParsedAtNS,
-	)
-	if err != nil {
-		return fmt.Errorf("sqlite writer: save parsed result: %w", err)
-	}
-
-	parent, err := transaction.Exec(`
-UPDATE audit_records
-SET parse_status = ?
-WHERE audit_id = ?
-  AND parser_name = ?
-  AND parse_status = 'processing'
-  AND forward_status <> 'rejected'`, result.Status, result.AuditID, result.ParserName)
-	if err != nil {
-		return fmt.Errorf("sqlite writer: finish parse status: %w", err)
-	}
-	return requireOneRow(parent, "finish parse status")
+func saveParsedResult(transaction *sql.Tx, result ParsedResult, signer *security.IntegritySigner) error {
+	return saveParsedAudit(transaction, ParsedAudit{Result: result}, signer)
 }
 
 func boolDatabaseValue(value *bool) any {

@@ -98,8 +98,8 @@ status/code 可进入公共字段，message/details 只存在于加密 raw Body�
 
 统一限额：
 
-- 请求侧解码后最多 16 MiB。
-- 响应侧解码后最多 16 MiB。
+- 请求侧解码后最多 64 MiB。
+- 响应侧解码后最多 64 MiB。
 - gzip 最大解压比 50:1。
 
 单个 candidate/Part/event 畸形时尽量继续并设 `partial`；顶层完全无法解析时设 `error`。限额和解析失败均不影响原始证据。
@@ -122,7 +122,7 @@ reparse 覆盖当前结果并更新 `audit_records.parse_status`，数据库只�
 - streamGenerateContent 文本/thought SSE、function call/result、最后 usage snapshot 和 clean EOF。
 - 缺 candidate index、未知 Part、单事件畸形和截断 EOF。
 - Body 中 model 不覆盖路径模型。
-- Google error JSON、gzip、16 MiB/50:1 限额。
+- Google error JSON、gzip、64 MiB/50:1 限额。
 - inline data、函数名称/参数和输出文本不出现在明文列。
 
 ## 9. 实施任务

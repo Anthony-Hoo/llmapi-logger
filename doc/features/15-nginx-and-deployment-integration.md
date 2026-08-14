@@ -120,11 +120,21 @@ doc/deployment/backup-and-restore.md
 
 构建脚本生成 Windows/Linux amd64 的 CGO=0 二进制。完整启动、配置校验、Nginx 校验和管理面检查见[单机部署说明](../deployment/README.md)。
 
-## 8. 数据备份
+## 8. generation 2 破坏性切换
+
+内容寻址 audit schema 不兼容旧审计数据。候选二进制必须先在独立临时数据目录完成 config、fake upstream、reconstruction、metadata/full raw 和 integrity smoke；获得维护者批准后，才进入停机窗口。
+
+需要真正释放旧库空间时，正常停止旧进程后处理精确的 `audit.db`、`audit.db-wal`、`audit.db-shm`，保留 `audit.key`、运行时配置和凭据文件，再启动候选版本创建空 generation 2 数据库。仅让破坏性 migration 在原 6 GiB 级数据库上 `DROP TABLE` 不保证主文件缩小。自定义 UA 规则应事先导出非敏感配置并在新库重建；全新库会创建默认规则。
+
+切换后依次验证 ready、schema/table、UA 规则、passthrough、受审计 JSON、SSE、reconstructed JSON、metadata raw 410、异常 full raw 和调用者关联。旧二进制与 generation 2 数据库不构成有效回滚组合；需要回滚时必须同时恢复匹配的旧二进制、旧数据库和旧主密钥备份集。
+
+代理/Body interceptor 最多允许 512 MiB，但当前 parser 单侧解码上限为 64 MiB；超限仍转发并保留 full raw，不获得 item 级压缩。生产验收必须确认正常请求尺寸分布在该边界内。
+
+## 9. 数据备份
 
 数据库和 `audit.key` 必须作为一个备份集。在线数据库处于 WAL 模式时必须使用 SQLite `.backup`，不能直接复制主 DB 文件。最终镜像不为此加入 SQLite CLI；从宿主机或受控工具容器执行。详见[备份与恢复](../deployment/backup-and-restore.md)。
 
-## 9. 验收
+## 10. 验收
 
 - Nginx 统一送入 audit-proxy，不存在可绕过进程内边界的 NewAPI fallback。
 - `/v1/models` 等安全非 LLM 请求经 passthrough 到达 NewAPI，且不会产生 audit/interceptor 调用。
@@ -136,6 +146,8 @@ doc/deployment/backup-and-restore.md
 - `newapi.access_token`/`newapi.user_id` 配置后每五分钟同步安全用户目录，并异步回填 request ID 对应的用户/Token 身份；失败不影响转发，完整用户 API Key 不进入该链路。
 - 最终镜像不含 Node 或源码，单一 Go 二进制提供 API 和 React UI。
 - Windows/Linux amd64 CGO=0 构建成功。
+- generation 2 新库、默认/自定义 UA 规则、verified reconstructed、metadata 410、异常 full raw 和 integrity 重启验证通过。
+- 正常请求尺寸分布已确认不会持续触发 64 MiB parser 上限；超限行为被明确接受或在发布前调整。
 - 实际部署环境中的 `nginx -t`、Compose 配置检查和 smoke test 有真实结果；未执行时明确记录为未验证。
 
 首版不提供 metrics、在线导出、DELETE、自动 VACUUM 或复杂运行时重连。

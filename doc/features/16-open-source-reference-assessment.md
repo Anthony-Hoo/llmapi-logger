@@ -101,8 +101,8 @@ metadata 模块默认拿不到 Body，因此启用 credential、Header 或路径
 首版只保留：
 
 1. 精确路径透明代理。
-2. SQLite 原始证据记录。
-3. 三个协议的基础解析。
+2. SQLite 四阶段元数据、异常 raw 和内容寻址的 OpenAI turn/multimodal object 存储。
+3. 三个协议的基础解析，以及 OpenAI provider JSON 重建。
 4. 本地查询页面。
 5. 可选 request-id 调用者身份回填。
 6. 仅面向 LLM 白名单请求的有序入站 interceptor chain；Body 检查必须有界且原字节回放。
