@@ -150,6 +150,80 @@ func TestOpenRejectsAppliedMigrationNotEmbeddedByProgram(t *testing.T) {
 	}
 }
 
+func TestOpenSkipsFullForeignKeyScanWhenSchemaIsCurrent(t *testing.T) {
+	store, path := openTestStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("PRAGMA foreign_keys=OFF"); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO http_stages (
+    audit_id, stage, state, proto, method, host, started_at_ns
+) VALUES ('missing-audit', ?, 'streaming', 'HTTP/1.1', 'POST', 'example', 1)`, StageRequestReceived); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open current schema: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+}
+
+func TestOpenChecksForeignKeysAfterApplyingMigration(t *testing.T) {
+	store, path := openTestStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("PRAGMA foreign_keys=OFF"); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO http_stages (
+    audit_id, stage, state, proto, method, host, started_at_ns
+) VALUES ('missing-audit', ?, 'streaming', 'HTTP/1.1', 'POST', 'example', 1)`, StageRequestReceived); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("DELETE FROM schema_migrations WHERE version = 4"); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("DROP TABLE user_agent_rules"); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(context.Background(), path)
+	if reopened != nil {
+		_ = reopened.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "foreign key check reported violations") {
+		t.Fatalf("Open error = %v, want foreign-key check failure", err)
+	}
+}
+
 func TestSchemaRejectsInvalidRejectedRowsAndForeignKeys(t *testing.T) {
 	t.Parallel()
 

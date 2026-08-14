@@ -97,7 +97,11 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 
 	runtime := assembleAudit(configuration, logger)
 	rulesContext, cancelRules := context.WithTimeout(context.Background(), 10*time.Second)
-	userAgentRules, err := uaguard.New(rulesContext, runtime.store)
+	var ruleRepository uaguard.Repository
+	if runtime.store != nil {
+		ruleRepository = runtime.store
+	}
+	userAgentRules, err := uaguard.New(rulesContext, ruleRepository)
 	cancelRules()
 	if err != nil {
 		if runtime.store != nil {

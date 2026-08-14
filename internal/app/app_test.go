@@ -62,6 +62,31 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	}
 }
 
+func TestNewKeepsAvailableModeRunningWhenAuditStoreUnavailable(t *testing.T) {
+	configuration := config.Default()
+	configuration.Mode = audit.ModeAvailable
+	configuration.DBPath = t.TempDir()
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
+
+	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New with unavailable audit store: %v", err)
+	}
+	t.Cleanup(func() { _ = application.Close() })
+
+	if application.auditStore != nil {
+		t.Fatal("application retained an audit store after open failure")
+	}
+	if application.auditSink == nil || application.auditSink.Healthy() {
+		t.Fatal("application did not retain the unavailable audit sink")
+	}
+	rules := application.userAgentRules.List()
+	if len(rules) != 1 || rules[0].ModelPattern != "^gpt" {
+		t.Fatalf("fallback user agent rules = %#v", rules)
+	}
+}
+
 func TestUserAgentRuleBlocksGPTBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
 	var upstreamRequests atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {

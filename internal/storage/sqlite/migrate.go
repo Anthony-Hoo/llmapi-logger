@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		}
 	}
 
+	appliedMigration := false
 	for _, item := range migrations {
 		if _, exists := applied[item.version]; exists {
 			continue
@@ -81,8 +82,15 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		if err := applyMigration(ctx, database, item); err != nil {
 			return err
 		}
+		appliedMigration = true
 	}
-	return foreignKeyCheck(ctx, database)
+	if appliedMigration {
+		return foreignKeyCheck(ctx, database)
+	}
+	// A full foreign-key scan grows with the audit database and is unnecessary
+	// when the schema is already current. Normal writes remain protected by
+	// foreign_keys=ON on every connection.
+	return nil
 }
 
 func loadMigrations() ([]migration, error) {
