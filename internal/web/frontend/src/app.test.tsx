@@ -6,6 +6,7 @@ import type { ApiClient } from "./api";
 import {
   AuditFiltersPanel,
   AuditList,
+  DeveloperBadge,
   HTTPAuditEvidence,
   StreamTimingPanel,
   TurnStoragePanel,
@@ -307,6 +308,54 @@ describe("audit filters", () => {
     expect(html).toContain("<details");
     expect(html).not.toContain("<details open");
   });
+
+  it("hides the caller filters from a scoped developer session", () => {
+    const html = renderToStaticMarkup(
+      <AuditFiltersPanel
+        path=""
+        model=""
+        userAgent=""
+        newAPIUserID=""
+        newAPITokenID=""
+        forwardStatus=""
+        users={[]}
+        showCallerFilters={false}
+        onPathChange={() => undefined}
+        onModelChange={() => undefined}
+        onUserAgentChange={() => undefined}
+        onNewAPIUserIDChange={() => undefined}
+        onNewAPITokenIDChange={() => undefined}
+        onForwardStatusChange={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    // A scoped session is pinned to one caller, and the API rejects these
+    // filters outright, so offering them would only mislead.
+    expect(html).not.toContain("全部调用者");
+    expect(html).not.toContain("NewAPI Token ID");
+    // Everything not tied to caller identity stays available.
+    expect(html).toContain("模型");
+    expect(html).toContain("User-Agent");
+    expect(html).toContain("路径");
+    expect(html).toContain("转发状态");
+  });
+});
+
+describe("developer session badge", () => {
+  it("names the token whose traffic is being shown", () => {
+    const html = renderToStaticMarkup(
+      <DeveloperBadge identity={{ user_id: 7, username: "developer", token_id: 42, token_name: "agent-token" }} />,
+    );
+    expect(html).toContain("开发者");
+    expect(html).toContain("agent-token");
+  });
+
+  it("stays meaningful for a key NewAPI could not identify yet", () => {
+    const html = renderToStaticMarkup(<DeveloperBadge identity={null} />);
+    expect(html).toContain("开发者");
+    expect(html).toContain("本 API Key 的调用记录");
+  });
 });
 
 describe("User-Agent rule configuration", () => {
@@ -324,7 +373,7 @@ describe("User-Agent rule configuration", () => {
         }],
       }),
     } as ApiClient;
-    const html = renderToStaticMarkup(<UserAgentRulesPanel client={client} onAuthenticated={() => undefined} />);
+    const html = renderToStaticMarkup(<UserAgentRulesPanel client={client} />);
 
     expect(html).toContain("UA 拦截规则");
     expect(html).toContain("Go RE2");

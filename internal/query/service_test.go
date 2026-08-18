@@ -861,6 +861,8 @@ type fakeStore struct {
 	requestHeaderErr error
 	timeline         sqlite.StoredStreamTimeline
 	timelineErr      error
+	scopeRows        map[string]sqlite.AuditScopeRow
+	scopeErr         error
 }
 
 func (store *fakeStore) Healthy() bool { return store.healthy }
@@ -878,6 +880,17 @@ func (store *fakeStore) QueryRequestHeaderEvidence(_ context.Context, auditID st
 
 func (store *fakeStore) QueryAuditDetail(context.Context, string) (sqlite.AuditQueryDetail, error) {
 	return store.detail, store.detailErr
+}
+
+func (store *fakeStore) QueryAuditScope(_ context.Context, auditID string) (sqlite.AuditScopeRow, error) {
+	if store.scopeErr != nil {
+		return sqlite.AuditScopeRow{}, store.scopeErr
+	}
+	row, ok := store.scopeRows[auditID]
+	if !ok {
+		return sqlite.AuditScopeRow{}, sql.ErrNoRows
+	}
+	return row, nil
 }
 
 func (store *fakeStore) RawBodyMeta(_ context.Context, _, stage string) (sqlite.RawBodyMetadata, error) {

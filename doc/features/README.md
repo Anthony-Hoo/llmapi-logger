@@ -129,6 +129,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 16 | [开源项目参考取舍](16-open-source-reference-assessment.md) |
 | 17 | [入站请求拦截链](17-request-interceptor-chain.md) |
 | 18 | [内容寻址的对话、轮次与多模态审计存储](18-content-addressed-conversation-storage.md) |
+| 19 | [开发者 API Key 会话](19-developer-key-session.md) |
 
 ## 10. 当前实现范围
 
@@ -157,6 +158,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - healthy/degraded/not_ready 与 available/strict 语义一致。
 - 管理列表只返回紧凑摘要、TTFT 和解密后的入站 User-Agent；详情在 Admin Token 下返回 turn/conversation、Request-URI、Body retention 与逐项 Header/Trailer，reconstructed/timeline/raw 按各自状态按需读取，所有管理证据响应禁止缓存。
 - loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token 或有效管理 Cookie。
+- 启用 `developer_login` 后，NewAPI 用户可用自己的 API Key 登录并以同等深度只读自己 Key 的记录；他人记录与被本地策略拦截的记录返回 404，health/ready/调用者目录/UA 规则返回 403，登录失败按来源地址限流。
 
 ## 12. 文档优先级
 

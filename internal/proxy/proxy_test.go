@@ -345,7 +345,7 @@ func TestCompletionLogUsesFinalAuditSessionSummary(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	manager, err := audit.NewManager(store, cipher, audit.ModeAvailable, logger)
+	manager, err := audit.NewManager(store, cipher, nil, audit.ModeAvailable, logger)
 	if err != nil {
 		t.Fatalf("create audit manager: %v", err)
 	}

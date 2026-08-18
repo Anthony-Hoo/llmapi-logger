@@ -176,3 +176,7 @@ user_agent_policy 是所有匹配 LLM route 末尾的动态 Body interceptor。�
 ## 11. 实现边界
 
 routing 决定哪些请求能进入 chain；app 负责三态分发；interceptor 只产生 allow/reject；proxy 负责本地拒绝响应和 NewAPI I/O；audit 记录 blocked_by/block_code。任一层都不能让 interceptor 扩大路由或把受保护路径降级为 passthrough。
+
+`blocked_by` 与 `block_code` 描述站点防护策略本身，属管理员可见信息。开发者会话按 fail-closed 允许清单排除本地拦截记录：默认隐藏全部 `forward_status=rejected`，只放行显式列出的非策略 block code（当前仅 `body_too_large`）。新增拦截器默认不可见，要放行必须显式修改该清单。详见[模块 19](19-developer-key-session.md)。
+
+`require_credential` 与审计指纹共用 `security` 中同一份入站凭据传输清单（`Authorization`、`X-Api-Key`、`X-Goog-Api-Key`、query `key`），新增传输方式只需改一处。两者判定语义不同：拦截器仍要求 `Authorization` 必须是 Bearer 方案。

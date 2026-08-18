@@ -248,6 +248,16 @@ func (client *Client) LookupRequest(ctx context.Context, requestID string) (Requ
 }
 
 func (client *Client) get(ctx context.Context, endpoint string, destination any) error {
+	return fetchJSON(ctx, client.client, endpoint, func(request *http.Request) {
+		request.Header.Set("Authorization", client.accessToken)
+		request.Header.Set("New-Api-User", client.userID)
+	}, destination)
+}
+
+// fetchJSON performs one bounded read-only NewAPI GET. The caller supplies the
+// credential because the administrator endpoints and the token endpoint
+// authenticate differently.
+func fetchJSON(ctx context.Context, httpClient *http.Client, endpoint string, authorize func(*http.Request), destination any) error {
 	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
@@ -255,16 +265,17 @@ func (client *Client) get(ctx context.Context, endpoint string, destination any)
 		return ErrRequestFailed
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Authorization", client.accessToken)
-	request.Header.Set("New-Api-User", client.userID)
+	if authorize != nil {
+		authorize(request)
+	}
 
-	response, err := client.client.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return ErrRequestFailed
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: HTTP %d", ErrUnexpectedStatus, response.StatusCode)
+		return unexpectedStatusError{status: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes+1))
 	if err != nil {
@@ -283,6 +294,19 @@ func (client *Client) get(ctx context.Context, endpoint string, destination any)
 	}
 	return nil
 }
+
+// unexpectedStatusError keeps the upstream status available so key validation
+// can separate "this key was refused" from "NewAPI is unhealthy", while still
+// matching errors.Is(err, ErrUnexpectedStatus).
+type unexpectedStatusError struct {
+	status int
+}
+
+func (err unexpectedStatusError) Error() string {
+	return fmt.Sprintf("%s: HTTP %d", ErrUnexpectedStatus, err.status)
+}
+
+func (unexpectedStatusError) Unwrap() error { return ErrUnexpectedStatus }
 
 func (client *Client) pageURL(path string, pageNumber, size int, extra url.Values) string {
 	endpoint := *client.baseURL

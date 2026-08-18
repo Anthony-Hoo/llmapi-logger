@@ -26,6 +26,7 @@ type Store interface {
 	ListAudits(context.Context, sqlite.AuditQueryFilter, sqlite.AuditQueryCursor, int) (sqlite.AuditListPage, error)
 	QueryRequestHeaderEvidence(context.Context, string) ([]sqlite.HeaderEvidence, error)
 	QueryAuditDetail(context.Context, string) (sqlite.AuditQueryDetail, error)
+	QueryAuditScope(context.Context, string) (sqlite.AuditScopeRow, error)
 	RawBodyMeta(context.Context, string, string) (sqlite.RawBodyMetadata, error)
 	StreamBodyChunks(context.Context, string, string, func(sqlite.BodyChunk) error) error
 	QueryStreamTimeline(context.Context, string, string) (sqlite.StoredStreamTimeline, error)
@@ -77,6 +78,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		Username:      filter.Username,
 		NewAPITokenID: filter.NewAPITokenID,
 		TokenName:     filter.TokenName,
+		Scope:         storageScope(filter.Scope),
 	}
 	storageCursor := sqlite.AuditQueryCursor{
 		BeforeStartedAtNS: cursor.BeforeStartedAtNS,
@@ -192,6 +194,46 @@ func (service *Service) decryptHeader(auditID string, header sqlite.HeaderEviden
 
 func cursorForRow(row sqlite.AuditListRow) *Cursor {
 	return &Cursor{BeforeStartedAtNS: row.StartedAtNS, BeforeID: row.AuditID}
+}
+
+func storageScope(scope *Scope) *sqlite.AuditScope {
+	if scope == nil {
+		return nil
+	}
+	return &sqlite.AuditScope{Fingerprint: scope.Fingerprint, TokenID: scope.TokenID}
+}
+
+// Authorize reports whether a developer session may read one audit, and is the
+// gate every per-audit endpoint calls before doing any expensive work. An audit
+// that does not exist and one that belongs to somebody else both return
+// ErrNotFound, so the response never confirms that another tenant's audit
+// exists.
+func (service *Service) Authorize(ctx context.Context, auditID string, scope *Scope) error {
+	if ctx == nil {
+		return invalid("nil context")
+	}
+	if err := validateAuditID(auditID); err != nil {
+		return err
+	}
+	if scope == nil {
+		// Administrator sessions carry no scope and read everything.
+		return nil
+	}
+	storage := storageScope(scope)
+	if err := storage.Validate(); err != nil {
+		return invalid("invalid session scope")
+	}
+	row, err := service.store.QueryAuditScope(ctx, auditID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("query: authorize audit: %w", err)
+	}
+	if !storage.Allows(row) {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (service *Service) Get(ctx context.Context, auditID string) (Detail, error) {
@@ -517,6 +559,11 @@ func validateList(filter Filter, cursor Cursor, limit int) error {
 	} {
 		if len(value) > 512 || strings.ContainsRune(value, '\x00') || strings.TrimSpace(value) != value {
 			return invalid("invalid " + name)
+		}
+	}
+	if filter.Scope != nil {
+		if err := storageScope(filter.Scope).Validate(); err != nil {
+			return invalid("invalid session scope")
 		}
 	}
 	return nil

@@ -23,6 +23,7 @@ type Config struct {
 	DBPath                 string                       `yaml:"db_path"`
 	KeyPath                string                       `yaml:"key_path"`
 	AdminToken             string                       `yaml:"admin_token"`
+	DeveloperLogin         DeveloperLoginConfig         `yaml:"developer_login"`
 	ShutdownTimeoutSeconds int                          `yaml:"shutdown_timeout_seconds"`
 	RetentionDays          int                          `yaml:"retention_days"`
 	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
@@ -39,6 +40,14 @@ type NewAPIConfig struct {
 	PreserveHost                 bool   `yaml:"preserve_host"`
 	AccessToken                  string `yaml:"access_token"`
 	UserID                       int64  `yaml:"user_id"`
+}
+
+// DeveloperLoginConfig controls the second management identity: a NewAPI user
+// who signs in with their own API key and may only read the audits that key
+// produced. It authenticates against newapi.url directly and therefore needs
+// neither newapi.access_token nor newapi.user_id.
+type DeveloperLoginConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // InterceptorConfig defines one named interceptor instance. Config is kept as

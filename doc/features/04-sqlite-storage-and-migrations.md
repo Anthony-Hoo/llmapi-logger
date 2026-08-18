@@ -11,7 +11,7 @@
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
 internal/storage/sqlite/{graph_writer.go,graph_reader.go,timeline_reader.go,integrity.go}
-internal/storage/sqlite/migrations/{001_init.sql,...,005_content_addressed_audit.sql}
+internal/storage/sqlite/migrations/{001_init.sql,...,006_developer_key_fingerprint.sql}
 ~~~
 
 固定连接参数：
@@ -36,6 +36,8 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 
 `005_content_addressed_audit.sql` 会删除并重建旧审计表，创建 `schema_generation=2` 的新结构；`schema_migrations` 和动态 `user_agent_rules` 保留。升级前仍应做数据库与主密钥的联合离线备份，但程序不会迁移或兼容旧 audit 记录。migration 按数字版本顺序在事务内执行；数据库包含当前二进制未知版本时拒绝使用。
 
+`006_developer_key_fingerprint.sql` 用 `ALTER TABLE` 为 `audit_records` 增加可空的 `api_key_fpr`（32 字节）和一个部分索引，用于把开发者会话限定在自己 Key 的记录上（[模块 19](19-developer-key-session.md)）。它就地升级旧库，不重建表也不清除数据。该列是访问控制索引而非证据，**不得**进入 `capturePayloadDigest`：一旦加入，旧库中每条历史记录的重算摘要都会改变，启动时的完整性链校验会失败。
+
 ## 3. 表结构
 
 当前最终 schema 共 20 张表，按职责分组如下。
@@ -45,7 +47,7 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 | 表 | 用途 |
 | --- | --- |
 | schema_migrations | 已应用 migration 版本 |
-| audit_records | audit 终态、schema generation、路由、状态、TTFT、调用者查询状态 |
+| audit_records | audit 终态、schema generation、路由、状态、TTFT、调用者查询状态、入站 Key 指纹 |
 | http_stages | 四个固定 HTTP 观察阶段 |
 | http_headers | 独立加密的 Header/Trailer value |
 | body_streams | 每阶段长度、SHA-256、来源阶段、保留状态、分块数和 SSE 事件统计 |
@@ -56,6 +58,8 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 | user_agent_rules | 动态 UA 正则规则 |
 
 `audit_records.ttft_ns` 保存从代理开始处理到收到上游首字节的时长。`blocked_by`、`block_code` 只允许在 `forward_status=rejected` 时出现。未触发的 HTTP 阶段不插入行，因此不存在 `request_sent_to_newapi` 是“没有访问 NewAPI”的权威证据。
+
+`audit_records.api_key_fpr` 是入站凭据的 keyed 指纹（主密钥派生，无凭据时为 NULL），只用于开发者会话的作用域过滤，不还原 Key、不进入任何 DTO 或日志。
 
 ### 3.2 内容寻址对象与轮次图
 

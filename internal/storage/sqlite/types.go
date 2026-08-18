@@ -68,6 +68,10 @@ const (
 	GapDetailProcessExit   = "interrupted_audits_recovered"
 )
 
+// APIKeyFingerprintSize is the width of audit_records.api_key_fpr, matching the
+// HMAC-SHA-256 tag produced by security.CredentialFingerprinter.
+const APIKeyFingerprintSize = 32
+
 const (
 	writerQueueCapacity = 1024
 	writerBatchSize     = 64
@@ -109,6 +113,9 @@ type AuditRecord struct {
 	CallerAttempts    int
 	CallerNextAtNS    *int64
 	CallerUpdatedAtNS *int64
+	// APIKeyFPR scopes developer sessions to the audits their own key produced.
+	// It is nil when the request carried no credential.
+	APIKeyFPR []byte
 }
 
 // HTTPStage represents one actually observed proxy boundary. Missing stages
@@ -370,6 +377,9 @@ func validateAuditRecord(record AuditRecord) error {
 	}
 	if record.CaptureStatus != CapturePending || record.ParseStatus != ParsePending {
 		return errors.New("sqlite: invalid initial audit status")
+	}
+	if len(record.APIKeyFPR) != 0 && len(record.APIKeyFPR) != APIKeyFingerprintSize {
+		return fmt.Errorf("sqlite: api key fingerprint must be %d bytes", APIKeyFingerprintSize)
 	}
 	return nil
 }

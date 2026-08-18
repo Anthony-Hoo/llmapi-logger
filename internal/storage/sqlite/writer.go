@@ -271,8 +271,8 @@ INSERT INTO audit_records (
     method, path, request_uri_enc, mode, status_code, ttft_ns, forward_status,
     capture_status, parse_status, blocked_by, block_code, error_code,
     newapi_request_id, caller_status, caller_attempts, caller_next_at_ns,
-    caller_updated_at_ns
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    caller_updated_at_ns, api_key_fpr
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.AuditID,
 		record.StartedAtNS,
 		record.EndedAtNS,
@@ -296,6 +296,7 @@ INSERT INTO audit_records (
 		record.CallerAttempts,
 		record.CallerNextAtNS,
 		record.CallerUpdatedAtNS,
+		nullableBytes(record.APIKeyFPR),
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite writer: begin audit: %w", err)
@@ -682,6 +683,7 @@ func cloneAuditRecord(record AuditRecord) AuditRecord {
 	record.NewAPIRequestID = cloneString(record.NewAPIRequestID)
 	record.CallerNextAtNS = cloneInt64(record.CallerNextAtNS)
 	record.CallerUpdatedAtNS = cloneInt64(record.CallerUpdatedAtNS)
+	record.APIKeyFPR = cloneBytes(record.APIKeyFPR)
 	return record
 }
 

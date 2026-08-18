@@ -11,7 +11,9 @@
 - 管理面使用独立 listener，默认 `127.0.0.1:8081`。
 - `/api/v1/*`、`/healthz`、`/readyz` 都要求 Bearer token 或有效 HttpOnly Cookie。
 - `/ui/` shell 和静态资源可匿名加载，但不包含审计数据或配置。
-- `POST /api/v1/session` 以一次性 admin token 换取七天 Cookie；`DELETE` 注销。
+- `POST /api/v1/session` 以一次性 admin token 换取七天 Cookie；`DELETE` 注销；`GET` 返回当前身份供前端引导。
+- 存在两种身份：管理员读取全部记录与站点配置；开发者用 NewAPI 用户 API Key 登录，只读取该 Key 的记录，详见[模块 19](19-developer-key-session.md)。开发者访问管理员专属端点返回 403。
+- `POST /api/v1/session` 按来源地址限流失败登录（5 分钟 10 次 → 429 + `Retry-After`）。
 - 所有证据 JSON、错误、raw、reconstructed 和 timeline 响应都使用 `Cache-Control: no-store`。
 
 ## 3. 列表 API
@@ -26,11 +28,15 @@ GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 
 列表 DTO 包含 TTFT、request/response model、caller status、可选用户/Token 元数据和入站 User-Agent。Web 层使用安全用户目录按 user ID 补充 `display_name`；前端优先显示显示名，不暴露完整用户名作为主标签，Token 名称和 ID 分行显示。
 
+开发者会话的作用域在解析 query 之后由服务端注入，客户端无法触及或替换；显式携带 `newapi_user_id`、`username`、`newapi_token_id`、`token_name` 返回 400，而不是静默覆盖。
+
 ## 4. 详情 API
 
 ~~~http
 GET /api/v1/audits/{audit_id}
 ~~~
+
+detail、raw、reconstructed 和 timeline 共用 `serveAuditResource` 中唯一一处授权闸门。开发者请求不属于自己或被策略拦截排除的 audit 时，返回与不存在相同的 `404`，不提供存在性预言。
 
 详情返回：
 
@@ -101,6 +107,8 @@ UI 默认只显示 TTFT、Body 首末观测、SSE event count 和 complete 状�
 - 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。
 - UA 规则：Go RE2 正则的新增、编辑、启停和删除，持久化后热生效。
 
+登录页提供管理员令牌与开发者 API Key 两种模式。开发者视图隐藏 UA 规则入口、调用者筛选和 Token ID 筛选，header 显示身份 chip；审计列表与详情组件本身不变。前端裁剪只为体验，边界一律由服务端强制。
+
 assistant text 使用 `react-markdown` + `remark-gfm`，不启用 raw HTML；只允许安全链接，远程图片降级为文本。其他角色、reasoning、工具参数和结果保持原始文本/JSON，不因展示而改写存储值。
 
 页面重建的是应用层 HTTP 视图，不恢复 TCP/TLS、HTTP/2 frame、Header 原始大小写/顺序或传输 chunk framing。
@@ -140,4 +148,5 @@ type AuditQuery interface {
 - timeline 完整/截断语义、首末时间和 point count 校验。
 - conversation 安全 Markdown、角色顺序、工具关联和未知内容展示。
 - 前端 API、组件、TypeScript 检查和生产构建。
-- 未授权响应、静态 shell、列表和日志不泄露 Request-URI、Header、Body、conversation、Token 或主密钥。
+- 双角色鉴权、会话 API 三态、开发者作用域强制与管理端点 403，详见[模块 19](19-developer-key-session.md)。
+- 未授权响应、静态 shell、列表和日志不泄露 Request-URI、Header、Body、conversation、Token、Key 指纹或主密钥。

@@ -42,10 +42,12 @@ import type {
   AuditHeader,
   AuditStage,
   AuditSummary,
+  DeveloperIdentity,
   NewAPIUser,
   RawBodyDownload,
   RawSide,
   ReconstructedBodyDownload,
+  SessionInfo,
   StreamTimeline,
   UserAgentRule,
   UserAgentRuleInput,
@@ -59,16 +61,47 @@ interface LoadedRawBody {
 export function App() {
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "anonymous">("checking");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [session, setSession] = useState<SessionInfo | null>(null);
 
   const handleUnauthorized = useCallback(() => {
     setAuthState("anonymous");
-    setAuthMessage("登录已失效，请重新输入管理令牌。");
+    setSession(null);
+    setAuthMessage("登录已失效，请重新登录。");
   }, []);
   const client = useMemo(() => createApiClient(handleUnauthorized), [handleUnauthorized]);
-  const handleAuthenticated = useCallback(() => setAuthState("authenticated"), []);
 
-  async function createSession(token: string) {
-    await client.createSession(token);
+  // Ask the server who we are instead of inferring it from whether the first
+  // audit request happens to succeed: the answer also carries the role, which
+  // decides what the dashboard may show.
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    client
+      .getSession(controller.signal)
+      .then((current) => {
+        if (!active) {
+          return;
+        }
+        setSession(current);
+        setAuthState(current ? "authenticated" : "anonymous");
+      })
+      .catch(() => {
+        if (active) {
+          setAuthState("anonymous");
+        }
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [client]);
+
+  async function createSession(mode: LoginMode, credential: string) {
+    const current =
+      mode === "admin"
+        ? await client.createSession(credential)
+        : await client.createDeveloperSession(credential);
+    setSession(current);
     setAuthMessage(null);
     setAuthState("authenticated");
   }
@@ -80,6 +113,7 @@ export function App() {
     } catch (cause: unknown) {
       setAuthMessage(`退出请求失败：${errorMessage(cause)}`);
     } finally {
+      setSession(null);
       setAuthState("anonymous");
     }
   }
@@ -96,28 +130,64 @@ export function App() {
   return (
     <Dashboard
       client={client}
+      session={session}
       checkingSession={authState === "checking"}
-      onAuthenticated={handleAuthenticated}
       onLogOut={deleteSession}
     />
   );
 }
 
-function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (token: string) => Promise<void> }) {
+type LoginMode = "admin" | "developer";
+
+const loginModes: { id: LoginMode; label: string; field: string; placeholder: string; hint: string }[] = [
+  {
+    id: "admin",
+    label: "管理员令牌",
+    field: "Admin token",
+    placeholder: "输入 configs 中配置的 admin_token",
+    hint: "管理员可查看全部审计记录与站点策略配置。",
+  },
+  {
+    id: "developer",
+    label: "开发者 API Key",
+    field: "NewAPI API Key",
+    placeholder: "输入你的 NewAPI API Key（sk-…）",
+    hint: "使用你自己的 API Key 登录，只能查看该 Key 产生的调用记录，用于审计 agent 调用链。",
+  },
+];
+
+function TokenGate({
+  message,
+  onSubmit,
+}: {
+  message: string | null;
+  onSubmit: (mode: LoginMode, credential: string) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<LoginMode>("admin");
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const active = loginModes.find((option) => option.id === mode) ?? loginModes[0];
+
+  function switchMode(next: LoginMode) {
+    if (next === mode || submitting) {
+      return;
+    }
+    setMode(next);
+    setDraft("");
+    setSubmitError(null);
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const token = draft.trim();
-    if (!token || submitting) {
+    const credential = draft.trim();
+    if (!credential || submitting) {
       return;
     }
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onSubmit(token);
+      await onSubmit(mode, credential);
       setDraft("");
     } catch (cause: unknown) {
       setSubmitError(errorMessage(cause));
@@ -135,7 +205,7 @@ function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (t
           <div className="space-y-2">
             <CardTitle className="text-2xl">LLM API Audit</CardTitle>
             <CardDescription>
-              输入本机管理令牌建立安全会话。登录完成后页面不会继续保留令牌，也不会写入浏览器存储。
+              建立安全会话后进入审计页面。登录完成后页面不会继续保留凭据，也不会写入浏览器存储。
             </CardDescription>
           </div>
         </CardHeader>
@@ -152,29 +222,49 @@ function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (t
               <AlertDescription className="text-red-800">{submitError}</AlertDescription>
             </Alert>
           ) : null}
+          <div className="mb-5 grid grid-cols-2 gap-2 rounded-lg bg-slate-100 p-1" role="tablist">
+            {loginModes.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                role="tab"
+                aria-selected={option.id === mode}
+                onClick={() => switchMode(option.id)}
+                disabled={submitting}
+                className={
+                  option.id === mode
+                    ? "rounded-md bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-sm"
+                    : "rounded-md px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+                }
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
           <form className="space-y-4" onSubmit={submit}>
             <div className="space-y-2">
-              <label htmlFor="admin-token" className="text-sm font-medium">
-                Admin token
+              <label htmlFor="login-credential" className="text-sm font-medium">
+                {active.field}
               </label>
               <Input
-                id="admin-token"
+                id="login-credential"
                 autoFocus
                 autoComplete="off"
-                name="admin-token"
+                name="login-credential"
                 type="password"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
-                placeholder="输入 configs 中配置的 admin_token"
+                placeholder={active.placeholder}
                 disabled={submitting}
               />
+              <p className="text-xs leading-relaxed text-muted-foreground">{active.hint}</p>
             </div>
             <Button className="w-full" type="submit" disabled={!draft.trim() || submitting}>
               {submitting ? "正在登录…" : "进入审计页面"}
             </Button>
           </form>
           <p className="mt-5 text-center text-xs leading-relaxed text-muted-foreground">
-            登录成功后仅使用服务端设置的 HttpOnly Cookie；页面不会使用 localStorage 或 sessionStorage 保存令牌。
+            登录成功后仅使用服务端设置的 HttpOnly Cookie；页面不会使用 localStorage 或 sessionStorage 保存凭据。
           </p>
         </CardContent>
       </Card>
@@ -184,15 +274,18 @@ function TokenGate({ message, onSubmit }: { message: string | null; onSubmit: (t
 
 function Dashboard({
   client,
+  session,
   checkingSession,
-  onAuthenticated,
   onLogOut,
 }: {
   client: ApiClient;
+  session: SessionInfo | null;
   checkingSession: boolean;
-  onAuthenticated: () => void;
   onLogOut: () => Promise<void>;
 }) {
+  // A developer session is scoped to one API key server side. The UI hides the
+  // surfaces that scope excludes; the boundary itself is enforced by the API.
+  const isDeveloper = session?.role === "developer";
   const [view, setView] = useState<"audits" | "rules">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
@@ -221,7 +314,6 @@ function Dashboard({
     client
       .listAudits(filters, cursor, controller.signal)
       .then((result) => {
-        onAuthenticated();
         setPage(result);
         setSelectedID((current) => {
           if (current && result.items.some((item) => item.audit_id === current)) {
@@ -242,9 +334,15 @@ function Dashboard({
       });
 
     return () => controller.abort();
-  }, [client, cursor, filters, onAuthenticated, refreshKey]);
+  }, [client, cursor, filters, refreshKey]);
 
   useEffect(() => {
+    // The caller directory is administrator-only; a developer already knows
+    // whose traffic they are looking at.
+    if (isDeveloper) {
+      setNewAPIUsers([]);
+      return;
+    }
     const controller = new AbortController();
     client
       .listNewAPICallers(controller.signal)
@@ -255,7 +353,7 @@ function Dashboard({
         }
       });
     return () => controller.abort();
-  }, [client, refreshKey]);
+  }, [client, isDeveloper, refreshKey]);
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -266,8 +364,10 @@ function Dashboard({
       path: draftPath.trim() || undefined,
       model: draftModel.trim() || undefined,
       user_agent: draftUserAgent.trim() || undefined,
-	  newapi_user_id: draftNewAPIUserID || undefined,
-      newapi_token_id: draftNewAPITokenID || undefined,
+      // Caller filters are rejected outright for a scoped session, so they must
+      // never be sent.
+	  newapi_user_id: isDeveloper ? undefined : draftNewAPIUserID || undefined,
+      newapi_token_id: isDeveloper ? undefined : draftNewAPITokenID || undefined,
       forward_status: draftForwardStatus || undefined,
     });
   }
@@ -301,12 +401,18 @@ function Dashboard({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant={view === "audits" ? "secondary" : "ghost"} size="sm" onClick={() => setView("audits")}>
-              审计记录
-            </Button>
-            <Button variant={view === "rules" ? "secondary" : "ghost"} size="sm" onClick={() => setView("rules")}>
-              UA 拦截规则
-            </Button>
+            {isDeveloper ? (
+              <DeveloperBadge identity={session?.identity ?? null} />
+            ) : (
+              <>
+                <Button variant={view === "audits" ? "secondary" : "ghost"} size="sm" onClick={() => setView("audits")}>
+                  审计记录
+                </Button>
+                <Button variant={view === "rules" ? "secondary" : "ghost"} size="sm" onClick={() => setView("rules")}>
+                  UA 拦截规则
+                </Button>
+              </>
+            )}
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
               <span className="ml-2 hidden sm:inline">刷新</span>
@@ -319,8 +425,8 @@ function Dashboard({
       </header>
 
       <main className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
-        {view === "rules" ? (
-          <UserAgentRulesPanel client={client} onAuthenticated={onAuthenticated} />
+        {view === "rules" && !isDeveloper ? (
+          <UserAgentRulesPanel client={client} />
         ) : (
           <>
         <AuditFiltersPanel
@@ -331,6 +437,7 @@ function Dashboard({
           newAPITokenID={draftNewAPITokenID}
           forwardStatus={draftForwardStatus}
 		  users={newAPIUsers}
+          showCallerFilters={!isDeveloper}
           onPathChange={setDraftPath}
           onModelChange={setDraftModel}
           onUserAgentChange={setDraftUserAgent}
@@ -395,13 +502,7 @@ const emptyRuleInput: UserAgentRuleInput = {
   user_agent_pattern: "",
 };
 
-export function UserAgentRulesPanel({
-  client,
-  onAuthenticated,
-}: {
-  client: ApiClient;
-  onAuthenticated: () => void;
-}) {
+export function UserAgentRulesPanel({ client }: { client: ApiClient }) {
   const [rules, setRules] = useState<UserAgentRule[]>([]);
   const [draft, setDraft] = useState<UserAgentRuleInput>(emptyRuleInput);
   const [editingID, setEditingID] = useState<number | null>(null);
@@ -417,10 +518,7 @@ export function UserAgentRulesPanel({
     setError(null);
     client
       .listUserAgentRules(controller.signal)
-      .then((result) => {
-        setRules(result.items);
-        onAuthenticated();
-      })
+      .then((result) => setRules(result.items))
       .catch((cause: unknown) => {
         if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
           setError(errorMessage(cause));
@@ -432,7 +530,7 @@ export function UserAgentRulesPanel({
         }
       });
     return () => controller.abort();
-  }, [client, onAuthenticated, reloadKey]);
+  }, [client, reloadKey]);
 
   function edit(rule: UserAgentRule) {
     setEditingID(rule.id);
@@ -655,6 +753,7 @@ export function AuditFiltersPanel({
   newAPITokenID,
   forwardStatus,
 	users,
+  showCallerFilters = true,
   onPathChange,
   onModelChange,
   onUserAgentChange,
@@ -670,6 +769,8 @@ export function AuditFiltersPanel({
   newAPITokenID: string;
   forwardStatus: string;
 	users: NewAPIUser[];
+  /** Hidden for a scoped session, whose caller is already fixed. */
+  showCallerFilters?: boolean;
   onPathChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onUserAgentChange: (value: string) => void;
@@ -683,6 +784,7 @@ export function AuditFiltersPanel({
       <CardContent className="!p-3">
         <form className="space-y-2" aria-label="审计筛选" onSubmit={onSubmit}>
           <div className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1.2fr)_minmax(160px,0.8fr)_minmax(240px,1.25fr)_auto]">
+			{showCallerFilters ? (
 			<FilterField label="调用者" htmlFor="filter-caller">
               <select
 				id="filter-caller"
@@ -698,6 +800,7 @@ export function AuditFiltersPanel({
                 ))}
               </select>
             </FilterField>
+			) : null}
             <FilterField label="模型" htmlFor="filter-model">
               <Input
                 id="filter-model"
@@ -725,7 +828,7 @@ export function AuditFiltersPanel({
 
           <details className="rounded-md border bg-slate-50/60">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-			  高级筛选（路径、Token ID、转发状态）
+			  {showCallerFilters ? "高级筛选（路径、Token ID、转发状态）" : "高级筛选（路径、转发状态）"}
             </summary>
 			<div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-3">
               <FilterField label="路径" htmlFor="filter-path">
@@ -737,6 +840,7 @@ export function AuditFiltersPanel({
                   placeholder="/v1/chat/completions"
                 />
               </FilterField>
+			  {showCallerFilters ? (
 			  <FilterField label="NewAPI Token ID" htmlFor="filter-token-id">
 				<Input
 				  id="filter-token-id"
@@ -747,6 +851,7 @@ export function AuditFiltersPanel({
 				  placeholder="如 42"
 				/>
 			  </FilterField>
+			  ) : null}
               <FilterField label="转发状态" htmlFor="filter-forward-status">
                 <select
                   id="filter-forward-status"
@@ -1811,6 +1916,20 @@ function DetailSkeleton() {
         ))}
       </div>
       <Skeleton className="h-36 w-full" />
+    </div>
+  );
+}
+
+// DeveloperBadge tells a scoped user whose traffic they are looking at, which
+// is the whole answer to "why is this list shorter than I expected".
+export function DeveloperBadge({ identity }: { identity: DeveloperIdentity | null }) {
+  const name = identity?.token_name?.trim() || identity?.username?.trim();
+  return (
+    <div className="flex items-center gap-2" title="仅显示该 API Key 产生的调用记录">
+      <Badge variant="secondary">开发者</Badge>
+      <span className="hidden max-w-[16rem] truncate text-xs text-muted-foreground sm:inline">
+        {name ? `${name} 的调用记录` : "本 API Key 的调用记录"}
+      </span>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import type {
   RawBodyDownload,
   RawSide,
   ReconstructedBodyDownload,
+  SessionInfo,
   StreamTimeline,
   UserAgentRule,
   UserAgentRuleInput,
@@ -28,7 +29,9 @@ export class ApiError extends Error {
 type FetchLike = typeof fetch;
 
 export interface ApiClient {
-  createSession: (token: string, signal?: AbortSignal) => Promise<void>;
+  getSession: (signal?: AbortSignal) => Promise<SessionInfo | null>;
+  createSession: (token: string, signal?: AbortSignal) => Promise<SessionInfo>;
+  createDeveloperSession: (apiKey: string, signal?: AbortSignal) => Promise<SessionInfo>;
   deleteSession: (signal?: AbortSignal) => Promise<void>;
   listNewAPICallers: (signal?: AbortSignal) => Promise<NewAPIUserList>;
   listAudits: (
@@ -85,21 +88,43 @@ export function createApiClient(
     return (await response.json()) as T;
   }
 
+  async function login(credentials: Record<string, string>, signal?: AbortSignal): Promise<SessionInfo> {
+    const response = await sessionFetch(
+      `${API_BASE}/session`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(credentials),
+        signal,
+      },
+      false,
+    );
+    if (!response.ok) {
+      throw await responseError(response);
+    }
+    return (await response.json()) as SessionInfo;
+  }
+
   return {
-    async createSession(token, signal) {
-      const response = await sessionFetch(
-        `${API_BASE}/session`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token }),
-          signal,
-        },
-        false,
-      );
+    // Returns null rather than throwing when nobody is signed in: an anonymous
+    // visitor is an expected state during start-up, not an error.
+    async getSession(signal) {
+      const response = await sessionFetch(`${API_BASE}/session`, { signal }, false);
+      if (response.status === 401) {
+        return null;
+      }
       if (!response.ok) {
         throw await responseError(response);
       }
+      return (await response.json()) as SessionInfo;
+    },
+
+    createSession(token, signal) {
+      return login({ token }, signal);
+    },
+
+    createDeveloperSession(apiKey, signal) {
+      return login({ api_key: apiKey }, signal);
     },
 
     async deleteSession(signal) {

@@ -25,7 +25,7 @@ func TestSessionPersistsNewAPIRequestIDAndNotifiesCallerWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(store, cipher, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager, err := NewManager(store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestSessionIgnoresInvalidNewAPIRequestID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	cipher, _ := security.NewAESGCM(make([]byte, 32))
-	manager, _ := NewManager(store, cipher, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager, _ := NewManager(store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody)
 	session, err := manager.Begin(context.Background(), request, routing.Match{RouteID: "chat", Parser: "openai.chat_completions"})
 	if err != nil {

@@ -1,5 +1,22 @@
 export type NanoTime = number | string;
 
+export type SessionRole = "admin" | "developer";
+
+/** Ownership of the NewAPI key a developer signed in with, for display only. */
+export interface DeveloperIdentity {
+  user_id?: number;
+  username?: string;
+  token_id?: number;
+  token_name?: string;
+}
+
+export interface SessionInfo {
+  status: string;
+  role: SessionRole;
+  expires_at?: string;
+  identity?: DeveloperIdentity | null;
+}
+
 export interface AuditCursor {
   before_started_at_ns: NanoTime;
   before_id: string;

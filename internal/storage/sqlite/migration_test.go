@@ -92,8 +92,8 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 3 || version != 5 {
-		t.Fatalf("migration rows = %d max=%d, want versions 1, 4 and 5", versionCount, version)
+	if versionCount != 4 || version != 6 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1, 4, 5 and 6", versionCount, version)
 	}
 	var quickCheck string
 	if err := store.readerDB.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil {
@@ -114,7 +114,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 3 {
+	if versionCount != 4 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -125,7 +125,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		6,
+		7,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)

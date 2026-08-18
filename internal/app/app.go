@@ -182,6 +182,7 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
+		Developer:  developerLoginOptions(configuration, runtime.fingerprints),
 		Query:      queryService,
 		Users:      newAPIClient,
 		Rules:      userAgentRules,
@@ -465,11 +466,42 @@ func assembleNewAPIClient(configuration config.NewAPIConfig, upstreamProxy *url.
 	})
 }
 
+// developerLoginOptions wires the second management identity. It stays disabled
+// unless the audit key loaded, because without the fingerprinter a developer
+// session could not be scoped to anything.
+func developerLoginOptions(configuration config.Config, fingerprints *security.CredentialFingerprinter) web.DeveloperLogin {
+	if !configuration.DeveloperLogin.Enabled || fingerprints == nil {
+		return web.DeveloperLogin{}
+	}
+	return web.DeveloperLogin{
+		Enabled:      true,
+		NewAPIURL:    configuration.NewAPI.URL,
+		HTTPClient:   &http.Client{Transport: developerLoginTransport(configuration.NewAPI), Timeout: newAPIManagementTimeout},
+		Fingerprints: fingerprints,
+		ValidateKey:  newapi.ValidateTokenKey,
+	}
+}
+
+// developerLoginTransport mirrors the management client: never read proxy
+// settings from the environment, honour only the explicitly configured proxy.
+func developerLoginTransport(configuration config.NewAPIConfig) http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.ForceAttemptHTTP2 = true
+	if configuration.ProxyURL != "" {
+		if proxyURL, err := url.Parse(configuration.ProxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+	return transport
+}
+
 type auditRuntime struct {
-	sink    audit.Sink
-	manager *audit.Manager
-	store   *sqlite.Store
-	cipher  security.Cipher
+	sink         audit.Sink
+	manager      *audit.Manager
+	store        *sqlite.Store
+	cipher       security.Cipher
+	fingerprints *security.CredentialFingerprinter
 }
 
 func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntime {
@@ -510,6 +542,15 @@ func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntim
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
+	// Derived while the master key is still in scope, alongside the cipher and
+	// the integrity signer, because the deferred clear wipes it on return.
+	fingerprints, err := security.NewCredentialFingerprinter(key)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit fingerprinter unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
 	recovered, recoveryErr := store.RecoverInterruptedAudits(ctx, time.Now().UnixNano())
 	if recoveryErr != nil {
 		_ = store.Close()
@@ -519,14 +560,14 @@ func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntim
 	} else if recovered > 0 {
 		logger.Info("interrupted audits recovered", "recovered_audits", recovered)
 	}
-	manager, err := audit.NewManager(store, cipher, configuration.Mode, logger)
+	manager, err := audit.NewManager(store, cipher, fingerprints, configuration.Mode, logger)
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable")
 		unavailable := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: unavailable, manager: unavailable}
 	}
-	return auditRuntime{sink: manager, manager: manager, store: store, cipher: cipher}
+	return auditRuntime{sink: manager, manager: manager, store: store, cipher: cipher, fingerprints: fingerprints}
 }
 
 type discardWriter struct{}

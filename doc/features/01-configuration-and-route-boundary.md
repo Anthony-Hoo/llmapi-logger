@@ -22,6 +22,8 @@ mode: available
 db_path: ./data/audit.db
 key_path: ./data/audit.key
 admin_token: "replace-with-a-random-token"
+developer_login:
+  enabled: false
 shutdown_timeout_seconds: 30
 retention_days: 30
 
@@ -85,9 +87,10 @@ routes:
 8. `shutdown_timeout_seconds` 为 1–86400；默认 30 秒。
 9. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
 10. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
-11. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
-12. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
-13. match 只能是 exact 或 template，规则不得重叠。
+11. `developer_login.enabled` 默认 false。启用后开发者用 NewAPI 用户 API Key 登录并只读取自己 Key 的记录（[模块 19](19-developer-key-session.md)）；它只依赖已必填的 `newapi.url`，不需要 `newapi.access_token`/`user_id`。主密钥不可用时该登录自动保持关闭。
+12. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
+13. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
+14. match 只能是 exact 或 template，规则不得重叠。
 
 validate-config 只检查配置，不要求 DB 或 NewAPI 在线。
 
@@ -167,7 +170,7 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情、verified reconstructed JSON、SSE timeline 和异常 raw Body。无论监听地址是否 loopback，所有管理 API 都必须校验 admin_token。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值；raw request/response Body 只对 `retention_state=full` 按需读取，metadata 使用 reconstructed API。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情、verified reconstructed JSON、SSE timeline 和异常 raw Body。无论监听地址是否 loopback，所有管理 API 都必须鉴权。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。启用 `developer_login` 后另有一种身份：NewAPI 用户提交自己的 API Key 登录，只读取该 Key 产生的记录，且不能访问 health、ready、调用者目录与 UA 规则（[模块 19](19-developer-key-session.md)）。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值；raw request/response Body 只对 `retention_state=full` 按需读取，metadata 使用 reconstructed API。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 

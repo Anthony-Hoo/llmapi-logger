@@ -4,7 +4,9 @@
 
 本模块是个人部署中的可选增强：当 NewAPI 在 LLM 响应中返回 `X-Oneapi-Request-Id` 时，audit-proxy 用只读管理凭证查询 NewAPI 全站日志，把该请求关联到用户和访问令牌元数据。
 
-关联结果只用于审计展示与筛选，不参与鉴权、配额、路由、interceptor 或流量放行。系统不读取、不匹配、不保存也不展示用户完整 API Key。
+关联结果只用于审计展示与筛选，不参与鉴权、配额、路由、interceptor 或流量放行。
+
+系统不保存也不展示用户完整或打码的 API Key。自[模块 19](19-developer-key-session.md)起，`audit_records.api_key_fpr` 保存由主密钥派生的 keyed 指纹，仅用于把开发者会话限定在自己 Key 的记录上；它无法还原 Key，没有主密钥也无法验证，且不出现在任何 API 响应、日志或错误文本中。
 
 ## 2. 配置
 
@@ -73,7 +75,9 @@ token_links(
 
 并把 `caller_status` 改为 `resolved`。NewAPI 日志可能晚于响应落库，因此首次未找到或临时错误后，最多再按 500ms、1s、2s、5s、10s、30s 重试六次；尝试次数和下次时间保存在 SQLite，进程重启后继续。最后仍失败则标为 `unresolved`，不无限请求 NewAPI。
 
-schema 中不定义用户 API Key 或打码 Key 字段；调用者关联只能由 request ID 日志查询产生。旧数据库不做兼容迁移，部署此基线时直接创建空库。
+`token_links` 中不定义用户 API Key 或打码 Key 字段；调用者关联只能由 request ID 日志查询产生。旧数据库不做兼容迁移，部署此基线时直接创建空库。
+
+[模块 19](19-developer-key-session.md) 另行引入的 `audit_records.api_key_fpr` 是访问控制索引而非调用者身份：它不参与本模块的关联流程，也不写入 `token_links`。开发者会话在指纹之外把本模块解析出的 `newapi_token_id` 作为历史记录兜底。
 
 ## 6. 查询与前端
 
@@ -102,5 +106,5 @@ schema 中不定义用户 API Key 或打码 Key 字段；调用者关联只能�
 - 响应 Header 被保存为 pending；成功查询原子写入用户/Token 身份并改为 resolved。
 - 延迟日志按退避重试，重启可恢复 pending，达到上限改为 unresolved。
 - interceptor 拒绝、passthrough 和无 request ID 响应不会创建身份关联。
-- 管理 API、数据库新记录、错误和普通日志都不包含完整或打码用户 API Key。
+- 管理 API、数据库新记录、错误和普通日志都不包含完整或打码用户 API Key，也不包含 `api_key_fpr`。
 - 用户筛选、Token ID 高级筛选，以及 pending/resolved/unresolved/none 的 UI 展示正确。

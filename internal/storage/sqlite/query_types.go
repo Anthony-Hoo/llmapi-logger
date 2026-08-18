@@ -19,6 +19,9 @@ type AuditQueryFilter struct {
 	Username      string
 	NewAPITokenID *int64
 	TokenName     string
+	// Scope is set for developer sessions only. It is enforced by the store
+	// rather than by the caller so no read path can forget to apply it.
+	Scope *AuditScope
 }
 
 // AuditQueryCursor is the keyset cursor for the fixed newest-first ordering.

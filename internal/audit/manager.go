@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -51,10 +52,11 @@ type Sink interface {
 
 // Manager admits matched requests and constructs their sparse Sessions.
 type Manager struct {
-	store  Store
-	cipher security.Cipher
-	mode   string
-	logger *slog.Logger
+	store        Store
+	cipher       security.Cipher
+	fingerprints *security.CredentialFingerprinter
+	mode         string
+	logger       *slog.Logger
 
 	now    func() time.Time
 	random io.Reader
@@ -66,8 +68,10 @@ type Manager struct {
 	callerNotify func(string) bool
 }
 
-// NewManager constructs a live audit manager.
-func NewManager(store Store, cipher security.Cipher, mode string, logger *slog.Logger) (*Manager, error) {
+// NewManager constructs a live audit manager. A nil fingerprinter disables
+// credential scoping: every record is then stored without an API key tag and no
+// developer session can match it.
+func NewManager(store Store, cipher security.Cipher, fingerprints *security.CredentialFingerprinter, mode string, logger *slog.Logger) (*Manager, error) {
 	if mode != ModeAvailable && mode != ModeStrict {
 		return nil, fmt.Errorf("audit: invalid mode %q", mode)
 	}
@@ -81,12 +85,13 @@ func NewManager(store Store, cipher security.Cipher, mode string, logger *slog.L
 		logger = slog.Default()
 	}
 	manager := &Manager{
-		store:  store,
-		cipher: cipher,
-		mode:   mode,
-		logger: logger,
-		now:    time.Now,
-		random: rand.Reader,
+		store:        store,
+		cipher:       cipher,
+		fingerprints: fingerprints,
+		mode:         mode,
+		logger:       logger,
+		now:          time.Now,
+		random:       rand.Reader,
 	}
 	manager.gaps = newGapBuffer(store, logger, func() time.Time { return manager.now() })
 	return manager, nil
@@ -226,8 +231,12 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 
 	started := manager.now()
 	path := "/"
-	if request.URL != nil && request.URL.EscapedPath() != "" {
-		path = request.URL.EscapedPath()
+	var query url.Values
+	if request.URL != nil {
+		if request.URL.EscapedPath() != "" {
+			path = request.URL.EscapedPath()
+		}
+		query = request.URL.Query()
 	}
 	record := sqlite.AuditRecord{
 		AuditID:       auditID,
@@ -242,6 +251,9 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		ForwardStatus: sqlite.ForwardInProgress,
 		CaptureStatus: sqlite.CapturePending,
 		ParseStatus:   sqlite.ParsePending,
+		// Tagging the credential here, before interceptors run, is what lets a
+		// developer session see its own rejected requests too.
+		APIKeyFPR: manager.fingerprints.FingerprintRequest(request.Header, query),
 	}
 	if err := manager.store.BeginAudit(ctx, record); err != nil {
 		manager.recordGap(gapReasonForWrite(err))

@@ -2,6 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError, createApiClient } from "./api";
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 describe("API client", () => {
   it("uses the Cookie session and sends all supported list filters", async () => {
     let calledURL = "";
@@ -130,11 +137,11 @@ describe("API client", () => {
     const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
       calledURL = String(input);
       calledInit = init;
-      return new Response(null, { status: 204 });
+      return jsonResponse({ status: "authenticated", role: "admin", expires_at: "2026-08-18T00:00:00Z" });
     }) as typeof fetch;
     const client = createApiClient(vi.fn(), fetcher);
 
-    await client.createSession("one-shot-admin-token");
+    const session = await client.createSession("one-shot-admin-token");
 
     expect(calledURL).toBe("/api/v1/session");
     expect(calledInit?.method).toBe("POST");
@@ -142,6 +149,48 @@ describe("API client", () => {
     expect(new Headers(calledInit?.headers).get("Content-Type")).toBe("application/json");
     expect(new Headers(calledInit?.headers).has("Authorization")).toBe(false);
     expect(JSON.parse(String(calledInit?.body))).toEqual({ token: "one-shot-admin-token" });
+    expect(session.role).toBe("admin");
+  });
+
+  it("signs a developer in with their API key and never sends it as a Header", async () => {
+    let calledInit: RequestInit | undefined;
+    const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calledInit = init;
+      return jsonResponse({
+        status: "authenticated",
+        role: "developer",
+        expires_at: "2026-08-18T00:00:00Z",
+        identity: { user_id: 7, username: "developer", token_id: 42, token_name: "agent-token" },
+      });
+    }) as typeof fetch;
+    const client = createApiClient(vi.fn(), fetcher);
+
+    const session = await client.createDeveloperSession("sk-test-developer-key");
+
+    expect(calledInit?.method).toBe("POST");
+    expect(new Headers(calledInit?.headers).has("Authorization")).toBe(false);
+    expect(JSON.parse(String(calledInit?.body))).toEqual({ api_key: "sk-test-developer-key" });
+    expect(session.role).toBe("developer");
+    expect(session.identity?.token_name).toBe("agent-token");
+  });
+
+  it("reports an anonymous visitor as no session instead of an error", async () => {
+    const anonymous = createApiClient(
+      vi.fn(),
+      (async () => new Response(null, { status: 401 })) as typeof fetch,
+    );
+    await expect(anonymous.getSession()).resolves.toBeNull();
+
+    const unauthorized = vi.fn();
+    const signedIn = createApiClient(
+      unauthorized,
+      (async () => jsonResponse({ status: "authenticated", role: "developer" })) as typeof fetch,
+    );
+    const session = await signedIn.getSession();
+    expect(session?.role).toBe("developer");
+    // Bootstrapping must not trip the shared 401 handler, which would bounce a
+    // visitor who simply has not signed in yet.
+    expect(unauthorized).not.toHaveBeenCalled();
   });
 
   it("deletes the Cookie session", async () => {

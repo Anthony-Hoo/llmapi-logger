@@ -82,6 +82,67 @@ func TestIntegrityChainCoversCaptureAndSemanticGraph(t *testing.T) {
 	}
 }
 
+func TestAPIKeyFingerprintStaysOutsideTheEvidenceChain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	key := bytes.Repeat([]byte{0x71}, security.KeySize)
+	path := filepath.Join(t.TempDir(), "audit.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnableIntegrity(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	record := testAudit("audit-fingerprint")
+	record.APIKeyFPR = bytes.Repeat([]byte{0x01}, APIKeyFingerprintSize)
+	if err := store.BeginAudit(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	status := 200
+	if err := store.FinishAudit(ctx, AuditFinish{
+		AuditID: "audit-fingerprint", EndedAtNS: 2, StatusCode: &status,
+		ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// api_key_fpr is an access-control index, not evidence. Rewriting it must
+	// leave the capture MAC valid, because the alternative -- folding the column
+	// into capturePayloadDigest -- would change the recomputed digest of every
+	// audit written before this migration and fail chain verification on every
+	// existing database. The tradeoff is deliberate: scope attribution is not
+	// tamper evident, captured bytes still are.
+	if _, err := store.writerDB.ExecContext(ctx,
+		`UPDATE audit_records SET api_key_fpr = ? WHERE audit_id = ?`,
+		bytes.Repeat([]byte{0x02}, APIKeyFingerprintSize), "audit-fingerprint",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.EnableIntegrity(ctx, key); err != nil {
+		t.Fatalf("api_key_fpr must not participate in the integrity chain: %v", err)
+	}
+}
+
+func TestAuditRecordRejectsMalformedFingerprint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	record := testAudit("audit-bad-fingerprint")
+	record.APIKeyFPR = []byte{0x01, 0x02}
+	if err := store.BeginAudit(ctx, record); err == nil {
+		t.Fatal("BeginAudit accepted a short api key fingerprint")
+	}
+}
+
 func TestEnableIntegrityRejectsTamperedOrMissingEvents(t *testing.T) {
 	t.Parallel()
 	key := bytes.Repeat([]byte{0x3c}, security.KeySize)

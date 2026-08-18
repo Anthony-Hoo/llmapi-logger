@@ -93,6 +93,14 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 
 该链能发现事件或受保护 payload 被修改、重排或删除，但无法单独证明数据库尾部从某个历史备份整体截断；需要外部备份或锚点解决该威胁。
 
+`audit_records.api_key_fpr` 刻意留在链外：它是访问控制索引而非证据，且把它并入 capture payload digest 会改变旧库中每条历史记录的重算摘要，令既有数据库无法通过启动校验。代价是作用域归属不具备防篡改性，被捕获的字节仍然具备。
+
+## 7.1 凭据指纹
+
+同样从主密钥用 HMAC-SHA-256 域分离（`llmapi-logger/credential-fingerprint-key/v1\x00`）派生独立子密钥，对规约后的入站凭据生成 32 字节标签，用于把开发者会话限定在自己 Key 的记录上（[模块 19](19-developer-key-session.md)）。
+
+规约逐字复刻 NewAPI 的 token 解析：去 `Bearer ` 前缀、去 `sk-` 前缀、取首个 `-` 之前的片段。指纹是 keyed 标签，无主密钥不可验证也不可反查，且不出现在任何 API 响应、日志或错误文本中。系统仍不保存完整或打码的 API Key。
+
 ## 8. 明文边界
 
 - 普通日志不记录 Query value、Header value、Body、conversation、Token、key、密文或底层错误文本。
@@ -102,6 +110,8 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 - raw API 只对 `retention_state=full` 开放；metadata 返回 `410 raw_not_retained`。
 - reconstructed API 返回 verified provider JSON；timeline API 返回认证后的逻辑 SSE 时间点。
 - NewAPI 调用者只保存 request ID、用户 ID/用户名、Token ID/名称和状态，不保存完整或打码 API Key。
+- 入站 Key 指纹只用于开发者会话的作用域判定，不进入任何 DTO、日志或错误；开发者登录提交的 Key 只作为一次上游校验请求的凭据，不落库也不回显。
+- 开发者会话看不到被本地策略拦截的记录，`blocked_by`/`block_code` 属管理员可见信息。
 
 详情能解密但 schema、枚举、连续 index、marker 或 hash 非法时，整条请求返回通用完整性错误，不返回部分明文。
 

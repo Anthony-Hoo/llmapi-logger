@@ -15,6 +15,10 @@ mode: available
 db_path: /data/audit.db
 key_path: /data/audit.key
 admin_token: "replace-with-a-random-token"
+# Let NewAPI users sign in with their own API key to audit only their own
+# traffic. Verified against newapi.url; no extra credential is stored.
+developer_login:
+  enabled: false
 shutdown_timeout_seconds: 30
 retention_days: 30
 

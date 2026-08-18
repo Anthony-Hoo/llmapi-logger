@@ -23,42 +23,147 @@ const maxLoginBodyBytes = 4096
 
 const maxRuleBodyBytes = 16 << 10
 
+// sessionResponse describes the caller to the UI. It never carries the admin
+// token, the submitted API key, or the key fingerprint.
+type sessionResponse struct {
+	Status    string             `json:"status"`
+	Role      role               `json:"role"`
+	ExpiresAt string             `json:"expires_at"`
+	Identity  *developerIdentity `json:"identity,omitempty"`
+}
+
+// serveSession is dispatched before the authenticating middleware, because
+// logging in and out must work without a session. GET therefore authenticates
+// itself.
 func (handler *managementHandler) serveSession(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
 	switch request.Method {
+	case http.MethodGet:
+		handler.serveSessionInfo(writer, request)
 	case http.MethodPost:
-		request.Body = http.MaxBytesReader(writer, request.Body, maxLoginBodyBytes)
-		decoder := json.NewDecoder(request.Body)
-		decoder.DisallowUnknownFields()
-		var credentials struct {
-			Token string `json:"token"`
-		}
-		if err := decoder.Decode(&credentials); err != nil {
-			writeError(writer, http.StatusBadRequest, "invalid_login", "invalid login request")
-			return
-		}
-		var trailing any
-		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-			writeError(writer, http.StatusBadRequest, "invalid_login", "invalid login request")
-			return
-		}
-		if handler.authenticator == nil || !handler.authenticator.validAdminToken(credentials.Token) {
-			writeError(writer, http.StatusUnauthorized, "unauthorized", "invalid admin token")
-			return
-		}
-		expires := handler.authenticator.issueSessionCookie(writer, request)
-		writeJSON(writer, http.StatusOK, map[string]string{
-			"status":     "authenticated",
-			"expires_at": expires.Format(time.RFC3339),
-		})
+		handler.serveLogin(writer, request)
 	case http.MethodDelete:
 		if handler.authenticator != nil {
 			handler.authenticator.clearSessionCookie(writer, request)
 		}
 		writer.WriteHeader(http.StatusNoContent)
 	default:
-		methodNotAllowed(writer, http.MethodPost, http.MethodDelete)
+		methodNotAllowed(writer, http.MethodGet, http.MethodPost, http.MethodDelete)
 	}
+}
+
+func (handler *managementHandler) serveSessionInfo(writer http.ResponseWriter, request *http.Request) {
+	if handler.authenticator == nil {
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
+		return
+	}
+	caller, ok := handler.authenticator.resolve(request)
+	if !ok {
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
+		return
+	}
+	response := sessionResponse{Status: "authenticated", Role: caller.Role}
+	if !caller.ExpiresAt.IsZero() {
+		response.ExpiresAt = caller.ExpiresAt.Format(time.RFC3339)
+	}
+	if caller.Role == roleDeveloper {
+		identity := caller.Identity
+		response.Identity = &identity
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (handler *managementHandler) serveLogin(writer http.ResponseWriter, request *http.Request) {
+	if allowed, retryAfter := handler.logins.allow(request); !allowed {
+		writeLoginRateLimited(writer, retryAfter)
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxLoginBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var credentials struct {
+		Token  string `json:"token"`
+		APIKey string `json:"api_key"`
+	}
+	if err := decoder.Decode(&credentials); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_login", "invalid login request")
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeError(writer, http.StatusBadRequest, "invalid_login", "invalid login request")
+		return
+	}
+	if handler.authenticator == nil || (credentials.Token == "") == (credentials.APIKey == "") {
+		writeError(writer, http.StatusBadRequest, "invalid_login", "provide exactly one of token or api_key")
+		return
+	}
+	if credentials.APIKey != "" {
+		handler.loginDeveloper(writer, request, credentials.APIKey)
+		return
+	}
+	if !handler.authenticator.validAdminToken(credentials.Token) {
+		handler.logins.recordFailure(request)
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "invalid admin token")
+		return
+	}
+	handler.logins.recordSuccess(request)
+	expires := handler.authenticator.issueSessionCookie(writer, request)
+	writeJSON(writer, http.StatusOK, sessionResponse{
+		Status: "authenticated", Role: roleAdmin, ExpiresAt: expires.Format(time.RFC3339),
+	})
+}
+
+// loginDeveloper authenticates a NewAPI user API key against NewAPI itself and
+// binds the resulting scope into the session cookie. The key is used only for
+// that single upstream request and is never stored or logged.
+func (handler *managementHandler) loginDeveloper(writer http.ResponseWriter, request *http.Request, apiKey string) {
+	if !handler.developer.usable() {
+		writeError(writer, http.StatusForbidden, "developer_login_disabled", "developer sign-in is disabled")
+		return
+	}
+	fingerprint := handler.developer.Fingerprints.Fingerprint(apiKey)
+	if len(fingerprint) == 0 {
+		handler.logins.recordFailure(request)
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "invalid api key")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
+	identity, err := handler.developer.ValidateKey(ctx, handler.developer.NewAPIURL, handler.developer.HTTPClient, apiKey)
+	if err != nil {
+		if errors.Is(err, newapi.ErrKeyRejected) {
+			handler.logins.recordFailure(request)
+			writeError(writer, http.StatusUnauthorized, "unauthorized", "invalid api key")
+			return
+		}
+		handler.logger.Warn("developer sign-in could not reach newapi", "error_category", "newapi_unavailable")
+		writeError(writer, http.StatusBadGateway, "newapi_unavailable", "could not verify the api key with NewAPI")
+		return
+	}
+
+	payload := developerSessionPayload{Fingerprint: fingerprint}
+	if identity.HasIdentity {
+		tokenID := identity.TokenID
+		payload.TokenID = &tokenID
+		payload.UserID = identity.UserID
+		payload.Username = identity.Username
+		payload.TokenName = identity.TokenName
+	}
+	expires, err := handler.authenticator.issueDeveloperCookie(writer, request, payload)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "session_unavailable", "could not start the session")
+		return
+	}
+	handler.logins.recordSuccess(request)
+	response := sessionResponse{
+		Status: "authenticated", Role: roleDeveloper, ExpiresAt: expires.Format(time.RFC3339),
+		Identity: &developerIdentity{
+			UserID: payload.UserID, Username: payload.Username,
+			TokenID: payload.TokenID, TokenName: payload.TokenName,
+		},
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (handler *managementHandler) serveHealth(writer http.ResponseWriter, request *http.Request) {
@@ -102,11 +207,14 @@ func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, req
 		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
 		return
 	}
-	filter, cursor, limit, err := parseListQuery(request.URL.Query())
+	scope := handler.sessionScope(request)
+	filter, cursor, limit, err := parseListQuery(request.URL.Query(), scope != nil)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid audit list query")
 		return
 	}
+	// Applied after parsing so no query string can reach or replace it.
+	filter.Scope = scope
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	page, err := handler.query.List(ctx, filter, cursor, limit)
@@ -239,23 +347,54 @@ func (handler *managementHandler) writeRuleError(writer http.ResponseWriter, err
 func (handler *managementHandler) serveAuditResource(writer http.ResponseWriter, request *http.Request) {
 	remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/audits/")
 	parts := strings.Split(remainder, "/")
-	if len(parts) == 1 && parts[0] != "" {
+	if parts[0] == "" {
+		http.NotFound(writer, request)
+		return
+	}
+	// One authorization gate in front of the whole audit resource family, so
+	// detail, raw, reconstructed and timeline cannot drift apart.
+	if !handler.authorizeAudit(writer, request, parts[0]) {
+		return
+	}
+	if len(parts) == 1 {
 		handler.serveAuditDetail(writer, request, parts[0])
 		return
 	}
-	if len(parts) == 3 && parts[0] != "" && parts[1] == "raw" {
+	if len(parts) == 3 && parts[1] == "raw" {
 		handler.serveRaw(writer, request, parts[0], query.Side(parts[2]))
 		return
 	}
-	if len(parts) == 3 && parts[0] != "" && parts[1] == "reconstructed" {
+	if len(parts) == 3 && parts[1] == "reconstructed" {
 		handler.serveReconstructed(writer, request, parts[0], query.Side(parts[2]))
 		return
 	}
-	if len(parts) == 3 && parts[0] != "" && parts[1] == "timeline" {
+	if len(parts) == 3 && parts[1] == "timeline" {
 		handler.serveTimeline(writer, request, parts[0], query.Side(parts[2]))
 		return
 	}
 	http.NotFound(writer, request)
+}
+
+// authorizeAudit resolves whether the caller may read one audit at all. A
+// developer asking for somebody else's audit, or for a record this proxy blocked
+// on policy grounds, gets the same 404 as a missing audit so the response never
+// reveals that it exists.
+func (handler *managementHandler) authorizeAudit(writer http.ResponseWriter, request *http.Request, auditID string) bool {
+	if handler.query == nil {
+		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
+		return false
+	}
+	scope := handler.sessionScope(request)
+	if scope == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
+	if err := handler.query.Authorize(ctx, auditID, scope); err != nil {
+		handler.writeQueryError(writer, err)
+		return false
+	}
+	return true
 }
 
 func (handler *managementHandler) serveAuditDetail(writer http.ResponseWriter, request *http.Request, auditID string) {
@@ -436,7 +575,12 @@ func (handler *managementHandler) writeQueryError(writer http.ResponseWriter, er
 	}
 }
 
-func parseListQuery(values url.Values) (query.Filter, query.Cursor, int, error) {
+// callerFilterKeys select by NewAPI identity. A scoped session is already
+// pinned to one caller, so accepting these would only invite the impression
+// that the scope can be widened or narrowed from the query string.
+var callerFilterKeys = []string{"newapi_user_id", "username", "newapi_token_id", "token_name"}
+
+func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor, int, error) {
 	allowed := map[string]bool{
 		"limit": true, "before_started_at_ns": true, "before_id": true,
 		"from_ns": true, "to_ns": true, "protocol": true, "path": true,
@@ -445,6 +589,11 @@ func parseListQuery(values url.Values) (query.Filter, query.Cursor, int, error) 
 		"blocked_by": true, "block_code": true, "capture_status": true,
 		"newapi_user_id": true, "username": true,
 		"newapi_token_id": true, "token_name": true,
+	}
+	if scoped {
+		for _, key := range callerFilterKeys {
+			delete(allowed, key)
+		}
 	}
 	for key, entries := range values {
 		if !allowed[key] || len(entries) != 1 {

@@ -916,24 +916,29 @@ func startApp(t *testing.T, cfg config.Config) *runningApp {
 		running.done <- application.Run(ctx)
 	}()
 
+	// Both planes are bound before Run serves either, but they come up
+	// asynchronously. Waiting only for the data plane leaves a test that starts
+	// with an admin request racing the admin listener.
 	deadline := time.Now().Add(integrationTimeout)
-	for {
-		connection, dialErr := net.DialTimeout("tcp", address, 50*time.Millisecond)
-		if dialErr == nil {
-			_ = connection.Close()
-			break
+	for _, listening := range []string{address, adminAddress} {
+		for {
+			connection, dialErr := net.DialTimeout("tcp", listening, 50*time.Millisecond)
+			if dialErr == nil {
+				_ = connection.Close()
+				break
+			}
+			select {
+			case runErr := <-running.done:
+				cancel()
+				t.Fatalf("audited app exited before listening: %v", runErr)
+			default:
+			}
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatalf("timed out waiting for audited app on %s: %v", listening, dialErr)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		select {
-		case runErr := <-running.done:
-			cancel()
-			t.Fatalf("audited app exited before listening: %v", runErr)
-		default:
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatalf("timed out waiting for audited app on %s: %v", address, dialErr)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	t.Cleanup(func() {

@@ -49,6 +49,18 @@ type Filter struct {
 	Username      string
 	NewAPITokenID *int64
 	TokenName     string
+	// Scope is set by the web layer for developer sessions and never parsed
+	// from client input.
+	Scope *Scope
+}
+
+// Scope limits every read to the audits produced by one NewAPI user API key.
+// Fingerprint is the keyed tag of that key; TokenID additionally admits the
+// records that were attributed through the NewAPI request log before this
+// database stored fingerprints.
+type Scope struct {
+	Fingerprint []byte
+	TokenID     *int64
 }
 
 // Cursor is the opaque-in-practice keyset represented by two query values.

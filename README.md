@@ -38,8 +38,9 @@ Client -> Nginx -> llmapi-logger
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
 - 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；调用者优先使用安全用户目录中的显示名，Token 名称与 ID 分行展示，长 User-Agent 自动换行；路径、状态和原始 HTTP 证据留在详情或高级筛选。
 - loopback 管理端同样强制鉴权；CLI 可用静态 Bearer token，Web UI 登录后使用七天过期的 HttpOnly Cookie；敏感详情和 raw 响应禁止缓存。
+- 可选的开发者登录：NewAPI 用户提交自己的 API Key 即可以同等只读深度审计该 Key 产生的 agent 调用链，看不到他人流量、站点策略配置与被本地策略拦截的记录。
 - 可选使用 NewAPI 全局管理凭证同步安全用户目录；对响应中的 `X-Oneapi-Request-Id` 异步查询全站日志，回填用户名、用户 ID、Token ID 和 Token 名称。
-- 调用者识别不读取、不匹配、不保存也不展示用户完整 API Key；主筛选按 NewAPI 用户，Token ID 只作为高级筛选。
+- 不保存也不展示用户完整或打码 API Key；开发者会话的归属由主密钥派生的 keyed 指纹判定，指纹不可反查且不进入任何响应或日志。
 - assistant 输出使用安全的 GFM Markdown 展示；禁用原始 HTML、危险链接协议和远程图片加载。
 - 启动异常记录恢复、完整性事件链、retention checkpoint/对象 GC、简单审计 gap 和安全 JSON 日志。
 
@@ -112,6 +113,12 @@ http://127.0.0.1:8081/ui/
 ```
 
 静态页面可以加载，但读取审计数据、`/healthz`、`/readyz` 和受保护的 `/api/v1/*` 都需要配置中的 `admin_token`。Web UI 登录成功后使用带固定过期时间的 HttpOnly Cookie，刷新页面无需重复输入；Bearer 方式仍可供 curl 和其他本地客户端使用。
+
+### 开发者用自己的 API Key 审计调用链
+
+把配置中的 `developer_login.enabled` 改为 `true` 后，登录页会多出「开发者 API Key」入口。NewAPI 用户提交自己的 `sk-…` 即可登录，看到的记录范围严格限定在该 Key 产生的调用上，详情深度与管理员一致（会话重建、重建后的 provider JSON、SSE 时序、留存的原始证据），便于审计 agent 的实际调用链条。
+
+该 Key 由 audit-proxy 转交 NewAPI 自身的 `GET /api/log/token` 校验，只作为这一次请求的凭据，不落库、不写日志、不回显；过期或额度耗尽的 Key 仍可用于审计历史。开发者看不到他人流量、调用者目录、UA 拦截规则、`/healthz`、`/readyz`，也看不到被本地策略拦截的记录（`blocked_by`/`block_code` 描述的是站点防护策略本身）；NewAPI 上游自己返回的 401/403 属于其调用链的真实响应，仍然可见。启用该功能不需要 `newapi.access_token`。
 
 管理页面中的“UA 拦截规则”支持新增、编辑、启停和删除。模型与 User-Agent 均使用 Go RE2 正则并默认区分大小写；一条规则的模型正则命中后，请求 User-Agent 必须命中该规则，多条命中规则全部需要通过。无效正则不会保存，也不会替换当前运行中的有效规则。
 

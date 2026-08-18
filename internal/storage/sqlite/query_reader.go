@@ -84,6 +84,13 @@ WHERE 1 = 1`)
 	if filter.TokenName != "" {
 		appendCondition("t.token_name = ?", filter.TokenName)
 	}
+	if filter.Scope != nil {
+		if err := filter.Scope.Validate(); err != nil {
+			return AuditListPage{}, err
+		}
+		condition, values := filter.Scope.condition()
+		appendCondition(condition, values...)
+	}
 	if cursor.BeforeID != "" {
 		appendCondition("(a.started_at_ns < ? OR (a.started_at_ns = ? AND a.audit_id < ?))", cursor.BeforeStartedAtNS, cursor.BeforeStartedAtNS, cursor.BeforeID)
 	}

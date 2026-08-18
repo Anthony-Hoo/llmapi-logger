@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"strings"
+
+	"llmapi-logger/internal/security"
 )
 
 type requireCredential struct{}
@@ -22,11 +23,7 @@ func (requireCredential) Requirements() Requirements {
 }
 
 func (requireCredential) Check(_ context.Context, request RequestView) (Decision, error) {
-	headers := request.Headers()
-	if hasBearer(headers.Values("Authorization")) ||
-		hasNonEmpty(headers.Values("X-Api-Key")) ||
-		hasNonEmpty(headers.Values("X-Goog-Api-Key")) ||
-		hasNonEmpty(request.Query()["key"]) {
+	if security.HasCredential(request.Headers(), request.Query()) {
 		return Decision{Allow: true}, nil
 	}
 
@@ -34,25 +31,6 @@ func (requireCredential) Check(_ context.Context, request RequestView) (Decision
 		StatusCode: http.StatusUnauthorized,
 		BlockCode:  "credential_required",
 	}, nil
-}
-
-func hasBearer(values []string) bool {
-	for _, value := range values {
-		parts := strings.Fields(value)
-		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && parts[1] != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func hasNonEmpty(values []string) bool {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 type maxBodyBytes struct {

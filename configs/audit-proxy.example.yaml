@@ -20,6 +20,12 @@ mode: available
 db_path: ./data/audit.db
 key_path: ./data/audit.key
 admin_token: "replace-with-a-random-token"
+# Second management identity. When enabled, a NewAPI user can sign in with their
+# own API key and read only the audits that key produced; policy-blocked records
+# stay administrator-only. The key is verified against newapi.url and is never
+# stored or logged, so no additional credential is needed here.
+developer_login:
+  enabled: false
 shutdown_timeout_seconds: 30
 retention_days: 30
 
