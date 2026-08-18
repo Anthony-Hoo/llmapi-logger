@@ -25,7 +25,14 @@ coverage.out
 
 # Frontend dependencies and local tooling
 internal/web/frontend/node_modules/
+internal/web/frontend/.pnpm-store/
 .tools/
+
+# Management UI build output. Produced by `pnpm build` or the Dockerfile
+# web-build stage; only .gitkeep is tracked so `//go:embed all:dist` resolves in
+# a fresh checkout.
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
 
 # Editors and operating systems
 .idea/

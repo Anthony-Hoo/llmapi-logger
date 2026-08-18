@@ -1,0 +1,7 @@
+Build output directory for the management UI.
+
+The contents are produced by `pnpm build` in internal/web/frontend (or by the
+web-build stage of the Dockerfile) and are not committed. This file is tracked
+only so that the `//go:embed all:dist` directive in embed.go still resolves in a
+fresh checkout; without it the whole module would fail to compile before the
+frontend is built.
