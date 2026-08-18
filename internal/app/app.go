@@ -62,11 +62,18 @@ type App struct {
 
 // Load reads, validates, and assembles one application from a config file.
 func Load(path string, logger *slog.Logger) (*App, error) {
+	return LoadContext(context.Background(), path, logger)
+}
+
+// LoadContext reads, validates, and assembles one application while allowing
+// a potentially long database integrity verification to be cancelled by the
+// process lifecycle context.
+func LoadContext(ctx context.Context, path string, logger *slog.Logger) (*App, error) {
 	configuration, err := config.Load(path)
 	if err != nil {
 		return nil, err
 	}
-	return New(configuration, logger)
+	return NewContext(ctx, configuration, logger)
 }
 
 // ValidateConfig runs all stage-one construction checks without binding a
@@ -82,6 +89,20 @@ func ValidateConfig(path string) error {
 
 // New assembles the route matcher, interceptor engine, and reverse proxy.
 func New(configuration config.Config, logger *slog.Logger) (*App, error) {
+	return NewContext(context.Background(), configuration, logger)
+}
+
+// NewContext assembles the application using the caller's lifecycle context
+// for startup database work. It deliberately adds no fixed deadline: full
+// integrity verification grows with retained history and must either finish,
+// fail validation, or be explicitly cancelled.
+func NewContext(ctx context.Context, configuration config.Config, logger *slog.Logger) (*App, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("app startup canceled: %w", err)
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -95,8 +116,14 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)
 	}
 
-	runtime := assembleAudit(configuration, logger)
-	rulesContext, cancelRules := context.WithTimeout(context.Background(), 10*time.Second)
+	runtime := assembleAudit(ctx, configuration, logger)
+	if err := ctx.Err(); err != nil {
+		if runtime.store != nil {
+			_ = runtime.store.Close()
+		}
+		return nil, fmt.Errorf("app startup canceled: %w", err)
+	}
+	rulesContext, cancelRules := context.WithTimeout(ctx, 10*time.Second)
 	var ruleRepository uaguard.Repository
 	if runtime.store != nil {
 		ruleRepository = runtime.store
@@ -504,10 +531,10 @@ type auditRuntime struct {
 	fingerprints *security.CredentialFingerprinter
 }
 
-func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntime {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
+func assembleAudit(ctx context.Context, configuration config.Config, logger *slog.Logger) auditRuntime {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	store, err := sqlite.Open(ctx, configuration.DBPath)
 	if err != nil {
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
@@ -536,12 +563,15 @@ func assembleAudit(configuration config.Config, logger *slog.Logger) auditRuntim
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
+	verificationStarted := time.Now()
+	logger.Info("audit integrity verification started")
 	if err := store.EnableIntegrity(ctx, key); err != nil {
 		_ = store.Close()
 		logger.Warn("audit integrity chain unavailable", "mode", configuration.Mode, "error_category", "integrity_unavailable")
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
+	logger.Info("audit integrity verification completed", "duration_ms", time.Since(verificationStarted).Milliseconds())
 	// Derived while the master key is still in scope, alongside the cipher and
 	// the integrity signer, because the deferred clear wipes it on return.
 	fingerprints, err := security.NewCredentialFingerprinter(key)

@@ -58,6 +58,7 @@ type integrityEvent struct {
 	PayloadDigest []byte
 	EventMAC      []byte
 	CreatedAtNS   int64
+	AuditExists   bool
 }
 
 func appendIntegrityEvent(transaction *sql.Tx, signer *security.IntegritySigner, auditID, eventType string, payloadDigest []byte, createdAtNS int64) error {
@@ -95,10 +96,12 @@ func verifyIntegrityChain(ctx context.Context, database *sql.DB, signer *securit
 	}
 	defer transaction.Rollback()
 	rows, err := transaction.QueryContext(ctx, `
-SELECT sequence, audit_id, event_type, previous_mac,
-       payload_digest, event_mac, created_at_ns
-FROM integrity_events
-ORDER BY sequence`)
+SELECT e.sequence, e.audit_id, e.event_type, e.previous_mac,
+       e.payload_digest, e.event_mac, e.created_at_ns,
+       a.audit_id IS NOT NULL
+FROM integrity_events AS e
+LEFT JOIN audit_records AS a ON a.audit_id = e.audit_id
+ORDER BY e.sequence`)
 	if err != nil {
 		return fmt.Errorf("sqlite integrity: read events: %w", err)
 	}
@@ -113,6 +116,7 @@ ORDER BY sequence`)
 			&event.PayloadDigest,
 			&event.EventMAC,
 			&event.CreatedAtNS,
+			&event.AuditExists,
 		); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("sqlite integrity: scan event: %w", err)
@@ -131,11 +135,7 @@ ORDER BY sequence`)
 			!signer.Verify(event.PreviousMAC, event.AuditID, event.EventType, event.PayloadDigest, event.EventMAC, event.CreatedAtNS) {
 			return errors.New("sqlite integrity: event chain verification failed")
 		}
-		var auditExists int
-		if err := transaction.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM audit_records WHERE audit_id = ?)`, event.AuditID).Scan(&auditExists); err != nil {
-			return fmt.Errorf("sqlite integrity: check event audit: %w", err)
-		}
-		if auditExists != 0 {
+		if event.AuditExists {
 			current, err := integrityPayloadDigest(ctx, transaction, event.AuditID, event.EventType)
 			if err != nil || !bytes.Equal(current, event.PayloadDigest) {
 				return errors.New("sqlite integrity: current audit payload verification failed")

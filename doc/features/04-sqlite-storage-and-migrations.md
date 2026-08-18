@@ -142,7 +142,7 @@ raw API 只对 `retention_state=full` 开放；`pending` 返回未就绪，`meta
 
 ## 7. 启动恢复与完整性链
 
-应用启动顺序为：打开/迁移数据库、加载主密钥、派生 integrity signer、验证全部既有 event chain、恢复未终结 audit、再启动 parser/caller worker。
+应用启动顺序为：打开/迁移数据库、加载主密钥、派生 integrity signer、验证全部既有 event chain、恢复未终结 audit、再启动 parser/caller worker。完整验证会重算仍保留 audit 的证据摘要，耗时随历史量增长，因此不使用固定墙钟超时；数据面和管理面监听器只在验证成功后启动。启动期间收到 SIGINT/SIGTERM 会通过 lifecycle context 取消校验并退出，而不是把一次超时永久降级为不可用 runtime。
 
 恢复会把未终结 audit 标记为 `interrupted/partial/process_exit`，把 streaming stage/body 标为 partial，把 raw retention 强制为 `full`，并根据 owning chunks 修复可证明的 stored length 和 chunk count。不能证明的 SHA-256、EOF 和 timeline complete 会被清空或置为 false。每个恢复 audit 写 `capture_finalized`，并只增加一条聚合 process-exit gap；重复恢复幂等。
 

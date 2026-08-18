@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -59,6 +60,24 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	}
 	if response.Body.String() != "created" {
 		t.Fatalf("body = %q, want created", response.Body.String())
+	}
+}
+
+func TestNewContextRejectsCanceledStartup(t *testing.T) {
+	configuration := config.Default()
+	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	application, err := NewContext(ctx, configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if application != nil {
+		_ = application.Close()
+		t.Fatal("NewContext returned an application after startup cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewContext error = %v, want context cancellation", err)
 	}
 }
 
@@ -594,7 +613,7 @@ END`); err != nil {
 			configuration.KeyPath = keyPath
 			var logs bytes.Buffer
 
-			runtime := assembleAudit(configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
+			runtime := assembleAudit(context.Background(), configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
 			if runtime.store != nil || runtime.cipher != nil {
 				t.Fatalf("runtime retained usable storage after recovery failure: store=%v cipher=%v", runtime.store != nil, runtime.cipher != nil)
 			}

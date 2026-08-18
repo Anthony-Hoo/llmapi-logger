@@ -44,14 +44,14 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(stderr, nil))
-	application, err := app.Load(*configPath, logger)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	application, err := app.LoadContext(ctx, *configPath, logger)
 	if err != nil {
 		logger.Error("application setup failed", "error", err)
 		return 1
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	if err := application.Run(ctx); err != nil {
 		logger.Error("application stopped with error", "error", err)
 		return 1
