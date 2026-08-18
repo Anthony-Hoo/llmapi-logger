@@ -257,6 +257,7 @@ func (application *App) Run(ctx context.Context) error {
 			application.callerHealthy.Store(true)
 		}
 	}
+	application.startIntegrityVerification(ctx)
 
 	dataListener, err := net.Listen("tcp", application.server.Addr)
 	if err != nil {
@@ -319,6 +320,38 @@ func (application *App) Run(ctx context.Context) error {
 		runErr = errors.Join(runErr, fmt.Errorf("shutdown listeners: %w", shutdownErr))
 	}
 	return runErr
+}
+
+// startIntegrityVerification re-derives the payload behind every audit event in
+// the background. EnableIntegrity has already proved the event chain itself, so
+// the proxy serves while this runs: the pass walks the whole turn graph and its
+// cost grows with conversation depth, which is not a bound worth holding the
+// listeners closed for. A mismatch downgrades the store instead, surfacing as
+// an unavailable database on the readiness endpoint.
+func (application *App) startIntegrityVerification(ctx context.Context) {
+	if application == nil || application.auditStore == nil || !application.auditStore.IntegrityEnabled() {
+		return
+	}
+	store := application.auditStore
+	logger := application.logger
+	go func() {
+		started := time.Now()
+		logger.Info("audit integrity payload verification started")
+		if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+			if store.IntegrityPayloadState() == "failed" {
+				logger.Error("audit integrity payload verification failed",
+					"duration_ms", time.Since(started).Milliseconds(),
+					"error_category", "integrity_payload_mismatch")
+				return
+			}
+			logger.Warn("audit integrity payload verification interrupted",
+				"duration_ms", time.Since(started).Milliseconds(),
+				"error_category", "integrity_verification_interrupted")
+			return
+		}
+		logger.Info("audit integrity payload verification completed",
+			"duration_ms", time.Since(started).Milliseconds())
+	}()
 }
 
 func (application *App) startUserCatalog(ctx context.Context) func() {
@@ -564,14 +597,14 @@ func assembleAudit(ctx context.Context, configuration config.Config, logger *slo
 		return auditRuntime{sink: manager, manager: manager}
 	}
 	verificationStarted := time.Now()
-	logger.Info("audit integrity verification started")
+	logger.Info("audit integrity chain verification started")
 	if err := store.EnableIntegrity(ctx, key); err != nil {
 		_ = store.Close()
 		logger.Warn("audit integrity chain unavailable", "mode", configuration.Mode, "error_category", "integrity_unavailable")
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
-	logger.Info("audit integrity verification completed", "duration_ms", time.Since(verificationStarted).Milliseconds())
+	logger.Info("audit integrity chain verification completed", "duration_ms", time.Since(verificationStarted).Milliseconds())
 	// Derived while the master key is still in scope, alongside the cipher and
 	// the integrity signer, because the deferred clear wipes it on return.
 	fingerprints, err := security.NewCredentialFingerprinter(key)

@@ -93,7 +93,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 SQLite schema generation 2 共 20 张表。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines 和 integrity events。完整表定义以[模块 04](04-sqlite-storage-and-migrations.md)为准。
 
-采用单 writer goroutine + 简单批事务，查询使用独立只读连接池。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动完整性验证会重算仍保留的历史证据，不设置固定墙钟上限；监听器在验证完成后才启动，进程生命周期 context 可取消该过程。
+采用单 writer goroutine + 简单批事务，查询使用独立只读连接池。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
 
 key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 

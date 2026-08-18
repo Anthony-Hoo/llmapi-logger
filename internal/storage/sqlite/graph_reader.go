@@ -93,7 +93,11 @@ WHERE audit_id = ?`, auditID).Scan(
 	if err != nil {
 		return nil, err
 	}
-	graph.Binaries, err = readGraphBinaries(ctx, transaction, graph.Objects)
+	objectHashes := make([][]byte, 0, len(graph.Objects))
+	for _, object := range graph.Objects {
+		objectHashes = append(objectHashes, object.Hash)
+	}
+	graph.Binaries, err = readGraphBinaries(ctx, transaction, objectHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -153,12 +157,8 @@ WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
 	return result, nil
 }
 
-func readGraphBinaries(ctx context.Context, transaction *sql.Tx, objects []auditmodel.StoredContent) ([]auditmodel.StoredBinary, error) {
-	hashes := make([][]byte, 0, len(objects))
-	for _, object := range objects {
-		hashes = append(hashes, object.Hash)
-	}
-	unique := uniqueHashes(hashes)
+func readGraphBinaries(ctx context.Context, transaction *sql.Tx, objectHashes [][]byte) ([]auditmodel.StoredBinary, error) {
+	unique := uniqueHashes(objectHashes)
 	binaries := make(map[string]auditmodel.StoredBinary)
 	for start := 0; start < len(unique); start += graphHashQueryBatch {
 		end := min(start+graphHashQueryBatch, len(unique))

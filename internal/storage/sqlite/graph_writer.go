@@ -78,7 +78,9 @@ WHERE audit_id = ?
 		return err
 	}
 	if graphVerified {
-		payloadDigest, err := semanticPayloadDigest(context.Background(), transaction, value.Result.AuditID)
+		// A nil cache means single-use: one write covers one audit, so there
+		// is no ancestor chain to amortize across.
+		payloadDigest, err := semanticPayloadDigest(context.Background(), transaction, nil, value.Result.AuditID)
 		if err != nil {
 			return err
 		}

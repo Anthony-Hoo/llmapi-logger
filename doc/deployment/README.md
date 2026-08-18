@@ -67,7 +67,9 @@ bin/audit-proxy-linux-amd64
 
 旧二进制不得直接打开 generation 2 数据库；回滚必须同时恢复旧二进制及其匹配的旧数据库/主密钥备份集。若维护者明确接受无历史回滚，可省略旧审计库备份，但仍不得删除唯一的 `audit.key` 或运行时配置。
 
-已有大库启动时会同步重算仍保留 audit 的完整性摘要，耗时随记录和对象数量增长。程序不会用固定的短超时把合法大库永久降级；在校验完成前不会绑定数据面或管理面监听器。容器 healthcheck/编排器的启动宽限期应覆盖实际历史校验时间，并可通过 `audit integrity verification started/completed` 安全日志区分“仍在校验”和“校验失败”。需要中止时发送 SIGTERM，startup lifecycle context 会取消数据库操作并退出。
+完整性校验分两段，启动不再被历史规模拖住。启动段只验证 event chain（`audit integrity chain verification started/completed`），耗时随事件数线性增长，随后立即绑定监听器开始转发。重算历史证据摘要的那一段随会话深度增长，在后台执行并单独打日志（`audit integrity payload verification started/completed`）。容器 healthcheck 只需覆盖链校验时间，不必等待后台段。
+
+后台段完成前 readiness 保持正常，因为链校验已经通过；只有真的算出摘要不一致才会记 `audit integrity payload verification failed`，并把 readiness 的 database 降为 unavailable，需要人工核对是否有人改动过审计行。日志里出现 `interrupted` 表示进程在校验途中退出，不代表证据有问题，下次启动会重跑。需要中止时发送 SIGTERM，lifecycle context 会取消两段校验并退出。
 
 ## 3. Docker Compose
 

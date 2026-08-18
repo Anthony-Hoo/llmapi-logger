@@ -142,7 +142,11 @@ raw API 只对 `retention_state=full` 开放；`pending` 返回未就绪，`meta
 
 ## 7. 启动恢复与完整性链
 
-应用启动顺序为：打开/迁移数据库、加载主密钥、派生 integrity signer、验证全部既有 event chain、恢复未终结 audit、再启动 parser/caller worker。完整验证会重算仍保留 audit 的证据摘要，耗时随历史量增长，因此不使用固定墙钟超时；数据面和管理面监听器只在验证成功后启动。启动期间收到 SIGINT/SIGTERM 会通过 lifecycle context 取消校验并退出，而不是把一次超时永久降级为不可用 runtime。
+应用启动顺序为：打开/迁移数据库、加载主密钥、派生 integrity signer、验证既有 event chain、恢复未终结 audit、启动 parser/caller worker、绑定监听器。
+
+完整性验证分两段，因为两段的成本上界不同。启动段只做事件数量可界定的检查：整条 chain 的 MAC 链接，以及每个终结 audit 和每个 turn 是否都有对应事件；通过后即接受新的审计写入。第二段重算每个事件覆盖的证据摘要，必须回溯整个 turn graph，成本随会话深度而不是事件数增长，因此放到监听器绑定之后由后台完成，不阻塞转发。
+
+后台段走只读连接池：writer 池只有一个连接，被长事务占住会阻塞全部审计写入。它按 conversation 分组，组内共享 turn ref 与 content object 缓存并在边界释放——父 turn 不跨 conversation，所以逐事件重建缓存会把 K 轮会话变成 O(K²) 次链回溯，而按 conversation 共享既能压回 O(K)，又把峰值内存限制在最大的单个会话上。摘要不一致意味着 chain 合法但底层 audit 行被改动，会把 store 置为 sticky 不健康（readiness 上报 database unavailable）；该状态不会被后续写入批次覆盖，而普通 health 标志会。两段都可由进程生命周期 context 取消，取消按中断处理，不记为校验失败。
 
 恢复会把未终结 audit 标记为 `interrupted/partial/process_exit`，把 streaming stage/body 标为 partial，把 raw retention 强制为 `full`，并根据 owning chunks 修复可证明的 stored length 和 chunk count。不能证明的 SHA-256、EOF 和 timeline complete 会被清空或置为 false。每个恢复 audit 写 `capture_finalized`，并只增加一条聚合 process-exit gap；重复恢复幂等。
 

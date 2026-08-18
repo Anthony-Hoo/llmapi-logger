@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
@@ -25,8 +26,14 @@ const (
 )
 
 // EnableIntegrity derives the event-chain signer from the audit master key
-// and verifies every existing event before accepting new audit writes. It is
-// intended to run during startup immediately after Open.
+// and verifies the recorded event chain before accepting new audit writes. It
+// is intended to run during startup immediately after Open.
+//
+// It checks only what the event count bounds: MAC linkage across the chain and
+// the presence of an event for every terminal audit and every turn. Re-deriving
+// each event's payload digest has to walk the whole turn graph behind that
+// event, which grows with conversation depth rather than event count, so it is
+// split into VerifyIntegrityPayloads for the caller to run once serving.
 func (store *Store) EnableIntegrity(ctx context.Context, masterKey []byte) error {
 	if ctx == nil {
 		return errors.New("sqlite: nil integrity context")
@@ -50,6 +57,35 @@ func (store *Store) IntegrityEnabled() bool {
 	return store != nil && store.integrity.Load() != nil
 }
 
+// VerifyIntegrityPayloads re-derives the signed payload of every recorded event
+// from the audit rows it still covers and compares it against the digest stored
+// when the event was appended. EnableIntegrity proves the chain itself was not
+// rewritten; this proves the rows underneath it did not change.
+//
+// It reads through the reader pool because the writer pool holds a single
+// connection: a pass measured in minutes on the writer would stall every audit
+// write for its duration. The outcome is sticky, since the writer resets the
+// general health flag on each committed batch.
+func (store *Store) VerifyIntegrityPayloads(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("sqlite: nil integrity context")
+	}
+	if store == nil || store.isClosed() {
+		return ErrClosed
+	}
+	if err := verifyIntegrityPayloads(ctx, store.readerDB); err != nil {
+		// Shutdown cancels the context and tears down the reader pool
+		// mid-pass. That is an interrupted verification, not a detected
+		// mismatch, and must not leave the store permanently unhealthy.
+		if ctx.Err() == nil && !store.isClosed() {
+			store.payloadState.Store(integrityPayloadsFailed)
+		}
+		return err
+	}
+	store.payloadState.Store(integrityPayloadsVerified)
+	return nil
+}
+
 type integrityEvent struct {
 	Sequence      int64
 	AuditID       string
@@ -58,7 +94,6 @@ type integrityEvent struct {
 	PayloadDigest []byte
 	EventMAC      []byte
 	CreatedAtNS   int64
-	AuditExists   bool
 }
 
 func appendIntegrityEvent(transaction *sql.Tx, signer *security.IntegritySigner, auditID, eventType string, payloadDigest []byte, createdAtNS int64) error {
@@ -96,12 +131,10 @@ func verifyIntegrityChain(ctx context.Context, database *sql.DB, signer *securit
 	}
 	defer transaction.Rollback()
 	rows, err := transaction.QueryContext(ctx, `
-SELECT e.sequence, e.audit_id, e.event_type, e.previous_mac,
-       e.payload_digest, e.event_mac, e.created_at_ns,
-       a.audit_id IS NOT NULL
-FROM integrity_events AS e
-LEFT JOIN audit_records AS a ON a.audit_id = e.audit_id
-ORDER BY e.sequence`)
+SELECT sequence, audit_id, event_type, previous_mac,
+       payload_digest, event_mac, created_at_ns
+FROM integrity_events
+ORDER BY sequence`)
 	if err != nil {
 		return fmt.Errorf("sqlite integrity: read events: %w", err)
 	}
@@ -116,7 +149,6 @@ ORDER BY e.sequence`)
 			&event.PayloadDigest,
 			&event.EventMAC,
 			&event.CreatedAtNS,
-			&event.AuditExists,
 		); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("sqlite integrity: scan event: %w", err)
@@ -134,12 +166,6 @@ ORDER BY e.sequence`)
 		if !bytes.Equal(event.PreviousMAC, previous) ||
 			!signer.Verify(event.PreviousMAC, event.AuditID, event.EventType, event.PayloadDigest, event.EventMAC, event.CreatedAtNS) {
 			return errors.New("sqlite integrity: event chain verification failed")
-		}
-		if event.AuditExists {
-			current, err := integrityPayloadDigest(ctx, transaction, event.AuditID, event.EventType)
-			if err != nil || !bytes.Equal(current, event.PayloadDigest) {
-				return errors.New("sqlite integrity: current audit payload verification failed")
-			}
 		}
 		previous = append(previous[:0], event.EventMAC...)
 	}
@@ -176,12 +202,184 @@ WHERE NOT EXISTS (
 	return nil
 }
 
-func integrityPayloadDigest(ctx context.Context, transaction *sql.Tx, auditID, eventType string) ([]byte, error) {
+// payloadTarget is one event the payload pass has to re-derive, carrying the
+// conversation its audit belongs to so the pass can group by turn graph.
+type payloadTarget struct {
+	AuditID        string
+	EventType      string
+	PayloadDigest  []byte
+	ConversationID string
+}
+
+func verifyIntegrityPayloads(ctx context.Context, database *sql.DB) error {
+	transaction, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("sqlite integrity: begin payload verification: %w", err)
+	}
+	defer transaction.Rollback()
+	// Only events whose audit still exists carry rows to re-derive from;
+	// retention removes the audit behind older events but keeps the chain.
+	// Ordering by conversation lets one cache serve a whole turn chain,
+	// because a turn's ancestors never live in another conversation.
+	rows, err := transaction.QueryContext(ctx, `
+SELECT e.audit_id, e.event_type, e.payload_digest, COALESCE(t.conversation_id, '')
+FROM integrity_events AS e
+JOIN audit_records AS a ON a.audit_id = e.audit_id
+LEFT JOIN turns AS t ON t.audit_id = e.audit_id
+ORDER BY COALESCE(t.conversation_id, ''), e.sequence`)
+	if err != nil {
+		return fmt.Errorf("sqlite integrity: read payload targets: %w", err)
+	}
+	// Drained before the per-event queries below, which reuse this
+	// transaction's single connection.
+	var targets []payloadTarget
+	for rows.Next() {
+		var target payloadTarget
+		if err := rows.Scan(&target.AuditID, &target.EventType, &target.PayloadDigest, &target.ConversationID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("sqlite integrity: scan payload target: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("sqlite integrity: close payload targets: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite integrity: iterate payload targets: %w", err)
+	}
+
+	cache := newIntegrityGraphCache()
+	conversation := ""
+	for index, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("sqlite integrity: payload verification canceled: %w", err)
+		}
+		if index == 0 || target.ConversationID != conversation {
+			conversation = target.ConversationID
+			cache.reset()
+		}
+		current, err := integrityPayloadDigest(ctx, transaction, cache, target.AuditID, target.EventType)
+		if err != nil || !bytes.Equal(current, target.PayloadDigest) {
+			return errors.New("sqlite integrity: current audit payload verification failed")
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("sqlite integrity: commit payload verification: %w", err)
+	}
+	return nil
+}
+
+// integrityGraphCache memoizes the turn-graph reads that dominate payload
+// verification. loadRequestRefs walks a turn's entire ancestor chain, so a
+// cache living for one event alone re-derives every ancestor once per
+// descendant and turns a K-turn conversation into O(K^2) chain walks. Parent
+// turns never cross conversations, so resetting on a conversation boundary
+// collapses that to O(K) while keeping peak memory bounded by the largest
+// single conversation rather than by the whole database.
+type integrityGraphCache struct {
+	refs    map[string][]auditmodel.ObjectRef
+	objects map[string]integrityObject
+}
+
+func newIntegrityGraphCache() *integrityGraphCache {
+	return &integrityGraphCache{
+		refs:    make(map[string][]auditmodel.ObjectRef),
+		objects: make(map[string]integrityObject),
+	}
+}
+
+func (cache *integrityGraphCache) reset() {
+	if cache == nil {
+		return
+	}
+	clear(cache.refs)
+	clear(cache.objects)
+}
+
+// integrityObject holds only what a payload digest consumes from a content
+// object. The stored ciphertext is reduced to its SHA-256 on read because that
+// is all the encoder writes, so caching a whole conversation's object set costs
+// a digest per object instead of the ciphertext itself.
+type integrityObject struct {
+	Hash            []byte
+	SemanticHash    []byte
+	Kind            string
+	Compression     string
+	PlaintextLength int64
+	EncodedLength   int64
+	DataDigest      []byte
+}
+
+// readIntegrityObjects mirrors readGraphObjects, including its sorted unique
+// ordering, but serves repeats from the cache and keeps only digests.
+func readIntegrityObjects(ctx context.Context, transaction *sql.Tx, cache *integrityGraphCache, hashes [][]byte) ([]integrityObject, error) {
+	unique := uniqueHashes(hashes)
+	missing := make([][]byte, 0, len(unique))
+	for _, hash := range unique {
+		if _, cached := cache.objects[hex.EncodeToString(hash)]; !cached {
+			missing = append(missing, hash)
+		}
+	}
+	for start := 0; start < len(missing); start += graphHashQueryBatch {
+		end := min(start+graphHashQueryBatch, len(missing))
+		arguments := make([]any, 0, end-start)
+		for _, hash := range missing[start:end] {
+			arguments = append(arguments, hash)
+		}
+		rows, err := transaction.QueryContext(ctx, `
+SELECT object_hash, semantic_hash, kind, compression,
+       plaintext_length, encoded_length, data_enc
+FROM content_objects
+WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite integrity: read graph content objects: %w", err)
+		}
+		for rows.Next() {
+			var object integrityObject
+			var data []byte
+			if err := rows.Scan(
+				&object.Hash,
+				&object.SemanticHash,
+				&object.Kind,
+				&object.Compression,
+				&object.PlaintextLength,
+				&object.EncodedLength,
+				&data,
+			); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("sqlite integrity: scan graph content object: %w", err)
+			}
+			object.Hash = cloneBytes(object.Hash)
+			object.SemanticHash = cloneBytes(object.SemanticHash)
+			// Matches digestEncoder.blobDigest: empty ciphertext hashes as an
+			// absent field rather than as the digest of an empty string.
+			if len(data) != 0 {
+				digest := sha256.Sum256(data)
+				object.DataDigest = digest[:]
+			}
+			cache.objects[hex.EncodeToString(object.Hash)] = object
+		}
+		if err := closeRows(rows); err != nil {
+			return nil, err
+		}
+	}
+	result := make([]integrityObject, 0, len(unique))
+	for _, hash := range unique {
+		object, cached := cache.objects[hex.EncodeToString(hash)]
+		if !cached {
+			return nil, errors.New("sqlite integrity: turn graph references a missing content object")
+		}
+		result = append(result, object)
+	}
+	return result, nil
+}
+
+func integrityPayloadDigest(ctx context.Context, transaction *sql.Tx, cache *integrityGraphCache, auditID, eventType string) ([]byte, error) {
 	switch eventType {
 	case integrityCaptureFinalized:
 		return capturePayloadDigest(ctx, transaction, auditID)
 	case integritySemanticCompacted:
-		return semanticPayloadDigest(ctx, transaction, auditID)
+		return semanticPayloadDigest(ctx, transaction, cache, auditID)
 	case integrityReconstructionFailed:
 		return reconstructionFailurePayloadDigest(ctx, transaction, auditID)
 	default:
@@ -374,7 +572,14 @@ ORDER BY `+stageOrderSQL, auditID)
 	return encoder.sum(), nil
 }
 
-func semanticPayloadDigest(ctx context.Context, transaction *sql.Tx, auditID string) ([]byte, error) {
+// semanticPayloadDigest derives the digest signed by a semantic_compacted
+// event. The cache is shared across every event of one conversation on the
+// verification path and single-use on the write path; either way the emitted
+// byte sequence is identical, which is what makes the two comparable.
+func semanticPayloadDigest(ctx context.Context, transaction *sql.Tx, cache *integrityGraphCache, auditID string) ([]byte, error) {
+	if cache == nil {
+		cache = newIntegrityGraphCache()
+	}
 	encoder := newDigestEncoder(semanticPayloadDomain)
 	encoder.text(auditID)
 	if err := appendParsedResultDigest(ctx, transaction, encoder, auditID); err != nil {
@@ -415,8 +620,7 @@ WHERE audit_id = ?`, auditID).Scan(
 	encoder.nullableText(responseID)
 	encoder.integer(createdAt)
 
-	memo := make(map[string][]auditmodel.ObjectRef)
-	requestRefs, err := loadRequestRefs(transaction, turnID, memo, make(map[string]bool))
+	requestRefs, err := loadRequestRefs(transaction, turnID, cache.refs, make(map[string]bool))
 	if err != nil {
 		return nil, err
 	}
@@ -433,10 +637,11 @@ WHERE audit_id = ?`, auditID).Scan(
 	for _, ref := range responseRefs {
 		hashes = append(hashes, ref.ObjectHash)
 	}
-	objects, err := readGraphObjects(ctx, transaction, hashes)
+	objects, err := readIntegrityObjects(ctx, transaction, cache, hashes)
 	if err != nil {
 		return nil, err
 	}
+	objectHashes := make([][]byte, 0, len(objects))
 	for _, object := range objects {
 		encoder.text("content_object")
 		encoder.field(object.Hash)
@@ -445,12 +650,13 @@ WHERE audit_id = ?`, auditID).Scan(
 		encoder.text(object.Compression)
 		encoder.integer(object.PlaintextLength)
 		encoder.integer(object.EncodedLength)
-		encoder.blobDigest(object.DataEnc)
+		encoder.field(object.DataDigest)
+		objectHashes = append(objectHashes, object.Hash)
 	}
-	if err := appendObjectReferenceDigest(ctx, transaction, encoder, objects); err != nil {
+	if err := appendObjectReferenceDigest(ctx, transaction, encoder, objectHashes); err != nil {
 		return nil, err
 	}
-	binaries, err := readGraphBinaries(ctx, transaction, objects)
+	binaries, err := readGraphBinaries(ctx, transaction, objectHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -594,13 +800,9 @@ func appendRefsDigest(encoder *digestEncoder, marker string, refs []auditmodel.O
 	}
 }
 
-func appendObjectReferenceDigest(ctx context.Context, transaction *sql.Tx, encoder *digestEncoder, objects []auditmodel.StoredContent) error {
-	if len(objects) == 0 {
+func appendObjectReferenceDigest(ctx context.Context, transaction *sql.Tx, encoder *digestEncoder, hashes [][]byte) error {
+	if len(hashes) == 0 {
 		return nil
-	}
-	hashes := make([][]byte, 0, len(objects))
-	for _, object := range objects {
-		hashes = append(hashes, object.Hash)
 	}
 	for start := 0; start < len(hashes); start += graphHashQueryBatch {
 		end := min(start+graphHashQueryBatch, len(hashes))

@@ -32,6 +32,11 @@ type Store struct {
 	healthy   atomic.Bool
 	integrity atomic.Pointer[security.IntegritySigner]
 
+	// Background payload verification outcome. Kept apart from healthy
+	// because the writer rewrites that flag after every committed batch,
+	// which would erase a detected mismatch on the next audit write.
+	payloadState atomic.Int32
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -115,15 +120,44 @@ func (store *Store) Close() error {
 	return store.closeErr
 }
 
-// Healthy reports whether the store is open and the latest writer batch
-// committed successfully.
+// Healthy reports whether the store is open, the latest writer batch committed
+// successfully, and background payload verification has not found a mismatch.
+// A still-running verification does not count as unhealthy: the chain check
+// already passed, and the pass only ever downgrades from there.
 func (store *Store) Healthy() bool {
 	if store == nil {
+		return false
+	}
+	if store.payloadState.Load() == integrityPayloadsFailed {
 		return false
 	}
 	store.submitMu.RLock()
 	defer store.submitMu.RUnlock()
 	return !store.closed && store.healthy.Load()
+}
+
+// Background payload verification states, reported by IntegrityPayloadState.
+const (
+	integrityPayloadsPending int32 = iota
+	integrityPayloadsVerified
+	integrityPayloadsFailed
+)
+
+// IntegrityPayloadState reports how far background payload verification got:
+// "pending" while it runs or was never started, "verified" once every event
+// re-derived to its stored digest, "failed" once one did not.
+func (store *Store) IntegrityPayloadState() string {
+	if store == nil {
+		return "pending"
+	}
+	switch store.payloadState.Load() {
+	case integrityPayloadsVerified:
+		return "verified"
+	case integrityPayloadsFailed:
+		return "failed"
+	default:
+		return "pending"
+	}
 }
 
 func (store *Store) isClosed() bool {
