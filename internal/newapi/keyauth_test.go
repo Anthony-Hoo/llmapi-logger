@@ -53,6 +53,64 @@ func TestValidateTokenKeyResolvesTokenIdentity(t *testing.T) {
 	}
 }
 
+func TestValidateTokenKeyAcceptsRenamedToken(t *testing.T) {
+	t.Parallel()
+	// Every row carries the labels as they read when that request was served,
+	// so a token renamed at some point has older rows holding the older name.
+	// That is one token with one history, not a corrupted response, and the
+	// name reported back is the current one regardless of row order.
+	server := newTokenLogServer(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"success":true,"data":[
+            {"user_id":7,"username":"developer","token_id":42,"token_name":"old-name","model_name":"model-example","request_id":"req-1","created_at":1000},
+            {"user_id":7,"username":"developer","token_id":42,"token_name":"current-name","model_name":"model-example","request_id":"req-2","created_at":3000},
+            {"user_id":7,"username":"developer","token_id":42,"token_name":"old-name","model_name":"model-example","request_id":"req-3","created_at":2000}
+        ]}`))
+	})
+
+	identity, err := ValidateTokenKey(context.Background(), server.URL, server.Client(), testDeveloperKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TokenIdentity{UserID: 7, Username: "developer", TokenID: 42, TokenName: "current-name", HasIdentity: true}
+	if identity != want {
+		t.Fatalf("identity = %+v, want %+v", identity, want)
+	}
+}
+
+func TestValidateTokenKeyRejectsDisagreeingOwners(t *testing.T) {
+	t.Parallel()
+	// Renaming is tolerated, but rows resolving to different owners are not:
+	// the endpoint filters by the authenticated token, so that cannot happen
+	// for a response this code is entitled to trust.
+	for name, body := range map[string]string{
+		"different token": `{"success":true,"data":[
+            {"user_id":7,"username":"developer","token_id":42,"token_name":"agent","created_at":1000},
+            {"user_id":7,"username":"developer","token_id":43,"token_name":"agent","created_at":2000}
+        ]}`,
+		"different user": `{"success":true,"data":[
+            {"user_id":7,"username":"developer","token_id":42,"token_name":"agent","created_at":1000},
+            {"user_id":8,"username":"developer","token_id":42,"token_name":"agent","created_at":2000}
+        ]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server := newTokenLogServer(t, func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(body))
+			})
+
+			identity, err := ValidateTokenKey(context.Background(), server.URL, server.Client(), testDeveloperKey)
+			if !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("error = %v, want ErrInvalidResponse", err)
+			}
+			if identity != (TokenIdentity{}) {
+				t.Fatalf("identity = %+v, want the zero identity", identity)
+			}
+		})
+	}
+}
+
 func TestValidateTokenKeyAcceptsUnusedKeyWithoutIdentity(t *testing.T) {
 	t.Parallel()
 	server := newTokenLogServer(t, func(writer http.ResponseWriter, _ *http.Request) {

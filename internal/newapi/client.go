@@ -394,4 +394,5 @@ type apiLog struct {
 	TokenName string `json:"token_name"`
 	ModelName string `json:"model_name"`
 	RequestID string `json:"request_id"`
+	CreatedAt int64  `json:"created_at"`
 }
