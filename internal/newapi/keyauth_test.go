@@ -3,6 +3,7 @@ package newapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,6 +76,62 @@ func TestValidateTokenKeyAcceptsRenamedToken(t *testing.T) {
 	want := TokenIdentity{UserID: 7, Username: "developer", TokenID: 42, TokenName: "current-name", HasIdentity: true}
 	if identity != want {
 		t.Fatalf("identity = %+v, want %+v", identity, want)
+	}
+}
+
+func TestValidateTokenKeyAcceptsLogPageLargerThanTheBufferedCeiling(t *testing.T) {
+	t.Parallel()
+	// /api/log/token ignores every paging parameter and returns its whole page,
+	// so the response size follows how much the token has been used, not
+	// anything the caller can ask for. A real deployment answered this with
+	// ~2.9 MB, which the shared 1 MiB buffered ceiling rejected as unusable and
+	// the sign-in handler reported as an unreachable NewAPI.
+	server := newTokenLogServer(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"success":true,"data":[`))
+		for row := 0; row < 1000; row++ {
+			if row > 0 {
+				_, _ = writer.Write([]byte(","))
+			}
+			_, _ = fmt.Fprintf(writer,
+				`{"user_id":7,"username":"developer","token_id":42,"token_name":"agent","created_at":%d,"content":%q}`,
+				row, strings.Repeat("x", 4096))
+		}
+		_, _ = writer.Write([]byte(`]}`))
+	})
+
+	identity, err := ValidateTokenKey(context.Background(), server.URL, server.Client(), testDeveloperKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TokenIdentity{UserID: 7, Username: "developer", TokenID: 42, TokenName: "agent", HasIdentity: true}
+	if identity != want {
+		t.Fatalf("identity = %+v, want %+v", identity, want)
+	}
+}
+
+func TestValidateTokenKeyRejectsUnboundedLogPage(t *testing.T) {
+	t.Parallel()
+	// Streaming removes the need to buffer, not the need for a limit: a body
+	// that never ends must still be abandoned rather than read forever.
+	server := newTokenLogServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`{"success":true,"data":[`))
+		// The padding goes in a field the decoder ignores, so every row stays
+		// individually valid and the read is stopped by the ceiling rather than
+		// by a row that fails validation.
+		filler := strings.Repeat("x", 64*1024)
+		for request.Context().Err() == nil {
+			if _, err := fmt.Fprintf(writer,
+				`{"user_id":7,"username":"developer","token_id":42,"token_name":"agent","created_at":1,"content":%q},`,
+				filler); err != nil {
+				return
+			}
+		}
+	})
+
+	_, err := ValidateTokenKey(context.Background(), server.URL, server.Client(), testDeveloperKey)
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("error = %v, want ErrResponseTooLarge", err)
 	}
 }
 
@@ -181,14 +238,17 @@ func TestValidateTokenKeySeparatesUpstreamFailuresFromRejection(t *testing.T) {
 		}
 	})
 
-	t.Run("oversized response", func(t *testing.T) {
+	t.Run("oversized field", func(t *testing.T) {
+		// A page is no longer rejected for being big -- see the large-page test
+		// above -- so an absurd value is caught as a malformed row instead, by
+		// the same per-field limit that has always applied to these labels.
 		server := newTokenLogServer(t, func(writer http.ResponseWriter, _ *http.Request) {
 			_, _ = writer.Write([]byte(`{"success":true,"data":[{"user_id":7,"username":"` +
 				strings.Repeat("x", maxResponseBodyBytes+16) + `","token_id":42,"token_name":"t"}]}`))
 		})
 		_, err := ValidateTokenKey(context.Background(), server.URL, server.Client(), testDeveloperKey)
-		if !errors.Is(err, ErrResponseTooLarge) {
-			t.Fatalf("error = %v, want ErrResponseTooLarge", err)
+		if !errors.Is(err, ErrInvalidResponse) {
+			t.Fatalf("error = %v, want ErrInvalidResponse", err)
 		}
 	})
 

@@ -258,6 +258,30 @@ func (client *Client) get(ctx context.Context, endpoint string, destination any)
 // credential because the administrator endpoints and the token endpoint
 // authenticate differently.
 func fetchJSON(ctx context.Context, httpClient *http.Client, endpoint string, authorize func(*http.Request), destination any) error {
+	return fetchBody(ctx, httpClient, endpoint, authorize, func(reader io.Reader) error {
+		body, err := io.ReadAll(io.LimitReader(reader, maxResponseBodyBytes+1))
+		if err != nil {
+			return ErrRequestFailed
+		}
+		if len(body) > maxResponseBodyBytes {
+			return ErrResponseTooLarge
+		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		if err := decoder.Decode(destination); err != nil {
+			return ErrInvalidResponse
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			return ErrInvalidResponse
+		}
+		return nil
+	})
+}
+
+// fetchBody performs the authenticated GET and hands the still-open body to
+// consume. Callers that can bound a response up front buffer it through
+// fetchJSON; the token log cannot be bounded and reads the body as a stream.
+func fetchBody(ctx context.Context, httpClient *http.Client, endpoint string, authorize func(*http.Request), consume func(io.Reader) error) error {
 	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
@@ -277,22 +301,28 @@ func fetchJSON(ctx context.Context, httpClient *http.Client, endpoint string, au
 	if response.StatusCode != http.StatusOK {
 		return unexpectedStatusError{status: response.StatusCode}
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes+1))
-	if err != nil {
-		return ErrRequestFailed
+	return consume(response.Body)
+}
+
+// ceilingReader fails the read once the response has produced more than the
+// caller allowed, so an upstream that never stops sending cannot be streamed
+// forever. It reports the condition as an error value rather than as EOF so a
+// truncated read is not mistaken for a malformed document.
+type ceilingReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (reader *ceilingReader) Read(buffer []byte) (int, error) {
+	if reader.remaining <= 0 {
+		return 0, ErrResponseTooLarge
 	}
-	if len(body) > maxResponseBodyBytes {
-		return ErrResponseTooLarge
+	if int64(len(buffer)) > reader.remaining {
+		buffer = buffer[:reader.remaining]
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	if err := decoder.Decode(destination); err != nil {
-		return ErrInvalidResponse
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return ErrInvalidResponse
-	}
-	return nil
+	read, err := reader.reader.Read(buffer)
+	reader.remaining -= int64(read)
+	return read, err
 }
 
 // unexpectedStatusError keeps the upstream status available so key validation
