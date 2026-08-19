@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
@@ -263,6 +264,7 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		manager.gaps.trigger()
 	}
 	session := newSession(manager, ctx, auditID, match.RouteID, started)
+	session.terminalMatcher = streamterminal.MatcherFor(match.Parser)
 	session.WrapRequestReceived(request)
 	return session, nil
 }

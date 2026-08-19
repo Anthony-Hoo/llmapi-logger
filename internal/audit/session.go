@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -24,19 +25,20 @@ const maxStreamTimelineEvents = 100_000
 const newAPIRequestIDHeader = "X-Oneapi-Request-Id"
 
 type stageCapture struct {
-	name          string
-	persisted     bool
-	startedAtNS   int64
-	proto         string
-	method        string
-	host          string
-	statusCode    *int
-	contentLength *int64
-	contentType   string
-	expectsBody   bool
-	body          *bodyCapture
-	faulted       bool
-	errorCode     string
+	name            string
+	persisted       bool
+	startedAtNS     int64
+	proto           string
+	method          string
+	host            string
+	statusCode      *int
+	contentLength   *int64
+	contentType     string
+	contentEncoding string
+	expectsBody     bool
+	body            *bodyCapture
+	faulted         bool
+	errorCode       string
 }
 
 // TerminalSummary is the immutable, non-sensitive request outcome available
@@ -57,18 +59,21 @@ type TerminalSummary struct {
 // Session owns the small, concurrency-safe state for one audit. It never
 // retains complete request or response bodies.
 type Session struct {
-	auditID      string
-	routeID      string
-	started      time.Time
-	store        Store
-	cipher       security.Cipher
-	logger       *slog.Logger
-	now          func() time.Time
-	request      context.Context
-	writeCtx     context.Context
-	notify       func(string) bool
-	callerNotify func(string) bool
-	gaps         *gapBuffer
+	auditID  string
+	routeID  string
+	started  time.Time
+	store    Store
+	cipher   security.Cipher
+	logger   *slog.Logger
+	now      func() time.Time
+	request  context.Context
+	writeCtx context.Context
+	// terminalMatcher is the protocol-owned SSE terminal-line matcher for
+	// this route's parser, provided by internal/parser/streamterminal.
+	terminalMatcher streamterminal.Matcher
+	notify          func(string) bool
+	callerNotify    func(string) bool
+	gaps            *gapBuffer
 
 	mu              sync.Mutex
 	stages          map[string]*stageCapture
@@ -227,11 +232,51 @@ func (session *Session) MarkClientCancelled() {
 	if session.forwardStatus == sqlite.ForwardRejected {
 		return
 	}
+	if session.responseLogicallyCompleteLocked() {
+		// A disconnect after the response was fully received (transport EOF
+		// or a stream terminal event) is a benign hang-up, not a
+		// cancellation; Finish will record the session as completed.
+		return
+	}
 	session.forwardStatus = sqlite.ForwardClientCancelled
 	session.blockedBy = nil
 	session.blockCode = nil
 	code := "client_cancelled"
 	session.errorCode = &code
+}
+
+// responseLogicallyCompleteLocked reports whether the response was received
+// in full AND every received byte was already handed to the client, so a
+// subsequent client disconnect is a benign hang-up rather than a
+// cancellation. Clients such as Codex close the connection immediately after
+// the stream's terminal event without reading to transport EOF, which cancels
+// the request context even though nothing was lost.
+//
+// Reception is complete when transport EOF was observed or the event stream
+// dispatched its protocol-level terminal event, and the observed length
+// satisfies any declared Content-Length. Delivery is complete when the
+// response_sent stage has observed at least the same number of bytes without
+// a downstream write failure. Capture-internal faults (persistence,
+// encryption) intentionally do not change this transport classification;
+// they still surface through capture_status.
+func (session *Session) responseLogicallyCompleteLocked() bool {
+	received := session.stages[sqlite.StageResponseReceived]
+	if received == nil || received.body == nil {
+		return false
+	}
+	receivedBody := received.body
+	if !receivedBody.eofSeen && !receivedBody.streamTerminalSeen {
+		return false
+	}
+	if received.contentLength != nil && *received.contentLength >= 0 &&
+		receivedBody.observedLength < *received.contentLength {
+		return false
+	}
+	sent := session.stages[sqlite.StageResponseSent]
+	if sent == nil || sent.body == nil || sent.body.errorCode == "body_write_error" {
+		return false
+	}
+	return sent.body.observedLength >= receivedBody.observedLength
 }
 
 func (session *Session) markFailure(status, errorCode string) {
@@ -243,7 +288,7 @@ func (session *Session) markFailure(status, errorCode string) {
 	if session.forwardStatus == sqlite.ForwardRejected || session.forwardStatus == sqlite.ForwardClientCancelled {
 		return
 	}
-	if session.request != nil && session.request.Err() != nil {
+	if session.request != nil && session.request.Err() != nil && !session.responseLogicallyCompleteLocked() {
 		session.forwardStatus = sqlite.ForwardClientCancelled
 		code := "client_cancelled"
 		session.errorCode = &code
@@ -270,7 +315,7 @@ func (session *Session) Finish() error {
 func (session *Session) finish() error {
 	session.mu.Lock()
 	if session.forwardStatus == sqlite.ForwardInProgress {
-		if session.request != nil && session.request.Err() != nil {
+		if session.request != nil && session.request.Err() != nil && !session.responseLogicallyCompleteLocked() {
 			session.forwardStatus = sqlite.ForwardClientCancelled
 			session.errorCode = stringPointer("client_cancelled")
 		} else {
@@ -496,15 +541,16 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 	}
 
 	stage := &stageCapture{
-		name:          name,
-		startedAtNS:   session.now().UnixNano(),
-		proto:         proto,
-		method:        method,
-		host:          host,
-		statusCode:    cloneInt(statusCode),
-		contentLength: cloneInt64(contentLength),
-		contentType:   headers.Get("Content-Type"),
-		expectsBody:   expectsBody,
+		name:            name,
+		startedAtNS:     session.now().UnixNano(),
+		proto:           proto,
+		method:          method,
+		host:            host,
+		statusCode:      cloneInt(statusCode),
+		contentLength:   cloneInt64(contentLength),
+		contentType:     headers.Get("Content-Type"),
+		contentEncoding: headers.Get("Content-Encoding"),
+		expectsBody:     expectsBody,
 	}
 	session.stages[name] = stage
 	if statusCode != nil {

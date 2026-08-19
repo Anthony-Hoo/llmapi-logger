@@ -148,7 +148,7 @@ FlushInterval=-1，wrapper 保持 Flush；原始 chunk 不是 SSE event，parser
 | 显式代理连接失败 | 按 NewAPI Transport 失败返回 502；超时仍按既有超时规则返回 504 |
 | NewAPI dial/TLS/round trip 失败 | 502 |
 | response header 超时 | 504 |
-| 客户端取消 | 取消 NewAPI context，不补错误 JSON |
+| 客户端取消 | 取消 NewAPI context，不补错误 JSON；若响应已完整接收且全部写给客户端（含流终止事件后的断开），审计终态为 completed 而非 client_cancelled，完成日志同步清除暂记的取消错误码 |
 | NewAPI 断流 / writer 短写 | 终止流并记录成功前缀、partial |
 | available 审计失败 | 继续转发，日志 + best-effort gap |
 | strict admission 后晚到审计失败 | partial/gap；不撤回已发送响应 |
