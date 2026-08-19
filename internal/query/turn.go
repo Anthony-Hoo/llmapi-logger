@@ -20,7 +20,7 @@ func (service *Service) ReconstructTurn(ctx context.Context, auditID string) (Re
 	if err := validateAuditID(auditID); err != nil {
 		return ReconstructedTurn{}, err
 	}
-	detail, err := service.store.QueryAuditDetail(ctx, auditID)
+	detail, err := service.store.QueryAuditDetail(ctx, auditID, nil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReconstructedTurn{}, ErrNotFound
 	}

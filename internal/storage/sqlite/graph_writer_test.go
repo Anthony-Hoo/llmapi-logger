@@ -158,7 +158,7 @@ func graphSide(values []graphTestItem) ([]auditmodel.Item, []any, []any) {
 
 func assertStoredTurn(t *testing.T, store *Store, prepared auditmodel.PreparedTurn, wantParent *string, wantReason string) {
 	t.Helper()
-	detail, err := store.QueryAuditDetail(context.Background(), prepared.AuditID)
+	detail, err := store.QueryAuditDetail(context.Background(), prepared.AuditID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
