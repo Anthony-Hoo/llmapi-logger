@@ -167,11 +167,6 @@ func (state *requestCompletionState) applyTerminal(summary audit.TerminalSummary
 	}
 	if summary.ErrorCode != "" {
 		state.errorCode = summary.ErrorCode
-	} else if summary.ForwardStatus == sqlite.ForwardCompleted {
-		// A benign post-terminal disconnect may have transiently recorded
-		// client_cancelled before the audit session reclassified the
-		// request as completed; the completion log must not mix the two.
-		state.errorCode = ""
 	}
 }
 

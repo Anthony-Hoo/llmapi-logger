@@ -338,20 +338,6 @@ func newReverseProxy(target *url.URL, options Options, logger *slog.Logger) *htt
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Proto")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Host")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Port")
-			if options.Audit != nil {
-				// Audited routes must reach the capture path as identity
-				// bytes. SSE framing and the stream terminal detector both
-				// read the raw upstream body, so a content-encoded response
-				// is observed as opaque bytes: event offsets become
-				// meaningless and no terminal marker can be seen, which is
-				// what separates a post-terminal client hang-up from a real
-				// cancellation. The transport sends no Accept-Encoding of its
-				// own, so only a client-supplied one can reintroduce a coding.
-				// Identity is always acceptable to a client that requested a
-				// coding, the inbound header is still recorded verbatim on the
-				// received stage, and passthrough keeps negotiating normally.
-				outbound.Header.Set("Accept-Encoding", "identity")
-			}
 			if session, ok := audit.SessionFromContext(inbound.Context()); ok {
 				session.WrapRequestSent(outbound)
 			}

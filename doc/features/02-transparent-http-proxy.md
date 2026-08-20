@@ -38,7 +38,6 @@ ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB
 3. 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 4. 不调用 ParseForm 或 url.Values.Encode。
 5. hop-by-hop Header 交给 ReverseProxy 处理。
-6. 仅审计路由把 Accept-Encoding 固定为 `identity`。采集读的是上游原始字节，content-encoded 的响应会让 SSE 分帧失去意义、流终止事件不可见，而后者正是区分「终止事件后挂断」与真实取消的依据。Transport 自身不发 Accept-Encoding（DisableCompression=true），只有客户端带的头会重新引入编码；对请求过编码的客户端 identity 始终可接受，入站原值仍逐字记录在 request_for_newapi_received_from_nginx 阶段。passthrough 不审计，照常协商。
 
 显式代理只改变 Transport 建立到 `newapi.url` 的网络路径，不参与 Rewrite，也不能扩大 LLM API 白名单或 passthrough 范围。`newapi.url` 为 HTTPS 时由 Transport 通过 HTTP(S) 代理执行 CONNECT，目标 Scheme、Host、Path、Query 和请求 Body 仍遵循上述规则。
 
@@ -149,7 +148,7 @@ FlushInterval=-1，wrapper 保持 Flush；原始 chunk 不是 SSE event，parser
 | 显式代理连接失败 | 按 NewAPI Transport 失败返回 502；超时仍按既有超时规则返回 504 |
 | NewAPI dial/TLS/round trip 失败 | 502 |
 | response header 超时 | 504 |
-| 客户端取消 | 取消 NewAPI context，不补错误 JSON；若响应已完整接收且全部写给客户端（含流终止事件后的断开），审计终态为 completed 而非 client_cancelled，完成日志同步清除暂记的取消错误码 |
+| 客户端取消 | 取消 NewAPI context，不补错误 JSON |
 | NewAPI 断流 / writer 短写 | 终止流并记录成功前缀、partial |
 | available 审计失败 | 继续转发，日志 + best-effort gap |
 | strict admission 后晚到审计失败 | partial/gap；不撤回已发送响应 |
