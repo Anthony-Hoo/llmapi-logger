@@ -38,6 +38,7 @@ ReverseProxy 固定 Rewrite、Transport、ModifyResponse、ErrorHandler、32 KiB
 3. 不修改 Method、Body、ContentLength、TransferEncoding 或认证 Header。
 4. 不调用 ParseForm 或 url.Values.Encode。
 5. hop-by-hop Header 交给 ReverseProxy 处理。
+6. 仅审计路由把 Accept-Encoding 固定为 `identity`。采集读的是上游原始字节，content-encoded 的响应会让 SSE 分帧失去意义、流终止事件不可见，而后者正是区分「终止事件后挂断」与真实取消的依据。Transport 自身不发 Accept-Encoding（DisableCompression=true），只有客户端带的头会重新引入编码；对请求过编码的客户端 identity 始终可接受，入站原值仍逐字记录在 request_for_newapi_received_from_nginx 阶段。passthrough 不审计，照常协商。
 
 显式代理只改变 Transport 建立到 `newapi.url` 的网络路径，不参与 Rewrite，也不能扩大 LLM API 白名单或 passthrough 范围。`newapi.url` 为 HTTPS 时由 Transport 通过 HTTP(S) 代理执行 CONNECT，目标 Scheme、Host、Path、Query 和请求 Body 仍遵循上述规则。
 

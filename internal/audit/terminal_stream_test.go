@@ -143,13 +143,40 @@ func TestClientDisconnectWithUndeliveredBytesStaysCancelled(t *testing.T) {
 		t.Fatalf("short delivery forward status = %q, want %q", shortDelivery.forwardStatus, sqlite.ForwardClientCancelled)
 	}
 
-	// Same, but the downstream write itself failed.
+	// Same, but the downstream write itself failed. The failure is driven
+	// through the real write path rather than hand-set, so the test binds to
+	// how production records it instead of to the fields it happens to touch.
 	writeFault, _, sent := streamResponseSession(true, 64, 64)
-	sent.body.errorCode = "body_write_error"
-	sent.body.faulted = true
+	writeFault.observeWrite(sqlite.StageResponseSent, nil, context.Canceled)
+	if !sent.body.writeFailed {
+		t.Fatal("observeWrite did not record the downstream write failure")
+	}
 	writeFault.MarkClientCancelled()
 	if writeFault.forwardStatus != sqlite.ForwardClientCancelled {
 		t.Fatalf("write fault forward status = %q, want %q", writeFault.forwardStatus, sqlite.ForwardClientCancelled)
+	}
+}
+
+// A capture-side fault on the response_sent body must not be mistaken for a
+// downstream write failure: both used to share the mutable errorCode field, so
+// a persistence failure landing after a real write error could erase it.
+func TestCaptureFaultOnSentBodyIsNotAWriteFailure(t *testing.T) {
+	t.Parallel()
+	session, _, sent := streamResponseSession(true, 64, 64)
+	sent.body.faulted = true
+	sent.body.errorCode = "body_encryption_failed"
+
+	if !session.responseLogicallyCompleteLocked() {
+		t.Fatal("a capture fault on the sent body demoted the transport classification")
+	}
+
+	sent.body.writeFailed = true
+	if session.responseLogicallyCompleteLocked() {
+		t.Fatal("a recorded write failure did not demote the transport classification")
+	}
+	sent.body.errorCode = "body_encryption_failed"
+	if session.responseLogicallyCompleteLocked() {
+		t.Fatal("overwriting errorCode erased the recorded write failure")
 	}
 }
 

@@ -273,7 +273,7 @@ func (session *Session) responseLogicallyCompleteLocked() bool {
 		return false
 	}
 	sent := session.stages[sqlite.StageResponseSent]
-	if sent == nil || sent.body == nil || sent.body.errorCode == "body_write_error" {
+	if sent == nil || sent.body == nil || sent.body.writeFailed {
 		return false
 	}
 	return sent.body.observedLength >= receivedBody.observedLength

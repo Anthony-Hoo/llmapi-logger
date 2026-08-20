@@ -34,6 +34,12 @@ type bodyCapture struct {
 	closed         bool
 	faulted        bool
 	errorCode      string
+	// writeFailed records that a downstream write actually failed, which is
+	// a transport fact and must not be confused with a capture-side fault.
+	// errorCode cannot carry this: persistence and encryption failures
+	// overwrite it on the same body, which would silently erase the signal
+	// that bytes never reached the client.
+	writeFailed    bool
 	stream         bool
 	streamLineData bool
 	streamHasData  bool
@@ -200,6 +206,7 @@ func (session *Session) observeWrite(stageName string, data []byte, writeErr err
 		return
 	}
 	body.faulted = true
+	body.writeFailed = true
 	body.errorCode = "body_write_error"
 	session.markStageFaultLocked(stage, body.errorCode)
 	if session.request != nil && session.request.Err() != nil {
@@ -228,8 +235,10 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 	if body.stream {
 		body.streamPoints = make([]streamtimeline.Point, 0, 256)
 		// The probe sees raw upstream bytes, so terminal detection is only
-		// possible for identity-encoded streams; a content-encoded stream
-		// keeps the plain cancellation classification.
+		// possible for identity-encoded streams. Audited routes ask NewAPI
+		// for identity, so this is a safety net for an upstream that encodes
+		// anyway: such a stream keeps the plain cancellation classification
+		// rather than being sealed on bytes nothing here can read.
 		if encoding := strings.ToLower(strings.TrimSpace(stage.contentEncoding)); encoding == "" || encoding == "identity" {
 			body.terminalMatcher = session.terminalMatcher
 		}
