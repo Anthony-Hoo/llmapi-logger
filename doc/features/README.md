@@ -28,7 +28,7 @@ Client -> Nginx -> Data-plane dispatcher
 | response_received_from_newapi | ReverseProxy 读取 NewAPI 响应 Body |
 | response_from_newapi_sent_to_nginx | ResponseWriter 成功接受响应字节 |
 
-每阶段独立保存元数据、Header/Trailer、observed length、SHA-256 和完整性状态；完整且相同的 request 接收/转发阶段、response 接收/发送阶段通过 `source_stage` 共享同一份 owning Body chunks。取消、短写或网络错误仍会让相邻阶段独立标记，不能共用一个完整性 summary。
+每阶段独立保存元数据、Header/Trailer、observed length、SHA-256 和完整性状态；完整且相同的 request 接收/转发阶段、response 接收/发送阶段通过 `source_stage` 共享同一份 owning Body chunks。短写、网络错误，以及响应尚未完整接收或未全部写给客户端时的取消，仍会让相邻阶段独立标记，不能共用一个完整性 summary。唯一例外是流终止事件后的客户端挂断：响应已完整接收且全部写出后，两个响应阶段按逻辑 EOF 封口并照常共享，判定规则见[模块 03](03-audit-session-and-evidence-capture.md)。
 
 ## 3. 架构
 

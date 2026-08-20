@@ -26,6 +26,11 @@ func MatcherFor(parserName string) Matcher {
 	}
 }
 
+// A provider error event ends the stream just as firmly as a completion: both
+// protocol parsers already stop at it (openai treats type "error" as terminal,
+// anthropic does the same for its error event), so omitting it here would leave
+// a client that hangs up after a complete error event recorded as a
+// cancellation while the parser reports a finished, failed response.
 func matchOpenAI(line []byte) bool {
 	text := string(line)
 	if rest, ok := strings.CutPrefix(text, "data:"); ok {
@@ -33,7 +38,7 @@ func matchOpenAI(line []byte) bool {
 	}
 	if rest, ok := strings.CutPrefix(text, "event:"); ok {
 		switch strings.TrimSpace(rest) {
-		case "response.completed", "response.failed", "response.incomplete":
+		case "response.completed", "response.failed", "response.incomplete", "error":
 			return true
 		}
 	}
@@ -42,5 +47,12 @@ func matchOpenAI(line []byte) bool {
 
 func matchAnthropic(line []byte) bool {
 	rest, ok := strings.CutPrefix(string(line), "event:")
-	return ok && strings.TrimSpace(rest) == "message_stop"
+	if !ok {
+		return false
+	}
+	switch strings.TrimSpace(rest) {
+	case "message_stop", "error":
+		return true
+	}
+	return false
 }

@@ -780,3 +780,84 @@ func TestAcceptEncodingNormalizedOnlyForAuditedRoutes(t *testing.T) {
 		})
 	}
 }
+
+// A client may refuse identity outright; asking NewAPI for a representation it
+// already rejected would trade a protocol violation for capture convenience.
+func TestAcceptEncodingRespectsExplicitIdentityRefusal(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{name: "plain preference is overridden", header: "gzip, br", want: "identity"},
+		{name: "no header still forces identity", header: "", want: "identity"},
+		{name: "identity refused outright", header: "gzip, identity;q=0", want: "gzip, identity;q=0"},
+		{name: "identity refused via wildcard", header: "gzip, *;q=0", want: "gzip, *;q=0"},
+		{name: "wildcard refusal but identity allowed", header: "*;q=0, identity;q=1", want: "identity"},
+		{name: "identity allowed explicitly", header: "identity;q=0.5, gzip", want: "identity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observed := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				observed <- request.Header.Get("Accept-Encoding")
+				response.WriteHeader(http.StatusNoContent)
+			}))
+			defer upstream.Close()
+
+			target, err := url.Parse(upstream.URL)
+			if err != nil {
+				t.Fatalf("parse target URL: %v", err)
+			}
+			matcher, err := routing.Compile(defaultTestRoutes())
+			if err != nil {
+				t.Fatalf("compile matcher: %v", err)
+			}
+			engine, err := interceptor.NewEngine(nil, defaultTestRoutes())
+			if err != nil {
+				t.Fatalf("compile interceptor engine: %v", err)
+			}
+
+			handler := NewWithOptions(target, matcher, engine, Options{Audit: stubSink{}}, nil)
+			request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody)
+			if test.header != "" {
+				request.Header.Set("Accept-Encoding", test.header)
+			}
+			handler.ServeHTTP(httptest.NewRecorder(), request)
+			select {
+			case got := <-observed:
+				if got != test.want {
+					t.Fatalf("upstream Accept-Encoding = %q, want %q", got, test.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("upstream never received the request")
+			}
+		})
+	}
+}
+
+// The audit session may legitimately finish as completed while the proxy itself
+// saw a downstream write fail; only the stale cancellation marker is stale.
+func TestApplyTerminalKeepsRealErrorCodes(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		initial string
+		want    string
+	}{
+		{name: "stale cancellation cleared", initial: "client_cancelled", want: ""},
+		{name: "downstream write error preserved", initial: "downstream_write_error", want: "downstream_write_error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newRequestCompletionState(true)
+			state.errorCode = test.initial
+			state.applyTerminal(audit.TerminalSummary{
+				AuditID:       "apx_test",
+				ForwardStatus: sqlite.ForwardCompleted,
+				CaptureStatus: sqlite.CaptureComplete,
+				ParseStatus:   sqlite.ParsePending,
+			})
+			if got := state.snapshot().errorCode; got != test.want {
+				t.Fatalf("error code = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

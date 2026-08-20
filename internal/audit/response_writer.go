@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,7 +38,14 @@ func (writer *observedResponseWriter) Write(data []byte) (int, error) {
 	if observedCount > len(data) {
 		observedCount = len(data)
 	}
-	writer.session.observeWrite(sqlite.StageResponseSent, data[:observedCount], err)
+	// A short write with a nil error still means bytes never reached the
+	// client. Reporting it as a write failure keeps the audit's own view in
+	// step with the completion recorder, which already treats it as one.
+	observedErr := err
+	if observedErr == nil && observedCount < len(data) {
+		observedErr = io.ErrShortWrite
+	}
+	writer.session.observeWrite(sqlite.StageResponseSent, data[:observedCount], observedErr)
 	return written, err
 }
 

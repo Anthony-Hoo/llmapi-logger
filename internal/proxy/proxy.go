@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -338,8 +339,8 @@ func newReverseProxy(target *url.URL, options Options, logger *slog.Logger) *htt
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Proto")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Host")
 			copyHeaderValues(outbound.Header, inbound.Header, "X-Forwarded-Port")
-			if options.Audit != nil {
-				// Audited routes must reach the capture path as identity
+			if options.Audit != nil && identityAcceptable(outbound.Header.Values("Accept-Encoding")) {
+				// Audited routes should reach the capture path as identity
 				// bytes. SSE framing and the stream terminal detector both
 				// read the raw upstream body, so a content-encoded response
 				// is observed as opaque bytes: event offsets become
@@ -347,8 +348,7 @@ func newReverseProxy(target *url.URL, options Options, logger *slog.Logger) *htt
 				// what separates a post-terminal client hang-up from a real
 				// cancellation. The transport sends no Accept-Encoding of its
 				// own, so only a client-supplied one can reintroduce a coding.
-				// Identity is always acceptable to a client that requested a
-				// coding, the inbound header is still recorded verbatim on the
+				// The inbound header is still recorded verbatim on the
 				// received stage, and passthrough keeps negotiating normally.
 				outbound.Header.Set("Accept-Encoding", "identity")
 			}
@@ -480,4 +480,53 @@ func (p *bufferPool) Put(buffer []byte) {
 		return
 	}
 	p.pool.Put(buffer[:p.size])
+}
+
+// identityAcceptable reports whether the client left identity encoding
+// acceptable. RFC 9110 lets a client refuse it outright with `identity;q=0`,
+// or implicitly with `*;q=0` when identity is not separately allowed. Asking
+// NewAPI for a representation the client already rejected would trade a
+// protocol violation for capture convenience, so such a request keeps its own
+// header and the stream simply stays unclassifiable.
+func identityAcceptable(values []string) bool {
+	starRefused := false
+	for _, value := range values {
+		for _, entry := range strings.Split(value, ",") {
+			name, quality, ok := parseEncodingPreference(entry)
+			if !ok {
+				continue
+			}
+			switch name {
+			case "identity":
+				// An explicit entry for identity is authoritative, whatever
+				// a wildcard elsewhere in the list says.
+				return quality > 0
+			case "*":
+				starRefused = quality == 0
+			}
+		}
+	}
+	return !starRefused
+}
+
+// parseEncodingPreference splits one Accept-Encoding entry into its coding
+// name and quality. Entries that carry no readable name are ignored rather
+// than guessed at, and an unparsable q leaves the default of 1.
+func parseEncodingPreference(entry string) (string, float64, bool) {
+	name, parameters, _ := strings.Cut(strings.TrimSpace(entry), ";")
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "", 0, false
+	}
+	quality := 1.0
+	for _, parameter := range strings.Split(parameters, ";") {
+		key, value, found := strings.Cut(parameter, "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(key), "q") {
+			continue
+		}
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil {
+			quality = parsed
+		}
+	}
+	return name, quality, true
 }

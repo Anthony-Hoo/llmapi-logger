@@ -3,6 +3,8 @@ package audit
 import (
 	"context"
 	"crypto/sha256"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,8 @@ func TestTerminalStreamMarkerDetection(t *testing.T) {
 		{name: "long payload line never matches", parser: "openai.chat_completions", chunks: []string{"data: " + strings.Repeat("x", 4096) + "\n\n"}, want: false},
 		{name: "overflowed line with terminal-looking prefix", parser: "openai.chat_completions", chunks: []string{"data: [DONE]" + strings.Repeat(" ", 36) + "trailing-payload\n\n"}, want: false},
 		{name: "done inside payload not a marker", parser: "openai.chat_completions", chunks: []string{"data: {\"text\":\"[DONE]\"}\n\n"}, want: false},
+		{name: "openai error event", parser: "openai.responses", chunks: []string{"event: error\ndata: {\"type\":\"error\"}\n\n"}, want: true},
+		{name: "anthropic error event", parser: "anthropic.messages", chunks: []string{"event: error\ndata: {\"type\":\"error\"}\n\n"}, want: true},
 		{name: "protocol without terminal marker", parser: "gemini.generate_content", chunks: []string{"data: [DONE]\n\n"}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -206,5 +210,41 @@ func TestCaptureFaultDoesNotChangeTransportClassification(t *testing.T) {
 	}
 	if !session.responseLogicallyCompleteLocked() {
 		t.Fatalf("responseLogicallyCompleteLocked = false, want true")
+	}
+}
+
+// shortWriter accepts only a prefix of every write and reports no error, which
+// is how the completion recorder's short-write detection is reached.
+type shortWriter struct {
+	http.ResponseWriter
+	accept int
+}
+
+func (writer *shortWriter) Write(data []byte) (int, error) {
+	if len(data) > writer.accept {
+		return writer.accept, nil
+	}
+	return len(data), nil
+}
+
+// A short write with a nil error still loses bytes, so the audit must record it
+// as a delivery failure rather than reporting an intact response.
+func TestShortWriteWithNilErrorIsRecordedAsWriteFailure(t *testing.T) {
+	t.Parallel()
+	session, _, sent := streamResponseSession(true, 0, 0)
+	writer := &observedResponseWriter{
+		underlying: &shortWriter{ResponseWriter: httptest.NewRecorder(), accept: 3},
+		session:    session,
+	}
+
+	written, err := writer.Write([]byte("0123456789"))
+	if written != 3 || err != nil {
+		t.Fatalf("Write = %d, %v; want the underlying short write reported verbatim", written, err)
+	}
+	if !sent.body.writeFailed {
+		t.Fatal("short write was not recorded as a delivery failure")
+	}
+	if session.responseLogicallyCompleteLocked() {
+		t.Fatal("a lost-byte response was still classified as fully delivered")
 	}
 }
