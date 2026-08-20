@@ -50,6 +50,8 @@ export interface AuditSummary {
   newapi_token_id?: number | string | null;
   token_name?: string | null;
   user_agent?: string | null;
+  conversation_id?: string | null;
+  conversation_turns?: number | string | null;
 }
 
 export interface AuditListPage {
@@ -257,6 +259,8 @@ export interface AuditFilters {
   newapi_user_id?: string;
   newapi_token_id?: string;
   forward_status?: string;
+  conversation?: string;
+  collapse?: boolean;
 }
 
 export type RawSide = "request" | "response";

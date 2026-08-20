@@ -88,16 +88,20 @@ func visibleToDeveloper(forwardStatus string, blockCode *string) bool {
 // condition renders the same rule as SQL, for the audit list query. The list
 // already joins token_links as t and audit_records as a.
 func (scope *AuditScope) condition() (string, []any) {
+	return scope.conditionWithAliases("a", "t")
+}
+
+func (scope *AuditScope) conditionWithAliases(auditAlias, tokenAlias string) (string, []any) {
 	arguments := []any{scope.Fingerprint}
-	ownership := "a.api_key_fpr = ?"
+	ownership := auditAlias + ".api_key_fpr = ?"
 	if scope.TokenID != nil {
-		ownership = "(a.api_key_fpr = ? OR t.newapi_token_id = ?)"
+		ownership = "(" + auditAlias + ".api_key_fpr = ? OR " + tokenAlias + ".newapi_token_id = ?)"
 		arguments = append(arguments, *scope.TokenID)
 	}
-	visible := "a.forward_status <> ?"
+	visible := auditAlias + ".forward_status <> ?"
 	arguments = append(arguments, ForwardRejected)
 	if len(developerVisibleBlockCodes) > 0 {
-		visible = "(" + visible + " OR a.block_code IN (" + placeholders(len(developerVisibleBlockCodes)) + "))"
+		visible = "(" + visible + " OR " + auditAlias + ".block_code IN (" + placeholders(len(developerVisibleBlockCodes)) + "))"
 		for _, code := range developerVisibleBlockCodes {
 			arguments = append(arguments, code)
 		}

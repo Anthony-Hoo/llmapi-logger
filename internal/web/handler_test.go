@@ -345,6 +345,13 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "not-an-integer") {
 		t.Fatalf("invalid token id response: status=%d body=%q", response.Code, response.Body.String())
 	}
+
+	request = authorizedRequest(http.MethodGet, "/api/v1/audits?collapse=conversations")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"invalid_query"`) {
+		t.Fatalf("invalid collapse response: status=%d body=%q", response.Code, response.Body.String())
+	}
 }
 
 func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
@@ -562,7 +569,7 @@ func (queries *fakeQuery) List(_ context.Context, filter query.Filter, cursor qu
 	return queries.page, queries.listErr
 }
 
-func (queries *fakeQuery) Get(context.Context, string) (query.Detail, error) {
+func (queries *fakeQuery) Get(context.Context, string, *query.Scope) (query.Detail, error) {
 	return queries.detail, queries.detailErr
 }
 

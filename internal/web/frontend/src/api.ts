@@ -180,6 +180,11 @@ export function createApiClient(
       if (filters.forward_status) {
         query.set("forward_status", filters.forward_status);
       }
+      if (filters.conversation?.trim()) {
+        query.set("conversation", filters.conversation.trim());
+      } else if (filters.collapse) {
+        query.set("collapse", "conversation");
+      }
       if (cursor) {
         query.set("before_started_at_ns", String(cursor.before_started_at_ns));
         query.set("before_id", cursor.before_id);
