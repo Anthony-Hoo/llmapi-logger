@@ -65,6 +65,8 @@ route match 后先建立 audit 并记录已看到的入站 metadata，再执行 
 
 模块主动 reject 使用其约定的安全 4xx；body 超限固定为 413 和 `body_too_large`。error、panic、非法 Decision 和非客户端取消的 Body 读取失败固定为 503，并分别使用 `interceptor_error`、`interceptor_panic`、`interceptor_invalid_decision`、`interceptor_body_read_error`。这些 fail-closed 行为与 available/strict 无关。客户端取消使用 forward_status=client_cancelled，不设 blocked_by/block_code。blocked_by/block_code 只对 rejected 非空，普通 NewAPI 4xx/5xx 仍是实际转发结果，不能误标为 rejected。
 
+**终止事件后的断开视为完成，而非取消。** Codex 等客户端在收到流的协议级终止事件（`data: [DONE]`、`event: response.completed` 等）后会立即关闭连接、不读到传输层 EOF，这会取消请求 context 并撕掉上游读取。判定规则：当响应已完整接收（传输层 EOF，或已派发完整的终止 SSE 事件——只在事件的终止空行到达后确认，`event:` 行本身只算候选），且接收长度满足已声明的 Content-Length，且 response_sent 阶段已把全部接收字节写给客户端（无 `body_write_error`、写出长度不小于接收长度）时，其后的客户端断开按 forward_status=completed 收尾，接收 body 以逻辑 EOF 封口，解析与轮次重建照常进行；不满足上述任一条件的断开仍是 client_cancelled。采集内部故障（落盘、加密失败）不改变这一传输层分类，只体现在 capture_status。终止事件的识别由 parser 层的 `internal/parser/streamterminal` 按协议提供匹配器，采集层只消费不解释：匹配基于逐行有界探针（48 字节，逐行清零、不落盘），超长行永不匹配。探针读的是上游原始字节，因此审计路由固定向 NewAPI 请求 `identity`（见 02 的 Rewrite 规则）；若上游仍然返回 content-encoded 的流，则不做识别、保持原取消分类，而不是在读不懂的字节上封口。投递失败由 body 上独立的 writeFailed 标志判定，不复用会被落盘、加密失败覆写的 error_code。
+
 stage、body_stream 和 chunk 只在真实观察开始时创建。没有调用 NewAPI 时，request_sent_to_newapi 及两个响应阶段必须不存在，而不是保存 not_started 空行。metadata reject 不为审计而 drain 入站 Body；若存在未读 Body，则第一个阶段和 capture_status 标 partial。body interceptor 已预读到 EOF 且证据成功落盘时，拒绝本身不导致 capture_status=partial。未触发的后三阶段也不计为采集缺失。
 
 ## 5. Body 采集
@@ -77,7 +79,7 @@ Observe 顺序固定：
 4. 为异步写入创建拥有型副本并独立 AES-GCM 加密。
 5. 提交 writer queue；失败则 stage/capture 标 partial 并记录 gap。
 
-只有观察到 EOF 时 hash_complete=true。取消、Read/Write error 或进程退出时，hash 只代表已观察前缀。seq/offset 是应用层采集顺序，不是 TCP 或 HTTP chunk。SSE 另外按完整逻辑 event 记录结束 offset 和时间；总事件超过 100,000 时停止追加时间点，但继续统计实际 event count。
+只有观察到 EOF 时 hash_complete=true；唯一例外是上节的逻辑 EOF——响应已完整接收且全部写给客户端后的客户端断开按 EOF 封口，此时 hash 覆盖完整 body。除此之外，取消、Read/Write error 或进程退出时，hash 只代表已观察前缀。seq/offset 是应用层采集顺序，不是 TCP 或 HTTP chunk。SSE 另外按完整逻辑 event 记录结束 offset 和时间；总事件超过 100,000 时停止追加时间点，但继续统计实际 event count。
 
 四个观察阶段在流式采集期间先各自保存 owning chunks。`FinishAudit` 的 writer 事务只有在成对阶段都完整、各自 chunk 聚合自洽、observed/stored length 相等且 SHA-256 完全一致时，才删除后一阶段的重复 chunks，并把其 `body_streams.source_stage` 改为前一阶段。若长度或 hash 不一致，后一阶段标记 `body_stage_mismatch`/partial，两个阶段的原始字节都保留，不能因预先共享掩盖短写、取消或代理改写错误。
 
