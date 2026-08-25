@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-alpine AS web-build
+FROM node:24-alpine AS web-build
 
 ARG PNPM_VERSION=10.15.0
 RUN npm install --global "pnpm@${PNPM_VERSION}"
@@ -15,7 +15,7 @@ COPY internal/web/frontend/ ./
 RUN pnpm build
 
 
-FROM golang:1.25-alpine AS go-build
+FROM golang:1.27-alpine AS go-build
 
 WORKDIR /src
 COPY go.mod go.sum ./
