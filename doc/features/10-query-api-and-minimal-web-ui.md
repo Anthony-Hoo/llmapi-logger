@@ -22,11 +22,13 @@
 GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 ~~~
 
-支持时间、协议、路径、模型、User-Agent、NewAPI 用户、用户名、Token ID/名称、状态码、转发状态、阻断组件/代码和捕获状态等窄筛选。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `started_at_ns + audit_id` keyset cursor，默认 50、最大 200。
+支持时间、协议、路径、模型、User-Agent、NewAPI 用户、用户名、Token ID/名称、状态码、转发状态、阻断组件/代码和捕获状态等窄筛选。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `started_at_ns + audit_id` keyset cursor，默认 50、最大 200；`conversation`/`collapse` 筛选不改变排序和分页语义。
 
 列表 SQL 只读取 audit、parsed summary 和 token link 窄列；query 层为每个候选 audit 单独读取并认证解密入站 User-Agent。User-Agent 筛选是不区分大小写的子串匹配，每次最多扫描 2000 个候选。列表不会读取 Request-URI、其他 Header、Body、parsed conversation 或 content/binary objects。
 
-列表 DTO 包含 TTFT、request/response model、caller status、可选用户/Token 元数据和入站 User-Agent。Web 层使用安全用户目录按 user ID 补充 `display_name`；前端优先显示显示名，不暴露完整用户名作为主标签，Token 名称和 ID 分行显示。
+列表 DTO 包含 TTFT、request/response model、caller status、可选用户/Token 元数据、入站 User-Agent 和所属 conversation。Web 层使用安全用户目录按 user ID 补充 `display_name`；前端优先显示显示名，不暴露完整用户名作为主标签，Token 名称和 ID 分行显示。
+
+`conversation=<conv_...>` 只返回 turn 归属于该内容寻址会话（详见[模块 18](18-content-addressed-conversation-storage.md)）的审计记录，按 `turns.conversation_id` 匹配，走 `turns_conversation_created_idx` 索引，不引入新 schema。`collapse=conversation` 时每个 conversation 只保留 `started_at_ns`/`audit_id` 意义上最新的一条；`collapse` 仅接受 `conversation`，其他非空值返回 `400 invalid_query`。被拦截、未解析等没有 turn 的记录不属于任何 conversation，始终逐条列出，不参与折叠去重。两个参数同时出现时以 `conversation` 为准，`collapse` 被忽略——查看单个会话应看到该会话的全部轮次。开发者会话中的代表记录选择与轮次计数均限定在该 API Key 的 scope 内。
 
 开发者会话的作用域在解析 query 之后由服务端注入，客户端无法触及或替换；显式携带 `newapi_user_id`、`username`、`newapi_token_id`、`token_name` 返回 400，而不是静默覆盖。
 
@@ -41,6 +43,7 @@ detail、raw、reconstructed 和 timeline 共用 `serveAuditResource` 中唯一�
 详情返回：
 
 - audit 状态、TTFT、路由、模型、调用者和 NewAPI request ID；
+- 所属 conversation id（无 turn 时为空）及该 conversation 的总轮数（仅在有 conversation id 时返回）；
 - 原始 Request-URI；
 - 四阶段元数据和逐项 Header/Trailer value；
 - Body 的 source stage、observed/stored length、SHA-256、retention state、chunk count、首末观测时间和 SSE event count；
@@ -100,8 +103,8 @@ UI 默认只显示 TTFT、Body 首末观测、SSE event count 和 complete 状�
 
 主要视图：
 
-- 审计列表：时间、调用者、窄模型列和可换行 User-Agent；异常记录显示短状态提示。
-- 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载。
+- 审计列表：时间、调用者、窄模型列和可换行 User-Agent；异常记录显示短状态提示；有所属 conversation 的行显示会话短 ID，按会话折叠开启且该会话轮数大于 1 时额外显示「N 轮」徽标。列表头提供「按会话折叠」开关，默认开启；查看单个会话（见下）时该开关不出现，因为此时应显示全部轮次。
+- 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后对列表应用该 conversation 的筛选；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作，取消后恢复折叠视图。
 - 对话审计：system/developer/user/assistant/tool、reasoning、tool call/result 按原顺序展示。
 - 流式响应时序：TTFT、event count、首末观测、timeline complete 和按需 timeline 校验。
 - 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。
@@ -140,7 +143,7 @@ type AuditQuery interface {
 
 ## 11. 最少测试
 
-- 列表 keyset、窄筛选、User-Agent 定向解密和 TTFT 映射。
+- 列表 keyset、窄筛选、User-Agent 定向解密、TTFT 映射、`conversation` 筛选、`collapse=conversation` 折叠语义及二者同时出现时的互斥优先级。
 - 详情逐项 Header/Trailer、Body retention/source/timeline 字段和 display name。
 - verified turn 的 complex Responses 请求/响应精确重建，包括 developer、reasoning、并行工具、PNG、`file_id`、inline file data 和 usage。
 - reconstructed/timeline 路由鉴权、`no-store` 和稳定错误。

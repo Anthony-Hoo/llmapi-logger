@@ -228,7 +228,7 @@ func TestDeleteExpiredCheckpointsRetainedChildAndCollectsUnreachableObjects(t *t
 	if result.DeletedAudits != 1 {
 		t.Fatalf("delete result = %+v", result)
 	}
-	detail, err := store.QueryAuditDetail(ctx, "child-turn")
+	detail, err := store.QueryAuditDetail(ctx, "child-turn", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

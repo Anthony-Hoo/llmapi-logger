@@ -301,7 +301,7 @@ function Dashboard({
   const [draftNewAPITokenID, setDraftNewAPITokenID] = useState("");
   const [draftForwardStatus, setDraftForwardStatus] = useState("");
   const [newAPIUsers, setNewAPIUsers] = useState<NewAPIUser[]>([]);
-  const [filters, setFilters] = useState<AuditFilters>({});
+  const [filters, setFilters] = useState<AuditFilters>({ collapse: true });
   const [cursor, setCursor] = useState<AuditCursor | null>(null);
   const [cursorHistory, setCursorHistory] = useState<Array<AuditCursor | null>>([]);
   const [selectedID, setSelectedID] = useState<string | null>(null);
@@ -369,7 +369,30 @@ function Dashboard({
 	  newapi_user_id: isDeveloper ? undefined : draftNewAPIUserID || undefined,
       newapi_token_id: isDeveloper ? undefined : draftNewAPITokenID || undefined,
       forward_status: draftForwardStatus || undefined,
+      conversation: filters.conversation,
+      collapse: filters.collapse,
     });
+  }
+
+  function filterByConversation(conversationID: string) {
+    setError(null);
+    setCursor(null);
+    setCursorHistory([]);
+    setFilters((current) => ({ ...current, conversation: conversationID }));
+  }
+
+  function clearConversationFilter() {
+    setError(null);
+    setCursor(null);
+    setCursorHistory([]);
+    setFilters(({ conversation: _removed, ...rest }) => rest);
+  }
+
+  function setCollapseConversations(collapse: boolean) {
+    setError(null);
+    setCursor(null);
+    setCursorHistory([]);
+    setFilters((current) => ({ ...current, collapse }));
   }
 
   function nextPage() {
@@ -447,6 +470,19 @@ function Dashboard({
           onSubmit={applyFilters}
         />
 
+        {filters.conversation ? (
+          <Alert className="border-blue-200 bg-blue-50/80">
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-blue-900">
+              <span className="min-w-0 truncate">
+                仅显示同一会话：<span className="font-mono text-xs" title={filters.conversation}>{filters.conversation}</span>
+              </span>
+              <Button variant="outline" size="sm" onClick={clearConversationFilter}>
+                清除会话筛选
+              </Button>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         {checkingSession ? (
           <Alert className="border-blue-200 bg-blue-50/80">
             <AlertDescription className="text-blue-800">正在检查已有管理会话…</AlertDescription>
@@ -471,8 +507,15 @@ function Dashboard({
             loading={loading}
             selectedID={selectedID}
             onSelect={setSelectedID}
+            collapse={Boolean(filters.collapse) && !filters.conversation}
+            onCollapseChange={filters.conversation ? undefined : setCollapseConversations}
           />
-          <AuditDetailPanel key={selectedID ?? "none"} client={client} auditID={selectedID} />
+          <AuditDetailPanel
+            key={selectedID ?? "none"}
+            client={client}
+            auditID={selectedID}
+            onFilterConversation={filterByConversation}
+          />
         </div>
 
         <div className="flex items-center justify-between pb-5">
@@ -881,11 +924,16 @@ export function AuditList({
   loading,
   selectedID,
   onSelect,
+  collapse = false,
+  onCollapseChange,
 }: {
   items: AuditSummary[];
   loading: boolean;
   selectedID: string | null;
   onSelect: (id: string) => void;
+  /** Whether the list keeps only the newest audit of every conversation. */
+  collapse?: boolean;
+  onCollapseChange?: (collapse: boolean) => void;
 }) {
   return (
     <Card className="min-w-0 overflow-hidden bg-white/90 shadow-sm">
@@ -894,7 +942,20 @@ export function AuditList({
           <CardTitle className="text-sm leading-5">审计记录</CardTitle>
           <CardDescription className="mt-0.5 truncate text-[11px]">按调用者、模型和客户端查看</CardDescription>
         </div>
-        {loading ? <Badge variant="secondary">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
+        <div className="flex items-center gap-3">
+          {onCollapseChange ? (
+            <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-blue-600"
+                checked={collapse}
+                onChange={(event) => onCollapseChange(event.target.checked)}
+              />
+              按会话折叠
+            </label>
+          ) : null}
+          {loading ? <Badge variant="secondary">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
+        </div>
       </div>
       <CardContent className="p-0">
         {loading ? (
@@ -933,6 +994,16 @@ export function AuditList({
                         {formatNanoTime(audit.started_at_ns)}
                       </span>
                       {status ? <span className="text-[11px] font-medium text-amber-700">{status}</span> : null}
+                      {audit.conversation_id ? (
+                        <span className="font-mono text-[11px] text-muted-foreground" title={audit.conversation_id}>
+                          会话 {audit.conversation_id.startsWith("conv_") ? audit.conversation_id.slice(5, 15) : audit.conversation_id.slice(0, 10)}
+                        </span>
+                      ) : null}
+                      {collapse && Number(audit.conversation_turns ?? 0) > 1 ? (
+                        <Badge variant="secondary" className="text-[10px]">
+                          {String(audit.conversation_turns)} 轮
+                        </Badge>
+                      ) : null}
                     </span>
                     <span className="mt-2 grid min-w-0 gap-x-5 gap-y-2 sm:grid-cols-[minmax(10rem,0.85fr)_minmax(6.5rem,0.4fr)_minmax(16rem,2fr)]">
                       <CallerValue audit={audit} />
@@ -1027,7 +1098,15 @@ function auditStatusSummary(audit: AuditSummary): string | null {
   return parts.join(" · ");
 }
 
-function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: string | null }) {
+function AuditDetailPanel({
+  client,
+  auditID,
+  onFilterConversation,
+}: {
+  client: ApiClient;
+  auditID: string | null;
+  onFilterConversation?: (conversationID: string) => void;
+}) {
   const [detail, setDetail] = useState<AuditDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1225,7 +1304,19 @@ function AuditDetailPanel({ client, auditID }: { client: ApiClient; auditID: str
               {auditID}
             </CardDescription>
           </div>
-          {detail ? <StatusBadge value={detail.audit.forward_status} /> : null}
+          <div className="flex items-center gap-2">
+            {detail?.audit.conversation_id && onFilterConversation ? (
+              <Button
+                variant="outline"
+                size="sm"
+                title={detail.audit.conversation_id}
+                onClick={() => onFilterConversation(detail.audit.conversation_id!)}
+              >
+                查看同会话
+              </Button>
+            ) : null}
+            {detail ? <StatusBadge value={detail.audit.forward_status} /> : null}
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-5 p-5">

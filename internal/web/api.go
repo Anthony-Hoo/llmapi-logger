@@ -408,7 +408,7 @@ func (handler *managementHandler) serveAuditDetail(writer http.ResponseWriter, r
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
-	detail, err := handler.query.Get(ctx, auditID)
+	detail, err := handler.query.Get(ctx, auditID, handler.sessionScope(request))
 	if err != nil {
 		handler.writeQueryError(writer, err)
 		return
@@ -589,6 +589,7 @@ func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor,
 		"blocked_by": true, "block_code": true, "capture_status": true,
 		"newapi_user_id": true, "username": true,
 		"newapi_token_id": true, "token_name": true,
+		"conversation": true, "collapse": true,
 	}
 	if scoped {
 		for _, key := range callerFilterKeys {
@@ -633,26 +634,32 @@ func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor,
 	if err != nil {
 		return query.Filter{}, query.Cursor{}, 0, err
 	}
+	collapse := values.Get("collapse")
+	if collapse != "" && collapse != "conversation" {
+		return query.Filter{}, query.Cursor{}, 0, fmt.Errorf("invalid collapse value %q", collapse)
+	}
 	cursor := query.Cursor{BeforeID: values.Get("before_id")}
 	if beforeNS != nil {
 		cursor.BeforeStartedAtNS = *beforeNS
 	}
 	filter := query.Filter{
-		FromNS:        fromNS,
-		ToNS:          toNS,
-		Protocol:      values.Get("protocol"),
-		Path:          values.Get("path"),
-		Model:         values.Get("model"),
-		UserAgent:     values.Get("user_agent"),
-		StatusCode:    statusCode,
-		ForwardStatus: values.Get("forward_status"),
-		BlockedBy:     values.Get("blocked_by"),
-		BlockCode:     values.Get("block_code"),
-		CaptureStatus: values.Get("capture_status"),
-		NewAPIUserID:  newAPIUserID,
-		Username:      values.Get("username"),
-		NewAPITokenID: newAPITokenID,
-		TokenName:     values.Get("token_name"),
+		FromNS:                fromNS,
+		ToNS:                  toNS,
+		Protocol:              values.Get("protocol"),
+		Path:                  values.Get("path"),
+		Model:                 values.Get("model"),
+		UserAgent:             values.Get("user_agent"),
+		StatusCode:            statusCode,
+		ForwardStatus:         values.Get("forward_status"),
+		BlockedBy:             values.Get("blocked_by"),
+		BlockCode:             values.Get("block_code"),
+		CaptureStatus:         values.Get("capture_status"),
+		NewAPIUserID:          newAPIUserID,
+		Username:              values.Get("username"),
+		NewAPITokenID:         newAPITokenID,
+		TokenName:             values.Get("token_name"),
+		Conversation:          values.Get("conversation"),
+		CollapseConversations: collapse == "conversation",
 	}
 	return filter, cursor, limit, nil
 }

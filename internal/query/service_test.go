@@ -596,7 +596,7 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	detail, err := service.Get(context.Background(), auditID)
+	detail, err := service.Get(context.Background(), auditID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +682,7 @@ func TestGetDecryptsConversationWithoutAddingItToListProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	detail, err := service.Get(context.Background(), auditID)
+	detail, err := service.Get(context.Background(), auditID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +748,7 @@ func TestGetRejectsTamperedOrInvalidEncryptedConversation(t *testing.T) {
 			if serviceErr != nil {
 				t.Fatal(serviceErr)
 			}
-			_, getErr := service.Get(context.Background(), auditID)
+			_, getErr := service.Get(context.Background(), auditID, nil)
 			if !errors.Is(getErr, ErrIntegrity) || getErr.Error() != ErrIntegrity.Error() || strings.Contains(getErr.Error(), "secret") {
 				t.Fatalf("Get error = %q, want safe ErrIntegrity", getErr)
 			}
@@ -818,7 +818,7 @@ func TestGetRejectsInvalidEncryptedDetailWithoutLeakingEvidence(t *testing.T) {
 			if serviceErr != nil {
 				t.Fatal(serviceErr)
 			}
-			_, getErr := service.Get(context.Background(), auditID)
+			_, getErr := service.Get(context.Background(), auditID, nil)
 			if !errors.Is(getErr, ErrIntegrity) {
 				t.Fatalf("Get error = %v, want ErrIntegrity", getErr)
 			}
@@ -878,7 +878,7 @@ func (store *fakeStore) QueryRequestHeaderEvidence(_ context.Context, auditID st
 	return store.requestHeaders[auditID], store.requestHeaderErr
 }
 
-func (store *fakeStore) QueryAuditDetail(context.Context, string) (sqlite.AuditQueryDetail, error) {
+func (store *fakeStore) QueryAuditDetail(context.Context, string, *sqlite.AuditScope) (sqlite.AuditQueryDetail, error) {
 	return store.detail, store.detailErr
 }
 

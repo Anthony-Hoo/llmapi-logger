@@ -19,6 +19,12 @@ type AuditQueryFilter struct {
 	Username      string
 	NewAPITokenID *int64
 	TokenName     string
+	// ConversationID narrows the list to audits whose turn belongs to one
+	// content-addressed conversation (`conv_...`).
+	ConversationID string
+	// CollapseConversations keeps only the newest audit of every
+	// conversation; audits without a turn are always listed individually.
+	CollapseConversations bool
 	// Scope is set for developer sessions only. It is enforced by the store
 	// rather than by the caller so no read path can forget to apply it.
 	Scope *AuditScope
@@ -59,6 +65,10 @@ type AuditListRow struct {
 	Username        *string
 	NewAPITokenID   *int64
 	TokenName       *string
+	ConversationID  *string
+	// ConversationTurns is the total number of turns in the row's
+	// conversation, or nil when the audit has no turn.
+	ConversationTurns *int64
 }
 
 // AuditListPage contains a keyset-paginated result. HasMore is computed by

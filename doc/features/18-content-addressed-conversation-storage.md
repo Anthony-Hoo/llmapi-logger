@@ -97,6 +97,8 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 同一 parent 可有多个 child。retry 可以选择父 request 作为 base；普通 continuation 通常选择父 post-turn context；回退、修改、上下文截断和总结压缩通过 delete/insert 增量表示。并行工具调用保留 item 顺序和 call id，不要求对话是单链。
 
+conversation id 作为查询维度暴露给[模块 10](10-query-api-and-minimal-web-ui.md) 的列表 API 和 React UI：列表可按 conversation 精确筛选或用唯一合法值 `collapse=conversation` 按 conversation 折叠展示，其他 `collapse` 值返回 `400 invalid_query`，但这只是查询层的过滤/展示逻辑，不改变本模块的存储或重建语义。开发者会话下的折叠代表记录与轮次计数均只覆盖该 API Key 的 scope。
+
 ## 8. 增量序列
 
 request context 不为每一轮重复保存完整引用列表，而保存把 parent base 转换为当前 context 的操作：

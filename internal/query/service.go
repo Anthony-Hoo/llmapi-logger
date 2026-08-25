@@ -25,7 +25,7 @@ type Store interface {
 	Healthy() bool
 	ListAudits(context.Context, sqlite.AuditQueryFilter, sqlite.AuditQueryCursor, int) (sqlite.AuditListPage, error)
 	QueryRequestHeaderEvidence(context.Context, string) ([]sqlite.HeaderEvidence, error)
-	QueryAuditDetail(context.Context, string) (sqlite.AuditQueryDetail, error)
+	QueryAuditDetail(context.Context, string, *sqlite.AuditScope) (sqlite.AuditQueryDetail, error)
 	QueryAuditScope(context.Context, string) (sqlite.AuditScopeRow, error)
 	RawBodyMeta(context.Context, string, string) (sqlite.RawBodyMetadata, error)
 	StreamBodyChunks(context.Context, string, string, func(sqlite.BodyChunk) error) error
@@ -64,21 +64,23 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 	}
 
 	storageFilter := sqlite.AuditQueryFilter{
-		FromNS:        filter.FromNS,
-		ToNS:          filter.ToNS,
-		Protocol:      filter.Protocol,
-		Path:          filter.Path,
-		Model:         filter.Model,
-		StatusCode:    filter.StatusCode,
-		ForwardStatus: filter.ForwardStatus,
-		BlockedBy:     filter.BlockedBy,
-		BlockCode:     filter.BlockCode,
-		CaptureStatus: filter.CaptureStatus,
-		NewAPIUserID:  filter.NewAPIUserID,
-		Username:      filter.Username,
-		NewAPITokenID: filter.NewAPITokenID,
-		TokenName:     filter.TokenName,
-		Scope:         storageScope(filter.Scope),
+		FromNS:                filter.FromNS,
+		ToNS:                  filter.ToNS,
+		Protocol:              filter.Protocol,
+		Path:                  filter.Path,
+		Model:                 filter.Model,
+		StatusCode:            filter.StatusCode,
+		ForwardStatus:         filter.ForwardStatus,
+		BlockedBy:             filter.BlockedBy,
+		BlockCode:             filter.BlockCode,
+		CaptureStatus:         filter.CaptureStatus,
+		NewAPIUserID:          filter.NewAPIUserID,
+		Username:              filter.Username,
+		NewAPITokenID:         filter.NewAPITokenID,
+		TokenName:             filter.TokenName,
+		ConversationID:        filter.Conversation,
+		CollapseConversations: filter.CollapseConversations && filter.Conversation == "",
+		Scope:                 storageScope(filter.Scope),
 	}
 	storageCursor := sqlite.AuditQueryCursor{
 		BeforeStartedAtNS: cursor.BeforeStartedAtNS,
@@ -236,14 +238,14 @@ func (service *Service) Authorize(ctx context.Context, auditID string, scope *Sc
 	return nil
 }
 
-func (service *Service) Get(ctx context.Context, auditID string) (Detail, error) {
+func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (Detail, error) {
 	if ctx == nil {
 		return Detail{}, invalid("nil context")
 	}
 	if err := validateAuditID(auditID); err != nil {
 		return Detail{}, err
 	}
-	storageDetail, err := service.store.QueryAuditDetail(ctx, auditID)
+	storageDetail, err := service.store.QueryAuditDetail(ctx, auditID, storageScope(scope))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Detail{}, ErrNotFound
 	}
@@ -479,31 +481,33 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 
 func mapAudit(row sqlite.AuditListRow) AuditSummary {
 	return AuditSummary{
-		AuditID:         row.AuditID,
-		StartedAtNS:     row.StartedAtNS,
-		EndedAtNS:       row.EndedAtNS,
-		RouteID:         row.RouteID,
-		Protocol:        row.Protocol,
-		ParserName:      row.ParserName,
-		Method:          row.Method,
-		Path:            row.Path,
-		Mode:            row.Mode,
-		StatusCode:      row.StatusCode,
-		TTFTNS:          row.TTFTNS,
-		ForwardStatus:   row.ForwardStatus,
-		CaptureStatus:   row.CaptureStatus,
-		ParseStatus:     row.ParseStatus,
-		BlockedBy:       row.BlockedBy,
-		BlockCode:       row.BlockCode,
-		ErrorCode:       row.ErrorCode,
-		RequestModel:    row.RequestModel,
-		ResponseModel:   row.ResponseModel,
-		NewAPIRequestID: row.NewAPIRequestID,
-		CallerStatus:    row.CallerStatus,
-		NewAPIUserID:    row.NewAPIUserID,
-		Username:        row.Username,
-		NewAPITokenID:   row.NewAPITokenID,
-		TokenName:       row.TokenName,
+		AuditID:           row.AuditID,
+		StartedAtNS:       row.StartedAtNS,
+		EndedAtNS:         row.EndedAtNS,
+		RouteID:           row.RouteID,
+		Protocol:          row.Protocol,
+		ParserName:        row.ParserName,
+		Method:            row.Method,
+		Path:              row.Path,
+		Mode:              row.Mode,
+		StatusCode:        row.StatusCode,
+		TTFTNS:            row.TTFTNS,
+		ForwardStatus:     row.ForwardStatus,
+		CaptureStatus:     row.CaptureStatus,
+		ParseStatus:       row.ParseStatus,
+		BlockedBy:         row.BlockedBy,
+		BlockCode:         row.BlockCode,
+		ErrorCode:         row.ErrorCode,
+		RequestModel:      row.RequestModel,
+		ResponseModel:     row.ResponseModel,
+		NewAPIRequestID:   row.NewAPIRequestID,
+		CallerStatus:      row.CallerStatus,
+		NewAPIUserID:      row.NewAPIUserID,
+		Username:          row.Username,
+		NewAPITokenID:     row.NewAPITokenID,
+		TokenName:         row.TokenName,
+		ConversationID:    row.ConversationID,
+		ConversationTurns: row.ConversationTurns,
 	}
 }
 
@@ -550,12 +554,13 @@ func validateList(filter Filter, cursor Cursor, limit int) error {
 		return invalid("invalid path")
 	}
 	for name, value := range map[string]string{
-		"protocol":   filter.Protocol,
-		"model":      filter.Model,
-		"user_agent": filter.UserAgent,
-		"blocked_by": filter.BlockedBy,
-		"username":   filter.Username,
-		"token_name": filter.TokenName,
+		"protocol":     filter.Protocol,
+		"model":        filter.Model,
+		"user_agent":   filter.UserAgent,
+		"blocked_by":   filter.BlockedBy,
+		"username":     filter.Username,
+		"token_name":   filter.TokenName,
+		"conversation": filter.Conversation,
 	} {
 		if len(value) > 512 || strings.ContainsRune(value, '\x00') || strings.TrimSpace(value) != value {
 			return invalid("invalid " + name)

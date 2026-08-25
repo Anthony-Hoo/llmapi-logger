@@ -23,20 +23,42 @@ func (store *Store) ListAudits(ctx context.Context, filter AuditQueryFilter, cur
 	if (cursor.BeforeStartedAtNS == 0) != (cursor.BeforeID == "") {
 		return AuditListPage{}, errors.New("sqlite: incomplete audit cursor")
 	}
+	if filter.Scope != nil {
+		if err := filter.Scope.Validate(); err != nil {
+			return AuditListPage{}, err
+		}
+	}
 
 	var statement strings.Builder
+	arguments := make([]any, 0, 16)
 	statement.WriteString(`
 SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code, a.ttft_ns,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
        a.newapi_request_id, a.caller_status,
-       t.newapi_user_id, t.username, t.newapi_token_id, t.token_name
+       t.newapi_user_id, t.username, t.newapi_token_id, t.token_name,
+       tn.conversation_id,`)
+	if filter.Scope == nil {
+		statement.WriteString(`
+       (SELECT COUNT(*) FROM turns AS tc WHERE tc.conversation_id = tn.conversation_id)`)
+	} else {
+		condition, values := filter.Scope.conditionWithAliases("ac", "tlc")
+		statement.WriteString(`
+       (SELECT COUNT(*)
+        FROM turns AS tc
+        JOIN audit_records AS ac ON ac.audit_id = tc.audit_id
+        LEFT JOIN token_links AS tlc ON tlc.audit_id = ac.audit_id
+        WHERE tc.conversation_id = tn.conversation_id
+          AND ` + condition + `)`)
+		arguments = append(arguments, values...)
+	}
+	statement.WriteString(`
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
 LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
+LEFT JOIN turns AS tn ON tn.audit_id = a.audit_id
 WHERE 1 = 1`)
-	arguments := make([]any, 0, 16)
 	appendCondition := func(condition string, values ...any) {
 		statement.WriteString("\n  AND ")
 		statement.WriteString(condition)
@@ -84,10 +106,30 @@ WHERE 1 = 1`)
 	if filter.TokenName != "" {
 		appendCondition("t.token_name = ?", filter.TokenName)
 	}
-	if filter.Scope != nil {
-		if err := filter.Scope.Validate(); err != nil {
-			return AuditListPage{}, err
+	if filter.ConversationID != "" {
+		appendCondition("tn.conversation_id = ?", filter.ConversationID)
+	}
+	if filter.CollapseConversations && filter.ConversationID == "" {
+		condition := `(tn.conversation_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM turns AS t2
+    JOIN audit_records AS a2 ON a2.audit_id = t2.audit_id
+`
+		var values []any
+		if filter.Scope != nil {
+			condition += "    LEFT JOIN token_links AS tl2 ON tl2.audit_id = a2.audit_id\n"
 		}
+		condition += `    WHERE t2.conversation_id = tn.conversation_id
+      AND (a2.started_at_ns > a.started_at_ns
+        OR (a2.started_at_ns = a.started_at_ns AND a2.audit_id > a.audit_id))`
+		if filter.Scope != nil {
+			scopeCondition, scopeValues := filter.Scope.conditionWithAliases("a2", "tl2")
+			condition += "\n      AND " + scopeCondition
+			values = scopeValues
+		}
+		condition += "))"
+		appendCondition(condition, values...)
+	}
+	if filter.Scope != nil {
 		condition, values := filter.Scope.condition()
 		appendCondition(condition, values...)
 	}
@@ -124,7 +166,7 @@ WHERE 1 = 1`)
 // QueryAuditDetail reads one transactionally consistent detail projection. It
 // loads the encrypted request URI, Header values, and parsed conversation for
 // the authenticated query service, but never loads Body chunks.
-func (store *Store) QueryAuditDetail(ctx context.Context, auditID string) (AuditQueryDetail, error) {
+func (store *Store) QueryAuditDetail(ctx context.Context, auditID string, scope *AuditScope) (AuditQueryDetail, error) {
 	if ctx == nil {
 		return AuditQueryDetail{}, errors.New("sqlite: nil context")
 	}
@@ -134,6 +176,11 @@ func (store *Store) QueryAuditDetail(ctx context.Context, auditID string) (Audit
 	if store == nil || store.isClosed() {
 		return AuditQueryDetail{}, ErrClosed
 	}
+	if scope != nil {
+		if err := scope.Validate(); err != nil {
+			return AuditQueryDetail{}, err
+		}
+	}
 
 	transaction, err := store.readerDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -142,17 +189,38 @@ func (store *Store) QueryAuditDetail(ctx context.Context, auditID string) (Audit
 	defer transaction.Rollback()
 
 	detail := AuditQueryDetail{}
-	if err := scanAuditListRow(transaction.QueryRowContext(ctx, `
+	var statement strings.Builder
+	arguments := make([]any, 0, 5)
+	statement.WriteString(`
 SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code, a.ttft_ns,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
        a.newapi_request_id, a.caller_status,
-       t.newapi_user_id, t.username, t.newapi_token_id, t.token_name
+       t.newapi_user_id, t.username, t.newapi_token_id, t.token_name,
+       tn.conversation_id,`)
+	if scope == nil {
+		statement.WriteString(`
+       (SELECT COUNT(*) FROM turns AS tc WHERE tc.conversation_id = tn.conversation_id)`)
+	} else {
+		condition, values := scope.conditionWithAliases("ac", "tlc")
+		statement.WriteString(`
+       (SELECT COUNT(*)
+        FROM turns AS tc
+        JOIN audit_records AS ac ON ac.audit_id = tc.audit_id
+        LEFT JOIN token_links AS tlc ON tlc.audit_id = ac.audit_id
+        WHERE tc.conversation_id = tn.conversation_id
+          AND ` + condition + `)`)
+		arguments = append(arguments, values...)
+	}
+	statement.WriteString(`
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
 LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
-WHERE a.audit_id = ?`, auditID), &detail.Audit); err != nil {
+LEFT JOIN turns AS tn ON tn.audit_id = a.audit_id
+WHERE a.audit_id = ?`)
+	arguments = append(arguments, auditID)
+	if err := scanAuditListRow(transaction.QueryRowContext(ctx, statement.String(), arguments...), &detail.Audit); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AuditQueryDetail{}, sql.ErrNoRows
 		}
@@ -334,8 +402,8 @@ ORDER BY seq`, auditID, sourceStage)
 }
 
 func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
-	var endedAt, statusCode, ttftNS, newAPIUserID, newAPITokenID sql.NullInt64
-	var blockedBy, blockCode, errorCode, requestModel, responseModel, requestID, username, tokenName sql.NullString
+	var endedAt, statusCode, ttftNS, newAPIUserID, newAPITokenID, conversationTurns sql.NullInt64
+	var blockedBy, blockCode, errorCode, requestModel, responseModel, requestID, username, tokenName, conversationID sql.NullString
 	if err := row.Scan(
 		&destination.AuditID,
 		&destination.StartedAtNS,
@@ -362,6 +430,8 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 		&username,
 		&newAPITokenID,
 		&tokenName,
+		&conversationID,
+		&conversationTurns,
 	); err != nil {
 		return err
 	}
@@ -374,6 +444,10 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	destination.RequestModel = nullStringPointer(requestModel)
 	destination.ResponseModel = nullStringPointer(responseModel)
 	destination.NewAPIRequestID = nullStringPointer(requestID)
+	destination.ConversationID = nullStringPointer(conversationID)
+	if destination.ConversationID != nil {
+		destination.ConversationTurns = nullInt64Pointer(conversationTurns)
+	}
 	destination.NewAPIUserID = nullInt64Pointer(newAPIUserID)
 	destination.Username = nullStringPointer(username)
 	destination.NewAPITokenID = nullInt64Pointer(newAPITokenID)

@@ -81,9 +81,9 @@ func TestGetReconstructsContentAddressedChatTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	detail, err := service.Get(ctx, auditID)
+	detail, err := service.Get(ctx, auditID, nil)
 	if err != nil {
-		storageDetail, readErr := store.QueryAuditDetail(ctx, auditID)
+		storageDetail, readErr := store.QueryAuditDetail(ctx, auditID, nil)
 		if readErr != nil {
 			t.Fatalf("Get: %v; read graph: %v", err, readErr)
 		}

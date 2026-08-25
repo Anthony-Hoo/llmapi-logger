@@ -49,6 +49,12 @@ type Filter struct {
 	Username      string
 	NewAPITokenID *int64
 	TokenName     string
+	// Conversation narrows results to one content-addressed conversation
+	// (`conv_...`), matching turns.conversation_id.
+	Conversation string
+	// CollapseConversations keeps only the newest audit of every
+	// conversation. Ignored when Conversation is set.
+	CollapseConversations bool
 	// Scope is set by the web layer for developer sessions and never parsed
 	// from client input.
 	Scope *Scope
@@ -71,33 +77,35 @@ type Cursor struct {
 
 // AuditSummary is the non-secret list projection.
 type AuditSummary struct {
-	AuditID         string  `json:"audit_id"`
-	StartedAtNS     int64   `json:"started_at_ns,string"`
-	EndedAtNS       *int64  `json:"ended_at_ns,string"`
-	RouteID         string  `json:"route_id"`
-	Protocol        string  `json:"protocol"`
-	ParserName      string  `json:"parser_name"`
-	Method          string  `json:"method"`
-	Path            string  `json:"path"`
-	Mode            string  `json:"mode"`
-	StatusCode      *int    `json:"status_code"`
-	TTFTNS          *int64  `json:"ttft_ns,string"`
-	ForwardStatus   string  `json:"forward_status"`
-	CaptureStatus   string  `json:"capture_status"`
-	ParseStatus     string  `json:"parse_status"`
-	BlockedBy       *string `json:"blocked_by"`
-	BlockCode       *string `json:"block_code"`
-	ErrorCode       *string `json:"error_code"`
-	RequestModel    *string `json:"request_model"`
-	ResponseModel   *string `json:"response_model"`
-	UserAgent       *string `json:"user_agent"`
-	NewAPIRequestID *string `json:"newapi_request_id"`
-	CallerStatus    string  `json:"caller_status"`
-	NewAPIUserID    *int64  `json:"newapi_user_id"`
-	Username        *string `json:"username"`
-	DisplayName     *string `json:"display_name"`
-	NewAPITokenID   *int64  `json:"newapi_token_id"`
-	TokenName       *string `json:"token_name"`
+	AuditID           string  `json:"audit_id"`
+	StartedAtNS       int64   `json:"started_at_ns,string"`
+	EndedAtNS         *int64  `json:"ended_at_ns,string"`
+	RouteID           string  `json:"route_id"`
+	Protocol          string  `json:"protocol"`
+	ParserName        string  `json:"parser_name"`
+	Method            string  `json:"method"`
+	Path              string  `json:"path"`
+	Mode              string  `json:"mode"`
+	StatusCode        *int    `json:"status_code"`
+	TTFTNS            *int64  `json:"ttft_ns,string"`
+	ForwardStatus     string  `json:"forward_status"`
+	CaptureStatus     string  `json:"capture_status"`
+	ParseStatus       string  `json:"parse_status"`
+	BlockedBy         *string `json:"blocked_by"`
+	BlockCode         *string `json:"block_code"`
+	ErrorCode         *string `json:"error_code"`
+	RequestModel      *string `json:"request_model"`
+	ResponseModel     *string `json:"response_model"`
+	UserAgent         *string `json:"user_agent"`
+	NewAPIRequestID   *string `json:"newapi_request_id"`
+	CallerStatus      string  `json:"caller_status"`
+	NewAPIUserID      *int64  `json:"newapi_user_id"`
+	Username          *string `json:"username"`
+	DisplayName       *string `json:"display_name"`
+	NewAPITokenID     *int64  `json:"newapi_token_id"`
+	TokenName         *string `json:"token_name"`
+	ConversationID    *string `json:"conversation_id"`
+	ConversationTurns *int64  `json:"conversation_turns,omitempty"`
 }
 
 // Page is a newest-first keyset page.
