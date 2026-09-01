@@ -1,7 +1,9 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { extractStructuredContent } from "../lib/images";
 import { Badge } from "./ui/badge";
+import { ImageAttachments } from "./image-attachments";
 
 import type {
   Conversation,
@@ -130,9 +132,6 @@ export function ConversationView({ conversation }: { conversation: Conversation 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <Badge variant="outline" className="font-mono">
-          schema v{conversation?.schema_version}
-        </Badge>
         <Badge variant="outline">{messages.length} 条消息</Badge>
         {partCounts.toolCalls > 0 ? <Badge variant="outline">{partCounts.toolCalls} 次工具调用</Badge> : null}
         {partCounts.toolResults > 0 ? <Badge variant="outline">{partCounts.toolResults} 条工具结果</Badge> : null}
@@ -168,9 +167,6 @@ function ConversationMessageView({ message, displayIndex }: { message: Conversat
       >
         <header className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">{presentation.label}</span>
-          <Badge variant="outline" className="font-mono font-normal">
-            {message.role}
-          </Badge>
           <span className="text-xs tabular-nums text-muted-foreground">#{displayIndex}</span>
           <Badge variant={isResponse ? "success" : "secondary"} className="font-normal">
             {isResponse ? "上游响应" : "请求上下文"}
@@ -185,9 +181,6 @@ function ConversationMessageView({ message, displayIndex }: { message: Conversat
               call id: {message.tool_call_id}
             </span>
           ) : null}
-          <span className="break-all font-mono text-[10px] text-muted-foreground" title="数据方向">
-            {message.direction}
-          </span>
         </header>
 
         <div className="mt-3 space-y-3">
@@ -243,19 +236,12 @@ function ConversationPartView({ part, renderMarkdown }: { part: ConversationPart
     case "tool_result":
       return <ToolResultView result={part} />;
     case "unknown":
-      return (
-        <details className="rounded-md border border-slate-200 bg-white/70 px-3 py-2">
-          <summary className="cursor-pointer text-xs font-medium text-muted-foreground">未识别内容块</summary>
-          <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
-            {part.data || "（空）"}
-          </pre>
-        </details>
-      );
+      return <UnknownPartView data={part.data ?? ""} />;
   }
 }
 
 function ToolCallView({ call }: { call: ConversationToolCallPart }) {
-  const argumentsView = formatStructuredText(call.arguments ?? "");
+  const argumentsView = extractStructuredContent(call.arguments ?? "");
 
   return (
     <div className="overflow-hidden rounded-md border border-violet-200 bg-white/85">
@@ -265,6 +251,7 @@ function ToolCallView({ call }: { call: ConversationToolCallPart }) {
         {call.id ? <span className="break-all font-mono text-[11px] text-violet-700">call id: {call.id}</span> : null}
       </div>
       <div className="p-3">
+        <ImageAttachments images={argumentsView.images} omitted={argumentsView.omittedImages} ownerLabel="工具调用参数" />
         <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           Arguments{argumentsView.formatted ? "（JSON 格式化）" : ""}
         </p>
@@ -281,7 +268,7 @@ function ToolCallView({ call }: { call: ConversationToolCallPart }) {
 }
 
 function ToolResultView({ result }: { result: ConversationToolResultPart }) {
-  const contentView = formatStructuredText(result.result ?? "");
+  const contentView = extractStructuredContent(result.result ?? "");
 
   return (
     <div className="overflow-hidden rounded-md border border-amber-200 bg-white/85">
@@ -293,6 +280,7 @@ function ToolResultView({ result }: { result: ConversationToolResultPart }) {
         ) : null}
       </div>
       <div className="p-3">
+        <ImageAttachments images={contentView.images} omitted={contentView.omittedImages} ownerLabel="工具结果" />
         <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           Result{contentView.formatted ? "（JSON 格式化）" : ""}
         </p>
@@ -305,6 +293,25 @@ function ToolResultView({ result }: { result: ConversationToolResultPart }) {
         )}
       </div>
     </div>
+  );
+}
+
+// Unknown blocks carry unparsed provider JSON (for example image blocks in
+// user messages); image extraction still applies so complete payloads render
+// while anything else stays inspectable as raw text.
+function UnknownPartView({ data }: { data: string }) {
+  const contentView = extractStructuredContent(data);
+
+  return (
+    <details className="rounded-md border border-slate-200 bg-white/70 px-3 py-2" open={contentView.images.length > 0}>
+      <summary className="cursor-pointer text-xs font-medium text-muted-foreground">未识别内容块</summary>
+      <div className="mt-2">
+        <ImageAttachments images={contentView.images} omitted={contentView.omittedImages} ownerLabel="未识别内容块" />
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
+          {contentView.text || "（空）"}
+        </pre>
+      </div>
+    </details>
   );
 }
 

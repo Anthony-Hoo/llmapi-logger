@@ -18,6 +18,7 @@ import { Separator } from "./components/ui/separator";
 import { Skeleton } from "./components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
 import { ConversationView } from "./components/conversation-view";
+import { buildConversationExport } from "./lib/conversation-export";
 import {
   displayValue,
   formatBytes,
@@ -415,7 +416,7 @@ function Dashboard({
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-20 border-b bg-white/85 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
+        <div className="mx-auto flex max-w-[1920px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3">
             <BrandMark compact />
             <div>
@@ -447,7 +448,7 @@ function Dashboard({
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
+      <main className="mx-auto max-w-[1920px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
         {view === "rules" && !isDeveloper ? (
           <UserAgentRulesPanel client={client} />
         ) : (
@@ -501,7 +502,9 @@ function Dashboard({
           </Alert>
         ) : null}
 
-        <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(440px,0.85fr)]">
+        {/* The conversation is the primary reading surface, so the list is a
+            compact rail and the detail takes the remaining width. */}
+        <div className="grid items-start gap-5 pb-5 xl:grid-cols-[minmax(320px,25rem)_minmax(0,1fr)]">
           <AuditList
             items={page.items}
             loading={loading}
@@ -509,6 +512,19 @@ function Dashboard({
             onSelect={setSelectedID}
             collapse={Boolean(filters.collapse) && !filters.conversation}
             onCollapseChange={filters.conversation ? undefined : setCollapseConversations}
+            footer={
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-muted-foreground">当前页 {page.items.length} 条</p>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" disabled={loading || cursorHistory.length === 0} onClick={previousPage}>
+                    上一页
+                  </Button>
+                  <Button variant="outline" size="sm" disabled={loading || !page.next_cursor} onClick={nextPage}>
+                    下一页
+                  </Button>
+                </div>
+              </div>
+            }
           />
           <AuditDetailPanel
             key={selectedID ?? "none"}
@@ -516,20 +532,6 @@ function Dashboard({
             auditID={selectedID}
             onFilterConversation={filterByConversation}
           />
-        </div>
-
-        <div className="flex items-center justify-between pb-5">
-          <p className="text-xs text-muted-foreground">
-            当前页 {page.items.length} 条 · 每页最多 50 条
-          </p>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={loading || cursorHistory.length === 0} onClick={previousPage}>
-              上一页
-            </Button>
-            <Button variant="outline" size="sm" disabled={loading || !page.next_cursor} onClick={nextPage}>
-              下一页
-            </Button>
-          </div>
         </div>
           </>
         )}
@@ -926,6 +928,7 @@ export function AuditList({
   onSelect,
   collapse = false,
   onCollapseChange,
+  footer,
 }: {
   items: AuditSummary[];
   loading: boolean;
@@ -934,10 +937,12 @@ export function AuditList({
   /** Whether the list keeps only the newest audit of every conversation. */
   collapse?: boolean;
   onCollapseChange?: (collapse: boolean) => void;
+  /** Rendered pinned below the list, e.g. pagination controls. */
+  footer?: ReactNode;
 }) {
   return (
-    <Card className="min-w-0 overflow-hidden bg-white/90 shadow-sm">
-      <div className="flex items-center justify-between gap-3 border-b px-4 py-2.5 text-left">
+    <Card className="flex min-w-0 flex-col overflow-hidden bg-white/90 shadow-sm xl:sticky xl:top-[4.5rem] xl:max-h-[calc(100vh-6rem)]">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2.5 text-left">
         <div className="min-w-0">
           <CardTitle className="text-sm leading-5">审计记录</CardTitle>
           <CardDescription className="mt-0.5 truncate text-[11px]">按调用者、模型和客户端查看</CardDescription>
@@ -957,7 +962,7 @@ export function AuditList({
           {loading ? <Badge variant="secondary">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
         </div>
       </div>
-      <CardContent className="p-0">
+      <CardContent className="min-h-0 flex-1 overflow-y-auto p-0">
         {loading ? (
           <div className="space-y-2 p-3">
             {Array.from({ length: 7 }, (_, index) => (
@@ -1005,7 +1010,9 @@ export function AuditList({
                         </Badge>
                       ) : null}
                     </span>
-                    <span className="mt-2 grid min-w-0 gap-x-5 gap-y-2 sm:grid-cols-[minmax(10rem,0.85fr)_minmax(6.5rem,0.4fr)_minmax(16rem,2fr)]">
+                    {/* Three columns while the list is full width, one stacked
+                        column inside the narrow rail. */}
+                    <span className="mt-2 grid min-w-0 gap-x-5 gap-y-2 sm:grid-cols-[minmax(10rem,0.85fr)_minmax(6.5rem,0.4fr)_minmax(16rem,2fr)] xl:grid-cols-1">
                       <CallerValue audit={audit} />
                       <ListValue label="模型" value={model} mono />
                       <ListValue label="User-Agent" value={userAgent} mono wrap />
@@ -1017,6 +1024,7 @@ export function AuditList({
           </ul>
         )}
       </CardContent>
+      {footer ? <div className="shrink-0 border-t bg-white/95 px-4 py-2.5">{footer}</div> : null}
     </Card>
   );
 }
@@ -1118,6 +1126,7 @@ function AuditDetailPanel({
   const [timelines, setTimelines] = useState<Partial<Record<RawSide, StreamTimeline>>>({});
   const [timelineLoading, setTimelineLoading] = useState<RawSide | null>(null);
   const [timelineNote, setTimelineNote] = useState<string | null>(null);
+  const [exportNote, setExportNote] = useState<string | null>(null);
   const rawController = useRef<AbortController | null>(null);
   const reconstructedController = useRef<AbortController | null>(null);
   const timelineController = useRef<AbortController | null>(null);
@@ -1131,6 +1140,7 @@ function AuditDetailPanel({
     setTimelines({});
     setTimelineNote(null);
     setTimelineLoading(null);
+    setExportNote(null);
     if (!auditID) {
       setDetail(null);
       setError(null);
@@ -1284,9 +1294,22 @@ function AuditDetailPanel({
     }
   }
 
+  function exportConversation() {
+    if (!detail) {
+      return;
+    }
+    const file = buildConversationExport(detail);
+    if (!file) {
+      setExportNote("当前记录没有可导出的解析会话。");
+      return;
+    }
+    saveBlob(new Blob([file.json], { type: "application/json" }), file.filename);
+    setExportNote(`会话记录已导出为 ${file.filename}。`);
+  }
+
   if (!auditID) {
     return (
-      <Card className="bg-white/90 shadow-sm xl:sticky xl:top-24">
+      <Card className="min-w-0 bg-white/90 shadow-sm">
         <CardContent className="flex min-h-80 items-center justify-center p-8 text-center text-sm text-muted-foreground">
           从左侧选择一条记录查看详情。
         </CardContent>
@@ -1295,30 +1318,7 @@ function AuditDetailPanel({
   }
 
   return (
-    <Card className="min-w-0 bg-white/90 shadow-sm xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto">
-      <CardHeader className="border-b px-5 py-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <CardTitle className="text-base">审计详情</CardTitle>
-            <CardDescription className="mt-1 truncate font-mono" title={auditID}>
-              {auditID}
-            </CardDescription>
-          </div>
-          <div className="flex items-center gap-2">
-            {detail?.audit.conversation_id && onFilterConversation ? (
-              <Button
-                variant="outline"
-                size="sm"
-                title={detail.audit.conversation_id}
-                onClick={() => onFilterConversation(detail.audit.conversation_id!)}
-              >
-                查看同会话
-              </Button>
-            ) : null}
-            {detail ? <StatusBadge value={detail.audit.forward_status} /> : null}
-          </div>
-        </div>
-      </CardHeader>
+    <Card className="min-w-0 bg-white/90 shadow-sm">
       <CardContent className="space-y-5 p-5">
         {loading ? <DetailSkeleton /> : null}
         {error ? (
@@ -1328,89 +1328,203 @@ function AuditDetailPanel({
           </Alert>
         ) : null}
         {!loading && detail ? (
-          <>
-            {detail.audit.forward_status === "rejected" ? (
-              <Alert className="border-red-200 bg-red-50">
-                <AlertTitle className="flex flex-wrap items-center gap-2 text-red-900">
-                  请求已在发送至 NewAPI 前被拦截
-                  {detail.audit.block_code ? <Badge variant="destructive">{detail.audit.block_code}</Badge> : null}
-                </AlertTitle>
-                <AlertDescription className="text-red-800">
-                  拦截模块：{detail.audit.blocked_by ?? "未知"}。该记录不会包含 NewAPI 请求或响应阶段。
-                </AlertDescription>
-              </Alert>
-            ) : null}
+          <AuditDetailBody
+            detail={detail}
+            onFilterConversation={onFilterConversation}
+            onExportConversation={exportConversation}
+            exportNote={exportNote}
+            reconstructedLoading={reconstructedLoading}
+            reconstructedNote={reconstructedNote}
+            onDownloadReconstructed={downloadReconstructed}
+            timelines={timelines}
+            timelineLoading={timelineLoading}
+            timelineNote={timelineNote}
+            onLoadTimeline={loadTimeline}
+            rawBodies={rawBodies}
+            rawLoading={rawLoading}
+            rawNote={rawNote}
+            onLoadRaw={loadRawBody}
+            onDownloadRaw={downloadRawBody}
+            onClearRaw={clearRawBody}
+          />
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
 
-            <Section title="轮次与内容存储">
+/**
+ * Detail layout: identity header, key facts, then the conversation as the
+ * primary content; every HTTP / parsing / storage detail lives below it.
+ */
+export function AuditDetailBody({
+  detail,
+  onFilterConversation,
+  onExportConversation,
+  exportNote,
+  reconstructedLoading,
+  reconstructedNote,
+  onDownloadReconstructed,
+  timelines,
+  timelineLoading,
+  timelineNote,
+  onLoadTimeline,
+  rawBodies,
+  rawLoading,
+  rawNote,
+  onLoadRaw,
+  onDownloadRaw,
+  onClearRaw,
+}: {
+  detail: AuditDetail;
+  onFilterConversation?: (conversationID: string) => void;
+  onExportConversation: () => void;
+  exportNote: string | null;
+  reconstructedLoading: RawSide | null;
+  reconstructedNote: string | null;
+  onDownloadReconstructed: (side: RawSide) => void;
+  timelines: Partial<Record<RawSide, StreamTimeline>>;
+  timelineLoading: RawSide | null;
+  timelineNote: string | null;
+  onLoadTimeline: (side: RawSide) => void;
+  rawBodies: Partial<Record<RawSide, LoadedRawBody>>;
+  rawLoading: RawSide | null;
+  rawNote: string | null;
+  onLoadRaw: (side: RawSide) => void;
+  onDownloadRaw: (side: RawSide) => void;
+  onClearRaw: (side: RawSide) => void;
+}) {
+  const audit = detail.audit;
+  const hasConversation = (detail.conversation?.messages.length ?? 0) > 0;
+
+  return (
+    <div className="space-y-5">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base font-semibold">审计详情</h2>
+            <StatusBadge value={audit.forward_status} />
+          </div>
+          <p className="mt-1 break-all font-mono text-xs text-muted-foreground" title={audit.audit_id}>
+            {audit.audit_id}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {audit.conversation_id && onFilterConversation ? (
+            <Button
+              variant="outline"
+              size="sm"
+              title={audit.conversation_id}
+              onClick={() => onFilterConversation(audit.conversation_id!)}
+            >
+              查看同会话
+            </Button>
+          ) : null}
+          <Button variant="outline" size="sm" onClick={onExportConversation} disabled={!hasConversation}>
+            <DownloadIcon />
+            <span className="ml-2">导出会话 JSON</span>
+          </Button>
+        </div>
+      </header>
+      {exportNote ? <p className="text-xs text-muted-foreground">{exportNote}</p> : null}
+
+      {audit.forward_status === "rejected" ? (
+        <Alert className="border-red-200 bg-red-50">
+          <AlertTitle className="flex flex-wrap items-center gap-2 text-red-900">
+            请求已在发送至 NewAPI 前被拦截
+            {audit.block_code ? <Badge variant="destructive">{audit.block_code}</Badge> : null}
+          </AlertTitle>
+          <AlertDescription className="text-red-800">
+            拦截模块：{audit.blocked_by ?? "未知"}。该记录不会包含 NewAPI 请求或响应阶段。
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <DefinitionGrid
+        columnsClassName="grid-cols-2 sm:grid-cols-3 2xl:grid-cols-6"
+        items={[
+          ["时间", formatNanoTime(audit.started_at_ns)],
+          ["模型", monoValue(audit.response_model?.trim() || audit.request_model?.trim() || "未记录")],
+          ["调用者", callerSummary(audit)],
+          ["HTTP 状态", audit.status_code ?? "—"],
+          ["TTFT", formatDurationNS(audit.ttft_ns)],
+          ["User-Agent", monoValue(audit.user_agent?.trim() || "未记录")],
+        ]}
+      />
+
+      <Section title="对话审计">
+        <ConversationView conversation={detail.conversation} />
+      </Section>
+
+      <Section title="HTTP 请求概览">
+        <DefinitionGrid
+          columnsClassName="sm:grid-cols-2 lg:grid-cols-3"
+          items={[
+            ["路由", audit.route_id],
+            ["协议", audit.protocol],
+            ["方法", audit.method],
+            ["路径", audit.path],
+            ["模式", audit.mode ?? "—"],
+            ["Parser", audit.parser_name ?? "—"],
+            ["捕获", <StatusBadge value={audit.capture_status} />],
+            ["解析", <StatusBadge value={audit.parse_status} />],
+            ["NewAPI Request ID", audit.newapi_request_id ?? "—"],
+            ["身份关联", callerStatusLabel(audit.caller_status)],
+          ]}
+        />
+      </Section>
+
+      <Section title="解析摘要">
+        {detail.parsed_result ? (
+          <DefinitionGrid
+            columnsClassName="sm:grid-cols-2 lg:grid-cols-3"
+            items={Object.entries(detail.parsed_result)
+              .filter(([, value]) => value !== null && value !== "")
+              .map(([key, value]) => [key, displayValue(value)])}
+          />
+        ) : (
+          <EmptyValue>当前没有解析摘要。</EmptyValue>
+        )}
+      </Section>
+
+      <Section title="流式响应时序">
+        <StreamTimingPanel
+          detail={detail}
+          timelines={timelines}
+          loading={timelineLoading}
+          note={timelineNote}
+          onLoad={onLoadTimeline}
+        />
+      </Section>
+
+      <Section title="存储与原始证据">
+        <div className="space-y-3">
+          <details className="overflow-hidden rounded-lg border bg-slate-50/60">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-semibold hover:bg-slate-100/80">
+              轮次与内容存储
+              <span className="ml-2 text-xs font-normal text-muted-foreground">重建校验与哈希 · 默认折叠</span>
+            </summary>
+            <div className="border-t bg-white/80 p-4">
               <TurnStoragePanel
                 detail={detail}
                 loading={reconstructedLoading}
                 note={reconstructedNote}
-                onDownload={downloadReconstructed}
+                onDownload={onDownloadReconstructed}
               />
-            </Section>
-
-            <Section title="对话审计">
-              <ConversationView conversation={detail.conversation} />
-            </Section>
-
-            <Section title="请求概览">
-              <DefinitionGrid
-                items={[
-                  ["时间", formatNanoTime(detail.audit.started_at_ns)],
-                  ["路由", detail.audit.route_id],
-                  ["协议", detail.audit.protocol],
-                  ["方法", detail.audit.method],
-                   ["路径", detail.audit.path],
-                   ["HTTP 状态", detail.audit.status_code ?? "—"],
-                   ["TTFT", formatDurationNS(detail.audit.ttft_ns)],
-                   ["转发", <StatusBadge value={detail.audit.forward_status} />],
-                  ["捕获", <StatusBadge value={detail.audit.capture_status} />],
-                  ["解析", <StatusBadge value={detail.audit.parse_status} />],
-                  ["模式", detail.audit.mode ?? "—"],
-                  ["Parser", detail.audit.parser_name ?? "—"],
-				  ["调用者", callerSummary(detail.audit)],
-				  ["NewAPI Request ID", detail.audit.newapi_request_id ?? "—"],
-				  ["身份关联", callerStatusLabel(detail.audit.caller_status)],
-                ]}
-              />
-            </Section>
-
-            <Section title="解析摘要">
-              {detail.parsed_result ? (
-                <DefinitionGrid
-                  items={Object.entries(detail.parsed_result)
-                    .filter(([, value]) => value !== null && value !== "")
-                    .map(([key, value]) => [key, displayValue(value)])}
-                />
-              ) : (
-                <EmptyValue>当前没有解析摘要。</EmptyValue>
-              )}
-            </Section>
-
-            <Section title="流式响应时序">
-              <StreamTimingPanel
-                detail={detail}
-                timelines={timelines}
-                loading={timelineLoading}
-                note={timelineNote}
-                onLoad={loadTimeline}
-              />
-            </Section>
-
-            <HTTPAuditEvidence
-              detail={detail}
-              rawBodies={rawBodies}
-              rawLoading={rawLoading}
-              rawNote={rawNote}
-              onLoad={loadRawBody}
-              onDownload={downloadRawBody}
-              onClear={clearRawBody}
-            />
-          </>
-        ) : null}
-      </CardContent>
-    </Card>
+            </div>
+          </details>
+          <HTTPAuditEvidence
+            detail={detail}
+            rawBodies={rawBodies}
+            rawLoading={rawLoading}
+            rawNote={rawNote}
+            onLoad={onLoadRaw}
+            onDownload={onDownloadRaw}
+            onClear={onClearRaw}
+          />
+        </div>
+      </Section>
+    </div>
   );
 }
 
@@ -1918,12 +2032,18 @@ function FilterField({ label, htmlFor, children }: { label: string; htmlFor: str
   );
 }
 
-function DefinitionGrid({ items }: { items: Array<[string, ReactNode]> }) {
+function DefinitionGrid({
+  items,
+  columnsClassName = "sm:grid-cols-2",
+}: {
+  items: Array<[string, ReactNode]>;
+  columnsClassName?: string;
+}) {
   if (items.length === 0) {
     return <EmptyValue>没有可展示的数据。</EmptyValue>;
   }
   return (
-    <dl className="grid gap-x-5 gap-y-3 text-sm sm:grid-cols-2">
+    <dl className={`grid gap-x-5 gap-y-3 text-sm ${columnsClassName}`}>
       {items.map(([label, value]) => (
         <div key={label} className="min-w-0">
           <dt className="text-xs text-muted-foreground">{label}</dt>

@@ -211,6 +211,77 @@ describe("conversation audit view", () => {
     expect(html).toContain("data");
   });
 
+  it("renders base64 images inside tool traffic as zoomable thumbnails with placeholders", () => {
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const withImages: Conversation = {
+      schema_version: 1,
+      messages: [
+        {
+          index: 0,
+          role: "tool",
+          phase: "request",
+          direction: "client_to_upstream",
+          tool_call_id: "call_shot_1",
+          content: [
+            {
+              index: 0,
+              type: "tool_result",
+              tool_call_id: "call_shot_1",
+              name: "take_screenshot",
+              result: JSON.stringify([
+                { type: "image", source: { type: "base64", media_type: "image/png", data: pngBase64 } },
+              ]),
+            },
+          ],
+        },
+      ],
+    };
+
+    const html = renderToStaticMarkup(<ConversationView conversation={withImages} />);
+
+    expect(html).toContain("<img");
+    expect(html).toContain("data:image/png;base64,");
+    expect(html).toContain("点击放大查看");
+    // The payload lives only in the thumbnail src; the JSON keeps a short
+    // placeholder instead of a wall of base64.
+    expect(html.split(pngBase64)).toHaveLength(2);
+    expect(html).toContain("[图片 #1 image/png");
+  });
+
+  it("renders complete images from unknown provider blocks and keeps raw JSON inspectable", () => {
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const withUnknown: Conversation = {
+      schema_version: 1,
+      messages: [
+        {
+          index: 0,
+          role: "user",
+          phase: "request",
+          direction: "client_to_upstream",
+          content: [
+            {
+              index: 0,
+              type: "unknown",
+              data: JSON.stringify({
+                type: "image",
+                source: { type: "base64", media_type: "image/png", data: pngBase64 },
+              }),
+            },
+          ],
+        },
+      ],
+    };
+
+    const html = renderToStaticMarkup(<ConversationView conversation={withUnknown} />);
+
+    expect(html).toContain("<img");
+    expect(html).toContain("未识别内容块");
+    // The disclosure starts open because there is an image worth seeing.
+    expect(html).toContain('open=""');
+  });
+
   it("pretty prints valid structured values and preserves non-JSON text", () => {
     expect(formatStructuredText("{\"city\":\"Shanghai\"}")).toEqual({
       text: "{\n  \"city\": \"Shanghai\"\n}",
