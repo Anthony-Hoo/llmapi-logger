@@ -251,7 +251,7 @@ function ToolCallView({ call }: { call: ConversationToolCallPart }) {
         {call.id ? <span className="break-all font-mono text-[11px] text-violet-700">call id: {call.id}</span> : null}
       </div>
       <div className="p-3">
-        <ImageAttachments images={argumentsView.images} ownerLabel="工具调用参数" />
+        <ImageAttachments images={argumentsView.images} omitted={argumentsView.omittedImages} ownerLabel="工具调用参数" />
         <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           Arguments{argumentsView.formatted ? "（JSON 格式化）" : ""}
         </p>
@@ -280,7 +280,7 @@ function ToolResultView({ result }: { result: ConversationToolResultPart }) {
         ) : null}
       </div>
       <div className="p-3">
-        <ImageAttachments images={contentView.images} ownerLabel="工具结果" />
+        <ImageAttachments images={contentView.images} omitted={contentView.omittedImages} ownerLabel="工具结果" />
         <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           Result{contentView.formatted ? "（JSON 格式化）" : ""}
         </p>
@@ -306,7 +306,7 @@ function UnknownPartView({ data }: { data: string }) {
     <details className="rounded-md border border-slate-200 bg-white/70 px-3 py-2" open={contentView.images.length > 0}>
       <summary className="cursor-pointer text-xs font-medium text-muted-foreground">未识别内容块</summary>
       <div className="mt-2">
-        <ImageAttachments images={contentView.images} ownerLabel="未识别内容块" />
+        <ImageAttachments images={contentView.images} omitted={contentView.omittedImages} ownerLabel="未识别内容块" />
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
           {contentView.text || "（空）"}
         </pre>

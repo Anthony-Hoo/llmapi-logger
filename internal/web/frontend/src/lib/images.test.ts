@@ -79,15 +79,31 @@ describe("extractStructuredContent", () => {
 
   it("keeps ordinary tool JSON untouched", () => {
     const result = extractStructuredContent('{"city":"Shanghai"}');
-    expect(result).toEqual({ text: '{\n  "city": "Shanghai"\n}', formatted: true, images: [] });
+    expect(result).toEqual({ text: '{\n  "city": "Shanghai"\n}', formatted: true, images: [], omittedImages: 0 });
   });
 
   it("passes through empty and plain text values", () => {
-    expect(extractStructuredContent("")).toEqual({ text: "", formatted: false, images: [] });
+    expect(extractStructuredContent("")).toEqual({ text: "", formatted: false, images: [], omittedImages: 0 });
     expect(extractStructuredContent("plain\nresult")).toEqual({
       text: "plain\nresult",
       formatted: false,
       images: [],
+      omittedImages: 0,
     });
+  });
+
+  it("keeps replacing payloads after the thumbnail cap so no base64 leaks into the text", () => {
+    const blocks = Array.from({ length: 30 }, () => ({
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: pngBase64 },
+    }));
+
+    const result = extractStructuredContent(JSON.stringify(blocks));
+
+    expect(result.images).toHaveLength(24);
+    expect(result.omittedImages).toBe(6);
+    expect(result.text).not.toContain(pngBase64);
+    expect(result.text).toContain("[图片 #24 image/png");
+    expect(result.text).toContain("[图片 #30 image/png 70 B，超出缩略图上限]");
   });
 });

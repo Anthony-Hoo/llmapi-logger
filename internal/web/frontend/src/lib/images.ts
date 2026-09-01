@@ -15,6 +15,8 @@ export interface StructuredContent {
   /** True when the value parsed as JSON and was pretty-printed. */
   formatted: boolean;
   images: ExtractedImage[];
+  /** Valid images beyond the gallery cap: replaced in text, not rendered. */
+  omittedImages: number;
 }
 
 // Providers embed images in tool traffic in three shapes: a data URL string
@@ -50,25 +52,36 @@ function decodedBytes(base64: string): number {
   return Math.max(0, Math.floor((compact.length * 3) / 4) - padding);
 }
 
-function placeholderFor(image: ExtractedImage, index: number): string {
-  return `[图片 #${index + 1} ${image.mediaType} ${formatBytes(image.bytes)}]`;
-}
-
 class ImageCollector {
   readonly images: ExtractedImage[] = [];
+  private total = 0;
 
+  get omitted(): number {
+    return this.total - this.images.length;
+  }
+
+  // Returning null keeps the original text, so it is reserved for values
+  // that are not inline images at all. A valid image past the gallery cap
+  // still gets its payload replaced: the cap bounds thumbnail count, and a
+  // wall of raw base64 in the JSON is exactly what the placeholder exists
+  // to prevent.
   add(mediaType: string, base64: string): string | null {
     const normalizedType = mediaType.toLowerCase();
-    if (this.images.length >= maxImagesPerPart || !imageMediaTypes.has(normalizedType) || !isBase64Payload(base64)) {
+    if (!imageMediaTypes.has(normalizedType) || !isBase64Payload(base64)) {
       return null;
     }
-    const image: ExtractedImage = {
+    this.total += 1;
+    const bytes = decodedBytes(base64);
+    const label = `图片 #${this.total} ${normalizedType} ${formatBytes(bytes)}`;
+    if (this.images.length >= maxImagesPerPart) {
+      return `[${label}，超出缩略图上限]`;
+    }
+    this.images.push({
       src: `data:${normalizedType};base64,${base64.replace(/\s+/g, "")}`,
       mediaType: normalizedType,
-      bytes: decodedBytes(base64),
-    };
-    this.images.push(image);
-    return placeholderFor(image, this.images.length - 1);
+      bytes,
+    });
+    return `[${label}]`;
   }
 }
 
@@ -127,13 +140,13 @@ function walkValue(value: unknown, collector: ImageCollector): unknown {
 export function extractStructuredContent(value: string): StructuredContent {
   const collector = new ImageCollector();
   if (!value.trim()) {
-    return { text: value, formatted: false, images: [] };
+    return { text: value, formatted: false, images: [], omittedImages: 0 };
   }
 
   try {
     const rewritten = walkValue(JSON.parse(value), collector);
-    return { text: JSON.stringify(rewritten, null, 2), formatted: true, images: collector.images };
+    return { text: JSON.stringify(rewritten, null, 2), formatted: true, images: collector.images, omittedImages: collector.omitted };
   } catch {
-    return { text: replaceDataUrls(value, collector), formatted: false, images: collector.images };
+    return { text: replaceDataUrls(value, collector), formatted: false, images: collector.images, omittedImages: collector.omitted };
   }
 }

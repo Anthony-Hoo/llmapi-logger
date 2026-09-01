@@ -10,7 +10,16 @@ import type { ExtractedImage } from "../lib/images";
  * thumbnail opens a full-screen viewer with wheel zoom, drag panning and
  * arrow-key navigation.
  */
-export function ImageAttachments({ images, ownerLabel }: { images: ExtractedImage[]; ownerLabel: string }) {
+export function ImageAttachments({
+  images,
+  ownerLabel,
+  omitted = 0,
+}: {
+  images: ExtractedImage[];
+  ownerLabel: string;
+  /** Valid images beyond the gallery cap: placeholders in text, no thumbnail. */
+  omitted?: number;
+}) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const [broken, setBroken] = useState<Record<number, boolean>>({});
 
@@ -49,6 +58,11 @@ export function ImageAttachments({ images, ownerLabel }: { images: ExtractedImag
           </li>
         ))}
       </ul>
+      {omitted > 0 ? (
+        <p className="mt-1.5 text-[11px] text-muted-foreground">
+          另有 {omitted} 张图片超出缩略图上限，未渲染；其占位符仍保留在下方文本中。
+        </p>
+      ) : null}
       {openIndex !== null && !broken[openIndex] ? (
         <ImageLightbox
           image={images[openIndex]}
