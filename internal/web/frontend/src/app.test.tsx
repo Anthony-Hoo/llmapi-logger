@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { AuditDetail, AuditSummary, NewAPIUser } from "./types";
 import type { ApiClient } from "./api";
 import {
+  AuditDetailBody,
   AuditFiltersPanel,
   AuditList,
   DeveloperBadge,
@@ -44,6 +45,95 @@ const detail: AuditDetail = {
   turn: null,
   token_link: null,
 };
+
+function renderDetailBody(value: AuditDetail): string {
+  return renderToStaticMarkup(
+    <AuditDetailBody
+      detail={value}
+      onFilterConversation={() => undefined}
+      onExportConversation={() => undefined}
+      exportNote={null}
+      reconstructedLoading={null}
+      reconstructedNote={null}
+      onDownloadReconstructed={() => undefined}
+      timelines={{}}
+      timelineLoading={null}
+      timelineNote={null}
+      onLoadTimeline={() => undefined}
+      rawBodies={{}}
+      rawLoading={null}
+      rawNote={null}
+      onLoadRaw={() => undefined}
+      onDownloadRaw={() => undefined}
+      onClearRaw={() => undefined}
+    />,
+  );
+}
+
+describe("audit detail layout", () => {
+  const conversationDetail: AuditDetail = {
+    ...detail,
+    audit: {
+      ...detail.audit,
+      response_model: "gpt-4o",
+      user_agent: "codex-cli/1.0",
+      conversation_id: "conv_demo",
+    },
+    conversation: {
+      schema_version: 1,
+      messages: [
+        {
+          index: 0,
+          role: "user",
+          phase: "request",
+          direction: "client_to_upstream",
+          content: [{ index: 0, type: "text", text: "What is the weather?" }],
+        },
+        {
+          index: 1,
+          role: "assistant",
+          phase: "response",
+          direction: "upstream_to_client",
+          content: [{ index: 0, type: "text", text: "Sunny." }],
+        },
+      ],
+    },
+  };
+
+  it("shows the conversation first and every HTTP / storage detail below it", () => {
+    const html = renderDetailBody(conversationDetail);
+
+    expect(html.indexOf("对话审计")).toBeGreaterThan(-1);
+    expect(html.indexOf("对话审计")).toBeLessThan(html.indexOf("HTTP 请求概览"));
+    expect(html.indexOf("HTTP 请求概览")).toBeLessThan(html.indexOf("解析摘要"));
+    expect(html.indexOf("解析摘要")).toBeLessThan(html.indexOf("流式响应时序"));
+    expect(html.indexOf("流式响应时序")).toBeLessThan(html.indexOf("轮次与内容存储"));
+    expect(html.indexOf("轮次与内容存储")).toBeLessThan(html.indexOf("原始 HTTP 证据与完整性"));
+    // Key facts appear above the conversation for orientation.
+    expect(html.indexOf("gpt-4o")).toBeLessThan(html.indexOf("对话审计"));
+    expect(html).toContain("codex-cli/1.0");
+    expect(html).toContain("查看同会话");
+  });
+
+  it("keeps turn storage and raw HTTP evidence in collapsed disclosures", () => {
+    const html = renderDetailBody(conversationDetail);
+
+    expect(html).toContain("<details");
+    expect(html).not.toContain("<details open");
+    expect(html).toContain("轮次与内容存储");
+    expect(html).toContain("原始 HTTP 证据与完整性");
+  });
+
+  it("offers a conversation JSON export exactly when a parsed conversation exists", () => {
+    const withConversation = renderDetailBody(conversationDetail);
+    expect(withConversation).toContain("导出会话 JSON");
+    expect(withConversation).not.toContain('disabled=""');
+
+    const withoutConversation = renderDetailBody({ ...conversationDetail, conversation: null });
+    expect(withoutConversation).toContain("导出会话 JSON");
+    expect(withoutConversation).toContain('disabled=""');
+  });
+});
 
 describe("HTTP audit evidence", () => {
   it("keeps raw HTTP and Header values in a secondary disclosure collapsed by default", () => {

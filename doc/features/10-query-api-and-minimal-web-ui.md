@@ -101,18 +101,21 @@ UI 默认只显示 TTFT、Body 首末观测、SSE event count 和 complete 状�
 
 源码位于 `internal/web/frontend`，Vite 输出到 `internal/web/dist` 并由 Go embed 打包；生产不依赖 Node。
 
+页面在宽屏下使用「窄列表栏 + 宽详情」双栏布局：列表是左侧固定宽度的滚动栏（分页控件内置其中），详情占据剩余宽度并随页面滚动。详情内部以解析出的对话为主体：身份头（audit id、转发状态、导出与「查看同会话」操作）和关键信息条（时间、模型、调用者、HTTP 状态、TTFT、User-Agent）之后立即展示对话审计；HTTP 请求概览、解析摘要、流式时序与存储/原始证据全部下沉到对话之后。
+
 主要视图：
 
 - 审计列表：时间、调用者、窄模型列和可换行 User-Agent；异常记录显示短状态提示；有所属 conversation 的行显示会话短 ID，按会话折叠开启且该会话轮数大于 1 时额外显示「N 轮」徽标。列表头提供「按会话折叠」开关，默认开启；查看单个会话（见下）时该开关不出现，因为此时应显示全部轮次。
-- 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后对列表应用该 conversation 的筛选；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作，取消后恢复折叠视图。
-- 对话审计：system/developer/user/assistant/tool、reasoning、tool call/result 按原顺序展示。
+- 对话审计：system/developer/user/assistant/tool、reasoning、tool call/result 按原顺序展示。详情头提供「导出会话 JSON」：前端把已获取的解析 conversation 连同关键审计元数据（audit/conversation/turn id、时间、模型、调用者、User-Agent）另存为本地 JSON 文件，面向阅读而非字节重放，不新增服务端导出 API；没有解析 conversation 时按钮禁用。
+- 工具流量内联图片：tool call 参数与 tool result 中的 base64 图片（data URL、Anthropic `source.data`、Gemini `inline_data` 三种形态）在展示层渲染为缩略图，点击进入全屏查看器：滚轮以光标为中心缩放、拖动平移、双击在适应屏幕与原始大小间切换，多图时两侧箭头按钮与 ←/→ 方向键循环切换（切换时重置缩放），Esc 或点击背景关闭；展示用 JSON 中的 base64 载荷替换为「[图片 #n 类型 大小]」占位符以保持可读。图片全部来自 data: URL，渲染不发起网络请求；该替换只作用于展示副本，不改写存储值。未识别内容块沿用同一提取逻辑，但用户消息中的图片块在 DTO 中被截断到 4 KiB，通常无法完整渲染。
+- 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载；在详情中位于「存储与原始证据」下，默认折叠。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后对列表应用该 conversation 的筛选；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作，取消后恢复折叠视图。
 - 流式响应时序：TTFT、event count、首末观测、timeline complete 和按需 timeline 校验。
 - 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。
 - UA 规则：Go RE2 正则的新增、编辑、启停和删除，持久化后热生效。
 
 登录页提供管理员令牌与开发者 API Key 两种模式。开发者视图隐藏 UA 规则入口、调用者筛选和 Token ID 筛选，header 显示身份 chip；审计列表与详情组件本身不变。前端裁剪只为体验，边界一律由服务端强制。
 
-assistant text 使用 `react-markdown` + `remark-gfm`，不启用 raw HTML；只允许安全链接，远程图片降级为文本。其他角色、reasoning、工具参数和结果保持原始文本/JSON，不因展示而改写存储值。
+assistant text 使用 `react-markdown` + `remark-gfm`，不启用 raw HTML；只允许安全链接，远程图片降级为文本。其他角色、reasoning、工具参数和结果保持原始文本/JSON（内联 base64 图片的展示层占位替换除外），不因展示而改写存储值。
 
 页面重建的是应用层 HTTP 视图，不恢复 TCP/TLS、HTTP/2 frame、Header 原始大小写/顺序或传输 chunk framing。
 
