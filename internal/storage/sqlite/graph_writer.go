@@ -240,14 +240,22 @@ ON CONFLICT(binary_hash) DO NOTHING`,
 		); err != nil {
 			return fmt.Errorf("sqlite writer: insert binary object: %w", err)
 		}
-		var mediaType, compression string
-		var plaintextLength, encodedLength int64
+		var mediaType string
+		var plaintextLength int64
+		// Only properties of the stored plaintext take part in the identity
+		// check. compression and encoded_length describe how the existing row
+		// was encoded, not what it holds: the codec picks them per write, so an
+		// encoder that emits a different number of bytes for the same input —
+		// a gzip implementation change across a toolchain upgrade, say — makes
+		// them disagree with a row written by an earlier build. Treating that
+		// as corruption would reject every turn reusing such an object, and the
+		// insert above is DO NOTHING, so the row keeps the encoding its own
+		// data_enc was produced with and stays self-consistent either way.
 		if err := transaction.QueryRow(`
-SELECT media_type, compression, plaintext_length, encoded_length
+SELECT media_type, plaintext_length
 FROM binary_objects
-WHERE binary_hash = ?`, object.Hash).Scan(&mediaType, &compression, &plaintextLength, &encodedLength); err != nil ||
-			mediaType != object.MediaType || compression != object.Compression ||
-			plaintextLength != object.PlaintextLength || encodedLength != object.EncodedLength {
+WHERE binary_hash = ?`, object.Hash).Scan(&mediaType, &plaintextLength); err != nil ||
+			mediaType != object.MediaType || plaintextLength != object.PlaintextLength {
 			return errors.New("sqlite writer: binary object hash collision or corruption")
 		}
 	}
@@ -268,13 +276,15 @@ ON CONFLICT(object_hash) DO NOTHING`,
 			return fmt.Errorf("sqlite writer: insert content object: %w", err)
 		}
 		var semanticHash []byte
-		var kind, compression string
-		var plaintextLength, encodedLength int64
+		var kind string
+		var plaintextLength int64
+		// compression and encoded_length are left out for the reason given in
+		// insertBinaryObjects.
 		if err := transaction.QueryRow(`
-SELECT semantic_hash, kind, compression, plaintext_length, encoded_length
-FROM content_objects WHERE object_hash = ?`, object.Hash).Scan(&semanticHash, &kind, &compression, &plaintextLength, &encodedLength); err != nil ||
-			!bytes.Equal(semanticHash, object.SemanticHash) || kind != object.Kind || compression != object.Compression ||
-			plaintextLength != object.PlaintextLength || encodedLength != object.EncodedLength {
+SELECT semantic_hash, kind, plaintext_length
+FROM content_objects WHERE object_hash = ?`, object.Hash).Scan(&semanticHash, &kind, &plaintextLength); err != nil ||
+			!bytes.Equal(semanticHash, object.SemanticHash) || kind != object.Kind ||
+			plaintextLength != object.PlaintextLength {
 			return errors.New("sqlite writer: content object hash collision or corruption")
 		}
 		for _, reference := range object.BinaryRefs {

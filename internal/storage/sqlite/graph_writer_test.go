@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"llmapi-logger/internal/auditmodel"
@@ -189,4 +190,33 @@ func graphTestCipher(t *testing.T) security.Cipher {
 		t.Fatal(err)
 	}
 	return cipher
+}
+
+func TestObjectsReuseRowsEncodedByADifferentCodecBuild(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	cipher := graphTestCipher(t)
+	payload := map[string]any{"role": "assistant", "content": strings.Repeat("compressible payload ", 64)}
+	image := map[string]any{"image_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(
+		append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x51, 0x29}, 512)...))}
+
+	saveGraphTestTurn(t, store, cipher, "turn-codec-one", "", "response-codec-one", 100,
+		[]graphTestItem{graphItem("image", image)}, []graphTestItem{graphItem("assistant_message", payload)})
+
+	// Simulate rows written by a build whose encoder produced a different
+	// number of bytes for the same plaintext, which is what a gzip
+	// implementation change across a toolchain upgrade looks like on disk.
+	for _, statement := range []string{
+		`UPDATE content_objects SET encoded_length = encoded_length + 37`,
+		`UPDATE binary_objects SET encoded_length = encoded_length + 37`,
+	} {
+		if _, err := store.writerDB.Exec(statement); err != nil {
+			t.Fatalf("age encoded lengths: %v", err)
+		}
+	}
+
+	saveGraphTestTurn(t, store, cipher, "turn-codec-two", "", "response-codec-two", 200,
+		[]graphTestItem{graphItem("image", image)}, []graphTestItem{graphItem("assistant_message", payload)})
+
+	assertTableCount(t, store.readerDB, "binary_objects", 1)
 }
