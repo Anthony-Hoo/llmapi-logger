@@ -41,6 +41,7 @@ type Filter struct {
 	Model         string
 	UserAgent     string
 	StatusCode    *int
+	StatusClass   string
 	ForwardStatus string
 	BlockedBy     string
 	BlockCode     string

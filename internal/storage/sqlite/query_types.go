@@ -11,6 +11,7 @@ type AuditQueryFilter struct {
 	Path          string
 	Model         string
 	StatusCode    *int
+	StatusClass   string
 	ForwardStatus string
 	BlockedBy     string
 	BlockCode     string

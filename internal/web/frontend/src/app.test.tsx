@@ -375,6 +375,8 @@ describe("audit filters", () => {
 		newAPIUserID=""
 		newAPITokenID=""
 		forwardStatus=""
+		statusClass=""
+		statusCode=""
 		users={users}
         onPathChange={() => undefined}
         onModelChange={() => undefined}
@@ -382,6 +384,8 @@ describe("audit filters", () => {
 		onNewAPIUserIDChange={() => undefined}
         onNewAPITokenIDChange={() => undefined}
         onForwardStatusChange={() => undefined}
+		onStatusClassChange={() => undefined}
+		onStatusCodeChange={() => undefined}
         onSubmit={() => undefined}
       />,
     );
@@ -408,6 +412,8 @@ describe("audit filters", () => {
         newAPIUserID=""
         newAPITokenID=""
         forwardStatus=""
+		statusClass=""
+		statusCode=""
         users={[]}
         showCallerFilters={false}
         onPathChange={() => undefined}
@@ -416,6 +422,8 @@ describe("audit filters", () => {
         onNewAPIUserIDChange={() => undefined}
         onNewAPITokenIDChange={() => undefined}
         onForwardStatusChange={() => undefined}
+		onStatusClassChange={() => undefined}
+		onStatusCodeChange={() => undefined}
         onSubmit={() => undefined}
       />,
     );
@@ -429,6 +437,39 @@ describe("audit filters", () => {
     expect(html).toContain("User-Agent");
     expect(html).toContain("路径");
     expect(html).toContain("转发状态");
+  });
+
+  it("renders the HTTP status filters with the selected values", () => {
+    const html = renderToStaticMarkup(
+      <AuditFiltersPanel
+        path=""
+        model=""
+        userAgent=""
+        newAPIUserID=""
+        newAPITokenID=""
+        forwardStatus=""
+        statusClass="5xx"
+        statusCode="503"
+        users={[]}
+        onPathChange={() => undefined}
+        onModelChange={() => undefined}
+        onUserAgentChange={() => undefined}
+        onNewAPIUserIDChange={() => undefined}
+        onNewAPITokenIDChange={() => undefined}
+        onForwardStatusChange={() => undefined}
+        onStatusClassChange={() => undefined}
+        onStatusCodeChange={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('id="filter-status-class"');
+    expect(html).toContain('id="filter-status-code"');
+    expect(html).toContain("≥400（4xx+5xx）");
+    expect(html).toContain(">4xx<");
+    expect(html).toContain(">5xx<");
+    expect(html).toContain('value="5xx" selected=""');
+    expect(html).toContain('value="503"');
   });
 });
 

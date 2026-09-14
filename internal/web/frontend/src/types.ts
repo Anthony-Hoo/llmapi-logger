@@ -261,6 +261,8 @@ export interface AuditFilters {
   forward_status?: string;
   conversation?: string;
   collapse?: boolean;
+  status_class?: string;
+  status_code?: string;
 }
 
 export type RawSide = "request" | "response";

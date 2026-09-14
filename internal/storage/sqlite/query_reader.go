@@ -82,6 +82,14 @@ WHERE 1 = 1`)
 	if filter.StatusCode != nil {
 		appendCondition("a.status_code = ?", *filter.StatusCode)
 	}
+	switch filter.StatusClass {
+	case "4xx":
+		appendCondition("a.status_code BETWEEN 400 AND 499")
+	case "5xx":
+		appendCondition("a.status_code BETWEEN 500 AND 599")
+	case "error":
+		appendCondition("a.status_code >= 400")
+	}
 	if filter.ForwardStatus != "" {
 		appendCondition("a.forward_status = ?", filter.ForwardStatus)
 	}

@@ -30,6 +30,8 @@ describe("API client", () => {
 	  newapi_user_id: "7",
 	  newapi_token_id: "42",
       forward_status: "rejected",
+      status_class: "5xx",
+      status_code: " 503 ",
     });
 
     expect(calledURL).toContain("limit=50");
@@ -39,8 +41,26 @@ describe("API client", () => {
 	expect(calledURL).toContain("newapi_user_id=7");
     expect(calledURL).toContain("newapi_token_id=42");
     expect(calledURL).toContain("forward_status=rejected");
+    expect(calledURL).toContain("status_class=5xx");
+    expect(calledURL).toContain("status_code=503");
     expect(calledInit?.credentials).toBe("same-origin");
     expect(new Headers(calledInit?.headers).has("Authorization")).toBe(false);
+  });
+
+  it("omits collapse when a status filter is active", async () => {
+    let calledURL = "";
+    const fetcher = (async (input: RequestInfo | URL) => {
+      calledURL = String(input);
+      return new Response(JSON.stringify({ items: [], next_cursor: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const client = createApiClient(vi.fn(), fetcher);
+
+    await client.listAudits({ collapse: true, status_class: "5xx" });
+
+    expect(calledURL).not.toContain("collapse=");
   });
 
   it("loads the safe NewAPI caller catalog through the Cookie session", async () => {
