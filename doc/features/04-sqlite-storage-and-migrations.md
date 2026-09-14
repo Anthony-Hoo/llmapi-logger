@@ -112,6 +112,8 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。
 
+局部错误采用白名单：SQLite constraint（含扩展码）、明确标记的对象身份/重建错误和预期的未找到记录。FULL、IOERR、READONLY、BUSY、CORRUPT 等其他数据库错误，以及无法分类的错误，一律回滚整批并标记不健康，即使 SQLite 允许回滚单条语句后提交空事务。仅包含局部失败的空提交不能把既有不健康状态恢复为健康。
+
 异步 stage/body/header/chunk 采集操作失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
 
 失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`FinishAuditWithResult` 只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。

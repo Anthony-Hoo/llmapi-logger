@@ -46,7 +46,7 @@ WHERE ended_at_ns IS NULL`).Scan(&count, &startedAtNS); err != nil {
 		return nil
 	}
 	interruptedRows, err := transaction.Query(`
-SELECT audit_id
+SELECT audit_id, capture_status
 FROM audit_records
 WHERE ended_at_ns IS NULL
 ORDER BY started_at_ns, audit_id`)
@@ -54,16 +54,28 @@ ORDER BY started_at_ns, audit_id`)
 		return fmt.Errorf("sqlite writer: list interrupted audits: %w", err)
 	}
 	auditIDs := make([]string, 0, count)
+	failedAuditIDs := make([]string, 0)
 	for interruptedRows.Next() {
-		var auditID string
-		if err := interruptedRows.Scan(&auditID); err != nil {
+		var auditID, captureStatus string
+		if err := interruptedRows.Scan(&auditID, &captureStatus); err != nil {
 			_ = interruptedRows.Close()
 			return fmt.Errorf("sqlite writer: scan interrupted audit: %w", err)
 		}
 		auditIDs = append(auditIDs, auditID)
+		if captureStatus == CaptureFailed {
+			failedAuditIDs = append(failedAuditIDs, auditID)
+		}
 	}
 	if err := closeRows(interruptedRows); err != nil {
 		return fmt.Errorf("sqlite writer: close interrupted audits: %w", err)
+	}
+	// Use the same reconciliation as normal finalization before generic exit
+	// recovery can overwrite a known missing-chunk marker. Completed bodies may
+	// also contain uncommitted chunks in their collector-supplied totals.
+	for _, auditID := range failedAuditIDs {
+		if err := finalizeIncompleteCapture(transaction, auditID, request.NowNS); err != nil {
+			return err
+		}
 	}
 
 	if _, err := transaction.Exec(`
@@ -138,8 +150,8 @@ WHERE state = 'streaming'
 UPDATE audit_records
 SET ended_at_ns = ?,
     forward_status = 'interrupted',
-    capture_status = 'partial',
-    error_code = 'process_exit'
+    capture_status = CASE WHEN capture_status = 'failed' THEN 'failed' ELSE 'partial' END,
+    error_code = CASE WHEN capture_status = 'failed' THEN COALESCE(error_code, 'capture_write_failed') ELSE 'process_exit' END
 WHERE ended_at_ns IS NULL`, request.NowNS)
 	if err != nil {
 		return fmt.Errorf("sqlite writer: recover interrupted audits: %w", err)
@@ -164,6 +176,9 @@ WHERE ended_at_ns IS NULL`, request.NowNS)
 		return fmt.Errorf("sqlite writer: record recovery gap: %w", err)
 	}
 	for _, auditID := range auditIDs {
+		if _, err := transaction.Exec("UPDATE body_streams SET retention_state = 'full' WHERE audit_id = ?", auditID); err != nil {
+			return fmt.Errorf("sqlite writer: retain recovered raw evidence: %w", err)
+		}
 		payloadDigest, err := capturePayloadDigest(context.Background(), transaction, auditID)
 		if err != nil {
 			return err

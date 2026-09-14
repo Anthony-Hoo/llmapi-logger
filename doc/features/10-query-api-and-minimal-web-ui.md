@@ -70,6 +70,8 @@ UI 提供“下载重建请求 JSON”和“下载重建响应 JSON”，不会�
 
 ## 6. 原始 Body
 
+前后端使用相同边界选择：请求优先 `request_sent_to_newapi`，没有该 Body 时回退入站请求；响应优先 `response_received_from_newapi`，没有该 Body 时回退发给客户端的响应。UI 的 Body、Header/Trailer、Content-Type、缺块提示和 raw 按钮均采用同一选择。首选 Body 存在但 raw 已压缩释放时，不改用另一边界的 Body 绕过保留策略。
+
 ~~~http
 GET /api/v1/audits/{audit_id}/raw/request
 GET /api/v1/audits/{audit_id}/raw/response

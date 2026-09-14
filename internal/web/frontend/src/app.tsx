@@ -31,6 +31,7 @@ import {
 } from "./lib/format";
 import {
   buildEvidenceEnvelope,
+  bodyForSide,
   capturedContentType,
   createRawBodyPreview,
   evidenceStage,
@@ -1251,7 +1252,7 @@ function AuditDetailPanel({
       return;
     }
     await fetchRawBody(side, async (result) => {
-      const preview = await createRawBodyPreview(result, capturedContentType(detail?.headers ?? [], side));
+      const preview = await createRawBodyPreview(result, capturedContentType(detail?.headers ?? [], side, detail ?? undefined));
       setRawBodies((current) => ({ ...current, [side]: { download: result, preview } }));
     });
   }
@@ -1828,7 +1829,7 @@ function RawHTTPMessage({
   onDownload: () => void;
   onClear: () => void;
 }) {
-  const stageName = evidenceStage(side);
+  const stageName = evidenceStage(side, detail);
   const stage = detail.stages.find((candidate) => candidate.stage === stageName);
   const headers = detail.headers.filter((header) => header.stage === stageName && header.kind === "header");
   const trailers = detail.headers.filter((header) => header.stage === stageName && header.kind === "trailer");
@@ -2295,11 +2296,6 @@ function downloadMessage(side: RawSide, download: RawBodyDownload): string {
     return `${side === "request" ? "请求" : "响应"}已保存片段已下载（${formatBytes(download.storedLength)}）。存在缺失分块，文件不是完整原始 Body。`;
   }
   return `${side === "request" ? "请求" : "响应"}原始 Body 已下载（${formatBytes(download.storedLength)}，${download.complete ? "完整" : "不完整"}）。`;
-}
-
-function bodyForSide(detail: AuditDetail, side: RawSide): AuditBody | undefined {
-  const expectedStage = side === "request" ? "request_sent_to_newapi" : "response_received_from_newapi";
-  return detail.bodies.find((body) => body.stage === expectedStage);
 }
 
 function isAbortError(cause: unknown): boolean {

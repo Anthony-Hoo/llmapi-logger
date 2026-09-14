@@ -10,6 +10,8 @@ import (
 
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/uaguard"
+
+	sqlitecodes "modernc.org/sqlite/lib"
 )
 
 type writeKind uint8
@@ -200,7 +202,16 @@ func (store *Store) runWriter() {
 		}
 
 		results, err := store.commitBatch(batch)
-		store.healthy.Store(err == nil)
+		if err != nil {
+			store.healthy.Store(false)
+		} else {
+			for _, result := range results {
+				if result == nil {
+					store.healthy.Store(true)
+					break
+				}
+			}
+		}
 		for index, request := range batch {
 			if request.ack != nil {
 				if err != nil {
@@ -216,8 +227,8 @@ func (store *Store) runWriter() {
 	}
 }
 
-// Local operation errors do not imply an unavailable database. Only a failure
-// of the outer transaction affects every acknowledgement and writer health.
+// Known local errors can be isolated. Storage errors fail the whole batch even
+// when SQLite would allow rolling back the statement and committing no writes.
 func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 	transaction, err := store.writerDB.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -231,6 +242,9 @@ func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 		}
 		results[index] = store.applyWrite(transaction, request)
 		if results[index] != nil {
+			if !isLocalWriteError(results[index]) {
+				return nil, results[index]
+			}
 			if _, err := transaction.Exec("ROLLBACK TO writer_operation"); err != nil {
 				return nil, fmt.Errorf("sqlite writer: rollback operation: %w", err)
 			}
@@ -246,6 +260,22 @@ func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 		return nil, fmt.Errorf("sqlite writer: commit batch: %w", err)
 	}
 	return results, nil
+}
+
+type localWriteError string
+
+func (err localWriteError) Error() string { return string(err) }
+
+// Only constraint conflicts and explicitly identified operation-local domain
+// errors can leave the database healthy. Everything else, including unknown
+// driver errors, must fail the outer batch rather than commit an empty success.
+func isLocalWriteError(err error) bool {
+	var coded interface{ Code() int }
+	if errors.As(err, &coded) {
+		return coded.Code()&0xff == sqlitecodes.SQLITE_CONSTRAINT
+	}
+	var local localWriteError
+	return errors.As(err, &local) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound)
 }
 
 // Async capture has no acknowledgement. Persist the failure on its audit so
@@ -792,6 +822,9 @@ func requireOneRow(result sql.Result, operation string) error {
 		return fmt.Errorf("sqlite writer: %s rows affected: %w", operation, err)
 	}
 	if rows != 1 {
+		if rows == 0 {
+			return localWriteError(fmt.Sprintf("sqlite writer: %s affected no rows", operation))
+		}
 		return fmt.Errorf("sqlite writer: %s affected %d rows", operation, rows)
 	}
 	return nil

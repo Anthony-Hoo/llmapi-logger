@@ -6,6 +6,8 @@
 
 ## 2. 请求完成日志
 
+writer 遇到磁盘满、I/O、只读等存储级错误时整批失败并报告不健康，不能因空事务提交成功而向 ready 报告数据库可用。只有明确的操作局部错误才使用保存点隔离。
+
 程序输出 `slog` JSON。每个被进程内 Matcher 精确命中的 LLM route 结束时最多记录一条 `llm request completed`，字段固定为：
 
 - `audit_id`（成功分配时）；
@@ -96,6 +98,7 @@ NewAPI 管理集成包含两个轻量后台任务：用户目录在监听前刷�
 - `/healthz`、`/readyz` 和受保护的 `/api/v1/*` 缺失或使用错误管理凭证时返回 `401`。
 - healthy/degraded/not_ready 的 JSON 和 HTTP 状态符合上表。
 - 启动恢复正确修正未终结 audit、streaming stage/body、长度和 parser 状态，且重复执行幂等。
+- 启动恢复对已标记采集失败的未终结 audit 复用正常终结的分块对账；保留 `capture_chunk_missing`、修复已 complete 但聚合不符的 Body，并将所有已保留 raw 设为 full 后签名。父记录使用 interrupted 转发状态并保留已知 failed 采集状态；无采集故障的普通中断仍用 partial/process_exit。
 - 只有实际恢复记录时生成聚合 process_exit gap。
 - available 启动依赖故障仍可转发，strict 返回 `503`；修复启动依赖后通过重启恢复。
 - 优雅关闭不会把仍未完成的证据标成 complete。

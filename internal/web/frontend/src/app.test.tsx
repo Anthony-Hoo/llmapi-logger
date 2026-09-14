@@ -205,6 +205,18 @@ describe("HTTP audit evidence", () => {
     expect(damagedHTML).toContain("原始证据存在缺失分块");
     expect(damagedHTML).toContain("缺失字节无法恢复");
     expect(damagedHTML).toContain("下载原始 Body");
+    for (const fallbackStage of ["request_for_newapi_received_from_nginx", "response_from_newapi_sent_to_nginx"]) {
+      const fallbackDetail: AuditDetail = { ...damagedDetail, bodies: damagedDetail.bodies.map((body) => ({
+        ...body, stage: fallbackStage, source_stage: fallbackStage,
+      })) };
+      const fallbackHTML = renderToStaticMarkup(
+        <HTTPAuditEvidence detail={fallbackDetail} rawBodies={{}} rawLoading={null} rawNote={null}
+          onLoad={() => undefined} onDownload={() => undefined} onClear={() => undefined} />,
+      );
+      expect(fallbackHTML).toContain("原始证据存在缺失分块");
+      expect(fallbackHTML).toContain("下载原始 Body");
+      expect(fallbackHTML).toContain("加载并查看 Body");
+    }
   });
 });
 

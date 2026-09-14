@@ -99,6 +99,8 @@ SQLite schema generation 2 共 20 张表。除原有 audit/stage/header/body/par
 
 即使阶段已经 complete，终结仍会核对失败 audit 的实际分块聚合；缺块 Body 降级并显式标记，raw 仅导出已保存片段，不伪造完整证据。
 
+启动恢复同样对已知采集失败执行分块对账，保留缺块标记和可读取片段。存储级错误（如只读、磁盘满和 I/O）不参与局部失败隔离，必须令整批失败并使数据库健康状态降级。
+
 key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 
 详细设计见 [03](03-audit-session-and-evidence-capture.md) 与 [04](04-sqlite-storage-and-migrations.md)。

@@ -215,14 +215,14 @@ func persistPreparedTurn(transaction *sql.Tx, turn auditmodel.PreparedTurn) erro
 		return err
 	}
 	if len(reconstructed) != len(turn.RequestRefs) || !bytes.Equal(auditmodel.SequenceHash(reconstructed), turn.RequestSequenceHash) {
-		return errors.New("sqlite writer: persisted request sequence failed reconstruction")
+		return localWriteError("sqlite writer: persisted request sequence failed reconstruction")
 	}
 	response, err := loadResponseRefs(transaction, turn.AuditID)
 	if err != nil {
 		return err
 	}
 	if len(response) != len(turn.ResponseRefs) || !bytes.Equal(auditmodel.SequenceHash(response), turn.ResponseSequenceHash) {
-		return errors.New("sqlite writer: persisted response sequence failed reconstruction")
+		return localWriteError("sqlite writer: persisted response sequence failed reconstruction")
 	}
 	return nil
 }
@@ -256,7 +256,7 @@ SELECT media_type, plaintext_length
 FROM binary_objects
 WHERE binary_hash = ?`, object.Hash).Scan(&mediaType, &plaintextLength); err != nil ||
 			mediaType != object.MediaType || plaintextLength != object.PlaintextLength {
-			return errors.New("sqlite writer: binary object hash collision or corruption")
+			return localWriteError("sqlite writer: binary object hash collision or corruption")
 		}
 	}
 	return nil
@@ -285,7 +285,7 @@ SELECT semantic_hash, kind, plaintext_length
 FROM content_objects WHERE object_hash = ?`, object.Hash).Scan(&semanticHash, &kind, &plaintextLength); err != nil ||
 			!bytes.Equal(semanticHash, object.SemanticHash) || kind != object.Kind ||
 			plaintextLength != object.PlaintextLength {
-			return errors.New("sqlite writer: content object hash collision or corruption")
+			return localWriteError("sqlite writer: content object hash collision or corruption")
 		}
 		for _, reference := range object.BinaryRefs {
 			if _, err := transaction.Exec(`
@@ -304,7 +304,7 @@ FROM content_binary_refs
 WHERE object_hash = ? AND json_pointer = ? AND binary_hash = ?`,
 				object.Hash, reference.JSONPointer, reference.BinaryHash,
 			).Scan(&mediaType, &encoding); err != nil || mediaType != reference.MediaType || encoding != reference.Encoding {
-				return errors.New("sqlite writer: content binary reference collision or corruption")
+				return localWriteError("sqlite writer: content binary reference collision or corruption")
 			}
 		}
 		for _, reference := range object.ExternalRefs {
@@ -324,7 +324,7 @@ FROM content_external_refs
 WHERE object_hash = ? AND json_pointer = ? AND ref_kind = ?`,
 				object.Hash, reference.JSONPointer, reference.Kind,
 			).Scan(&valueHash); err != nil || !bytes.Equal(valueHash, reference.ValueHash) {
-				return errors.New("sqlite writer: content external reference collision or corruption")
+				return localWriteError("sqlite writer: content external reference collision or corruption")
 			}
 		}
 	}
