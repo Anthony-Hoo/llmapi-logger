@@ -20,7 +20,7 @@ localhost -> audit-proxy management :8081
 
 ## 2. 本机构建
 
-需要 Go 1.25+、Node 22+ 和 pnpm。两个脚本都会先用锁文件安装前端依赖并构建嵌入资源，再生成 `CGO_ENABLED=0` 的 Windows/Linux amd64 二进制：
+需要 Go 1.27+、Node 24 LTS 和 pnpm 10.15.0。两个脚本都会先用锁文件安装前端依赖并构建嵌入资源，再生成 `CGO_ENABLED=0` 的 Windows/Linux amd64 二进制：
 
 ~~~powershell
 .\scripts\build.ps1

@@ -22,7 +22,7 @@
 GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 ~~~
 
-支持时间、协议、路径、模型、User-Agent、NewAPI 用户、用户名、Token ID/名称、状态码、状态段（`status_class`：`4xx`/`5xx`/`error`）、转发状态、阻断组件/代码和捕获状态等窄筛选。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `started_at_ns + audit_id` keyset cursor，默认 50、最大 200；`conversation`/`collapse` 筛选不改变排序和分页语义。`status_class=error` 匹配 `status_code` 在 400–599 的记录；`status_code` 为空的记录（客户端取消、处理中、意外中断等）不计入。带 `status_class` 或 `status_code` 时会话折叠（`collapse`）被忽略，按轮次逐条列出，避免命中的失败轮次被同会话更新的轮次折叠隐藏。
+支持时间、协议、路径、模型、User-Agent、NewAPI 用户、用户名、Token ID/名称、状态码、状态段（`status_class`：`4xx`/`5xx`/`error`）、转发状态、阻断组件/代码和捕获状态等窄筛选。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `started_at_ns + audit_id` keyset cursor，默认 50、最大 200；`conversation`/`collapse` 筛选不改变排序和分页语义。`status_class=error` 匹配 `status_code` 在 400–599 的记录；`status_code` 为空的记录（例如在收到上游响应头之前就取消的请求）不计入，收到上游响应头后取消仍保留上游状态码。任何上述行级筛选生效时会话折叠（`collapse`）都被忽略，按轮次逐条列出，避免命中的较早轮次被同会话更新的轮次隐藏；User-Agent 也在不折叠的候选集上过滤。分页 cursor 和开发者身份 scope 不关闭折叠。
 
 列表 SQL 只读取 audit、parsed summary 和 token link 窄列；query 层为每个候选 audit 单独读取并认证解密入站 User-Agent。User-Agent 筛选是不区分大小写的子串匹配，每次最多扫描 2000 个候选。列表不会读取 Request-URI、其他 Header、Body、parsed conversation 或 content/binary objects。
 
@@ -105,10 +105,10 @@ UI 默认只显示 TTFT、Body 首末观测、SSE event count 和 complete 状�
 
 主要视图：
 
-- 审计列表：时间、调用者、窄模型列和可换行 User-Agent；异常记录显示短状态提示；高级筛选提供 HTTP 状态段和精确状态码；有所属 conversation 的行显示会话短 ID，按会话折叠开启且该会话轮数大于 1 时额外显示「N 轮」徽标。列表头提供「按会话折叠」开关，默认开启；查看单个会话（见下）或状态筛选生效时该开关均不出现，因为此时应显示全部轮次。
+- 审计列表：时间、调用者、窄模型列和可换行 User-Agent；异常记录显示短状态提示；高级筛选提供 HTTP 状态段和精确状态码，非法状态码在字段旁就地提示，修改输入时清除提示，校验失败不提交筛选；有所属 conversation 的行显示会话短 ID，按会话折叠开启且该会话轮数大于 1 时额外显示「N 轮」徽标。列表头提供「按会话折叠」开关，默认开启；查看单个会话（见下）或任何行级筛选生效时该开关均不出现，因为此时应逐轮显示匹配记录。
 - 对话审计：system/developer/user/assistant/tool、reasoning、tool call/result 按原顺序展示。详情头提供「导出会话 JSON」：前端把已获取的解析 conversation 连同关键审计元数据（audit/conversation/turn id、时间、模型、调用者、User-Agent）另存为本地 JSON 文件，面向阅读而非字节重放，不新增服务端导出 API；没有解析 conversation 时按钮禁用。
 - 工具流量内联图片：tool call 参数与 tool result 中的 base64 图片（data URL、Anthropic `source.data`、Gemini `inline_data` 三种形态）在展示层渲染为缩略图，点击进入全屏查看器：滚轮以光标为中心缩放、拖动平移、双击在适应屏幕与原始大小间切换，多图时两侧箭头按钮与 ←/→ 方向键循环切换（切换时重置缩放），Esc 或点击背景关闭；展示用 JSON 中的 base64 载荷替换为「[图片 #n 类型 大小]」占位符以保持可读。图片全部来自 data: URL，渲染不发起网络请求；该替换只作用于展示副本，不改写存储值。未识别内容块沿用同一提取逻辑，但用户消息中的图片块在 DTO 中被截断到 4 KiB，通常无法完整渲染。
-- 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载；在详情中位于「存储与原始证据」下，默认折叠。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后对列表应用该 conversation 的筛选；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作，取消后恢复折叠视图。
+- 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载；在详情中位于「存储与原始证据」下，默认折叠。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后清除所有行级筛选及其输入草稿，再对列表应用该 conversation 筛选，保留折叠偏好与服务端身份 scope；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作。清除会话筛选仅移除 conversation；若在会话视图中重新应用了行级筛选，仍按轮次展示，否则按已保存的折叠偏好展示。
 - 流式响应时序：TTFT、event count、首末观测、timeline complete 和按需 timeline 校验。
 - 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。
 - UA 规则：Go RE2 正则的新增、编辑、启停和删除，持久化后热生效。
@@ -146,7 +146,8 @@ type AuditQuery interface {
 
 ## 11. 最少测试
 
-- 列表 keyset、窄筛选、User-Agent 定向解密、TTFT 映射、`conversation` 筛选、`collapse=conversation` 折叠语义及二者同时出现时的互斥优先级。
+- 列表 keyset、窄筛选、User-Agent 定向解密、TTFT 映射、`conversation` 筛选、`collapse=conversation` 折叠语义及二者同时出现时的互斥优先级；`status_class` 与独立 `status_code` 筛选，以及所有行级筛选优先于折叠、较早匹配轮次可见的规则。
+- 状态码草稿空白、前导零、非法字符、全角数字和 99/100/599/600 边界；查看同会话清除行级筛选并保留折叠偏好；字段校验提示和修改输入后清除提示。
 - 详情逐项 Header/Trailer、Body retention/source/timeline 字段和 display name。
 - verified turn 的 complex Responses 请求/响应精确重建，包括 developer、reasoning、并行工具、PNG、`file_id`、inline file data 和 usage。
 - reconstructed/timeline 路由鉴权、`no-store` 和稳定错误。

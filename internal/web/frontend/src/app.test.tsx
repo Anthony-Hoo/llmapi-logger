@@ -439,7 +439,7 @@ describe("audit filters", () => {
     expect(html).toContain("转发状态");
   });
 
-  it("renders the HTTP status filters with the selected values", () => {
+  it.each([null, "状态码须为 100–599 的整数"])("renders HTTP status filters and inline validation (%s)", (statusCodeError) => {
     const html = renderToStaticMarkup(
       <AuditFiltersPanel
         path=""
@@ -450,6 +450,7 @@ describe("audit filters", () => {
         forwardStatus=""
         statusClass="5xx"
         statusCode="503"
+        statusCodeError={statusCodeError}
         users={[]}
         onPathChange={() => undefined}
         onModelChange={() => undefined}
@@ -468,8 +469,17 @@ describe("audit filters", () => {
     expect(html).toContain("≥400（4xx+5xx）");
     expect(html).toContain(">4xx<");
     expect(html).toContain(">5xx<");
-    expect(html).toContain('value="5xx" selected=""');
+    expect(html).toMatch(/<option(?=[^>]*value="5xx")(?=[^>]*selected="")[^>]*>/);
     expect(html).toContain('value="503"');
+    if (statusCodeError) {
+      expect(html).toContain('aria-invalid="true"');
+      expect(html).toContain('aria-describedby="filter-status-code-error"');
+      expect(html).toContain('id="filter-status-code-error" role="alert"');
+      expect(html).toContain(statusCodeError);
+      expect(html).not.toContain("重试");
+    } else {
+      expect(html).not.toContain('id="filter-status-code-error"');
+    }
   });
 });
 

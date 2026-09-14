@@ -66,11 +66,13 @@ Gemini 只接受从头到尾锚定的两种模板：
 
 根目录 `Dockerfile` 分三步：
 
-1. Node 22 build stage 安装固定 pnpm 版本，使用 `pnpm-lock.yaml --frozen-lockfile` 构建 React/Vite 资源。
-2. Go 1.25 build stage 将新 dist 覆盖到 embed 目录，并以 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 编译。
+1. Node 24 LTS build stage 安装固定 pnpm 10.15.0，使用 `pnpm-lock.yaml --frozen-lockfile` 构建 React/Vite 资源；`onlyBuiltDependencies` 显式允许 esbuild 安装脚本。
+2. Go 1.27 build stage 将新 dist 覆盖到 embed 目录，并以 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 编译。
 3. distroless nonroot 运行 stage 只复制 Go 二进制和空挂载目录。
 
 最终镜像不含 Node、pnpm、`node_modules`、前端源码、Go 源码、编译器或 SQLite CLI。管理页面由 Go embed 提供。
+
+Vite 不清空 `dist`，以保留受跟踪的 `.gitkeep`，保证未构建前端的 checkout 仍可编译 Go 并显示回退页。本地重复构建可能保留旧哈希资源；正式发布使用干净 checkout 或 Docker 多阶段构建，避免把本地历史产物带入发布包。
 
 ## 5. Compose 网络
 

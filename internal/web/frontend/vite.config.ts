@@ -6,7 +6,9 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: "../dist",
-    emptyOutDir: true,
+    // Keep the tracked embed placeholder. Release/CI builds start from a clean
+    // checkout; local rebuilds may retain older hashed assets.
+    emptyOutDir: false,
     sourcemap: false,
   },
   server: {

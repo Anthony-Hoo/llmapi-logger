@@ -60,7 +60,7 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 - 文本、JSON、SSE 逻辑事件集合和其他可压缩数据使用 gzip；只有压缩后确实变小时才标记 `gzip`。
 - **压缩结果不是对象身份的一部分。** 同一份明文在不同编译产物下可以压出不同字节数——`compress/flate` 的 `BestSpeed` 策略随 Go 版本变化，升级工具链即可改变 `encoded_length`（解压结果不变，DEFLATE 只规定解码器）。因此 `compression` 与 `encoded_length` 只描述某一行是怎么存下来的，复用已有对象时不得拿它们判定冲突或损坏，否则一次工具链升级就会让旧库里的每个对象被误判。
-- binary object 的压缩选择只依据原始字节 magic，不能信任 occurrence 的 MIME 标签，否则相同 binary hash 可能得到不同存储表示。PNG、JPEG、GIF、WebP、ZIP、GZIP、PDF 等已压缩格式使用 `none`；未知格式只在试压缩确实节省空间时使用 gzip。
+- binary object 的压缩选择只依据原始字节 magic，不能信任 occurrence 的 MIME 标签，避免调用方用伪造标签影响压缩行为。存储表示不属于对象身份，同一 binary hash 可以复用其他编码器版本写入的对象。PNG、JPEG、GIF、WebP、ZIP、GZIP、PDF 等已压缩格式使用 `none`；未知格式只在试压缩确实节省空间时使用 gzip。
 - AAD 绑定对象域、object hash、kind 和 compression；数据库只保存 `nonce || ciphertext || tag`。
 - 原始异常证据也先按大块自适应压缩，再独立加密；不再把每个 32 KiB read 写成一行。
 

@@ -54,7 +54,7 @@ type Filter struct {
 	// (`conv_...`), matching turns.conversation_id.
 	Conversation string
 	// CollapseConversations keeps only the newest audit of every
-	// conversation. Ignored when Conversation is set.
+	// conversation. Ignored when Conversation or any row filter is set.
 	CollapseConversations bool
 	// Scope is set by the web layer for developer sessions and never parsed
 	// from client input.

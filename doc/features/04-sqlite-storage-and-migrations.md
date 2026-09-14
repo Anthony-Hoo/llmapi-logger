@@ -11,7 +11,7 @@
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
 internal/storage/sqlite/{graph_writer.go,graph_reader.go,timeline_reader.go,integrity.go}
-internal/storage/sqlite/migrations/{001_init.sql,...,006_developer_key_fingerprint.sql}
+internal/storage/sqlite/migrations/{001_init.sql,...,007_parse_retries.sql}
 ~~~
 
 固定连接参数：
@@ -39,6 +39,8 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 `006_developer_key_fingerprint.sql` 用 `ALTER TABLE` 为 `audit_records` 增加可空的 `api_key_fpr`（32 字节）和一个部分索引，用于把开发者会话限定在自己 Key 的记录上（[模块 19](19-developer-key-session.md)）。它就地升级旧库，不重建表也不清除数据。该列是访问控制索引而非证据，**不得**进入 `capturePayloadDigest`：一旦加入，旧库中每条历史记录的重算摘要都会改变，启动时的完整性链校验会失败。
 
 ## 3. 表结构
+
+`007_parse_retries.sql` 就地增加 `parse_save_failures` 和 `parse_next_at_ns`，分别保存解析写入失败次数和下一次允许重试的时间。这两列是可变调度元数据，不进入历史 HTTP 证据摘要，也不改变 schema generation。
 
 当前最终 schema 共 20 张表，按职责分组如下。
 
@@ -108,6 +110,8 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交一个事务。BeginAudit 和 strict admission 使用同步 Ack；普通证据写入保持异步。
 
+每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。
+
 主要写操作包括：
 
 - audit/stage/header/body 开始、分块和终结；
@@ -126,7 +130,7 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 6. 写 `semantic_compacted` 或 `reconstruction_failed` 完整性事件；
 7. 更新 `audit_records.parse_status`。
 
-任一步失败都回滚整个事务，不会出现“raw 已删但 turn 未写完”的中间状态。
+任一步失败都回滚该 `SaveParsedAudit` 操作的全部修改，不会出现“raw 已删但 turn 未写完”的中间状态，也不会撤销同批其他操作。
 
 ## 6. 读取与重建
 

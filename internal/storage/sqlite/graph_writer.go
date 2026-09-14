@@ -66,7 +66,7 @@ WHERE audit_id = ?`, retention, retention, retention, value.Result.AuditID); err
 
 	parent, err := transaction.Exec(`
 UPDATE audit_records
-SET parse_status = ?
+SET parse_status = ?, parse_next_at_ns = NULL
 WHERE audit_id = ?
   AND parser_name = ?
   AND parse_status = 'processing'

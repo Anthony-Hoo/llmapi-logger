@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import { ApiError, createApiClient, type ApiClient } from "./api";
+import { filtersForConversation, hasRowFilters, parseStatusCodeDraft } from "./filters";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -303,6 +304,7 @@ function Dashboard({
   const [draftForwardStatus, setDraftForwardStatus] = useState("");
   const [draftStatusClass, setDraftStatusClass] = useState("");
   const [draftStatusCode, setDraftStatusCode] = useState("");
+  const [statusCodeError, setStatusCodeError] = useState<string | null>(null);
   const [newAPIUsers, setNewAPIUsers] = useState<NewAPIUser[]>([]);
   const [filters, setFilters] = useState<AuditFilters>({ collapse: true });
   const [cursor, setCursor] = useState<AuditCursor | null>(null);
@@ -361,9 +363,9 @@ function Dashboard({
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    const trimmedStatusCode = draftStatusCode.trim();
-    if (trimmedStatusCode && (!/^\d+$/.test(trimmedStatusCode) || Number(trimmedStatusCode) < 100 || Number(trimmedStatusCode) > 599)) {
-      setError("状态码须为 100–599 的整数");
+    const parsedStatusCode = parseStatusCodeDraft(draftStatusCode);
+    setStatusCodeError(parsedStatusCode.error);
+    if (parsedStatusCode.error) {
       return;
     }
     setCursor(null);
@@ -380,7 +382,7 @@ function Dashboard({
       conversation: filters.conversation,
       collapse: filters.collapse,
       status_class: draftStatusClass || undefined,
-      status_code: trimmedStatusCode || undefined,
+      status_code: parsedStatusCode.value,
     });
   }
 
@@ -390,10 +392,14 @@ function Dashboard({
     setCursorHistory([]);
     setDraftStatusClass("");
     setDraftStatusCode("");
-    setFilters((current) => {
-      const { status_class: _removedStatusClass, status_code: _removedStatusCode, ...rest } = current;
-      return { ...rest, conversation: conversationID };
-    });
+    setStatusCodeError(null);
+    setDraftPath("");
+    setDraftModel("");
+    setDraftUserAgent("");
+    setDraftNewAPIUserID("");
+    setDraftNewAPITokenID("");
+    setDraftForwardStatus("");
+    setFilters((current) => filtersForConversation(current, conversationID));
   }
 
   function clearConversationFilter() {
@@ -427,11 +433,7 @@ function Dashboard({
     setCursor(previous);
   }
 
-  // A status filter lists every matching turn individually, so the collapse
-  // toggle (which only ever keeps the newest turn per conversation) would
-  // hide the very turn the filter is looking for; it is disabled while one
-  // is active, matching the conversation filter's existing behavior.
-  const statusFilterActive = Boolean(filters.status_class) || Boolean(filters.status_code);
+  const rowFilterActive = hasRowFilters(filters);
 
   return (
     <div className="min-h-screen">
@@ -491,7 +493,11 @@ function Dashboard({
           onNewAPITokenIDChange={setDraftNewAPITokenID}
           onForwardStatusChange={setDraftForwardStatus}
 		  onStatusClassChange={setDraftStatusClass}
-		  onStatusCodeChange={setDraftStatusCode}
+          statusCodeError={statusCodeError}
+          onStatusCodeChange={(value) => {
+            setDraftStatusCode(value);
+            setStatusCodeError(null);
+          }}
           onSubmit={applyFilters}
         />
 
@@ -534,8 +540,8 @@ function Dashboard({
             loading={loading}
             selectedID={selectedID}
             onSelect={setSelectedID}
-            collapse={Boolean(filters.collapse) && !filters.conversation && !statusFilterActive}
-            onCollapseChange={filters.conversation || statusFilterActive ? undefined : setCollapseConversations}
+            collapse={Boolean(filters.collapse) && !filters.conversation && !rowFilterActive}
+            onCollapseChange={filters.conversation || rowFilterActive ? undefined : setCollapseConversations}
             footer={
               <div className="flex items-center justify-between gap-2">
                 <p className="text-xs text-muted-foreground">当前页 {page.items.length} 条</p>
@@ -823,6 +829,7 @@ export function AuditFiltersPanel({
   forwardStatus,
 	statusClass,
 	statusCode,
+  statusCodeError = null,
 	users,
   showCallerFilters = true,
   onPathChange,
@@ -843,6 +850,7 @@ export function AuditFiltersPanel({
   forwardStatus: string;
 	statusClass: string;
 	statusCode: string;
+  statusCodeError?: string | null;
 	users: NewAPIUser[];
   /** Hidden for a scoped session, whose caller is already fixed. */
   showCallerFilters?: boolean;
@@ -961,12 +969,15 @@ export function AuditFiltersPanel({
 			  <FilterField label="状态码" htmlFor="filter-status-code">
 				<Input
 				  id="filter-status-code"
+                  aria-invalid={Boolean(statusCodeError)}
+                  aria-describedby={statusCodeError ? "filter-status-code-error" : undefined}
 				  className="h-9"
 				  inputMode="numeric"
 				  value={statusCode}
 				  onChange={(event) => onStatusCodeChange(event.target.value)}
 				  placeholder="如 503"
 				/>
+                {statusCodeError ? <p id="filter-status-code-error" role="alert" className="text-xs text-red-700">{statusCodeError}</p> : null}
 			  </FilterField>
             </div>
           </details>

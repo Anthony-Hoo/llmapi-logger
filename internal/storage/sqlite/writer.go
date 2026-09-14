@@ -186,11 +186,15 @@ func (store *Store) runWriter() {
 			}
 		}
 
-		err := store.commitBatch(batch)
+		results, err := store.commitBatch(batch)
 		store.healthy.Store(err == nil)
-		for _, request := range batch {
+		for index, request := range batch {
 			if request.ack != nil {
-				request.ack <- err
+				if err != nil {
+					request.ack <- err
+				} else {
+					request.ack <- results[index]
+				}
 			}
 		}
 		if queueClosed {
@@ -199,21 +203,33 @@ func (store *Store) runWriter() {
 	}
 }
 
-func (store *Store) commitBatch(batch []writeRequest) error {
+// Local operation errors do not imply an unavailable database. Only a failure
+// of the outer transaction affects every acknowledgement and writer health.
+func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 	transaction, err := store.writerDB.BeginTx(context.Background(), nil)
 	if err != nil {
-		return fmt.Errorf("sqlite writer: begin batch: %w", err)
+		return nil, fmt.Errorf("sqlite writer: begin batch: %w", err)
 	}
-	for _, request := range batch {
-		if err := store.applyWrite(transaction, request); err != nil {
-			_ = transaction.Rollback()
-			return err
+	defer transaction.Rollback()
+	results := make([]error, len(batch))
+	for index, request := range batch {
+		if _, err := transaction.Exec("SAVEPOINT writer_operation"); err != nil {
+			return nil, fmt.Errorf("sqlite writer: savepoint: %w", err)
+		}
+		results[index] = store.applyWrite(transaction, request)
+		if results[index] != nil {
+			if _, err := transaction.Exec("ROLLBACK TO writer_operation"); err != nil {
+				return nil, fmt.Errorf("sqlite writer: rollback operation: %w", err)
+			}
+		}
+		if _, err := transaction.Exec("RELEASE writer_operation"); err != nil {
+			return nil, fmt.Errorf("sqlite writer: release operation: %w", err)
 		}
 	}
 	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("sqlite writer: commit batch: %w", err)
+		return nil, fmt.Errorf("sqlite writer: commit batch: %w", err)
 	}
-	return nil
+	return results, nil
 }
 
 func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error {
@@ -238,7 +254,7 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 	case writeClaimPendingParse:
 		return claimPendingParse(transaction, request.data.(*parseClaim))
 	case writeReleaseProcessingParse:
-		return releaseProcessingParse(transaction, request.data.(string))
+		return releaseProcessingParse(transaction, request.data.(string), signer, time.Now())
 	case writeSaveParsedResult:
 		return saveParsedResult(transaction, request.data.(ParsedResult), signer)
 	case writeSaveParsedAudit:

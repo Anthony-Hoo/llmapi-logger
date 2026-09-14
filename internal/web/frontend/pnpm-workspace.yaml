@@ -1,5 +1,6 @@
 packages:
   - .
 
-allowBuilds:
-  esbuild: true
+# Supported by the pnpm 10.15.0 used by CI and Docker.
+onlyBuiltDependencies:
+  - esbuild

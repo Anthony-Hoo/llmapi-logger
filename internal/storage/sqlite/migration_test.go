@@ -1,14 +1,86 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	"llmapi-logger/internal/security"
 )
+
+func TestParseRetryMigrationPreservesExistingAuditAndIntegrity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	database, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		if migration.version <= 6 {
+			if err := applyMigration(ctx, database, migration); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	key := bytes.Repeat([]byte{0x52}, security.KeySize)
+	signer, err := security.NewIntegritySigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	record := testAudit("audit-before-retry-migration")
+	record.defaults()
+	if err := insertAudit(tx, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := finishAudit(tx, AuditFinish{AuditID: record.AuditID, EndedAtNS: 2, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}, signer); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.EnableIntegrity(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	var failures int
+	var next *int64
+	if err := store.readerDB.QueryRow("SELECT parse_save_failures, parse_next_at_ns FROM audit_records WHERE audit_id = ?", record.AuditID).Scan(&failures, &next); err != nil || failures != 0 || next != nil {
+		t.Fatalf("invalid retry defaults after upgrade: %d, %v, %v", failures, next, err)
+	}
+	if claimed, err := store.ClaimPendingParse(ctx, record.AuditID); err != nil || !claimed {
+		t.Fatalf("cannot claim migrated audit: %v, %v", claimed, err)
+	}
+	if err := store.ReleaseProcessingParse(ctx, record.AuditID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatalf("retry scheduling changed historical evidence: %v", err)
+	}
+}
 
 func TestOpenAppliesBaselineMigrationAndPragmas(t *testing.T) {
 	t.Parallel()
@@ -92,8 +164,8 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 4 || version != 6 {
-		t.Fatalf("migration rows = %d max=%d, want versions 1, 4, 5 and 6", versionCount, version)
+	if versionCount != 5 || version != 7 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1, 4, 5, 6 and 7", versionCount, version)
 	}
 	var quickCheck string
 	if err := store.readerDB.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil {
@@ -114,7 +186,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 4 {
+	if versionCount != 5 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -125,7 +197,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		7,
+		8,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)

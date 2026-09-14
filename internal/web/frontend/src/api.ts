@@ -14,6 +14,8 @@ import type {
   UserAgentRuleList,
 } from "./types";
 
+import { hasRowFilters } from "./filters";
+
 const API_BASE = "/api/v1";
 
 export class ApiError extends Error {
@@ -188,7 +190,7 @@ export function createApiClient(
       }
       if (filters.conversation?.trim()) {
         query.set("conversation", filters.conversation.trim());
-      } else if (filters.collapse && !filters.status_class && !filters.status_code?.trim()) {
+      } else if (filters.collapse && !hasRowFilters(filters)) {
         query.set("collapse", "conversation");
       }
       if (cursor) {
