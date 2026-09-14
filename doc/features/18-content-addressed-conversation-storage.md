@@ -58,7 +58,8 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 顺序固定为：canonical plaintext -> 可选压缩 -> AES-256-GCM。
 
-- 文本、JSON、SSE 逻辑事件集合和其他可压缩数据使用确定性 gzip；只有压缩后确实变小时才标记 `gzip`。
+- 文本、JSON、SSE 逻辑事件集合和其他可压缩数据使用 gzip；只有压缩后确实变小时才标记 `gzip`。
+- **压缩结果不是对象身份的一部分。** 同一份明文在不同编译产物下可以压出不同字节数——`compress/flate` 的 `BestSpeed` 策略随 Go 版本变化，升级工具链即可改变 `encoded_length`（解压结果不变，DEFLATE 只规定解码器）。因此 `compression` 与 `encoded_length` 只描述某一行是怎么存下来的，复用已有对象时不得拿它们判定冲突或损坏，否则一次工具链升级就会让旧库里的每个对象被误判。
 - binary object 的压缩选择只依据原始字节 magic，不能信任 occurrence 的 MIME 标签，否则相同 binary hash 可能得到不同存储表示。PNG、JPEG、GIF、WebP、ZIP、GZIP、PDF 等已压缩格式使用 `none`；未知格式只在试压缩确实节省空间时使用 gzip。
 - AAD 绑定对象域、object hash、kind 和 compression；数据库只保存 `nonce || ciphertext || tag`。
 - 原始异常证据也先按大块自适应压缩，再独立加密；不再把每个 32 KiB read 写成一行。
@@ -177,6 +178,8 @@ retention 删除 audit/turn 引用后，在同一 writer 事务中删除已不�
 
 - OpenAI Responses/Chat Completions 的 JSON 与 SSE 单元/集成测试；
 - data URL 按解码字节去重、外部 file id 保留、已压缩二进制不重复 gzip；
+- 复用由另一套编码器产物写入的既有对象（`compression`/`encoded_length`/`data_enc` 整体不同而明文一致）不被判为冲突，两轮保存后每个对象仍可 `OpenObject`/`OpenBinary` 打开且完整性 payload 校验通过；
+- 身份字段（content 的 `kind`/`plaintext_length`/`semantic_hash`，binary 的 `media_type`/`plaintext_length`）被逐一篡改时，再次保存同一内容必须报冲突并整体回滚；
 - 连续、retry、truncate、edit、summary、rollback、parallel tools 和 branch 重建测试；
 - 任意轮 turn reconstruction hash 校验；
 - 异常自动保留 full evidence、普通成功清除 raw chunk；

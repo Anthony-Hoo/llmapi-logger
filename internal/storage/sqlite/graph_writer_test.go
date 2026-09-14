@@ -2,8 +2,11 @@ package sqlite
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
+	"strings"
 	"testing"
 
 	"llmapi-logger/internal/auditmodel"
@@ -118,8 +121,31 @@ func summaryTurnResponseItem() graphTestItem {
 
 func saveGraphTestTurn(t *testing.T, store *Store, cipher security.Cipher, auditID, previousResponseID, responseID string, createdAtNS int64, request, response []graphTestItem) auditmodel.PreparedTurn {
 	t.Helper()
+	parsed := buildGraphTestTurn(t, store, cipher, auditID, previousResponseID, responseID, createdAtNS, request, response)
+	if err := store.SaveParsedAudit(context.Background(), parsed); err != nil {
+		t.Fatalf("save %s: %v", auditID, err)
+	}
+	return *parsed.Turn
+}
+
+// buildGraphTestTurn records the capture-side rows and prepares the turn without
+// saving it, so a caller that expects the save to be rejected can inspect the
+// error itself.
+func buildGraphTestTurn(t *testing.T, store *Store, cipher security.Cipher, auditID, previousResponseID, responseID string, createdAtNS int64, request, response []graphTestItem) ParsedAudit {
+	t.Helper()
 	endedAtNS := createdAtNS + 1
 	insertRetentionAudit(t, store, auditID, createdAtNS, &endedAtNS, ParseProcessing, false)
+	prepared := prepareGraphTestTurn(t, cipher, auditID, previousResponseID, responseID, createdAtNS, request, response)
+	return ParsedAudit{
+		Result: ParsedResult{AuditID: auditID, ParserName: "parser", ParserVersion: "2", Status: ParseOK, ParsedAtNS: endedAtNS + 1},
+		Turn:   &prepared,
+	}
+}
+
+// prepareGraphTestTurn builds the turn the writer would be handed without
+// touching the store, so a caller can learn the object rows a save will produce.
+func prepareGraphTestTurn(t *testing.T, cipher security.Cipher, auditID, previousResponseID, responseID string, createdAtNS int64, request, response []graphTestItem) auditmodel.PreparedTurn {
+	t.Helper()
 	requestItems, requestValues, requestMarkers := graphSide(request)
 	responseItems, responseValues, responseMarkers := graphSide(response)
 	prepared, err := auditmodel.Prepare(auditmodel.Turn{
@@ -134,12 +160,6 @@ func saveGraphTestTurn(t *testing.T, store *Store, cipher security.Cipher, audit
 	}, cipher)
 	if err != nil {
 		t.Fatalf("prepare %s: %v", auditID, err)
-	}
-	if err := store.SaveParsedAudit(context.Background(), ParsedAudit{
-		Result: ParsedResult{AuditID: auditID, ParserName: "parser", ParserVersion: "2", Status: ParseOK, ParsedAtNS: endedAtNS + 1},
-		Turn:   &prepared,
-	}); err != nil {
-		t.Fatalf("save %s: %v", auditID, err)
 	}
 	return prepared
 }
@@ -189,4 +209,285 @@ func graphTestCipher(t *testing.T) security.Cipher {
 		t.Fatal(err)
 	}
 	return cipher
+}
+
+// TestObjectsReuseRowsEncodedByADifferentCodecBuild seeds the store with object
+// rows another build's codec would have written — the other compression, that
+// build's own gzip output, AAD bound to the new compression — and then saves the
+// same content twice. Both saves must reuse those rows, leave them in place, and
+// leave every object openable under an intact integrity chain.
+func TestObjectsReuseRowsEncodedByADifferentCodecBuild(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	cipher := graphTestCipher(t)
+	request, response := graphObjectFixture()
+
+	// Seeding before the first turn keeps the rows older than every recorded
+	// digest, which is what lets integrity cover the reuse: rewriting rows a
+	// turn had already been signed over would be plain tampering.
+	plaintexts := seedForeignEncodedObjects(t, store, cipher, request, response)
+	if err := store.EnableIntegrity(ctx, bytes.Repeat([]byte{0x2d}, security.KeySize)); err != nil {
+		t.Fatal(err)
+	}
+	seeded := countGraphRows(t, store)
+
+	saveGraphTestTurn(t, store, cipher, "turn-codec-one", "", "response-codec-one", 100, request, response)
+	assertTableCount(t, store.readerDB, "content_objects", seeded.contentObjects)
+	assertTableCount(t, store.readerDB, "binary_objects", seeded.binaryObjects)
+
+	saveGraphTestTurn(t, store, cipher, "turn-codec-two", "", "response-codec-two", 200, request, response)
+	// Only the response envelope differs between the two turns, so every other
+	// object has to be reused instead of written again.
+	assertTableCount(t, store.readerDB, "content_objects", seeded.contentObjects+1)
+	assertTableCount(t, store.readerDB, "binary_objects", seeded.binaryObjects)
+
+	for _, auditID := range []string{"turn-codec-one", "turn-codec-two"} {
+		assertGraphObjectsOpen(t, store, cipher, auditID, plaintexts)
+	}
+	if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatalf("verify integrity payloads over reused rows: %v", err)
+	}
+}
+
+// TestObjectIdentityMismatchRejectsTheSecondSave pins what the narrowed identity
+// check still covers: each remaining field must reject reuse on its own, and the
+// rejected save must leave no rows behind.
+func TestObjectIdentityMismatchRejectsTheSecondSave(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name   string
+		tamper string
+	}{
+		{name: "content kind", tamper: `UPDATE content_objects SET kind = 'assistant_message_v2' WHERE kind = 'assistant_message'`},
+		{name: "content plaintext length", tamper: `UPDATE content_objects SET plaintext_length = plaintext_length + 1 WHERE kind = 'assistant_message'`},
+		{name: "content semantic hash", tamper: `UPDATE content_objects SET semantic_hash = zeroblob(32) WHERE kind = 'assistant_message'`},
+		{name: "binary media type", tamper: `UPDATE binary_objects SET media_type = 'image/png'`},
+		{name: "binary plaintext length", tamper: `UPDATE binary_objects SET plaintext_length = plaintext_length + 1`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			store, _ := openTestStore(t)
+			cipher := graphTestCipher(t)
+			request, response := graphObjectFixture()
+			saveGraphTestTurn(t, store, cipher, "turn-identity-one", "", "response-identity-one", 100, request, response)
+			if _, err := store.writerDB.Exec(testCase.tamper); err != nil {
+				t.Fatalf("tamper stored identity: %v", err)
+			}
+			before := countGraphRows(t, store)
+
+			parsed := buildGraphTestTurn(t, store, cipher, "turn-identity-two", "", "response-identity-two", 200, request, response)
+			err := store.SaveParsedAudit(context.Background(), parsed)
+			if err == nil || !strings.Contains(err.Error(), "hash collision or corruption") {
+				t.Fatalf("second save error = %v, want hash collision or corruption", err)
+			}
+			if after := countGraphRows(t, store); after != before {
+				t.Fatalf("rows after rejected save = %+v, want %+v", after, before)
+			}
+		})
+	}
+}
+
+// graphObjectFixture pairs a compressible response with an already compressed
+// image so one turn holds content objects on both sides of the compression
+// threshold plus a binary object.
+func graphObjectFixture() ([]graphTestItem, []graphTestItem) {
+	image := map[string]any{"image_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(
+		append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x51, 0x29}, 512)...))}
+	question := map[string]any{"role": "user", "content": "short question"}
+	answer := map[string]any{"role": "assistant", "content": strings.Repeat("compressible payload ", 64)}
+	return []graphTestItem{graphItem("image", image), graphItem("user_message", question)},
+		[]graphTestItem{graphItem("assistant_message", answer)}
+}
+
+// seedForeignEncodedObjects writes the object rows of one prepared turn as a
+// build whose codec picked the other compression would have written them:
+// compression, encoded_length and data_enc are set together and the ciphertext is
+// bound to AAD carrying the new compression. It returns the plaintext of every
+// seeded row, keyed by hex hash.
+func seedForeignEncodedObjects(t *testing.T, store *Store, cipher security.Cipher, request, response []graphTestItem) map[string][]byte {
+	t.Helper()
+	prepared := prepareGraphTestTurn(t, cipher, "turn-codec-one", "", "response-codec-one", 100, request, response)
+	plaintexts := make(map[string][]byte)
+	flips := make(map[string]int)
+	seedForeignContent(t, store, cipher, prepared.Objects, plaintexts, flips)
+	seedForeignBinaries(t, store, cipher, prepared.Binaries, plaintexts, flips)
+	// A fixture landing every object on the same side of the threshold would
+	// never exercise the gzip <-> none flip in both directions.
+	if flips[auditmodel.CompressionNone] == 0 || flips[auditmodel.CompressionGZIP] == 0 {
+		t.Fatalf("seeded rows per target compression = %v, want both directions", flips)
+	}
+	return plaintexts
+}
+
+func seedForeignContent(t *testing.T, store *Store, cipher security.Cipher, objects []auditmodel.ContentObject, plaintexts map[string][]byte, flips map[string]int) {
+	t.Helper()
+	for _, object := range objects {
+		plaintext := openSeedContent(t, cipher, object)
+		compression := otherCompression(object.Compression)
+		encoded := foreignEncode(t, compression, plaintext)
+		aad, err := security.AAD("content_object", hex.EncodeToString(object.Hash), object.Kind, compression)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dataEnc, err := cipher.Encrypt(aad, encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writerDB.Exec(`
+INSERT INTO content_objects (
+    object_hash, semantic_hash, kind, compression, plaintext_length,
+    encoded_length, data_enc, created_at_ns
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			object.Hash, object.SemanticHash, object.Kind, compression,
+			object.PlaintextLength, int64(len(encoded)), dataEnc, foreignSeedCreatedAtNS,
+		); err != nil {
+			t.Fatalf("seed content object %x: %v", object.Hash, err)
+		}
+		plaintexts[hex.EncodeToString(object.Hash)] = plaintext
+		flips[compression]++
+	}
+}
+
+func seedForeignBinaries(t *testing.T, store *Store, cipher security.Cipher, binaries []auditmodel.BinaryObject, plaintexts map[string][]byte, flips map[string]int) {
+	t.Helper()
+	for _, binary := range binaries {
+		plaintext, err := auditmodel.OpenBinary(cipher, auditmodel.StoredBinary{
+			Hash: binary.Hash, MediaType: binary.MediaType, Compression: binary.Compression,
+			PlaintextLength: binary.PlaintextLength, EncodedLength: binary.EncodedLength, DataEnc: binary.DataEnc,
+		})
+		if err != nil {
+			t.Fatalf("open prepared binary object %x: %v", binary.Hash, err)
+		}
+		compression := otherCompression(binary.Compression)
+		encoded := foreignEncode(t, compression, plaintext)
+		aad, err := security.AAD("binary_object", hex.EncodeToString(binary.Hash), compression)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dataEnc, err := cipher.Encrypt(aad, encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writerDB.Exec(`
+INSERT INTO binary_objects (
+    binary_hash, media_type, compression, plaintext_length,
+    encoded_length, data_enc, created_at_ns
+) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			binary.Hash, binary.MediaType, compression, binary.PlaintextLength,
+			int64(len(encoded)), dataEnc, foreignSeedCreatedAtNS,
+		); err != nil {
+			t.Fatalf("seed binary object %x: %v", binary.Hash, err)
+		}
+		plaintexts[hex.EncodeToString(binary.Hash)] = plaintext
+		flips[compression]++
+	}
+}
+
+// openSeedContent recovers the canonical plaintext a prepared content object was
+// sealed from, so the seeded row can be re-encoded from the same bytes.
+func openSeedContent(t *testing.T, cipher security.Cipher, object auditmodel.ContentObject) []byte {
+	t.Helper()
+	decoded, err := auditmodel.OpenObject(cipher, auditmodel.StoredContent{
+		Hash: object.Hash, SemanticHash: object.SemanticHash, Kind: object.Kind, Compression: object.Compression,
+		PlaintextLength: object.PlaintextLength, EncodedLength: object.EncodedLength, DataEnc: object.DataEnc,
+	})
+	if err != nil {
+		t.Fatalf("open prepared content object %x: %v", object.Hash, err)
+	}
+	plaintext, err := auditmodel.CanonicalJSON(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auditmodel.EqualHash(auditmodel.ContentHash(plaintext), object.Hash) {
+		t.Fatalf("content object %x did not round-trip to its own plaintext", object.Hash)
+	}
+	return plaintext
+}
+
+// foreignSeedCreatedAtNS predates every turn in these tests, so the seeded rows
+// read as leftovers from an earlier build.
+const foreignSeedCreatedAtNS = 50
+
+func otherCompression(compression string) string {
+	if compression == auditmodel.CompressionGZIP {
+		return auditmodel.CompressionNone
+	}
+	return auditmodel.CompressionGZIP
+}
+
+// foreignEncode produces the encoded form another build would have stored: the
+// plaintext itself for none, and gzip written at a level the codec never uses,
+// so the bytes differ from anything Prepare produces.
+func foreignEncode(t *testing.T, compression string, plaintext []byte) []byte {
+	t.Helper()
+	if compression == auditmodel.CompressionNone {
+		return append([]byte(nil), plaintext...)
+	}
+	var buffer bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&buffer, gzip.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(plaintext); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+// assertGraphObjectsOpen opens every object one turn's graph exposes and checks
+// it still yields the plaintext the row held before it was re-encoded.
+func assertGraphObjectsOpen(t *testing.T, store *Store, cipher security.Cipher, auditID string, plaintexts map[string][]byte) {
+	t.Helper()
+	detail, err := store.QueryAuditDetail(context.Background(), auditID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := detail.TurnGraph
+	if graph == nil || len(graph.Objects) == 0 || len(graph.Binaries) == 0 {
+		t.Fatalf("turn %s graph = %+v, want content and binary objects", auditID, graph)
+	}
+	for _, object := range graph.Objects {
+		decoded, err := auditmodel.OpenObject(cipher, object)
+		if err != nil {
+			t.Fatalf("open content object %x of %s: %v", object.Hash, auditID, err)
+		}
+		plaintext, err := auditmodel.CanonicalJSON(decoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want, rewritten := plaintexts[hex.EncodeToString(object.Hash)]; rewritten && !bytes.Equal(plaintext, want) {
+			t.Fatalf("content object %x of %s opened to a different plaintext", object.Hash, auditID)
+		}
+	}
+	for _, binary := range graph.Binaries {
+		plaintext, err := auditmodel.OpenBinary(cipher, binary)
+		if err != nil {
+			t.Fatalf("open binary object %x of %s: %v", binary.Hash, auditID, err)
+		}
+		if want, rewritten := plaintexts[hex.EncodeToString(binary.Hash)]; rewritten && !bytes.Equal(plaintext, want) {
+			t.Fatalf("binary object %x of %s opened to a different plaintext", binary.Hash, auditID)
+		}
+	}
+}
+
+type graphRowCounts struct {
+	turns          int
+	contentObjects int
+	binaryObjects  int
+}
+
+func countGraphRows(t *testing.T, store *Store) graphRowCounts {
+	t.Helper()
+	var counts graphRowCounts
+	if err := store.readerDB.QueryRow(`
+SELECT (SELECT COUNT(*) FROM turns),
+       (SELECT COUNT(*) FROM content_objects),
+       (SELECT COUNT(*) FROM binary_objects)`).Scan(&counts.turns, &counts.contentObjects, &counts.binaryObjects); err != nil {
+		t.Fatal(err)
+	}
+	return counts
 }
