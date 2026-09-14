@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -264,12 +265,18 @@ func TestObjectIdentityMismatchRejectsTheSecondSave(t *testing.T) {
 		{name: "content semantic hash", tamper: `UPDATE content_objects SET semantic_hash = zeroblob(32) WHERE kind = 'assistant_message'`},
 		{name: "binary media type", tamper: `UPDATE binary_objects SET media_type = 'image/png'`},
 		{name: "binary plaintext length", tamper: `UPDATE binary_objects SET plaintext_length = plaintext_length + 1`},
+		{name: "binary reference media type", tamper: `UPDATE content_binary_refs SET media_type = 'image/jpeg'`},
+		{name: "binary reference encoding", tamper: `UPDATE content_binary_refs SET encoding = 'base64'`},
+		{name: "external reference hash", tamper: `UPDATE content_external_refs SET value_hash = zeroblob(32)`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			store, _ := openTestStore(t)
 			cipher := graphTestCipher(t)
 			request, response := graphObjectFixture()
+			if testCase.name == "external reference hash" {
+				request = append(request, graphItem("file", map[string]any{"file_id": "file-example"}))
+			}
 			saveGraphTestTurn(t, store, cipher, "turn-identity-one", "", "response-identity-one", 100, request, response)
 			if _, err := store.writerDB.Exec(testCase.tamper); err != nil {
 				t.Fatalf("tamper stored identity: %v", err)
@@ -278,8 +285,9 @@ func TestObjectIdentityMismatchRejectsTheSecondSave(t *testing.T) {
 
 			parsed := buildGraphTestTurn(t, store, cipher, "turn-identity-two", "", "response-identity-two", 200, request, response)
 			err := store.SaveParsedAudit(context.Background(), parsed)
-			if err == nil || !strings.Contains(err.Error(), "hash collision or corruption") {
-				t.Fatalf("second save error = %v, want hash collision or corruption", err)
+			var integrityFailure storedObjectIntegrityError
+			if !errors.As(err, &integrityFailure) || !strings.Contains(err.Error(), "collision or corruption") {
+				t.Fatalf("second save error = %v, want stored-object integrity failure", err)
 			}
 			if after := countGraphRows(t, store); after != before {
 				t.Fatalf("rows after rejected save = %+v, want %+v", after, before)
@@ -287,6 +295,20 @@ func TestObjectIdentityMismatchRejectsTheSecondSave(t *testing.T) {
 			audit, err := store.LoadParserAudit(context.Background(), parsed.Result.AuditID)
 			if err != nil || audit.ParseStatus != ParseProcessing {
 				t.Fatalf("rejected save changed parse state: %+v, %v", audit, err)
+			}
+			if store.Healthy() || store.IntegrityPayloadState() != "failed" {
+				t.Fatal("stored identity mismatch did not latch integrity health")
+			}
+			if err := store.BeginAudit(context.Background(), testAudit("unrelated-after-corruption")); err != nil {
+				t.Fatal(err)
+			}
+			// This fixture has no signed events, so a verification pass succeeds.
+			// It still must not erase the writer's independent corruption finding.
+			if err := store.VerifyIntegrityPayloads(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if store.Healthy() || store.IntegrityPayloadState() != "failed" {
+				t.Fatal("later write or verification cleared the integrity failure")
 			}
 		})
 	}

@@ -18,16 +18,16 @@ func TestOnlyKnownLocalWriteErrorsAreIsolated(t *testing.T) {
 	for _, code := range []int{sqlitecodes.SQLITE_FULL, sqlitecodes.SQLITE_READONLY,
 		sqlitecodes.SQLITE_IOERR, sqlitecodes.SQLITE_IOERR | (3 << 8), sqlitecodes.SQLITE_BUSY,
 		sqlitecodes.SQLITE_CORRUPT, sqlitecodes.SQLITE_ERROR} {
-		if isLocalWriteError(fmt.Errorf("wrapped: %w", codedWriteFailure(code))) {
+		if canIsolateWriteError(fmt.Errorf("wrapped: %w", codedWriteFailure(code))) {
 			t.Fatalf("database error %d was classified as local", code)
 		}
 	}
-	if isLocalWriteError(errors.New("unknown write failure")) {
+	if canIsolateWriteError(errors.New("unknown write failure")) {
 		t.Fatal("unknown write failure was classified as local")
 	}
 	for _, err := range []error{codedWriteFailure(sqlitecodes.SQLITE_CONSTRAINT),
-		codedWriteFailure(sqlitecodes.SQLITE_CONSTRAINT | (8 << 8)), localWriteError("object identity mismatch")} {
-		if !isLocalWriteError(fmt.Errorf("wrapped: %w", err)) {
+		codedWriteFailure(sqlitecodes.SQLITE_CONSTRAINT | (8 << 8)), localWriteError("invalid prepared sequence"), storedObjectIntegrityError("object identity mismatch")} {
+		if !canIsolateWriteError(fmt.Errorf("wrapped: %w", err)) {
 			t.Fatal("known operation-local error failed the database")
 		}
 	}
@@ -74,7 +74,7 @@ func TestReadOnlyWriterFailsBatchAndRecoversAfterRealWrite(t *testing.T) {
 	if _, err := store.writerDB.Exec("PRAGMA query_only = OFF"); err != nil {
 		t.Fatal(err)
 	}
-	if err := run("constraint-failure")[0]; err == nil || !isLocalWriteError(err) {
+	if err := run("constraint-failure")[0]; err == nil || !canIsolateWriteError(err) {
 		t.Fatal("expected an isolated constraint error")
 	}
 	if writer.Healthy() {

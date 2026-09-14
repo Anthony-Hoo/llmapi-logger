@@ -186,6 +186,9 @@ func TestWriterIsolatesParsedSaveFailureFromQueuedCapture(t *testing.T) {
 	if !writer.healthy.Load() {
 		t.Fatal("isolated parser failure changed writer health")
 	}
+	if writer.Healthy() || writer.IntegrityPayloadState() != "failed" {
+		t.Fatal("same-batch successful capture hid stored object corruption")
+	}
 	snapshot, err := store.Snapshot(context.Background(), record.AuditID)
 	if err != nil || len(snapshot.Stages) != 1 || len(snapshot.Headers) != 1 || len(snapshot.Chunks) != 1 {
 		t.Fatalf("capture batch was lost: %+v, %v", snapshot, err)

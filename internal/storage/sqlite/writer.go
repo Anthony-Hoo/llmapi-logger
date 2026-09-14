@@ -242,7 +242,13 @@ func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 		}
 		results[index] = store.applyWrite(transaction, request)
 		if results[index] != nil {
-			if !isLocalWriteError(results[index]) {
+			var integrityFailure storedObjectIntegrityError
+			if errors.As(results[index], &integrityFailure) {
+				// Detection remains valid even if this operation rolls back.
+				// Isolate its write failure, but latch readiness unhealthy.
+				store.payloadState.Store(integrityPayloadsFailed)
+			}
+			if !canIsolateWriteError(results[index]) {
 				return nil, results[index]
 			}
 			if _, err := transaction.Exec("ROLLBACK TO writer_operation"); err != nil {
@@ -266,16 +272,21 @@ type localWriteError string
 
 func (err localWriteError) Error() string { return string(err) }
 
-// Only constraint conflicts and explicitly identified operation-local domain
-// errors can leave the database healthy. Everything else, including unknown
-// driver errors, must fail the outer batch rather than commit an empty success.
-func isLocalWriteError(err error) bool {
+type storedObjectIntegrityError string
+
+func (err storedObjectIntegrityError) Error() string { return string(err) }
+
+// This controls rollback scope, not health: object integrity faults are
+// isolated but also latch payloadState failed. Unclassified errors and storage
+// failures must abort the outer transaction.
+func canIsolateWriteError(err error) bool {
 	var coded interface{ Code() int }
 	if errors.As(err, &coded) {
 		return coded.Code()&0xff == sqlitecodes.SQLITE_CONSTRAINT
 	}
 	var local localWriteError
-	return errors.As(err, &local) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound)
+	var integrityFailure storedObjectIntegrityError
+	return errors.As(err, &local) || errors.As(err, &integrityFailure) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound)
 }
 
 // Async capture has no acknowledgement. Persist the failure on its audit so
