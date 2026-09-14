@@ -7,7 +7,6 @@ import (
 	"errors"
 
 	"llmapi-logger/internal/conversation"
-	"llmapi-logger/internal/storage/sqlite"
 )
 
 const (
@@ -253,15 +252,4 @@ type StreamTimeline struct {
 	LastEventAtNS  *int64          `json:"last_event_at_ns,string"`
 	Complete       bool            `json:"complete"`
 	Points         []TimelinePoint `json:"points"`
-}
-
-func stageForSide(side Side) (string, error) {
-	switch side {
-	case SideRequest:
-		return sqlite.StageRequestSent, nil
-	case SideResponse:
-		return sqlite.StageResponseReceived, nil
-	default:
-		return "", ErrInvalidQuery
-	}
 }

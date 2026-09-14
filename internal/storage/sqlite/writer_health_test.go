@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -51,7 +52,14 @@ func TestReadOnlyWriterFailsBatchAndRecoversAfterRealWrite(t *testing.T) {
 				record.Mode = "invalid"
 			}
 			acks[i] = make(chan error, 1)
-			writer.queue <- writeRequest{kind: writeBeginAudit, data: record, ack: acks[i]}
+			op := writeRequest{kind: writeBeginAudit, data: record, ack: acks[i]}
+			if id == "noop-release" {
+				op.kind, op.data = writeReleaseProcessingParse, "absent-audit"
+			}
+			if id == "noop-claim" {
+				op.kind, op.data = writeClaimPendingParse, &parseClaim{AuditID: "absent-audit"}
+			}
+			writer.queue <- op
 		}
 		close(writer.queue)
 		writer.runWriter()
@@ -71,6 +79,12 @@ func TestReadOnlyWriterFailsBatchAndRecoversAfterRealWrite(t *testing.T) {
 		t.Fatal("read-only database still reports healthy")
 	}
 	assertTableCount(t, store.readerDB, "audit_records", 0)
+	if err := run("noop-release")[0]; err != nil {
+		t.Fatal(err)
+	}
+	if writer.Healthy() {
+		t.Fatal("a read-only idempotent release restored write health")
+	}
 	if _, err := store.writerDB.Exec("PRAGMA query_only = OFF"); err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +94,14 @@ func TestReadOnlyWriterFailsBatchAndRecoversAfterRealWrite(t *testing.T) {
 	if writer.Healthy() {
 		t.Fatal("an empty commit after a local failure restored health")
 	}
+	for _, err := range run("noop-release", "noop-claim") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if writer.Healthy() {
+		t.Fatal("successful no-op operations restored write health")
+	}
 	if err := run("after-storage-recovery")[0]; err != nil {
 		t.Fatal(err)
 	}
@@ -87,4 +109,29 @@ func TestReadOnlyWriterFailsBatchAndRecoversAfterRealWrite(t *testing.T) {
 		t.Fatal("successful committed write did not restore health")
 	}
 	assertTableCount(t, store.readerDB, "audit_records", 1)
+}
+
+func TestRolledBackMutationsCannotRestoreWriteHealth(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ended := int64(20)
+	insertRetentionAudit(t, store, "rollback-health", 10, &ended, ParseProcessing, false)
+	store.healthy.Store(false)
+	// The parsed-result UPSERT changes a row before the wrong parser name
+	// makes parent finalization fail. total_changes counts that rolled-back
+	// mutation, but it cannot be used as evidence of a committed write.
+	err := store.SaveParsedResult(context.Background(), ParsedResult{AuditID: "rollback-health", ParserName: "wrong-parser", ParserVersion: "1", Status: ParseOK, ParsedAtNS: 21})
+	if err == nil || !canIsolateWriteError(err) {
+		t.Fatalf("expected a local parse failure: %v", err)
+	}
+	assertTableCount(t, store.readerDB, "parsed_results", 0)
+	if store.Healthy() {
+		t.Fatal("rolled-back writes restored health")
+	}
+	if err := store.ReleaseProcessingParse(context.Background(), "absent-audit"); err != nil {
+		t.Fatal(err)
+	}
+	if store.Healthy() {
+		t.Fatal("a later no-op restored health")
+	}
 }

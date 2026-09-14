@@ -90,6 +90,8 @@ UI 在 metadata 状态直接解释“原始 Body 已完成校验并释放”，�
 
 ## 7. SSE 时间线
 
+时间线 API 采用与 raw/UI 相同的 Body 首选和回退规则，并通过 `source_stage` 读取 owning 时间线，用 owning stage 构造解密 AAD。若首选 Body 存在但没有时间线，不越过它读取另一观察边界。返回的 complete 同时受时间线行、所选 Body 和 owning Body 的完整标志约束，避免缺块修复后详情标记不完整而时间线 API 仍标记完整。
+
 ~~~http
 GET /api/v1/audits/{audit_id}/timeline/request
 GET /api/v1/audits/{audit_id}/timeline/response

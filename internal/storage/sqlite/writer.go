@@ -201,16 +201,11 @@ func (store *Store) runWriter() {
 			}
 		}
 
-		results, err := store.commitBatch(batch)
+		results, wrote, err := store.commitBatch(batch)
 		if err != nil {
 			store.healthy.Store(false)
-		} else {
-			for _, result := range results {
-				if result == nil {
-					store.healthy.Store(true)
-					break
-				}
-			}
+		} else if wrote {
+			store.healthy.Store(true)
 		}
 		for index, request := range batch {
 			if request.ack != nil {
@@ -229,16 +224,23 @@ func (store *Store) runWriter() {
 
 // Known local errors can be isolated. Storage errors fail the whole batch even
 // when SQLite would allow rolling back the statement and committing no writes.
-func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
+func (store *Store) commitBatch(batch []writeRequest) ([]error, bool, error) {
 	transaction, err := store.writerDB.BeginTx(context.Background(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite writer: begin batch: %w", err)
+		return nil, false, fmt.Errorf("sqlite writer: begin batch: %w", err)
 	}
 	defer transaction.Rollback()
 	results := make([]error, len(batch))
+	wrote := false
 	for index, request := range batch {
 		if _, err := transaction.Exec("SAVEPOINT writer_operation"); err != nil {
-			return nil, fmt.Errorf("sqlite writer: savepoint: %w", err)
+			return nil, false, fmt.Errorf("sqlite writer: savepoint: %w", err)
+		}
+		var before int64
+		if !wrote {
+			if err := transaction.QueryRow("SELECT total_changes()").Scan(&before); err != nil {
+				return nil, false, fmt.Errorf("sqlite writer: read write counter: %w", err)
+			}
 		}
 		results[index] = store.applyWrite(transaction, request)
 		if results[index] != nil {
@@ -249,23 +251,37 @@ func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 				store.payloadState.Store(integrityPayloadsFailed)
 			}
 			if !canIsolateWriteError(results[index]) {
-				return nil, results[index]
+				return nil, false, results[index]
 			}
 			if _, err := transaction.Exec("ROLLBACK TO writer_operation"); err != nil {
-				return nil, fmt.Errorf("sqlite writer: rollback operation: %w", err)
+				return nil, false, fmt.Errorf("sqlite writer: rollback operation: %w", err)
+			}
+			// total_changes includes rolled-back statements. Exclude those;
+			// only a later committed failure marker can prove write recovery.
+			if !wrote {
+				if err := transaction.QueryRow("SELECT total_changes()").Scan(&before); err != nil {
+					return nil, false, fmt.Errorf("sqlite writer: read rollback counter: %w", err)
+				}
 			}
 			if err := markCaptureWriteFailed(transaction, request); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
+		if !wrote {
+			var after int64
+			if err := transaction.QueryRow("SELECT total_changes()").Scan(&after); err != nil {
+				return nil, false, fmt.Errorf("sqlite writer: read mutation counter: %w", err)
+			}
+			wrote = after > before
+		}
 		if _, err := transaction.Exec("RELEASE writer_operation"); err != nil {
-			return nil, fmt.Errorf("sqlite writer: release operation: %w", err)
+			return nil, false, fmt.Errorf("sqlite writer: release operation: %w", err)
 		}
 	}
 	if err := transaction.Commit(); err != nil {
-		return nil, fmt.Errorf("sqlite writer: commit batch: %w", err)
+		return nil, false, fmt.Errorf("sqlite writer: commit batch: %w", err)
 	}
-	return results, nil
+	return results, wrote, nil
 }
 
 type localWriteError string

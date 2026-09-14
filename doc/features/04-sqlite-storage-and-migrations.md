@@ -114,6 +114,8 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 局部错误采用白名单：SQLite constraint（含扩展码）、明确标记的对象身份/重建错误和预期的未找到记录。FULL、IOERR、READONLY、BUSY、CORRUPT 等其他数据库错误，以及无法分类的错误，一律回滚整批并标记不健康，即使 SQLite 允许回滚单条语句后提交空事务。仅包含局部失败的空提交不能把既有不健康状态恢复为健康。
 
+恢复普通写入健康状态还要求事务实际提交了行变更。writer 根据连接的 `total_changes()` 核对每条操作的变更，并排除已回滚部分；返回 nil 的只读 release、未命中的 claim 等空操作不构成恢复证据。独立的完整性失败锁定仍优先于普通写入健康状态。
+
 回滚范围与完整性健康状态独立：存量 content/binary object 或其引用的身份字段不匹配时，该解析操作仍隔离回滚，但 writer 会立即锁定 `IntegrityPayloadState=failed`，使 readiness 不健康。同批或后续正常写入、基于较旧快照完成的后台验证都不能清除该状态，排查并修复数据后需重启重新校验。读取身份元数据的数据库错误保留原始 error 类型，继续按存储级错误处理，不伪装为对象身份不匹配。
 
 异步 stage/body/header/chunk 采集操作失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。

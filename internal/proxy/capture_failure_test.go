@@ -31,6 +31,7 @@ WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); E
 		{"stage enqueue", "", nil},
 		{"first chunk", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 0 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{0}},
 		{"middle chunk", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 1 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{1}},
+		{"middle chunk SSE", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 1 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{1}},
 		{"last chunk", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{2}},
 		{"all chunks", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{0, 1, 2}},
 		{"last chunk and stage finish", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END;
@@ -46,6 +47,11 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 			retained := ""
 			if test.missing != nil {
 				parts := []string{strings.Repeat("A", 1<<20), strings.Repeat("B", 1<<20), strings.Repeat("C", 1<<20)}
+				if test.name == "middle chunk SSE" {
+					for i := range parts {
+						parts[i] = "data: " + parts[i][:len(parts[i])-8] + "\n\n"
+					}
+				}
 				requestBody, responseBody = strings.Join(parts, ""), strings.Join(parts, "")
 				expectedChunks = int64(len(parts) - len(test.missing))
 				for seq, part := range parts {
@@ -60,6 +66,9 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 					t.Error("capture failure changed upstream request bytes")
 				}
 				w.Header().Set("Content-Type", "application/json")
+				if test.name == "middle chunk SSE" {
+					w.Header().Set("Content-Type", "text/event-stream")
+				}
 				_, _ = io.WriteString(w, responseBody)
 			}))
 			defer upstream.Close()
@@ -141,6 +150,12 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 			queries, err := query.New(store, cipher)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if test.name == "middle chunk SSE" {
+				timeline, err := queries.Timeline(ctx, auditID, query.SideResponse)
+				if err != nil || timeline.Complete || timeline.EventCount != 3 || len(timeline.Points) != 3 {
+					t.Fatalf("timeline did not respect reconciled body completeness: %+v, %v", timeline, err)
+				}
 			}
 			for side, expected := range map[query.Side]string{query.SideRequest: requestBody, query.SideResponse: responseBody} {
 				if test.missing != nil {

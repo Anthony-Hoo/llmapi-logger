@@ -103,13 +103,13 @@ WHEN NEW.seq = 1 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`); err !
 				independent.AuditID = "independent-capture"
 				batch := []writeRequest{failed, {kind: writeFinishStage, data: stageFinish}, {kind: writeFinishAudit, data: &finish}, {kind: writeFinishAudit, data: &independent}}
 				if laterBatch {
-					results, err := store.commitBatch(batch[:1])
+					results, _, err := store.commitBatch(batch[:1])
 					if err != nil || results[0] == nil {
 						t.Fatalf("capture failure was not isolated: %v, %v", results, err)
 					}
 					batch = batch[1:]
 				}
-				results, err := store.commitBatch(batch)
+				results, _, err := store.commitBatch(batch)
 				if err != nil {
 					t.Fatal(err)
 				}
