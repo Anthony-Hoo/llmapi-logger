@@ -1836,7 +1836,7 @@ function RawHTTPMessage({
   const envelope = buildEvidenceEnvelope(detail, side);
   const body = bodyForSide(detail, side);
   const available = body?.retention_state === "full" && body.state !== "streaming";
-  const title = side === "request" ? "发往 NewAPI 的请求" : "从 NewAPI 收到的响应";
+  const title = humanizeStage(stageName);
   const envelopeText = [envelope.startLine, ...envelope.headerLines].join("\n");
 
   return (

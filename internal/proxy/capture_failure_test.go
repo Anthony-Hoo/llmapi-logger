@@ -132,6 +132,17 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 			assertLogField(t, record, "capture_status", snapshot.Audit.CaptureStatus)
 			assertLogField(t, record, "error_code", *snapshot.Audit.ErrorCode)
 			assertLogField(t, record, "forward_status", sqlite.ForwardCompleted)
+			if test.name == "header insert" {
+				for _, stage := range snapshot.Stages {
+					requestStage := stage.Stage == sqlite.StageRequestReceived || stage.Stage == sqlite.StageRequestSent
+					if requestStage && (stage.State != sqlite.StageStatePartial || stage.ErrorCode == nil || *stage.ErrorCode != "capture_headers_failed") {
+						t.Error("missing request headers were reported as a complete observation")
+					}
+					if !requestStage && stage.State != sqlite.StageStateComplete {
+						t.Error("unaffected response observation was downgraded")
+					}
+				}
+			}
 			if test.name != "header insert" {
 				for _, stage := range snapshot.Stages {
 					if stage.State != sqlite.StageStatePartial || stage.EndedAtNS == nil {

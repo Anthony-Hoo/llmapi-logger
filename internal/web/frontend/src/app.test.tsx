@@ -216,6 +216,8 @@ describe("HTTP audit evidence", () => {
       expect(fallbackHTML).toContain("原始证据存在缺失分块");
       expect(fallbackHTML).toContain("下载原始 Body");
       expect(fallbackHTML).toContain("加载并查看 Body");
+      const actualBoundary = fallbackStage === "request_for_newapi_received_from_nginx" ? "接收入站请求" : "返回响应";
+      expect(fallbackHTML).toMatch(new RegExp(`<h4\\b[^>]*>${actualBoundary}</h4>`));
     }
   });
 });

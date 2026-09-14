@@ -310,6 +310,7 @@ func canIsolateWriteError(err error) bool {
 // A parser or management operation must never taint unrelated capture.
 func markCaptureWriteFailed(transaction *sql.Tx, request writeRequest) error {
 	var auditIDs []string
+	headerStages := make(map[[2]string]struct{})
 	switch request.kind {
 	case writeStartStage:
 		auditIDs = []string{request.data.(HTTPStage).AuditID}
@@ -318,6 +319,7 @@ func markCaptureWriteFailed(transaction *sql.Tx, request writeRequest) error {
 	case writeAddHeaders:
 		seen := make(map[string]bool)
 		for _, header := range request.data.([]HTTPHeader) {
+			headerStages[[2]string{header.AuditID, header.Stage}] = struct{}{}
 			if !seen[header.AuditID] {
 				seen[header.AuditID] = true
 				auditIDs = append(auditIDs, header.AuditID)
@@ -333,6 +335,15 @@ func markCaptureWriteFailed(transaction *sql.Tx, request writeRequest) error {
 UPDATE audit_records SET capture_status = 'failed', error_code = 'capture_write_failed'
 WHERE audit_id = ? AND ended_at_ns IS NULL`, auditID); err != nil {
 			return fmt.Errorf("sqlite writer: record capture failure: %w", err)
+		}
+	}
+	for identity := range headerStages {
+		if _, err := transaction.Exec(`
+UPDATE http_stages SET state = 'partial', error_code = 'capture_headers_failed'
+WHERE audit_id = ? AND stage = ?
+  AND EXISTS (SELECT 1 FROM audit_records a WHERE a.audit_id = http_stages.audit_id AND a.ended_at_ns IS NULL)`,
+			identity[0], identity[1]); err != nil {
+			return fmt.Errorf("sqlite writer: record header stage failure: %w", err)
 		}
 	}
 	if request.kind == writeAddChunk {
@@ -537,7 +548,9 @@ INSERT INTO body_chunks (
 func finishStage(transaction *sql.Tx, finish StageFinish) error {
 	result, err := transaction.Exec(`
 UPDATE http_stages
-SET state = ?, status_code = ?, content_length = ?, ended_at_ns = ?, error_code = ?
+SET state = CASE WHEN error_code = 'capture_headers_failed' THEN 'partial' ELSE ? END,
+    status_code = ?, content_length = ?, ended_at_ns = ?,
+    error_code = CASE WHEN error_code = 'capture_headers_failed' THEN error_code ELSE ? END
 WHERE audit_id = ? AND stage = ?`,
 		finish.State,
 		finish.StatusCode,
@@ -723,8 +736,9 @@ WHERE audit_id = ? AND (
 	}
 	if _, err := transaction.Exec(`
 UPDATE http_stages
-SET state = 'partial', ended_at_ns = COALESCE(ended_at_ns, ?), error_code = 'capture_write_failed'
-WHERE audit_id = ? AND (state = 'streaming' OR EXISTS (
+SET state = 'partial', ended_at_ns = COALESCE(ended_at_ns, ?),
+    error_code = CASE WHEN error_code = 'capture_headers_failed' THEN error_code ELSE 'capture_write_failed' END
+WHERE audit_id = ? AND (state = 'streaming' OR error_code = 'capture_headers_failed' OR EXISTS (
     SELECT 1 FROM body_streams b WHERE b.audit_id = http_stages.audit_id AND b.stage = http_stages.stage
       AND b.state = 'partial' AND b.error_code IN ('capture_write_failed', 'capture_chunk_missing')
 ))`, endedAtNS, auditID); err != nil {
