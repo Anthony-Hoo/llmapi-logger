@@ -479,21 +479,25 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 		if bodyError == "" {
 			bodyError = errorCode
 		}
-		bodyFinish = &sqlite.BodyFinish{
-			ObservedLength:         body.observedLength,
-			StoredLength:           storedLength,
-			SHA256:                 body.digest.Sum(nil),
-			HashComplete:           body.hashComplete,
-			EOFSeen:                body.eofSeen,
-			State:                  bodyState,
-			RetentionState:         sqlite.RetentionPending,
-			FirstObservedAtNS:      optionalInt64(body.firstAtNS),
-			LastObservedAtNS:       optionalInt64(body.lastAtNS),
-			ChunkCount:             chunkCount,
-			StreamEventCount:       streamEventCount,
-			StreamTimelineComplete: streamTimelineComplete,
-			Timeline:               timeline,
-			ErrorCode:              optionalString(bodyError),
+		// A body whose start was rejected has no row to finish. Its fault is
+		// already on the stage; sending the body would fail as a writer error.
+		if body.persisted {
+			bodyFinish = &sqlite.BodyFinish{
+				ObservedLength:         body.observedLength,
+				StoredLength:           storedLength,
+				SHA256:                 body.digest.Sum(nil),
+				HashComplete:           body.hashComplete,
+				EOFSeen:                body.eofSeen,
+				State:                  bodyState,
+				RetentionState:         sqlite.RetentionPending,
+				FirstObservedAtNS:      optionalInt64(body.firstAtNS),
+				LastObservedAtNS:       optionalInt64(body.lastAtNS),
+				ChunkCount:             chunkCount,
+				StreamEventCount:       streamEventCount,
+				StreamTimelineComplete: streamTimelineComplete,
+				Timeline:               timeline,
+				ErrorCode:              optionalString(bodyError),
+			}
 		}
 	}
 	return sqlite.StageFinish{

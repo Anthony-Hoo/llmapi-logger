@@ -225,3 +225,47 @@ WHEN NEW.audit_id = 'abort-batch' BEGIN SELECT RAISE(ROLLBACK, 'test transaction
 	}
 	assertTableCount(t, store.readerDB, "audit_records", 0)
 }
+
+func TestWriterIsolatesStoredTurnGraphFailureFromQueuedCapture(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	cipher := graphTestCipher(t)
+	request, response := graphObjectFixture()
+	saveGraphTestTurn(t, store, cipher, "parent-turn", "", "response-parent", 100, request, response)
+	followUp := append(append([]graphTestItem(nil), request...), graphItem("user_message", map[string]any{"role": "user", "content": "follow up"}))
+	parsed := buildGraphTestTurn(t, store, cipher, "child-turn", "response-parent", "response-child", 200, followUp, response)
+	if _, err := store.writerDB.Exec("UPDATE turns SET request_sequence_hash = zeroblob(32) WHERE turn_id = 'parent-turn'"); err != nil {
+		t.Fatal(err)
+	}
+	record := testAudit("capture-alongside-graph")
+	record.defaults()
+	stage := HTTPStage{AuditID: record.AuditID, Stage: StageRequestReceived, StartedAtNS: 2}
+	stage.defaults()
+	batch := []writeRequest{
+		{kind: writeBeginAudit, data: record, ack: make(chan error, 1)},
+		{kind: writeStartStage, data: stage},
+		{kind: writeSaveParsedAudit, data: parsed, ack: make(chan error, 1)},
+		{kind: writeAddHeaders, data: []HTTPHeader{{AuditID: record.AuditID, Stage: stage.Stage, Kind: HeaderKindHeader, Name: "x-test", ValueLength: 1, ValueEnc: []byte{2}}}},
+	}
+	writer := &Store{writerDB: store.writerDB, queue: make(chan writeRequest, len(batch)), done: make(chan struct{})}
+	for _, op := range batch {
+		writer.queue <- op
+	}
+	close(writer.queue)
+	writer.runWriter()
+	if err := <-batch[0].ack; err != nil {
+		t.Fatalf("turn graph failure rolled back same-batch capture admission: %v", err)
+	}
+	var local localWriteError
+	if err := <-batch[2].ack; !errors.As(err, &local) {
+		t.Fatalf("stored turn graph failure = %v, want an isolated local write error", err)
+	}
+	if !writer.healthy.Load() {
+		t.Fatal("isolated turn graph failure changed writer health")
+	}
+	snapshot, err := store.Snapshot(context.Background(), record.AuditID)
+	if err != nil || len(snapshot.Stages) != 1 || len(snapshot.Headers) != 1 {
+		t.Fatalf("capture batch was lost: %+v, %v", snapshot, err)
+	}
+	assertTableCount(t, store.readerDB, "turns", 1)
+}

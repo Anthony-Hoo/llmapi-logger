@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/uaguard"
 
@@ -302,7 +303,8 @@ func canIsolateWriteError(err error) bool {
 	}
 	var local localWriteError
 	var integrityFailure storedObjectIntegrityError
-	return errors.As(err, &local) || errors.As(err, &integrityFailure) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound)
+	return errors.As(err, &local) || errors.As(err, &integrityFailure) || errors.Is(err, auditmodel.ErrReconstruction) ||
+		errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound)
 }
 
 // Async capture has no acknowledgement. Persist the failure on its audit so
@@ -704,6 +706,8 @@ WHERE audit_id = ?`, finish.AuditID); err != nil {
 // Reconcile every damaged body, including a successful FinishStage whose
 // in-memory totals include chunks that never committed. Keep the observed
 // length, but describe only the actual stored bytes as retained evidence.
+// A sealed timeline and a collector stage code describe what was observed, so
+// both survive; only a body that never finished has no timeline to vouch for.
 func finalizeIncompleteCapture(transaction *sql.Tx, auditID string, endedAtNS int64) error {
 	if _, err := transaction.Exec(`
 WITH chunk_lengths AS (
@@ -717,7 +721,8 @@ SET stored_length = COALESCE((SELECT stored_length FROM chunk_lengths WHERE stag
     observed_length = MAX(observed_length, COALESCE((SELECT observed_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)),
     chunk_count = COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0),
     sha256 = NULL, hash_complete = 0, eof_seen = 0,
-    state = 'partial', retention_state = 'full', stream_timeline_complete = 0,
+    state = 'partial', retention_state = 'full',
+    stream_timeline_complete = CASE WHEN state = 'streaming' THEN 0 ELSE stream_timeline_complete END,
     error_code = CASE WHEN error_code = 'capture_chunk_missing'
         OR (state <> 'streaming' AND (
             stored_length > COALESCE((SELECT stored_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)
@@ -737,7 +742,7 @@ WHERE audit_id = ? AND (
 	if _, err := transaction.Exec(`
 UPDATE http_stages
 SET state = 'partial', ended_at_ns = COALESCE(ended_at_ns, ?),
-    error_code = CASE WHEN error_code = 'capture_headers_failed' THEN error_code ELSE 'capture_write_failed' END
+    error_code = COALESCE(error_code, 'capture_write_failed')
 WHERE audit_id = ? AND (state = 'streaming' OR error_code = 'capture_headers_failed' OR EXISTS (
     SELECT 1 FROM body_streams b WHERE b.audit_id = http_stages.audit_id AND b.stage = http_stages.stage
       AND b.state = 'partial' AND b.error_code IN ('capture_write_failed', 'capture_chunk_missing')

@@ -33,8 +33,8 @@ func (store *Store) ClaimPendingParse(ctx context.Context, auditID string) (bool
 
 // ReleaseProcessingParse records a save failure with persistent backoff, or
 // stores a terminal error after five failures. The original raw is retained.
-// The update is intentionally idempotent because a timed-out SaveParsedResult
-// may still have committed before this recovery operation reaches the writer.
+// Releasing an audit that is no longer processing is a no-op, so a duplicate
+// or late release cannot overwrite a completed result.
 func (store *Store) ReleaseProcessingParse(ctx context.Context, auditID string) error {
 	if auditID == "" {
 		return errors.New("sqlite: empty audit id")
@@ -110,7 +110,7 @@ func releaseProcessingParse(transaction *sql.Tx, auditID string, signer *securit
 SELECT parse_save_failures, parser_name FROM audit_records
 WHERE audit_id = ? AND parse_status = 'processing' AND forward_status <> 'rejected'`, auditID).Scan(&failures, &parserName)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil // A timed-out save may already have committed.
+		return nil // Already saved or not processing: nothing to release.
 	}
 	if err != nil {
 		return fmt.Errorf("sqlite writer: read parse retry: %w", err)

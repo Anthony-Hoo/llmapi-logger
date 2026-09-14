@@ -92,7 +92,7 @@ UI 在 metadata 状态直接解释“原始 Body 已完成校验并释放”，�
 
 ## 7. SSE 时间线
 
-时间线 API 采用与 raw/UI 相同的 Body 首选和回退规则，并通过 `source_stage` 读取 owning 时间线，用 owning stage 构造解密 AAD。若首选 Body 存在但没有时间线，不越过它读取另一观察边界。返回的 complete 同时受时间线行、所选 Body 和 owning Body 的完整标志约束，避免缺块修复后详情标记不完整而时间线 API 仍标记完整。
+时间线 API 采用与 raw/UI 相同的 Body 首选和回退规则，并通过 `source_stage` 读取 owning 时间线，用 owning stage 构造解密 AAD。若首选 Body 存在但没有时间线，不越过它读取另一观察边界。返回的 complete 只表示时间点序列是否被截断：时间点在采集时按观察到的字节生成，与 raw 分块是否落盘无关。缺块 Body 的已封存时间线因此保持原有 complete，详情中的 Body 时间线标志与之一致；分块缺失由 Body 状态和 `capture_chunk_missing` 表达。
 
 ~~~http
 GET /api/v1/audits/{audit_id}/timeline/request
@@ -155,13 +155,13 @@ type AuditQuery interface {
 ## 11. 最少测试
 
 - 列表 keyset、窄筛选、User-Agent 定向解密、TTFT 映射、`conversation` 筛选、`collapse=conversation` 折叠语义及二者同时出现时的互斥优先级；`status_class` 与独立 `status_code` 筛选，以及所有行级筛选优先于折叠、较早匹配轮次可见的规则。
-- 状态码草稿空白、前导零、非法字符、全角数字和 99/100/599/600 边界；查看同会话清除行级筛选并保留折叠偏好；字段校验提示和修改输入后清除提示。
+- 状态码草稿空白、前导零、非法字符、全角数字和 99/100/599/600 边界；查看同会话清除行级筛选并保留折叠偏好（纯函数覆盖）；字段校验提示的渲染与无障碍属性。
 - 缺失首块、中间块、尾块或全部分块后，已保存片段仍可读取，metadata/HTTP Header/UI 都明确表示缺块；已知缺块不放宽 GCM、越界、重叠或未标记 gap 的校验。
 - 详情逐项 Header/Trailer、Body retention/source/timeline 字段和 display name。
 - verified turn 的 complex Responses 请求/响应精确重建，包括 developer、reasoning、并行工具、PNG、`file_id`、inline file data 和 usage。
 - reconstructed/timeline 路由鉴权、`no-store` 和稳定错误。
 - metadata raw 不可读取且 UI 不显示 raw 按钮；full raw 大 Body 内存有界。
-- timeline 完整/截断语义、首末时间和 point count 校验。
+- timeline 完整/截断语义、首末时间和 point count 校验；Body 缺块不改变已封存时间线的 complete。
 - conversation 安全 Markdown、角色顺序、工具关联和未知内容展示。
 - 前端 API、组件、TypeScript 检查和生产构建。
 - 双角色鉴权、会话 API 三态、开发者作用域强制与管理端点 403，详见[模块 19](19-developer-key-session.md)。

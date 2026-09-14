@@ -163,9 +163,16 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 				t.Fatal(err)
 			}
 			if test.name == "middle chunk SSE" {
+				// Timeline points come from observed bytes before chunk persistence;
+				// losing a raw chunk must not report the logical timeline truncated.
 				timeline, err := queries.Timeline(ctx, auditID, query.SideResponse)
-				if err != nil || timeline.Complete || timeline.EventCount != 3 || len(timeline.Points) != 3 {
-					t.Fatalf("timeline did not respect reconciled body completeness: %+v, %v", timeline, err)
+				if err != nil || !timeline.Complete || timeline.EventCount != 3 || len(timeline.Points) != 3 {
+					t.Fatalf("raw chunk loss changed timeline completeness: %+v, %v", timeline, err)
+				}
+				for _, body := range snapshot.Bodies {
+					if body.Stage == sqlite.StageResponseReceived && !body.StreamTimelineComplete {
+						t.Error("body timeline flag disagrees with the stored complete timeline")
+					}
 				}
 			}
 			for side, expected := range map[query.Side]string{query.SideRequest: requestBody, query.SideResponse: responseBody} {
@@ -195,4 +202,128 @@ type rejectStageFinishStore struct{ *sqlite.Store }
 
 func (*rejectStageFinishStore) FinishStage(context.Context, sqlite.StageFinish) error {
 	return sqlite.ErrQueueFull
+}
+
+// A full writer queue is reported to the collector synchronously, so these
+// losses are collector faults: finalization must not relabel them as writer
+// failures or change evidence the collector observed completely.
+func TestCollectorQueueRejectionKeepsCollectorFaultLabels(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		seq  int64
+		code string
+	}{
+		{"middle chunk", 1, "add_chunk_failed"},
+		{"start body", -1, "start_body_failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			parts := make([]string, 3)
+			for i, fill := range []string{"A", "B", "C"} {
+				parts[i] = "data: " + strings.Repeat(fill, 1<<20-8) + "\n\n"
+			}
+			responseBody := strings.Join(parts, "")
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, responseBody)
+			}))
+			defer upstream.Close()
+			store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			key := bytes.Repeat([]byte{0x36}, security.KeySize)
+			cipher, err := security.NewAESGCM(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.EnableIntegrity(ctx, key); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			manager, err := audit.NewManager(&rejectResponseReceivedStore{Store: store, seq: test.seq}, cipher, nil, audit.ModeAvailable, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := newTestHandlerWithOptions(t, upstream.URL, manager, logger, nil, defaultTestRoutes())
+			request := httptest.NewRequest(http.MethodPost, "http://example.com/v1/chat/completions", strings.NewReader(`{"model":"model-example","stream":true}`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || response.Body.String() != responseBody {
+				t.Fatal("collector queue rejection changed the downstream response")
+			}
+			auditID, ok := singleCompletionLogRecord(t, logs.Bytes())["audit_id"].(string)
+			if !ok {
+				t.Fatal("completion log is missing its audit ID")
+			}
+			snapshot, err := store.Snapshot(ctx, auditID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Audit.CaptureStatus != sqlite.CapturePartial {
+				t.Fatalf("collector-side loss finalized as %q, want partial", snapshot.Audit.CaptureStatus)
+			}
+			for _, stage := range snapshot.Stages {
+				if stage.Stage == sqlite.StageResponseReceived && (stage.State != sqlite.StageStatePartial || stage.ErrorCode == nil || *stage.ErrorCode != test.code) {
+					t.Fatalf("response stage lost its collector fault: %+v", stage)
+				}
+			}
+			queries, err := query.New(store, cipher)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var received *sqlite.BodyStream
+			for index := range snapshot.Bodies {
+				if snapshot.Bodies[index].Stage == sqlite.StageResponseReceived {
+					received = &snapshot.Bodies[index]
+				}
+			}
+			var raw bytes.Buffer
+			if test.seq < 0 {
+				if received != nil {
+					t.Fatal("unpersisted response body gained a row")
+				}
+				if err := queries.StreamRaw(ctx, auditID, query.SideResponse, &raw); err != nil || raw.String() != responseBody {
+					t.Fatalf("client-facing response fallback is not readable: %v", err)
+				}
+			} else {
+				if received == nil || received.ErrorCode == nil || *received.ErrorCode != sqlite.CaptureChunkMissing || !received.StreamTimelineComplete {
+					t.Fatalf("response body did not keep its observed timeline beside the chunk gap: %+v", received)
+				}
+				timeline, err := queries.Timeline(ctx, auditID, query.SideResponse)
+				if err != nil || !timeline.Complete || timeline.EventCount != 3 || len(timeline.Points) != 3 {
+					t.Fatalf("chunk gap changed timeline completeness: %+v, %v", timeline, err)
+				}
+				if err := queries.StreamRaw(ctx, auditID, query.SideResponse, &raw); err != nil || raw.String() != parts[0]+parts[2] {
+					t.Fatalf("saved response fragments are not readable: %v", err)
+				}
+			}
+			if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+type rejectResponseReceivedStore struct {
+	*sqlite.Store
+	seq int64 // Negative rejects StartBody; otherwise the matching AddChunk.
+}
+
+func (store *rejectResponseReceivedStore) StartBody(ctx context.Context, body sqlite.BodyStream) error {
+	if store.seq < 0 && body.Stage == sqlite.StageResponseReceived {
+		return sqlite.ErrQueueFull
+	}
+	return store.Store.StartBody(ctx, body)
+}
+
+func (store *rejectResponseReceivedStore) AddChunk(ctx context.Context, chunk sqlite.BodyChunk) error {
+	if store.seq >= 0 && chunk.Stage == sqlite.StageResponseReceived && chunk.Seq == store.seq {
+		return sqlite.ErrQueueFull
+	}
+	return store.Store.AddChunk(ctx, chunk)
 }

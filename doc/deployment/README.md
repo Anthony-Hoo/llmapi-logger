@@ -37,6 +37,8 @@ bin/audit-proxy-windows-amd64.exe
 bin/audit-proxy-linux-amd64
 ~~~
 
+构建不会清空 `internal/web/dist`，以保留受跟踪的 `.gitkeep`。在同一工作区重复构建时，旧的哈希资源会一并嵌入二进制，但页面只引用最新资源。正式发布应使用干净 checkout 或 Docker 多阶段构建。
+
 宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。若 NewAPI 允许长时间等待首包，将 `newapi.response_header_timeout_seconds` 设置为高于 NewAPI 自身超时，并同步提高 `shutdown_timeout_seconds`、Nginx read/send timeout 与容器 stop grace period。只有需要让 NewAPI 继续观察公网域名时才启用 `newapi.preserve_host`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
 
 代理和 Body interceptor 的传输上限为 512 MiB；异步 parser 为限制单 worker 内存，当前请求侧和响应侧各最多解码 64 MiB。超过 parser 上限的请求仍按原字节转发并保留 `full` raw，但不会生成 verified turn，也不会获得 item/binary 内容寻址压缩。部署前应根据真实请求分布确认 64 MiB 是否覆盖正常流量，不能把 512 MiB 传输上限当成 normalizer 上限。

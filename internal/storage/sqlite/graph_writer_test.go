@@ -315,23 +315,28 @@ func TestObjectIdentityMismatchRejectsTheSecondSave(t *testing.T) {
 }
 
 // graphObjectFixture pairs a compressible response with an already compressed
-// image so one turn holds content objects on both sides of the compression
-// threshold plus a binary object.
+// image so one turn holds content and binary objects on both sides of their
+// compression decisions.
 func graphObjectFixture() ([]graphTestItem, []graphTestItem) {
 	image := map[string]any{"image_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(
 		append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x51, 0x29}, 512)...))}
+	// Unknown binary bytes are trial-compressed, so this object is stored gzip
+	// and can drift at the same compression like the reasoning object.
+	blob := map[string]any{"image_url": "data:application/octet-stream;base64," + base64.StdEncoding.EncodeToString(
+		bytes.Repeat([]byte("compressible binary payload "), 64))}
 	question := map[string]any{"role": "user", "content": "short question"}
 	answer := map[string]any{"role": "assistant", "content": strings.Repeat("compressible payload ", 64)}
 	reasoning := map[string]any{"text": strings.Repeat("a different compressible reasoning payload ", 64)}
-	return []graphTestItem{graphItem("image", image), graphItem("user_message", question)},
+	return []graphTestItem{graphItem("image", image), graphItem("image", blob), graphItem("user_message", question)},
 		[]graphTestItem{graphItem("assistant_message", answer), graphItem("reasoning", reasoning)}
 }
 
 // seedForeignEncodedObjects writes the object rows of one prepared turn as a
 // build whose codec picked another representation would have written them:
 // compression, encoded_length and data_enc are set together and the ciphertext is
-// bound to AAD carrying the new compression. It returns the plaintext of every
-// seeded row, keyed by hex hash.
+// bound to AAD carrying the stored compression, whether flipped or kept with
+// different gzip bytes. It returns the plaintext of every seeded row, keyed by
+// hex hash.
 func seedForeignEncodedObjects(t *testing.T, store *Store, cipher security.Cipher, request, response []graphTestItem) map[string][]byte {
 	t.Helper()
 	prepared := prepareGraphTestTurn(t, cipher, "turn-codec-one", "", "response-codec-one", 100, request, response)
@@ -404,7 +409,16 @@ func seedForeignBinaries(t *testing.T, store *Store, cipher security.Cipher, bin
 			t.Fatalf("open prepared binary object %x: %v", binary.Hash, err)
 		}
 		compression := otherCompression(binary.Compression)
+		if binary.Compression == auditmodel.CompressionGZIP {
+			compression = auditmodel.CompressionGZIP
+		}
 		encoded := foreignEncode(t, compression, plaintext)
+		if binary.Compression == auditmodel.CompressionGZIP {
+			if int64(len(encoded)) == binary.EncodedLength {
+				t.Fatal("foreign binary gzip must have a different encoded length")
+			}
+			flips["binary_gzip_drift"]++
+		}
 		aad, err := security.AAD("binary_object", hex.EncodeToString(binary.Hash), compression)
 		if err != nil {
 			t.Fatal(err)
@@ -424,7 +438,12 @@ INSERT INTO binary_objects (
 			t.Fatalf("seed binary object %x: %v", binary.Hash, err)
 		}
 		plaintexts[hex.EncodeToString(binary.Hash)] = plaintext
-		flips[compression]++
+		if binary.Compression != compression {
+			flips[compression]++
+		}
+	}
+	if flips["binary_gzip_drift"] == 0 {
+		t.Fatal("fixture must include same-compression binary gzip length drift")
 	}
 }
 

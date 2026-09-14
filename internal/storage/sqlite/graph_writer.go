@@ -366,7 +366,7 @@ WHERE conversation_id = ?`, conversationID).Scan(&protocol, &keyHash); err != ni
 		return "", fmt.Errorf("sqlite writer: verify conversation: %w", err)
 	}
 	if protocol != turn.Protocol || !bytes.Equal(keyHash, turn.ConversationKeyHash) {
-		return "", errors.New("sqlite writer: conversation identity collision")
+		return "", localWriteError("sqlite writer: conversation identity collision")
 	}
 	return conversationID, nil
 }
@@ -622,8 +622,10 @@ func loadRequestRefs(transaction *sql.Tx, turnID string, memo map[string][]audit
 	if cached, exists := memo[turnID]; exists {
 		return cloneObjectRefs(cached), nil
 	}
+	// Graph validation failures are deterministic parser-operation faults: they
+	// roll back this save without discarding unrelated writes in the batch.
 	if visiting[turnID] {
-		return nil, errors.New("sqlite writer: turn parent cycle")
+		return nil, localWriteError("sqlite writer: turn parent cycle")
 	}
 	visiting[turnID] = true
 	defer delete(visiting, turnID)
@@ -652,10 +654,10 @@ FROM turns WHERE turn_id = ?`, turnID).Scan(&parent, &header.ParentBase, &header
 			}
 			base = append(base, parentResponse...)
 		} else if header.ParentBase != "request" {
-			return nil, errors.New("sqlite writer: invalid non-root parent base")
+			return nil, localWriteError("sqlite writer: invalid non-root parent base")
 		}
 	} else if header.ParentBase != "root" {
-		return nil, errors.New("sqlite writer: root turn has non-root base")
+		return nil, localWriteError("sqlite writer: root turn has non-root base")
 	}
 	operations, err := loadContextOperations(transaction, turnID)
 	if err != nil {
@@ -666,7 +668,7 @@ FROM turns WHERE turn_id = ?`, turnID).Scan(&parent, &header.ParentBase, &header
 		return nil, err
 	}
 	if len(result) != header.RequestItemCount || !bytes.Equal(auditmodel.SequenceHash(result), header.RequestSequenceHash) {
-		return nil, errors.New("sqlite writer: stored turn sequence hash mismatch")
+		return nil, localWriteError("sqlite writer: stored turn sequence hash mismatch")
 	}
 	memo[turnID] = cloneObjectRefs(result)
 	return result, nil

@@ -58,6 +58,7 @@ func completedBodyStage(name, value string) *stageCapture {
 		body: &bodyCapture{
 			digest:         digest,
 			persistChunks:  true,
+			persisted:      true,
 			sourceStage:    name,
 			observedLength: int64(len(value)),
 			storedLength:   int64(len(value)),

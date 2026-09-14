@@ -110,23 +110,25 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交一个事务。BeginAudit 和 strict admission 使用同步 Ack；普通证据写入保持异步。
 
-每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。
+每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。整批失败时，批内已入队的异步采集操作随事务一起丢弃，writer 也无法在已回滚的事务里为它们留下失败标记。
 
-局部错误采用白名单：SQLite constraint（含扩展码）、明确标记的对象身份/重建错误和预期的未找到记录。FULL、IOERR、READONLY、BUSY、CORRUPT 等其他数据库错误，以及无法分类的错误，一律回滚整批并标记不健康，即使 SQLite 允许回滚单条语句后提交空事务。仅包含局部失败的空提交不能把既有不健康状态恢复为健康。
+局部错误采用白名单：SQLite constraint（含扩展码）、明确标记的对象身份/重建/turn 图校验错误和预期的未找到记录。FULL、IOERR、READONLY、BUSY、CORRUPT 等其他数据库错误，以及无法分类的错误，一律回滚整批并标记不健康，即使 SQLite 允许回滚单条语句后提交空事务。仅包含局部失败的空提交不能把既有不健康状态恢复为健康。
 
 恢复普通写入健康状态还要求事务实际提交了行变更。writer 根据连接的 `total_changes()` 核对每条操作的变更，并排除已回滚部分；返回 nil 的只读 release、未命中的 claim 等空操作不构成恢复证据。独立的完整性失败锁定仍优先于普通写入健康状态。
 
 回滚范围与完整性健康状态独立：存量 content/binary object 或其引用的身份字段不匹配时，该解析操作仍隔离回滚，但 writer 会立即锁定 `IntegrityPayloadState=failed`，使 readiness 不健康。同批或后续正常写入、基于较旧快照完成的后台验证都不能清除该状态，排查并修复数据后需重启重新校验。读取身份元数据的数据库错误保留原始 error 类型，继续按存储级错误处理，不伪装为对象身份不匹配。
 
-异步 stage/body/header/chunk 采集操作失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
+异步 stage/body/header/chunk 采集操作以局部错误失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
+
+已知边界：上述标记只覆盖被隔离的局部错误。FULL、IOERR、READONLY、BUSY 等存储级错误或事务失败使整批回滚时，批内异步采集操作没有 Ack，也不留标记。存储恢复后，同一 audit 在后续批次的终结仍可能以 complete 提交，而分块、Header 或阶段终结已经缺失：缺中间分块时 raw 读取返回完整性错误；缺阶段终结时子记录保持 streaming、raw 保持未就绪，启动恢复也不处理已终结的 audit。该场景需要瞬时存储故障恰好落在单个请求的生命周期内，本版本不处理，另行跟踪。
 
 Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `capture_headers_failed` 标记该观察阶段为 partial。后续 `FinishStage`、父记录终结与启动恢复都保留这个标记，不能因 Body 完整而把丢失 Header 的阶段重新标为 complete；未受影响的阶段不因此降级。
 
 失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`FinishAuditWithResult` 只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。
 
-阶段终结在入队前失败时，Session 会以 partial 和稳定 `audit_finalize_failed` 终结；同样修复未结束的子记录，并保持日志与已提交父记录的状态及错误码一致。
+阶段终结在入队前失败时，Session 会以 partial 和稳定 `audit_finalize_failed` 终结；同样修复未结束的子记录，并保持日志与已提交父记录的状态及错误码一致。Body 开始写入在入队前被拒绝时，采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
 
-修复还会核对已经 complete 的 Body：如果采集器上报的 stored length/chunk count 与实际 owning chunks 不符，或分块序号/偏移存在缺口，同样修正存储聚合、降级 stage/body 为 partial、清除不能验证的完整 hash/EOF 标志。已观察长度保留；未落盘的分块无法恢复。缺失分块以 `capture_chunk_missing` 标记，分块原序号、偏移和密文不重写；raw 可导出按原序号拼接的已保存片段，但必须明确声明不完整及存在缺块。
+修复还会核对已经 complete 的 Body：如果采集器上报的 stored length/chunk count 与实际 owning chunks 不符，或分块序号/偏移存在缺口，同样修正存储聚合、降级 stage/body 为 partial、清除不能验证的完整 hash/EOF 标志。stage 保留采集器已记录的错误码，只在没有错误码时写 `capture_write_failed`。已封存的 SSE 时间线描述观察到的事件，与分块是否落盘无关，因此 Body 的 `stream_timeline_complete` 与时间线行保持原值；只有仍为 streaming、尚无时间线行的 Body 才置为 false。已观察长度保留；未落盘的分块无法恢复。缺失分块以 `capture_chunk_missing` 标记，分块原序号、偏移和密文不重写；raw 可导出按原序号拼接的已保存片段，但必须明确声明不完整及存在缺块。
 
 主要写操作包括：
 

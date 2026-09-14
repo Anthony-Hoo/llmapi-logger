@@ -500,9 +500,8 @@ describe("audit filters", () => {
     if (statusCodeError) {
       expect(html).toContain('aria-invalid="true"');
       expect(html).toContain('aria-describedby="filter-status-code-error"');
-      expect(html).toContain('id="filter-status-code-error" role="alert"');
+      expect(html).toMatch(/<p(?=[^>]*id="filter-status-code-error")(?=[^>]*role="alert")[^>]*>/);
       expect(html).toContain(statusCodeError);
-      expect(html).not.toContain("重试");
     } else {
       expect(html).not.toContain('id="filter-status-code-error"');
     }

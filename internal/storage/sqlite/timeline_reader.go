@@ -22,14 +22,11 @@ func (store *Store) QueryStreamTimeline(ctx context.Context, auditID, stage stri
 	var complete int
 	err := store.readerDB.QueryRowContext(ctx, `
 SELECT t.audit_id, t.stage, b.observed_length, t.event_count,
-       t.first_event_at_ns, t.last_event_at_ns,
-       (t.timeline_complete AND b.stream_timeline_complete AND source.stream_timeline_complete),
+       t.first_event_at_ns, t.last_event_at_ns, t.timeline_complete,
        t.compression, t.plaintext_length, t.timeline_enc
 FROM body_streams AS b
 JOIN stream_timelines AS t
   ON t.audit_id = b.audit_id AND t.stage = b.source_stage
-JOIN body_streams AS source
-  ON source.audit_id = t.audit_id AND source.stage = t.stage
 WHERE b.audit_id = ? AND b.stage = ?`, auditID, stage).Scan(
 		&result.AuditID,
 		&result.Stage,
