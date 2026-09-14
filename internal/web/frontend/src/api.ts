@@ -180,6 +180,12 @@ export function createApiClient(
       if (filters.forward_status) {
         query.set("forward_status", filters.forward_status);
       }
+      if (filters.status_class) {
+        query.set("status_class", filters.status_class);
+      }
+      if (filters.status_code?.trim()) {
+        query.set("status_code", filters.status_code.trim());
+      }
       if (filters.conversation?.trim()) {
         query.set("conversation", filters.conversation.trim());
       } else if (filters.collapse) {

@@ -30,6 +30,8 @@ describe("API client", () => {
 	  newapi_user_id: "7",
 	  newapi_token_id: "42",
       forward_status: "rejected",
+      status_class: "5xx",
+      status_code: " 503 ",
     });
 
     expect(calledURL).toContain("limit=50");
@@ -39,6 +41,8 @@ describe("API client", () => {
 	expect(calledURL).toContain("newapi_user_id=7");
     expect(calledURL).toContain("newapi_token_id=42");
     expect(calledURL).toContain("forward_status=rejected");
+    expect(calledURL).toContain("status_class=5xx");
+    expect(calledURL).toContain("status_code=503");
     expect(calledInit?.credentials).toBe("same-origin");
     expect(new Headers(calledInit?.headers).has("Authorization")).toBe(false);
   });

@@ -70,6 +70,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		Path:                  filter.Path,
 		Model:                 filter.Model,
 		StatusCode:            filter.StatusCode,
+		StatusClass:           filter.StatusClass,
 		ForwardStatus:         filter.ForwardStatus,
 		BlockedBy:             filter.BlockedBy,
 		BlockCode:             filter.BlockCode,
@@ -534,6 +535,9 @@ func validateList(filter Filter, cursor Cursor, limit int) error {
 	}
 	if filter.StatusCode != nil && (*filter.StatusCode < 100 || *filter.StatusCode > 599) {
 		return invalid("status_code must be an HTTP status")
+	}
+	if filter.StatusClass != "" && filter.StatusClass != "4xx" && filter.StatusClass != "5xx" && filter.StatusClass != "error" {
+		return invalid("invalid status_class")
 	}
 	if filter.NewAPITokenID != nil && *filter.NewAPITokenID < 0 {
 		return invalid("newapi_token_id must not be negative")

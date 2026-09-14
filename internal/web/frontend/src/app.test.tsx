@@ -375,6 +375,8 @@ describe("audit filters", () => {
 		newAPIUserID=""
 		newAPITokenID=""
 		forwardStatus=""
+		statusClass=""
+		statusCode=""
 		users={users}
         onPathChange={() => undefined}
         onModelChange={() => undefined}
@@ -382,6 +384,8 @@ describe("audit filters", () => {
 		onNewAPIUserIDChange={() => undefined}
         onNewAPITokenIDChange={() => undefined}
         onForwardStatusChange={() => undefined}
+		onStatusClassChange={() => undefined}
+		onStatusCodeChange={() => undefined}
         onSubmit={() => undefined}
       />,
     );
@@ -408,6 +412,8 @@ describe("audit filters", () => {
         newAPIUserID=""
         newAPITokenID=""
         forwardStatus=""
+		statusClass=""
+		statusCode=""
         users={[]}
         showCallerFilters={false}
         onPathChange={() => undefined}
@@ -416,6 +422,8 @@ describe("audit filters", () => {
         onNewAPIUserIDChange={() => undefined}
         onNewAPITokenIDChange={() => undefined}
         onForwardStatusChange={() => undefined}
+		onStatusClassChange={() => undefined}
+		onStatusCodeChange={() => undefined}
         onSubmit={() => undefined}
       />,
     );

@@ -148,6 +148,56 @@ INSERT INTO parsed_results (
 	}
 }
 
+func TestListAuditsFiltersByStatusClass(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	for _, item := range []struct {
+		id     string
+		status int
+	}{
+		{id: "audit-ok", status: 200},
+		{id: "audit-4xx", status: 404},
+		{id: "audit-5xx", status: 503},
+	} {
+		record := testAudit(item.id)
+		if err := store.BeginAudit(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		status := item.status
+		if err := store.FinishAudit(ctx, AuditFinish{
+			AuditID: item.id, EndedAtNS: 2, StatusCode: &status,
+			ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParseOK,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		class string
+		want  []string
+	}{
+		{name: "4xx", class: "4xx", want: []string{"audit-4xx"}},
+		{name: "5xx", class: "5xx", want: []string{"audit-5xx"}},
+		{name: "error", class: "error", want: []string{"audit-5xx", "audit-4xx"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			page, err := store.ListAudits(ctx, AuditQueryFilter{StatusClass: tc.class}, AuditQueryCursor{}, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, len(page.Rows))
+			for i, row := range page.Rows {
+				got[i] = row.AuditID
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("status class %s = %v, want %v", tc.class, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestQueryAuditDetailLoadsEncryptedValuesForQueryService(t *testing.T) {
 	t.Parallel()
 

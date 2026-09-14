@@ -585,7 +585,7 @@ func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor,
 		"limit": true, "before_started_at_ns": true, "before_id": true,
 		"from_ns": true, "to_ns": true, "protocol": true, "path": true,
 		"model": true, "user_agent": true,
-		"status_code": true, "forward_status": true,
+		"status_code": true, "status_class": true, "forward_status": true,
 		"blocked_by": true, "block_code": true, "capture_status": true,
 		"newapi_user_id": true, "username": true,
 		"newapi_token_id": true, "token_name": true,
@@ -622,6 +622,7 @@ func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor,
 	if err != nil {
 		return query.Filter{}, query.Cursor{}, 0, err
 	}
+	statusClass := values.Get("status_class")
 	newAPITokenID, err := optionalInt64(values, "newapi_token_id")
 	if err != nil {
 		return query.Filter{}, query.Cursor{}, 0, err
@@ -650,6 +651,7 @@ func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor,
 		Model:                 values.Get("model"),
 		UserAgent:             values.Get("user_agent"),
 		StatusCode:            statusCode,
+		StatusClass:           statusClass,
 		ForwardStatus:         values.Get("forward_status"),
 		BlockedBy:             values.Get("blocked_by"),
 		BlockCode:             values.Get("block_code"),

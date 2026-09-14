@@ -301,6 +301,8 @@ function Dashboard({
 	const [draftNewAPIUserID, setDraftNewAPIUserID] = useState("");
   const [draftNewAPITokenID, setDraftNewAPITokenID] = useState("");
   const [draftForwardStatus, setDraftForwardStatus] = useState("");
+  const [draftStatusClass, setDraftStatusClass] = useState("");
+  const [draftStatusCode, setDraftStatusCode] = useState("");
   const [newAPIUsers, setNewAPIUsers] = useState<NewAPIUser[]>([]);
   const [filters, setFilters] = useState<AuditFilters>({ collapse: true });
   const [cursor, setCursor] = useState<AuditCursor | null>(null);
@@ -372,6 +374,8 @@ function Dashboard({
       forward_status: draftForwardStatus || undefined,
       conversation: filters.conversation,
       collapse: filters.collapse,
+      status_class: draftStatusClass || undefined,
+      status_code: draftStatusCode.trim() || undefined,
     });
   }
 
@@ -460,6 +464,8 @@ function Dashboard({
 		  newAPIUserID={draftNewAPIUserID}
           newAPITokenID={draftNewAPITokenID}
           forwardStatus={draftForwardStatus}
+		  statusClass={draftStatusClass}
+		  statusCode={draftStatusCode}
 		  users={newAPIUsers}
           showCallerFilters={!isDeveloper}
           onPathChange={setDraftPath}
@@ -468,6 +474,8 @@ function Dashboard({
 		  onNewAPIUserIDChange={setDraftNewAPIUserID}
           onNewAPITokenIDChange={setDraftNewAPITokenID}
           onForwardStatusChange={setDraftForwardStatus}
+		  onStatusClassChange={setDraftStatusClass}
+		  onStatusCodeChange={setDraftStatusCode}
           onSubmit={applyFilters}
         />
 
@@ -794,9 +802,11 @@ export function AuditFiltersPanel({
   path,
   model,
   userAgent,
-	newAPIUserID,
+  newAPIUserID,
   newAPITokenID,
   forwardStatus,
+	statusClass,
+	statusCode,
 	users,
   showCallerFilters = true,
   onPathChange,
@@ -805,6 +815,8 @@ export function AuditFiltersPanel({
 	onNewAPIUserIDChange,
   onNewAPITokenIDChange,
   onForwardStatusChange,
+	onStatusClassChange,
+	onStatusCodeChange,
   onSubmit,
 }: {
   path: string;
@@ -813,6 +825,8 @@ export function AuditFiltersPanel({
 	newAPIUserID: string;
   newAPITokenID: string;
   forwardStatus: string;
+	statusClass: string;
+	statusCode: string;
 	users: NewAPIUser[];
   /** Hidden for a scoped session, whose caller is already fixed. */
   showCallerFilters?: boolean;
@@ -822,6 +836,8 @@ export function AuditFiltersPanel({
 	onNewAPIUserIDChange: (value: string) => void;
   onNewAPITokenIDChange: (value: string) => void;
   onForwardStatusChange: (value: string) => void;
+	onStatusClassChange: (value: string) => void;
+	onStatusCodeChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -873,9 +889,9 @@ export function AuditFiltersPanel({
 
           <details className="rounded-md border bg-slate-50/60">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-			  {showCallerFilters ? "高级筛选（路径、Token ID、转发状态）" : "高级筛选（路径、转发状态）"}
+			  {showCallerFilters ? "高级筛选（路径、Token ID、转发状态、HTTP 状态）" : "高级筛选（路径、转发状态、HTTP 状态）"}
             </summary>
-			<div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-3">
+			<div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-2 xl:grid-cols-4">
               <FilterField label="路径" htmlFor="filter-path">
                 <Input
                   id="filter-path"
@@ -913,6 +929,29 @@ export function AuditFiltersPanel({
                   <option value="interrupted">意外中断</option>
                 </select>
               </FilterField>
+			  <FilterField label="HTTP 状态" htmlFor="filter-status-class">
+				<select
+				  id="filter-status-class"
+				  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+				  value={statusClass}
+				  onChange={(event) => onStatusClassChange(event.target.value)}
+				>
+				  <option value="">全部</option>
+				  <option value="error">异常（≥400）</option>
+				  <option value="4xx">4xx</option>
+				  <option value="5xx">5xx</option>
+				</select>
+			  </FilterField>
+			  <FilterField label="状态码" htmlFor="filter-status-code">
+				<Input
+				  id="filter-status-code"
+				  className="h-9"
+				  inputMode="numeric"
+				  value={statusCode}
+				  onChange={(event) => onStatusCodeChange(event.target.value)}
+				  placeholder="如 503"
+				/>
+			  </FilterField>
             </div>
           </details>
         </form>

@@ -287,6 +287,9 @@ func TestListMapsCursorAndRejectsUnsafeInputs(t *testing.T) {
 	if _, err := service.List(context.Background(), Filter{Path: "not-absolute"}, Cursor{}, 1); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("invalid path error = %v", err)
 	}
+	if _, err := service.List(context.Background(), Filter{StatusClass: "bad"}, Cursor{}, 1); !errors.Is(err, ErrInvalidQuery) {
+		t.Fatalf("invalid status class error = %v", err)
+	}
 }
 
 func TestListFiltersUserAgentSubstringAndReturnsMatchingValue(t *testing.T) {
