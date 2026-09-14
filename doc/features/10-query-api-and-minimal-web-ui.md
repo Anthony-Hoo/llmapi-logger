@@ -92,7 +92,7 @@ UI 在 metadata 状态直接解释“原始 Body 已完成校验并释放”，�
 
 ## 7. SSE 时间线
 
-时间线 API 采用与 raw/UI 相同的 Body 首选和回退规则，并通过 `source_stage` 读取 owning 时间线，用 owning stage 构造解密 AAD。若首选 Body 存在但没有时间线，不越过它读取另一观察边界。返回的 complete 只表示时间点序列是否被截断：时间点在采集时按观察到的字节生成，与 raw 分块是否落盘无关。缺块 Body 的已封存时间线因此保持原有 complete，详情中的 Body 时间线标志与之一致；分块缺失由 Body 状态和 `capture_chunk_missing` 表达。
+时间线 API 采用与 raw/UI 相同的 Body 首选和回退规则，并通过 `source_stage` 读取 owning 时间线，用 owning stage 构造解密 AAD。若首选 Body 存在但没有时间线，不越过它读取另一观察边界。返回的 complete=false 表示时间点序列被截断，或观察到的 SSE 在最后一个事件结束前中断；时间点在采集时按观察到的字节生成，与 raw 分块是否落盘无关。缺块 Body 的已封存时间线因此保持原有 complete，详情中的 Body 时间线标志与之一致；分块缺失由 Body 状态和 `capture_chunk_missing` 表达。
 
 ~~~http
 GET /api/v1/audits/{audit_id}/timeline/request

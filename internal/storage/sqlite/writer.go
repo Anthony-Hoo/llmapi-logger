@@ -707,7 +707,8 @@ WHERE audit_id = ?`, finish.AuditID); err != nil {
 // in-memory totals include chunks that never committed. Keep the observed
 // length, but describe only the actual stored bytes as retained evidence.
 // A sealed timeline and a collector stage code describe what was observed, so
-// both survive; only a body that never finished has no timeline to vouch for.
+// both survive. A finished body without a sealed timeline already reports it
+// incomplete; only a body that never finished still needs the flag cleared.
 func finalizeIncompleteCapture(transaction *sql.Tx, auditID string, endedAtNS int64) error {
 	if _, err := transaction.Exec(`
 WITH chunk_lengths AS (

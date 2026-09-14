@@ -70,8 +70,8 @@ retention、gap flush 或单次用户目录刷新失败不改变 readiness；已
 
 SQLite migration/open 成功后、parser 扫描 pending 记录前，应用调用一次恢复：
 
-- `ended_at_ns IS NULL` 的 audit 设为 `forward_status=interrupted`、`capture_status=partial`、`error_code=process_exit`，结束时间使用本次恢复时间。
-- 仍为 streaming 的 stage 和 body 设为 partial，并写稳定 `process_exit`。
+- `ended_at_ns IS NULL` 的 audit 设为 `forward_status=interrupted`，结束时间使用本次恢复时间。无采集故障的记录写 `capture_status=partial`、`error_code=process_exit`；已标记采集失败的记录保留 `failed` 与原错误码（缺省 `capture_write_failed`）。
+- 已标记采集失败的 audit 先复用正常终结的分块对账：子记录写 `capture_write_failed` 或 `capture_chunk_missing`，保留采集器已记录的 stage 错误码和已封存时间线标志。其余仍为 streaming 的 stage 和 body 设为 partial，并写稳定 `process_exit`。
 - Body 的 stored length 从已提交 chunk 求和，observed length 至少覆盖已提交的 offset+length；未完成 hash、EOF 和 SHA-256 不伪造为完整。
 - 只有实际恢复了 audit 时才增加一条聚合 `process_exit` gap；重复执行没有变化。
 - 遗留 `parse_status=processing` 重置为 pending，再由 parser worker 扫描入队。

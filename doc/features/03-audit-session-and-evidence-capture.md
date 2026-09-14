@@ -113,7 +113,7 @@ Session 通过 `FinishAuditWithResult` 获取提交后的实际 capture status/e
 
 异步分块失败、但阶段终结成功时，也必须按实际落盘分块修正存储长度和计数，不能继续把采集器内存中的完整聚合当作已保存证据。缺块只保留并导出剩余片段，明确标记 `capture_chunk_missing`；不能承诺恢复未落盘字节。逻辑 SSE 时间线在观察字节时生成，缺块不改变已封存时间线的完整性。
 
-Body 开始写入被拒绝时，采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
+Body 开始写入在入队前被拒绝时（例如写队列满），采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
 
 available：queue/DB/key 失败时不阻塞代理，标 partial/failed，写结构化日志；DB 不可用时合并一个内存 gap，下一次成功写入时补记。
 
@@ -146,7 +146,7 @@ worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存
 
 ## 12. 崩溃恢复
 
-启动后先验证 HMAC integrity event chain，再把 ended_at_ns 为空的 audit 改为 forward_status=interrupted、capture_status=partial、error_code=process_exit；仍为 streaming 的 stage/stream 改为 partial，raw retention 强制为 full，并按 owning chunks 修复可证明长度。每条恢复记录写 capture event，随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk、SHA-256 或精确结束时间；SQLite WAL 只保证已提交事务一致。
+启动后先验证 HMAC integrity event chain，再把 ended_at_ns 为空的 audit 改为 forward_status=interrupted：无采集故障的记录写 capture_status=partial、error_code=process_exit，已标记采集失败的记录先复用正常终结的分块对账并保留 failed 状态；仍为 streaming 的 stage/stream 改为 partial，raw retention 强制为 full，并按 owning chunks 修复可证明长度。每条恢复记录写 capture event，随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk、SHA-256 或精确结束时间；SQLite WAL 只保证已提交事务一致。
 
 ## 13. 测试
 

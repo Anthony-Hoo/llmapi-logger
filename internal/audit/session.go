@@ -452,6 +452,8 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 			var timelineErr error
 			timeline, timelineErr = session.sealStreamTimelineLocked(stage, body)
 			if timelineErr != nil {
+				// No sealed timeline can vouch for these events.
+				streamTimelineComplete = false
 				body.faulted = true
 				body.errorCode = "stream_timeline_failed"
 				session.markStageFaultLocked(stage, body.errorCode)

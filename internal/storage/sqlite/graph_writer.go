@@ -622,8 +622,9 @@ func loadRequestRefs(transaction *sql.Tx, turnID string, memo map[string][]audit
 	if cached, exists := memo[turnID]; exists {
 		return cloneObjectRefs(cached), nil
 	}
-	// Graph validation failures are deterministic parser-operation faults: they
-	// roll back this save without discarding unrelated writes in the batch.
+	// Graph validation failures, including corrupt stored ancestors, roll back
+	// only this save; like reconstruction failures they must not discard
+	// unrelated writes that share the batch.
 	if visiting[turnID] {
 		return nil, localWriteError("sqlite writer: turn parent cycle")
 	}

@@ -85,7 +85,7 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 | stream_timelines | 逻辑 SSE event 的数量、首末时间和压缩加密的 offset/time delta 序列 |
 | integrity_events | HMAC-SHA-256 append-only 完整性链 |
 
-时间线最多保存前 100,000 个事件时间点，但 `event_count` 保留实际总数；`timeline_complete=false` 明确表示时间点序列被截断。网络 read/write chunk 不作为长期 SSE 事件行。
+时间线最多保存前 100,000 个事件时间点，但 `event_count` 保留实际总数；`timeline_complete=false` 明确表示时间点序列被截断，或观察到的 SSE 在最后一个事件结束前中断；它由观察到的字节决定，与 raw 分块是否落盘无关。有事件但未能封存时间线的 Body 同样把 `stream_timeline_complete` 记为 false。网络 read/write chunk 不作为长期 SSE 事件行。
 
 ## 4. HTTP Body 保存方式
 
@@ -148,7 +148,7 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 6. 写 `semantic_compacted` 或 `reconstruction_failed` 完整性事件；
 7. 更新 `audit_records.parse_status`。
 
-任一步失败都回滚该 `SaveParsedAudit` 操作的全部修改，不会出现“raw 已删但 turn 未写完”的中间状态，也不会撤销同批其他操作。
+任一步失败都回滚该 `SaveParsedAudit` 操作的全部修改，不会出现“raw 已删但 turn 未写完”的中间状态。以局部错误失败时不会撤销同批其他操作；存储级或无法分类的错误仍按本节规则回滚整批。
 
 ## 6. 读取与重建
 
@@ -170,7 +170,7 @@ raw API 只对 `retention_state=full` 开放；`pending` 返回未就绪，`meta
 
 后台段走只读连接池：writer 池只有一个连接，被长事务占住会阻塞全部审计写入。它按 conversation 分组，组内共享 turn ref 与 content object 缓存并在边界释放——父 turn 不跨 conversation，所以逐事件重建缓存会把 K 轮会话变成 O(K²) 次链回溯，而按 conversation 共享既能压回 O(K)，又把峰值内存限制在最大的单个会话上。摘要不一致意味着 chain 合法但底层 audit 行被改动，会把 store 置为 sticky 不健康（readiness 上报 database unavailable）；该状态不会被后续写入批次覆盖，而普通 health 标志会。两段都可由进程生命周期 context 取消，取消按中断处理，不记为校验失败。
 
-恢复会把未终结 audit 标记为 `interrupted/partial/process_exit`，把 streaming stage/body 标为 partial，把 raw retention 强制为 `full`，并根据 owning chunks 修复可证明的 stored length 和 chunk count。不能证明的 SHA-256、EOF 和 timeline complete 会被清空或置为 false。每个恢复 audit 写 `capture_finalized`，并只增加一条聚合 process-exit gap；重复恢复幂等。
+恢复会把未终结 audit 标记为 interrupted：无采集故障的记录为 `partial/process_exit`，已标记采集失败的记录先复用正常终结的分块对账，并保留 `failed` 与原错误码；其余 streaming stage/body 标为 partial，把 raw retention 强制为 `full`，并根据 owning chunks 修复可证明的 stored length 和 chunk count。不能证明的 SHA-256、EOF 和 timeline complete 会被清空或置为 false。每个恢复 audit 写 `capture_finalized`，并只增加一条聚合 process-exit gap；重复恢复幂等。
 
 完整性链验证失败、终结 audit 缺少 capture event、turn 缺少 semantic event，都会使审计存储不可用；不会以忽略校验的方式继续写入。
 
