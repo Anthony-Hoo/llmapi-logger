@@ -1891,6 +1891,12 @@ function RawHTTPMessage({
           ) : null}
         </div>
 
+        {body?.error_code === "capture_chunk_missing" ? (
+          <Alert className="border-amber-200 bg-amber-50">
+            <AlertTitle>原始证据存在缺失分块</AlertTitle>
+            <AlertDescription>查看和下载仅包含按原顺序拼接的已保存片段，缺失字节无法恢复，不能视为完整的请求或响应。</AlertDescription>
+          </Alert>
+        ) : null}
         {!body ? (
           <EmptyValue>该审计边界没有捕获 Body。</EmptyValue>
         ) : body.retention_state === "metadata" ? (
@@ -2285,6 +2291,9 @@ function saveBlob(blob: Blob, filename: string) {
 }
 
 function downloadMessage(side: RawSide, download: RawBodyDownload): string {
+  if (download.missingChunks) {
+    return `${side === "request" ? "请求" : "响应"}已保存片段已下载（${formatBytes(download.storedLength)}）。存在缺失分块，文件不是完整原始 Body。`;
+  }
   return `${side === "request" ? "请求" : "响应"}原始 Body 已下载（${formatBytes(download.storedLength)}，${download.complete ? "完整" : "不完整"}）。`;
 }
 

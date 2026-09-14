@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,17 +22,38 @@ import (
 func TestAsyncCaptureFailuresMatchCompletionLogAndAllowRetainedRaw(t *testing.T) {
 	for _, test := range []struct {
 		name, trigger string
+		missing       []int
 	}{
 		{"header insert", `CREATE TRIGGER fail_capture_header BEFORE INSERT ON http_headers
-WHEN NEW.name = 'X-Fail-Capture' BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`},
+WHEN NEW.name = 'X-Fail-Capture' BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, nil},
 		{"stage finalization", `CREATE TRIGGER fail_capture_finish BEFORE UPDATE OF state ON body_streams
-WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`},
-		{"stage enqueue", ""},
+WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, nil},
+		{"stage enqueue", "", nil},
+		{"first chunk", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 0 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{0}},
+		{"middle chunk", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 1 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{1}},
+		{"last chunk", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{2}},
+		{"all chunks", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`, []int{0, 1, 2}},
+		{"last chunk and stage finish", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END;
+CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test finish failure'); END`, []int{2}},
+		{"all chunks and stage finish", `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks BEGIN SELECT RAISE(ABORT, 'test capture failure'); END;
+CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test finish failure'); END`, []int{0, 1, 2}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			const requestBody = `{"model":"model-example","messages":[{"role":"user","content":"hello"}]}`
-			const responseBody = `{"id":"response-example","choices":[{"message":{"role":"assistant","content":"hi"}}]}`
+			requestBody := `{"model":"model-example","messages":[{"role":"user","content":"hello"}]}`
+			responseBody := `{"id":"response-example","choices":[{"message":{"role":"assistant","content":"hi"}}]}`
+			expectedChunks := int64(1)
+			retained := ""
+			if test.missing != nil {
+				parts := []string{strings.Repeat("A", 1<<20), strings.Repeat("B", 1<<20), strings.Repeat("C", 1<<20)}
+				requestBody, responseBody = strings.Join(parts, ""), strings.Join(parts, "")
+				expectedChunks = int64(len(parts) - len(test.missing))
+				for seq, part := range parts {
+					if !slices.Contains(test.missing, seq) {
+						retained += part
+					}
+				}
+			}
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil || string(body) != requestBody {
@@ -108,8 +130,11 @@ WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); E
 					}
 				}
 				for _, body := range snapshot.Bodies {
-					if body.State != sqlite.StageStatePartial || body.RetentionState != sqlite.RetentionFull || body.HashComplete || body.EOFSeen || body.ChunkCount != 1 || body.StoredLength == 0 {
+					if body.State != sqlite.StageStatePartial || body.RetentionState != sqlite.RetentionFull || body.HashComplete || body.EOFSeen || body.ChunkCount != expectedChunks {
 						t.Errorf("body %s did not recover a partial raw aggregate", body.Stage)
+					}
+					if test.missing != nil && (body.StoredLength != int64(len(retained)) || body.ObservedLength != int64(len(requestBody)) || body.ErrorCode == nil || *body.ErrorCode != sqlite.CaptureChunkMissing) {
+						t.Error("chunk loss did not reconcile the actual retained aggregate")
 					}
 				}
 			}
@@ -118,12 +143,19 @@ WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); E
 				t.Fatal(err)
 			}
 			for side, expected := range map[query.Side]string{query.SideRequest: requestBody, query.SideResponse: responseBody} {
+				if test.missing != nil {
+					expected = retained
+					metadata, err := queries.RawMeta(ctx, auditID, side)
+					if err != nil || metadata.Complete || !metadata.MissingChunks || metadata.StoredLength != int64(len(retained)) {
+						t.Fatalf("raw loss metadata is not explicit: %+v, %v", metadata, err)
+					}
+				}
 				var raw bytes.Buffer
 				if err := queries.StreamRaw(ctx, auditID, side, &raw); err != nil {
 					t.Errorf("retained %s raw cannot be downloaded: %v", side, err)
 				}
 				if raw.String() != expected {
-					t.Errorf("retained %s raw differs from the forwarded bytes", side)
+					t.Errorf("retained %s raw differs from the expected saved fragments", side)
 				}
 			}
 			if err := store.VerifyIntegrityPayloads(ctx); err != nil {

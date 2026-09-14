@@ -278,6 +278,16 @@ WHERE audit_id = ? AND ended_at_ns IS NULL`, auditID); err != nil {
 			return fmt.Errorf("sqlite writer: record capture failure: %w", err)
 		}
 	}
+	if request.kind == writeAddChunk {
+		chunk := request.data.(BodyChunk)
+		if _, err := transaction.Exec(`
+UPDATE body_streams SET observed_length = MAX(observed_length, ?), error_code = ?
+WHERE audit_id = ? AND stage = ? AND state = 'streaming'
+  AND EXISTS (SELECT 1 FROM audit_records a WHERE a.audit_id = body_streams.audit_id AND a.ended_at_ns IS NULL)`,
+			chunk.Offset+int64(chunk.PlaintextLength), CaptureChunkMissing, chunk.AuditID, chunk.Stage); err != nil {
+			return fmt.Errorf("sqlite writer: record missing chunk: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -621,14 +631,15 @@ WHERE audit_id = ?`, finish.AuditID); err != nil {
 	return nil
 }
 
-// A failed FinishStage rolls back its metadata along with its body update.
-// Repair still-open children before signing and ending their failed parent;
-// startup recovery only visits parents that have not ended yet.
+// Reconcile every damaged body, including a successful FinishStage whose
+// in-memory totals include chunks that never committed. Keep the observed
+// length, but describe only the actual stored bytes as retained evidence.
 func finalizeIncompleteCapture(transaction *sql.Tx, auditID string, endedAtNS int64) error {
 	if _, err := transaction.Exec(`
 WITH chunk_lengths AS (
     SELECT stage, SUM(plaintext_length) AS stored_length,
-           MAX("offset" + plaintext_length) AS observed_length, COUNT(*) AS chunk_count
+           MAX("offset" + plaintext_length) AS observed_length, COUNT(*) AS chunk_count,
+           MAX(seq) + 1 AS sequence_count
     FROM body_chunks WHERE audit_id = ? GROUP BY stage
 )
 UPDATE body_streams
@@ -637,14 +648,29 @@ SET stored_length = COALESCE((SELECT stored_length FROM chunk_lengths WHERE stag
     chunk_count = COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0),
     sha256 = NULL, hash_complete = 0, eof_seen = 0,
     state = 'partial', retention_state = 'full', stream_timeline_complete = 0,
-    error_code = 'capture_write_failed'
-WHERE audit_id = ? AND state = 'streaming'`, auditID, auditID); err != nil {
+    error_code = CASE WHEN error_code = 'capture_chunk_missing'
+        OR (state <> 'streaming' AND (
+            stored_length > COALESCE((SELECT stored_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)
+            OR chunk_count > COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)))
+        OR EXISTS (SELECT 1 FROM chunk_lengths WHERE stage = body_streams.source_stage
+            AND (sequence_count <> chunk_count OR observed_length <> stored_length))
+        THEN 'capture_chunk_missing' ELSE 'capture_write_failed' END
+WHERE audit_id = ? AND (
+    state = 'streaming' OR error_code = 'capture_chunk_missing'
+    OR stored_length <> COALESCE((SELECT stored_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)
+    OR chunk_count <> COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)
+    OR EXISTS (SELECT 1 FROM chunk_lengths WHERE stage = body_streams.source_stage
+        AND (sequence_count <> chunk_count OR observed_length <> stored_length))
+)`, auditID, auditID); err != nil {
 		return fmt.Errorf("sqlite writer: finalize incomplete body: %w", err)
 	}
 	if _, err := transaction.Exec(`
 UPDATE http_stages
 SET state = 'partial', ended_at_ns = COALESCE(ended_at_ns, ?), error_code = 'capture_write_failed'
-WHERE audit_id = ? AND state = 'streaming'`, endedAtNS, auditID); err != nil {
+WHERE audit_id = ? AND (state = 'streaming' OR EXISTS (
+    SELECT 1 FROM body_streams b WHERE b.audit_id = http_stages.audit_id AND b.stage = http_stages.stage
+      AND b.state = 'partial' AND b.error_code IN ('capture_write_failed', 'capture_chunk_missing')
+))`, endedAtNS, auditID); err != nil {
 		return fmt.Errorf("sqlite writer: finalize incomplete stage: %w", err)
 	}
 	return nil

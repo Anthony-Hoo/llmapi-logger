@@ -193,6 +193,18 @@ describe("HTTP audit evidence", () => {
     expect(html).toContain("仅元数据 + 可重建对象");
     expect(html).not.toContain("下载原始 Body");
     expect(html).not.toContain("加载并查看 Body");
+
+    const damagedDetail: AuditDetail = { ...metadataDetail, bodies: metadataDetail.bodies.map((body) => ({
+      ...body, state: "partial", retention_state: "full", error_code: "capture_chunk_missing",
+      hash_complete: false, eof_seen: false,
+    })) };
+    const damagedHTML = renderToStaticMarkup(
+      <HTTPAuditEvidence detail={damagedDetail} rawBodies={{}} rawLoading={null} rawNote={null}
+        onLoad={() => undefined} onDownload={() => undefined} onClear={() => undefined} />,
+    );
+    expect(damagedHTML).toContain("原始证据存在缺失分块");
+    expect(damagedHTML).toContain("缺失字节无法恢复");
+    expect(damagedHTML).toContain("下载原始 Body");
   });
 });
 

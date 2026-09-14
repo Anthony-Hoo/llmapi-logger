@@ -28,10 +28,11 @@ const (
 	ForwardProxyError      = "proxy_error"
 	ForwardInterrupted     = "interrupted"
 
-	CapturePending  = "pending"
-	CaptureComplete = "complete"
-	CapturePartial  = "partial"
-	CaptureFailed   = "failed"
+	CapturePending      = "pending"
+	CaptureComplete     = "complete"
+	CapturePartial      = "partial"
+	CaptureFailed       = "failed"
+	CaptureChunkMissing = "capture_chunk_missing"
 
 	ParsePending    = "pending"
 	ParseProcessing = "processing"

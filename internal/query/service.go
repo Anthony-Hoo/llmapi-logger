@@ -482,6 +482,7 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 	}
 	complete := metadata.State == sqlite.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
 	return RawMetadata{
+		MissingChunks:  rawHasMissingChunks(metadata),
 		ObservedLength: metadata.ObservedLength,
 		StoredLength:   metadata.StoredLength,
 		SHA256:         encodedDigest,

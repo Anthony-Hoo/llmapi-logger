@@ -221,6 +221,7 @@ export function createApiClient(
         storedLength: response.headers.get("X-Audit-Stored-Length"),
         sha256: response.headers.get("X-Audit-SHA256"),
         complete: response.headers.get("X-Audit-Complete")?.toLowerCase() === "true",
+        missingChunks: response.headers.get("X-Audit-Missing-Chunks")?.toLowerCase() === "true",
       };
     },
 

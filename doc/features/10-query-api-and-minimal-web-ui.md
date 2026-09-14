@@ -144,10 +144,13 @@ type AuditQuery interface {
 - raw 已开始写出后发生错误时直接中断，不追加伪 JSON。
 - UI 不自动加载 raw Body 或最多 100,000 点的 timeline。
 
+缺块 raw 使用 `X-Audit-Missing-Chunks: true` 和 `X-Audit-Complete: false` 明示：返回体仅按原顺序拼接已保存片段，不能作为完整 HTTP Body。页面和下载提示同时说明缺块。只有 full/partial 且带 `capture_chunk_missing` 标记的证据允许向前跳过缺失序号；仍验证原序号的 GCM/AAD、每块解压后长度、无重叠的偏移、观察长度边界和实际输出长度。没有该标记的 gap、错误密文、重叠或越界仍返回完整性错误。原始 seq/offset 继续保存在审计分块中，不伪造缺失字节。
+
 ## 11. 最少测试
 
 - 列表 keyset、窄筛选、User-Agent 定向解密、TTFT 映射、`conversation` 筛选、`collapse=conversation` 折叠语义及二者同时出现时的互斥优先级；`status_class` 与独立 `status_code` 筛选，以及所有行级筛选优先于折叠、较早匹配轮次可见的规则。
 - 状态码草稿空白、前导零、非法字符、全角数字和 99/100/599/600 边界；查看同会话清除行级筛选并保留折叠偏好；字段校验提示和修改输入后清除提示。
+- 缺失首块、中间块、尾块或全部分块后，已保存片段仍可读取，metadata/HTTP Header/UI 都明确表示缺块；已知缺块不放宽 GCM、越界、重叠或未标记 gap 的校验。
 - 详情逐项 Header/Trailer、Body retention/source/timeline 字段和 display name。
 - verified turn 的 complex Responses 请求/响应精确重建，包括 developer、reasoning、并行工具、PNG、`file_id`、inline file data 和 usage。
 - reconstructed/timeline 路由鉴权、`no-store` 和稳定错误。

@@ -48,11 +48,20 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 	var expectedSequence int64
 	var expectedOffset int64
 	complete := metadata.State == sqlite.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
+	missingChunks := rawHasMissingChunks(metadata)
 	err = service.store.StreamBodyChunks(ctx, auditID, stage, func(chunk sqlite.BodyChunk) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if chunk.Seq != expectedSequence || chunk.Offset != expectedOffset {
+			// Only a capture-time, explicitly recorded loss permits a forward
+			// gap. Keep original sequence/AAD and offsets; never renumber or
+			// fabricate missing bytes. Other gaps still mean corruption.
+			if !missingChunks || chunk.Seq <= expectedSequence || chunk.Offset < expectedOffset {
+				return ErrIntegrity
+			}
+		}
+		if missingChunks && (chunk.PlaintextLength < 0 || chunk.Offset > metadata.ObservedLength || int64(chunk.PlaintextLength) > metadata.ObservedLength-chunk.Offset) {
 			return ErrIntegrity
 		}
 		compression := chunk.Compression
@@ -106,6 +115,11 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 		}
 	}
 	return nil
+}
+
+func rawHasMissingChunks(metadata sqlite.RawBodyMetadata) bool {
+	return metadata.State == sqlite.StageStatePartial && metadata.RetentionState == sqlite.RetentionFull &&
+		metadata.ErrorCode != nil && *metadata.ErrorCode == sqlite.CaptureChunkMissing
 }
 
 // selectRawBody prefers the provider-side stage used for ordinary request and

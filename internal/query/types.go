@@ -232,6 +232,7 @@ type Detail struct {
 
 // RawMetadata is safe to expose as HTTP response headers.
 type RawMetadata struct {
+	MissingChunks  bool
 	ObservedLength int64
 	StoredLength   int64
 	SHA256         string

@@ -527,6 +527,7 @@ func (handler *managementHandler) serveRaw(writer http.ResponseWriter, request *
 	writer.Header().Set("X-Audit-Observed-Length", strconv.FormatInt(metadata.ObservedLength, 10))
 	writer.Header().Set("X-Audit-Stored-Length", strconv.FormatInt(metadata.StoredLength, 10))
 	writer.Header().Set("X-Audit-Complete", strconv.FormatBool(metadata.Complete))
+	writer.Header().Set("X-Audit-Missing-Chunks", strconv.FormatBool(metadata.MissingChunks))
 	if metadata.SHA256 != "" {
 		writer.Header().Set("X-Audit-SHA256", metadata.SHA256)
 	}
@@ -718,7 +719,7 @@ func methodNotAllowed(writer http.ResponseWriter, methods ...string) {
 func clearRawHeaders(header http.Header) {
 	for _, name := range []string{
 		"Content-Length", "Content-Type", "X-Audit-Observed-Length",
-		"X-Audit-Stored-Length", "X-Audit-Complete", "X-Audit-SHA256",
+		"X-Audit-Stored-Length", "X-Audit-Complete", "X-Audit-SHA256", "X-Audit-Missing-Chunks",
 	} {
 		header.Del(name)
 	}

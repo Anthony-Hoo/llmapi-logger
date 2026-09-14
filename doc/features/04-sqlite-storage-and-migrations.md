@@ -118,6 +118,8 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 阶段终结在入队前失败时，Session 会以 partial 和稳定 `audit_finalize_failed` 终结；同样修复未结束的子记录，并保持日志与已提交父记录的状态及错误码一致。
 
+修复还会核对已经 complete 的 Body：如果采集器上报的 stored length/chunk count 与实际 owning chunks 不符，或分块序号/偏移存在缺口，同样修正存储聚合、降级 stage/body 为 partial、清除不能验证的完整 hash/EOF 标志。已观察长度保留；未落盘的分块无法恢复。缺失分块以 `capture_chunk_missing` 标记，分块原序号、偏移和密文不重写；raw 可导出按原序号拼接的已保存片段，但必须明确声明不完整及存在缺块。
+
 主要写操作包括：
 
 - audit/stage/header/body 开始、分块和终结；
