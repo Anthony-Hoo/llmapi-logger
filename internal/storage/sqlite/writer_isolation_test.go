@@ -3,10 +3,46 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"llmapi-logger/internal/security"
 )
+
+func TestFinishAuditWithResultDoesNotReturnUncommittedOutcome(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	if err := store.BeginAudit(ctx, testAudit("finish-result")); err != nil {
+		t.Fatal(err)
+	}
+	// The finalization operation succeeds, but a deferred foreign-key violation
+	// prevents the outer transaction from committing its effective outcome.
+	if _, err := store.writerDB.Exec(`CREATE TABLE reject_commit (
+    audit_id TEXT REFERENCES audit_records(audit_id) DEFERRABLE INITIALLY DEFERRED
+)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writerDB.Exec(`CREATE TRIGGER reject_finish_commit AFTER UPDATE OF ended_at_ns ON audit_records
+BEGIN INSERT INTO reject_commit VALUES ('missing-audit'); END`); err != nil {
+		t.Fatal(err)
+	}
+	finish := AuditFinish{AuditID: "finish-result", EndedAtNS: 2, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}
+	result, err := store.FinishAuditWithResult(ctx, finish)
+	if err == nil || result.AuditID != "" || result.CaptureStatus != "" {
+		t.Fatal("failed commit returned a terminal outcome")
+	}
+	snapshot, err := store.Snapshot(ctx, finish.AuditID)
+	if err != nil || snapshot.Audit.EndedAtNS != nil {
+		t.Fatal("failed commit persisted a terminal audit")
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	result, err = store.FinishAuditWithResult(cancelled, finish)
+	if !errors.Is(err, context.Canceled) || result.AuditID != "" || result.CaptureStatus != "" {
+		t.Fatal("cancelled finalization returned a terminal outcome")
+	}
+}
 
 func TestCaptureFailureCannotBeFinalizedAsComplete(t *testing.T) {
 	t.Parallel()
@@ -65,7 +101,7 @@ WHEN NEW.seq = 1 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`); err !
 				finish := AuditFinish{AuditID: stage.AuditID, EndedAtNS: 5, StatusCode: &status, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}
 				independent := finish
 				independent.AuditID = "independent-capture"
-				batch := []writeRequest{failed, {kind: writeFinishStage, data: stageFinish}, {kind: writeFinishAudit, data: finish}, {kind: writeFinishAudit, data: independent}}
+				batch := []writeRequest{failed, {kind: writeFinishStage, data: stageFinish}, {kind: writeFinishAudit, data: &finish}, {kind: writeFinishAudit, data: &independent}}
 				if laterBatch {
 					results, err := store.commitBatch(batch[:1])
 					if err != nil || results[0] == nil {
@@ -130,7 +166,7 @@ func TestWriterIsolatesParsedSaveFailureFromQueuedCapture(t *testing.T) {
 		{kind: writeAddChunk, data: chunk},
 		{kind: writeAddHeaders, data: []HTTPHeader{{AuditID: record.AuditID, Stage: stage.Stage, Kind: HeaderKindHeader, Name: "x-test", ValueLength: 1, ValueEnc: []byte{2}}}},
 		{kind: writeFinishStage, data: StageFinish{AuditID: record.AuditID, Stage: stage.Stage, State: StageStatePartial, EndedAtNS: 4}},
-		{kind: writeFinishAudit, data: AuditFinish{AuditID: record.AuditID, EndedAtNS: 5, ForwardStatus: ForwardCompleted, CaptureStatus: CapturePartial, ParseStatus: ParsePending}, ack: make(chan error, 1)},
+		{kind: writeFinishAudit, data: &AuditFinish{AuditID: record.AuditID, EndedAtNS: 5, ForwardStatus: ForwardCompleted, CaptureStatus: CapturePartial, ParseStatus: ParsePending}, ack: make(chan error, 1)},
 	}
 	// Preload a separate writer loop so all operations deterministically share
 	// one batch, independent of scheduler timing and the 5 ms batch window.

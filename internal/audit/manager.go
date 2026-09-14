@@ -29,8 +29,9 @@ const (
 
 var ErrUnavailable = errors.New("audit unavailable")
 
-// Store is the ordered persistence surface used by a Session. FinishAudit is
-// a barrier for all earlier accepted asynchronous writes.
+// Store is the ordered persistence surface used by a Session.
+// FinishAuditWithResult is a barrier for earlier asynchronous writes and
+// returns the effective committed outcome for the completion log.
 type Store interface {
 	Healthy() bool
 	BeginAudit(context.Context, sqlite.AuditRecord) error
@@ -39,7 +40,7 @@ type Store interface {
 	AddHeaders(context.Context, []sqlite.HTTPHeader) error
 	AddChunk(context.Context, sqlite.BodyChunk) error
 	FinishStage(context.Context, sqlite.StageFinish) error
-	FinishAudit(context.Context, sqlite.AuditFinish) error
+	FinishAuditWithResult(context.Context, sqlite.AuditFinish) (sqlite.AuditFinish, error)
 	InsertAuditGaps(context.Context, []sqlite.AuditGap) error
 }
 

@@ -109,11 +109,24 @@ func (store *Store) FinishStage(ctx context.Context, finish StageFinish) error {
 // commit. Since the writer is ordered, this is also a barrier for all earlier
 // accepted operations.
 func (store *Store) FinishAudit(ctx context.Context, finish AuditFinish) error {
+	_, err := store.FinishAuditWithResult(ctx, finish)
+	return err
+}
+
+// FinishAuditWithResult returns the effective terminal outcome only after the
+// outer transaction commits. In particular, asynchronous capture failures may
+// downgrade the submitted status. No outcome is returned on a failed or
+// canceled acknowledgement, even if an accepted write later commits.
+func (store *Store) FinishAuditWithResult(ctx context.Context, finish AuditFinish) (AuditFinish, error) {
 	finish.defaults()
 	if err := validateAuditFinish(finish); err != nil {
-		return err
+		return AuditFinish{}, err
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeFinishAudit, data: cloneAuditFinish(finish)})
+	owned := cloneAuditFinish(finish)
+	if err := store.submitSync(ctx, writeRequest{kind: writeFinishAudit, data: &owned}); err != nil {
+		return AuditFinish{}, err
+	}
+	return owned, nil
 }
 
 func (store *Store) submitAsync(ctx context.Context, request writeRequest) error {
@@ -284,7 +297,7 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 	case writeFinishStage:
 		return finishStage(transaction, request.data.(StageFinish))
 	case writeFinishAudit:
-		return finishAudit(transaction, request.data.(AuditFinish), signer)
+		return finishAudit(transaction, request.data.(*AuditFinish), signer)
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
 	case writeClaimPendingParse:
@@ -532,7 +545,7 @@ ON CONFLICT(audit_id, stage) DO UPDATE SET
 	return nil
 }
 
-func finishAudit(transaction *sql.Tx, finish AuditFinish, signer *security.IntegritySigner) error {
+func finishAudit(transaction *sql.Tx, finish *AuditFinish, signer *security.IntegritySigner) error {
 	var storedCaptureStatus string
 	var storedErrorCode sql.NullString
 	if err := transaction.QueryRow("SELECT capture_status, error_code FROM audit_records WHERE audit_id = ?", finish.AuditID).Scan(&storedCaptureStatus, &storedErrorCode); err != nil {
@@ -545,6 +558,9 @@ func finishAudit(transaction *sql.Tx, finish AuditFinish, signer *security.Integ
 			code = storedErrorCode.String
 		}
 		finish.ErrorCode = &code
+		if err := finalizeIncompleteCapture(transaction, finish.AuditID, finish.EndedAtNS); err != nil {
+			return err
+		}
 	} else {
 		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
 			return err
@@ -599,6 +615,35 @@ WHERE audit_id = ?`, finish.AuditID); err != nil {
 	}
 	if err := appendIntegrityEvent(transaction, signer, finish.AuditID, integrityCaptureFinalized, payloadDigest, finish.EndedAtNS); err != nil {
 		return err
+	}
+	return nil
+}
+
+// A failed FinishStage rolls back its metadata along with its body update.
+// Repair still-open children before signing and ending their failed parent;
+// startup recovery only visits parents that have not ended yet.
+func finalizeIncompleteCapture(transaction *sql.Tx, auditID string, endedAtNS int64) error {
+	if _, err := transaction.Exec(`
+WITH chunk_lengths AS (
+    SELECT stage, SUM(plaintext_length) AS stored_length,
+           MAX("offset" + plaintext_length) AS observed_length, COUNT(*) AS chunk_count
+    FROM body_chunks WHERE audit_id = ? GROUP BY stage
+)
+UPDATE body_streams
+SET stored_length = COALESCE((SELECT stored_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0),
+    observed_length = MAX(observed_length, COALESCE((SELECT observed_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)),
+    chunk_count = COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0),
+    sha256 = NULL, hash_complete = 0, eof_seen = 0,
+    state = 'partial', retention_state = 'full', stream_timeline_complete = 0,
+    error_code = 'capture_write_failed'
+WHERE audit_id = ? AND state = 'streaming'`, auditID, auditID); err != nil {
+		return fmt.Errorf("sqlite writer: finalize incomplete body: %w", err)
+	}
+	if _, err := transaction.Exec(`
+UPDATE http_stages
+SET state = 'partial', ended_at_ns = COALESCE(ended_at_ns, ?), error_code = 'capture_write_failed'
+WHERE audit_id = ? AND state = 'streaming'`, endedAtNS, auditID); err != nil {
+		return fmt.Errorf("sqlite writer: finalize incomplete stage: %w", err)
 	}
 	return nil
 }

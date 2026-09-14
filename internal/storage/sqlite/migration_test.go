@@ -49,7 +49,7 @@ func TestParseRetryMigrationPreservesExistingAuditAndIntegrity(t *testing.T) {
 	if err := insertAudit(tx, record); err != nil {
 		t.Fatal(err)
 	}
-	if err := finishAudit(tx, AuditFinish{AuditID: record.AuditID, EndedAtNS: 2, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}, signer); err != nil {
+	if err := finishAudit(tx, &AuditFinish{AuditID: record.AuditID, EndedAtNS: 2, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}, signer); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

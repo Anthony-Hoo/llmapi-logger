@@ -95,7 +95,7 @@ SQLite schema generation 2 共 20 张表。除原有 audit/stage/header/body/par
 
 采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw，不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
 
-异步采集写入失败会持久化标记对应 audit 为 failed，后续终结不能把它覆盖为 complete；正常停机取消不会消耗解析保存重试预算。
+异步采集写入失败会持久化标记对应 audit 为 failed，后续终结不能把它覆盖为 complete；终结时修复仍在 streaming 的子记录，并将提交后的实际状态回传 Session，使完成日志与审计一致、已保留 raw 可读。正常停机取消不会消耗解析保存重试预算。
 
 key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 

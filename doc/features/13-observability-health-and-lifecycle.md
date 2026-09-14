@@ -17,6 +17,8 @@
 
 日志调用不传入 `http.Request` 或原始 error 对象。禁止记录 Query、Header value、Body、解析全文、admin token、上游凭据、主密钥、密文 BLOB 或底层数据库错误文本。
 
+审计终结成功时，Session 使用 writer 在外层事务提交后回传的有效 capture status/error code 更新 TerminalSummary。异步采集失败因此在数据库和完成日志中都呈现为 `failed / capture_write_failed`；事务提交失败或 Ack 等待取消则沿用未确认终结的错误路径，不发布未提交的 writer 结果。
+
 可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。
 
 `/v1/models` 等安全非 LLM 请求即使经本程序 passthrough，也不创建 audit、不执行 interceptor，并且不写 `llm request completed`。错误 Method、受保护路径族和危险路径在分发边界 fail-closed，也不伪装成 LLM audit。

@@ -385,13 +385,17 @@ func (session *Session) finish() error {
 		}
 		finish.TTFTNS = &ttft
 	}
-	if err := session.store.FinishAudit(session.writeCtx, finish); err != nil {
+	if persisted, err := session.store.FinishAuditWithResult(session.writeCtx, finish); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
 		captureStatus = sqlite.CapturePartial
 		session.recordGapReason(gapReasonForWrite(err))
 		session.logCaptureFailure("", "finish_audit_failed")
-	} else if parseStatus == sqlite.ParsePending && session.notify != nil {
-		_ = session.notify(session.auditID)
+	} else {
+		captureStatus = persisted.CaptureStatus
+		errorCode = cloneString(persisted.ErrorCode)
+		if parseStatus == sqlite.ParsePending && session.notify != nil {
+			_ = session.notify(session.auditID)
+		}
 	}
 	if newAPIRequestID != nil && session.callerNotify != nil && len(writeErrors) == 0 {
 		_ = session.callerNotify(session.auditID)

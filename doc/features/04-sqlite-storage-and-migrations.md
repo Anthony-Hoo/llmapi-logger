@@ -114,6 +114,8 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 异步 stage/body/header/chunk 采集操作失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
 
+失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`FinishAuditWithResult` 只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。
+
 主要写操作包括：
 
 - audit/stage/header/body 开始、分块和终结；
