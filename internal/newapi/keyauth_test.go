@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,28 +111,49 @@ func TestValidateTokenKeyAcceptsLogPageLargerThanTheBufferedCeiling(t *testing.T
 	}
 }
 
-func TestValidateTokenKeyRejectsUnboundedLogPage(t *testing.T) {
+func TestDecodeTokenLogRejectsUnboundedLogPage(t *testing.T) {
 	t.Parallel()
 	// Streaming removes the need to buffer, not the need for a limit: a body
-	// that never ends must still be abandoned rather than read forever.
-	server := newTokenLogServer(t, func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = writer.Write([]byte(`{"success":true,"data":[`))
-		// The padding goes in a field the decoder ignores, so every row stays
-		// individually valid and the read is stopped by the ceiling rather than
-		// by a row that fails validation.
-		filler := strings.Repeat("x", 64*1024)
-		for request.Context().Err() == nil {
-			if _, err := fmt.Fprintf(writer,
-				`{"user_id":7,"username":"developer","token_id":42,"token_name":"agent","created_at":1,"content":%q},`,
-				filler); err != nil {
-				return
-			}
-		}
-	})
-
-	_, err := ValidateTokenKey(context.Background(), server.URL, server.Client(), testDeveloperKey)
+	// that never ends must still be abandoned. Exercise the real byte ceiling
+	// without racing the independent HTTP deadline on a busy race-test runner.
+	const prefix = `{"success":true,"data":[`
+	rows := &repeatedLogRows{row: fmt.Sprintf(
+		`{"user_id":7,"username":"developer","token_id":42,"token_name":"agent","created_at":1,"content":%q},`,
+		strings.Repeat("x", 64*1024))}
+	_, err := decodeTokenLog(io.MultiReader(strings.NewReader(prefix), rows))
 	if !errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("error = %v, want ErrResponseTooLarge", err)
+	}
+	if rows.bytesRead+int64(len(prefix)) != maxTokenLogBodyBytes {
+		t.Fatal("decoder did not stop at the configured byte ceiling")
+	}
+}
+
+type repeatedLogRows struct {
+	row       string
+	offset    int
+	bytesRead int64
+}
+
+func (rows *repeatedLogRows) Read(buffer []byte) (int, error) {
+	n := copy(buffer, rows.row[rows.offset:])
+	rows.offset = (rows.offset + n) % len(rows.row)
+	rows.bytesRead += int64(n)
+	return n, nil
+}
+
+type logLimitReader struct{}
+
+func (logLimitReader) Read([]byte) (int, error) { return 0, ErrResponseTooLarge }
+
+func TestValidateTokenKeyPropagatesLogPageLimitError(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(logLimitReader{})}, nil
+	})}
+	identity, err := ValidateTokenKey(context.Background(), "https://example.com", client, testDeveloperKey)
+	if !errors.Is(err, ErrResponseTooLarge) || identity != (TokenIdentity{}) {
+		t.Fatalf("limit error was not propagated with an empty identity: %v", err)
 	}
 }
 
