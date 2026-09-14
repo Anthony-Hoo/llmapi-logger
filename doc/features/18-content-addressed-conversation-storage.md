@@ -178,7 +178,8 @@ retention 删除 audit/turn 引用后，在同一 writer 事务中删除已不�
 
 - OpenAI Responses/Chat Completions 的 JSON 与 SSE 单元/集成测试；
 - data URL 按解码字节去重、外部 file id 保留、已压缩二进制不重复 gzip；
-- 复用由另一套编码器产物写入的既有对象（`encoded_length` 不同而明文一致）不被判为冲突；
+- 复用由另一套编码器产物写入的既有对象（`compression`/`encoded_length`/`data_enc` 整体不同而明文一致）不被判为冲突，两轮保存后每个对象仍可 `OpenObject`/`OpenBinary` 打开且完整性 payload 校验通过；
+- 身份字段（content 的 `kind`/`plaintext_length`/`semantic_hash`，binary 的 `media_type`/`plaintext_length`）被逐一篡改时，再次保存同一内容必须报冲突并整体回滚；
 - 连续、retry、truncate、edit、summary、rollback、parallel tools 和 branch 重建测试；
 - 任意轮 turn reconstruction hash 校验；
 - 异常自动保留 full evidence、普通成功清除 raw chunk；

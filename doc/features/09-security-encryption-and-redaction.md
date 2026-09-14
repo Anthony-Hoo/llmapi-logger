@@ -30,7 +30,7 @@ schema generation 2 的破坏性 migration 会清除旧 audit 数据；若升级
 
 顺序固定为：plaintext/canonical bytes -> 可选 gzip -> AES-GCM。
 
-- 文本、JSON、SSE timeline 和可压缩 raw chunks 使用确定性 gzip；只有节省超过固定开销时才保留 gzip。
+- 文本、JSON、SSE timeline 和可压缩 raw chunks 使用 gzip，只有节省超过固定开销时才保留 gzip；gzip 输出字节随工具链版本可变，解码一律以存储行自身的 `compression` 与其绑定的 AAD 为准。
 - PNG、JPEG、GIF、WebP、ZIP、GZIP、PDF 等按 magic 判定为已压缩，不重复 gzip。
 - binary object 的压缩决策只由实际字节决定，不能由调用者可伪造的 MIME 标签改变。
 - 每个加密单位使用独立随机 12-byte nonce。
