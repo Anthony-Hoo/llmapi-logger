@@ -558,11 +558,13 @@ func finishAudit(transaction *sql.Tx, finish *AuditFinish, signer *security.Inte
 			code = storedErrorCode.String
 		}
 		finish.ErrorCode = &code
-		if err := finalizeIncompleteCapture(transaction, finish.AuditID, finish.EndedAtNS); err != nil {
-			return err
-		}
 	} else {
 		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
+			return err
+		}
+	}
+	if finish.CaptureStatus != CaptureComplete {
+		if err := finalizeIncompleteCapture(transaction, finish.AuditID, finish.EndedAtNS); err != nil {
 			return err
 		}
 	}

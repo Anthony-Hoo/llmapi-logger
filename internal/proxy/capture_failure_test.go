@@ -26,6 +26,7 @@ func TestAsyncCaptureFailuresMatchCompletionLogAndAllowRetainedRaw(t *testing.T)
 WHEN NEW.name = 'X-Fail-Capture' BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`},
 		{"stage finalization", `CREATE TRIGGER fail_capture_finish BEFORE UPDATE OF state ON body_streams
 WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`},
+		{"stage enqueue", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -59,12 +60,20 @@ WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); E
 				t.Fatal(err)
 			}
 			defer injection.Close()
-			if _, err := injection.Exec(test.trigger); err != nil {
-				t.Fatal(err)
+			if test.trigger != "" {
+				if _, err := injection.Exec(test.trigger); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logs, nil))
-			manager, err := audit.NewManager(store, cipher, nil, audit.ModeAvailable, logger)
+			var persistence audit.Store = store
+			wantStatus, wantCode := sqlite.CaptureFailed, "capture_write_failed"
+			if test.name == "stage enqueue" {
+				persistence = &rejectStageFinishStore{Store: store}
+				wantStatus, wantCode = sqlite.CapturePartial, "audit_finalize_failed"
+			}
+			manager, err := audit.NewManager(persistence, cipher, nil, audit.ModeAvailable, logger)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -86,13 +95,13 @@ WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); E
 			if err != nil {
 				t.Fatal(err)
 			}
-			if snapshot.Audit.CaptureStatus != sqlite.CaptureFailed || snapshot.Audit.ErrorCode == nil || *snapshot.Audit.ErrorCode != "capture_write_failed" {
+			if snapshot.Audit.CaptureStatus != wantStatus || snapshot.Audit.ErrorCode == nil || *snapshot.Audit.ErrorCode != wantCode {
 				t.Fatal("fault injection did not persist a failed capture")
 			}
 			assertLogField(t, record, "capture_status", snapshot.Audit.CaptureStatus)
 			assertLogField(t, record, "error_code", *snapshot.Audit.ErrorCode)
 			assertLogField(t, record, "forward_status", sqlite.ForwardCompleted)
-			if test.name == "stage finalization" {
+			if test.name != "header insert" {
 				for _, stage := range snapshot.Stages {
 					if stage.State != sqlite.StageStatePartial || stage.EndedAtNS == nil {
 						t.Errorf("stage %s not terminated after rollback: %s", stage.Stage, stage.State)
@@ -122,4 +131,10 @@ WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); E
 			}
 		})
 	}
+}
+
+type rejectStageFinishStore struct{ *sqlite.Store }
+
+func (*rejectStageFinishStore) FinishStage(context.Context, sqlite.StageFinish) error {
+	return sqlite.ErrQueueFull
 }

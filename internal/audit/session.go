@@ -366,6 +366,9 @@ func (session *Session) finish() error {
 			session.logCaptureFailure(finish.Stage, "finish_stage_failed")
 		}
 	}
+	if len(writeErrors) != 0 && errorCode == nil {
+		errorCode = stringPointer("audit_finalize_failed")
+	}
 	finish := sqlite.AuditFinish{
 		AuditID:         session.auditID,
 		EndedAtNS:       endedAtNS,
