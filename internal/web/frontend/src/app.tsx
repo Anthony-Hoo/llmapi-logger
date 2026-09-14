@@ -361,6 +361,11 @@ function Dashboard({
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    const trimmedStatusCode = draftStatusCode.trim();
+    if (trimmedStatusCode && (!/^\d+$/.test(trimmedStatusCode) || Number(trimmedStatusCode) < 100 || Number(trimmedStatusCode) > 599)) {
+      setError("状态码须为 100–599 的整数");
+      return;
+    }
     setCursor(null);
     setCursorHistory([]);
     setFilters({
@@ -375,7 +380,7 @@ function Dashboard({
       conversation: filters.conversation,
       collapse: filters.collapse,
       status_class: draftStatusClass || undefined,
-      status_code: draftStatusCode.trim() || undefined,
+      status_code: trimmedStatusCode || undefined,
     });
   }
 
@@ -383,7 +388,12 @@ function Dashboard({
     setError(null);
     setCursor(null);
     setCursorHistory([]);
-    setFilters((current) => ({ ...current, conversation: conversationID }));
+    setDraftStatusClass("");
+    setDraftStatusCode("");
+    setFilters((current) => {
+      const { status_class: _removedStatusClass, status_code: _removedStatusCode, ...rest } = current;
+      return { ...rest, conversation: conversationID };
+    });
   }
 
   function clearConversationFilter() {
@@ -416,6 +426,12 @@ function Dashboard({
     setCursorHistory((history) => history.slice(0, -1));
     setCursor(previous);
   }
+
+  // A status filter lists every matching turn individually, so the collapse
+  // toggle (which only ever keeps the newest turn per conversation) would
+  // hide the very turn the filter is looking for; it is disabled while one
+  // is active, matching the conversation filter's existing behavior.
+  const statusFilterActive = Boolean(filters.status_class) || Boolean(filters.status_code);
 
   return (
     <div className="min-h-screen">
@@ -518,8 +534,8 @@ function Dashboard({
             loading={loading}
             selectedID={selectedID}
             onSelect={setSelectedID}
-            collapse={Boolean(filters.collapse) && !filters.conversation}
-            onCollapseChange={filters.conversation ? undefined : setCollapseConversations}
+            collapse={Boolean(filters.collapse) && !filters.conversation && !statusFilterActive}
+            onCollapseChange={filters.conversation || statusFilterActive ? undefined : setCollapseConversations}
             footer={
               <div className="flex items-center justify-between gap-2">
                 <p className="text-xs text-muted-foreground">当前页 {page.items.length} 条</p>
@@ -802,7 +818,7 @@ export function AuditFiltersPanel({
   path,
   model,
   userAgent,
-  newAPIUserID,
+	newAPIUserID,
   newAPITokenID,
   forwardStatus,
 	statusClass,
@@ -937,7 +953,7 @@ export function AuditFiltersPanel({
 				  onChange={(event) => onStatusClassChange(event.target.value)}
 				>
 				  <option value="">全部</option>
-				  <option value="error">异常（≥400）</option>
+				  <option value="error">≥400（4xx+5xx）</option>
 				  <option value="4xx">4xx</option>
 				  <option value="5xx">5xx</option>
 				</select>

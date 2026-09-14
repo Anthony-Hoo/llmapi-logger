@@ -80,7 +80,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		NewAPITokenID:         filter.NewAPITokenID,
 		TokenName:             filter.TokenName,
 		ConversationID:        filter.Conversation,
-		CollapseConversations: filter.CollapseConversations && filter.Conversation == "",
+		CollapseConversations: filter.CollapseConversations && filter.Conversation == "" && filter.StatusClass == "" && filter.StatusCode == nil,
 		Scope:                 storageScope(filter.Scope),
 	}
 	storageCursor := sqlite.AuditQueryCursor{

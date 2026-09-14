@@ -223,6 +223,125 @@ func TestReconstructResponsesTurnWithHistoryReasoningParallelToolsAndMultimodalC
 	}
 }
 
+// TestListCollapseConversationsIgnoresStatusFilteredTurns guards against the
+// regression where a status filter combined with the default conversation
+// collapse hid the very turn the filter was looking for (e.g. a 503 retried
+// on the same conversation): collapsing must be skipped whenever a status
+// filter is active so every matching turn is listed individually.
+func TestListCollapseConversationsIgnoresStatusFilteredTurns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cipher := testCipher(t)
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	implementation, err := openai.New(openai.Responses)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	makeTurn := func(auditID string, startedAtNS int64, statusCode int, responseID, previousResponseID string) {
+		requestValue := map[string]any{
+			"model":    "model-example",
+			"metadata": map[string]any{"conversation_id": "conversation-status-collapse"},
+			"input": []any{map[string]any{
+				"type": "message", "role": "user",
+				"content": []any{map[string]any{"type": "input_text", "text": "hello"}},
+			}},
+		}
+		if previousResponseID != "" {
+			requestValue["previous_response_id"] = previousResponseID
+		}
+		responseValue := map[string]any{
+			"id": responseID, "object": "response", "model": "model-result",
+			"output": []any{map[string]any{
+				"type": "message", "id": "message-" + auditID, "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": "hi"}},
+			}},
+		}
+		requestBody, err := auditmodel.CanonicalJSON(requestValue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		responseBody, err := auditmodel.CanonicalJSON(responseValue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestURI, err := encryptRequestURI(cipher, auditID, "/v1/responses")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.BeginAudit(ctx, sqlite.AuditRecord{
+			AuditID: auditID, StartedAtNS: startedAtNS, RouteID: "responses-route",
+			Protocol: "openai", ParserName: openai.Responses, Method: "POST", Path: "/v1/responses",
+			RequestURIEnc: requestURI, Mode: "available",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		status := statusCode
+		if err := store.FinishAudit(ctx, sqlite.AuditFinish{
+			AuditID: auditID, EndedAtNS: startedAtNS + 1, StatusCode: &status,
+			ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParsePending,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := store.ClaimPendingParse(ctx, auditID)
+		if err != nil || !claimed {
+			t.Fatalf("claim %s = %v, %v", auditID, claimed, err)
+		}
+		input := base.Input{
+			AuditID: auditID, Protocol: "openai", Endpoint: "/v1/responses",
+			Request:  base.BodySource{Present: true, Complete: true, ContentType: "application/json", Data: requestBody},
+			Response: base.BodySource{Present: true, Complete: true, ContentType: "application/json", Data: responseBody},
+		}
+		result := implementation.Parse(ctx, input)
+		turn, err := implementation.NormalizeAudit(ctx, input, result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		turn.CreatedAtNS = startedAtNS + 2
+		prepared, err := auditmodel.Prepare(turn, cipher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SaveParsedAudit(ctx, sqlite.ParsedAudit{
+			Result: sqlite.ParsedResult{
+				AuditID: auditID, ParserName: openai.Responses, ParserVersion: "2",
+				Status: sqlite.ParseOK, ResponseID: &responseID, ParsedAtNS: startedAtNS + 3,
+			},
+			Turn: &prepared,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	makeTurn("audit-collapse-status-a", 10, 503, "response-collapse-a", "")
+	makeTurn("audit-collapse-status-b", 20, 200, "response-collapse-b", "response-collapse-a")
+
+	service, err := New(store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	collapsed, err := service.List(ctx, Filter{CollapseConversations: true}, Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(collapsed.Items) != 1 || collapsed.Items[0].AuditID != "audit-collapse-status-b" {
+		t.Fatalf("collapsed without status filter = %+v, want only the newest turn", collapsed.Items)
+	}
+
+	filtered, err := service.List(ctx, Filter{CollapseConversations: true, StatusClass: "5xx"}, Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Items) != 1 || filtered.Items[0].AuditID != "audit-collapse-status-a" {
+		t.Fatalf("collapsed with 5xx filter = %+v, want the earlier 503 turn to stay visible", filtered.Items)
+	}
+}
+
 func graphFromPrepared(prepared auditmodel.PreparedTurn) *sqlite.TurnGraph {
 	graph := &sqlite.TurnGraph{
 		TurnID: prepared.AuditID, ConversationID: "conv-" + prepared.AuditID,

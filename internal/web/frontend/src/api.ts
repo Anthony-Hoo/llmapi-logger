@@ -188,7 +188,7 @@ export function createApiClient(
       }
       if (filters.conversation?.trim()) {
         query.set("conversation", filters.conversation.trim());
-      } else if (filters.collapse) {
+      } else if (filters.collapse && !filters.status_class && !filters.status_code?.trim()) {
         query.set("collapse", "conversation");
       }
       if (cursor) {

@@ -159,6 +159,7 @@ func TestListAuditsFiltersByStatusClass(t *testing.T) {
 	}{
 		{id: "audit-ok", status: 200},
 		{id: "audit-4xx", status: 404},
+		{id: "audit-4xx-403", status: 403},
 		{id: "audit-5xx", status: 503},
 	} {
 		record := testAudit(item.id)
@@ -173,14 +174,28 @@ func TestListAuditsFiltersByStatusClass(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A client-cancelled audit has no status_code at all (the client hung up
+	// before any status was observed); it must never count as an "error".
+	cancelledRecord := testAudit("audit-cancelled")
+	if err := store.BeginAudit(ctx, cancelledRecord); err != nil {
+		t.Fatal(err)
+	}
+	cancelledErrorCode := ForwardClientCancelled
+	if err := store.FinishAudit(ctx, AuditFinish{
+		AuditID: "audit-cancelled", EndedAtNS: 2, StatusCode: nil,
+		ForwardStatus: ForwardClientCancelled, CaptureStatus: CapturePartial, ParseStatus: ParseSkipped,
+		ErrorCode: &cancelledErrorCode,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name  string
 		class string
 		want  []string
 	}{
-		{name: "4xx", class: "4xx", want: []string{"audit-4xx"}},
+		{name: "4xx", class: "4xx", want: []string{"audit-4xx-403", "audit-4xx"}},
 		{name: "5xx", class: "5xx", want: []string{"audit-5xx"}},
-		{name: "error", class: "error", want: []string{"audit-5xx", "audit-4xx"}},
+		{name: "error", class: "error", want: []string{"audit-5xx", "audit-4xx-403", "audit-4xx"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			page, err := store.ListAudits(ctx, AuditQueryFilter{StatusClass: tc.class}, AuditQueryCursor{}, 10)
@@ -196,6 +211,31 @@ func TestListAuditsFiltersByStatusClass(t *testing.T) {
 			}
 		})
 	}
+	t.Run("error_excludes_null_status_code", func(t *testing.T) {
+		page, err := store.ListAudits(ctx, AuditQueryFilter{StatusClass: "error"}, AuditQueryCursor{}, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range page.Rows {
+			if row.AuditID == "audit-cancelled" {
+				t.Fatalf("status class error must not include a null-status client-cancelled audit, got %+v", page.Rows)
+			}
+		}
+	})
+	t.Run("status_class_and_status_code_combine", func(t *testing.T) {
+		statusCode := 404
+		page, err := store.ListAudits(ctx, AuditQueryFilter{StatusClass: "4xx", StatusCode: &statusCode}, AuditQueryCursor{}, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, len(page.Rows))
+		for i, row := range page.Rows {
+			got[i] = row.AuditID
+		}
+		if want := []string{"audit-4xx"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("status class 4xx + status_code 404 = %v, want %v", got, want)
+		}
+	})
 }
 
 func TestQueryAuditDetailLoadsEncryptedValuesForQueryService(t *testing.T) {
