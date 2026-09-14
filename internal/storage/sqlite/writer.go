@@ -221,6 +221,9 @@ func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 			if _, err := transaction.Exec("ROLLBACK TO writer_operation"); err != nil {
 				return nil, fmt.Errorf("sqlite writer: rollback operation: %w", err)
 			}
+			if err := markCaptureWriteFailed(transaction, request); err != nil {
+				return nil, err
+			}
 		}
 		if _, err := transaction.Exec("RELEASE writer_operation"); err != nil {
 			return nil, fmt.Errorf("sqlite writer: release operation: %w", err)
@@ -230,6 +233,39 @@ func (store *Store) commitBatch(batch []writeRequest) ([]error, error) {
 		return nil, fmt.Errorf("sqlite writer: commit batch: %w", err)
 	}
 	return results, nil
+}
+
+// Async capture has no acknowledgement. Persist the failure on its audit so
+// finalization in this or any later batch cannot claim complete evidence.
+// A parser or management operation must never taint unrelated capture.
+func markCaptureWriteFailed(transaction *sql.Tx, request writeRequest) error {
+	var auditIDs []string
+	switch request.kind {
+	case writeStartStage:
+		auditIDs = []string{request.data.(HTTPStage).AuditID}
+	case writeStartBody:
+		auditIDs = []string{request.data.(BodyStream).AuditID}
+	case writeAddHeaders:
+		seen := make(map[string]bool)
+		for _, header := range request.data.([]HTTPHeader) {
+			if !seen[header.AuditID] {
+				seen[header.AuditID] = true
+				auditIDs = append(auditIDs, header.AuditID)
+			}
+		}
+	case writeAddChunk:
+		auditIDs = []string{request.data.(BodyChunk).AuditID}
+	case writeFinishStage:
+		auditIDs = []string{request.data.(StageFinish).AuditID}
+	}
+	for _, auditID := range auditIDs {
+		if _, err := transaction.Exec(`
+UPDATE audit_records SET capture_status = 'failed', error_code = 'capture_write_failed'
+WHERE audit_id = ? AND ended_at_ns IS NULL`, auditID); err != nil {
+			return fmt.Errorf("sqlite writer: record capture failure: %w", err)
+		}
+	}
+	return nil
 }
 
 func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error {
@@ -497,8 +533,22 @@ ON CONFLICT(audit_id, stage) DO UPDATE SET
 }
 
 func finishAudit(transaction *sql.Tx, finish AuditFinish, signer *security.IntegritySigner) error {
-	if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
-		return err
+	var storedCaptureStatus string
+	var storedErrorCode sql.NullString
+	if err := transaction.QueryRow("SELECT capture_status, error_code FROM audit_records WHERE audit_id = ?", finish.AuditID).Scan(&storedCaptureStatus, &storedErrorCode); err != nil {
+		return fmt.Errorf("sqlite writer: read capture status: %w", err)
+	}
+	if storedCaptureStatus == CaptureFailed {
+		finish.CaptureStatus = CaptureFailed
+		code := "capture_write_failed"
+		if storedErrorCode.Valid {
+			code = storedErrorCode.String
+		}
+		finish.ErrorCode = &code
+	} else {
+		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
+			return err
+		}
 	}
 	result, err := transaction.Exec(`
 UPDATE audit_records

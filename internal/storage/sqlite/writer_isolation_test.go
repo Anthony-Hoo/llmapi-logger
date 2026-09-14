@@ -1,9 +1,108 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"testing"
+
+	"llmapi-logger/internal/security"
 )
+
+func TestCaptureFailureCannotBeFinalizedAsComplete(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []string{"headers", "chunk", "start stage", "start body", "finish stage"} {
+		for _, laterBatch := range []bool{false, true} {
+			t.Run(operation+map[bool]string{false: "/same batch", true: "/later batch"}[laterBatch], func(t *testing.T) {
+				t.Parallel()
+				ctx := context.Background()
+				store, _ := openTestStore(t)
+				if err := store.EnableIntegrity(ctx, bytes.Repeat([]byte{0x25}, security.KeySize)); err != nil {
+					t.Fatal(err)
+				}
+				for _, id := range []string{"failed-capture", "independent-capture"} {
+					if err := store.BeginAudit(ctx, testAudit(id)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stage := HTTPStage{AuditID: "failed-capture", Stage: StageRequestReceived, StartedAtNS: 2}
+				stage.defaults()
+				body := BodyStream{AuditID: stage.AuditID, Stage: stage.Stage}
+				body.defaults()
+				if err := store.submitSync(ctx, writeRequest{kind: writeStartStage, data: stage}); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.submitSync(ctx, writeRequest{kind: writeStartBody, data: body}); err != nil {
+					t.Fatal(err)
+				}
+				chunk := BodyChunk{AuditID: stage.AuditID, Stage: stage.Stage, PlaintextLength: 1, ObservedAtNS: 3, DataEnc: []byte{1}}
+				chunk.defaults()
+				if err := store.submitSync(ctx, writeRequest{kind: writeAddChunk, data: chunk}); err != nil {
+					t.Fatal(err)
+				}
+				stageFinish := StageFinish{AuditID: stage.AuditID, Stage: stage.Stage, State: StageStateComplete, EndedAtNS: 4,
+					Body: &BodyFinish{ObservedLength: 1, StoredLength: 1, ChunkCount: 1, HashComplete: true, EOFSeen: true, State: StageStateComplete, RetentionState: RetentionPending}}
+				duplicateHeader := HTTPHeader{AuditID: stage.AuditID, Stage: stage.Stage, Kind: HeaderKindHeader, Name: "x-test", ValueLength: 1, ValueEnc: []byte{1}}
+				failed := writeRequest{kind: writeAddHeaders, data: []HTTPHeader{duplicateHeader, duplicateHeader}}
+				switch operation {
+				case "chunk":
+					if _, err := store.writerDB.Exec(`CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks
+WHEN NEW.seq = 1 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`); err != nil {
+						t.Fatal(err)
+					}
+					chunk.Seq, chunk.Offset = 1, 1
+					failed = writeRequest{kind: writeAddChunk, data: chunk}
+					stageFinish.Body.ObservedLength, stageFinish.Body.StoredLength, stageFinish.Body.ChunkCount = 2, 2, 2
+				case "start stage":
+					failed = writeRequest{kind: writeStartStage, data: stage}
+				case "start body":
+					failed = writeRequest{kind: writeStartBody, data: body}
+				case "finish stage":
+					missing := stageFinish
+					missing.Stage = StageResponseReceived
+					failed = writeRequest{kind: writeFinishStage, data: missing}
+				}
+				status := 200
+				finish := AuditFinish{AuditID: stage.AuditID, EndedAtNS: 5, StatusCode: &status, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}
+				independent := finish
+				independent.AuditID = "independent-capture"
+				batch := []writeRequest{failed, {kind: writeFinishStage, data: stageFinish}, {kind: writeFinishAudit, data: finish}, {kind: writeFinishAudit, data: independent}}
+				if laterBatch {
+					results, err := store.commitBatch(batch[:1])
+					if err != nil || results[0] == nil {
+						t.Fatalf("capture failure was not isolated: %v, %v", results, err)
+					}
+					batch = batch[1:]
+				}
+				results, err := store.commitBatch(batch)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i, result := range results {
+					if (result != nil) != (!laterBatch && i == 0) {
+						t.Fatalf("operation %d: %v", i, result)
+					}
+				}
+				snapshot, err := store.Snapshot(ctx, stage.AuditID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if snapshot.Audit.CaptureStatus != CaptureFailed || snapshot.Audit.ErrorCode == nil || *snapshot.Audit.ErrorCode != "capture_write_failed" {
+					t.Fatalf("failed capture finalized with status %q and missing or incorrect failure code", snapshot.Audit.CaptureStatus)
+				}
+				if snapshot.Audit.ForwardStatus != ForwardCompleted || len(snapshot.Chunks) != 1 || snapshot.Bodies[0].RetentionState != RetentionFull {
+					t.Fatal("failed capture changed forwarding or lost the remaining raw evidence")
+				}
+				other, err := store.Snapshot(ctx, independent.AuditID)
+				if err != nil || other.Audit.CaptureStatus != CaptureComplete {
+					t.Fatalf("independent audit status = %q, error = %v", other.Audit.CaptureStatus, err)
+				}
+				if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+					t.Fatalf("final capture failure was not signed consistently: %v", err)
+				}
+			})
+		}
+	}
+}
 
 func TestWriterIsolatesParsedSaveFailureFromQueuedCapture(t *testing.T) {
 	t.Parallel()
