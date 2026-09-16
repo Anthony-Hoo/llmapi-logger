@@ -32,7 +32,7 @@ type Store struct {
 	healthy   atomic.Bool
 	integrity atomic.Pointer[security.IntegritySigner]
 
-	// Background payload verification outcome. Kept apart from healthy
+	// Background and writer-detected integrity outcome. Kept apart from healthy
 	// because the writer rewrites that flag after every committed batch,
 	// which would erase a detected mismatch on the next audit write.
 	payloadState atomic.Int32
@@ -145,7 +145,8 @@ const (
 
 // IntegrityPayloadState reports how far background payload verification got:
 // "pending" while it runs or was never started, "verified" once every event
-// re-derived to its stored digest, "failed" once one did not.
+// re-derived to its stored digest, "failed" once verification or a writer-side
+// stored-object identity check detected corruption. Failure is sticky.
 func (store *Store) IntegrityPayloadState() string {
 	if store == nil {
 		return "pending"

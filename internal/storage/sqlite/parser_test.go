@@ -100,6 +100,9 @@ func TestParserLifecycleAndEvidenceReads(t *testing.T) {
 	if err := store.ReleaseProcessingParse(ctx, auditID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.writerDB.Exec("UPDATE audit_records SET parse_next_at_ns = 0 WHERE audit_id = ?", auditID); err != nil {
+		t.Fatal(err)
+	}
 	claimed, err = store.ClaimPendingParse(ctx, auditID)
 	if err != nil || !claimed {
 		t.Fatalf("claim after release = %v, %v", claimed, err)

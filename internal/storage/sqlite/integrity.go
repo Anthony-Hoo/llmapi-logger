@@ -82,7 +82,10 @@ func (store *Store) VerifyIntegrityPayloads(ctx context.Context) error {
 		}
 		return err
 	}
-	store.payloadState.Store(integrityPayloadsVerified)
+	// A concurrent writer may have detected corruption after this read-only
+	// snapshot began. Success must never clear a failure already observed by
+	// another verifier or an object identity check.
+	store.payloadState.CompareAndSwap(integrityPayloadsPending, integrityPayloadsVerified)
 	return nil
 }
 

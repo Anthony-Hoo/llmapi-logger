@@ -1,8 +1,13 @@
-import type { AuditDetail, AuditHeader, RawBodyDownload, RawSide } from "../types";
+import type { AuditBody, AuditDetail, AuditHeader, RawBodyDownload, RawSide } from "../types";
 
 const stageBySide: Record<RawSide, string> = {
   request: "request_sent_to_newapi",
   response: "response_received_from_newapi",
+};
+
+const fallbackBySide: Record<RawSide, string> = {
+  request: "request_for_newapi_received_from_nginx",
+  response: "response_from_newapi_sent_to_nginx",
 };
 
 export type RawBodyPreview =
@@ -53,22 +58,31 @@ export async function createRawBodyPreview(
   return { kind: "text", text, contentType };
 }
 
-export function capturedContentType(headers: AuditHeader[], side: RawSide): string | null {
+export function capturedContentType(headers: AuditHeader[], side: RawSide, detail?: AuditDetail): string | null {
   const match = headers.find(
     (header) =>
-      header.stage === stageBySide[side] &&
+      header.stage === evidenceStage(side, detail) &&
       header.kind === "header" &&
       header.name.toLowerCase() === "content-type",
   );
   return match?.value || null;
 }
 
-export function evidenceStage(side: RawSide): string {
-  return stageBySide[side];
+export function bodyForSide(detail: AuditDetail, side: RawSide): AuditBody | undefined {
+  return detail.bodies.find((body) => body.stage === stageBySide[side])
+    ?? detail.bodies.find((body) => body.stage === fallbackBySide[side]);
+}
+
+export function evidenceStage(side: RawSide, detail?: AuditDetail): string {
+  if (!detail) return stageBySide[side];
+  return bodyForSide(detail, side)?.stage
+    ?? detail.stages.find((stage) => stage.stage === stageBySide[side])?.stage
+    ?? detail.stages.find((stage) => stage.stage === fallbackBySide[side])?.stage
+    ?? stageBySide[side];
 }
 
 export function buildEvidenceEnvelope(detail: AuditDetail, side: RawSide): EvidenceEnvelope {
-  const stageName = stageBySide[side];
+  const stageName = evidenceStage(side, detail);
   const stage = detail.stages.find((candidate) => candidate.stage === stageName);
   const headers = detail.headers.filter((header) => header.stage === stageName && header.kind === "header");
   const trailers = detail.headers.filter((header) => header.stage === stageName && header.kind === "trailer");

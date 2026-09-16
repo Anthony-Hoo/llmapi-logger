@@ -76,7 +76,7 @@ Client -> Nginx -> llmapi-logger
 
 ## 快速开始
 
-本机构建需要 Go 1.25+、Node.js 22+ 和 pnpm。
+本机构建需要 Go 1.27+、Node.js 24 LTS 和 pnpm 10.15.0（与 CI、Docker 一致）。
 
 Windows：
 

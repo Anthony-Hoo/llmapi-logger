@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -212,8 +213,8 @@ func graphTestCipher(t *testing.T) security.Cipher {
 }
 
 // TestObjectsReuseRowsEncodedByADifferentCodecBuild seeds the store with object
-// rows another build's codec would have written — the other compression, that
-// build's own gzip output, AAD bound to the new compression — and then saves the
+// rows another build's codec would have written — compression flips and
+// different gzip bytes at the same compression, with matching AAD — and then saves the
 // same content twice. Both saves must reuse those rows, leave them in place, and
 // leave every object openable under an intact integrity chain.
 func TestObjectsReuseRowsEncodedByADifferentCodecBuild(t *testing.T) {
@@ -264,12 +265,18 @@ func TestObjectIdentityMismatchRejectsTheSecondSave(t *testing.T) {
 		{name: "content semantic hash", tamper: `UPDATE content_objects SET semantic_hash = zeroblob(32) WHERE kind = 'assistant_message'`},
 		{name: "binary media type", tamper: `UPDATE binary_objects SET media_type = 'image/png'`},
 		{name: "binary plaintext length", tamper: `UPDATE binary_objects SET plaintext_length = plaintext_length + 1`},
+		{name: "binary reference media type", tamper: `UPDATE content_binary_refs SET media_type = 'image/jpeg'`},
+		{name: "binary reference encoding", tamper: `UPDATE content_binary_refs SET encoding = 'base64'`},
+		{name: "external reference hash", tamper: `UPDATE content_external_refs SET value_hash = zeroblob(32)`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			store, _ := openTestStore(t)
 			cipher := graphTestCipher(t)
 			request, response := graphObjectFixture()
+			if testCase.name == "external reference hash" {
+				request = append(request, graphItem("file", map[string]any{"file_id": "file-example"}))
+			}
 			saveGraphTestTurn(t, store, cipher, "turn-identity-one", "", "response-identity-one", 100, request, response)
 			if _, err := store.writerDB.Exec(testCase.tamper); err != nil {
 				t.Fatalf("tamper stored identity: %v", err)
@@ -278,33 +285,58 @@ func TestObjectIdentityMismatchRejectsTheSecondSave(t *testing.T) {
 
 			parsed := buildGraphTestTurn(t, store, cipher, "turn-identity-two", "", "response-identity-two", 200, request, response)
 			err := store.SaveParsedAudit(context.Background(), parsed)
-			if err == nil || !strings.Contains(err.Error(), "hash collision or corruption") {
-				t.Fatalf("second save error = %v, want hash collision or corruption", err)
+			var integrityFailure storedObjectIntegrityError
+			if !errors.As(err, &integrityFailure) || !strings.Contains(err.Error(), "collision or corruption") {
+				t.Fatalf("second save error = %v, want stored-object integrity failure", err)
 			}
 			if after := countGraphRows(t, store); after != before {
 				t.Fatalf("rows after rejected save = %+v, want %+v", after, before)
+			}
+			audit, err := store.LoadParserAudit(context.Background(), parsed.Result.AuditID)
+			if err != nil || audit.ParseStatus != ParseProcessing {
+				t.Fatalf("rejected save changed parse state: %+v, %v", audit, err)
+			}
+			if store.Healthy() || store.IntegrityPayloadState() != "failed" {
+				t.Fatal("stored identity mismatch did not latch integrity health")
+			}
+			if err := store.BeginAudit(context.Background(), testAudit("unrelated-after-corruption")); err != nil {
+				t.Fatal(err)
+			}
+			// This fixture has no signed events, so a verification pass succeeds.
+			// It still must not erase the writer's independent corruption finding.
+			if err := store.VerifyIntegrityPayloads(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if store.Healthy() || store.IntegrityPayloadState() != "failed" {
+				t.Fatal("later write or verification cleared the integrity failure")
 			}
 		})
 	}
 }
 
 // graphObjectFixture pairs a compressible response with an already compressed
-// image so one turn holds content objects on both sides of the compression
-// threshold plus a binary object.
+// image so one turn holds content and binary objects on both sides of their
+// compression decisions.
 func graphObjectFixture() ([]graphTestItem, []graphTestItem) {
 	image := map[string]any{"image_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(
 		append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x51, 0x29}, 512)...))}
+	// Unknown binary bytes are trial-compressed, so this object is stored gzip
+	// and can drift at the same compression like the reasoning object.
+	blob := map[string]any{"image_url": "data:application/octet-stream;base64," + base64.StdEncoding.EncodeToString(
+		bytes.Repeat([]byte("compressible binary payload "), 64))}
 	question := map[string]any{"role": "user", "content": "short question"}
 	answer := map[string]any{"role": "assistant", "content": strings.Repeat("compressible payload ", 64)}
-	return []graphTestItem{graphItem("image", image), graphItem("user_message", question)},
-		[]graphTestItem{graphItem("assistant_message", answer)}
+	reasoning := map[string]any{"text": strings.Repeat("a different compressible reasoning payload ", 64)}
+	return []graphTestItem{graphItem("image", image), graphItem("image", blob), graphItem("user_message", question)},
+		[]graphTestItem{graphItem("assistant_message", answer), graphItem("reasoning", reasoning)}
 }
 
 // seedForeignEncodedObjects writes the object rows of one prepared turn as a
-// build whose codec picked the other compression would have written them:
+// build whose codec picked another representation would have written them:
 // compression, encoded_length and data_enc are set together and the ciphertext is
-// bound to AAD carrying the new compression. It returns the plaintext of every
-// seeded row, keyed by hex hash.
+// bound to AAD carrying the stored compression, whether flipped or kept with
+// different gzip bytes. It returns the plaintext of every seeded row, keyed by
+// hex hash.
 func seedForeignEncodedObjects(t *testing.T, store *Store, cipher security.Cipher, request, response []graphTestItem) map[string][]byte {
 	t.Helper()
 	prepared := prepareGraphTestTurn(t, cipher, "turn-codec-one", "", "response-codec-one", 100, request, response)
@@ -317,6 +349,9 @@ func seedForeignEncodedObjects(t *testing.T, store *Store, cipher security.Ciphe
 	if flips[auditmodel.CompressionNone] == 0 || flips[auditmodel.CompressionGZIP] == 0 {
 		t.Fatalf("seeded rows per target compression = %v, want both directions", flips)
 	}
+	if flips["gzip_drift"] == 0 {
+		t.Fatal("fixture must include same-compression gzip length drift")
+	}
 	return plaintexts
 }
 
@@ -325,7 +360,19 @@ func seedForeignContent(t *testing.T, store *Store, cipher security.Cipher, obje
 	for _, object := range objects {
 		plaintext := openSeedContent(t, cipher, object)
 		compression := otherCompression(object.Compression)
+		if object.Kind == "reasoning" {
+			if object.Compression != auditmodel.CompressionGZIP {
+				t.Fatal("reasoning fixture must be gzip encoded")
+			}
+			compression = auditmodel.CompressionGZIP
+		}
 		encoded := foreignEncode(t, compression, plaintext)
+		if object.Kind == "reasoning" {
+			if int64(len(encoded)) == object.EncodedLength {
+				t.Fatal("foreign gzip must have a different encoded length")
+			}
+			flips["gzip_drift"]++
+		}
 		aad, err := security.AAD("content_object", hex.EncodeToString(object.Hash), object.Kind, compression)
 		if err != nil {
 			t.Fatal(err)
@@ -345,7 +392,9 @@ INSERT INTO content_objects (
 			t.Fatalf("seed content object %x: %v", object.Hash, err)
 		}
 		plaintexts[hex.EncodeToString(object.Hash)] = plaintext
-		flips[compression]++
+		if object.Compression != compression {
+			flips[compression]++
+		}
 	}
 }
 
@@ -360,7 +409,16 @@ func seedForeignBinaries(t *testing.T, store *Store, cipher security.Cipher, bin
 			t.Fatalf("open prepared binary object %x: %v", binary.Hash, err)
 		}
 		compression := otherCompression(binary.Compression)
+		if binary.Compression == auditmodel.CompressionGZIP {
+			compression = auditmodel.CompressionGZIP
+		}
 		encoded := foreignEncode(t, compression, plaintext)
+		if binary.Compression == auditmodel.CompressionGZIP {
+			if int64(len(encoded)) == binary.EncodedLength {
+				t.Fatal("foreign binary gzip must have a different encoded length")
+			}
+			flips["binary_gzip_drift"]++
+		}
 		aad, err := security.AAD("binary_object", hex.EncodeToString(binary.Hash), compression)
 		if err != nil {
 			t.Fatal(err)
@@ -380,7 +438,12 @@ INSERT INTO binary_objects (
 			t.Fatalf("seed binary object %x: %v", binary.Hash, err)
 		}
 		plaintexts[hex.EncodeToString(binary.Hash)] = plaintext
-		flips[compression]++
+		if binary.Compression != compression {
+			flips[compression]++
+		}
+	}
+	if flips["binary_gzip_drift"] == 0 {
+		t.Fatal("fixture must include same-compression binary gzip length drift")
 	}
 }
 
@@ -425,7 +488,7 @@ func foreignEncode(t *testing.T, compression string, plaintext []byte) []byte {
 		return append([]byte(nil), plaintext...)
 	}
 	var buffer bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&buffer, gzip.BestCompression)
+	writer, err := gzip.NewWriterLevel(&buffer, gzip.HuffmanOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,9 +538,11 @@ func assertGraphObjectsOpen(t *testing.T, store *Store, cipher security.Cipher, 
 }
 
 type graphRowCounts struct {
-	turns          int
-	contentObjects int
-	binaryObjects  int
+	parsedResults     int
+	contentBinaryRefs int
+	turns             int
+	contentObjects    int
+	binaryObjects     int
 }
 
 func countGraphRows(t *testing.T, store *Store) graphRowCounts {
@@ -486,7 +551,9 @@ func countGraphRows(t *testing.T, store *Store) graphRowCounts {
 	if err := store.readerDB.QueryRow(`
 SELECT (SELECT COUNT(*) FROM turns),
        (SELECT COUNT(*) FROM content_objects),
-       (SELECT COUNT(*) FROM binary_objects)`).Scan(&counts.turns, &counts.contentObjects, &counts.binaryObjects); err != nil {
+       (SELECT COUNT(*) FROM binary_objects),
+       (SELECT COUNT(*) FROM parsed_results),
+       (SELECT COUNT(*) FROM content_binary_refs)`).Scan(&counts.turns, &counts.contentObjects, &counts.binaryObjects, &counts.parsedResults, &counts.contentBinaryRefs); err != nil {
 		t.Fatal(err)
 	}
 	return counts

@@ -7,7 +7,6 @@ import (
 	"errors"
 
 	"llmapi-logger/internal/conversation"
-	"llmapi-logger/internal/storage/sqlite"
 )
 
 const (
@@ -54,7 +53,7 @@ type Filter struct {
 	// (`conv_...`), matching turns.conversation_id.
 	Conversation string
 	// CollapseConversations keeps only the newest audit of every
-	// conversation. Ignored when Conversation is set.
+	// conversation. Ignored when Conversation or any row filter is set.
 	CollapseConversations bool
 	// Scope is set by the web layer for developer sessions and never parsed
 	// from client input.
@@ -232,6 +231,7 @@ type Detail struct {
 
 // RawMetadata is safe to expose as HTTP response headers.
 type RawMetadata struct {
+	MissingChunks  bool
 	ObservedLength int64
 	StoredLength   int64
 	SHA256         string
@@ -252,15 +252,4 @@ type StreamTimeline struct {
 	LastEventAtNS  *int64          `json:"last_event_at_ns,string"`
 	Complete       bool            `json:"complete"`
 	Points         []TimelinePoint `json:"points"`
-}
-
-func stageForSide(side Side) (string, error) {
-	switch side {
-	case SideRequest:
-		return sqlite.StageRequestSent, nil
-	case SideResponse:
-		return sqlite.StageResponseReceived, nil
-	default:
-		return "", ErrInvalidQuery
-	}
 }

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { AuditHeader, RawBodyDownload } from "../types";
+import type { AuditBody, AuditHeader, RawBodyDownload } from "../types";
 import type { AuditDetail } from "../types";
-import { buildEvidenceEnvelope, capturedContentType, createRawBodyPreview } from "./raw-body";
+import { bodyForSide, buildEvidenceEnvelope, capturedContentType, createRawBodyPreview, evidenceStage } from "./raw-body";
 
 function download(bytes: BlobPart, contentType = "application/octet-stream"): RawBodyDownload {
   return {
@@ -17,6 +17,26 @@ function download(bytes: BlobPart, contentType = "application/octet-stream"): Ra
 }
 
 describe("raw Body preview", () => {
+  it.each([
+    ["request", "request_sent_to_newapi", "request_for_newapi_received_from_nginx"],
+    ["response", "response_received_from_newapi", "response_from_newapi_sent_to_nginx"],
+  ] as const)("selects the %s fallback and keeps its metadata together", (side, preferred, fallback) => {
+    const detail = {
+      bodies: [{ stage: fallback, retention_state: "full", error_code: "capture_chunk_missing" } as AuditBody],
+      // A preferred stage without a body must not hide a retained fallback body.
+      stages: [{ stage: preferred, state: "complete" }, { stage: fallback, state: "partial" }],
+      headers: [preferred, fallback].map((stage) => ({ stage, kind: "header", name: "Content-Type", value_index: 0, value_length: 10,
+        value: stage === fallback ? "text/plain" : "application/json" })),
+      audit: { method: "POST", path: "/v1/responses", status_code: 503 },
+    } as AuditDetail;
+    expect(bodyForSide(detail, side)?.stage).toBe(fallback);
+    expect(evidenceStage(side, detail)).toBe(fallback);
+    expect(capturedContentType(detail.headers, side, detail)).toBe("text/plain");
+    expect(buildEvidenceEnvelope(detail, side).headerLines).toEqual(["Content-Type: text/plain"]);
+    detail.bodies.push({ stage: preferred, retention_state: "metadata" } as AuditBody);
+    expect(bodyForSide(detail, side)?.stage).toBe(preferred);
+    expect(capturedContentType(detail.headers, side, detail)).toBe("application/json");
+  });
   it("renders valid UTF-8 evidence without rewriting it", async () => {
     const raw = "{\"message\":\"你好\"}\n";
 

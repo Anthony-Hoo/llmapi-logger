@@ -450,6 +450,14 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 		t.Fatalf("raw cache policy = %q, want no-store", response.Header().Get("Cache-Control"))
 	}
 
+	queries.rawMetadata.Complete = false
+	queries.rawMetadata.MissingChunks = true
+	request = authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail/raw/request")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Header().Get("X-Audit-Missing-Chunks") != "true" || response.Header().Get("X-Audit-Complete") != "false" {
+		t.Fatal("raw fragment response did not disclose missing chunks")
+	}
 	queries.rawData = nil
 	queries.rawErr = errors.New("database ciphertext included " + testAdminToken)
 	request = authorizedRequest(http.MethodGet, "/api/v1/audits/audit-detail/raw/response")
@@ -457,6 +465,9 @@ func TestAuditDetailAndRawResponsesNeverExposeInternalErrors(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "ciphertext") || strings.Contains(response.Body.String(), testAdminToken) {
 		t.Fatalf("raw error leaked details: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response.Header().Get("X-Audit-Missing-Chunks") != "" {
+		t.Fatal("raw error response retained fragment metadata")
 	}
 
 	queries.rawErr = nil

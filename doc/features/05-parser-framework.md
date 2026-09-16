@@ -84,7 +84,11 @@ type Result struct {
 - claim 使用条件更新，重复通知不会重复处理同一完成状态；
 - parser panic 被 recover，并写稳定 `parser_panic`。
 
-保存使用 `SaveParsedAudit` 单事务写 parsed summary、turn graph、对象、raw retention 和完整性事件。保存失败后 processing 被释放回 pending，等待后续重试。
+保存使用 `SaveParsedAudit` 在一个 writer 操作内原子写入 parsed summary、turn graph、对象、raw retention 和完整性事件；保存点隔离保证它以局部错误（约束冲突、对象身份、turn 图或重建校验失败）失败时不会回滚同批采集；存储级错误仍按 writer 规则整批失败。保存失败后的 release 将失败次数持久化，前四次分别退避 30、60、120、240 秒并回到 pending；扫描和 claim 都检查到期时间，重复通知不能绕过退避，重启也不清空预算。第 5 次失败写入 `parse_status=error` 和 `parsed_results.error_code=parsed_result_save_failed`，保留 full raw，不再自动重试。错误摘要不保存底层错误文本，无法确定 parser 版本时标记为 `unknown`。迟到的 release 不改变已提交的成功结果。
+
+如果数据库本身不可写，release 也可能失败；此时记录保留 processing，日志只记录 `parse_release_failed`，等待数据库恢复后重启时重置处理状态。这类存储故障不能承诺成功持久化重试次数，但不会篡改已经完成的转发结果。
+
+worker 生命周期取消或超时导致的保存中止不计入写入失败预算，也不调用带计数的 release：保存可能尚未尝试，也可能已入队但等待 Ack 被取消。尚未完成的 processing 留给下次启动恢复，已经提交的终态保持不变；多次正常停机不会把同一条长耗时解析误判为永久保存失败。
 
 ## 6. 证据读取
 
@@ -138,7 +142,7 @@ OpenAI verified turn 的管理 conversation 由 query 层执行以下步骤后�
 
 ## 10. 最少测试
 
-- queue 满、pending scan、processing 恢复、panic 隔离和保存失败重试。
+- queue 满、pending scan、processing 恢复、panic 隔离、保存失败持久化退避及终态、迟到 release 的幂等性。
 - chunk 顺序、offset、压缩、GCM、SHA-256、gzip ratio 和 64 MiB 限额。
 - OpenAI Chat/Responses/Completions JSON 与 SSE 摘要。
 - developer/system/user/assistant/tool/reasoning/tool result 的顺序和 call id。

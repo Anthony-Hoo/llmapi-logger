@@ -193,6 +193,32 @@ describe("HTTP audit evidence", () => {
     expect(html).toContain("仅元数据 + 可重建对象");
     expect(html).not.toContain("下载原始 Body");
     expect(html).not.toContain("加载并查看 Body");
+
+    const damagedDetail: AuditDetail = { ...metadataDetail, bodies: metadataDetail.bodies.map((body) => ({
+      ...body, state: "partial", retention_state: "full", error_code: "capture_chunk_missing",
+      hash_complete: false, eof_seen: false,
+    })) };
+    const damagedHTML = renderToStaticMarkup(
+      <HTTPAuditEvidence detail={damagedDetail} rawBodies={{}} rawLoading={null} rawNote={null}
+        onLoad={() => undefined} onDownload={() => undefined} onClear={() => undefined} />,
+    );
+    expect(damagedHTML).toContain("原始证据存在缺失分块");
+    expect(damagedHTML).toContain("缺失字节无法恢复");
+    expect(damagedHTML).toContain("下载原始 Body");
+    for (const fallbackStage of ["request_for_newapi_received_from_nginx", "response_from_newapi_sent_to_nginx"]) {
+      const fallbackDetail: AuditDetail = { ...damagedDetail, bodies: damagedDetail.bodies.map((body) => ({
+        ...body, stage: fallbackStage, source_stage: fallbackStage,
+      })) };
+      const fallbackHTML = renderToStaticMarkup(
+        <HTTPAuditEvidence detail={fallbackDetail} rawBodies={{}} rawLoading={null} rawNote={null}
+          onLoad={() => undefined} onDownload={() => undefined} onClear={() => undefined} />,
+      );
+      expect(fallbackHTML).toContain("原始证据存在缺失分块");
+      expect(fallbackHTML).toContain("下载原始 Body");
+      expect(fallbackHTML).toContain("加载并查看 Body");
+      const actualBoundary = fallbackStage === "request_for_newapi_received_from_nginx" ? "接收入站请求" : "返回响应";
+      expect(fallbackHTML).toMatch(new RegExp(`<h4\\b[^>]*>${actualBoundary}</h4>`));
+    }
   });
 });
 
@@ -439,7 +465,7 @@ describe("audit filters", () => {
     expect(html).toContain("转发状态");
   });
 
-  it("renders the HTTP status filters with the selected values", () => {
+  it.each([null, "状态码须为 100–599 的整数"])("renders HTTP status filters and inline validation (%s)", (statusCodeError) => {
     const html = renderToStaticMarkup(
       <AuditFiltersPanel
         path=""
@@ -450,6 +476,7 @@ describe("audit filters", () => {
         forwardStatus=""
         statusClass="5xx"
         statusCode="503"
+        statusCodeError={statusCodeError}
         users={[]}
         onPathChange={() => undefined}
         onModelChange={() => undefined}
@@ -468,8 +495,16 @@ describe("audit filters", () => {
     expect(html).toContain("≥400（4xx+5xx）");
     expect(html).toContain(">4xx<");
     expect(html).toContain(">5xx<");
-    expect(html).toContain('value="5xx" selected=""');
+    expect(html).toMatch(/<option(?=[^>]*value="5xx")(?=[^>]*selected="")[^>]*>/);
     expect(html).toContain('value="503"');
+    if (statusCodeError) {
+      expect(html).toContain('aria-invalid="true"');
+      expect(html).toContain('aria-describedby="filter-status-code-error"');
+      expect(html).toMatch(/<p(?=[^>]*id="filter-status-code-error")(?=[^>]*role="alert")[^>]*>/);
+      expect(html).toContain(statusCodeError);
+    } else {
+      expect(html).not.toContain('id="filter-status-code-error"');
+    }
   });
 });
 

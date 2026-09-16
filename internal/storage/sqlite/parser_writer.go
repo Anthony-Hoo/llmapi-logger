@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"llmapi-logger/internal/security"
 )
@@ -30,9 +31,10 @@ func (store *Store) ClaimPendingParse(ctx context.Context, auditID string) (bool
 	return claim.Claimed, nil
 }
 
-// ReleaseProcessingParse makes a claimed audit eligible for a later retry.
-// The update is intentionally idempotent because a timed-out SaveParsedResult
-// may still have committed before this recovery operation reaches the writer.
+// ReleaseProcessingParse records a save failure with persistent backoff, or
+// stores a terminal error after five failures. The original raw is retained.
+// Releasing an audit that is no longer processing is a no-op, so a duplicate
+// or late release cannot overwrite a completed result.
 func (store *Store) ReleaseProcessingParse(ctx context.Context, auditID string) error {
 	if auditID == "" {
 		return errors.New("sqlite: empty audit id")
@@ -80,7 +82,8 @@ SET parse_status = 'processing'
 WHERE audit_id = ?
   AND ended_at_ns IS NOT NULL
   AND parse_status = 'pending'
-  AND forward_status <> 'rejected'`, claim.AuditID)
+  AND (parse_next_at_ns IS NULL OR parse_next_at_ns <= ?)
+  AND forward_status <> 'rejected'`, claim.AuditID, time.Now().UnixNano())
 	if err != nil {
 		return fmt.Errorf("sqlite writer: claim pending parse: %w", err)
 	}
@@ -95,25 +98,43 @@ WHERE audit_id = ?
 	return nil
 }
 
-func releaseProcessingParse(transaction *sql.Tx, auditID string) error {
+const maxParseSaveFailures = 5
+
+func releaseProcessingParse(transaction *sql.Tx, auditID string, signer *security.IntegritySigner, now time.Time) error {
 	if auditID == "" {
 		return errors.New("sqlite writer: empty audit id")
 	}
-	result, err := transaction.Exec(`
+	var failures int
+	var parserName string
+	err := transaction.QueryRow(`
+SELECT parse_save_failures, parser_name FROM audit_records
+WHERE audit_id = ? AND parse_status = 'processing' AND forward_status <> 'rejected'`, auditID).Scan(&failures, &parserName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // Already saved or not processing: nothing to release.
+	}
+	if err != nil {
+		return fmt.Errorf("sqlite writer: read parse retry: %w", err)
+	}
+	failures++
+	var nextAt any
+	if failures < maxParseSaveFailures {
+		nextAt = now.Add(30 * time.Second * time.Duration(1<<(failures-1))).UnixNano()
+	} else {
+		code := "parsed_result_save_failed"
+		if err := saveParsedResult(transaction, ParsedResult{
+			AuditID: auditID, ParserName: parserName, ParserVersion: "unknown",
+			Status: ParseError, ErrorCode: &code, ParsedAtNS: now.UnixNano(),
+		}, signer); err != nil {
+			return err
+		}
+	}
+	_, err = transaction.Exec(`
 UPDATE audit_records
-SET parse_status = 'pending'
-WHERE audit_id = ?
-  AND parse_status = 'processing'
-  AND forward_status <> 'rejected'`, auditID)
+SET parse_save_failures = ?, parse_next_at_ns = ?,
+    parse_status = CASE WHEN parse_status = 'processing' THEN 'pending' ELSE parse_status END
+WHERE audit_id = ?`, failures, nextAt, auditID)
 	if err != nil {
 		return fmt.Errorf("sqlite writer: release processing parse: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("sqlite writer: release processing parse rows affected: %w", err)
-	}
-	if rows > 1 {
-		return fmt.Errorf("sqlite writer: release processing parse affected %d rows", rows)
 	}
 	return nil
 }

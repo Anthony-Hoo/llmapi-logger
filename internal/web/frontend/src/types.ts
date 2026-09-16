@@ -268,6 +268,7 @@ export interface AuditFilters {
 export type RawSide = "request" | "response";
 
 export interface RawBodyDownload {
+	missingChunks?: boolean;
   blob: Blob;
   filename: string;
   contentType: string;

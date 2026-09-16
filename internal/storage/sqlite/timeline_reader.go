@@ -24,10 +24,10 @@ func (store *Store) QueryStreamTimeline(ctx context.Context, auditID, stage stri
 SELECT t.audit_id, t.stage, b.observed_length, t.event_count,
        t.first_event_at_ns, t.last_event_at_ns, t.timeline_complete,
        t.compression, t.plaintext_length, t.timeline_enc
-FROM stream_timelines AS t
-JOIN body_streams AS b
-  ON b.audit_id = t.audit_id AND b.stage = t.stage
-WHERE t.audit_id = ? AND t.stage = ?`, auditID, stage).Scan(
+FROM body_streams AS b
+JOIN stream_timelines AS t
+  ON t.audit_id = b.audit_id AND t.stage = b.source_stage
+WHERE b.audit_id = ? AND b.stage = ?`, auditID, stage).Scan(
 		&result.AuditID,
 		&result.Stage,
 		&result.ObservedLength,

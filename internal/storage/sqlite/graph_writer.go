@@ -66,7 +66,7 @@ WHERE audit_id = ?`, retention, retention, retention, value.Result.AuditID); err
 
 	parent, err := transaction.Exec(`
 UPDATE audit_records
-SET parse_status = ?
+SET parse_status = ?, parse_next_at_ns = NULL
 WHERE audit_id = ?
   AND parser_name = ?
   AND parse_status = 'processing'
@@ -215,14 +215,14 @@ func persistPreparedTurn(transaction *sql.Tx, turn auditmodel.PreparedTurn) erro
 		return err
 	}
 	if len(reconstructed) != len(turn.RequestRefs) || !bytes.Equal(auditmodel.SequenceHash(reconstructed), turn.RequestSequenceHash) {
-		return errors.New("sqlite writer: persisted request sequence failed reconstruction")
+		return localWriteError("sqlite writer: persisted request sequence failed reconstruction")
 	}
 	response, err := loadResponseRefs(transaction, turn.AuditID)
 	if err != nil {
 		return err
 	}
 	if len(response) != len(turn.ResponseRefs) || !bytes.Equal(auditmodel.SequenceHash(response), turn.ResponseSequenceHash) {
-		return errors.New("sqlite writer: persisted response sequence failed reconstruction")
+		return localWriteError("sqlite writer: persisted response sequence failed reconstruction")
 	}
 	return nil
 }
@@ -254,9 +254,11 @@ ON CONFLICT(binary_hash) DO NOTHING`,
 		if err := transaction.QueryRow(`
 SELECT media_type, plaintext_length
 FROM binary_objects
-WHERE binary_hash = ?`, object.Hash).Scan(&mediaType, &plaintextLength); err != nil ||
-			mediaType != object.MediaType || plaintextLength != object.PlaintextLength {
-			return errors.New("sqlite writer: binary object hash collision or corruption")
+WHERE binary_hash = ?`, object.Hash).Scan(&mediaType, &plaintextLength); err != nil {
+			return fmt.Errorf("sqlite writer: read binary object identity: %w", err)
+		}
+		if mediaType != object.MediaType || plaintextLength != object.PlaintextLength {
+			return storedObjectIntegrityError("sqlite writer: binary object hash collision or corruption")
 		}
 	}
 	return nil
@@ -282,10 +284,12 @@ ON CONFLICT(object_hash) DO NOTHING`,
 		// insertBinaryObjects.
 		if err := transaction.QueryRow(`
 SELECT semantic_hash, kind, plaintext_length
-FROM content_objects WHERE object_hash = ?`, object.Hash).Scan(&semanticHash, &kind, &plaintextLength); err != nil ||
-			!bytes.Equal(semanticHash, object.SemanticHash) || kind != object.Kind ||
+FROM content_objects WHERE object_hash = ?`, object.Hash).Scan(&semanticHash, &kind, &plaintextLength); err != nil {
+			return fmt.Errorf("sqlite writer: read content object identity: %w", err)
+		}
+		if !bytes.Equal(semanticHash, object.SemanticHash) || kind != object.Kind ||
 			plaintextLength != object.PlaintextLength {
-			return errors.New("sqlite writer: content object hash collision or corruption")
+			return storedObjectIntegrityError("sqlite writer: content object hash collision or corruption")
 		}
 		for _, reference := range object.BinaryRefs {
 			if _, err := transaction.Exec(`
@@ -303,8 +307,11 @@ SELECT media_type, encoding
 FROM content_binary_refs
 WHERE object_hash = ? AND json_pointer = ? AND binary_hash = ?`,
 				object.Hash, reference.JSONPointer, reference.BinaryHash,
-			).Scan(&mediaType, &encoding); err != nil || mediaType != reference.MediaType || encoding != reference.Encoding {
-				return errors.New("sqlite writer: content binary reference collision or corruption")
+			).Scan(&mediaType, &encoding); err != nil {
+				return fmt.Errorf("sqlite writer: read binary reference identity: %w", err)
+			}
+			if mediaType != reference.MediaType || encoding != reference.Encoding {
+				return storedObjectIntegrityError("sqlite writer: content binary reference collision or corruption")
 			}
 		}
 		for _, reference := range object.ExternalRefs {
@@ -323,8 +330,11 @@ SELECT value_hash
 FROM content_external_refs
 WHERE object_hash = ? AND json_pointer = ? AND ref_kind = ?`,
 				object.Hash, reference.JSONPointer, reference.Kind,
-			).Scan(&valueHash); err != nil || !bytes.Equal(valueHash, reference.ValueHash) {
-				return errors.New("sqlite writer: content external reference collision or corruption")
+			).Scan(&valueHash); err != nil {
+				return fmt.Errorf("sqlite writer: read external reference identity: %w", err)
+			}
+			if !bytes.Equal(valueHash, reference.ValueHash) {
+				return storedObjectIntegrityError("sqlite writer: content external reference collision or corruption")
 			}
 		}
 	}
@@ -356,7 +366,7 @@ WHERE conversation_id = ?`, conversationID).Scan(&protocol, &keyHash); err != ni
 		return "", fmt.Errorf("sqlite writer: verify conversation: %w", err)
 	}
 	if protocol != turn.Protocol || !bytes.Equal(keyHash, turn.ConversationKeyHash) {
-		return "", errors.New("sqlite writer: conversation identity collision")
+		return "", localWriteError("sqlite writer: conversation identity collision")
 	}
 	return conversationID, nil
 }
@@ -612,8 +622,11 @@ func loadRequestRefs(transaction *sql.Tx, turnID string, memo map[string][]audit
 	if cached, exists := memo[turnID]; exists {
 		return cloneObjectRefs(cached), nil
 	}
+	// Graph validation failures, including corrupt stored ancestors, roll back
+	// only this save; like reconstruction failures they must not discard
+	// unrelated writes that share the batch.
 	if visiting[turnID] {
-		return nil, errors.New("sqlite writer: turn parent cycle")
+		return nil, localWriteError("sqlite writer: turn parent cycle")
 	}
 	visiting[turnID] = true
 	defer delete(visiting, turnID)
@@ -642,10 +655,10 @@ FROM turns WHERE turn_id = ?`, turnID).Scan(&parent, &header.ParentBase, &header
 			}
 			base = append(base, parentResponse...)
 		} else if header.ParentBase != "request" {
-			return nil, errors.New("sqlite writer: invalid non-root parent base")
+			return nil, localWriteError("sqlite writer: invalid non-root parent base")
 		}
 	} else if header.ParentBase != "root" {
-		return nil, errors.New("sqlite writer: root turn has non-root base")
+		return nil, localWriteError("sqlite writer: root turn has non-root base")
 	}
 	operations, err := loadContextOperations(transaction, turnID)
 	if err != nil {
@@ -656,7 +669,7 @@ FROM turns WHERE turn_id = ?`, turnID).Scan(&parent, &header.ParentBase, &header
 		return nil, err
 	}
 	if len(result) != header.RequestItemCount || !bytes.Equal(auditmodel.SequenceHash(result), header.RequestSequenceHash) {
-		return nil, errors.New("sqlite writer: stored turn sequence hash mismatch")
+		return nil, localWriteError("sqlite writer: stored turn sequence hash mismatch")
 	}
 	memo[turnID] = cloneObjectRefs(result)
 	return result, nil

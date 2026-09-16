@@ -239,7 +239,7 @@ func TestWriterConcurrentAudits(t *testing.T) {
 	}
 }
 
-func TestWriterRollsBackFailedOperationAndRecoversHealth(t *testing.T) {
+func TestWriterRollsBackFailedOperationWithoutChangingHealth(t *testing.T) {
 	t.Parallel()
 
 	store, _ := openTestStore(t)
@@ -268,8 +268,8 @@ func TestWriterRollsBackFailedOperationAndRecoversHealth(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected duplicate-header transaction failure")
 	}
-	if store.Healthy() {
-		t.Fatal("store remained healthy after failed writer transaction")
+	if !store.Healthy() {
+		t.Fatal("isolated operation failure made the database unavailable")
 	}
 	var headerCount int
 	if err := store.readerDB.QueryRow("SELECT COUNT(*) FROM http_headers WHERE audit_id = ?", record.AuditID).Scan(&headerCount); err != nil {

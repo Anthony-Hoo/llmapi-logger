@@ -209,6 +209,12 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 	worker.normalizeResult(&result, input, evidenceErr)
 	prepared := worker.prepareTurn(ctx, audit, implementation, input, &result)
 	if err := worker.persistResult(ctx, audit, implementation, result, prepared); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// A canceled save may not have been attempted, or may still commit
+			// after submitSync stops waiting. Leave processing for startup
+			// recovery instead of spending the persistence-failure budget.
+			return
+		}
 		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed")
 		releaseContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()

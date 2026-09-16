@@ -20,7 +20,7 @@ localhost -> audit-proxy management :8081
 
 ## 2. 本机构建
 
-需要 Go 1.25+、Node 22+ 和 pnpm。两个脚本都会先用锁文件安装前端依赖并构建嵌入资源，再生成 `CGO_ENABLED=0` 的 Windows/Linux amd64 二进制：
+需要 Go 1.27+、Node 24 LTS 和 pnpm 10.15.0。两个脚本都会先用锁文件安装前端依赖并构建嵌入资源，再生成 `CGO_ENABLED=0` 的 Windows/Linux amd64 二进制：
 
 ~~~powershell
 .\scripts\build.ps1
@@ -36,6 +36,8 @@ bash ./scripts/build.sh
 bin/audit-proxy-windows-amd64.exe
 bin/audit-proxy-linux-amd64
 ~~~
+
+构建不会清空 `internal/web/dist`，以保留受跟踪的 `.gitkeep`。在同一工作区重复构建时，旧的哈希资源会一并嵌入二进制，但页面只引用最新资源。正式发布应使用干净 checkout 或 Docker 多阶段构建。
 
 宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。若 NewAPI 允许长时间等待首包，将 `newapi.response_header_timeout_seconds` 设置为高于 NewAPI 自身超时，并同步提高 `shutdown_timeout_seconds`、Nginx read/send timeout 与容器 stop grace period。只有需要让 NewAPI 继续观察公网域名时才启用 `newapi.preserve_host`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
 

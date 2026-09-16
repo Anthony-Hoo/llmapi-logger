@@ -6,6 +6,12 @@
 
 ## 2. 请求完成日志
 
+writer 遇到磁盘满、I/O、只读等存储级错误时整批失败并报告不健康，不能因空事务提交成功而向 ready 报告数据库可用。只有明确的操作局部错误才使用保存点隔离。
+
+只读或无匹配行的幂等操作即使成功，也不能恢复 writer 健康；必须观察到排除回滚部分后的实际行变更成功提交。
+
+writer 检测到存量内容/二进制对象或引用的身份损坏时，即使保存点隔离允许同批其他操作提交，完整性健康状态也会锁定为 failed。后台验证成功只允许 pending 转为 verified，不能覆盖已检测的失败。
+
 程序输出 `slog` JSON。每个被进程内 Matcher 精确命中的 LLM route 结束时最多记录一条 `llm request completed`，字段固定为：
 
 - `audit_id`（成功分配时）；
@@ -16,6 +22,8 @@
 - 存在故障时的稳定 `error_code`。
 
 日志调用不传入 `http.Request` 或原始 error 对象。禁止记录 Query、Header value、Body、解析全文、admin token、上游凭据、主密钥、密文 BLOB 或底层数据库错误文本。
+
+审计终结成功时，Session 使用 writer 在外层事务提交后回传的有效 capture status/error code 更新 TerminalSummary。被保存点隔离的异步采集失败因此在数据库和完成日志中都呈现为 `failed / capture_write_failed`；事务提交失败或 Ack 等待取消则沿用未确认终结的错误路径，不发布未提交的 writer 结果。整批存储级失败丢弃的异步采集操作没有 Ack，也无法在已回滚的事务里留下标记，属于[模块 04](04-sqlite-storage-and-migrations.md)记录的已知边界。
 
 可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。
 
@@ -62,8 +70,8 @@ retention、gap flush 或单次用户目录刷新失败不改变 readiness；已
 
 SQLite migration/open 成功后、parser 扫描 pending 记录前，应用调用一次恢复：
 
-- `ended_at_ns IS NULL` 的 audit 设为 `forward_status=interrupted`、`capture_status=partial`、`error_code=process_exit`，结束时间使用本次恢复时间。
-- 仍为 streaming 的 stage 和 body 设为 partial，并写稳定 `process_exit`。
+- `ended_at_ns IS NULL` 的 audit 设为 `forward_status=interrupted`，结束时间使用本次恢复时间。无采集故障的记录写 `capture_status=partial`、`error_code=process_exit`；已标记采集失败的记录保留 `failed` 与原错误码（缺省 `capture_write_failed`）。
+- 已标记采集失败的 audit 先复用正常终结的分块对账：子记录写 `capture_write_failed` 或 `capture_chunk_missing`，保留采集器已记录的 stage 错误码和已封存时间线标志。其余仍为 streaming 的 stage 和 body 设为 partial，并写稳定 `process_exit`。
 - Body 的 stored length 从已提交 chunk 求和，observed length 至少覆盖已提交的 offset+length；未完成 hash、EOF 和 SHA-256 不伪造为完整。
 - 只有实际恢复了 audit 时才增加一条聚合 `process_exit` gap；重复执行没有变化。
 - 遗留 `parse_status=processing` 重置为 pending，再由 parser worker 扫描入队。
@@ -94,6 +102,7 @@ NewAPI 管理集成包含两个轻量后台任务：用户目录在监听前刷�
 - `/healthz`、`/readyz` 和受保护的 `/api/v1/*` 缺失或使用错误管理凭证时返回 `401`。
 - healthy/degraded/not_ready 的 JSON 和 HTTP 状态符合上表。
 - 启动恢复正确修正未终结 audit、streaming stage/body、长度和 parser 状态，且重复执行幂等。
+- 启动恢复对已标记采集失败的未终结 audit 复用正常终结的分块对账；保留 `capture_chunk_missing`、修复已 complete 但聚合不符的 Body，并将所有已保留 raw 设为 full 后签名。父记录使用 interrupted 转发状态并保留已知 failed 采集状态；无采集故障的普通中断仍用 partial/process_exit。
 - 只有实际恢复记录时生成聚合 process_exit gap。
 - available 启动依赖故障仍可转发，strict 返回 `503`；修复启动依赖后通过重启恢复。
 - 优雅关闭不会把仍未完成的证据标成 complete。

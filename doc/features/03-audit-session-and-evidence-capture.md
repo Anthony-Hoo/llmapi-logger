@@ -109,6 +109,12 @@ ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
 
 采集模块提交 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit 和 AddGap；parser 使用 SaveParsedAudit 原子写摘要、turn graph、对象、raw retention 和完整性事件。queue 固定 1024 ops。
 
+Session 通过 `FinishAuditWithResult` 获取提交后的实际 capture status/error code，再生成不可变的 TerminalSummary。被保存点隔离的异步写入失败不能只在数据库中降级、却在请求完成日志中仍报告 complete。失败终结还会将回滚后遗留的 streaming stage/body 修复为 partial，使已提交的 raw 可按不完整证据读取。整批存储级失败时，批内异步写入随事务丢弃且不留标记，采集器无法感知，这一边界见[模块 04](04-sqlite-storage-and-migrations.md)。
+
+异步分块失败、但阶段终结成功时，也必须按实际落盘分块修正存储长度和计数，不能继续把采集器内存中的完整聚合当作已保存证据。缺块只保留并导出剩余片段，明确标记 `capture_chunk_missing`；不能承诺恢复未落盘字节。逻辑 SSE 时间线在观察字节时生成，缺块不改变已封存时间线的完整性。
+
+Body 开始写入在入队前被拒绝时（例如写队列满），采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
+
 available：queue/DB/key 失败时不阻塞代理，标 partial/failed，写结构化日志；DB 不可用时合并一个内存 gap，下一次成功写入时补记。
 
 strict：BeginAudit 必须使用已加载的 key 同步 COMMIT；本次提交失败时返回 503，parser queue 不参与 admission。上一批写入留下的健康快照不替代这次提交，也不会永久阻止后续重试。Begin 成功后的 chunk 仍批量异步写，晚到故障只标 partial/gap，不提供逐块 durable ack。
@@ -140,7 +146,7 @@ worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存
 
 ## 12. 崩溃恢复
 
-启动后先验证 HMAC integrity event chain，再把 ended_at_ns 为空的 audit 改为 forward_status=interrupted、capture_status=partial、error_code=process_exit；仍为 streaming 的 stage/stream 改为 partial，raw retention 强制为 full，并按 owning chunks 修复可证明长度。每条恢复记录写 capture event，随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk、SHA-256 或精确结束时间；SQLite WAL 只保证已提交事务一致。
+启动后先验证 HMAC integrity event chain，再把 ended_at_ns 为空的 audit 改为 forward_status=interrupted：无采集故障的记录写 capture_status=partial、error_code=process_exit，已标记采集失败的记录先复用正常终结的分块对账并保留 failed 状态；仍为 streaming 的 stage/stream 改为 partial，raw retention 强制为 full，并按 owning chunks 修复可证明长度。每条恢复记录写 capture event，随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk、SHA-256 或精确结束时间；SQLite WAL 只保证已提交事务一致。
 
 ## 13. 测试
 

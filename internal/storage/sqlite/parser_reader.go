@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 const maxParserReadLimit = 1000
@@ -27,9 +28,10 @@ SELECT audit_id
 FROM audit_records
 WHERE ended_at_ns IS NOT NULL
   AND parse_status = 'pending'
+  AND (parse_next_at_ns IS NULL OR parse_next_at_ns <= ?)
   AND forward_status <> 'rejected'
 ORDER BY started_at_ns, audit_id
-LIMIT ?`, limit)
+LIMIT ?`, time.Now().UnixNano(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list pending parses: %w", err)
 	}

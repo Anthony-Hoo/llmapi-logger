@@ -98,7 +98,7 @@ func worthwhileCompression(plainLength, compressedLength int) bool {
 
 func shouldCompressBinary(_ string, data []byte) bool {
 	// Compression is selected from the bytes, not a caller-controlled media
-	// label, so the same binary hash always has the same stored representation.
+	// label, so callers cannot influence compression with a forged MIME type.
 	// Unknown formats may be trial-compressed, but are only retained compressed
 	// when the size reduction is worthwhile.
 	return !alreadyCompressedMagic(data)

@@ -20,7 +20,10 @@ func (service *Service) Timeline(ctx context.Context, auditID string, side Side)
 	if err := validateAuditID(auditID); err != nil {
 		return StreamTimeline{}, err
 	}
-	stage, err := stageForSide(side)
+	stage, _, err := service.selectRawBody(ctx, auditID, side)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StreamTimeline{}, ErrNotFound
+	}
 	if err != nil {
 		return StreamTimeline{}, err
 	}
@@ -34,7 +37,7 @@ func (service *Service) Timeline(ctx context.Context, auditID string, side Side)
 	if stored.EventCount <= 0 || stored.PlaintextLength <= 0 || len(stored.DataEnc) == 0 {
 		return StreamTimeline{}, ErrIntegrity
 	}
-	aad, err := security.AAD(auditID, "stream_timeline_v1", stage, stored.Compression)
+	aad, err := security.AAD(auditID, "stream_timeline_v1", stored.Stage, stored.Compression)
 	if err != nil {
 		return StreamTimeline{}, ErrIntegrity
 	}

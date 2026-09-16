@@ -11,7 +11,7 @@
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
 internal/storage/sqlite/{graph_writer.go,graph_reader.go,timeline_reader.go,integrity.go}
-internal/storage/sqlite/migrations/{001_init.sql,...,006_developer_key_fingerprint.sql}
+internal/storage/sqlite/migrations/{001_init.sql,...,007_parse_retries.sql}
 ~~~
 
 固定连接参数：
@@ -39,6 +39,8 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 `006_developer_key_fingerprint.sql` 用 `ALTER TABLE` 为 `audit_records` 增加可空的 `api_key_fpr`（32 字节）和一个部分索引，用于把开发者会话限定在自己 Key 的记录上（[模块 19](19-developer-key-session.md)）。它就地升级旧库，不重建表也不清除数据。该列是访问控制索引而非证据，**不得**进入 `capturePayloadDigest`：一旦加入，旧库中每条历史记录的重算摘要都会改变，启动时的完整性链校验会失败。
 
 ## 3. 表结构
+
+`007_parse_retries.sql` 就地增加 `parse_save_failures` 和 `parse_next_at_ns`，分别保存解析写入失败次数和下一次允许重试的时间。这两列是可变调度元数据，不进入历史 HTTP 证据摘要，也不改变 schema generation。
 
 当前最终 schema 共 20 张表，按职责分组如下。
 
@@ -83,7 +85,7 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 | stream_timelines | 逻辑 SSE event 的数量、首末时间和压缩加密的 offset/time delta 序列 |
 | integrity_events | HMAC-SHA-256 append-only 完整性链 |
 
-时间线最多保存前 100,000 个事件时间点，但 `event_count` 保留实际总数；`timeline_complete=false` 明确表示时间点序列被截断。网络 read/write chunk 不作为长期 SSE 事件行。
+时间线最多保存前 100,000 个事件时间点，但 `event_count` 保留实际总数；`timeline_complete=false` 明确表示时间点序列被截断，或观察到的 SSE 在最后一个事件结束前中断；它由观察到的字节决定，与 raw 分块是否落盘无关。有事件但未能封存时间线的 Body 同样把 `stream_timeline_complete` 记为 false。网络 read/write chunk 不作为长期 SSE 事件行。
 
 ## 4. HTTP Body 保存方式
 
@@ -108,6 +110,26 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交一个事务。BeginAudit 和 strict admission 使用同步 Ack；普通证据写入保持异步。
 
+每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。整批失败时，批内已入队的异步采集操作随事务一起丢弃，writer 也无法在已回滚的事务里为它们留下失败标记。
+
+局部错误采用白名单：SQLite constraint（含扩展码）、明确标记的对象身份/重建/turn 图校验错误和预期的未找到记录。FULL、IOERR、READONLY、BUSY、CORRUPT 等其他数据库错误，以及无法分类的错误，一律回滚整批并标记不健康，即使 SQLite 允许回滚单条语句后提交空事务。仅包含局部失败的空提交不能把既有不健康状态恢复为健康。
+
+恢复普通写入健康状态还要求事务实际提交了行变更。writer 根据连接的 `total_changes()` 核对每条操作的变更，并排除已回滚部分；返回 nil 的只读 release、未命中的 claim 等空操作不构成恢复证据。独立的完整性失败锁定仍优先于普通写入健康状态。
+
+回滚范围与完整性健康状态独立：存量 content/binary object 或其引用的身份字段不匹配时，该解析操作仍隔离回滚，但 writer 会立即锁定 `IntegrityPayloadState=failed`，使 readiness 不健康。同批或后续正常写入、基于较旧快照完成的后台验证都不能清除该状态，排查并修复数据后需重启重新校验。读取身份元数据的数据库错误保留原始 error 类型，继续按存储级错误处理，不伪装为对象身份不匹配。
+
+异步 stage/body/header/chunk 采集操作以局部错误失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
+
+已知边界：上述标记只覆盖被隔离的局部错误。FULL、IOERR、READONLY、BUSY 等存储级错误或事务失败使整批回滚时，批内异步采集操作没有 Ack，也不留标记。存储恢复后，同一 audit 在后续批次的终结仍可能以 complete 提交，而分块、Header 或阶段终结已经缺失：缺中间分块时 raw 读取返回完整性错误；缺阶段终结时子记录保持 streaming、raw 保持未就绪，启动恢复也不处理已终结的 audit。该场景需要瞬时存储故障恰好落在单个请求的生命周期内，本版本不处理，另行跟踪。
+
+Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `capture_headers_failed` 标记该观察阶段为 partial。后续 `FinishStage`、父记录终结与启动恢复都保留这个标记，不能因 Body 完整而把丢失 Header 的阶段重新标为 complete；未受影响的阶段不因此降级。
+
+失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`FinishAuditWithResult` 只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。
+
+阶段终结在入队前失败时，Session 会以 partial 和稳定 `audit_finalize_failed` 终结；同样修复未结束的子记录，并保持日志与已提交父记录的状态及错误码一致。Body 开始写入在入队前被拒绝时，采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
+
+修复还会核对已经 complete 的 Body：如果采集器上报的 stored length/chunk count 与实际 owning chunks 不符，或分块序号/偏移存在缺口，同样修正存储聚合、降级 stage/body 为 partial、清除不能验证的完整 hash/EOF 标志。stage 保留采集器已记录的错误码，只在没有错误码时写 `capture_write_failed`。已封存的 SSE 时间线描述观察到的事件，与分块是否落盘无关，因此 Body 的 `stream_timeline_complete` 与时间线行保持原值；只有仍为 streaming、尚无时间线行的 Body 才置为 false。已观察长度保留；未落盘的分块无法恢复。缺失分块以 `capture_chunk_missing` 标记，分块原序号、偏移和密文不重写；raw 可导出按原序号拼接的已保存片段，但必须明确声明不完整及存在缺块。
+
 主要写操作包括：
 
 - audit/stage/header/body 开始、分块和终结；
@@ -126,7 +148,7 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 6. 写 `semantic_compacted` 或 `reconstruction_failed` 完整性事件；
 7. 更新 `audit_records.parse_status`。
 
-任一步失败都回滚整个事务，不会出现“raw 已删但 turn 未写完”的中间状态。
+任一步失败都回滚该 `SaveParsedAudit` 操作的全部修改，不会出现“raw 已删但 turn 未写完”的中间状态。以局部错误失败时不会撤销同批其他操作；存储级或无法分类的错误仍按本节规则回滚整批。
 
 ## 6. 读取与重建
 
@@ -148,7 +170,7 @@ raw API 只对 `retention_state=full` 开放；`pending` 返回未就绪，`meta
 
 后台段走只读连接池：writer 池只有一个连接，被长事务占住会阻塞全部审计写入。它按 conversation 分组，组内共享 turn ref 与 content object 缓存并在边界释放——父 turn 不跨 conversation，所以逐事件重建缓存会把 K 轮会话变成 O(K²) 次链回溯，而按 conversation 共享既能压回 O(K)，又把峰值内存限制在最大的单个会话上。摘要不一致意味着 chain 合法但底层 audit 行被改动，会把 store 置为 sticky 不健康（readiness 上报 database unavailable）；该状态不会被后续写入批次覆盖，而普通 health 标志会。两段都可由进程生命周期 context 取消，取消按中断处理，不记为校验失败。
 
-恢复会把未终结 audit 标记为 `interrupted/partial/process_exit`，把 streaming stage/body 标为 partial，把 raw retention 强制为 `full`，并根据 owning chunks 修复可证明的 stored length 和 chunk count。不能证明的 SHA-256、EOF 和 timeline complete 会被清空或置为 false。每个恢复 audit 写 `capture_finalized`，并只增加一条聚合 process-exit gap；重复恢复幂等。
+恢复会把未终结 audit 标记为 interrupted：无采集故障的记录为 `partial/process_exit`，已标记采集失败的记录先复用正常终结的分块对账，并保留 `failed` 与原错误码；其余 streaming stage/body 标为 partial，把 raw retention 强制为 `full`，并根据 owning chunks 修复可证明的 stored length 和 chunk count。不能证明的 SHA-256、EOF 和 timeline complete 会被清空或置为 false。每个恢复 audit 写 `capture_finalized`，并只增加一条聚合 process-exit gap；重复恢复幂等。
 
 完整性链验证失败、终结 audit 缺少 capture event、turn 缺少 semantic event，都会使审计存储不可用；不会以忽略校验的方式继续写入。
 

@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"time"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/uaguard"
+
+	sqlitecodes "modernc.org/sqlite/lib"
 )
 
 type writeKind uint8
@@ -109,11 +112,24 @@ func (store *Store) FinishStage(ctx context.Context, finish StageFinish) error {
 // commit. Since the writer is ordered, this is also a barrier for all earlier
 // accepted operations.
 func (store *Store) FinishAudit(ctx context.Context, finish AuditFinish) error {
+	_, err := store.FinishAuditWithResult(ctx, finish)
+	return err
+}
+
+// FinishAuditWithResult returns the effective terminal outcome only after the
+// outer transaction commits. In particular, asynchronous capture failures may
+// downgrade the submitted status. No outcome is returned on a failed or
+// canceled acknowledgement, even if an accepted write later commits.
+func (store *Store) FinishAuditWithResult(ctx context.Context, finish AuditFinish) (AuditFinish, error) {
 	finish.defaults()
 	if err := validateAuditFinish(finish); err != nil {
-		return err
+		return AuditFinish{}, err
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeFinishAudit, data: cloneAuditFinish(finish)})
+	owned := cloneAuditFinish(finish)
+	if err := store.submitSync(ctx, writeRequest{kind: writeFinishAudit, data: &owned}); err != nil {
+		return AuditFinish{}, err
+	}
+	return owned, nil
 }
 
 func (store *Store) submitAsync(ctx context.Context, request writeRequest) error {
@@ -186,11 +202,19 @@ func (store *Store) runWriter() {
 			}
 		}
 
-		err := store.commitBatch(batch)
-		store.healthy.Store(err == nil)
-		for _, request := range batch {
+		results, wrote, err := store.commitBatch(batch)
+		if err != nil {
+			store.healthy.Store(false)
+		} else if wrote {
+			store.healthy.Store(true)
+		}
+		for index, request := range batch {
 			if request.ack != nil {
-				request.ack <- err
+				if err != nil {
+					request.ack <- err
+				} else {
+					request.ack <- results[index]
+				}
 			}
 		}
 		if queueClosed {
@@ -199,19 +223,140 @@ func (store *Store) runWriter() {
 	}
 }
 
-func (store *Store) commitBatch(batch []writeRequest) error {
+// Known local errors can be isolated. Storage errors fail the whole batch even
+// when SQLite would allow rolling back the statement and committing no writes.
+func (store *Store) commitBatch(batch []writeRequest) ([]error, bool, error) {
 	transaction, err := store.writerDB.BeginTx(context.Background(), nil)
 	if err != nil {
-		return fmt.Errorf("sqlite writer: begin batch: %w", err)
+		return nil, false, fmt.Errorf("sqlite writer: begin batch: %w", err)
 	}
-	for _, request := range batch {
-		if err := store.applyWrite(transaction, request); err != nil {
-			_ = transaction.Rollback()
-			return err
+	defer transaction.Rollback()
+	results := make([]error, len(batch))
+	wrote := false
+	for index, request := range batch {
+		if _, err := transaction.Exec("SAVEPOINT writer_operation"); err != nil {
+			return nil, false, fmt.Errorf("sqlite writer: savepoint: %w", err)
+		}
+		var before int64
+		if !wrote {
+			if err := transaction.QueryRow("SELECT total_changes()").Scan(&before); err != nil {
+				return nil, false, fmt.Errorf("sqlite writer: read write counter: %w", err)
+			}
+		}
+		results[index] = store.applyWrite(transaction, request)
+		if results[index] != nil {
+			var integrityFailure storedObjectIntegrityError
+			if errors.As(results[index], &integrityFailure) {
+				// Detection remains valid even if this operation rolls back.
+				// Isolate its write failure, but latch readiness unhealthy.
+				store.payloadState.Store(integrityPayloadsFailed)
+			}
+			if !canIsolateWriteError(results[index]) {
+				return nil, false, results[index]
+			}
+			if _, err := transaction.Exec("ROLLBACK TO writer_operation"); err != nil {
+				return nil, false, fmt.Errorf("sqlite writer: rollback operation: %w", err)
+			}
+			// total_changes includes rolled-back statements. Exclude those;
+			// only a later committed failure marker can prove write recovery.
+			if !wrote {
+				if err := transaction.QueryRow("SELECT total_changes()").Scan(&before); err != nil {
+					return nil, false, fmt.Errorf("sqlite writer: read rollback counter: %w", err)
+				}
+			}
+			if err := markCaptureWriteFailed(transaction, request); err != nil {
+				return nil, false, err
+			}
+		}
+		if !wrote {
+			var after int64
+			if err := transaction.QueryRow("SELECT total_changes()").Scan(&after); err != nil {
+				return nil, false, fmt.Errorf("sqlite writer: read mutation counter: %w", err)
+			}
+			wrote = after > before
+		}
+		if _, err := transaction.Exec("RELEASE writer_operation"); err != nil {
+			return nil, false, fmt.Errorf("sqlite writer: release operation: %w", err)
 		}
 	}
 	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("sqlite writer: commit batch: %w", err)
+		return nil, false, fmt.Errorf("sqlite writer: commit batch: %w", err)
+	}
+	return results, wrote, nil
+}
+
+type localWriteError string
+
+func (err localWriteError) Error() string { return string(err) }
+
+type storedObjectIntegrityError string
+
+func (err storedObjectIntegrityError) Error() string { return string(err) }
+
+// This controls rollback scope, not health: object integrity faults are
+// isolated but also latch payloadState failed. Unclassified errors and storage
+// failures must abort the outer transaction.
+func canIsolateWriteError(err error) bool {
+	var coded interface{ Code() int }
+	if errors.As(err, &coded) {
+		return coded.Code()&0xff == sqlitecodes.SQLITE_CONSTRAINT
+	}
+	var local localWriteError
+	var integrityFailure storedObjectIntegrityError
+	return errors.As(err, &local) || errors.As(err, &integrityFailure) || errors.Is(err, auditmodel.ErrReconstruction) ||
+		errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound)
+}
+
+// Async capture has no acknowledgement. Persist the failure on its audit so
+// finalization in this or any later batch cannot claim complete evidence.
+// A parser or management operation must never taint unrelated capture.
+func markCaptureWriteFailed(transaction *sql.Tx, request writeRequest) error {
+	var auditIDs []string
+	headerStages := make(map[[2]string]struct{})
+	switch request.kind {
+	case writeStartStage:
+		auditIDs = []string{request.data.(HTTPStage).AuditID}
+	case writeStartBody:
+		auditIDs = []string{request.data.(BodyStream).AuditID}
+	case writeAddHeaders:
+		seen := make(map[string]bool)
+		for _, header := range request.data.([]HTTPHeader) {
+			headerStages[[2]string{header.AuditID, header.Stage}] = struct{}{}
+			if !seen[header.AuditID] {
+				seen[header.AuditID] = true
+				auditIDs = append(auditIDs, header.AuditID)
+			}
+		}
+	case writeAddChunk:
+		auditIDs = []string{request.data.(BodyChunk).AuditID}
+	case writeFinishStage:
+		auditIDs = []string{request.data.(StageFinish).AuditID}
+	}
+	for _, auditID := range auditIDs {
+		if _, err := transaction.Exec(`
+UPDATE audit_records SET capture_status = 'failed', error_code = 'capture_write_failed'
+WHERE audit_id = ? AND ended_at_ns IS NULL`, auditID); err != nil {
+			return fmt.Errorf("sqlite writer: record capture failure: %w", err)
+		}
+	}
+	for identity := range headerStages {
+		if _, err := transaction.Exec(`
+UPDATE http_stages SET state = 'partial', error_code = 'capture_headers_failed'
+WHERE audit_id = ? AND stage = ?
+  AND EXISTS (SELECT 1 FROM audit_records a WHERE a.audit_id = http_stages.audit_id AND a.ended_at_ns IS NULL)`,
+			identity[0], identity[1]); err != nil {
+			return fmt.Errorf("sqlite writer: record header stage failure: %w", err)
+		}
+	}
+	if request.kind == writeAddChunk {
+		chunk := request.data.(BodyChunk)
+		if _, err := transaction.Exec(`
+UPDATE body_streams SET observed_length = MAX(observed_length, ?), error_code = ?
+WHERE audit_id = ? AND stage = ? AND state = 'streaming'
+  AND EXISTS (SELECT 1 FROM audit_records a WHERE a.audit_id = body_streams.audit_id AND a.ended_at_ns IS NULL)`,
+			chunk.Offset+int64(chunk.PlaintextLength), CaptureChunkMissing, chunk.AuditID, chunk.Stage); err != nil {
+			return fmt.Errorf("sqlite writer: record missing chunk: %w", err)
+		}
 	}
 	return nil
 }
@@ -232,13 +377,13 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 	case writeFinishStage:
 		return finishStage(transaction, request.data.(StageFinish))
 	case writeFinishAudit:
-		return finishAudit(transaction, request.data.(AuditFinish), signer)
+		return finishAudit(transaction, request.data.(*AuditFinish), signer)
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
 	case writeClaimPendingParse:
 		return claimPendingParse(transaction, request.data.(*parseClaim))
 	case writeReleaseProcessingParse:
-		return releaseProcessingParse(transaction, request.data.(string))
+		return releaseProcessingParse(transaction, request.data.(string), signer, time.Now())
 	case writeSaveParsedResult:
 		return saveParsedResult(transaction, request.data.(ParsedResult), signer)
 	case writeSaveParsedAudit:
@@ -405,7 +550,9 @@ INSERT INTO body_chunks (
 func finishStage(transaction *sql.Tx, finish StageFinish) error {
 	result, err := transaction.Exec(`
 UPDATE http_stages
-SET state = ?, status_code = ?, content_length = ?, ended_at_ns = ?, error_code = ?
+SET state = CASE WHEN error_code = 'capture_headers_failed' THEN 'partial' ELSE ? END,
+    status_code = ?, content_length = ?, ended_at_ns = ?,
+    error_code = CASE WHEN error_code = 'capture_headers_failed' THEN error_code ELSE ? END
 WHERE audit_id = ? AND stage = ?`,
 		finish.State,
 		finish.StatusCode,
@@ -480,9 +627,28 @@ ON CONFLICT(audit_id, stage) DO UPDATE SET
 	return nil
 }
 
-func finishAudit(transaction *sql.Tx, finish AuditFinish, signer *security.IntegritySigner) error {
-	if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
-		return err
+func finishAudit(transaction *sql.Tx, finish *AuditFinish, signer *security.IntegritySigner) error {
+	var storedCaptureStatus string
+	var storedErrorCode sql.NullString
+	if err := transaction.QueryRow("SELECT capture_status, error_code FROM audit_records WHERE audit_id = ?", finish.AuditID).Scan(&storedCaptureStatus, &storedErrorCode); err != nil {
+		return fmt.Errorf("sqlite writer: read capture status: %w", err)
+	}
+	if storedCaptureStatus == CaptureFailed {
+		finish.CaptureStatus = CaptureFailed
+		code := "capture_write_failed"
+		if storedErrorCode.Valid {
+			code = storedErrorCode.String
+		}
+		finish.ErrorCode = &code
+	} else {
+		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
+			return err
+		}
+	}
+	if finish.CaptureStatus != CaptureComplete {
+		if err := finalizeIncompleteCapture(transaction, finish.AuditID, finish.EndedAtNS); err != nil {
+			return err
+		}
 	}
 	result, err := transaction.Exec(`
 UPDATE audit_records
@@ -533,6 +699,56 @@ WHERE audit_id = ?`, finish.AuditID); err != nil {
 	}
 	if err := appendIntegrityEvent(transaction, signer, finish.AuditID, integrityCaptureFinalized, payloadDigest, finish.EndedAtNS); err != nil {
 		return err
+	}
+	return nil
+}
+
+// Reconcile every damaged body, including a successful FinishStage whose
+// in-memory totals include chunks that never committed. Keep the observed
+// length, but describe only the actual stored bytes as retained evidence.
+// A sealed timeline and a collector stage code describe what was observed, so
+// both survive. A finished body without a sealed timeline already reports it
+// incomplete; only a body that never finished still needs the flag cleared.
+func finalizeIncompleteCapture(transaction *sql.Tx, auditID string, endedAtNS int64) error {
+	if _, err := transaction.Exec(`
+WITH chunk_lengths AS (
+    SELECT stage, SUM(plaintext_length) AS stored_length,
+           MAX("offset" + plaintext_length) AS observed_length, COUNT(*) AS chunk_count,
+           MAX(seq) + 1 AS sequence_count
+    FROM body_chunks WHERE audit_id = ? GROUP BY stage
+)
+UPDATE body_streams
+SET stored_length = COALESCE((SELECT stored_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0),
+    observed_length = MAX(observed_length, COALESCE((SELECT observed_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)),
+    chunk_count = COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0),
+    sha256 = NULL, hash_complete = 0, eof_seen = 0,
+    state = 'partial', retention_state = 'full',
+    stream_timeline_complete = CASE WHEN state = 'streaming' THEN 0 ELSE stream_timeline_complete END,
+    error_code = CASE WHEN error_code = 'capture_chunk_missing'
+        OR (state <> 'streaming' AND (
+            stored_length > COALESCE((SELECT stored_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)
+            OR chunk_count > COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)))
+        OR EXISTS (SELECT 1 FROM chunk_lengths WHERE stage = body_streams.source_stage
+            AND (sequence_count <> chunk_count OR observed_length <> stored_length))
+        THEN 'capture_chunk_missing' ELSE 'capture_write_failed' END
+WHERE audit_id = ? AND (
+    state = 'streaming' OR error_code = 'capture_chunk_missing'
+    OR stored_length <> COALESCE((SELECT stored_length FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)
+    OR chunk_count <> COALESCE((SELECT chunk_count FROM chunk_lengths WHERE stage = body_streams.source_stage), 0)
+    OR EXISTS (SELECT 1 FROM chunk_lengths WHERE stage = body_streams.source_stage
+        AND (sequence_count <> chunk_count OR observed_length <> stored_length))
+)`, auditID, auditID); err != nil {
+		return fmt.Errorf("sqlite writer: finalize incomplete body: %w", err)
+	}
+	if _, err := transaction.Exec(`
+UPDATE http_stages
+SET state = 'partial', ended_at_ns = COALESCE(ended_at_ns, ?),
+    error_code = COALESCE(error_code, 'capture_write_failed')
+WHERE audit_id = ? AND (state = 'streaming' OR error_code = 'capture_headers_failed' OR EXISTS (
+    SELECT 1 FROM body_streams b WHERE b.audit_id = http_stages.audit_id AND b.stage = http_stages.stage
+      AND b.state = 'partial' AND b.error_code IN ('capture_write_failed', 'capture_chunk_missing')
+))`, endedAtNS, auditID); err != nil {
+		return fmt.Errorf("sqlite writer: finalize incomplete stage: %w", err)
 	}
 	return nil
 }
@@ -653,6 +869,9 @@ func requireOneRow(result sql.Result, operation string) error {
 		return fmt.Errorf("sqlite writer: %s rows affected: %w", operation, err)
 	}
 	if rows != 1 {
+		if rows == 0 {
+			return localWriteError(fmt.Sprintf("sqlite writer: %s affected no rows", operation))
+		}
 		return fmt.Errorf("sqlite writer: %s affected %d rows", operation, rows)
 	}
 	return nil

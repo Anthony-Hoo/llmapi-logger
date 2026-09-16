@@ -366,6 +366,9 @@ func (session *Session) finish() error {
 			session.logCaptureFailure(finish.Stage, "finish_stage_failed")
 		}
 	}
+	if len(writeErrors) != 0 && errorCode == nil {
+		errorCode = stringPointer("audit_finalize_failed")
+	}
 	finish := sqlite.AuditFinish{
 		AuditID:         session.auditID,
 		EndedAtNS:       endedAtNS,
@@ -385,13 +388,17 @@ func (session *Session) finish() error {
 		}
 		finish.TTFTNS = &ttft
 	}
-	if err := session.store.FinishAudit(session.writeCtx, finish); err != nil {
+	if persisted, err := session.store.FinishAuditWithResult(session.writeCtx, finish); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
 		captureStatus = sqlite.CapturePartial
 		session.recordGapReason(gapReasonForWrite(err))
 		session.logCaptureFailure("", "finish_audit_failed")
-	} else if parseStatus == sqlite.ParsePending && session.notify != nil {
-		_ = session.notify(session.auditID)
+	} else {
+		captureStatus = persisted.CaptureStatus
+		errorCode = cloneString(persisted.ErrorCode)
+		if parseStatus == sqlite.ParsePending && session.notify != nil {
+			_ = session.notify(session.auditID)
+		}
 	}
 	if newAPIRequestID != nil && session.callerNotify != nil && len(writeErrors) == 0 {
 		_ = session.callerNotify(session.auditID)
@@ -445,6 +452,8 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 			var timelineErr error
 			timeline, timelineErr = session.sealStreamTimelineLocked(stage, body)
 			if timelineErr != nil {
+				// No sealed timeline can vouch for these events.
+				streamTimelineComplete = false
 				body.faulted = true
 				body.errorCode = "stream_timeline_failed"
 				session.markStageFaultLocked(stage, body.errorCode)
@@ -472,21 +481,25 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 		if bodyError == "" {
 			bodyError = errorCode
 		}
-		bodyFinish = &sqlite.BodyFinish{
-			ObservedLength:         body.observedLength,
-			StoredLength:           storedLength,
-			SHA256:                 body.digest.Sum(nil),
-			HashComplete:           body.hashComplete,
-			EOFSeen:                body.eofSeen,
-			State:                  bodyState,
-			RetentionState:         sqlite.RetentionPending,
-			FirstObservedAtNS:      optionalInt64(body.firstAtNS),
-			LastObservedAtNS:       optionalInt64(body.lastAtNS),
-			ChunkCount:             chunkCount,
-			StreamEventCount:       streamEventCount,
-			StreamTimelineComplete: streamTimelineComplete,
-			Timeline:               timeline,
-			ErrorCode:              optionalString(bodyError),
+		// A body whose start was rejected has no row to finish. Its fault is
+		// already on the stage; sending the body would fail as a writer error.
+		if body.persisted {
+			bodyFinish = &sqlite.BodyFinish{
+				ObservedLength:         body.observedLength,
+				StoredLength:           storedLength,
+				SHA256:                 body.digest.Sum(nil),
+				HashComplete:           body.hashComplete,
+				EOFSeen:                body.eofSeen,
+				State:                  bodyState,
+				RetentionState:         sqlite.RetentionPending,
+				FirstObservedAtNS:      optionalInt64(body.firstAtNS),
+				LastObservedAtNS:       optionalInt64(body.lastAtNS),
+				ChunkCount:             chunkCount,
+				StreamEventCount:       streamEventCount,
+				StreamTimelineComplete: streamTimelineComplete,
+				Timeline:               timeline,
+				ErrorCode:              optionalString(bodyError),
+			}
 		}
 	}
 	return sqlite.StageFinish{

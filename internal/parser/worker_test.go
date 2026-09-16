@@ -387,8 +387,80 @@ func (store *fakeStore) SaveParsedResult(_ context.Context, result sqlite.Parsed
 	return store.saveParsed(result)
 }
 
-func (store *fakeStore) SaveParsedAudit(_ context.Context, value sqlite.ParsedAudit) error {
+func (store *fakeStore) SaveParsedAudit(ctx context.Context, value sqlite.ParsedAudit) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return store.saveParsed(value.Result)
+}
+
+type cancelSaveStore struct {
+	*fakeStore
+	cancel context.CancelFunc
+}
+
+func (store *cancelSaveStore) SaveParsedAudit(ctx context.Context, _ sqlite.ParsedAudit) error {
+	store.cancel()
+	return ctx.Err()
+}
+
+type cancelParser struct {
+	*recordingParser
+	cancel context.CancelFunc
+}
+
+func (implementation *cancelParser) Parse(ctx context.Context, input Input) Result {
+	implementation.cancel()
+	return implementation.recordingParser.Parse(ctx, input)
+}
+
+func TestWorkerCancellationDoesNotConsumeSaveRetryBudget(t *testing.T) {
+	t.Parallel()
+	for _, duringSave := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during save=%v", duringSave), func(t *testing.T) {
+			cipher := testCipher(t)
+			const id = "cancelled-worker"
+			store := newFakeStore(id, "test.parser")
+			stage, chunks := encryptedStage(t, cipher, id, sqlite.StageRequestReceived, "application/json", "", []byte(`{}`))
+			key := stageKey(id, sqlite.StageRequestReceived)
+			store.stages[key], store.chunks[key] = stage, chunks
+			for restart := 0; restart < 6; restart++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				implementation := &recordingParser{name: "test.parser"}
+				var persistence Store = store
+				var parser Parser = &cancelParser{recordingParser: implementation, cancel: cancel}
+				if duringSave {
+					persistence = &cancelSaveStore{fakeStore: store, cancel: cancel}
+					parser = implementation
+				}
+				worker, err := NewWorker(persistence, cipher, []Parser{parser}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.ResetProcessingParses(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				worker.process(ctx, id)
+				cancel()
+				worker.Close()
+				if store.releaseCount != 0 || store.audits[id].ParseStatus != sqlite.ParseProcessing {
+					t.Fatalf("restart %d charged cancellation as failure: releases=%d status=%s", restart, store.releaseCount, store.audits[id].ParseStatus)
+				}
+			}
+			if err := store.ResetProcessingParses(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			worker, err := NewWorker(store, cipher, []Parser{&recordingParser{name: "test.parser"}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer worker.Close()
+			worker.process(context.Background(), id)
+			if store.audits[id].ParseStatus != sqlite.ParseOK || store.releaseCount != 0 {
+				t.Fatal("audit could not complete after repeated shutdowns")
+			}
+		})
+	}
 }
 
 func (store *fakeStore) saveParsed(result sqlite.ParsedResult) error {

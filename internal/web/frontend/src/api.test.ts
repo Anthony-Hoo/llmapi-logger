@@ -10,6 +10,31 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("API client", () => {
+  it("marks raw downloads that only contain saved fragments", async () => {
+    const client = createApiClient(vi.fn(), (async () => new Response("abcghi", {
+      headers: { "X-Audit-Complete": "false", "X-Audit-Missing-Chunks": "true" },
+    })) as typeof fetch);
+    const result = await client.getRawBody("audit-example", "request");
+    expect(result.complete).toBe(false);
+    expect(result.missingChunks).toBe(true);
+    expect(await result.blob.text()).toBe("abcghi");
+  });
+  it.each(["path", "model", "user_agent", "newapi_user_id", "newapi_token_id", "forward_status", "status_class", "status_code"])(
+    "omits collapse for a standalone %s filter", async (key) => {
+      const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({ items: [], next_cursor: null }));
+      await createApiClient(vi.fn(), fetcher).listAudits({ collapse: true, [key]: "503" });
+      const url = String(fetcher.mock.calls[0]?.[0]);
+      expect(url).toContain(`${key}=503`);
+      expect(url).not.toContain("collapse=");
+    },
+  );
+
+  it("keeps collapse when the status code is only whitespace", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({ items: [], next_cursor: null }));
+    await createApiClient(vi.fn(), fetcher).listAudits({ collapse: true, status_code: " \t " });
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain("collapse=conversation");
+    expect(String(fetcher.mock.calls[0]?.[0])).not.toContain("status_code=");
+  });
   it("uses the Cookie session and sends all supported list filters", async () => {
     let calledURL = "";
     let calledInit: RequestInit | undefined;

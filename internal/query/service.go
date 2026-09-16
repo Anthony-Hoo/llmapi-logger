@@ -80,7 +80,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		NewAPITokenID:         filter.NewAPITokenID,
 		TokenName:             filter.TokenName,
 		ConversationID:        filter.Conversation,
-		CollapseConversations: filter.CollapseConversations && filter.Conversation == "" && filter.StatusClass == "" && filter.StatusCode == nil,
+		CollapseConversations: filter.CollapseConversations && filter.Conversation == "" && !filter.hasRowFilters(),
 		Scope:                 storageScope(filter.Scope),
 	}
 	storageCursor := sqlite.AuditQueryCursor{
@@ -111,6 +111,16 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		page.NextCursor = &Cursor{BeforeStartedAtNS: last.StartedAtNS, BeforeID: last.AuditID}
 	}
 	return page, nil
+}
+
+// Filtering must precede collapse, including the User-Agent match performed
+// after SQL. Show all matching turns whenever a row filter is active.
+func (filter Filter) hasRowFilters() bool {
+	return filter.FromNS != nil || filter.ToNS != nil || filter.Protocol != "" ||
+		filter.Path != "" || filter.Model != "" || filter.UserAgent != "" ||
+		filter.StatusCode != nil || filter.StatusClass != "" || filter.ForwardStatus != "" ||
+		filter.BlockedBy != "" || filter.BlockCode != "" || filter.CaptureStatus != "" ||
+		filter.NewAPIUserID != nil || filter.Username != "" || filter.NewAPITokenID != nil || filter.TokenName != ""
 }
 
 func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter sqlite.AuditQueryFilter, cursor sqlite.AuditQueryCursor, filter Filter, limit int) (Page, error) {
@@ -472,6 +482,7 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 	}
 	complete := metadata.State == sqlite.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
 	return RawMetadata{
+		MissingChunks:  rawHasMissingChunks(metadata),
 		ObservedLength: metadata.ObservedLength,
 		StoredLength:   metadata.StoredLength,
 		SHA256:         encodedDigest,
