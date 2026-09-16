@@ -3,7 +3,7 @@ module llmapi-logger
 go 1.27.0
 
 require (
-	go.yaml.in/yaml/v3 v3.0.4
+	go.yaml.in/yaml/v3 v3.0.5
 	modernc.org/sqlite v1.56.0
 )
 
