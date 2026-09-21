@@ -183,7 +183,8 @@ func TestRunnerLogsStableFailureAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.interval = 5 * time.Millisecond
+	runner.interval = time.Hour
+	runner.retryInterval = 5 * time.Millisecond
 	runner.Start(context.Background())
 	select {
 	case <-secondCall:
@@ -197,5 +198,59 @@ func TestRunnerLogsStableFailureAndContinues(t *testing.T) {
 	}
 	if strings.Contains(logText, "secret database path") {
 		t.Fatalf("failure log leaked underlying error: %q", logText)
+	}
+}
+
+func TestRunnerCatchesUpBeyondOneRunLimit(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	remaining := 8000
+	drained := make(chan struct{})
+	var once sync.Once
+	store := &fakeStore{fn: func(_ context.Context, _ int64, auditLimit, _ int) (sqlite.RetentionResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		deleted := min(remaining, auditLimit)
+		remaining -= deleted
+		if remaining == 0 {
+			once.Do(func() { close(drained) })
+		}
+		return sqlite.RetentionResult{DeletedAudits: deleted}, nil
+	}}
+	runner, err := New(store, 7, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.interval = time.Hour
+	runner.retryInterval = 5 * time.Millisecond
+	runner.Start(context.Background())
+	defer runner.Close()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("retention waited for the idle interval after hitting its batch budget")
+	}
+	runner.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if remaining != 0 || store.callCount() <= maxRowsPerKindPerRun/sqlite.RetentionBatchLimit {
+		t.Fatal("retention did not continue through the bounded backlog")
+	}
+}
+
+func TestCaughtUpRetentionReturnsToIdleSchedule(t *testing.T) {
+	t.Parallel()
+	store := &fakeStore{fn: func(context.Context, int64, int, int) (sqlite.RetentionResult, error) {
+		return sqlite.RetentionResult{}, nil
+	}}
+	runner, err := New(store, 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delay := runner.cleanupAndLog(context.Background()); delay != cleanupInterval {
+		t.Fatalf("idle delay=%s", delay)
+	}
+	if store.callCount() != 1 {
+		t.Fatal("caught-up retention kept scanning")
 	}
 }

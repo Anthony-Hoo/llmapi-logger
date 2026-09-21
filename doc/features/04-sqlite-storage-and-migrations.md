@@ -110,7 +110,7 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交一个事务。BeginAudit 和 strict admission 使用同步 Ack；普通证据写入保持异步。
 
-每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。整批失败时，批内已入队的异步采集操作随事务一起丢弃，writer 也无法在已回滚的事务里为它们留下失败标记。
+每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。整批失败时，writer 在内存中记录受影响的 audit、阶段、缺块观察边界和待补写终态，供同一 writer 在存储恢复后处理；不会缓存或重放 Header value、Body、密文和 timeline payload。
 
 局部错误采用白名单：SQLite constraint（含扩展码）、明确标记的对象身份/重建/turn 图校验错误和预期的未找到记录。FULL、IOERR、READONLY、BUSY、CORRUPT 等其他数据库错误，以及无法分类的错误，一律回滚整批并标记不健康，即使 SQLite 允许回滚单条语句后提交空事务。仅包含局部失败的空提交不能把既有不健康状态恢复为健康。
 
@@ -120,7 +120,11 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 异步 stage/body/header/chunk 采集操作以局部错误失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
 
-已知边界：上述标记只覆盖被隔离的局部错误。FULL、IOERR、READONLY、BUSY 等存储级错误或事务失败使整批回滚时，批内异步采集操作没有 Ack，也不留标记。存储恢复后，同一 audit 在后续批次的终结仍可能以 complete 提交，而分块、Header 或阶段终结已经缺失：缺中间分块时 raw 读取返回完整性错误；缺阶段终结时子记录保持 streaming、raw 保持未就绪，启动恢复也不处理已终结的 audit。该场景需要瞬时存储故障恰好落在单个请求的生命周期内，本版本不处理，另行跟踪。
+存储级错误后的恢复由原 writer 每 5 秒执行一次，即使没有新流量也会运行；每轮最多处理 16 个 audit，轮转选择防止某个永久失败的记录饿死其他记录。各条恢复使用保存点隔离，只有外层 COMMIT 成功才清除对应内存记录；并发追加的终结信息使用版本检查保留。丢失的异步采集写入先补记 `capture_write_failed`，受影响阶段使用 `capture_headers_failed` 或 `capture_storage_failed`，已知缺块使用 `capture_chunk_missing` 并保留观察长度。正常终结即使早于恢复定时器，也必须在同一事务内先写这些标记；无法写标记时不能提交 complete。未落盘字节无法恢复，剩余证据保留 full raw。
+
+`FinishAudit` 提交失败或因写队列满未能入队时，恢复记录保留原始结束时间、转发状态、HTTP 状态和调用者查询标识。队列为已接受操作分配有序序号；补写终态必须等其之前已入队的采集操作全部处理完，避免提前签署随后又被修改的证据。已成功终结的 audit 再次收到终结或恢复请求时，只读取既有终态，不修改 parse/caller 状态，不追加重复完整性事件。恢复后的 pending 解析和调用者任务由既有后台扫描发现，不需要重启，不改变已经完成的转发。
+
+恢复表最多保留 1024 个 audit 的固定大小阶段摘要及终态元数据。达到上限后不驱逐未知故障：Store 锁定恢复溢出状态，拒绝新的审计准入，并将仍在结束的 audit 标记为 failed/full；available 模式继续原有无审计转发和 gap 语义，strict 的准入失败保持 503。需要修复存储后重启，由既有启动恢复处理未终结记录。进程退出会丢失尚未持久化的内存摘要，启动恢复只能声明 interrupted/partial，不能补造精确观测信息。恢复积压未清空、恢复溢出或完整性失败时，Store 不报告 healthy。
 
 Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `capture_headers_failed` 标记该观察阶段为 partial。后续 `FinishStage`、父记录终结与启动恢复都保留这个标记，不能因 Body 完整而把丢失 Header 的阶段重新标为 complete；未受影响的阶段不因此降级。
 

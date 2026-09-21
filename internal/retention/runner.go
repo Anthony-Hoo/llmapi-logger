@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	cleanupInterval      = 24 * time.Hour
+	cleanupInterval      = time.Hour
+	cleanupRetryInterval = time.Minute
 	maxRowsPerKindPerRun = 5000
 )
 
@@ -36,6 +37,7 @@ type Runner struct {
 	logger        *slog.Logger
 	now           func() time.Time
 	interval      time.Duration
+	retryInterval time.Duration
 
 	mu      sync.Mutex
 	started bool
@@ -62,12 +64,13 @@ func New(store Store, retentionDays int, logger *slog.Logger) (*Runner, error) {
 		logger:        logger,
 		now:           time.Now,
 		interval:      cleanupInterval,
+		retryInterval: cleanupRetryInterval,
 		done:          make(chan struct{}),
 	}, nil
 }
 
 // Start begins cleanup once. Enabled runners run immediately and then every
-// 24 hours. Calling Start repeatedly has no effect.
+// hour when caught up, or after a short pause on backlog/failure.
 func (runner *Runner) Start(parent context.Context) {
 	if runner == nil {
 		return
@@ -161,26 +164,26 @@ func (runner *Runner) RunOnce(ctx context.Context) (Result, error) {
 
 func (runner *Runner) loop(ctx context.Context) {
 	defer close(runner.done)
-	runner.cleanupAndLog(ctx)
-	ticker := time.NewTicker(runner.interval)
-	defer ticker.Stop()
+	delay := runner.cleanupAndLog(ctx)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			runner.cleanupAndLog(ctx)
+		case <-timer.C:
+			timer.Reset(runner.cleanupAndLog(ctx))
 		}
 	}
 }
 
-func (runner *Runner) cleanupAndLog(ctx context.Context) {
+func (runner *Runner) cleanupAndLog(ctx context.Context) time.Duration {
 	result, err := runner.RunOnce(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			runner.logger.Warn("retention cleanup failed", "error_category", "retention_failed")
+			runner.logger.Warn("retention cleanup failed", "error_category", "retention_failed", "storage_error", sqlite.ErrorClass(err))
 		}
-		return
+		return runner.retryInterval
 	}
 	if result.DeletedAudits > 0 || result.DeletedGaps > 0 {
 		runner.logger.Info(
@@ -189,4 +192,8 @@ func (runner *Runner) cleanupAndLog(ctx context.Context) {
 			"deleted_gaps", result.DeletedGaps,
 		)
 	}
+	if result.DeletedAudits == maxRowsPerKindPerRun || result.DeletedGaps == maxRowsPerKindPerRun {
+		return runner.retryInterval
+	}
+	return runner.interval
 }

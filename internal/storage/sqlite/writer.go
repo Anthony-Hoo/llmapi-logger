@@ -41,9 +41,10 @@ const (
 )
 
 type writeRequest struct {
-	kind writeKind
-	data any
-	ack  chan error
+	kind     writeKind
+	data     any
+	ack      chan error
+	sequence uint64
 }
 
 // BeginAudit enqueues a parent audit row and waits until its batch commits.
@@ -143,15 +144,21 @@ func (store *Store) submitAsync(ctx context.Context, request writeRequest) error
 		return ErrClosed
 	}
 
-	store.submitMu.RLock()
-	defer store.submitMu.RUnlock()
+	store.submitMu.Lock()
+	defer store.submitMu.Unlock()
 	if store.closed {
 		return ErrClosed
 	}
+	request.sequence = store.submittedSequence + 1
 	select {
 	case store.queue <- request:
+		store.submittedSequence = request.sequence
 		return nil
 	default:
+		if request.kind == writeFinishAudit {
+			// Replaying must wait for every earlier accepted stage write.
+			store.rememberFailedWrite(request, store.submittedSequence)
+		}
 		return ErrQueueFull
 	}
 }
@@ -171,9 +178,22 @@ func (store *Store) submitSync(ctx context.Context, request writeRequest) error 
 
 func (store *Store) runWriter() {
 	defer close(store.done)
+	ticker := time.NewTicker(captureRecoveryInterval)
+	defer ticker.Stop()
 	for {
-		first, open := <-store.queue
+		var first writeRequest
+		var open bool
+		select {
+		case first, open = <-store.queue:
+		case <-ticker.C:
+			store.recoverCaptureWrites()
+			continue
+		case <-store.recoveryWake:
+			store.recoverCaptureWrites()
+			continue
+		}
 		if !open {
+			store.recoverCaptureWrites()
 			return
 		}
 
@@ -205,8 +225,29 @@ func (store *Store) runWriter() {
 		results, wrote, err := store.commitBatch(batch)
 		if err != nil {
 			store.healthy.Store(false)
+			if store.logger != nil {
+				store.logger.Warn("audit writer batch failed", "error_category", "writer_batch_failed",
+					"storage_error", ErrorClass(err), "write_count", len(batch))
+			}
+			for _, request := range batch {
+				store.rememberFailedWrite(request, request.sequence)
+			}
 		} else if wrote {
 			store.healthy.Store(true)
+		}
+		if err == nil {
+			for index, request := range batch {
+				if request.kind == writeFinishAudit {
+					if results[index] != nil && !errors.Is(results[index], sql.ErrNoRows) {
+						store.rememberFailedWrite(request, request.sequence)
+					} else if results[index] == nil {
+						store.forgetFinishedRecovery(request.data.(*AuditFinish).AuditID)
+					}
+				}
+			}
+		}
+		for _, request := range batch {
+			store.processedSequence = max(store.processedSequence, request.sequence)
 		}
 		for index, request := range batch {
 			if request.ack != nil {
@@ -218,6 +259,7 @@ func (store *Store) runWriter() {
 			}
 		}
 		if queueClosed {
+			store.recoverCaptureWrites()
 			return
 		}
 	}
@@ -303,7 +345,7 @@ func canIsolateWriteError(err error) bool {
 	}
 	var local localWriteError
 	var integrityFailure storedObjectIntegrityError
-	return errors.As(err, &local) || errors.As(err, &integrityFailure) || errors.Is(err, auditmodel.ErrReconstruction) ||
+	return errors.As(err, &local) || errors.As(err, &integrityFailure) || errors.Is(err, ErrRecoveryOverflow) || errors.Is(err, auditmodel.ErrReconstruction) ||
 		errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound)
 }
 
@@ -365,6 +407,9 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 	signer := store.integrity.Load()
 	switch request.kind {
 	case writeBeginAudit:
+		if store.recoveryOverflow.Load() {
+			return ErrRecoveryOverflow
+		}
 		return insertAudit(transaction, request.data.(AuditRecord))
 	case writeStartStage:
 		return insertStage(transaction, request.data.(HTTPStage))
@@ -377,6 +422,24 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 	case writeFinishStage:
 		return finishStage(transaction, request.data.(StageFinish))
 	case writeFinishAudit:
+		store.recoveryMu.Lock()
+		entry, pending := store.recoveries[request.data.(*AuditFinish).AuditID]
+		store.recoveryMu.Unlock()
+		if pending && !entry.marked {
+			// A failed recovery attempt and this batch use separate
+			// transactions. The later finish must not outrun its marker.
+			entry.finish = nil
+			if _, err := store.recoverCaptureEntry(transaction, request.data.(*AuditFinish).AuditID, entry); err != nil {
+				return err
+			}
+		}
+		if store.recoveryOverflow.Load() {
+			if _, err := transaction.Exec(`UPDATE audit_records
+SET capture_status='failed', error_code='capture_recovery_overflow'
+WHERE audit_id=? AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID); err != nil {
+				return err
+			}
+		}
 		return finishAudit(transaction, request.data.(*AuditFinish), signer)
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
@@ -550,9 +613,9 @@ INSERT INTO body_chunks (
 func finishStage(transaction *sql.Tx, finish StageFinish) error {
 	result, err := transaction.Exec(`
 UPDATE http_stages
-SET state = CASE WHEN error_code = 'capture_headers_failed' THEN 'partial' ELSE ? END,
+SET state = CASE WHEN error_code IN ('capture_headers_failed','capture_storage_failed') THEN 'partial' ELSE ? END,
     status_code = ?, content_length = ?, ended_at_ns = ?,
-    error_code = CASE WHEN error_code = 'capture_headers_failed' THEN error_code ELSE ? END
+    error_code = CASE WHEN error_code IN ('capture_headers_failed','capture_storage_failed') THEN error_code ELSE ? END
 WHERE audit_id = ? AND stage = ?`,
 		finish.State,
 		finish.StatusCode,
@@ -628,6 +691,15 @@ ON CONFLICT(audit_id, stage) DO UPDATE SET
 }
 
 func finishAudit(transaction *sql.Tx, finish *AuditFinish, signer *security.IntegritySigner) error {
+	// Recovery and a caller retry may meet after an uncertain Ack. A second
+	// finalization must not overwrite parsing/caller state or sign a new event.
+	var ended sql.NullInt64
+	if err := transaction.QueryRow("SELECT ended_at_ns FROM audit_records WHERE audit_id=?", finish.AuditID).Scan(&ended); err != nil {
+		return fmt.Errorf("sqlite writer: read finalization state: %w", err)
+	}
+	if ended.Valid {
+		return loadFinishedOutcome(transaction, finish)
+	}
 	var storedCaptureStatus string
 	var storedErrorCode sql.NullString
 	if err := transaction.QueryRow("SELECT capture_status, error_code FROM audit_records WHERE audit_id = ?", finish.AuditID).Scan(&storedCaptureStatus, &storedErrorCode); err != nil {
@@ -700,6 +772,24 @@ WHERE audit_id = ?`, finish.AuditID); err != nil {
 	if err := appendIntegrityEvent(transaction, signer, finish.AuditID, integrityCaptureFinalized, payloadDigest, finish.EndedAtNS); err != nil {
 		return err
 	}
+	return nil
+}
+
+func loadFinishedOutcome(transaction *sql.Tx, finish *AuditFinish) error {
+	var status, ttft sql.NullInt64
+	var blocked, blockCode, errorCode, requestID sql.NullString
+	err := transaction.QueryRow(`SELECT ended_at_ns, status_code, ttft_ns, forward_status,
+capture_status, parse_status, blocked_by, block_code, error_code, newapi_request_id
+FROM audit_records WHERE audit_id=?`, finish.AuditID).Scan(
+		&finish.EndedAtNS, &status, &ttft, &finish.ForwardStatus, &finish.CaptureStatus,
+		&finish.ParseStatus, &blocked, &blockCode, &errorCode, &requestID)
+	if err != nil {
+		return fmt.Errorf("sqlite writer: read committed outcome: %w", err)
+	}
+	finish.StatusCode = nullIntPointer(status)
+	finish.TTFTNS = nullInt64Pointer(ttft)
+	finish.BlockedBy, finish.BlockCode = nullStringPointer(blocked), nullStringPointer(blockCode)
+	finish.ErrorCode, finish.NewAPIRequestID = nullStringPointer(errorCode), nullStringPointer(requestID)
 	return nil
 }
 

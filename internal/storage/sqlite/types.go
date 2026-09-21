@@ -83,8 +83,9 @@ const (
 )
 
 var (
-	ErrClosed    = errors.New("sqlite store is closed")
-	ErrQueueFull = errors.New("sqlite writer queue is full")
+	ErrClosed           = errors.New("sqlite store is closed")
+	ErrQueueFull        = errors.New("sqlite writer queue is full")
+	ErrRecoveryOverflow = errors.New("sqlite capture recovery capacity exceeded; restart required")
 )
 
 var stableBlockCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)

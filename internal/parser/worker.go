@@ -25,6 +25,9 @@ type Worker struct {
 	parsers map[string]Parser
 	logger  *slog.Logger
 	queue   chan string
+	// Only the parser goroutine accesses this bounded recovery backlog.
+	// A failed release must be retried before the same audit can be claimed.
+	pendingReleases map[string]struct{}
 
 	scanInterval time.Duration
 	now          func() time.Time
@@ -58,13 +61,14 @@ func NewWorker(store Store, cipher security.Cipher, parsers []Parser, logger *sl
 		indexed[implementation.Name()] = implementation
 	}
 	return &Worker{
-		store:        store,
-		cipher:       cipher,
-		parsers:      indexed,
-		logger:       logger,
-		queue:        make(chan string, QueueCapacity),
-		scanInterval: defaultScanInterval,
-		now:          time.Now,
+		store:           store,
+		cipher:          cipher,
+		parsers:         indexed,
+		logger:          logger,
+		queue:           make(chan string, QueueCapacity),
+		pendingReleases: make(map[string]struct{}),
+		scanInterval:    defaultScanInterval,
+		now:             time.Now,
 	}, nil
 }
 
@@ -161,6 +165,7 @@ func (worker *Worker) run(ctx context.Context) {
 		case auditID := <-worker.queue:
 			worker.process(ctx, auditID)
 		case <-ticker.C:
+			worker.retryProcessingReleases(ctx)
 			worker.scan(ctx)
 		}
 	}
@@ -180,6 +185,11 @@ func (worker *Worker) scan(ctx context.Context) {
 }
 
 func (worker *Worker) process(ctx context.Context, auditID string) {
+	if _, waiting := worker.pendingReleases[auditID]; waiting || len(worker.pendingReleases) >= QueueCapacity {
+		// Pending rows remain discoverable after storage recovers. Do not
+		// claim more work than this worker can remember to release safely.
+		return
+	}
 	audit, err := worker.store.LoadParserAudit(ctx, auditID)
 	if err != nil {
 		worker.logger.Warn("parser audit load failed", "audit_id", auditID, "error_code", "audit_load_failed")
@@ -215,11 +225,29 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 			// recovery instead of spending the persistence-failure budget.
 			return
 		}
-		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed")
-		releaseContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if releaseErr := worker.store.ReleaseProcessingParse(releaseContext, audit.AuditID); releaseErr != nil {
-			worker.logger.Warn("parser retry release failed", "audit_id", audit.AuditID, "error_code", "parse_release_failed")
+		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", sqlite.ErrorClass(err))
+		worker.releaseProcessing(ctx, audit.AuditID)
+	}
+}
+
+func (worker *Worker) releaseProcessing(ctx context.Context, auditID string) bool {
+	releaseContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := worker.store.ReleaseProcessingParse(releaseContext, auditID); err != nil {
+		worker.pendingReleases[auditID] = struct{}{}
+		worker.logger.Warn("parser retry release failed", "audit_id", auditID, "error_code", "parse_release_failed", "storage_error", sqlite.ErrorClass(err))
+		return false
+	}
+	delete(worker.pendingReleases, auditID)
+	return true
+}
+
+func (worker *Worker) retryProcessingReleases(ctx context.Context) {
+	for auditID := range worker.pendingReleases {
+		if ctx.Err() != nil || !worker.releaseProcessing(ctx, auditID) {
+			// A storage outage should not cause a tight retry loop or spend
+			// five seconds on every outstanding audit during this scan.
+			return
 		}
 	}
 }
