@@ -568,7 +568,7 @@ func assembleAudit(ctx context.Context, configuration config.Config, logger *slo
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	store, err := sqlite.Open(ctx, configuration.DBPath)
+	store, err := sqlite.OpenWithLogger(ctx, configuration.DBPath, logger)
 	if err != nil {
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)

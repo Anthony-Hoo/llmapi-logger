@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ type Store struct {
 	readerDB *sql.DB
 	queue    chan writeRequest
 	done     chan struct{}
+	logger   *slog.Logger
 
 	submitMu  sync.RWMutex
 	closed    bool
@@ -37,6 +39,16 @@ type Store struct {
 	// which would erase a detected mismatch on the next audit write.
 	payloadState atomic.Int32
 
+	// Failed writes retain only bounded capture metadata, never ciphertext.
+	recoveryMu        sync.Mutex
+	recoveries        map[string]captureRecovery
+	recoveryPending   atomic.Int32
+	recoveryOverflow  atomic.Bool
+	recoveryWake      chan struct{}
+	submittedSequence uint64 // protected by submitMu
+	processedSequence uint64 // writer goroutine only
+	recoveryCursor    string // writer goroutine only; round-robin recovery
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -44,6 +56,11 @@ type Store struct {
 // Open creates the database parent directory, applies embedded migrations,
 // configures WAL durability, and starts the single writer goroutine.
 func Open(ctx context.Context, path string) (*Store, error) {
+	return OpenWithLogger(ctx, path, nil)
+}
+
+// OpenWithLogger also reports bounded recovery outcomes using stable codes.
+func OpenWithLogger(ctx context.Context, path string, logger *slog.Logger) (*Store, error) {
 	if ctx == nil {
 		return nil, errors.New("sqlite: nil context")
 	}
@@ -88,10 +105,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 
 	store := &Store{
-		writerDB: writerDB,
-		readerDB: readerDB,
-		queue:    make(chan writeRequest, writerQueueCapacity),
-		done:     make(chan struct{}),
+		writerDB:     writerDB,
+		readerDB:     readerDB,
+		queue:        make(chan writeRequest, writerQueueCapacity),
+		done:         make(chan struct{}),
+		recoveryWake: make(chan struct{}, 1),
+		logger:       logger,
 	}
 	store.healthy.Store(true)
 	go store.runWriter()
@@ -128,7 +147,7 @@ func (store *Store) Healthy() bool {
 	if store == nil {
 		return false
 	}
-	if store.payloadState.Load() == integrityPayloadsFailed {
+	if store.payloadState.Load() == integrityPayloadsFailed || store.recoveryOverflow.Load() || store.recoveryPending.Load() != 0 {
 		return false
 	}
 	store.submitMu.RLock()

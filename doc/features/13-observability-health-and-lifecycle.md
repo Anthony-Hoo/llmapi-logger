@@ -23,7 +23,9 @@ writer 检测到存量内容/二进制对象或引用的身份损坏时，即使
 
 日志调用不传入 `http.Request` 或原始 error 对象。禁止记录 Query、Header value、Body、解析全文、admin token、上游凭据、主密钥、密文 BLOB 或底层数据库错误文本。
 
-审计终结成功时，Session 使用 writer 在外层事务提交后回传的有效 capture status/error code 更新 TerminalSummary。被保存点隔离的异步采集失败因此在数据库和完成日志中都呈现为 `failed / capture_write_failed`；事务提交失败或 Ack 等待取消则沿用未确认终结的错误路径，不发布未提交的 writer 结果。整批存储级失败丢弃的异步采集操作没有 Ack，也无法在已回滚的事务里留下标记，属于[模块 04](04-sqlite-storage-and-migrations.md)记录的已知边界。
+审计终结成功时，Session 使用 writer 在外层事务提交后回传的有效 capture status/error code 更新 TerminalSummary。局部或整批故障造成的采集丢失都必须在终结前标记，不能在完成日志中误报 complete。终结提交失败或 Ack 等待取消仍记录当时的未确认结果；后续补偿只更新审计存储并写恢复摘要日志，不回写已输出的请求日志。恢复行为及边界见[模块 04](04-sqlite-storage-and-migrations.md)。
+
+writer 整批失败、审计 begin/finish、解析保存/release、保留清理和捕获恢复的失败日志增加固定白名单 `storage_error`：可区分 `sqlite_full`、`sqlite_busy`、`sqlite_read_only`、`sqlite_io_error`、`sqlite_corrupt`、`sqlite_constraint`、`object_integrity`、`queue_full`、`recovery_overflow` 等；无法分类时为 `unknown`，不输出底层错误文本。后台恢复成功只报告完成条目数，失败报告稳定类别及待恢复数量。
 
 可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。
 
@@ -66,6 +68,8 @@ health、ready、详情 JSON、错误 JSON 和 raw Body 响应统一使用 `Cach
 
 retention、gap flush 或单次用户目录刷新失败不改变 readiness；已配置 caller worker 无法启动时 readiness 降级。首版没有 `/metrics` 实现。
 
+Store 的采集恢复积压尚未清空时 database 不报告 ok；恢复溢出会锁定不健康状态直到重启恢复。正常恢复必须成功提交实际变更，回滚过的修改和只读幂等重试不能使既有写入故障变成 healthy。strict 准入继续要求本次 BeginAudit 同步提交；恢复溢出时明确拒绝新审计。
+
 ## 4. 启动恢复
 
 SQLite migration/open 成功后、parser 扫描 pending 记录前，应用调用一次恢复：
@@ -87,7 +91,7 @@ DB 暂时写失败后，后续 writer 事务成功时可以补写内存中的聚
 
 ## 6. 依赖故障与关闭
 
-首版不在进程内周期性重建 Store、cipher、query 或 parser。available 模式若启动时 DB/key 不可用，会继续透明转发并处于 degraded；修复文件或权限后需要重启。已经打开的 Store 遇到短暂写失败，可以在后续 writer 事务成功时恢复健康。
+首版不在进程内周期性重建 Store、cipher、query 或 parser。available 模式若启动时 DB/key 不可用，会继续透明转发并处于 degraded；修复文件或权限后需要重启。已经打开的 Store 遇到短暂写失败，会由同一 writer 有界补记采集故障和失败终态；成功提交并清空恢复积压后恢复健康，无新请求时也会重试。解析 worker 对失败 release 同样保留有界重试，避免记录永久卡在 processing。
 
 NewAPI 管理集成包含两个轻量后台任务：用户目录在监听前刷新一次，之后每五分钟刷新；caller worker 单 goroutine 扫描 SQLite pending 行，按 request ID 做有限重试。目录失败保留旧快照，pending 任务可跨重启恢复；两者都不重建数据面组件，也不改变已完成请求的结果。
 
