@@ -130,6 +130,8 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 
 失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`FinishAuditWithResult` 只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。
 
+恢复过程已标为 `capture_storage_failed` 的阶段也必须参与收尾，包括没有 Body 的阶段；其结束时间为空时使用父 audit 的已知结束时间补齐，已有结束时间保持不变，不能在阶段未终结时签署父记录。
+
 阶段终结在入队前失败时，Session 会以 partial 和稳定 `audit_finalize_failed` 终结；同样修复未结束的子记录，并保持日志与已提交父记录的状态及错误码一致。Body 开始写入在入队前被拒绝时，采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
 
 修复还会核对已经 complete 的 Body：如果采集器上报的 stored length/chunk count 与实际 owning chunks 不符，或分块序号/偏移存在缺口，同样修正存储聚合、降级 stage/body 为 partial、清除不能验证的完整 hash/EOF 标志。stage 保留采集器已记录的错误码，只在没有错误码时写 `capture_write_failed`。已封存的 SSE 时间线描述观察到的事件，与分块是否落盘无关，因此 Body 的 `stream_timeline_complete` 与时间线行保持原值；只有仍为 streaming、尚无时间线行的 Body 才置为 false。已观察长度保留；未落盘的分块无法恢复。缺失分块以 `capture_chunk_missing` 标记，分块原序号、偏移和密文不重写；raw 可导出按原序号拼接的已保存片段，但必须明确声明不完整及存在缺块。

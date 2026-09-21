@@ -834,7 +834,7 @@ WHERE audit_id = ? AND (
 UPDATE http_stages
 SET state = 'partial', ended_at_ns = COALESCE(ended_at_ns, ?),
     error_code = COALESCE(error_code, 'capture_write_failed')
-WHERE audit_id = ? AND (state = 'streaming' OR error_code = 'capture_headers_failed' OR EXISTS (
+WHERE audit_id = ? AND (state = 'streaming' OR error_code IN ('capture_headers_failed', 'capture_storage_failed') OR EXISTS (
     SELECT 1 FROM body_streams b WHERE b.audit_id = http_stages.audit_id AND b.stage = http_stages.stage
       AND b.state = 'partial' AND b.error_code IN ('capture_write_failed', 'capture_chunk_missing')
 ))`, endedAtNS, auditID); err != nil {

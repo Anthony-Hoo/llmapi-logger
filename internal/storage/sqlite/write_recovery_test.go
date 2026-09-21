@@ -108,6 +108,60 @@ func TestGlobalHeaderFailureCannotFinalizeComplete(t *testing.T) {
 	}
 }
 
+func TestRecoveredBodylessStageGetsTerminalTimestamp(t *testing.T) {
+	t.Parallel()
+	for _, deferredFinish := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred audit finish=%v", deferredFinish), func(t *testing.T) {
+			ctx := context.Background()
+			store, _ := openTestStore(t)
+			if err := store.EnableIntegrity(ctx, bytes.Repeat([]byte{0x69}, security.KeySize)); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.BeginAudit(ctx, testAudit("bodyless-recovery")); err != nil {
+				t.Fatal(err)
+			}
+			stage := HTTPStage{AuditID: "bodyless-recovery", Stage: StageResponseReceived, StartedAtNS: 2}
+			stage.defaults()
+			if err := store.submitSync(ctx, writeRequest{kind: writeStartStage, data: stage}); err != nil {
+				t.Fatal(err)
+			}
+			setWriterReadOnly(t, store, true)
+			stageFinish := StageFinish{AuditID: stage.AuditID, Stage: stage.Stage, State: StageStateComplete, EndedAtNS: 3}
+			if err := store.submitSync(ctx, writeRequest{kind: writeFinishStage, data: stageFinish}); ErrorClass(err) != "sqlite_read_only" {
+				t.Fatalf("stage finish error=%v", err)
+			}
+			finish := AuditFinish{AuditID: stage.AuditID, EndedAtNS: 4, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}
+			if deferredFinish {
+				if _, err := store.FinishAuditWithResult(ctx, finish); ErrorClass(err) != "sqlite_read_only" {
+					t.Fatalf("audit finish error=%v", err)
+				}
+			}
+			setWriterReadOnly(t, store, false)
+			store.recoveryWake <- struct{}{}
+			waitForCaptureRecovery(t, store)
+			if !deferredFinish {
+				if _, err := store.FinishAuditWithResult(ctx, finish); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshot, err := store.Snapshot(ctx, stage.AuditID)
+			if err != nil || len(snapshot.Stages) != 1 || len(snapshot.Bodies) != 0 {
+				t.Fatalf("bodyless snapshot=%+v err=%v", snapshot, err)
+			}
+			recovered := snapshot.Stages[0]
+			if recovered.State != StageStatePartial || recovered.EndedAtNS == nil || *recovered.EndedAtNS != finish.EndedAtNS || recovered.ErrorCode == nil || *recovered.ErrorCode != "capture_storage_failed" {
+				t.Fatalf("recovered stage lacks a terminal timestamp or lost its fault: %+v", recovered)
+			}
+			if snapshot.Audit.CaptureStatus != CaptureFailed || snapshot.Audit.EndedAtNS == nil {
+				t.Fatal("parent was not finalized as failed")
+			}
+			if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestQueueFullFinalizationWaitsForAcceptedStages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
