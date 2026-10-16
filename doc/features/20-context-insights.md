@@ -82,7 +82,8 @@ parser worker 已经持有解密后的请求/响应 Body，在同一次解析中
   2. 推断键：`HMAC(派生子密钥, protocol ‖ api_key_fpr ‖ system 指纹 ‖ 首条用户消息 item 指纹)`。同一 Agent 会话的请求共享系统提示词和首条用户消息，主 Agent 与子 Agent 的系统提示词通常不同，因此天然分开。
 
   会话 ID 为 `ses_<hex>`，键里总是带 `api_key_fpr`，不会跨 Key 合并。
-- 上一步（prev step）= 同会话、同 `api_key_fpr`（NULL 只匹配 NULL；会话 id 可能被多个 Key 共享）中时间早于本请求、item 指纹序列与本请求公共前缀最长的那一条，候选上限 32，与 `parentCandidateLimit` 一致。
+- 上一步（prev step）= 同会话、同 `api_key_fpr`（会话 id 可能被多个 Key 共享）中时间早于本请求、item 指纹序列与本请求公共前缀最长的那一条，候选上限 32，与 `parentCandidateLimit` 一致。
+- **无 Key 的审计互相隔离**：`api_key_fpr` 为 NULL（历史记录，或请求没带凭据）的审计不是同一个身份，NULL 不与 NULL 相等。这类审计没有 prev（不写 `prev_audit_id`、增删条目数和差异事件），也不从其他审计继承 root，父链接字段同样不继承（root 退回无存储可继承时的规则：父节点指纹，否则自身节点指纹）；NULL-key 的行也永远不会成为任何审计的 prev 候选或 root 来源。原因：开发者作用域在指纹为 NULL 时仍可能经 `newapi_token_id` 放行，如果把无 Key 审计按 NULL 合并，会把别人的差异、根和父子关系带进当前调用者可见的数据。内容匹配（§5.8 第三层）早已要求非 NULL Key，规则一致。
 
 已知限制：
 
@@ -201,6 +202,8 @@ CREATE INDEX audit_analysis_model_idx   ON audit_analysis(model, started_at_ns);
 ### 5.4 差异与事件
 
 `detail_enc` 保存本请求的 item 指纹序列（keyed HMAC）。计算 prev 时只解密 prev 一条记录的 `detail_enc`，成本有界。OpenAI 直接读 `turn_context_ops`，不需要解密。
+
+prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr` 为 NULL 的审计没有 prev，因此不产生下表任何差异事件，也不会成为别人的 prev。
 
 | 事件 | 判定 | 置信度 |
 | --- | --- | --- |

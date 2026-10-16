@@ -154,8 +154,8 @@ type LinkInput struct {
 //     SyntheticAgentFPR(analysis_session_id), so every agent is addressable
 //     by agent_node_fpr.
 //  4. prev_audit_id is the latest earlier main/subagent step of the session
-//     made with the same api key (a session id can be shared by keys);
-//     explicit and inferred sessions pick, among the last eight, the one with
+//     made with the same api key (a session id can be shared by keys; an audit
+//     without a key has no predecessor and inherits nothing); explicit and inferred sessions pick, among the last eight, the one with
 //     the longest common item prefix.
 //  5. A synthetic node without its own parent inherits a content link from
 //     its previous step; otherwise the first step of such a session may be
@@ -199,10 +199,18 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 		nodeFPR = SyntheticAgentFPR(linker.fp, sessionID)
 	}
 
+	// An audit without an api key fingerprint (historical, or sent without a
+	// credential) is not one identity with the other such audits: NULL keys are
+	// never compared as equal. It gets no predecessor and inherits no root,
+	// parent or link from other audits, because developer scope can still reach
+	// it by token id and would otherwise show another caller's diff or tree.
+	// Content matching already requires a key.
+	keyed := len(meta.APIKeyFPR) != 0
+
 	first := true
 	var prev *sqlite.AnalysisLinkCandidate
 	var prevDetail *Detail
-	if sessionID != "" {
+	if sessionID != "" && keyed {
 		earlier, err := linker.store.HasEarlierAnalysisStep(ctx, sessionID, meta.APIKeyFPR, meta.StartedAtNS, meta.AuditID)
 		if err != nil {
 			return sqlite.AnalysisRow{}, err
@@ -313,13 +321,15 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 			rootFPR = parentFPR
 		}
 	case parentFPR != nil:
-		stored, err := linker.store.LatestAgentRootFPR(ctx, parentFPR, meta.APIKeyFPR, meta.AuditID)
-		if err != nil {
-			return sqlite.AnalysisRow{}, err
-		}
 		rootFPR = parentFPR
-		if len(stored) != 0 {
-			rootFPR = stored
+		if keyed {
+			stored, err := linker.store.LatestAgentRootFPR(ctx, parentFPR, meta.APIKeyFPR, meta.AuditID)
+			if err != nil {
+				return sqlite.AnalysisRow{}, err
+			}
+			if len(stored) != 0 {
+				rootFPR = stored
+			}
 		}
 	default:
 		rootFPR = nodeFPR

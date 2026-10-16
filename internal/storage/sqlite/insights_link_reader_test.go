@@ -43,13 +43,14 @@ func TestLinkReaderSessionCandidatesSkipAuxiliarySteps(t *testing.T) {
 	role := func(value string) func(*AnalysisRow) {
 		return func(row *AnalysisRow) { row.AgentRole = &value }
 	}
-	saveLinkRow(t, store, "audit-a", 100, nil, role("main"))
-	saveLinkRow(t, store, "audit-b", 200, nil, role("compaction"))
-	saveLinkRow(t, store, "audit-c", 300, nil, role("subagent"))
-	saveLinkRow(t, store, "audit-d", 300, nil, role("main")) // same start: ordered after audit-c
+	key := bytes.Repeat([]byte{0xa1}, AnalysisFingerprintSize)
+	saveLinkRow(t, store, "audit-a", 100, key, role("main"))
+	saveLinkRow(t, store, "audit-b", 200, key, role("compaction"))
+	saveLinkRow(t, store, "audit-c", 300, key, role("subagent"))
+	saveLinkRow(t, store, "audit-d", 300, key, role("main")) // same start: ordered after audit-c
 	session := *testAnalysisRow("", 0).AnalysisSessionID
 
-	candidates, err := store.ListAnalysisPrevCandidates(ctx, session, nil, 300, "audit-d", 8)
+	candidates, err := store.ListAnalysisPrevCandidates(ctx, session, key, 300, "audit-d", 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,12 +60,12 @@ func TestLinkReaderSessionCandidatesSkipAuxiliarySteps(t *testing.T) {
 	if candidates[0].EstimateTotal != 920 || candidates[0].AnalysisVersion != 1 || len(candidates[0].DetailEnc) == 0 {
 		t.Fatalf("candidate fields = %+v", candidates[0])
 	}
-	earlier, err := store.HasEarlierAnalysisStep(ctx, session, nil, 100, "audit-a")
+	earlier, err := store.HasEarlierAnalysisStep(ctx, session, key, 100, "audit-a")
 	if err != nil || earlier {
 		t.Fatalf("HasEarlierAnalysisStep(first) = %v, %v", earlier, err)
 	}
 	// An auxiliary step still counts as an earlier step of the session.
-	earlier, err = store.HasEarlierAnalysisStep(ctx, session, nil, 250, "audit-z")
+	earlier, err = store.HasEarlierAnalysisStep(ctx, session, key, 250, "audit-z")
 	if err != nil || !earlier {
 		t.Fatalf("HasEarlierAnalysisStep(later) = %v, %v", earlier, err)
 	}
@@ -77,19 +78,20 @@ func TestLinkReaderLatestRootAndMeta(t *testing.T) {
 	node := bytes.Repeat([]byte{0x22}, AnalysisFingerprintSize)
 	rootOld := bytes.Repeat([]byte{0x41}, AnalysisFingerprintSize)
 	rootNew := bytes.Repeat([]byte{0x42}, AnalysisFingerprintSize)
-	saveLinkRow(t, store, "audit-old", 100, nil, func(row *AnalysisRow) { row.AgentRootFPR = rootOld })
-	saveLinkRow(t, store, "audit-new", 200, nil, func(row *AnalysisRow) { row.AgentRootFPR = rootNew })
+	key := bytes.Repeat([]byte{0xa1}, AnalysisFingerprintSize)
+	saveLinkRow(t, store, "audit-old", 100, key, func(row *AnalysisRow) { row.AgentRootFPR = rootOld })
+	saveLinkRow(t, store, "audit-new", 200, key, func(row *AnalysisRow) { row.AgentRootFPR = rootNew })
 
-	root, err := store.LatestAgentRootFPR(ctx, node, nil, "")
+	root, err := store.LatestAgentRootFPR(ctx, node, key, "")
 	if err != nil || !bytes.Equal(root, rootNew) {
 		t.Fatalf("LatestAgentRootFPR = %x, %v", root, err)
 	}
 	// A recomputed row never reads its own previous root.
-	root, err = store.LatestAgentRootFPR(ctx, node, nil, "audit-new")
+	root, err = store.LatestAgentRootFPR(ctx, node, key, "audit-new")
 	if err != nil || !bytes.Equal(root, rootOld) {
 		t.Fatalf("LatestAgentRootFPR excluding self = %x, %v", root, err)
 	}
-	root, err = store.LatestAgentRootFPR(ctx, bytes.Repeat([]byte{0x99}, AnalysisFingerprintSize), nil, "")
+	root, err = store.LatestAgentRootFPR(ctx, bytes.Repeat([]byte{0x99}, AnalysisFingerprintSize), key, "")
 	if err != nil || root != nil {
 		t.Fatalf("LatestAgentRootFPR unknown = %x, %v", root, err)
 	}
@@ -98,7 +100,7 @@ func TestLinkReaderLatestRootAndMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.StartedAtNS != 200 || meta.EndedAtNS == nil || *meta.EndedAtNS != 210 || meta.APIKeyFPR != nil ||
+	if meta.StartedAtNS != 200 || meta.EndedAtNS == nil || *meta.EndedAtNS != 210 || !bytes.Equal(meta.APIKeyFPR, key) ||
 		meta.FirstEventAtNS != nil || meta.ConversationID != nil {
 		t.Fatalf("meta = %+v", meta)
 	}
@@ -158,9 +160,16 @@ func TestLinkReaderPredecessorQueriesStayWithinOneAPIKey(t *testing.T) {
 	if err != nil || len(candidates) != 1 || candidates[0].AuditID != "audit-a" {
 		t.Fatalf("candidates for key A = %+v, %v", candidates, err)
 	}
+	// Audits without a key are not one identity: a NULL key has no candidates
+	// and a NULL-key row is never a candidate for anyone.
 	candidates, err = store.ListAnalysisPrevCandidates(ctx, session, nil, 1000, "audit-z", 8)
-	if err != nil || len(candidates) != 1 || candidates[0].AuditID != "audit-null" {
+	if err != nil || len(candidates) != 0 {
 		t.Fatalf("candidates for NULL key = %+v, %v", candidates, err)
+	}
+	saveLinkRow(t, store, "audit-null-2", 400, nil, setRoot(rootNull))
+	candidates, err = store.ListAnalysisPrevCandidates(ctx, session, keyA, 1000, "audit-z", 8)
+	if err != nil || len(candidates) != 1 || candidates[0].AuditID != "audit-a" {
+		t.Fatalf("a NULL-key row became a candidate of key A = %+v, %v", candidates, err)
 	}
 	unknown := bytes.Repeat([]byte{0xc3}, AnalysisFingerprintSize)
 	candidates, err = store.ListAnalysisPrevCandidates(ctx, session, unknown, 1000, "audit-z", 8)
@@ -171,6 +180,10 @@ func TestLinkReaderPredecessorQueriesStayWithinOneAPIKey(t *testing.T) {
 	earlier, err := store.HasEarlierAnalysisStep(ctx, session, unknown, 1000, "audit-z")
 	if err != nil || earlier {
 		t.Fatalf("another key's step counted as earlier = %v, %v", earlier, err)
+	}
+	earlier, err = store.HasEarlierAnalysisStep(ctx, session, nil, 1000, "audit-z")
+	if err != nil || earlier {
+		t.Fatalf("NULL key counted another NULL-key step as earlier = %v, %v", earlier, err)
 	}
 	earlier, err = store.HasEarlierAnalysisStep(ctx, session, keyB, 150, "audit-z")
 	if err != nil || earlier {
@@ -185,7 +198,7 @@ func TestLinkReaderPredecessorQueriesStayWithinOneAPIKey(t *testing.T) {
 		name string
 		key  []byte
 		want []byte
-	}{{"key A", keyA, rootA}, {"key B", keyB, rootB}, {"NULL key", nil, rootNull}, {"unknown key", unknown, nil}} {
+	}{{"key A", keyA, rootA}, {"key B", keyB, rootB}, {"NULL key", nil, nil}, {"unknown key", unknown, nil}} {
 		root, err := store.LatestAgentRootFPR(ctx, node, test.key, "")
 		if err != nil || !bytes.Equal(root, test.want) {
 			t.Fatalf("LatestAgentRootFPR(%s) = %x, %v", test.name, root, err)

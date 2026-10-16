@@ -206,6 +206,51 @@ func TestLinkNeverInheritsRootOfAnotherAPIKey(t *testing.T) {
 	}
 }
 
+func TestLinkNullKeyAuditsShareNoIdentity(t *testing.T) {
+	t.Parallel()
+	parentFPR := AgentFPR(testFingerprinter{}, "claude_code", "parent-id")
+	foreignRoot := testKey(0x77)
+	const session = "conv-null"
+	// The fake store compares NULL keys as equal, like the old query did; the
+	// linker itself must not consult it for a NULL-key audit.
+	store := &fakeLinkStore{rows: []fakeLinkRow{{
+		candidate: sqlite.AnalysisLinkCandidate{
+			AuditID: "audit-a", AnalysisVersion: AnalysisVersion, StartedAtNS: 100,
+			AgentNodeFPR: parentFPR, AgentRootFPR: foreignRoot,
+		},
+		session: session,
+		detail:  Detail{ItemFPRs: []string{"i1", "i2", "i3"}},
+	}}}
+	linker := newTestLinker(t, store, nil)
+	conversationID := session
+	prevRow, err := linker.Link(context.Background(), LinkInput{
+		Meta:     sqlite.AnalysisAuditMeta{AuditID: "audit-b", StartedAtNS: 200, ConversationID: &conversationID},
+		Protocol: "openai",
+		Analysis: Analysis{Detail: Detail{ItemFPRs: []string{"i1", "x2"}}},
+		Identity: AgentIdentity{Client: ClientUnknown, Role: RoleMain},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prevRow.PrevAuditID != nil || prevRow.AppendedItems != nil || prevRow.RemovedItems != nil || prevRow.EventFlags != 0 {
+		t.Fatalf("NULL-key audit inherited a predecessor: prev=%v appended=%v removed=%v flags=%d",
+			prevRow.PrevAuditID, prevRow.AppendedItems, prevRow.RemovedItems, prevRow.EventFlags)
+	}
+	childRow, err := linker.Link(context.Background(), LinkInput{
+		Meta:     sqlite.AnalysisAuditMeta{AuditID: "audit-child", StartedAtNS: 300},
+		Protocol: "anthropic",
+		Identity: AgentIdentity{
+			Client: "claude_code", Role: RoleSubagent, NodeID: "child-id", ParentID: "parent-id",
+			LinkSource: LinkHeader, Confidence: 100,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(childRow.AgentRootFPR, parentFPR) {
+		t.Fatalf("NULL-key audit inherited a stored root: %x", childRow.AgentRootFPR)
+	}
+}
 func TestLinkContentMatchesSubagentWithoutParentHeader(t *testing.T) {
 	t.Parallel()
 	key := testKey(0xa1)
