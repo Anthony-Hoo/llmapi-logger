@@ -92,6 +92,8 @@ parser worker 已经持有解密后的请求/响应 Body，在同一次解析中
 
 ## 4. 数据模型（提案，待并入 04）
 
+> 实现以 `internal/storage/sqlite/migrations/008_audit_analysis.sql` 为准（含 Agent 树列与 `agent_spawn_hints` 表），下文 SQL 为早期草图。
+
 迁移 `008_audit_analysis.sql`：
 
 ~~~sql
@@ -312,7 +314,7 @@ insights:
 
 ## 7. 管理 API（提案，待并入 10）
 
-全部走既有鉴权，响应 `Cache-Control: no-store`，时间范围上限 400 天。
+全部走既有鉴权，响应 `Cache-Control: no-store`，时间范围上限 400 天。JSON 结构以 `internal/insights/apitypes.go` 为唯一契约，前端 `src/types.ts` 与之镜像；另有 `GET /api/v1/insights/agent-trees/{tree_id}` 返回 `TreeResponse`（§5.8）。
 
 | 端点 | 返回 | 作用域 |
 | --- | --- | --- |
@@ -348,7 +350,51 @@ insights:
 | P2b | composition 端点与上下文浏览器、差异与事件、文件活动、工具来源标签、Treemap/DNA | 中 | 启发式事件误报；词表维护成本 |
 | P3 | 解码拆分计时 | 小-中 | 价值相对低，按需再做 |
 
-## 11. 验收
+## 11. 自定义 Agent 接入
+
+自研 Agent 框架只要在发往代理的**每一个** LLM 请求上带以下 Header，就能被精确归入 Agent 树，不需要任何内容推断。这组 Header 属于默认词表的 `custom` 客户端，优先级排在四家内置客户端的原生 Header 之后。
+
+| Header | 必填 | 取值 | 含义 |
+| --- | --- | --- | --- |
+| `X-Agent-Session-Id` | 推荐 | 不透明字符串，≤ 256 字节，建议 UUID | 整棵 Agent 树的根标识。主 Agent 和它派生的所有子 Agent、孙 Agent 都填**同一个值** |
+| `X-Agent-Id` | 是 | 同上 | 当前 Agent 自己的标识。同一 Agent 的所有请求保持不变，不同 Agent 必须不同 |
+| `X-Agent-Parent-Id` | 子 Agent 必填 | 同上 | 直接父 Agent 的 `X-Agent-Id`。主 Agent 不带此头 |
+| `X-Agent-Role` | 否 | `main` / `subagent` / `compaction` / `title` / `review` / `auxiliary` | 请求类别。缺省时：有 `X-Agent-Parent-Id` 的视为 `subagent`，否则视为 `main` |
+| `X-Agent-Name` | 否 | ≤ 64 字节的可读名，如 `researcher` | 只在详情页展示 |
+
+规则：
+
+- **缺 `X-Agent-Session-Id`** 时，根由父链上溯得到；父 Agent 的请求晚到或已过期时，这棵子树会暂时显示为独立树，补齐后自动合并。
+- **附属请求**（压缩、生成标题、总结）带发起它的那个 Agent 的 `X-Agent-Id`，并把 `X-Agent-Role` 设为对应类别。这样它们挂在该节点下，不会被当成子 Agent。
+- **透明转发**：代理不删除、不改写这些 Header，NewAPI 和上游会照常收到。上游若对未知 Header 敏感，请在 Nginx 之后、NewAPI 之前自行处理；代理本身不提供剥离功能。
+- **安全**：Header 值与其他 Header 一样逐个 AES-256-GCM 加密存储。明文列中只出现 keyed HMAC 指纹，指纹不可反查，所以填 UUID 或业务 ID 都可以。但不要放密钥、Token 或个人信息。
+- **`prompt_cache_key` 的副作用**：若同时把根会话 ID 写进 OpenAI 的 `prompt_cache_key`，现有 OpenAI 轮次图会把父子 Agent 串进同一个 conversation（§5.8“对现有轮次图的影响”）。建议每个 Agent 用自己的 `X-Agent-Id` 作 `prompt_cache_key`，或者干脆不填。
+- **识别优先级**：内置客户端的原生 Header → 本节通用 Header → Body 回链 → 内容推断。框架若本身就是 Codex/Claude Code 等客户端的封装，无需重复设置。
+
+示例：主 Agent 派生一个子 Agent，子 Agent 再触发一次压缩。
+
+~~~http
+POST /v1/chat/completions            # 主 Agent
+X-Agent-Session-Id: 7d0c…-root
+X-Agent-Id: 7d0c…-root
+X-Agent-Name: planner
+
+POST /v1/chat/completions            # 子 Agent
+X-Agent-Session-Id: 7d0c…-root
+X-Agent-Id: 51a9…-child
+X-Agent-Parent-Id: 7d0c…-root
+X-Agent-Name: researcher
+
+POST /v1/chat/completions            # 子 Agent 的压缩请求
+X-Agent-Session-Id: 7d0c…-root
+X-Agent-Id: 51a9…-child
+X-Agent-Parent-Id: 7d0c…-root
+X-Agent-Role: compaction
+~~~
+
+Header 名称可以在词表覆盖文件中改成你框架已有的名字（`configs/insights-vocabulary.example.yaml`），不必修改框架。
+
+## 12. 验收
 
 - 三协议流式/非流式样本的四个用量桶与 §5.1 表一致；Anthropic 缓存场景的 prompt_total 等于三桶之和。
 - 锚定后各类别之和等于上游 prompt_total（舍入误差 ≤ 类别数）。
