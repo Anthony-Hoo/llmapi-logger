@@ -1,64 +1,169 @@
 @import "tailwindcss";
 
 /*
- * CSS-first Tailwind v4 config. shadcn-style tokens stay as bare HSL channel
- * triplets on :root (unchanged from v3) and are wrapped in hsl() here, so
- * `bg-primary/90` style opacity modifiers keep working.
+ * Design tokens (CSS-first Tailwind v4). doc/design/tokens.md is the spec for
+ * every value below; change both together.
+ *
+ * Colors are plain hex so Tailwind opacity modifiers (bg-primary/10) work via
+ * color-mix(). The chart code references the same variables by name
+ * (src/lib/tokens.ts), so this file is the single source of truth for color.
  */
 @theme {
-  --color-border: hsl(var(--border));
-  --color-input: hsl(var(--input));
-  --color-ring: hsl(var(--ring));
-  --color-background: hsl(var(--background));
-  --color-foreground: hsl(var(--foreground));
-  --color-primary: hsl(var(--primary));
-  --color-primary-foreground: hsl(var(--primary-foreground));
-  --color-secondary: hsl(var(--secondary));
-  --color-secondary-foreground: hsl(var(--secondary-foreground));
-  --color-muted: hsl(var(--muted));
-  --color-muted-foreground: hsl(var(--muted-foreground));
-  --color-accent: hsl(var(--accent));
-  --color-accent-foreground: hsl(var(--accent-foreground));
-  --color-destructive: hsl(var(--destructive));
-  --color-destructive-foreground: hsl(var(--destructive-foreground));
-  --color-card: hsl(var(--card));
-  --color-card-foreground: hsl(var(--card-foreground));
+  /* ---- Primary: calm steel blue (brand logo #3b6e9e -> #2c5378, deep #1d3b57) ---- */
+  --color-primary-50: #f0f5fa;
+  --color-primary-100: #e3edf6;
+  --color-primary-200: #c3d5e8;
+  --color-primary-300: #98b7d6;
+  --color-primary-400: #6893bf;
+  --color-primary-500: #4a7aab;
+  --color-primary-600: #3b6e9e;
+  --color-primary-700: #2c5378;
+  --color-primary-800: #1d3b57;
+  --color-primary-900: #13283c;
+  --color-primary: var(--color-primary-600);
+  --color-primary-hover: var(--color-primary-700);
+  --color-primary-foreground: #ffffff;
 
+  /* ---- Neutral (slate) ---- */
+  --color-neutral-50: #f8fafc;
+  --color-neutral-100: #f1f5f9;
+  --color-neutral-200: #e2e8f0;
+  --color-neutral-300: #cbd5e1;
+  --color-neutral-400: #94a3b8;
+  --color-neutral-500: #64748b;
+  --color-neutral-600: #475569;
+  --color-neutral-700: #334155;
+  --color-neutral-800: #1e293b;
+  --color-neutral-900: #0f172a;
+  --color-neutral-950: #0b1420;
+  --color-white: #ffffff;
+
+  /* ---- Semantic surfaces, lines and text ---- */
+  --color-background: #f4f6f9;
+  --color-surface: #ffffff;
+  --color-surface-muted: var(--color-neutral-50);
+  --color-surface-sunken: var(--color-neutral-100);
+  --color-border: var(--color-neutral-200);
+  --color-border-strong: var(--color-neutral-300);
+  --color-foreground: var(--color-neutral-800);
+  --color-muted: var(--color-neutral-600);
+  --color-subtle: #5d6c80;
+  --color-ring: var(--color-primary-500);
+  --color-code: #172331;
+  --color-code-foreground: var(--color-neutral-200);
+  --color-scrim: var(--color-neutral-950);
+
+  /* ---- Status (muted, low saturation): solid / bg / border / fg ---- */
+  --color-success: #2f7d57;
+  --color-success-bg: #edf6f1;
+  --color-success-border: #c3e0cf;
+  --color-success-fg: #1f5e40;
+  --color-warning: #b07514;
+  --color-warning-bg: #fbf5e8;
+  --color-warning-border: #ecd6a8;
+  --color-warning-fg: #7a4f0c;
+  --color-danger: #b23b3b;
+  --color-danger-hover: #9a3030;
+  --color-danger-bg: #fbeeee;
+  --color-danger-border: #efc8c8;
+  --color-danger-fg: #8f2b2b;
+  --color-info: var(--color-primary-600);
+  --color-info-bg: var(--color-primary-50);
+  --color-info-border: var(--color-primary-200);
+  --color-info-fg: var(--color-primary-700);
+
+  /* ---- Insights composition categories (validated: lightness band, chroma,
+         adjacent CVD >= 8, normal-vision >= 15, >= 3:1 on white) ---- */
+  --color-cat-system: #2f6aa3;
+  --color-cat-tools: #d0743c;
+  --color-cat-user: #2a9c78;
+  --color-cat-injected: #b8861f;
+  --color-cat-assistant: #7466c0;
+  --color-cat-reasoning: #c7608c;
+  --color-cat-tool-result: #5f9a3a;
+  --color-cat-media: #a0522d;
+  --color-cat-unknown: var(--color-neutral-400);
+
+  /* ---- Chart chrome ---- */
+  --color-chart-grid: var(--color-neutral-200);
+  --color-chart-axis: var(--color-subtle);
+  --color-chart-cursor: rgb(148 163 184 / 0.16);
+  --color-chart-track: var(--color-neutral-200);
+
+  /* ---- Legacy shadcn aliases: removed once every component uses the tokens above ---- */
+  --color-input: var(--color-border-strong);
+  --color-card: var(--color-surface);
+  --color-card-foreground: var(--color-foreground);
+  --color-secondary: var(--color-surface-sunken);
+  --color-secondary-foreground: var(--color-foreground);
+  --color-accent: var(--color-surface-sunken);
+  --color-accent-foreground: var(--color-foreground);
+  --color-muted-foreground: var(--color-muted);
+  --color-destructive: var(--color-danger);
+  --color-destructive-foreground: #ffffff;
+
+  /* ---- Typography: 7-step scale with paired line heights + mono code ---- */
   /* Tailwind 4.3 changed the default sans stack to -apple-system first; keep the v3 stack. */
   --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --text-caption: 0.6875rem;
+  --text-caption--line-height: 1rem;
+  --text-label: 0.75rem;
+  --text-label--line-height: 1rem;
+  --text-body-sm: 0.8125rem;
+  --text-body-sm--line-height: 1.25rem;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.25rem;
+  --text-title: 1rem;
+  --text-title--line-height: 1.5rem;
+  --text-heading: 1.25rem;
+  --text-heading--line-height: 1.75rem;
+  --text-display: 1.5rem;
+  --text-display--line-height: 2rem;
+  --text-code: 0.75rem;
+  --text-code--line-height: 1.25rem;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
 
-  /* Same values the v3 config produced for rounded-lg/md/sm (sm stays 8px). */
-  --radius-lg: var(--radius);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-sm: calc(var(--radius) - 4px);
+  /* ---- Spacing (4px base; Tailwind's numeric scale stays) + semantic steps ---- */
+  --spacing-gutter: 1rem; /* page side padding: 16 / 24 (sm) / 32 (lg) */
+  --spacing-section: 1rem; /* gap between page sections, cards and card grids */
+  --spacing-card: 1rem; /* card padding */
+  --spacing-stack: 0.75rem; /* gap between blocks inside a card */
+  --spacing-header: 3.5rem; /* app header height */
 
-  --shadow-soft: 0 18px 50px -24px rgb(15 23 42 / 0.28);
+  /* ---- Layout ---- */
+  --container-page: 1920px;
+
+  /* ---- Radius ---- */
+  --radius-xs: 2px; /* swatches, data marks, inline code */
+  --radius-sm: 6px; /* badges, chips, small inset blocks */
+  --radius-md: 8px; /* controls, inset panels, code blocks, popovers */
+  --radius-lg: 12px; /* cards */
+  --radius-xl: 0.75rem; /* BrandMark only (logo kept unchanged) */
+
+  /* ---- Shadows ---- */
+  --shadow-xs: 0 1px 2px 0 rgb(15 23 42 / 0.05);
+  --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.06);
+  --shadow-overlay: 0 2px 6px 0 rgb(15 23 42 / 0.08), 0 10px 24px -6px rgb(15 23 42 / 0.18);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1); /* BrandMark only */
 }
 
 @layer base {
-  :root {
-    --background: 210 40% 98%;
-    --foreground: 222.2 47.4% 11.2%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 47.4% 11.2%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 214.3 31.8% 91.4%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 72.2% 50.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 88%;
-    --input: 214.3 31.8% 88%;
-    --ring: 221.2 83.2% 53.3%;
-    --radius: 0.75rem;
+  @media (width >= 40rem) {
+    :root {
+      --spacing-gutter: 1.5rem;
+    }
   }
 
-  /* v4 defaults borders to currentColor; keep the v3 themed border color. */
+  @media (width >= 64rem) {
+    :root {
+      --spacing-gutter: 2rem;
+    }
+  }
+
+  /* v4 defaults borders to currentColor; keep a themed default border color. */
   *,
   ::after,
   ::before,
@@ -73,17 +178,13 @@
     cursor: pointer;
   }
 
-  /* v4 placeholder defaults to currentColor at 50%; v3 used gray-400. */
   input::placeholder,
   textarea::placeholder {
-    color: var(--color-gray-400);
+    color: var(--color-subtle);
   }
 
   body {
-    @apply min-h-screen bg-background text-foreground antialiased;
-    background-image:
-      radial-gradient(circle at 10% 0%, rgb(219 234 254 / 0.72), transparent 32rem),
-      linear-gradient(to bottom, rgb(248 250 252), rgb(241 245 249));
+    @apply min-h-screen bg-background font-sans text-body text-foreground antialiased;
   }
 
   button,
