@@ -76,7 +76,7 @@ parser worker 已经持有解密后的请求/响应 Body，在同一次解析中
 “分析会话”是趋势与会话卡片的分组单位，记为 `analysis_session_id`，粒度是**单个 Agent**（主 Agent 与每个子 Agent 各一个会话，父子关系见 §5.8）。三协议统一按以下顺序取第一个可用的键：
 
 1. **客户端显式 Agent 标识**（§5.8 表中的节点 ID，例如 Codex `thread-id`、Claude Code `x-claude-code-agent-id`/会话 ID、OpenCode `x-opencode-session-id`、dsh `x-deepseek-harness-session-id`）。
-2. **OpenAI 既有 `turns.conversation_id`**：仅在没有显式标识时使用。注意它的会话键优先取 `prompt_cache_key`，而 Codex 与新版 OpenCode 把根会话 ID 填进这个字段，所以父子 Agent 会落进同一个 conversation（见 §5.8“对现有轮次图的影响”）。
+2. **OpenAI 既有 `turns.conversation_id`**：仅在没有显式标识时使用。Codex 与新版 OpenCode 把根会话 ID 填进 `prompt_cache_key`，父子 Agent 会落进同一个 conversation（每个 Agent 一条链，见 §5.8“与 OpenAI 轮次图的关系”），所以有显式 Agent 标识时优先使用第 1 条。
 3. **Anthropic / Gemini 的轻量拼接**：不移植完整对象图。依次取：
   1. 通用 `metadata.{session_id, conversation_id, thread_id}`；Claude Code 新版的 `metadata.user_id` 是 JSON，其中有 `session_id`。
   2. 推断键：`HMAC(派生子密钥, protocol ‖ api_key_fpr ‖ system 指纹 ‖ 首条用户消息 item 指纹)`。同一 Agent 会话的请求共享系统提示词和首条用户消息，主 Agent 与子 Agent 的系统提示词通常不同，因此天然分开。
@@ -297,12 +297,13 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 - 布局参考 dsh-context `agentTree.ts`：整洁树、单树最多 40 个节点、按血缘着色。点击节点进入该 Agent 的趋势页。
 - 会话卡片按根聚合，显示“含 N 个子 Agent”。
 
-**对现有轮次图的影响**：`conversationKey`（`internal/parser/openai/auditmodel.go:360`）在 `conversation_id` 之后优先取 `prompt_cache_key`；而 `chooseTurnParent`（`graph_writer.go:443-451`）命中会话键后，会强制挂到该会话**最新**的一轮，不比较内容。Codex 的父子 Agent 共享 `prompt_cache_key`（都是根会话 ID），OpenCode v2.0.10 以后在 Responses 协议上也是这样。结果是并发运行的父子 Agent 被串进同一条轮次链，彼此交错成父子关系：
+**与 OpenAI 轮次图的关系**：Codex 的父子 Agent 共享 `prompt_cache_key`（都是根会话 ID），OpenCode v2.0.10 以后在 Responses 协议上也是这样，因此它们落在同一个 keyed conversation 中。轮次图（[18](18-content-addressed-conversation-storage.md)）命中这类只用于分组的 key 后，不再强制挂到最新一轮，而是在该 conversation 最近 32 轮中按内容关系选父轮次；都不匹配时作为同一 conversation 的新根，所以一个 keyed conversation 可以有每个 Agent 一条链。上游托管会话（顶层 `conversation_id`/`conversation`）仍按 key 挂最新一轮。
 
-- 重建仍然正确，因为 delta 能表示任意编辑。
-- 但 `link_reason=conversation_key` 的血缘是错的，delta 体积也会膨胀，`conversation_turns` 计数偏大。
+剩余影响：
 
-修正方向（独立于本模块，建议单独做）：会话键命中后仍要比较内容；或者识别到显式 Agent 节点 ID 时，把它作为会话键的一部分。
+- `conversation_turns` 按整个客户端会话计数，包含子 Agent 的轮次；按 Agent 区分以本模块的 `analysis_session_id`（`agt_…`）为准。
+- 子 Agent 首个请求若与父 Agent 早期请求共享 ≥70% 前缀，会在轮次图里表现为分叉；本模块的 Agent 树按 Header 识别，不受影响。
+- 修正前写入的旧轮次保留原有血缘，重建与完整性校验不受影响。
 
 ## 6. 配置（已并入 [01](01-configuration-and-route-boundary.md) §2、§4）
 
@@ -378,7 +379,7 @@ insights:
 - **附属请求**（压缩、生成标题、总结）带发起它的那个 Agent 的 `X-Agent-Id`，并把 `X-Agent-Role` 设为对应类别。这样它们挂在该节点下，不会被当成子 Agent。
 - **透明转发**：代理不删除、不改写这些 Header，NewAPI 和上游会照常收到。上游若对未知 Header 敏感，请在 Nginx 之后、NewAPI 之前自行处理；代理本身不提供剥离功能。
 - **安全**：Header 值与其他 Header 一样逐个 AES-256-GCM 加密存储。明文列中只出现 keyed HMAC 指纹，指纹不可反查，所以填 UUID 或业务 ID 都可以。但不要放密钥、Token 或个人信息。
-- **`prompt_cache_key` 的副作用**：若同时把根会话 ID 写进 OpenAI 的 `prompt_cache_key`，现有 OpenAI 轮次图会把父子 Agent 串进同一个 conversation（§5.8“对现有轮次图的影响”）。建议每个 Agent 用自己的 `X-Agent-Id` 作 `prompt_cache_key`，或者干脆不填。
+- **`prompt_cache_key` 的影响**：若把根会话 ID 写进 OpenAI 的 `prompt_cache_key`，OpenAI 轮次图会把父子 Agent 归入同一个 conversation（按内容各成一条链，见 §5.8“与 OpenAI 轮次图的关系”），`conversation_turns` 计数也会包含子 Agent。Agent 树与洞察统计按本节 Header 区分，不受影响。
 - **识别优先级**：内置客户端的原生 Header → 本节通用 Header → Body 回链 → 内容推断。框架若本身就是 Codex/Claude Code 等客户端的封装，无需重复设置。
 
 示例：主 Agent 派生一个子 Agent，子 Agent 再触发一次压缩。

@@ -74,7 +74,7 @@ insights:
 - **附属请求**（压缩、生成标题、总结）带发起它的那个 Agent 的 `X-Agent-Id`，并把 `X-Agent-Role` 设为对应类别。它们挂在该节点下，不被当成子 Agent，也不开启新 turn。
 - 代理不删除、不改写这些 Header。上游若对未知 Header 敏感，请在 Nginx 之后、NewAPI 之前自行处理。
 - 不要在 ID 里放密钥、Token 或个人信息；UUID 或业务 ID 都可以。
-- **`prompt_cache_key` 的副作用**：若同时把根会话 ID 写进 OpenAI 的 `prompt_cache_key`，OpenAI 轮次图会按它把父子 Agent 串进同一个 conversation，导致血缘和 delta 体积失真（重建仍然正确）。建议每个 Agent 用自己的 `X-Agent-Id` 作 `prompt_cache_key`，或者不填。
+- **`prompt_cache_key` 的影响**：若把根会话 ID 写进 OpenAI 的 `prompt_cache_key`，OpenAI 轮次图会把父子 Agent 归入同一个 conversation，按内容各成一条链，`conversation_turns` 计数包含子 Agent。Agent 树与洞察统计按上面的 Header 区分，不受影响。
 
 没有客户端 Agent ID 的普通会话不算 Agent 树：只有同一根下出现 ≥ 2 个不同 Agent，或存在 Header/Body/内容连边时才会显示为树。
 
