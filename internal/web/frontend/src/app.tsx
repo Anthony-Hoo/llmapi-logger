@@ -71,6 +71,7 @@ import type {
   ReconstructedBodyDownload,
   SessionInfo,
   StreamTimeline,
+  TokenLink,
   UserAgentRule,
   UserAgentRuleInput,
 } from "./types";
@@ -1586,7 +1587,7 @@ export function AuditDetailBody({
             ["解析", <StatusBadge value={audit.parse_status} />],
             ["NewAPI Request ID", audit.newapi_request_id ?? "—"],
             ["身份关联", callerStatusLabel(audit.caller_status)],
-            ...billingItems(audit),
+            ...billingItems(detail.token_link),
           ]}
         />
       </Section>
@@ -2228,9 +2229,9 @@ function callerSummary(audit: AuditSummary): string {
 	.join(" · ");
 }
 
-function billingItems(audit: AuditSummary): Array<[string, ReactNode]> {
-  const state = audit.billing_state;
-  if (!state) {
+function billingItems(link: TokenLink | null | undefined): Array<[string, ReactNode]> {
+  const state = link?.billing_state;
+  if (!link || !state) {
     return [];
   }
   if (state === "unbilled") {
@@ -2241,10 +2242,10 @@ function billingItems(audit: AuditSummary): Array<[string, ReactNode]> {
   }
   const count = (value: number | null | undefined) => (value === null || value === undefined ? "—" : value.toLocaleString("zh-CN"));
   return [
-    ["实际计费", formatUSD(audit.cost_usd)],
-    ["NewAPI quota", count(audit.newapi_quota)],
-    ["计费 prompt Token", count(audit.billed_prompt_tokens)],
-    ["计费输出 Token", count(audit.billed_completion_tokens)],
+    ["实际计费", formatUSD(link.cost_usd)],
+    ["NewAPI quota", count(link.newapi_quota)],
+    ["计费 prompt Token", count(link.billed_prompt_tokens)],
+    ["计费输出 Token", count(link.billed_completion_tokens)],
   ];
 }
 

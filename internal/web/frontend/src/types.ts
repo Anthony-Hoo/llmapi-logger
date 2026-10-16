@@ -56,12 +56,6 @@ export interface AuditSummary {
   user_agent?: string | null;
   conversation_id?: string | null;
   conversation_turns?: number | string | null;
-  /** null when the audit has no NewAPI link. */
-  billing_state?: BillingState | null;
-  newapi_quota?: number | null;
-  cost_usd?: number | null;
-  billed_prompt_tokens?: number | null;
-  billed_completion_tokens?: number | null;
 }
 
 export interface AuditListPage {
@@ -178,6 +172,12 @@ export interface TokenLink {
   newapi_token_id?: number | string | null;
   token_name?: string | null;
   linked_at_ns?: NanoTime | null;
+  billing_state?: BillingState;
+  /** The numbers are non-null only when billing_state is "billed". */
+  newapi_quota?: number | null;
+  cost_usd?: number | null;
+  billed_prompt_tokens?: number | null;
+  billed_completion_tokens?: number | null;
 }
 
 export interface AuditTurn {

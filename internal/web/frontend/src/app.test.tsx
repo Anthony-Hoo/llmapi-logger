@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { AuditDetail, AuditSummary, NewAPIUser, SessionInfo } from "./types";
+import type { AuditDetail, AuditSummary, NewAPIUser, SessionInfo, TokenLink } from "./types";
 import type { ApiClient } from "./api";
 import {
   AuditDetailBody,
@@ -137,8 +137,8 @@ describe("audit detail layout", () => {
 });
 
 describe("audit detail billing", () => {
-  function withBilling(extra: Partial<AuditDetail["audit"]>): AuditDetail {
-    return { ...detail, audit: { ...detail.audit, ...extra } };
+  function withBilling(extra: Partial<TokenLink> | null): AuditDetail {
+    return { ...detail, token_link: extra === null ? null : { newapi_user_id: 7, username: "alice", token_name: "laptop", ...extra } };
   }
 
   it("shows the actual cost, quota and billed tokens for a billed request", () => {
@@ -161,7 +161,7 @@ describe("audit detail billing", () => {
   it("explains unbilled and unchecked states and hides billing without a NewAPI link", () => {
     expect(renderDetailBody(withBilling({ billing_state: "unbilled" }))).toContain("无消费记录");
     expect(renderDetailBody(withBilling({ billing_state: "unchecked" }))).toContain("待补查");
-    const none = renderDetailBody(withBilling({ billing_state: null }));
+    const none = renderDetailBody(withBilling(null));
     expect(none).not.toContain("NewAPI 计费");
     expect(none).not.toContain("实际计费");
   });
