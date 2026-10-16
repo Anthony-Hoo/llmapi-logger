@@ -69,10 +69,10 @@ SELECT COUNT(DISTINCT conversation_id), SUM(parent_turn_id IS NULL) FROM turns`)
 	}
 }
 
-// TestConversationKeyNeverMovesATurnIntoAnotherConversation keeps the old
-// guarantee that a keyed turn stays in its keyed conversation: when none of
-// that conversation's turns matches, it becomes a new root there instead of
-// joining an unrelated conversation through the protocol-wide content search.
+// TestConversationKeyNeverMovesATurnIntoAnotherConversation keeps a keyed turn
+// in its keyed conversation: when none of that conversation's turns matches,
+// or the key has no turns yet, it becomes a new root there instead of joining
+// an unrelated conversation through the protocol-wide content search.
 func TestConversationKeyNeverMovesATurnIntoAnotherConversation(t *testing.T) {
 	t.Parallel()
 	store, _ := openTestStore(t)
@@ -98,6 +98,27 @@ func TestConversationKeyNeverMovesATurnIntoAnotherConversation(t *testing.T) {
 	}
 	if movedConversation != ownConversation || movedConversation == otherConversation {
 		t.Fatalf("keyed turn conversation = %q, own = %q, other = %q", movedConversation, ownConversation, otherConversation)
+	}
+
+	// The first turn of a new key must not be adopted by another session
+	// either; that would drop the key and orphan every later turn using it.
+	first := saveKeyedGraphTestTurn(t, store, cipher, "new-key-first", "prompt_cache_key\x00new-session", 400,
+		[]graphTestItem{developer, question, answer, question}, []graphTestItem{answer})
+	assertStoredTurn(t, store, first, nil, "root")
+	next := saveKeyedGraphTestTurn(t, store, cipher, "new-key-next", "prompt_cache_key\x00new-session", 500,
+		[]graphTestItem{developer, question, answer, question, answer, question}, []graphTestItem{answer})
+	assertStoredTurn(t, store, next, graphStringPointer("new-key-first"), "conversation_key")
+	var firstConversation string
+	var keyHash []byte
+	if err := store.readerDB.QueryRow(`
+SELECT c.conversation_id, c.key_hash FROM turns AS t
+JOIN conversations AS c ON c.conversation_id = t.conversation_id
+WHERE t.turn_id = 'new-key-first'`).Scan(&firstConversation, &keyHash); err != nil {
+		t.Fatal(err)
+	}
+	if firstConversation == otherConversation || firstConversation == ownConversation ||
+		!auditmodel.EqualHash(keyHash, first.ConversationKeyHash) {
+		t.Fatalf("new key's first turn joined conversation %q (key recorded: %v)", firstConversation, auditmodel.EqualHash(keyHash, first.ConversationKeyHash))
 	}
 }
 

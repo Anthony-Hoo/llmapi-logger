@@ -456,21 +456,11 @@ LIMIT ?`, turn.Protocol, turn.ConversationKeyHash, turn.CreatedAtNS, parentCandi
 		// OpenCode send the root session id as prompt_cache_key for the parent
 		// and every sub-agent, so the latest keyed turn may belong to a
 		// concurrent sibling. Rank the session's recent turns by content
-		// instead. When none qualifies the turn starts a new root inside the
-		// same keyed conversation rather than borrowing another session's
-		// conversation through the protocol-wide search below.
-		if len(candidates) > 0 {
-			return bestTurnParent(transaction, turn, candidates, linkConversationKey)
-		}
-		var keyed int
-		if err := transaction.QueryRow(`
-SELECT EXISTS(SELECT 1 FROM conversations WHERE protocol = ? AND key_hash = ?)`,
-			turn.Protocol, turn.ConversationKeyHash).Scan(&keyed); err != nil {
-			return nil, fmt.Errorf("sqlite writer: find keyed conversation: %w", err)
-		}
-		if keyed != 0 {
-			return nil, nil
-		}
+		// instead. When none qualifies, including the key's first turn, the
+		// turn starts a new root in its own keyed conversation: the
+		// protocol-wide search below would attach it to another session and
+		// drop the key, so later turns with this key could not find it.
+		return bestTurnParent(transaction, turn, candidates, linkConversationKey)
 	}
 
 	candidates, err := listTurnCandidates(transaction, `

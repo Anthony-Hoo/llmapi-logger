@@ -100,7 +100,7 @@ conversation key 只确定“属于哪个客户端会话”，不确定“接在
 
 - 候选是该 keyed conversation 中早于本轮的最近 32 轮（`parentCandidateLimit`），不只是最新一轮。
 - 每个候选都要通过与无 key 推断相同的强内容关系判定（retry、continuation 或 ≥70% 公共前缀的 context edit），在通过者中选 delta 代价最小的，代价相同取较新的。链接原因记为 `conversation_key`，置信度 95；retry/branch 的判定照旧覆盖原因。
-- 都不通过时，本轮成为同一 keyed conversation 中的新根，例如子 Agent 的首个请求，或一次把历史大幅改写的压缩。它不会再走全协议范围的内容搜索，因此不会被挪进别的会话。
+- 都不通过时，本轮成为同一 keyed conversation 中的新根，例如子 Agent 的首个请求，或一次把历史大幅改写的压缩。该 key 的首轮也一样：没有候选就新建以该 key 命名的 conversation 并作为根。带 key 的轮次从不走全协议范围的内容搜索，否则可能被挂进别的会话并丢掉 key，后续同 key 的轮次就找不到它了。
 - 所以一个 keyed conversation 可以有多个根，每个 Agent 一条链。conversation 计数仍按整个客户端会话统计，即主 Agent 加子 Agent。`conversations` 上 `(protocol, key_hash)` 的唯一索引决定了同一 key 只能对应一个 conversation。
 
 内容判定仍无法区分“子 Agent 的首个请求”与“对父 Agent 早期请求的编辑”。若两者共享的前缀足够长（≥70%），子 Agent 首轮会作为 branch 挂在父 Agent 的那一轮下面。重建不受影响，只是血缘表现为分叉。要彻底按 Agent 分链，需要把显式 Agent 节点 ID（如 Codex 的 `thread-id` Header）引入 conversation key。但 normalizer 目前只拿得到 Body，这一项留作后续。
