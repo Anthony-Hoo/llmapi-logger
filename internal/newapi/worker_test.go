@@ -103,7 +103,7 @@ func (lookup *fakeIdentityLookup) LookupRequest(_ context.Context, requestID str
 	return result.record, result.found, result.err
 }
 
-func (lookup *fakeIdentityLookup) QuotaPerUnit() (float64, bool) {
+func (lookup *fakeIdentityLookup) EnsureQuotaPerUnit(context.Context) (float64, bool) {
 	lookup.mu.Lock()
 	defer lookup.mu.Unlock()
 	return lookup.quotaPerUnit, lookup.quotaPerUnit > 0

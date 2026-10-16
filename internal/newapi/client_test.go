@@ -209,6 +209,35 @@ func TestClientRefreshesQuotaPerUnitWithoutCredentials(t *testing.T) {
 	}
 }
 
+func TestClientEnsureQuotaPerUnitReadsOnDemandAndThrottles(t *testing.T) {
+	var calls atomic.Int32
+	var healthy atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		if !healthy.Load() {
+			http.Error(writer, "down", http.StatusBadGateway)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"success":true,"data":{"quota_per_unit":500000}}`)
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL, nil)
+	if _, ok := client.EnsureQuotaPerUnit(context.Background()); ok {
+		t.Fatal("rate from an unhealthy NewAPI")
+	}
+	healthy.Store(true)
+	if _, ok := client.EnsureQuotaPerUnit(context.Background()); ok || calls.Load() != 1 {
+		t.Fatalf("throttle not applied: calls=%d", calls.Load())
+	}
+	client.lastStatusTry.Store(time.Now().Add(-statusRetryInterval).UnixNano())
+	if rate, ok := client.EnsureQuotaPerUnit(context.Background()); !ok || rate != 500000 || calls.Load() != 2 {
+		t.Fatalf("rate = %v %v calls=%d", rate, ok, calls.Load())
+	}
+	if _, ok := client.EnsureQuotaPerUnit(context.Background()); !ok || calls.Load() != 2 {
+		t.Fatalf("held rate re-read: calls=%d", calls.Load())
+	}
+}
+
 func TestClientRejectsConflictingLogOwners(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writeEnvelope(t, writer, apiPage[apiLog]{Total: 2, Items: []apiLog{

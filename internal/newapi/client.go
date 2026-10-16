@@ -113,7 +113,12 @@ type Client struct {
 	// quotaPerUnit holds math.Float64bits of the last valid quota_per_unit;
 	// zero means none has been read yet.
 	quotaPerUnit atomic.Uint64
+	// lastStatusTry is the UnixNano of the last on-demand /api/status read.
+	lastStatusTry atomic.Int64
 }
+
+// statusRetryInterval throttles on-demand quota_per_unit reads.
+const statusRetryInterval = 10 * time.Second
 
 // NewClient validates a read-only NewAPI management client configuration.
 func NewClient(config Config) (*Client, error) {
@@ -323,6 +328,23 @@ func (client *Client) QuotaPerUnit() (float64, bool) {
 		return 0, false
 	}
 	return math.Float64frombits(bits), true
+}
+
+// EnsureQuotaPerUnit returns quota_per_unit, reading /api/status first when no
+// value is held yet. A failed startup read would otherwise leave billed lookups
+// without a rate until the next periodic refresh; the on-demand read is
+// throttled so an unreachable NewAPI is not asked once per lookup.
+func (client *Client) EnsureQuotaPerUnit(ctx context.Context) (float64, bool) {
+	if rate, ok := client.QuotaPerUnit(); ok || client == nil || ctx == nil {
+		return rate, ok
+	}
+	now := time.Now().UnixNano()
+	last := client.lastStatusTry.Load()
+	if now-last < int64(statusRetryInterval) || !client.lastStatusTry.CompareAndSwap(last, now) {
+		return 0, false
+	}
+	_ = client.RefreshStatus(ctx)
+	return client.QuotaPerUnit()
 }
 
 func validQuotaPerUnit(value float64) bool {

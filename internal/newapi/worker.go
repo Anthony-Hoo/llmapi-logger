@@ -47,7 +47,7 @@ type CallerStore interface {
 // LogLookup is implemented by Client and kept injectable for tests.
 type LogLookup interface {
 	LookupRequest(context.Context, string) (RequestLog, bool, error)
-	QuotaPerUnit() (float64, bool)
+	EnsureQuotaPerUnit(context.Context) (float64, bool)
 }
 
 // Worker resolves completed audit request IDs through NewAPI's system log and
@@ -220,7 +220,7 @@ func (worker *Worker) process(ctx context.Context, item sqlite.CallerLookup) {
 	attempts := item.Attempts + 1
 	final := attempts > len(retryDelays)
 	if err == nil && found {
-		quotaPerUnit, haveRate := worker.client.QuotaPerUnit()
+		quotaPerUnit, haveRate := worker.client.EnsureQuotaPerUnit(ctx)
 		switch {
 		case record.Billed() && !haveRate && !final:
 			// Never store a billing row without its conversion factor.
@@ -304,7 +304,7 @@ func (worker *Worker) backfillStep(ctx context.Context) (time.Duration, bool) {
 	if ctx.Err() != nil {
 		return 0, false
 	}
-	quotaPerUnit, haveRate := worker.client.QuotaPerUnit()
+	quotaPerUnit, haveRate := worker.client.EnsureQuotaPerUnit(ctx)
 	update := sqlite.BillingUpdate{AuditID: item.AuditID, Attempts: item.Attempts + 1, State: sqlite.BillingUnbilled}
 	failed := lookupErr != nil || (found && record.Billed() && !haveRate)
 	switch {
