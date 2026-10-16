@@ -17,6 +17,8 @@ import {
   type TrendGranularity,
   type TrendMode,
 } from "../../lib/insights/trend";
+import { axisTick, chartColors, chartFont } from "../../lib/tokens";
+import { tooltipClassName } from "../ui/styles";
 import { EVENT_INFO, eventLabel } from "./ui-bits";
 
 const MARKER_ROOM = 26;
@@ -56,28 +58,30 @@ export function TrendChart({
           margin={{ top: MARKER_ROOM, right: 8, bottom: 0, left: 0 }}
           barCategoryGap="12%"
         >
-          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={chartColors.grid} />
           <XAxis
             dataKey="key"
-            tick={{ fontSize: 11 }}
+            tick={axisTick}
+            stroke={chartColors.grid}
             interval={tickEvery - 1}
             tickFormatter={(value: string) => rows.find((row) => row.key === value)?.label ?? ""}
           />
           <YAxis
-            tick={{ fontSize: 11 }}
+            tick={axisTick}
+            stroke={chartColors.grid}
             width={52}
             tickFormatter={(value: number) => (mode === "delta" ? formatSignedTokens(value) : formatTokens(value))}
           />
-          {mode === "delta" ? <ReferenceLine y={0} stroke="#64748b" /> : null}
+          {mode === "delta" ? <ReferenceLine y={0} stroke={chartColors.axis} /> : null}
           {showWindow ? (
             <ReferenceLine
               y={contextWindow ?? undefined}
-              stroke="#dc2626"
+              stroke={chartColors.danger}
               strokeDasharray="4 4"
-              label={{ value: "上下文窗口", position: "insideTopRight", fontSize: 11, fill: "#dc2626" }}
+              label={{ value: "上下文窗口", position: "insideTopRight", fontSize: chartFont.caption, fill: chartColors.danger }}
             />
           ) : null}
-          <Tooltip content={<TrendTooltip mode={mode} granularity={granularity} />} cursor={{ fill: "rgba(148,163,184,0.15)" }} />
+          <Tooltip content={<TrendTooltip mode={mode} granularity={granularity} />} cursor={{ fill: chartColors.cursor }} />
           {CATEGORIES.map((category) => (
             <Bar
               key={category.key}
@@ -129,7 +133,7 @@ function EventMarkers({ rows, selectedAuditID }: { rows: readonly ChartRow[]; se
               return (
                 <g key={event}>
                   <circle cx={x} cy={area.y - 12} r={6} fill={info.color} />
-                  <text x={x} y={area.y - 12} fontSize="8" fill="#ffffff" textAnchor="middle" dominantBaseline="central">
+                  <text x={x} y={area.y - 12} fontSize={chartFont.glyph} fill={chartColors.onColor} textAnchor="middle" dominantBaseline="central">
                     {info.glyph}
                   </text>
                 </g>
@@ -165,17 +169,17 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
   const source = mode === "delta" ? row.delta : bar.anchored;
   const usage = bar.usage;
   return (
-    <div className="max-w-[20rem] space-y-2 rounded-md border bg-white p-3 text-xs shadow-md">
+    <div className={`${tooltipClassName} max-w-80 space-y-2`}>
       <div>
         <p className="font-semibold">
           {granularity === "turn" ? `第 ${bar.turn} 轮（${bar.steps} 步）` : `第 ${bar.position} 步`}
-          <span className="ml-2 font-normal text-muted-foreground">{bar.model || "未记录模型"}</span>
+          <span className="ml-2 font-normal text-subtle">{bar.model || "未记录模型"}</span>
         </p>
-        <p className="text-muted-foreground">{formatNanoTime(bar.startedAtNS)}</p>
+        <p className="text-subtle">{formatNanoTime(bar.startedAtNS)}</p>
       </div>
 
       <div>
-        <p className="mb-1 text-muted-foreground">
+        <p className="mb-1 text-subtle">
           {mode === "delta" && row.boundary
             ? "截断边界，无上一项"
             : mode === "delta"
@@ -188,7 +192,7 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
           {CATEGORIES.filter((category) => source[category.key] !== 0).map((category) => (
             <li key={category.key} className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: category.color }} />
+                <span className="inline-block h-2.5 w-2.5 rounded-xs" style={{ backgroundColor: category.color }} />
                 {category.label}
               </span>
               <span className="tabular-nums">
@@ -202,14 +206,14 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
             <span>净变化</span>
             <span className="tabular-nums">
               {formatSignedTokens(row.net)}
-              <span className="ml-1 font-normal text-muted-foreground">（幅度 {formatTokens(absoluteDelta(row.delta))}）</span>
+              <span className="ml-1 font-normal text-subtle">（幅度 {formatTokens(absoluteDelta(row.delta))}）</span>
             </span>
           </p>
         ) : null}
       </div>
 
       <div>
-        <p className="mb-1 text-muted-foreground">实际 usage</p>
+        <p className="mb-1 text-subtle">实际 usage</p>
         <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5">
           <dt>未缓存输入</dt>
           <dd className="text-right tabular-nums">{formatTokens(usage.uncached_input)}</dd>
@@ -225,7 +229,7 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
           <dd className="text-right font-medium tabular-nums">
             {formatTokens(bar.promptTotal)}
             {bar.promptTotal ? (
-              <span className="ml-1 font-normal text-muted-foreground">
+              <span className="ml-1 font-normal text-subtle">
                 缓存 {formatRatio((usage.cache_read ?? 0) / bar.promptTotal)}
               </span>
             ) : null}
@@ -234,7 +238,7 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
       </div>
 
       <div>
-        <p className="mb-1 text-muted-foreground">耗时</p>
+        <p className="mb-1 text-subtle">耗时</p>
         <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5">
           <dt>首事件延迟</dt>
           <dd className="text-right tabular-nums">{formatMillis(bar.firstEventMS)}</dd>
@@ -246,13 +250,13 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
       </div>
 
       <p className="flex justify-between">
-        <span className="text-muted-foreground">估算成本{granularity === "turn" && bar.steps > 1 ? "（合计）" : ""}</span>
+        <span className="text-subtle">估算成本{granularity === "turn" && bar.steps > 1 ? "（合计）" : ""}</span>
         <span className="tabular-nums">{formatUSD(bar.costUSD)}</span>
       </p>
       {bar.events.length > 0 ? (
-        <p className="text-muted-foreground">事件：{bar.events.map(eventLabel).join("、")}</p>
+        <p className="text-subtle">事件：{bar.events.map(eventLabel).join("、")}</p>
       ) : null}
-      <p className="text-[11px] text-muted-foreground">点击柱子查看该请求的审计详情</p>
+      <p className="text-caption text-subtle">点击柱子查看该请求的审计详情</p>
     </div>
   );
 }

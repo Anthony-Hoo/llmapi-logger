@@ -154,6 +154,7 @@ export function lineageHue(index: number): number {
   return (index * 137.508) % 360;
 }
 
+/** Low-saturation lineage color that sits with the steel-blue palette (doc/design/tokens.md). */
 export function lineageColor(index: number): string {
-  return `hsl(${lineageHue(index).toFixed(1)} 62% 46%)`;
+  return `hsl(${lineageHue(index).toFixed(1)} 34% 48%)`;
 }
