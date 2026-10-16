@@ -94,7 +94,18 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 - request/response sequence hash、重建 hash和验证状态；
 - response id、previous response id、模型参数、usage、错误和时间信息。
 
-父轮次优先按协议显式字段关联，例如 `previous_response_id`。其次使用稳定 conversation/thread key 的域分离 hash。没有显式 id 时，只在最近候选中存在强内容关系时使用 item sequence 推断；证据不足则创建新 conversation，禁止为了形成线性链而强行关联。
+父轮次优先按协议显式字段关联，例如 `previous_response_id`，命中即链接。其次使用稳定 conversation/thread key 的域分离 hash；没有显式 id 时，只在最近候选中存在强内容关系时使用 item sequence 推断；证据不足则创建新根轮次（无 key 时即新 conversation），禁止为了形成线性链而强行关联。
+
+conversation key 只确定“属于哪个客户端会话”，不确定“接在哪一轮后面”。OpenAI 的 key 依次取 `conversation_id`、`prompt_cache_key`、`thread_id` 等字段，而 Codex 和 OpenCode ≥ v2.0.10 会把根会话 ID 同时填进主 Agent 与所有子 Agent 的 `prompt_cache_key`，所以同一 key 下可能并发跑着多条 Agent 链。因此命中 key 后：
+
+- 候选是该 keyed conversation 中早于本轮的最近 32 轮（`parentCandidateLimit`），不只是最新一轮。
+- 每个候选都要通过与无 key 推断相同的强内容关系判定（retry、continuation 或 ≥70% 公共前缀的 context edit），在通过者中选 delta 代价最小的，代价相同取较新的。链接原因记为 `conversation_key`，置信度 95；retry/branch 的判定照旧覆盖原因。
+- 都不通过时，本轮成为同一 keyed conversation 中的新根，例如子 Agent 的首个请求，或一次把历史大幅改写的压缩。它不会再走全协议范围的内容搜索，因此不会被挪进别的会话。
+- 所以一个 keyed conversation 可以有多个根，每个 Agent 一条链。conversation 计数仍按整个客户端会话统计，即主 Agent 加子 Agent。`conversations` 上 `(protocol, key_hash)` 的唯一索引决定了同一 key 只能对应一个 conversation。
+
+内容判定仍无法区分“子 Agent 的首个请求”与“对父 Agent 早期请求的编辑”。若两者共享的前缀足够长（≥70%），子 Agent 首轮会作为 branch 挂在父 Agent 的那一轮下面。重建不受影响，只是血缘表现为分叉。要彻底按 Agent 分链，需要把显式 Agent 节点 ID（如 Codex 的 `thread-id` Header）引入 conversation key。但 normalizer 目前只拿得到 Body，这一项留作后续。
+
+修正前写入的旧行不做迁移。它们保留当时强制挂到最新一轮的 `conversation_key` 血缘，可能把父子 Agent 交错串成一条链；每轮的 delta 自包含于其 parent base，重建和完整性校验仍然逐字节正确。父轮次的选择不参与 `capturePayloadDigest` 和 `appendParsedResultDigest`；`parent_turn_id`、`link_reason` 也不进入 semantic payload digest，新旧行都能通过既有校验。
 
 同一 parent 可有多个 child。retry 可以选择父 request 作为 base；普通 continuation 通常选择父 post-turn context；回退、修改、上下文截断和总结压缩通过 delete/insert 增量表示。并行工具调用保留 item 顺序和 call id，不要求对话是单链。
 
