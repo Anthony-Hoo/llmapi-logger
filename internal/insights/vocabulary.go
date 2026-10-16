@@ -192,6 +192,14 @@ func parseVocabulary(data []byte, strict bool) (*Vocabulary, error) {
 		}
 		return nil, err
 	}
+	// A second document would otherwise be silently ignored.
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple YAML documents are not supported")
+		}
+		return nil, err
+	}
 	return &vocab, nil
 }
 

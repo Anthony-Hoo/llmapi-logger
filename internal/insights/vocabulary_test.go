@@ -238,7 +238,7 @@ func TestLoadVocabularyValidation(t *testing.T) {
 		{"bad file style", "file_ops:\n  tools:\n    x: {op: write, style: weird}\n", "unknown style"},
 		{"empty file key", "file_ops:\n  path_keys: [\"\"]\n", "empty key"},
 		{"not yaml", "clients: [\n", "yaml"},
-	}
+		{"second document", "injection_markers: [a]\n---\ninjection_markers: [b]\n", "multiple YAML documents"}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadVocabulary(writeVocabulary(t, tc.yaml))
