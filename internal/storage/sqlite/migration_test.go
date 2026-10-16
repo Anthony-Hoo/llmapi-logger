@@ -121,6 +121,8 @@ ORDER BY name`)
 		t.Fatal(err)
 	}
 	wantTables := []string{
+		"agent_spawn_hints",
+		"audit_analysis",
 		"audit_gaps",
 		"audit_records",
 		"binary_objects",
@@ -164,8 +166,8 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 5 || version != 7 {
-		t.Fatalf("migration rows = %d max=%d, want versions 1, 4, 5, 6 and 7", versionCount, version)
+	if versionCount != 6 || version != 8 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1, 4, 5, 6, 7 and 8", versionCount, version)
 	}
 	var quickCheck string
 	if err := store.readerDB.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil {
@@ -186,7 +188,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 5 {
+	if versionCount != 6 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -197,7 +199,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		8,
+		9,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)

@@ -152,7 +152,29 @@ type AuditQuery interface {
 
 缺块 raw 使用 `X-Audit-Missing-Chunks: true` 和 `X-Audit-Complete: false` 明示：返回体仅按原顺序拼接已保存片段，不能作为完整 HTTP Body。页面和下载提示同时说明缺块。只有 full/partial 且带 `capture_chunk_missing` 标记的证据允许向前跳过缺失序号；仍验证原序号的 GCM/AAD、每块解压后长度、无重叠的偏移、观察长度边界和实际输出长度。没有该标记的 gap、错误密文、重叠或越界仍返回完整性错误。原始 seq/offset 继续保存在审计分块中，不伪造缺失字节。
 
-## 11. 最少测试
+## 11. 上下文洞察 API 与页面
+
+上下文洞察（[模块 20](20-context-insights.md)）在既有鉴权和 Cookie 之上增加五个只读端点。`insights.enabled=false` 时全部返回 `404 not_found`，洞察页入口隐藏。所有响应带 `Cache-Control: no-store`；查询参数只接受下表列出的键，未知键、重复键和非法取值返回 `400 invalid_query`；单次查询沿用 10 秒超时。JSON 结构以 `internal/insights/apitypes.go` 为唯一契约，前端 `src/types.ts` 与之镜像。
+
+| 端点 | 参数 | 返回 |
+| --- | --- | --- |
+| `GET /api/v1/insights/overview` | `from_ns`、`to_ns`（默认近 7 天，范围上限 400 天）、`group_by=model\|protocol\|client\|caller\|token`（默认 `model`）、`tz_offset_min`（-840 到 840，用于按本地日分桶） | 请求数、会话数、Agent 树数、归一化用量各桶、缓存命中率、估算成本和未定价请求数，按日序列，近 8 周热力图，构成混合，分组小计 |
+| `GET /api/v1/insights/sessions` | `from_ns`、`to_ns`、`sort=recent\|tokens\|context`、`cursor`（不透明 keyset，且绑定排序键）、`limit`（默认 20，最大 100） | 会话卡片：首末时间、步数/轮数、用量、末步构成与 prompt 总量、模型、窗口、`tree_id`、子 Agent 数、调用者 |
+| `GET /api/v1/insights/sessions/{session_id}/trend` | 无 | 逐步序列：构成、用量、事件、时间、turn 标号；最多 2000 步，超出时返回最近一段并标记 `truncated` |
+| `GET /api/v1/insights/agent-trees/{tree_id}` | 无 | Agent 树节点与边；父节点不在作用域内时返回不可见占位节点。单节点根也可读取（无害） |
+| `GET /api/v1/audits/{audit_id}/composition` | 无 | 解密 `detail_enc`：逐条目清单、与上一步差异、文件活动；经 `authorizeAudit` |
+
+作用域：作用域由会话身份决定，**从不**取自查询参数。管理员看到全部记录；开发者会话的每条 SQL 聚合都逐行套用与审计列表相同的 `conditionWithAliases` 条件，只统计自己 Key 产生的步骤。共享会话或 Agent 树只暴露调用者自己的步骤，作用域内没有步骤的会话、树和审计一律返回 `404`（不区分“不存在”和“无权访问”）。开发者不能使用 `caller` 与 `token` 分组，会话卡片的 `caller` 为 `null`。
+
+口径要点：
+
+- 会话卡片的角色、末步构成和 prompt 总量取该会话**最新的 main/subagent 步骤**；压缩、标题、review 等附属请求只在会话只有附属步骤时才作为兜底。附属请求不开启新 turn，也不产生事件。
+- `trees`、`tree_id` 与 `subagents` 只对**真实 Agent 树**计数：根在作用域内拥有 2 个及以上不同节点指纹，或其任一步骤带有 `agent_link_source`。没有客户端 Agent ID 的普通会话使用合成节点指纹，不算树，`tree_id` 为空。
+- 成本在查询时按价格表计算，不落库；趋势估算保持原始值，由前端按真实 prompt 总量锚定。
+
+洞察页是 Dashboard 的 `insights` 视图（不引入路由）：KPI 栏、日用量柱图、8 周热力图（点击某天筛选会话）、会话卡片（构成条、用量、子 Agent 数，可排序）；点击卡片进入会话趋势（Step/Turn、Total/Delta 切换和事件标记）与 Agent 树；审计详情新增“上下文构成”一节。开发者登录同样可见，但只含自己的数据。
+
+## 12. 最少测试
 
 - 列表 keyset、窄筛选、User-Agent 定向解密、TTFT 映射、`conversation` 筛选、`collapse=conversation` 折叠语义及二者同时出现时的互斥优先级；`status_class` 与独立 `status_code` 筛选，以及所有行级筛选优先于折叠、较早匹配轮次可见的规则。
 - 状态码草稿空白、前导零、非法字符、全角数字和 99/100/599/600 边界；查看同会话清除行级筛选并保留折叠偏好（纯函数覆盖）；字段校验提示的渲染与无障碍属性。
@@ -166,3 +188,5 @@ type AuditQuery interface {
 - 前端 API、组件、TypeScript 检查和生产构建。
 - 双角色鉴权、会话 API 三态、开发者作用域强制与管理端点 403，详见[模块 19](19-developer-key-session.md)。
 - 未授权响应、静态 shell、列表和日志不泄露 Request-URI、Header、Body、conversation、Token、Key 指纹或主密钥。
+- 洞察端点的 404（关闭时）、
+o-store、未知/重复参数、开发者作用域逐行强制、真实树判定与附属请求口径（见 §11）。

@@ -109,7 +109,7 @@ ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
 
 采集模块提交 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit 和 AddGap；parser 使用 SaveParsedAudit 原子写摘要、turn graph、对象、raw retention 和完整性事件。queue 固定 1024 ops。
 
-Session 通过 `FinishAuditWithResult` 获取提交后的实际 capture status/error code，再生成不可变的 TerminalSummary。被保存点隔离的异步写入失败不能只在数据库中降级、却在请求完成日志中仍报告 complete。失败终结还会将回滚后遗留的 streaming stage/body 修复为 partial，使已提交的 raw 可按不完整证据读取。整批存储级失败时，批内异步写入随事务丢弃且不留标记，采集器无法感知，这一边界见[模块 04](04-sqlite-storage-and-migrations.md)。
+Session 通过 `FinishAuditWithResult` 获取提交后的实际 capture status/error code，再生成不可变的 TerminalSummary。被保存点隔离或整批存储故障丢弃的采集写入，必须在终结事务前标记对应 audit 为 failed；失败终结还会将遗留的 streaming stage/body 修复为 partial，使已提交 raw 可按不完整证据读取。终结本身失败或队列满时，writer 保留有界终态元数据并在恢复后补写；原请求日志记录当时的终结失败，异步恢复不会重写这条日志或原请求结果。队列屏障、恢复容量及进程退出边界见[模块 04](04-sqlite-storage-and-migrations.md)。
 
 异步分块失败、但阶段终结成功时，也必须按实际落盘分块修正存储长度和计数，不能继续把采集器内存中的完整聚合当作已保存证据。缺块只保留并导出剩余片段，明确标记 `capture_chunk_missing`；不能承诺恢复未落盘字节。逻辑 SSE 时间线在观察字节时生成，缺块不改变已封存时间线的完整性。
 

@@ -144,7 +144,11 @@ type Turn struct {
 	PreviousResponseID string
 	ResponseID         string
 	ConversationKey    string
-	CreatedAtNS        int64
+	// ServerManagedContext marks a request whose earlier context the provider
+	// keeps (a Responses conversation), so it carries only the new input and
+	// cannot be matched to its parent by repeated content.
+	ServerManagedContext bool
+	CreatedAtNS          int64
 }
 
 type ObjectRef struct {
@@ -207,6 +211,7 @@ type PreparedTurn struct {
 	PreviousResponseID         string
 	ResponseID                 string
 	ConversationKeyHash        []byte
+	ServerManagedContext       bool
 	CreatedAtNS                int64
 	Objects                    []ContentObject
 	Binaries                   []BinaryObject

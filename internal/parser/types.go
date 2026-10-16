@@ -4,9 +4,11 @@ package parser
 
 import (
 	"context"
+	"net/http"
 
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
+	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
@@ -43,6 +45,7 @@ type Store interface {
 	ReleaseProcessingParse(context.Context, string) error
 	LoadParserStage(context.Context, string, string) (sqlite.ParserStage, error)
 	ReadParserChunks(context.Context, string, string, int64, int) ([]sqlite.BodyChunk, error)
+	LoadParserRequestHeaders(context.Context, string, []string) ([]sqlite.HeaderEvidence, error)
 	SaveParsedResult(context.Context, sqlite.ParsedResult) error
 	SaveParsedAudit(context.Context, sqlite.ParsedAudit) error
 }
@@ -59,6 +62,8 @@ type BodySource struct {
 }
 
 // Input is the immutable evidence view supplied to one protocol parser.
+// Headers holds only the decrypted inbound request headers named by the
+// worker's allowlist; it is nil when the allowlist is empty or loading failed.
 type Input struct {
 	AuditID    string
 	Protocol   string
@@ -66,6 +71,7 @@ type Input struct {
 	Request    BodySource
 	Response   BodySource
 	StatusCode *int
+	Headers    http.Header
 }
 
 // Usage keeps provider-reported counters nullable. Parsers do not invent
@@ -78,6 +84,8 @@ type Usage struct {
 
 // Result is the compact, queryable parser output. ParsedJSON is plaintext only
 // in memory and is encrypted by Worker before it crosses the storage boundary.
+// Normalized is the mutually exclusive cache-aware usage breakdown for
+// insights; it is not part of parsed_results, which keeps Usage unchanged.
 type Result struct {
 	Status          string
 	RequestModel    string
@@ -86,6 +94,7 @@ type Result struct {
 	ObservedStream  *bool
 	ResponseID      string
 	Usage           Usage
+	Normalized      insights.Usage
 	ErrorType       string
 	ErrorCode       string
 	MessageCount    *int

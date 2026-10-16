@@ -1,0 +1,13 @@
+{
+  "systemInstruction": {"parts": [{"text": "Be brief."}]},
+  "tools": [
+    {"functionDeclarations": [{"name": "get_weather", "description": "Weather lookup", "parameters": {"type": "object"}}]},
+    {"googleSearch": {}}
+  ],
+  "generationConfig": {"maxOutputTokens": 1024},
+  "contents": [
+    {"role": "user", "parts": [{"text": "Weather in Paris?"}, {"inlineData": {"mimeType": "image/png", "data": "AAAA"}}]},
+    {"role": "model", "parts": [{"thought": true, "text": "thinking"}, {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}]},
+    {"role": "user", "parts": [{"functionResponse": {"name": "get_weather", "response": {"temp": 20}}}]}
+  ]
+}

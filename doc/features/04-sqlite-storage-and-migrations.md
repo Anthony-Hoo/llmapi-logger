@@ -42,7 +42,7 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 
 `007_parse_retries.sql` 就地增加 `parse_save_failures` 和 `parse_next_at_ns`，分别保存解析写入失败次数和下一次允许重试的时间。这两列是可变调度元数据，不进入历史 HTTP 证据摘要，也不改变 schema generation。
 
-当前最终 schema 共 20 张表，按职责分组如下。
+当前最终 schema 共 22 张表（schema generation 仍为 2），按职责分组如下。`008_audit_analysis.sql` 就地新增 `audit_analysis` 与 `agent_spawn_hints` 两张派生表，不重建、不修改任何既有表。
 
 ### 3.1 HTTP 审计与身份
 
@@ -87,6 +87,19 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 时间线最多保存前 100,000 个事件时间点，但 `event_count` 保留实际总数；`timeline_complete=false` 明确表示时间点序列被截断，或观察到的 SSE 在最后一个事件结束前中断；它由观察到的字节决定，与 raw 分块是否落盘无关。有事件但未能封存时间线的 Body 同样把 `stream_timeline_complete` 记为 false。网络 read/write chunk 不作为长期 SSE 事件行。
 
+### 3.4 派生分析（上下文洞察）
+
+| 表 | 用途 |
+| --- | --- |
+| audit_analysis | 每个已解析 audit 至多一行：归一化用量各桶、构成估算、停止原因、会话与上一步、事件位图、Agent 树指纹、加密的 `detail_enc` |
+| agent_spawn_hints | 响应中子 Agent 派生提示词的 keyed 指纹，供内容匹配兜底连边 |
+
+两张表都以 `audit_id` 外键 `ON DELETE CASCADE` 挂在 `audit_records` 上，随 retention 删除自动清理。完整列定义以 `internal/storage/sqlite/migrations/008_audit_analysis.sql` 为准，语义见[模块 20](20-context-insights.md)。
+
+- **不在完整性链内**：这两张表是可重算的派生数据，**不得**进入 `capturePayloadDigest`、`appendParsedResultDigest` 或任何完整性事件；一旦加入，旧库中每条历史记录的重算摘要都会改变，启动校验会失败。测试锁定：写入、更新、删除 `audit_analysis` 行不改变任何已签名摘要。
+- **明文列只有数值、枚举、计数 JSON 和 keyed HMAC 指纹**。消息正文、工具名、文件路径和原始 Agent ID 只存在 `detail_enc`（AES-256-GCM，AAD 标签 `analysis_detail`，绑定 audit id 与 `analysis_version`），日志同样不得出现。
+- `analysis_version` 随算法升级递增；后台回填（模块 20 §9）按版本重算，不触碰 `parse_status`。索引 `audit_analysis_version_idx` 支撑“缺失或过旧”扫描。
+- 写入走既有单 writer 的 `SaveAnalysis`（按 `audit_id` upsert，并整体替换该 audit 的 spawn hints）；失败只记录日志，不影响解析结果。
 ## 4. HTTP Body 保存方式
 
 每个阶段仍保存自己的 observed length、SHA-256、状态和时间。流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并：
@@ -110,7 +123,7 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交一个事务。BeginAudit 和 strict admission 使用同步 Ack；普通证据写入保持异步。
 
-每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。整批失败时，批内已入队的异步采集操作随事务一起丢弃，writer 也无法在已回滚的事务里为它们留下失败标记。
+每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。整批失败时，writer 在内存中记录受影响的 audit、阶段、缺块观察边界和待补写终态，供同一 writer 在存储恢复后处理；不会缓存或重放 Header value、Body、密文和 timeline payload。
 
 局部错误采用白名单：SQLite constraint（含扩展码）、明确标记的对象身份/重建/turn 图校验错误和预期的未找到记录。FULL、IOERR、READONLY、BUSY、CORRUPT 等其他数据库错误，以及无法分类的错误，一律回滚整批并标记不健康，即使 SQLite 允许回滚单条语句后提交空事务。仅包含局部失败的空提交不能把既有不健康状态恢复为健康。
 
@@ -120,11 +133,17 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 异步 stage/body/header/chunk 采集操作以局部错误失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
 
-已知边界：上述标记只覆盖被隔离的局部错误。FULL、IOERR、READONLY、BUSY 等存储级错误或事务失败使整批回滚时，批内异步采集操作没有 Ack，也不留标记。存储恢复后，同一 audit 在后续批次的终结仍可能以 complete 提交，而分块、Header 或阶段终结已经缺失：缺中间分块时 raw 读取返回完整性错误；缺阶段终结时子记录保持 streaming、raw 保持未就绪，启动恢复也不处理已终结的 audit。该场景需要瞬时存储故障恰好落在单个请求的生命周期内，本版本不处理，另行跟踪。
+存储级错误后的恢复由原 writer 每 5 秒执行一次，即使没有新流量也会运行；每轮最多处理 16 个 audit，轮转选择防止某个永久失败的记录饿死其他记录。各条恢复使用保存点隔离，只有外层 COMMIT 成功才清除对应内存记录；并发追加的终结信息使用版本检查保留。丢失的异步采集写入先补记 `capture_write_failed`，受影响阶段使用 `capture_headers_failed` 或 `capture_storage_failed`，已知缺块使用 `capture_chunk_missing` 并保留观察长度。正常终结即使早于恢复定时器，也必须在同一事务内先写这些标记；无法写标记时不能提交 complete。未落盘字节无法恢复，剩余证据保留 full raw。
+
+`FinishAudit` 提交失败或因写队列满未能入队时，恢复记录保留原始结束时间、转发状态、HTTP 状态和调用者查询标识。队列为已接受操作分配有序序号；补写终态必须等其之前已入队的采集操作全部处理完，避免提前签署随后又被修改的证据。已成功终结的 audit 再次收到终结或恢复请求时，只读取既有终态，不修改 parse/caller 状态，不追加重复完整性事件。恢复后的 pending 解析和调用者任务由既有后台扫描发现，不需要重启，不改变已经完成的转发。
+
+恢复表最多保留 1024 个 audit 的固定大小阶段摘要及终态元数据。达到上限后不驱逐未知故障：Store 锁定恢复溢出状态，拒绝新的审计准入，并将仍在结束的 audit 标记为 failed/full；available 模式继续原有无审计转发和 gap 语义，strict 的准入失败保持 503。需要修复存储后重启，由既有启动恢复处理未终结记录。进程退出会丢失尚未持久化的内存摘要，启动恢复只能声明 interrupted/partial，不能补造精确观测信息。恢复积压未清空、恢复溢出或完整性失败时，Store 不报告 healthy。
 
 Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `capture_headers_failed` 标记该观察阶段为 partial。后续 `FinishStage`、父记录终结与启动恢复都保留这个标记，不能因 Body 完整而把丢失 Header 的阶段重新标为 complete；未受影响的阶段不因此降级。
 
 失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`FinishAuditWithResult` 只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。
+
+恢复过程已标为 `capture_storage_failed` 的阶段也必须参与收尾，包括没有 Body 的阶段；其结束时间为空时使用父 audit 的已知结束时间补齐，已有结束时间保持不变，不能在阶段未终结时签署父记录。
 
 阶段终结在入队前失败时，Session 会以 partial 和稳定 `audit_finalize_failed` 终结；同样修复未结束的子记录，并保持日志与已提交父记录的状态及错误码一致。Body 开始写入在入队前被拒绝时，采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
 
@@ -202,3 +221,4 @@ GC 使用 `NOT EXISTS` 可达性检查和对象引用索引，不维护可漂移
 - SSE 大于 100,000 个事件时保留总数和截断语义，完整时间线严格校验首末点。
 - recovery、integrity event 篡改、缺 event 和重复恢复测试通过。
 - DB/WAL 扫描不到测试 Header、Body、二进制和主密钥明文。
+- `audit_analysis` 的写入、更新和级联删除不改变任何完整性摘要；明文列扫描不到消息、工具名、路径和原始 Agent ID。

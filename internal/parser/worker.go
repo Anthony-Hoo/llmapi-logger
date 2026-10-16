@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -25,9 +26,22 @@ type Worker struct {
 	parsers map[string]Parser
 	logger  *slog.Logger
 	queue   chan string
+	// Only the parser goroutine accesses this bounded recovery backlog.
+	// A failed release must be retried before the same audit can be claimed.
+	pendingReleases map[string]struct{}
 
 	scanInterval time.Duration
 	now          func() time.Time
+
+	// Guarded by mu; read once per audit by the parser goroutine.
+	headerAllowlist []string
+	analyzer        AuditAnalyzer
+	reconstructor   Reconstructor
+
+	// Only the parser goroutine accesses the insights backfill state.
+	backfillCursor   *sqlite.AnalysisBackfillCursor
+	backfillSkipped  map[string]struct{}
+	backfillNextScan time.Time
 
 	mu      sync.Mutex
 	started bool
@@ -58,14 +72,70 @@ func NewWorker(store Store, cipher security.Cipher, parsers []Parser, logger *sl
 		indexed[implementation.Name()] = implementation
 	}
 	return &Worker{
-		store:        store,
-		cipher:       cipher,
-		parsers:      indexed,
-		logger:       logger,
-		queue:        make(chan string, QueueCapacity),
-		scanInterval: defaultScanInterval,
-		now:          time.Now,
+		store:           store,
+		cipher:          cipher,
+		parsers:         indexed,
+		logger:          logger,
+		queue:           make(chan string, QueueCapacity),
+		pendingReleases: make(map[string]struct{}),
+		scanInterval:    defaultScanInterval,
+		now:             time.Now,
 	}, nil
+}
+
+// SetHeaderAllowlist names the inbound request headers decrypted into
+// Input.Headers. Matching is case-insensitive; an empty list, the default,
+// loads no headers. Call it before Start.
+func (worker *Worker) SetHeaderAllowlist(names []string) {
+	if worker == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(names))
+	allowlist := make([]string, 0, len(names))
+	for _, name := range names {
+		lowered := strings.ToLower(strings.TrimSpace(name))
+		if lowered == "" {
+			continue
+		}
+		if _, duplicate := seen[lowered]; duplicate {
+			continue
+		}
+		seen[lowered] = struct{}{}
+		allowlist = append(allowlist, lowered)
+	}
+	worker.mu.Lock()
+	worker.headerAllowlist = allowlist
+	worker.mu.Unlock()
+}
+
+func (worker *Worker) headerNames() []string {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.headerAllowlist
+}
+
+// AuditAnalyzer derives insights from one successfully parsed audit. It runs
+// on the parser goroutine after the parse result is saved and can never
+// change that result.
+type AuditAnalyzer interface {
+	AnalyzeAudit(context.Context, insights.Input) error
+}
+
+// SetAnalyzer installs the optional insights analyzer; nil, the default,
+// disables analysis. Call it before Start.
+func (worker *Worker) SetAnalyzer(analyzer AuditAnalyzer) {
+	if worker == nil {
+		return
+	}
+	worker.mu.Lock()
+	worker.analyzer = analyzer
+	worker.mu.Unlock()
+}
+
+func (worker *Worker) auditAnalyzer() AuditAnalyzer {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.analyzer
 }
 
 // Start resets interrupted processing rows, performs the startup pending scan,
@@ -161,7 +231,9 @@ func (worker *Worker) run(ctx context.Context) {
 		case auditID := <-worker.queue:
 			worker.process(ctx, auditID)
 		case <-ticker.C:
+			worker.retryProcessingReleases(ctx)
 			worker.scan(ctx)
+			worker.backfill(ctx)
 		}
 	}
 }
@@ -180,6 +252,11 @@ func (worker *Worker) scan(ctx context.Context) {
 }
 
 func (worker *Worker) process(ctx context.Context, auditID string) {
+	if _, waiting := worker.pendingReleases[auditID]; waiting || len(worker.pendingReleases) >= QueueCapacity {
+		// Pending rows remain discoverable after storage recovers. Do not
+		// claim more work than this worker can remember to release safely.
+		return
+	}
 	audit, err := worker.store.LoadParserAudit(ctx, auditID)
 	if err != nil {
 		worker.logger.Warn("parser audit load failed", "audit_id", auditID, "error_code", "audit_load_failed")
@@ -208,18 +285,93 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 	}
 	worker.normalizeResult(&result, input, evidenceErr)
 	prepared := worker.prepareTurn(ctx, audit, implementation, input, &result)
-	if err := worker.persistResult(ctx, audit, implementation, result, prepared); err != nil {
+	savedStatus, err := worker.persistResult(ctx, audit, implementation, result, prepared)
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// A canceled save may not have been attempted, or may still commit
 			// after submitSync stops waiting. Leave processing for startup
 			// recovery instead of spending the persistence-failure budget.
 			return
 		}
-		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed")
-		releaseContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if releaseErr := worker.store.ReleaseProcessingParse(releaseContext, audit.AuditID); releaseErr != nil {
-			worker.logger.Warn("parser retry release failed", "audit_id", audit.AuditID, "error_code", "parse_release_failed")
+		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", sqlite.ErrorClass(err))
+		worker.releaseProcessing(ctx, audit.AuditID)
+		return
+	}
+	worker.analyze(ctx, audit, input, result, savedStatus)
+}
+
+// analyze runs the optional insights analyzer for a saved ok or partial
+// parse with a request body. savedStatus is the status actually committed,
+// which persistResult may have downgraded. Failures and panics are logged
+// with a stable code and dropped: the parse status is already committed, and
+// the insights backfill recomputes missing rows later instead of retrying
+// here.
+func (worker *Worker) analyze(ctx context.Context, audit sqlite.ParserAudit, input Input, result Result, savedStatus string) {
+	analyzer := worker.auditAnalyzer()
+	if analyzer == nil || (savedStatus != StatusOK && savedStatus != StatusPartial) ||
+		!input.Request.Present || len(input.Request.Data) == 0 {
+		return
+	}
+	err := runAnalyzer(ctx, analyzer, audit, input, result)
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	if errors.Is(err, errAnalyzerPanic) {
+		worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", "analysis_panic")
+		return
+	}
+	worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", insights.ErrorCode(err), "storage_error", sqlite.ErrorClass(err))
+}
+
+var errAnalyzerPanic = errors.New("parser: analyzer panic")
+
+// runAnalyzer invokes the analyzer hook shared by live parsing and the
+// insights backfill, converting a panic into errAnalyzerPanic.
+func runAnalyzer(ctx context.Context, analyzer AuditAnalyzer, audit sqlite.ParserAudit, input Input, result Result) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errAnalyzerPanic
+		}
+	}()
+	endpoint := audit.ParserName
+	if _, suffix, found := strings.Cut(endpoint, "."); found {
+		endpoint = suffix
+	}
+	return analyzer.AnalyzeAudit(ctx, insights.Input{
+		AuditID:          audit.AuditID,
+		Protocol:         audit.Protocol,
+		Endpoint:         endpoint,
+		Request:          input.Request.Data,
+		RequestComplete:  input.Request.Complete,
+		Response:         input.Response.Data,
+		ResponseComplete: input.Response.Complete,
+		ResponseIsStream: result.ObservedStream != nil && *result.ObservedStream,
+		Headers:          input.Headers,
+		RequestModel:     result.RequestModel,
+		ResponseModel:    result.ResponseModel,
+		Usage:            result.Normalized,
+		Conversation:     result.Conversation,
+	})
+}
+
+func (worker *Worker) releaseProcessing(ctx context.Context, auditID string) bool {
+	releaseContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := worker.store.ReleaseProcessingParse(releaseContext, auditID); err != nil {
+		worker.pendingReleases[auditID] = struct{}{}
+		worker.logger.Warn("parser retry release failed", "audit_id", auditID, "error_code", "parse_release_failed", "storage_error", sqlite.ErrorClass(err))
+		return false
+	}
+	delete(worker.pendingReleases, auditID)
+	return true
+}
+
+func (worker *Worker) retryProcessingReleases(ctx context.Context) {
+	for auditID := range worker.pendingReleases {
+		if ctx.Err() != nil || !worker.releaseProcessing(ctx, auditID) {
+			// A storage outage should not cause a tight retry loop or spend
+			// five seconds on every outstanding audit during this scan.
+			return
 		}
 	}
 }
@@ -300,7 +452,9 @@ func (worker *Worker) normalizeResult(result *Result, input Input, evidenceErr e
 	}
 }
 
-func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, result Result, prepared *auditmodel.PreparedTurn) error {
+// persistResult saves the parse and returns the status it actually stored,
+// which encryption failures downgrade to error.
+func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, result Result, prepared *auditmodel.PreparedTurn) (string, error) {
 	parserVersion := "1"
 	if implementation != nil {
 		parserVersion = implementation.Version()
@@ -345,7 +499,7 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 		ParsedJSONEnc:   encrypted,
 		ParsedAtNS:      worker.now().UnixNano(),
 	}
-	return worker.store.SaveParsedAudit(ctx, sqlite.ParsedAudit{Result: storageResult, Turn: prepared})
+	return result.Status, worker.store.SaveParsedAudit(ctx, sqlite.ParsedAudit{Result: storageResult, Turn: prepared})
 }
 
 func parsedResultPlaintext(result Result, includeConversation bool) ([]byte, bool) {

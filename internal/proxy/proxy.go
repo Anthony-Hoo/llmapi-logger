@@ -20,6 +20,7 @@ import (
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/observability"
 	"llmapi-logger/internal/routing"
+	"llmapi-logger/internal/storage/sqlite"
 )
 
 const (
@@ -213,6 +214,7 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 					"audit_id", session.ID(),
 					"route_id", match.RouteID,
 					"error_category", "write_error",
+					"storage_error", sqlite.ErrorClass(err),
 				)
 			}
 		}()
@@ -296,7 +298,7 @@ func (h *handler) beginAudit(request *http.Request, match routing.Match) (*audit
 	if err == nil && session != nil {
 		return session, true
 	}
-	h.logger.WarnContext(request.Context(), "audit begin failed", "route_id", match.RouteID, "error_category", "audit_unavailable")
+	h.logger.WarnContext(request.Context(), "audit begin failed", "route_id", match.RouteID, "error_category", "audit_unavailable", "storage_error", sqlite.ErrorClass(err))
 	if h.audit.Mode() == audit.ModeStrict {
 		return nil, false
 	}

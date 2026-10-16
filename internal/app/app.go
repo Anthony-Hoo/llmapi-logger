@@ -15,6 +15,8 @@ import (
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/insights"
+	"llmapi-logger/internal/insights/pricing"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/parser"
@@ -83,8 +85,57 @@ func ValidateConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	_, _, _, _, err = assembleDataPlane(configuration)
-	return err
+	if _, _, _, _, err = assembleDataPlane(configuration); err != nil {
+		return err
+	}
+	return validateInsights(configuration.Insights)
+}
+
+// validateInsights loads every insights override file so that --validate-config
+// rejects what startup would reject. Disabled insights read nothing.
+func validateInsights(configuration config.InsightsConfig) error {
+	if !configuration.Enabled {
+		return nil
+	}
+	if _, err := loadInsightsVocabulary(configuration); err != nil {
+		return err
+	}
+	if _, err := pricing.Load(configuration.PricingFile); err != nil {
+		return fmt.Errorf("load insights pricing: %w", err)
+	}
+	return nil
+}
+
+// loadInsightsVocabulary returns nil when insights are disabled, so a disabled
+// deployment never reads the override file.
+func loadInsightsVocabulary(configuration config.InsightsConfig) (*insights.Vocabulary, error) {
+	if !configuration.Enabled {
+		return nil, nil
+	}
+	vocabulary, err := insights.LoadVocabulary(configuration.VocabularyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load insights vocabulary: %w", err)
+	}
+	return vocabulary, nil
+}
+
+// installInsights wires the analyzer into the parser worker: it narrows the
+// decrypted request headers to the vocabulary allowlist and links each parsed
+// audit with the analysis fingerprinter.
+func installInsights(worker *parser.Worker, store *sqlite.Store, cipher security.Cipher, vocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter) error {
+	if worker == nil || vocabulary == nil {
+		return nil
+	}
+	if fingerprints == nil {
+		return errors.New("insights: analysis fingerprinter unavailable")
+	}
+	runner, err := insights.NewRunner(store, cipher, vocabulary, fingerprints)
+	if err != nil {
+		return err
+	}
+	worker.SetHeaderAllowlist(vocabulary.HeaderAllowlist())
+	worker.SetAnalyzer(runner)
+	return nil
 }
 
 // New assembles the route matcher, interceptor engine, and reverse proxy.
@@ -114,6 +165,10 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 	newAPIClient, err := assembleNewAPIClient(configuration.NewAPI, upstreamProxy)
 	if err != nil {
 		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)
+	}
+	vocabulary, err := loadInsightsVocabulary(configuration.Insights)
+	if err != nil {
+		return nil, err
 	}
 
 	runtime := assembleAudit(ctx, configuration, logger)
@@ -185,6 +240,15 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 			_ = runtime.store.Close()
 			return nil, fmt.Errorf("assemble parser worker: %w", err)
 		}
+		if err := installInsights(application.parserWorker, runtime.store, runtime.cipher, vocabulary, runtime.analysisFingerprints); err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("assemble insights analyzer: %w", err)
+		}
+		if vocabulary != nil {
+			// Metadata-retention OpenAI audits are backfilled from the
+			// verified turn graph instead of released raw chunks.
+			application.parserWorker.SetReconstructor(queryService)
+		}
 		if runtime.manager != nil {
 			runtime.manager.SetCompletionNotifier(application.parserWorker.Notify)
 		}
@@ -199,6 +263,22 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 			}
 		}
 	}
+	// --- context insights (WP2) ---
+	var insightsService web.InsightsQuery
+	if configuration.Insights.Enabled && runtime.store != nil && runtime.cipher != nil {
+		prices, err := pricing.Load(configuration.Insights.PricingFile)
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("load insights pricing: %w", err)
+		}
+		service, err := query.NewInsights(runtime.store, runtime.cipher, prices)
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("assemble insights service: %w", err)
+		}
+		insightsService = service
+	}
+	// --- end context insights (WP2) ---
 	if runtime.store != nil && configuration.RetentionDays > 0 {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
 		if err != nil {
@@ -211,6 +291,7 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 		AdminToken: configuration.AdminToken,
 		Developer:  developerLoginOptions(configuration, runtime.fingerprints),
 		Query:      queryService,
+		Insights:   insightsService, // context insights (WP2)
 		Users:      newAPIClient,
 		Rules:      userAgentRules,
 		Assets:     web.EmbeddedAssets(),
@@ -562,13 +643,15 @@ type auditRuntime struct {
 	store        *sqlite.Store
 	cipher       security.Cipher
 	fingerprints *security.CredentialFingerprinter
+	// analysisFingerprints is nil when insights are disabled.
+	analysisFingerprints *security.AnalysisFingerprinter
 }
 
 func assembleAudit(ctx context.Context, configuration config.Config, logger *slog.Logger) auditRuntime {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	store, err := sqlite.Open(ctx, configuration.DBPath)
+	store, err := sqlite.OpenWithLogger(ctx, configuration.DBPath, logger)
 	if err != nil {
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
@@ -614,6 +697,16 @@ func assembleAudit(ctx context.Context, configuration config.Config, logger *slo
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
+	var analysisFingerprints *security.AnalysisFingerprinter
+	if configuration.Insights.Enabled {
+		analysisFingerprints, err = security.NewAnalysisFingerprinter(key)
+		if err != nil {
+			_ = store.Close()
+			logger.Warn("audit fingerprinter unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+			manager := audit.NewUnavailable(configuration.Mode, err, logger)
+			return auditRuntime{sink: manager, manager: manager}
+		}
+	}
 	recovered, recoveryErr := store.RecoverInterruptedAudits(ctx, time.Now().UnixNano())
 	if recoveryErr != nil {
 		_ = store.Close()
@@ -630,7 +723,10 @@ func assembleAudit(ctx context.Context, configuration config.Config, logger *slo
 		unavailable := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: unavailable, manager: unavailable}
 	}
-	return auditRuntime{sink: manager, manager: manager, store: store, cipher: cipher, fingerprints: fingerprints}
+	return auditRuntime{
+		sink: manager, manager: manager, store: store, cipher: cipher,
+		fingerprints: fingerprints, analysisFingerprints: analysisFingerprints,
+	}
 }
 
 type discardWriter struct{}

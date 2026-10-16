@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"net/http"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -252,6 +254,90 @@ func TestWorkerEvidenceErrorsOverrideProtocolFallbacks(t *testing.T) {
 	}
 }
 
+func encryptedRequestHeader(t *testing.T, cipher security.Cipher, auditID, name string, index int, value string) sqlite.HeaderEvidence {
+	t.Helper()
+	aad, err := security.AAD(auditID, "header", sqlite.StageRequestReceived, sqlite.HeaderKindHeader, name, strconv.Itoa(index))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt(aad, []byte(value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sqlite.HeaderEvidence{
+		Stage: sqlite.StageRequestReceived, Kind: sqlite.HeaderKindHeader, Name: name,
+		ValueIndex: index, ValueLength: len(value), ValueEnc: encrypted,
+	}
+}
+
+func TestWorkerDecryptsAllowlistedRequestHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		allowlist []string
+		tamper    bool
+		storeErr  error
+		wantCalls int
+		want      http.Header
+	}{
+		{
+			name: "allowlisted", allowlist: []string{"X-Agent-Id", " x-agent-id ", "X-Agent-Parent-Id", ""}, wantCalls: 1,
+			want: http.Header{"X-Agent-Id": {"node-example", "node-second"}, "X-Agent-Parent-Id": {"parent-example"}},
+		},
+		{name: "empty allowlist loads nothing", wantCalls: 0},
+		{name: "tampered value is dropped", allowlist: []string{"x-agent-id"}, tamper: true, wantCalls: 1},
+		{name: "store failure is dropped", allowlist: []string{"x-agent-id"}, storeErr: fmt.Errorf("read failure"), wantCalls: 1},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cipher := testCipher(t)
+			auditID := "audit-headers"
+			store := newFakeStore(auditID, "test.parser")
+			stage, chunks := encryptedStage(t, cipher, auditID, sqlite.StageRequestReceived, "application/json", "", []byte(`{}`))
+			key := stageKey(auditID, sqlite.StageRequestReceived)
+			store.stages[key], store.chunks[key] = stage, chunks
+			store.headers = []sqlite.HeaderEvidence{
+				encryptedRequestHeader(t, cipher, auditID, "X-Agent-Id", 0, "node-example"),
+				encryptedRequestHeader(t, cipher, auditID, "X-Agent-Id", 1, "node-second"),
+				encryptedRequestHeader(t, cipher, auditID, "x-agent-parent-id", 0, "parent-example"),
+			}
+			if test.tamper {
+				store.headers[1].ValueEnc[len(store.headers[1].ValueEnc)-1] ^= 0xff
+			}
+			store.headerErr = test.storeErr
+			implementation := &recordingParser{name: "test.parser", inputs: make(chan Input, 1)}
+			worker, err := NewWorker(store, cipher, []Parser{implementation}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker.SetHeaderAllowlist(test.allowlist)
+			defer worker.Close()
+			worker.process(context.Background(), auditID)
+
+			input := <-implementation.inputs
+			if !reflect.DeepEqual(input.Headers, test.want) {
+				t.Fatalf("headers = %#v, want %#v", input.Headers, test.want)
+			}
+			saved := <-store.saved
+			// Header problems never downgrade the parse of intact bodies.
+			if saved.Status != StatusOK {
+				t.Fatalf("parse status = %q code=%v", saved.Status, saved.ErrorCode)
+			}
+			store.mu.Lock()
+			calls := store.headerNames
+			store.mu.Unlock()
+			if len(calls) != test.wantCalls {
+				t.Fatalf("header loads = %d, want %d", len(calls), test.wantCalls)
+			}
+			if test.wantCalls > 0 && test.name == "allowlisted" && !reflect.DeepEqual(calls[0], []string{"x-agent-id", "x-agent-parent-id"}) {
+				t.Fatalf("requested names = %q", calls[0])
+			}
+		})
+	}
+}
+
 type recordingParser struct {
 	name   string
 	inputs chan Input
@@ -293,6 +379,9 @@ type fakeStore struct {
 	saveFailures int
 	saveAttempts int
 	releaseCount int
+	headers      []sqlite.HeaderEvidence
+	headerErr    error
+	headerNames  [][]string
 }
 
 func newFakeStore(auditID, parserName string) *fakeStore {
@@ -379,6 +468,21 @@ func (store *fakeStore) ReadParserChunks(_ context.Context, auditID, stage strin
 		if len(result) == limit {
 			break
 		}
+	}
+	return result, nil
+}
+
+func (store *fakeStore) LoadParserRequestHeaders(_ context.Context, _ string, names []string) ([]sqlite.HeaderEvidence, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.headerNames = append(store.headerNames, append([]string(nil), names...))
+	if store.headerErr != nil {
+		return nil, store.headerErr
+	}
+	result := make([]sqlite.HeaderEvidence, len(store.headers))
+	for index, header := range store.headers {
+		header.ValueEnc = append([]byte(nil), header.ValueEnc...)
+		result[index] = header
 	}
 	return result, nil
 }

@@ -1,0 +1,12 @@
+{
+  "snapshot": "example",
+  "note": "EXAMPLE ONLY. The prices below are placeholders, not real list prices. Replace them with the rates you want to estimate against. USD per 1M tokens. Point insights.pricing_file at a copy of this file. Schedule start/end are UTC and their minutes must be 00 or 30 (usage is priced in 30-minute slots); any other value is rejected at startup.",
+  "models": {
+    "example-provider/example-large": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75, "context": 200000},
+    "example-provider/example-small": {"input": 0.5, "output": 2.0, "cache_read": 0.05, "context": 128000},
+    "my-gateway-alias": {"input": 1.0, "output": 4.0, "context": 64000}
+  },
+  "schedules": [
+    {"model": "example-provider/example-*", "weekdays": [], "start": "16:30", "end": "00:30", "multiplier": 0.5}
+  ]
+}

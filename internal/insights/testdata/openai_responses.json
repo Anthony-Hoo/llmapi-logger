@@ -1,0 +1,17 @@
+{
+  "model": "gpt-test",
+  "instructions": "Follow the rules.",
+  "max_output_tokens": 2000,
+  "tools": [
+    {"type": "function", "name": "apply_patch", "description": "Apply a patch", "parameters": {}},
+    {"type": "web_search"}
+  ],
+  "input": [
+    {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<user_instructions>be nice</user_instructions>"}]},
+    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Add a line"}]},
+    {"type": "reasoning", "summary": [{"type": "summary_text", "text": "plan"}], "encrypted_content": "AAAAAAAA"},
+    {"type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{\"command\":[\"ls\"]}"},
+    {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go on"}]}
+  ]
+}

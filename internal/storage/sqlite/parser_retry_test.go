@@ -115,3 +115,30 @@ func TestLateParseReleaseDoesNotUndoSuccessfulSave(t *testing.T) {
 		t.Fatalf("late release changed successful save: failures=%d status=%s err=%v", failures, status, err)
 	}
 }
+
+func TestDuplicatePendingReleaseDoesNotChargeRetryBudget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	insertRetentionAudit(t, store, "release-ack-uncertain", 1, int64Pointer(2), ParseProcessing, true)
+	if err := store.ReleaseProcessingParse(ctx, "release-ack-uncertain"); err != nil {
+		t.Fatal(err)
+	}
+	var before int64
+	if err := store.readerDB.QueryRow("SELECT parse_next_at_ns FROM audit_records WHERE audit_id='release-ack-uncertain'").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := store.ReleaseProcessingParse(ctx, "release-ack-uncertain"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var failures int
+	var due int64
+	if err := store.readerDB.QueryRow("SELECT parse_save_failures, parse_next_at_ns FROM audit_records WHERE audit_id='release-ack-uncertain'").Scan(&failures, &due); err != nil {
+		t.Fatal(err)
+	}
+	if failures != 1 || due != before {
+		t.Fatalf("duplicate release charged budget or postponed retry: failures=%d due=%d want=%d", failures, due, before)
+	}
+}

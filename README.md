@@ -157,6 +157,10 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 
 备份流程见[备份与恢复](doc/deployment/backup-and-restore.md)。
 
+## 上下文洞察
+
+默认启用的 `insights` 在异步解析后派生用量、上下文构成、会话与 Agent 树和估算成本，并提供洞察页。价格与词表覆盖、各客户端接入（含自研 Agent 的 `X-Agent-*` Header 约定及 curl/Python/TypeScript 示例）见[洞察与 Agent 接入指南](doc/deployment/insights-and-agent-headers.md)。
+
 ## 项目边界
 
 - 本项目只能记录 Nginx、audit-proxy 和 NewAPI 边界上实际观察到的数据。

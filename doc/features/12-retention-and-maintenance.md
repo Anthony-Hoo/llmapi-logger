@@ -41,7 +41,7 @@
 
 1. 创建必要的 retention checkpoints；
 2. 在删除集合内按叶到根删除 turns；
-3. 删除目标 audit_records，由外键级联清理 HTTP、parsed result、token link 和 turn 子表；
+3. 删除目标 audit_records，由外键级联清理 HTTP、parsed result、token link、turn 子表以及派生的 `audit_analysis` 与 `agent_spawn_hints` 行（上下文洞察，不在完整性链内，也不需要任何额外清理步骤）；
 4. 删除不再包含 turn 的 conversations；
 5. 删除不再被 turn envelope、context op 或 response item 引用的 content objects；
 6. 删除不再被 content object 引用的 binary objects；
@@ -51,11 +51,11 @@
 
 ## 5. 执行方式
 
-- 应用启动后异步执行一轮，此后每 24 小时执行一次。
+- 应用启动后异步执行一轮；已追平时每小时检查一次。
 - 每个 writer 事务最多删除 200 条 audit，并最多删除 200 条 gap。
-- 单轮最多分别删除 5000 条 audit 和 5000 条 gap。
+- 单轮最多分别删除 5000 条 audit 和 5000 条 gap；任一类别达到上限时，暂停一分钟后继续下一轮，直到追平，再回到每小时检查。
 - 所有写入经过既有单 writer，不增加第二个写连接。
-- 任意 checkpoint、删除或 GC 失败都回滚整批，只记录稳定 `retention_failed`，等待下一轮。
+- 任意 checkpoint、删除或 GC 失败都回滚本批，记录稳定 `retention_failed` 和安全的 `storage_error` 类别，一分钟后重试。延迟从本轮结束时计算，不重叠运行，也不在单轮里无限追赶。
 
 retention 失败不改变 data-plane admission；数据库 writer 本身不健康时，原有 available/strict 语义仍然适用。
 
@@ -63,12 +63,14 @@ retention 失败不改变 data-plane admission；数据库 writer 本身不健�
 
 - cutoff 边界正确，未终结和 processing 记录不删除。
 - audit/gap 每批和单轮上限正确，两类互不阻塞。
+- 超过单轮上限的积压会自动继续处理；失败不等待空闲检查周期，追平后恢复空闲周期。
 - 删除简单 audit 后不存在 HTTP/parsed/token/turn 孤儿行。
 - 删除父轮次但保留子轮次时，子轮次成为 `retention_checkpoint`，provider request/response 仍可精确重建。
 - 多层删除集合按叶到根完成，不触发 parent RESTRICT，也不会形成循环。
 - 仅由过期 turns 引用的 content/binary objects 被清理，共享对象继续保留。
 - 事务中任何一步失败完整回滚。
 - 日志不包含 Header、Body、Query、Token、主密钥或底层数据库错误原文。
+- 删除 audit 后不残留 `audit_analysis` 与 `agent_spawn_hints` 行。
 
 ## 7. 运维
 

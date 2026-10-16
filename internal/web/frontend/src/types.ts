@@ -15,6 +15,8 @@ export interface SessionInfo {
   role: SessionRole;
   expires_at?: string;
   identity?: DeveloperIdentity | null;
+  /** False when the server runs without context insights; its routes would 404. */
+  insights_enabled?: boolean;
 }
 
 export interface AuditCursor {
@@ -282,4 +284,251 @@ export interface ReconstructedBodyDownload {
   blob: Blob;
   filename: string;
   contentType: string;
+}
+
+// ---------------------------------------------------------------------------
+// Context insights (doc/features/20-context-insights.md). Mirrors the JSON tags
+// of internal/insights/apitypes.go and types.go. Nanosecond timestamps are JSON
+// strings there (like the audit API; epoch ns exceed 2^53), hence NanoTime;
+// nullable numbers mean "not reported" or "unknown price".
+// ---------------------------------------------------------------------------
+
+export type CategoryKey =
+  | "system"
+  | "tools"
+  | "user"
+  | "injected"
+  | "assistant"
+  | "reasoning"
+  | "tool_result"
+  | "media";
+
+export type CategoryValues = Record<CategoryKey, number>;
+
+export interface InsightsUsage {
+  uncached_input: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  output: number | null;
+  reasoning: number | null;
+}
+
+export interface UsageTotals {
+  requests: number;
+  uncached_input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  reasoning: number;
+  prompt_total: number;
+  cache_hit_rate: number | null;
+  estimated_cost_usd: number | null;
+  unpriced_requests: number;
+}
+
+export type InsightsGroupBy = "model" | "protocol" | "client" | "caller" | "token";
+export type InsightsSessionSort = "recent" | "tokens" | "context";
+
+export interface DailyUsage {
+  day: string;
+  usage: UsageTotals;
+}
+
+export interface HeatmapDay {
+  day: string;
+  requests: number;
+  sessions: number;
+}
+
+export interface GroupUsage {
+  key: string;
+  label: string;
+  usage: UsageTotals;
+}
+
+export interface OverviewResponse {
+  from_ns: NanoTime;
+  to_ns: NanoTime;
+  totals: UsageTotals;
+  sessions: number;
+  trees: number;
+  daily: DailyUsage[];
+  heatmap: HeatmapDay[];
+  group_by: string;
+  groups: GroupUsage[];
+  composition: CategoryValues;
+}
+
+export interface SessionCaller {
+  username?: string;
+  token_name?: string;
+}
+
+export interface SessionCard {
+  session_id: string;
+  session_link: string;
+  tree_id?: string;
+  protocol: string;
+  client: string;
+  role: string;
+  first_ns: NanoTime;
+  last_ns: NanoTime;
+  steps: number;
+  turns: number;
+  models: string[];
+  usage: UsageTotals;
+  last_composition: CategoryValues;
+  last_prompt_total: number | null;
+  context_window: number | null;
+  subagents: number;
+  caller: SessionCaller | null;
+}
+
+export interface SessionsResponse {
+  items: SessionCard[];
+  next_cursor?: string;
+}
+
+export type InsightsEvent =
+  | "model_switch"
+  | "compaction"
+  | "prune"
+  | "system_changed"
+  | "tools_changed"
+  | "injected";
+
+export type ResponseKind = "thinking" | "tool_call" | "text";
+
+export interface TrendStep {
+  audit_id: string;
+  started_at_ns: NanoTime;
+  turn: number;
+  turn_start: boolean;
+  model: string;
+  role: string;
+  estimate: CategoryValues;
+  usage: InsightsUsage;
+  prompt_total: number | null;
+  events: string[];
+  appended_items: number | null;
+  removed_items: number | null;
+  stop_reason?: string;
+  response_kinds: string[];
+  first_event_ms: number | null;
+  generation_ms: number | null;
+  client_gap_ms: number | null;
+  cost_usd: number | null;
+}
+
+export interface TrendResponse {
+  session_id: string;
+  tree_id?: string;
+  context_window: number | null;
+  truncated: boolean;
+  steps: TrendStep[];
+}
+
+export interface TreeNode {
+  node_id: string;
+  parent_node_id?: string;
+  visible: boolean;
+  session_id?: string;
+  client: string;
+  role: string;
+  first_ns: NanoTime;
+  last_ns: NanoTime;
+  steps: number;
+  aux_requests: number;
+  usage: UsageTotals;
+  last_composition: CategoryValues;
+  last_prompt_total: number | null;
+  context_window: number | null;
+  link_source?: string;
+  link_confidence?: number;
+}
+
+export interface TreeResponse {
+  tree_id: string;
+  truncated: boolean;
+  nodes: TreeNode[];
+}
+
+export interface CompositionItem {
+  index: number;
+  category: string;
+  role: string;
+  /** text | thinking | tool_call | tool_result | image | file | tool_def | system */
+  kind: string;
+  tokens: number;
+  label?: string;
+  summary?: string;
+  /** added | kept; absent without a previous step. */
+  change?: string;
+}
+
+export interface ToolDef {
+  name: string;
+  tokens: number;
+  /** builtin | mcp:<server> | custom */
+  source: string;
+}
+
+export interface FileOp {
+  tool: string;
+  /** read | write | search | shell */
+  op: string;
+  path?: string;
+  added_lines?: number;
+  removed_lines?: number;
+}
+
+export interface AgentIdentity {
+  client: string;
+  role: string;
+  root_id?: string;
+  node_id?: string;
+  parent_id?: string;
+  name?: string;
+  link_source?: string;
+  confidence?: number;
+}
+
+export interface CompositionDiff {
+  added_items: number;
+  removed_items: number;
+  by_category: CategoryValues;
+}
+
+export interface CompositionResponse {
+  audit_id: string;
+  analysis_version: number;
+  model: string;
+  usage: InsightsUsage;
+  prompt_total: number | null;
+  estimate: CategoryValues;
+  anchored: CategoryValues | null;
+  context_window: number | null;
+  items: CompositionItem[];
+  tools: ToolDef[];
+  file_ops: FileOp[];
+  agent: AgentIdentity;
+  previous_audit_id?: string;
+  diff: CompositionDiff | null;
+  events: string[];
+  truncated: boolean;
+}
+
+export interface OverviewQuery {
+  from_ns: string;
+  to_ns: string;
+  tz_offset_min: number;
+  group_by: InsightsGroupBy;
+}
+
+export interface SessionsQuery {
+  from_ns?: string;
+  to_ns?: string;
+  sort?: InsightsSessionSort;
+  limit?: number;
+  cursor?: string;
 }

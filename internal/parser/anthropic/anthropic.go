@@ -183,6 +183,24 @@ func applyUsage(usage map[string]any, result *base.Result) {
 	if value := protocolutil.Int64(usage["output_tokens"]); value != nil {
 		result.Usage.Output = value
 	}
+	// input_tokens already excludes cache reads and writes. Streams report
+	// message_start usage first and cumulative message_delta usage later, so
+	// each later reported field replaces the earlier one. Anthropic does not
+	// break out reasoning tokens.
+	normalized := &result.Normalized
+	for _, field := range []struct {
+		target **int64
+		key    string
+	}{
+		{&normalized.UncachedInput, "input_tokens"},
+		{&normalized.CacheRead, "cache_read_input_tokens"},
+		{&normalized.CacheWrite, "cache_creation_input_tokens"},
+		{&normalized.Output, "output_tokens"},
+	} {
+		if value := protocolutil.Int64(usage[field.key]); value != nil {
+			*field.target = value
+		}
+	}
 }
 
 func countToolBlocks(value any) int {
