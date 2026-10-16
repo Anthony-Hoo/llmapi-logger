@@ -17,7 +17,7 @@ insights:
 
 - **关闭**：设 `insights.enabled: false` 并重启。已有的 `audit_analysis` 行保留但不再更新，也不会被读取。重新开启后，后台回填会补齐关闭期间缺失的记录。
 - **开启**：默认即开启。启动后新请求在解析成功后立即分析；历史记录由后台回填逐步补齐（队列空闲时每个扫描周期最多 20 条，已被 retention 清除原始正文且无法重建的记录会跳过）。
-- 非空的 `pricing_file` / `vocabulary_file` 必须在启动时已存在且是普通文件；内容非法时拒绝启动。
+- `insights.enabled` 为 true 时，非空的 `pricing_file` / `vocabulary_file` 必须在启动时已存在且是普通文件；内容非法时拒绝启动。
 
 ## 2. 价格覆盖
 

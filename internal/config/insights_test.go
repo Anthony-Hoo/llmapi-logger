@@ -85,6 +85,15 @@ func TestValidateInsightsFiles(t *testing.T) {
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
+
+	// Disabled insights never read the files, so missing or invalid paths are ignored.
+	for _, path := range []string{missing, directory, " " + regular} {
+		cfg := testConfig()
+		cfg.Insights = InsightsConfig{Enabled: false, PricingFile: path, VocabularyFile: path}
+		if err := Validate(cfg); err != nil {
+			t.Errorf("Validate() with insights disabled and file %q: %v", path, err)
+		}
+	}
 }
 
 // quoteYAML single-quotes a path so Windows separators survive YAML decoding.

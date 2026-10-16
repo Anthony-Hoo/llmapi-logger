@@ -69,11 +69,15 @@ func Validate(cfg Config) error {
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > 3650 {
 		return fmt.Errorf("retention_days must be 0 or between 1 and 3650, got %d", cfg.RetentionDays)
 	}
-	if err := validateOptionalFile("insights.pricing_file", cfg.Insights.PricingFile); err != nil {
-		return err
-	}
-	if err := validateOptionalFile("insights.vocabulary_file", cfg.Insights.VocabularyFile); err != nil {
-		return err
+	// The files are only read when insights are enabled, so a stale path in a
+	// disabled section must not block startup.
+	if cfg.Insights.Enabled {
+		if err := validateOptionalFile("insights.pricing_file", cfg.Insights.PricingFile); err != nil {
+			return err
+		}
+		if err := validateOptionalFile("insights.vocabulary_file", cfg.Insights.VocabularyFile); err != nil {
+			return err
+		}
 	}
 	if err := validateInterceptors(cfg.Interceptors); err != nil {
 		return err
