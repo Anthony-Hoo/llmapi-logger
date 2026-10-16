@@ -81,12 +81,15 @@ type InsightsUsageRow struct {
 	Key, Label, Model string
 	SlotNS            int64
 	Requests          int64
-	UncachedInput     int64
-	CacheRead         int64
-	CacheWrite        int64
-	Output            int64
-	Reasoning         int64
-	Mix               InsightsMix
+	// UsageRequests counts the requests that reported any normalized usage;
+	// the others sum to zero and must not be priced.
+	UsageRequests int64
+	UncachedInput int64
+	CacheRead     int64
+	CacheWrite    int64
+	Output        int64
+	Reasoning     int64
+	Mix           InsightsMix
 }
 
 // InsightsDayCount is the activity of one local calendar day.
@@ -105,6 +108,7 @@ WHERE 1 = 1`
 const (
 	insightsPromptSQL = `(COALESCE(x.u_uncached_input, 0) + COALESCE(x.u_cache_read, 0) + COALESCE(x.u_cache_write, 0))`
 	insightsHasUsage  = `(x.u_uncached_input IS NOT NULL OR x.u_cache_read IS NOT NULL OR x.u_cache_write IS NOT NULL)`
+	insightsAnyUsage  = `(` + insightsHasUsage + ` OR x.u_output IS NOT NULL OR x.u_reasoning IS NOT NULL)`
 	insightsEstSumSQL = `(x.est_system + x.est_tools + x.est_user + x.est_injected + x.est_assistant + x.est_reasoning + x.est_tool_result + x.est_media)`
 	insightsAnchorSQL = `(CASE WHEN ` + insightsHasUsage + ` AND ` + insightsEstSumSQL + ` > 0 THEN 1.0 * ` +
 		insightsPromptSQL + ` / ` + insightsEstSumSQL + ` ELSE 1.0 END)`
@@ -239,7 +243,7 @@ func (store *Store) InsightsUsage(ctx context.Context, filter InsightsFilter, sp
 	}
 	statement := `
 SELECT ` + key + ` AS grp_key, ` + label + ` AS grp_label, COALESCE(x.model, '') AS grp_model, ` + slot + ` AS grp_slot,
-       COUNT(*),
+       COUNT(*), COALESCE(SUM(CASE WHEN ` + insightsAnyUsage + ` THEN 1 ELSE 0 END), 0),
        COALESCE(SUM(x.u_uncached_input), 0), COALESCE(SUM(x.u_cache_read), 0), COALESCE(SUM(x.u_cache_write), 0),
        COALESCE(SUM(x.u_output), 0), COALESCE(SUM(x.u_reasoning), 0),
        SUM(x.est_system * ` + insightsAnchorSQL + `), SUM(x.est_tools * ` + insightsAnchorSQL + `),
@@ -257,7 +261,7 @@ ORDER BY grp_key, grp_model, grp_slot`
 	result := make([]InsightsUsageRow, 0)
 	for rows.Next() {
 		var row InsightsUsageRow
-		if err := rows.Scan(&row.Key, &row.Label, &row.Model, &row.SlotNS, &row.Requests,
+		if err := rows.Scan(&row.Key, &row.Label, &row.Model, &row.SlotNS, &row.Requests, &row.UsageRequests,
 			&row.UncachedInput, &row.CacheRead, &row.CacheWrite, &row.Output, &row.Reasoning,
 			&row.Mix.System, &row.Mix.Tools, &row.Mix.User, &row.Mix.Injected,
 			&row.Mix.Assistant, &row.Mix.Reasoning, &row.Mix.ToolResult, &row.Mix.Media); err != nil {

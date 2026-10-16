@@ -176,8 +176,13 @@ func (service *Insights) fold(rows []sqlite.InsightsUsageRow) usageFold {
 			accumulator.totals.UnpricedRequests += row.Requests
 			continue
 		}
-		accumulator.cost += *cost
-		accumulator.priced = true
+		// Requests without any reported usage sum to zero in SQL; they are
+		// unpriced rather than free.
+		accumulator.totals.UnpricedRequests += row.Requests - row.UsageRequests
+		if row.UsageRequests > 0 {
+			accumulator.cost += *cost
+			accumulator.priced = true
+		}
 	}
 	return result
 }
@@ -619,7 +624,9 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 			ResponseKinds: bitNames(row.RespKinds, kindNames),
 			FirstEventMS:  milliseconds(row.FirstEventNS),
 			GenerationMS:  milliseconds(row.GenerationNS),
-			CostUSD:       service.prices.Cost(usage, row.Model, time.Unix(0, row.StartedAtNS)),
+		}
+		if usage.UncachedInput != nil || usage.CacheRead != nil || usage.CacheWrite != nil || usage.Output != nil || usage.Reasoning != nil {
+			step.CostUSD = service.prices.Cost(usage, row.Model, time.Unix(0, row.StartedAtNS))
 		}
 		if previous := byID[row.PrevAuditID]; previous != nil && previous.StopReason == insights.StopToolUse &&
 			previous.EndedAtNS != nil && row.StartedAtNS >= *previous.EndedAtNS {

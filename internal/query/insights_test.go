@@ -780,3 +780,58 @@ func TestInsightsSubagentCountIgnoresTheTimeRange(t *testing.T) {
 		t.Fatalf("card tree/subagents = %q/%d, want a tree with 1 subagent", card.TreeID, card.Subagents)
 	}
 }
+
+func TestInsightsRequestsWithoutUsageAreUnpricedNotFree(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	root, node := fingerprint(0xc0), fingerprint(0x21)
+	fixture.seed(stepSeed{id: "priced", offset: 0, key: keyOwn, session: testSessionShared, root: root, node: node,
+		uncached: i64(100), output: i64(10), turnStart: true})
+	fixture.seed(stepSeed{id: "no-usage", offset: 10 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node, prev: "priced"})
+	fixture.seed(stepSeed{id: "only-no-usage", offset: 20 * time.Second, key: keyOwn, session: "agt_bbbbbbbbbbbbbbbbbbbbbbbb",
+		root: fingerprint(0xc1), node: fingerprint(0x22)})
+	ctx := context.Background()
+	from, to := fixture.rangeNS()
+	want := (100*2.0 + 10*8.0) / 1e6
+
+	overview, err := fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to, GroupBy: "model", Scope: scopeFor(keyOwn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	totals := overview.Totals
+	if totals.Requests != 3 || totals.UnpricedRequests != 2 || totals.EstimatedCostUSD == nil || *totals.EstimatedCostUSD-want > 1e-12 || want-*totals.EstimatedCostUSD > 1e-12 {
+		t.Fatalf("totals = %+v", totals)
+	}
+	if day := overview.Daily[len(overview.Daily)-1].Usage; day.UnpricedRequests != 2 {
+		t.Fatalf("daily = %+v", day)
+	}
+	sessions, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOwn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, card := range sessions.Items {
+		switch card.SessionID {
+		case testSessionShared:
+			if card.Usage.UnpricedRequests != 1 || card.Usage.EstimatedCostUSD == nil {
+				t.Fatalf("shared card = %+v", card.Usage)
+			}
+		default:
+			if card.Usage.UnpricedRequests != 1 || card.Usage.EstimatedCostUSD != nil {
+				t.Fatalf("usage-less card = %+v", card.Usage)
+			}
+		}
+	}
+
+	tree, err := fixture.service.Tree(ctx, "c0c0c0c0c0c0c0c0c0c0c0c0", scopeFor(keyOwn))
+	if err != nil || len(tree.Nodes) != 1 || tree.Nodes[0].Usage.UnpricedRequests != 1 || tree.Nodes[0].Usage.EstimatedCostUSD == nil {
+		t.Fatalf("tree = %+v %v", tree, err)
+	}
+
+	trend, err := fixture.service.Trend(ctx, testSessionShared, scopeFor(keyOwn))
+	if err != nil || len(trend.Steps) != 2 {
+		t.Fatalf("trend = %+v %v", trend, err)
+	}
+	if trend.Steps[0].CostUSD == nil || trend.Steps[1].CostUSD != nil {
+		t.Fatalf("step costs = %v / %v", trend.Steps[0].CostUSD, trend.Steps[1].CostUSD)
+	}
+}
