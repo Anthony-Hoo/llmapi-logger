@@ -141,6 +141,7 @@ export function TrendPage({
                   granularity={granularity}
                   contextWindow={trend.context_window}
                   selectedAuditID={selectedAuditID}
+                  truncated={trend.truncated}
                   onSelectBar={setSelectedAuditID}
                 />
                 <CategoryLegend />

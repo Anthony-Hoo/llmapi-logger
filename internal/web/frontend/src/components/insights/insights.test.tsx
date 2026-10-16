@@ -256,6 +256,15 @@ describe("trend tooltip", () => {
     expect(html).toContain("缓存读取");
   });
 
+  it("explains the unavailable delta of the first bar of a truncated trend", () => {
+    const steps = stepBars([step(), step({ audit_id: "a2" })]);
+    const [first, second] = buildChartRows(steps, "delta", "step", true);
+    const html = renderToStaticMarkup(<TrendTooltipBody row={first} mode="delta" granularity="step" />);
+    expect(html).toContain("截断边界，无上一项");
+    expect(html).not.toContain("相对上一柱的变化");
+    expect(renderToStaticMarkup(<TrendTooltipBody row={second} mode="delta" granularity="step" />)).toContain("相对上一柱的变化");
+  });
+
   it("shows the net change in delta mode and flags missing usage", () => {
     const rows = buildChartRows(stepBars([step(), step({ audit_id: "a2", estimate: values({ system: 100 }), prompt_total: null })]), "delta", "step");
     const html = renderToStaticMarkup(<TrendTooltipBody row={rows[1]} mode="delta" granularity="step" />);

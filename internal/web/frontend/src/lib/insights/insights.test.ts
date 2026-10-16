@@ -159,6 +159,21 @@ describe("delta computation", () => {
     expect(netDelta(deltas[2])).toBe(-190);
   });
 
+  it("leaves the first delta unavailable when the trend is truncated", () => {
+    const bars = stepBars([
+      step("a", 1, { system: 5000, user: 3000 }),
+      step("b", 1, { system: 5000, user: 3100 }),
+    ]);
+    expect(computeDeltas(bars)[0].system).toBe(5000);
+    const truncated = computeDeltas(bars, true);
+    expect(truncated[0]).toEqual(values({}));
+    expect(truncated[1]).toEqual(values({ user: 100 }));
+    const rows = buildChartRows(bars, "delta", "step", true);
+    expect(rows.map((row) => row.boundary)).toEqual([true, false]);
+    expect(rows[0].net).toBe(0);
+    expect(buildChartRows(bars, "delta", "step").every((row) => !row.boundary)).toBe(true);
+  });
+
   it("feeds recharts rows with anchored totals or signed deltas", () => {
     const bars = stepBars([
       step("a", 1, { system: 1, user: 1 }, { prompt_total: 200 }),

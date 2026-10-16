@@ -27,6 +27,7 @@ export function TrendChart({
   granularity,
   contextWindow,
   selectedAuditID,
+  truncated = false,
   onSelectBar,
 }: {
   bars: readonly TrendBar[];
@@ -34,9 +35,10 @@ export function TrendChart({
   granularity: TrendGranularity;
   contextWindow: number | null;
   selectedAuditID: string | null;
+  truncated?: boolean;
   onSelectBar: (auditID: string) => void;
 }) {
-  const rows = buildChartRows(bars, mode, granularity);
+  const rows = buildChartRows(bars, mode, granularity, truncated);
   const tickEvery = Math.max(1, Math.ceil(rows.length / 24));
   const maxTotal = Math.max(0, ...bars.map((bar) => bar.promptTotal ?? Object.values(bar.anchored).reduce((a, b) => a + b, 0)));
   const showWindow = mode === "total" && contextWindow !== null && contextWindow > 0 && maxTotal >= contextWindow * 0.5;
@@ -174,11 +176,13 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
 
       <div>
         <p className="mb-1 text-muted-foreground">
-          {mode === "delta"
-            ? "相对上一柱的变化（估算）"
-            : bar.anchoredToUsage
-              ? "构成（已锚定到 prompt 总量）"
-              : "构成（估算，无 usage）"}
+          {mode === "delta" && row.boundary
+            ? "截断边界，无上一项"
+            : mode === "delta"
+              ? "相对上一柱的变化（估算）"
+              : bar.anchoredToUsage
+                ? "构成（已锚定到 prompt 总量）"
+                : "构成（估算，无 usage）"}
         </p>
         <ul className="space-y-0.5">
           {CATEGORIES.filter((category) => source[category.key] !== 0).map((category) => (

@@ -119,15 +119,19 @@ export function sumNullable(values: ReadonlyArray<number | null | undefined>): n
 /**
  * Signed per-category difference between each bar and the one before it; the
  * first bar is compared against an empty context. Positive values stack up,
- * negative values stack down in the chart.
+ * negative values stack down in the chart. When the trend is truncated the
+ * first visible bar has a real predecessor that was cut off, so its delta is
+ * unavailable and stays zero instead of a huge artificial increase.
  */
-export function computeDeltas(bars: readonly TrendBar[]): CategoryValues[] {
+export function computeDeltas(bars: readonly TrendBar[], truncated = false): CategoryValues[] {
   const deltas: CategoryValues[] = [];
   let previous = emptyCategoryValues();
-  for (const bar of bars) {
+  for (const [index, bar] of bars.entries()) {
     const delta = emptyCategoryValues();
-    for (const key of CATEGORY_KEYS) {
-      delta[key] = bar.anchored[key] - previous[key];
+    if (!(truncated && index === 0)) {
+      for (const key of CATEGORY_KEYS) {
+        delta[key] = bar.anchored[key] - previous[key];
+      }
     }
     deltas.push(delta);
     previous = bar.anchored;
@@ -152,6 +156,8 @@ export interface ChartRow {
   /** Signed delta of this bar; zero values in total mode. */
   delta: CategoryValues;
   net: number;
+  /** True for the first bar of a truncated trend: its delta has no predecessor. */
+  boundary: boolean;
   [category: string]: unknown;
 }
 
@@ -160,8 +166,13 @@ export interface ChartRow {
  * values; delta mode feeds signed differences (recharts stacks them with
  * stackOffset="sign").
  */
-export function buildChartRows(bars: readonly TrendBar[], mode: TrendMode, granularity: TrendGranularity): ChartRow[] {
-  const deltas = computeDeltas(bars);
+export function buildChartRows(
+  bars: readonly TrendBar[],
+  mode: TrendMode,
+  granularity: TrendGranularity,
+  truncated = false,
+): ChartRow[] {
+  const deltas = computeDeltas(bars, truncated);
   return bars.map((bar, index) => {
     const delta = deltas[index];
     const source = mode === "delta" ? delta : bar.anchored;
@@ -171,6 +182,7 @@ export function buildChartRows(bars: readonly TrendBar[], mode: TrendMode, granu
       bar,
       delta,
       net: netDelta(delta),
+      boundary: truncated && index === 0,
     };
     for (const key of CATEGORY_KEYS) {
       row[key] = source[key];
