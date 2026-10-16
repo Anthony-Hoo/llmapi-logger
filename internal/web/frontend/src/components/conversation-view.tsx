@@ -168,11 +168,11 @@ function ConversationMessageView({ message, displayIndex }: { message: Conversat
         <header className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">{presentation.label}</span>
           <span className="text-xs tabular-nums text-muted-foreground">#{displayIndex}</span>
-          <Badge variant={isResponse ? "success" : "secondary"} className="font-normal">
+          <Badge variant={isResponse ? "success" : "secondary"}>
             {isResponse ? "上游响应" : "请求上下文"}
           </Badge>
           {message.name ? (
-            <Badge variant="secondary" className="font-mono font-normal">
+            <Badge variant="secondary" className="font-mono">
               name: {message.name}
             </Badge>
           ) : null}

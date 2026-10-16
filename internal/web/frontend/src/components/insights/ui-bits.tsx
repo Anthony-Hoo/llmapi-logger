@@ -38,7 +38,7 @@ export function Segmented<T extends string>({
           key={option.value}
           variant={option.value === value ? "secondary" : "ghost"}
           size="sm"
-          className="h-7 px-2.5"
+
           aria-pressed={option.value === value}
           title={option.title}
           onClick={() => onChange(option.value)}

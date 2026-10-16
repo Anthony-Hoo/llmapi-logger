@@ -85,7 +85,7 @@ export function TrendPage({
       </div>
 
       {error ? (
-        <Alert className="border-red-200 bg-red-50/90">
+        <Alert className="border-red-200">
           <AlertTitle className="text-red-900">无法读取会话趋势</AlertTitle>
           <AlertDescription className="text-red-800">{error}</AlertDescription>
         </Alert>
@@ -94,8 +94,8 @@ export function TrendPage({
       {loading ? <Skeleton className="h-80 w-full" /> : null}
 
       {trend && !loading ? (
-        <Card className="bg-white/90 shadow-xs">
-          <CardContent className="space-y-4 p-4 pt-4">
+        <Card className="bg-white/90">
+          <CardContent className="space-y-4 pt-4">
             <PanelTitle
               title="上下文构成趋势"
               hint={
@@ -127,8 +127,8 @@ export function TrendPage({
               }
             />
             {trend.truncated ? (
-              <Alert className="border-amber-200 bg-amber-50/80">
-                <AlertDescription className="text-amber-900">更早步骤已截断，仅显示最近的步骤。</AlertDescription>
+              <Alert className="border-amber-200">
+                <AlertDescription>更早步骤已截断，仅显示最近的步骤。</AlertDescription>
               </Alert>
             ) : null}
             {bars.length === 0 ? (

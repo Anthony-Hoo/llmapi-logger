@@ -53,7 +53,7 @@ export function CompositionSection({ client, auditID }: { client: ApiClient; aud
   }
   if (state.status === "error") {
     return (
-      <Alert className="border-red-200 bg-red-50">
+      <Alert className="border-red-200">
         <AlertDescription className="text-red-800">无法读取上下文构成：{state.message}</AlertDescription>
       </Alert>
     );
@@ -139,8 +139,8 @@ export function CompositionPanel({ data }: { data: CompositionResponse }) {
           </p>
         ) : null}
         {data.truncated ? (
-          <Alert className="border-amber-200 bg-amber-50/80">
-            <AlertDescription className="text-amber-900">条目清单已截断，部分条目未列出；类别合计仍为完整估算。</AlertDescription>
+          <Alert className="border-amber-200">
+            <AlertDescription>条目清单已截断，部分条目未列出；类别合计仍为完整估算。</AlertDescription>
           </Alert>
         ) : null}
       </div>
@@ -264,9 +264,9 @@ function CategoryList({
         <span className="text-xs tabular-nums text-muted-foreground">
           {formatTokens(total)} · {items.length} 项
         </span>
-        {added > 0 ? <Badge variant="success" className="px-2 py-0 text-[11px]">+{added} 项</Badge> : null}
+        {added > 0 ? <Badge variant="success">+{added} 项</Badge> : null}
         {deltaTokens !== null && deltaTokens !== 0 ? (
-          <Badge variant={deltaTokens > 0 ? "warning" : "outline"} className="px-2 py-0 text-[11px] tabular-nums">
+          <Badge variant={deltaTokens > 0 ? "warning" : "outline"} className="tabular-nums">
             {formatSignedTokens(deltaTokens)}
           </Badge>
         ) : null}
@@ -279,7 +279,7 @@ function CategoryList({
               <span className="inline-flex flex-wrap items-center gap-1.5">
                 <span className="font-medium">{item.label?.trim() || itemKindLabel(item.kind)}</span>
                 <span className="text-muted-foreground">{itemKindLabel(item.kind)}</span>
-                {item.change === "added" ? <Badge variant="success" className="px-1.5 py-0 text-[10px]">新增</Badge> : null}
+                {item.change === "added" ? <Badge variant="success">新增</Badge> : null}
               </span>
               {item.summary ? <span className="mt-0.5 block break-words text-muted-foreground">{item.summary}</span> : null}
             </span>
@@ -334,7 +334,7 @@ function ToolList({ tools }: { tools: readonly ToolDef[] }) {
                   <span className="block h-1 rounded-full bg-sky-400" style={{ width: `${(tool.tokens / max) * 100}%` }} />
                 </span>
               </span>
-              <Badge variant={source.variant} className="shrink-0 px-2 py-0 text-[11px]">{source.label}</Badge>
+              <Badge variant={source.variant} className="shrink-0">{source.label}</Badge>
             </li>
           );
         })}
