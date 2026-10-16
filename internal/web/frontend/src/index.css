@@ -7,8 +7,20 @@
  * Colors are plain hex so Tailwind opacity modifiers (bg-primary/10) work via
  * color-mix(). The chart code references the same variables by name
  * (src/lib/tokens.ts), so this file is the single source of truth for color.
+ * static keeps every variable in the output even when only TS references it.
  */
-@theme {
+@theme static {
+  /*
+   * Drop Tailwind's default palette, type scale, weights, radii and shadows so
+   * only the tokens below generate utilities (bg-slate-50, text-xs, shadow-md
+   * produce nothing). Spacing keeps Tailwind's 4px numeric scale.
+   */
+  --color-*: initial;
+  --text-*: initial;
+  --font-weight-*: initial;
+  --radius-*: initial;
+  --shadow-*: initial;
+
   /* ---- Primary: calm steel blue (brand logo #3b6e9e -> #2c5378, deep #1d3b57) ---- */
   --color-primary-50: #f0f5fa;
   --color-primary-100: #e3edf6;
@@ -89,18 +101,6 @@
   --color-chart-axis: var(--color-subtle);
   --color-chart-cursor: rgb(148 163 184 / 0.16);
   --color-chart-track: var(--color-neutral-200);
-
-  /* ---- Legacy shadcn aliases: removed once every component uses the tokens above ---- */
-  --color-input: var(--color-border-strong);
-  --color-card: var(--color-surface);
-  --color-card-foreground: var(--color-foreground);
-  --color-secondary: var(--color-surface-sunken);
-  --color-secondary-foreground: var(--color-foreground);
-  --color-accent: var(--color-surface-sunken);
-  --color-accent-foreground: var(--color-foreground);
-  --color-muted-foreground: var(--color-muted);
-  --color-destructive: var(--color-danger);
-  --color-destructive-foreground: #ffffff;
 
   /* ---- Typography: 7-step scale with paired line heights + mono code ---- */
   /* Tailwind 4.3 changed the default sans stack to -apple-system first; keep the v3 stack. */

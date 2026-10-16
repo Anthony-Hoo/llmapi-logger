@@ -47,7 +47,7 @@ export function ImageAttachments({
                   src={image.src}
                   alt={`第 ${index + 1} 张图片（${image.mediaType}）`}
                   loading="lazy"
-                  className="max-h-40 max-w-[16rem] cursor-zoom-in object-contain"
+                  className="max-h-40 max-w-64 cursor-zoom-in object-contain"
                   onError={() => setBroken((current) => ({ ...current, [index]: true }))}
                 />
                 <span className="block border-t bg-surface-muted px-2 py-1 text-left text-caption tabular-nums text-subtle">
@@ -228,7 +228,7 @@ function ImageLightbox({
       aria-label="图片放大查看"
       className="fixed inset-0 z-50 flex flex-col bg-scrim/90 backdrop-blur-sm"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-neutral-100">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-gutter py-3 text-neutral-100">
         <p className="min-w-0 truncate text-label text-neutral-300">
           {count > 1 ? `第 ${index + 1} / ${count} 张 · ` : ""}
           {image.mediaType} · {formatBytes(image.bytes)}
@@ -285,7 +285,7 @@ function ImageLightbox({
           </>
         ) : null}
       </div>
-      <p className="px-4 pb-3 text-center text-caption text-neutral-400">
+      <p className="px-gutter pb-3 text-center text-caption text-neutral-400">
         滚轮缩放 · 拖动平移 · 双击在适应屏幕与原始大小间切换{count > 1 ? " · ←/→ 切换图片" : ""} · Esc 关闭
       </p>
     </div>,

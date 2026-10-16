@@ -104,7 +104,7 @@
 |---|---|---|
 | `gutter` | 16 / 24（≥640）/ 32（≥1024） | 页头与主体左右内边距 `px-gutter` |
 | `section` | 16 | 页面区块之间、卡片之间、卡片网格 `space-y-section` / `gap-section` |
-| `card` | 16 | 卡片内边距 `p-card`；无头卡片 `CardContent` 加 `pt-card` |
+| `card` | 16 | 卡片内边距 `p-card`；无头卡片 `CardContent` 加 `pt-card`（登录卡例外：24，`p-6`） |
 | `stack` | 12 | 卡片头与内容、卡片内区块之间 `space-y-stack` |
 | `header` | 56 | 顶栏最小高度，粘性列表据此计算 `top` |
 

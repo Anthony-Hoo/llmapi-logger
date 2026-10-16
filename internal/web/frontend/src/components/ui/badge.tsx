@@ -2,9 +2,7 @@ import type { HTMLAttributes } from "react";
 
 import { cn } from "../../lib/utils";
 
-export type BadgeVariant = "neutral" | "outline" | "info" | "success" | "warning" | "danger" | LegacyBadgeVariant;
-/** Temporary aliases until every call site uses the token-based names. */
-type LegacyBadgeVariant = "default" | "secondary" | "destructive";
+export type BadgeVariant = "neutral" | "outline" | "info" | "success" | "warning" | "danger";
 
 const variants: Record<BadgeVariant, string> = {
   neutral: "border-transparent bg-surface-sunken text-muted",
@@ -13,9 +11,6 @@ const variants: Record<BadgeVariant, string> = {
   success: "border-success-border bg-success-bg text-success-fg",
   warning: "border-warning-border bg-warning-bg text-warning-fg",
   danger: "border-danger-border bg-danger-bg text-danger-fg",
-  default: "border-info-border bg-info-bg text-info-fg",
-  secondary: "border-transparent bg-surface-sunken text-muted",
-  destructive: "border-danger-border bg-danger-bg text-danger-fg",
 };
 
 export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {

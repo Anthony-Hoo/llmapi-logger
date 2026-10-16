@@ -2,7 +2,7 @@ import { forwardRef, type ButtonHTMLAttributes } from "react";
 
 import { cn } from "../../lib/utils";
 
-export type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "danger" | "default" | "destructive";
+export type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "danger";
 type ButtonSize = "default" | "sm" | "lg" | "icon";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -16,9 +16,6 @@ const variants: Record<ButtonVariant, string> = {
   outline: "border border-border-strong bg-surface text-foreground shadow-xs hover:bg-surface-muted",
   ghost: "text-muted hover:bg-surface-sunken hover:text-foreground",
   danger: "bg-danger text-white shadow-xs hover:bg-danger-hover",
-  /* Temporary aliases until every call site uses the token-based names. */
-  default: "bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover",
-  destructive: "bg-danger text-white shadow-xs hover:bg-danger-hover",
 };
 
 const sizes: Record<ButtonSize, string> = {
