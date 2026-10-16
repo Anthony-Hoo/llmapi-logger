@@ -195,6 +195,26 @@ func SpawnPrompts(input Input, vocab *Vocabulary) []string {
 // SubagentPrefixes entry, the stripped text follows it as an extra candidate.
 // The identity resolver fingerprints them with HintFPR to match SpawnPrompts.
 func OpeningUserTexts(input Input, vocab *Vocabulary) []string {
+	hints := OpeningUserHints(input, vocab)
+	if hints == nil {
+		return nil
+	}
+	texts := make([]string, len(hints))
+	for index, hint := range hints {
+		texts[index] = hint.Text
+	}
+	return texts
+}
+
+// OpeningHint is one OpeningUserTexts candidate. Stripped marks the variant
+// with a SubagentPrefixes entry removed; a match on it is less certain.
+type OpeningHint struct {
+	Text     string
+	Stripped bool
+}
+
+// OpeningUserHints is OpeningUserTexts with each candidate's provenance.
+func OpeningUserHints(input Input, vocab *Vocabulary) []OpeningHint {
 	if vocab == nil {
 		vocab = defaultVocabulary()
 	}
@@ -202,7 +222,7 @@ func OpeningUserTexts(input Input, vocab *Vocabulary) []string {
 	if err != nil {
 		return nil
 	}
-	var texts []string
+	var texts []OpeningHint
 	msg := -1
 	blocks := 0
 	for _, item := range request.items {
@@ -220,9 +240,9 @@ func OpeningUserTexts(input Input, vocab *Vocabulary) []string {
 		}
 		blocks++
 		text := strings.TrimSpace(item.text)
-		texts = append(texts, text)
+		texts = append(texts, OpeningHint{Text: text})
 		if stripped := strings.TrimSpace(vocab.StripSubagentPrefix(item.text)); stripped != text {
-			texts = append(texts, stripped)
+			texts = append(texts, OpeningHint{Text: stripped, Stripped: true})
 		}
 	}
 	return texts
