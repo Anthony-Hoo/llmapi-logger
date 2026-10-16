@@ -22,7 +22,8 @@ type AnalysisBackfillCandidate struct {
 
 // ListAnalysisBackfillCandidates returns up to limit ended audits whose parse
 // status is ok or partial and whose audit_analysis row is missing or older than
-// version, oldest first, so a session's earlier audits are analysed before the\n// later ones that link to them. The LEFT JOIN uses the primary key, and the
+// version, oldest first, so a session's earlier audits are analysed before the
+// later ones that link to them. The LEFT JOIN uses the primary key, and the
 // audit_analysis_version_idx index keeps the version predicate cheap.
 // A nil after starts from the oldest audit.
 func (store *Store) ListAnalysisBackfillCandidates(ctx context.Context, version int, after *AnalysisBackfillCursor, limit int) ([]AnalysisBackfillCandidate, error) {
