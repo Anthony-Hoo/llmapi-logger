@@ -302,6 +302,14 @@ describe("agent tree", () => {
     expect(Math.abs(at("a").top - at("b").top)).toBeGreaterThan(100);
   });
 
+  it("shares one lineage hue per branch of the root", () => {
+    const { placed } = placeNodes([node("r", undefined), node("a", "r"), node("b", "r"), node("a1", "a"), node("a11", "a1")]);
+    const lineage = (id: string) => placed.find((entry) => entry.node.node_id === id)!.lineage;
+    expect(lineage("a1")).toBe(lineage("a"));
+    expect(lineage("a11")).toBe(lineage("a"));
+    expect(lineage("b")).not.toBe(lineage("a"));
+  });
+
   it("renders cards, a greyed placeholder and an indented list fallback", () => {
     const html = renderToStaticMarkup(
       <AgentTree

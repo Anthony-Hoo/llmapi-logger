@@ -35,6 +35,8 @@ export interface PlacedNode {
   node: TreeNode;
   depth: number;
   order: number;
+  /** Pre-order index of the depth-1 ancestor (own index for roots); descendants share its hue. */
+  lineage: number;
   left: number;
   top: number;
 }
@@ -50,10 +52,23 @@ export function placeNodes(nodes: readonly TreeNode[]): { placed: PlacedNode[]; 
         node,
         depth: entry.depth,
         order: entry.order,
+        lineage: entry.order,
         left: entry.depth * (CARD_WIDTH + GAP_X),
         top: entry.x * (CARD_HEIGHT + GAP_Y),
       });
     }
+  }
+  const placedByID = new Map(placed.map((entry) => [entry.node.node_id, entry]));
+  for (const entry of placed) {
+    let cursor = entry;
+    while (cursor.depth > 1) {
+      const parent = placedByID.get(cursor.node.parent_node_id ?? "");
+      if (!parent) {
+        break;
+      }
+      cursor = parent;
+    }
+    entry.lineage = cursor.order;
   }
   const width = layout.levels * (CARD_WIDTH + GAP_X) - GAP_X;
   const height = layout.breadth * (CARD_HEIGHT + GAP_Y) + CARD_HEIGHT;
@@ -174,7 +189,7 @@ export function AgentTree({ nodes, onOpenNode }: { nodes: readonly TreeNode[]; o
                   key={entry.node.node_id}
                   d={`M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`}
                   fill="none"
-                  stroke={lineageColor(entry.order)}
+                  stroke={lineageColor(entry.lineage)}
                   strokeWidth={2}
                   opacity={entry.node.visible ? 0.9 : 0.4}
                 />
@@ -183,7 +198,7 @@ export function AgentTree({ nodes, onOpenNode }: { nodes: readonly TreeNode[]; o
           </svg>
           {placed.map((entry) => (
             <div key={entry.node.node_id} className="absolute" style={{ left: entry.left, top: entry.top, width: CARD_WIDTH, height: CARD_HEIGHT }}>
-              <NodeCard node={entry.node} color={lineageColor(entry.order)} onOpen={onOpenNode} />
+              <NodeCard node={entry.node} color={lineageColor(entry.lineage)} onOpen={onOpenNode} />
             </div>
           ))}
         </div>
@@ -192,7 +207,7 @@ export function AgentTree({ nodes, onOpenNode }: { nodes: readonly TreeNode[]; o
       <ul className="space-y-2 md:hidden" aria-label="Agent 树（列表）" data-testid="agent-tree-list">
         {placed.map((entry) => (
           <li key={entry.node.node_id} style={{ marginLeft: Math.min(entry.depth, 4) * 14 }}>
-            <NodeCard node={entry.node} color={lineageColor(entry.order)} onOpen={onOpenNode} />
+            <NodeCard node={entry.node} color={lineageColor(entry.lineage)} onOpen={onOpenNode} />
           </li>
         ))}
       </ul>

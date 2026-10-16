@@ -400,9 +400,9 @@ function AgentBlock({ agent }: { agent: AgentIdentity }) {
     ["角色", roleLabel(agent.role), false],
     ["名称", agent.name || "—", false],
     ["关联方式", linkSourceText(agent), false],
-    ["Node ID", agent.node_id || "—", true],
-    ["Parent ID", agent.parent_id || "—", true],
-    ["Root ID", agent.root_id || "—", true],
+    ["节点 ID", agent.node_id || "—", true],
+    ["父节点 ID", agent.parent_id || "—", true],
+    ["根 ID", agent.root_id || "—", true],
   ];
   return (
     <dl className="grid gap-x-5 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
