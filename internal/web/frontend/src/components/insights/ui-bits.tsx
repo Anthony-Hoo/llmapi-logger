@@ -4,7 +4,7 @@ import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
 
 export const selectClassName =
-  "h-9 rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring";
+  "h-9 rounded-md border border-input bg-white px-3 text-sm shadow-xs outline-hidden focus:ring-2 focus:ring-ring";
 
 export function EmptyNote({ children, className }: { children: ReactNode; className?: string }) {
   return (
@@ -38,7 +38,7 @@ export function Segmented<T extends string>({
           key={option.value}
           variant={option.value === value ? "secondary" : "ghost"}
           size="sm"
-          className="h-7 px-2.5"
+
           aria-pressed={option.value === value}
           title={option.title}
           onClick={() => onChange(option.value)}

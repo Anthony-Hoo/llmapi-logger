@@ -167,8 +167,8 @@ export function OverviewPage({
 
   return (
     <div className="space-y-5">
-      <Card className="bg-white/90 shadow-sm">
-        <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 pt-4">
+      <Card className="bg-white/90">
+        <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-4">
           <div className="flex flex-wrap items-center gap-3">
             <Segmented
               label="时间范围"
@@ -204,7 +204,7 @@ export function OverviewPage({
       </Card>
 
       {overviewError ? (
-        <Alert className="border-red-200 bg-red-50/90">
+        <Alert className="border-red-200">
           <AlertTitle className="text-red-900">无法读取用量洞察</AlertTitle>
           <AlertDescription className="text-red-800">{overviewError}</AlertDescription>
         </Alert>
@@ -216,30 +216,30 @@ export function OverviewPage({
         <>
           <KpiBar overview={overview} />
 
-          <Card className="bg-white/90 shadow-sm">
-            <CardContent className="space-y-3 p-4 pt-4">
+          <Card className="bg-white/90">
+            <CardContent className="space-y-3 pt-4">
               <PanelTitle title="每日用量" hint="每天一对柱：Token 与估算成本" />
               <DailyChart daily={overview.daily} />
             </CardContent>
           </Card>
 
           <div className="grid gap-5 lg:grid-cols-2">
-            <Card className="bg-white/90 shadow-sm">
-              <CardContent className="space-y-3 p-4 pt-4">
+            <Card className="bg-white/90">
+              <CardContent className="space-y-3 pt-4">
                 <PanelTitle title="近 8 周活动" hint="颜色按当前最忙一天的四分位分级" />
                 <ActivityHeatmap days={overview.heatmap} today={today} selectedDay={selectedDay} onSelectDay={setSelectedDay} />
               </CardContent>
             </Card>
-            <Card className="bg-white/90 shadow-sm">
-              <CardContent className="space-y-3 p-4 pt-4">
+            <Card className="bg-white/90">
+              <CardContent className="space-y-3 pt-4">
                 <PanelTitle title="上下文构成" hint="范围内各请求的估算，已按 prompt 总量锚定" />
                 <MixPanel mix={overview.composition} />
               </CardContent>
             </Card>
           </div>
 
-          <Card className="bg-white/90 shadow-sm">
-            <CardContent className="space-y-3 p-4 pt-4">
+          <Card className="bg-white/90">
+            <CardContent className="space-y-3 pt-4">
               <PanelTitle title="分组统计" />
               <GroupTable groups={overview.groups} />
             </CardContent>
@@ -277,7 +277,7 @@ export function OverviewPage({
           }
         />
         {cardsError ? (
-          <Alert className="border-red-200 bg-red-50/90">
+          <Alert className="border-red-200">
             <AlertDescription className="text-red-800">{cardsError}</AlertDescription>
           </Alert>
         ) : null}
@@ -344,7 +344,7 @@ export function KpiBar({ overview }: { overview: OverviewResponse }) {
 
 function Kpi({ label, value, hint, warn }: { label: string; value: string; hint?: string; warn?: boolean }) {
   return (
-    <div className="min-w-0 rounded-lg border bg-white/90 p-3 shadow-sm">
+    <div className="min-w-0 rounded-lg border bg-white/90 p-3 shadow-xs">
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="mt-1 truncate text-xl font-semibold tabular-nums">{value}</p>
       {hint ? <p className={`mt-0.5 text-[11px] leading-4 ${warn ? "text-amber-700" : "text-muted-foreground"}`}>{hint}</p> : null}

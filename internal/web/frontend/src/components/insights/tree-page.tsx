@@ -130,7 +130,7 @@ export function TreePage({
       </div>
 
       {error ? (
-        <Alert className="border-red-200 bg-red-50/90">
+        <Alert className="border-red-200">
           <AlertTitle className="text-red-900">无法读取 Agent 树</AlertTitle>
           <AlertDescription className="text-red-800">{error}</AlertDescription>
         </Alert>
@@ -138,15 +138,15 @@ export function TreePage({
       {loading ? <Skeleton className="h-64 w-full" /> : null}
 
       {tree && !loading ? (
-        <Card className="bg-white/90 shadow-sm">
-          <CardContent className="space-y-4 p-4 pt-4">
+        <Card className="bg-white/90">
+          <CardContent className="space-y-4 pt-4">
             <PanelTitle
               title={`共 ${tree.nodes.length} 个节点`}
               hint="点击节点查看该 Agent 的会话趋势；附属请求（压缩、标题等）计在发起它的节点上"
             />
             {tree.truncated ? (
-              <Alert className="border-amber-200 bg-amber-50/80">
-                <AlertDescription className="text-amber-900">节点过多，仅显示最多 40 个。</AlertDescription>
+              <Alert className="border-amber-200">
+                <AlertDescription>节点过多，仅显示最多 40 个。</AlertDescription>
               </Alert>
             ) : null}
             <AgentTree nodes={tree.nodes} onOpenNode={onOpenSession} />
@@ -244,8 +244,8 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
       role={clickable ? "button" : undefined}
       tabIndex={clickable ? 0 : undefined}
       aria-label={clickable ? `查看 ${clientLabel(node.client)} ${roleLabel(node.role)} 的会话趋势` : undefined}
-      className={`h-full space-y-1.5 overflow-hidden rounded-lg border bg-white p-3 shadow-sm ${borderClass} ${
-        clickable ? "cursor-pointer outline-none transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring" : ""
+      className={`h-full space-y-1.5 overflow-hidden rounded-lg border bg-white p-3 shadow-xs ${borderClass} ${
+        clickable ? "cursor-pointer outline-hidden transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring" : ""
       }`}
       style={{ borderLeft: `4px solid ${color}` }}
       data-occupancy={level}
@@ -262,14 +262,14 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
       }
     >
       <div className="flex flex-wrap items-center gap-1">
-        <Badge variant="secondary" className="px-2 py-0 text-[11px]">
+        <Badge variant="secondary">
           {clientLabel(node.client)}
         </Badge>
-        <Badge variant={node.role === "main" ? "default" : "outline"} className="px-2 py-0 text-[11px]">
+        <Badge variant={node.role === "main" ? "default" : "outline"}>
           {roleLabel(node.role)}
         </Badge>
         {link ? (
-          <Badge variant={node.link_source === "content" ? "warning" : "success"} className="px-2 py-0 text-[11px]" title="父子关系来源">
+          <Badge variant={node.link_source === "content" ? "warning" : "success"} title="父子关系来源">
             {link}
           </Badge>
         ) : null}
