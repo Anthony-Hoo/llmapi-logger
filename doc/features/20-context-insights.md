@@ -15,7 +15,7 @@ dsh-context 回答三个问题：Agent 的上下文窗口里装了什么、它�
 - 上下文构成：按类别估算每个请求的 Token 分布，并锚定到上游报告的真实 prompt 总量。
 - 会话趋势：逐请求（step）/逐轮（turn）的构成变化，Total/Delta 两种视图和事件标记。
 - 用量洞察页：KPI、日用量图、活动热力图和会话卡片。
-- 成本估算：内嵌价格快照，可由本地文件覆盖。
+- 实际计费：成本直接取 NewAPI 对每个请求的实际扣费（[模块 21](21-newapi-billing.md)），不做本地估算。
 - 详情增强：单条请求的上下文浏览器、与上一步的差异、文件活动。
 
 不做：
@@ -30,7 +30,7 @@ dsh-context 回答三个问题：Agent 的上下文窗口里装了什么、它�
 
 | dsh-context 功能 | 依赖 | 结论 | 说明 |
 | --- | --- | --- | --- |
-| Token Stats、缓存命中率、成本（`cost.ts`/`modelPrices.ts`） | 响应 `usage`、模型、时间 | **移植（P0）** | 输入全部在响应里，需要按协议归一化口径 |
+| Token Stats、缓存命中率、成本（`cost.ts`/`modelPrices.ts`） | 响应 `usage`、模型、时间 | **移植（P0）** | 输入全部在响应里，需要按协议归一化口径；成本后改为 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），不移植价格表 |
 | 上下文构成 + 4 字符/Token 估算 + 锚定（`estimate.ts`/`pricing.ts`/`categories.ts`） | 请求 `system`/`tools`/`messages` + `usage` | **移植（P1）** | 角色直接对应；`inject`/`skill` 只能靠文本标记启发式判断 |
 | 上下文趋势 Total/Delta、Step/Turn（`trendChart.tsx`） | 同一会话的连续请求 | **移植（P1）** | step=一次请求；turn 由“最后一条是真实用户消息”判定 |
 | 洞察页 KPI / 7 天图 / 热力图 / 会话卡片（`overview.ts`/`activity.ts`/`heatmap.tsx`） | 逐请求用量 + 时间 + 会话标识 | **移植（P1）** | 会话标题、cwd、工作区分组属于 Harness 状态，改为按调用者/Token/模型分组 |
@@ -213,13 +213,12 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 | prune | 公共前缀长度不变但其中 tool_result 条目指纹改变且估算变小 | 推断 |
 | injected | 新增条目中含命中注入标记的部分 | 推断 |
 
-### 5.5 成本
+### 5.5 成本与上下文窗口
 
-- 内嵌 models.dev 价格快照（`internal/insights/prices.json`，构建时更新，**运行时不外联**）。可选本地覆盖文件，按 `provider/model` 精确、大小写不敏感、唯一后缀的顺序匹配，与 dsh `cost.ts` 的查找链相同但去掉跨厂商投票。匹配不到时不计价并显示“未知价格”。
-- 成本 = `(uncached·input + cache_read·cache_read_rate + cache_write·cache_write_rate + output·output_rate) / 1e6`，缺失的缓存价回落到 input 价。成本在查询时计算、不落库，覆盖文件更新后即时生效。
-- 时段价（DeepSeek 峰谷）以覆盖文件中的通用 `schedules` 表达，不硬编码厂商规则。
-- 上下文窗口取 `limit.context`，用于占用率 = `prompt_total / window`。
-- 本项目看不到 NewAPI 的实际计费倍率，UI 一律标为“估算成本”。
+- 成本只来自 NewAPI 的实际计费（[模块 21](21-newapi-billing.md)）：模块 11 按 request ID 查询日志时，同时读取 consume 行的 `quota`，与当时的 `quota_per_unit` 快照一起写入 `token_links`。本服务不维护价格表，也不做本地估算。
+- 查询时在 SQL 中按 `LEFT JOIN token_links` 求和 `quota / quota_per_unit`，作用域沿用 `audit_records` 上已有的条件。没有计费结果的请求计入 `unbilled_requests`，不与成本混合；没有已计费请求时 `cost_usd` 为 `null`。
+- 未配置 `newapi.access_token`/`user_id` 时无法取得计费，overview 与 sessions 返回 `billing_enabled=false`，UI 说明原因而不是把全部请求显示为未计费。
+- 上下文窗口是模型元数据，由内嵌表 `internal/insights/models` 提供，可用 `insights.context_windows` 按模型覆盖，用于占用率 = `prompt_total / window`。查找链：完整 id（大小写不敏感）→ 去掉厂商前缀后的唯一裸名 → 最长的已知族名加 `-`/`@`/`:` 后缀（带日期的发行版本）→ 未知（有歧义时也视为未知）。运行时不外联。
 
 ### 5.6 时间
 
@@ -310,11 +309,11 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 ~~~yaml
 insights:
   enabled: true          # 关闭后不计算 audit_analysis，页面隐藏
-  pricing_file: ""       # 可选：本地价格覆盖 JSON，路径在仓库外
   vocabulary_file: ""    # 可选：工具词表 / 注入标记覆盖 YAML
+  context_windows: {}    # 可选：按模型覆盖上下文窗口（Token），如 my-gateway-alias: 200000
 ~~~
 
-默认词表编译进二进制，覆盖文件按键合并，启动时校验，非法时拒绝启动。
+默认词表编译进二进制，覆盖文件按键合并，启动时校验，非法时拒绝启动。`context_windows` 的键按 §5.5 的查找链匹配，值必须为正整数。旧配置中的 `pricing_file` 已废弃：仍可解析，但不再生效，启动时输出一次警告。
 
 ## 7. 管理 API（已并入 10 §11）
 
@@ -322,9 +321,9 @@ insights:
 
 | 端点 | 返回 | 作用域 |
 | --- | --- | --- |
-| `GET /api/v1/insights/overview?from_ns&to_ns&group_by=model\|protocol\|caller\|token` | KPI（请求数、会话数、各用量桶、缓存命中率、估算成本）、按日序列、热力图（近 8 周）、分组小计 | developer 逐行套 `conditionWithAliases`，并禁用 `caller`/`token` 分组 |
-| `GET /api/v1/insights/sessions?from_ns&to_ns&sort=recent\|tokens\|context&cursor` | 会话卡片：首末时间、步数/轮数、各用量桶、末步构成、主模型、调用者 | 只统计作用域内步骤；作用域内为空的会话不出现 |
-| `GET /api/v1/insights/sessions/{id}/trend` | 逐步序列：构成、usage、事件、时间、turn 标号；最多 2000 步，超出时返回最近一段并标记截断 | 作用域内步骤为 0 时返回 404 |
+| `GET /api/v1/insights/overview?from_ns&to_ns&group_by=model\|protocol\|caller\|token` | KPI（请求数、会话数、各用量桶、缓存命中率、实际计费与已/未计费请求数）、按日序列、热力图（近 8 周）、分组小计、`billing_enabled` | developer 逐行套 `conditionWithAliases`，并禁用 `caller`/`token` 分组 |
+| `GET /api/v1/insights/sessions?from_ns&to_ns&sort=recent\|tokens\|context&cursor` | 会话卡片：首末时间、步数/轮数、各用量桶与实际计费、末步构成、主模型、调用者；响应带 `billing_enabled` | 只统计作用域内步骤；作用域内为空的会话不出现 |
+| `GET /api/v1/insights/sessions/{id}/trend` | 逐步序列：构成、usage、该步实际计费 `cost_usd`、事件、时间、turn 标号；最多 2000 步，超出时返回最近一段并标记截断 | 作用域内步骤为 0 时返回 404 |
 | `GET /api/v1/audits/{id}/composition` | 解密 `detail_enc`：逐条目清单（类别、估算、标签、摘要）、与 prev 的差异、文件活动 | 经 `authorizeAudit` |
 
 会话卡片不展示 User-Agent 分组，因为那需要逐行解密。
@@ -355,7 +354,7 @@ insights:
 
 | 阶段 | 内容 | 工作量 | 主要风险 |
 | --- | --- | --- | --- |
-| P0 | 迁移 008、三协议用量归一化、价格快照与成本计算、详情页用量卡片 | 小 | 各协议 usage 边角（流式分段、缺字段） |
+| P0 | 迁移 008、三协议用量归一化、详情页用量卡片（成本已改为 NewAPI 实际计费，见模块 21） | 小 | 各协议 usage 边角（流式分段、缺字段） |
 | P1 | 构成估算、会话拼接、overview/sessions/trend API、洞察页与趋势图、回填任务 | 中-大 | 推断会话误合并；developer 作用域漏套 |
 | P2a | 子 Agent 树：parser `Input` 增加白名单 Header（当前只有 Body，见 `internal/parser/types.go:62`），三层识别、agent-trees API 与树视图 | 中 | 客户端字段随版本变化，需要靠词表跟进 |
 | P2b | composition 端点与上下文浏览器、差异与事件、文件活动、工具来源标签、Treemap/DNA | 中 | 启发式事件误报；词表维护成本 |
@@ -416,7 +415,7 @@ Header 名称可以在词表覆盖文件中改成你框架已有的名字（`con
 - DB/WAL 中没有测试 secret、消息正文、工具名、文件路径的明文；`detail_enc` 可正常解密。
 - 洞察相关 API 不触发 Body/对象解密（composition 端点除外），用查询计数或打桩验证。
 - 回填任务可取消、幂等；版本升级后只重算旧版本行。
-- 价格未知的模型不报错，显示“未知价格”；运行时没有外联请求。
+- 成本等于已计费请求的 Σ`quota`/`quota_per_unit`，未计费请求只计数；上下文窗口未知的模型不报错，占用率留空；洞察查询没有外联请求。
 - 用四家客户端的录制样本（脱敏）构造父子与孙级请求：显式标识层还原的树与真实结构一致；附属请求（压缩、标题）不出现为子 Agent。
 - 去掉全部 Header 后，内容匹配层只在唯一命中时连边，并标为推断；两个子 Agent 使用相同 prompt 时不连边。
 - 原始 Agent ID 不以明文出现在 DB/WAL 中。
@@ -427,6 +426,6 @@ Header 名称可以在词表覆盖文件中改成你框架已有的名字（`con
 - **真实树规则**：因此 `agent_root_fpr` 非空并不代表这是一棵 Agent 树。查询层只在根满足以下任一条件时才视为真实树：作用域内有 ≥ 2 个不同的 `agent_node_fpr`，或该根的任一行带非空 `agent_parent_fpr`。`agent_link_source` 不参与判定：只带节点头的主 Agent 也会记 `link_source=header`，不能据此认定为树。`OverviewResponse.trees`、`SessionCard.tree_id`（非树为空）与 `subagents` 都按此判定；`agent-trees` 端点仍可读取单节点根。总览按所选时间窗口内的行判定，会话卡片与趋势按作用域内全部行判定。
 - **卡片取值口径**：会话卡片的角色、末步构成/prompt 总量取最新的 main/subagent 步骤；附属请求不开始 turn（`turn_start` 在统计和趋势序号中被忽略），其 `event_flags` 为 0（`prev_audit_id`/增删条目数仍保留）。
 - **趋势估算保持原始值**：`/trend` 返回未锚定的构成估算与真实 usage，锚定到 prompt 总量由前端完成（会话卡片与树节点由服务端锚定）。
-- **价格表**：内嵌快照 `internal/insights/pricing/prices.json`，可由 `insights.pricing_file` 覆盖。JSON 顶层为 `snapshot`、`note`、`models`、`schedules`，禁止未知字段。`models` 的键为小写 `provider/model`（或裸模型名），值为每百万 Token 美元价：`input`、`output` 必填，`cache_read`、`cache_write` 缺省回落到 `input`，`context` 为上下文窗口（0 表示未知）。`schedules` 是按 UTC 时段的成本倍率（`model` glob、`weekdays` 0=周日、`start`/`end` 为 `HH:MM`、`multiplier` ∈ (0,100]），首个匹配生效，跨午夜的窗口按开始日计星期。覆盖文件的同键条目替换内嵌条目，`schedules` 追加。查找链：完整 id（大小写不敏感）→ 去掉厂商前缀后的裸名（唯一才命中）→ 最长的已知族名加 `-`/`@`/`:` 后缀（带日期的发行版本，跨厂商共享则视为未知）→ 未知价格，不计价并计入 `unpriced_requests`。
+- **上下文窗口表**：内嵌表 `internal/insights/models/context_windows.json`，键为小写 `provider/model`（或裸模型名），值为上下文窗口 Token 数；`insights.context_windows` 的同键条目替换内嵌条目，新键追加。原价格表（`prices.json`、`pricing_file`、`schedules` 与 30 分钟时间槽聚合）已随[模块 21](21-newapi-billing.md) 删除。
 - **请求体被多次解析**：一次 audit 的请求体会被协议 parser、OpenAI normalizer、insights 分析器（`Analyze`、`IdentifyAgent`、`SpawnPrompts`、`OpeningUserHints`）各自反序列化一次。输入受 `MaxDecodedBodyBytes`（64 MiB）限制且全部在异步 worker 中，不影响代理字节路径；合并为一次解码是后续优化，目前不做。
 - **回填速率**：每个扫描 tick 最多 20 条，历史量大时需要数小时到数天，期间洞察页展示的是已分析部分。

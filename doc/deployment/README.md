@@ -207,4 +207,4 @@ SQLite 数据库与 `audit.key` 必须作为一个备份集保存。运行中不
 
 ## 8. 上下文洞察
 
-insights 默认启用，无需额外部署步骤。开关、价格与词表覆盖文件、各客户端（Claude Code、Codex、OpenCode、dsh）的接入提示，以及自研 Agent 通过 X-Agent-* Header 归入 Agent 树的约定见[洞察与 Agent 接入指南](insights-and-agent-headers.md)。
+insights 默认启用，无需额外部署步骤。开关、NewAPI 实际计费、上下文窗口与词表覆盖、各客户端（Claude Code、Codex、OpenCode、dsh）的接入提示，以及自研 Agent 通过 X-Agent-* Header 归入 Agent 树的约定见[洞察与 Agent 接入指南](insights-and-agent-headers.md)。

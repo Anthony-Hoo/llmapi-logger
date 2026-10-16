@@ -39,7 +39,7 @@ writer 整批失败、审计 begin/finish、解析保存/release、保留清理�
 | `analysis_backfill_failed` | 回填失败，附 `reason`（如 `list_failed`、`audit_load_failed`、`evidence_read_failed`、`reconstruction_failed`、`analysis_failed`、`analysis_save_failed`、`analysis_panic`）与 `storage_error`；同一进程内不再重试 |
 
 回填不引入新的健康状态或指标端点：它只在 parser 队列为空时每个扫描周期最多处理 20 条，不影响 `/readyz`。
-可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。
+可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别；`/api/status` 换算系数刷新失败只记录 `newapi_status_refresh_failed`。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码；计费相关只记录 `billing_rate_missing`、`billing_backfill_scan_failed`、`billing_backfill_save_failed` 等稳定码。启动配置含已废弃的 `insights.pricing_file` 时输出一次 `deprecated_config` 警告，不记录路径。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。
 
 `/v1/models` 等安全非 LLM 请求即使经本程序 passthrough，也不创建 audit、不执行 interceptor，并且不写 `llm request completed`。错误 Method、受保护路径族和危险路径在分发边界 fail-closed，也不伪装成 LLM audit。
 
@@ -105,7 +105,7 @@ DB 暂时写失败后，后续 writer 事务成功时可以补写内存中的聚
 
 首版不在进程内周期性重建 Store、cipher、query 或 parser。available 模式若启动时 DB/key 不可用，会继续透明转发并处于 degraded；修复文件或权限后需要重启。已经打开的 Store 遇到短暂写失败，会由同一 writer 有界补记采集故障和失败终态；成功提交并清空恢复积压后恢复健康，无新请求时也会重试。解析 worker 对失败 release 同样保留有界重试，避免记录永久卡在 processing。
 
-NewAPI 管理集成包含两个轻量后台任务：用户目录在监听前刷新一次，之后每五分钟刷新；caller worker 单 goroutine 扫描 SQLite pending 行，按 request ID 做有限重试。目录失败保留旧快照，pending 任务可跨重启恢复；两者都不重建数据面组件，也不改变已完成请求的结果。
+NewAPI 管理集成包含两个轻量后台任务：用户目录与 `/api/status` 的 `quota_per_unit` 在监听前刷新一次，之后每五分钟刷新；caller worker 单 goroutine 扫描 SQLite pending 行，按 request ID 做有限重试，并在没有到期查询的间隙以至少 500ms 的间隔逐条补查迁移前链接的计费（[模块 21](21-newapi-billing.md) §4），连续失败时暂停 1 分钟，随 worker 关闭停止。目录失败保留旧快照，pending 任务可跨重启恢复；两者都不重建数据面组件，也不改变已完成请求的结果。
 
 收到 SIGINT/SIGTERM 后停止接收新请求，在 `shutdown_timeout_seconds` 配置的关闭窗口内尽量完成在途代理、parser 和 writer 队列，然后关闭 HTTP server 与 SQLite；默认 30 秒，长流部署可提高到与最长请求策略一致。超时退出留下的记录由下次启动恢复为 interrupted/partial。
 

@@ -104,3 +104,11 @@ insights:
 - 未配置 NewAPI 凭据时 `billing_enabled=false`，旧配置中的 `pricing_file` 只产生警告。
 - 上下文窗口与占用率结果与改造前一致；`context_windows` 覆盖生效。
 - developer 作用域下看不到他人计费。
+
+## 8. 实现说明
+
+- 审计记录没有响应状态（如未收到完整响应）时按“非 2xx”处理：只有 error 行即写 `unbilled`，不等待重试。
+- 有 consume 行但重试耗尽仍没有有效的 `quota_per_unit` 时，身份照常写入、计费记为 `unbilled`，不写缺少换算系数的计费值，也不让调用者降级为未识别。
+- 日志总数超过单页（10 行）时 consume 行可能不全，计费记为 `unbilled`，身份不受影响。
+- 历史补查按 `token_links.linked_at_ns` 从新到旧取行（部分索引 `token_links_unchecked_idx`），与请求时间基本一致；连续 2 次补查失败后暂停 1 分钟，任一成功后恢复 500ms 间隔；所有 `unchecked` 行处理完后补查停止。
+- 迁移以重建表的方式加入跨列 CHECK；新列默认 `unchecked`，因此直接插入的旧格式行也会进入补查。
