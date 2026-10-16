@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ApiError, type ApiClient } from "../../api";
 import { errorMessage, isAbortError } from "../../lib/errors";
 import { formatRatio, formatTokens, formatUSD } from "../../lib/insights/format";
+import { createGeneration } from "../../lib/insights/generation";
 import {
   dayRange,
   localDayString,
@@ -107,8 +108,14 @@ export function OverviewPage({
   const [moreLoading, setMoreLoading] = useState(false);
   const [cardsError, setCardsError] = useState<string | null>(null);
 
+  // Advanced whenever the first page is reloaded (day filter, sort or range
+  // change), so a "加载更多" response of an older list is discarded.
+  const listGeneration = useRef(createGeneration());
+
   useEffect(() => {
     const controller = new AbortController();
+    listGeneration.current.advance();
+    setMoreLoading(false);
     setCardsLoading(true);
     setCardsError(null);
     client
@@ -136,17 +143,23 @@ export function OverviewPage({
     if (!nextCursor || moreLoading) {
       return;
     }
+    const generation = listGeneration.current.current();
     setMoreLoading(true);
     try {
       const page = await client.listInsightsSessions({ ...sessionRange, sort, limit: 20, cursor: nextCursor });
+      if (!listGeneration.current.isCurrent(generation)) {
+        return;
+      }
       setCards((current) => [...current, ...page.items]);
       setNextCursor(page.next_cursor || null);
     } catch (cause: unknown) {
-      if (!(cause instanceof ApiError && cause.status === 401)) {
+      if (listGeneration.current.isCurrent(generation) && !(cause instanceof ApiError && cause.status === 401)) {
         setCardsError(errorMessage(cause));
       }
     } finally {
-      setMoreLoading(false);
+      if (listGeneration.current.isCurrent(generation)) {
+        setMoreLoading(false);
+      }
     }
   }
 
