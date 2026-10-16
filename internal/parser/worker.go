@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -34,6 +35,7 @@ type Worker struct {
 
 	// Guarded by mu; read once per audit by the parser goroutine.
 	headerAllowlist []string
+	analyzer        AuditAnalyzer
 
 	mu      sync.Mutex
 	started bool
@@ -104,6 +106,30 @@ func (worker *Worker) headerNames() []string {
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 	return worker.headerAllowlist
+}
+
+// AuditAnalyzer derives insights from one successfully parsed audit. It runs
+// on the parser goroutine after the parse result is saved and can never
+// change that result.
+type AuditAnalyzer interface {
+	AnalyzeAudit(context.Context, insights.Input) error
+}
+
+// SetAnalyzer installs the optional insights analyzer; nil, the default,
+// disables analysis. Call it before Start.
+func (worker *Worker) SetAnalyzer(analyzer AuditAnalyzer) {
+	if worker == nil {
+		return
+	}
+	worker.mu.Lock()
+	worker.analyzer = analyzer
+	worker.mu.Unlock()
+}
+
+func (worker *Worker) auditAnalyzer() AuditAnalyzer {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.analyzer
 }
 
 // Start resets interrupted processing rows, performs the startup pending scan,
@@ -252,7 +278,8 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 	}
 	worker.normalizeResult(&result, input, evidenceErr)
 	prepared := worker.prepareTurn(ctx, audit, implementation, input, &result)
-	if err := worker.persistResult(ctx, audit, implementation, result, prepared); err != nil {
+	savedStatus, err := worker.persistResult(ctx, audit, implementation, result, prepared)
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// A canceled save may not have been attempted, or may still commit
 			// after submitSync stops waiting. Leave processing for startup
@@ -261,7 +288,51 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 		}
 		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", sqlite.ErrorClass(err))
 		worker.releaseProcessing(ctx, audit.AuditID)
+		return
 	}
+	worker.analyze(ctx, audit, input, result, savedStatus)
+}
+
+// analyze runs the optional insights analyzer for a saved ok or partial
+// parse with a request body. savedStatus is the status actually committed,
+// which persistResult may have downgraded. Failures and panics are logged
+// with a stable code and dropped: the parse status is already committed, and
+// the insights backfill recomputes missing rows later instead of retrying
+// here.
+func (worker *Worker) analyze(ctx context.Context, audit sqlite.ParserAudit, input Input, result Result, savedStatus string) {
+	analyzer := worker.auditAnalyzer()
+	if analyzer == nil || (savedStatus != StatusOK && savedStatus != StatusPartial) ||
+		!input.Request.Present || len(input.Request.Data) == 0 {
+		return
+	}
+	defer func() {
+		if recover() != nil {
+			worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", "analysis_panic")
+		}
+	}()
+	endpoint := audit.ParserName
+	if _, suffix, found := strings.Cut(endpoint, "."); found {
+		endpoint = suffix
+	}
+	err := analyzer.AnalyzeAudit(ctx, insights.Input{
+		AuditID:          audit.AuditID,
+		Protocol:         audit.Protocol,
+		Endpoint:         endpoint,
+		Request:          input.Request.Data,
+		RequestComplete:  input.Request.Complete,
+		Response:         input.Response.Data,
+		ResponseComplete: input.Response.Complete,
+		ResponseIsStream: result.ObservedStream != nil && *result.ObservedStream,
+		Headers:          input.Headers,
+		RequestModel:     result.RequestModel,
+		ResponseModel:    result.ResponseModel,
+		Usage:            result.Normalized,
+		Conversation:     result.Conversation,
+	})
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", insights.ErrorCode(err), "storage_error", sqlite.ErrorClass(err))
 }
 
 func (worker *Worker) releaseProcessing(ctx context.Context, auditID string) bool {
@@ -362,7 +433,9 @@ func (worker *Worker) normalizeResult(result *Result, input Input, evidenceErr e
 	}
 }
 
-func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, result Result, prepared *auditmodel.PreparedTurn) error {
+// persistResult saves the parse and returns the status it actually stored,
+// which encryption failures downgrade to error.
+func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, result Result, prepared *auditmodel.PreparedTurn) (string, error) {
 	parserVersion := "1"
 	if implementation != nil {
 		parserVersion = implementation.Version()
@@ -407,7 +480,7 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 		ParsedJSONEnc:   encrypted,
 		ParsedAtNS:      worker.now().UnixNano(),
 	}
-	return worker.store.SaveParsedAudit(ctx, sqlite.ParsedAudit{Result: storageResult, Turn: prepared})
+	return result.Status, worker.store.SaveParsedAudit(ctx, sqlite.ParsedAudit{Result: storageResult, Turn: prepared})
 }
 
 func parsedResultPlaintext(result Result, includeConversation bool) ([]byte, bool) {
