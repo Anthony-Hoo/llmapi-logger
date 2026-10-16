@@ -190,6 +190,8 @@ func TestLoadRejectsInvalidOverrides(t *testing.T) {
 		"zero multiplier":   `{"schedules":[{"model":"a","start":"01:00","end":"02:00","multiplier":0}]}`,
 		"bad glob":          `{"schedules":[{"model":"[","start":"01:00","end":"02:00","multiplier":1}]}`,
 		"bad weekday":       `{"schedules":[{"model":"a","weekdays":[7],"start":"01:00","end":"02:00","multiplier":1}]}`,
+		"off-grid start":    `{"schedules":[{"model":"a","start":"12:15","end":"13:00","multiplier":1}]}`,
+		"off-grid end":      `{"schedules":[{"model":"a","start":"12:00","end":"13:45","multiplier":1}]}`,
 		"trailing document": `{"models":{}} {}`,
 	} {
 		if _, err := Load(writeOverride(t, content)); err == nil {
@@ -212,5 +214,16 @@ func TestExamplePricingFileLoads(t *testing.T) {
 	}
 	if _, ok := table.Lookup("my-gateway-alias"); !ok || !table.HasSchedules() {
 		t.Fatal("example aliases or schedules were not loaded")
+	}
+}
+
+func TestLoadRejectsOffGridScheduleBoundaryWithClearError(t *testing.T) {
+	t.Parallel()
+	_, err := Load(writeOverride(t, `{"schedules":[{"model":"a","start":"12:15","end":"13:00","multiplier":1}]}`))
+	if err == nil || !strings.Contains(err.Error(), "schedule 0") || !strings.Contains(err.Error(), "30-minute boundary") {
+		t.Fatalf("error = %v, want a schedule 0 30-minute boundary error", err)
+	}
+	if _, err := Load(writeOverride(t, `{"schedules":[{"model":"a","start":"12:30","end":"13:00","multiplier":1}]}`)); err != nil {
+		t.Fatalf("half-hour boundaries must load: %v", err)
 	}
 }

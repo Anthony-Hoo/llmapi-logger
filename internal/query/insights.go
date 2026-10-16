@@ -30,7 +30,7 @@ const (
 	MaxTreeNodes          = 40
 	HeatmapDays           = 56
 	maxTimezoneOffsetMin  = 840
-	priceScheduleSlotNS   = int64(30 * time.Minute)
+	priceScheduleSlotNS   = int64(pricing.ScheduleGranularityMinutes * time.Minute)
 	treeIDHexLength       = 24
 	nanosecondsPerSecond  = int64(time.Second)
 	secondsPerDay         = int64(24 * 60 * 60)

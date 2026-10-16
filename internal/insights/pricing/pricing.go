@@ -24,6 +24,11 @@ import (
 //go:embed prices.json
 var embeddedPrices []byte
 
+// ScheduleGranularityMinutes is the resolution of schedule boundaries. Usage is
+// aggregated into slots of this length and each slot is priced at its start, so
+// a boundary that falls inside a slot would misprice the requests around it.
+const ScheduleGranularityMinutes = 30
+
 // maxPriceFileBytes bounds the override file so a wrong path cannot exhaust memory.
 const maxPriceFileBytes = 4 << 20
 
@@ -39,7 +44,8 @@ type Entry struct {
 // Schedule multiplies the cost of matching requests, for example off-peak
 // discounts. Times are UTC. A window whose End is not after its Start wraps
 // past midnight and its Weekdays refer to the day the window started. The first
-// matching schedule wins.
+// matching schedule wins. Start and End must fall on a 30-minute boundary
+// (ScheduleGranularityMinutes).
 type Schedule struct {
 	Model      string  `json:"model"`    // glob, case-insensitive, matched against the id and the bare name
 	Weekdays   []int   `json:"weekdays"` // 0 = Sunday; empty means every day
@@ -169,6 +175,11 @@ func (schedule *Schedule) prepare() error {
 	}
 	if schedule.endMinute, err = parseClock(schedule.End); err != nil {
 		return err
+	}
+	for _, minute := range []int{schedule.startMinute, schedule.endMinute} {
+		if minute%ScheduleGranularityMinutes != 0 {
+			return fmt.Errorf("start and end must fall on a %d-minute boundary (minutes 00 or 30)", ScheduleGranularityMinutes)
+		}
 	}
 	if schedule.startMinute == schedule.endMinute {
 		return errors.New("start and end must differ")
