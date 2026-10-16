@@ -301,7 +301,7 @@ CREATE INDEX audit_analysis_model_idx   ON audit_analysis(model, started_at_ns);
 
 修正方向（独立于本模块，建议单独做）：会话键命中后仍要比较内容；或者识别到显式 Agent 节点 ID 时，把它作为会话键的一部分。
 
-## 6. 配置（提案，待并入 01）
+## 6. 配置（已并入 [01](01-configuration-and-route-boundary.md) §2、§4）
 
 ~~~yaml
 insights:

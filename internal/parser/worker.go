@@ -32,6 +32,9 @@ type Worker struct {
 	scanInterval time.Duration
 	now          func() time.Time
 
+	// Guarded by mu; read once per audit by the parser goroutine.
+	headerAllowlist []string
+
 	mu      sync.Mutex
 	started bool
 	closed  bool
@@ -70,6 +73,37 @@ func NewWorker(store Store, cipher security.Cipher, parsers []Parser, logger *sl
 		scanInterval:    defaultScanInterval,
 		now:             time.Now,
 	}, nil
+}
+
+// SetHeaderAllowlist names the inbound request headers decrypted into
+// Input.Headers. Matching is case-insensitive; an empty list, the default,
+// loads no headers. Call it before Start.
+func (worker *Worker) SetHeaderAllowlist(names []string) {
+	if worker == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(names))
+	allowlist := make([]string, 0, len(names))
+	for _, name := range names {
+		lowered := strings.ToLower(strings.TrimSpace(name))
+		if lowered == "" {
+			continue
+		}
+		if _, duplicate := seen[lowered]; duplicate {
+			continue
+		}
+		seen[lowered] = struct{}{}
+		allowlist = append(allowlist, lowered)
+	}
+	worker.mu.Lock()
+	worker.headerAllowlist = allowlist
+	worker.mu.Unlock()
+}
+
+func (worker *Worker) headerNames() []string {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.headerAllowlist
 }
 
 // Start resets interrupted processing rows, performs the startup pending scan,

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"llmapi-logger/internal/insights"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
 )
@@ -115,6 +116,7 @@ func parseResponse(root map[string]any, result *base.Result) {
 		result.Usage.Input = protocolutil.Int64(usage["promptTokenCount"])
 		result.Usage.Output = protocolutil.Int64(usage["candidatesTokenCount"])
 		result.Usage.Total = protocolutil.Int64(usage["totalTokenCount"])
+		result.Normalized = normalizeUsage(usage)
 	}
 	if errorObject := protocolutil.Map(root["error"]); errorObject != nil {
 		result.ErrorType = protocolutil.String(errorObject["status"])
@@ -161,6 +163,25 @@ func parseStream(data []byte, result *base.Result) error {
 	}
 	appendStreamConversation(events, result)
 	return nil
+}
+
+// normalizeUsage splits promptTokenCount, which includes cached content, into
+// exclusive buckets. candidatesTokenCount excludes thinking, so output adds
+// thoughtsTokenCount back. Gemini does not report cache writes.
+func normalizeUsage(usage map[string]any) insights.Usage {
+	prompt := protocolutil.Int64(usage["promptTokenCount"])
+	cached := protocolutil.Int64(usage["cachedContentTokenCount"])
+	thoughts := protocolutil.Int64(usage["thoughtsTokenCount"])
+	normalized := insights.Usage{
+		UncachedInput: protocolutil.NonNegativeDifference(prompt, cached),
+		CacheRead:     cached,
+		Output:        protocolutil.SumReported(protocolutil.Int64(usage["candidatesTokenCount"]), thoughts),
+		Reasoning:     thoughts,
+	}
+	if prompt != nil {
+		normalized.CacheWrite = protocolutil.Int64Pointer(0)
+	}
+	return normalized
 }
 
 func countFunctionCalls(content map[string]any) int {

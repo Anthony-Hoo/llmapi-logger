@@ -26,8 +26,19 @@ type Config struct {
 	DeveloperLogin         DeveloperLoginConfig         `yaml:"developer_login"`
 	ShutdownTimeoutSeconds int                          `yaml:"shutdown_timeout_seconds"`
 	RetentionDays          int                          `yaml:"retention_days"`
+	Insights               InsightsConfig               `yaml:"insights"`
 	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
 	Routes                 []RouteConfig                `yaml:"routes"`
+}
+
+// InsightsConfig controls derived context and usage analysis
+// (doc/features/20-context-insights.md). The optional files are local
+// overrides for the embedded price snapshot and the tool/agent vocabulary;
+// startup only checks that they exist, their owners parse them.
+type InsightsConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	PricingFile    string `yaml:"pricing_file"`
+	VocabularyFile string `yaml:"vocabulary_file"`
 }
 
 // NewAPIConfig contains both the data-plane upstream settings and the
@@ -83,6 +94,7 @@ func Default() Config {
 		KeyPath:                DefaultKeyPath,
 		ShutdownTimeoutSeconds: DefaultShutdownTimeoutSecs,
 		RetentionDays:          DefaultRetentionDays,
+		Insights:               InsightsConfig{Enabled: true},
 		Interceptors:           make(map[string]InterceptorConfig),
 		Routes:                 make([]RouteConfig, 0),
 	}
