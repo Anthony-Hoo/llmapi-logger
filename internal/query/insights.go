@@ -51,6 +51,7 @@ type InsightsStore interface {
 	InsightsSessions(context.Context, sqlite.InsightsFilter, string, *sqlite.InsightsSessionCursor, int) (sqlite.InsightsSessionPage, error)
 	InsightsSessionModels(context.Context, sqlite.InsightsFilter) (map[string][]string, error)
 	InsightsSubagentCounts(context.Context, sqlite.InsightsFilter) (map[string]int64, error)
+	InsightsRealRoots(context.Context, sqlite.InsightsFilter) (map[string]bool, error)
 	InsightsTrend(context.Context, sqlite.InsightsFilter, int) ([]sqlite.InsightsTrendRow, bool, error)
 	InsightsTree(context.Context, sqlite.InsightsFilter, int) ([]sqlite.InsightsTreeNodeRow, bool, error)
 	LoadAnalysis(context.Context, string) (sqlite.AnalysisRow, error)
@@ -377,6 +378,16 @@ func displayComposition(estimate insights.CategoryValues, prompt *int64) insight
 	return estimate
 }
 
+// isAuxiliaryRole reports compaction, title, review and auxiliary requests,
+// which never start a turn.
+func isAuxiliaryRole(role string) bool {
+	switch role {
+	case insights.RoleCompaction, insights.RoleTitle, insights.RoleReview, insights.RoleAuxiliary:
+		return true
+	}
+	return false
+}
+
 func treeIDOf(fingerprint []byte) string {
 	if len(fingerprint) < treeIDHexLength/2 {
 		return ""
@@ -432,7 +443,7 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 	seenRoot := make(map[string]bool)
 	for _, row := range page.Rows {
 		ids = append(ids, row.SessionID)
-		if len(row.Root) != 0 && row.Role == insights.RoleMain && !seenRoot[string(row.Root)] {
+		if len(row.Root) != 0 && !seenRoot[string(row.Root)] {
 			seenRoot[string(row.Root)] = true
 			roots = append(roots, row.Root)
 		}
@@ -449,9 +460,13 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 		return insights.SessionsResponse{}, fmt.Errorf("query: insights session models: %w", err)
 	}
 	subagents := map[string]int64{}
+	realRoots := map[string]bool{}
 	if len(roots) != 0 {
 		rootFilter := filter
 		rootFilter.RootFPRs = roots
+		if realRoots, err = service.store.InsightsRealRoots(ctx, rootFilter); err != nil {
+			return insights.SessionsResponse{}, fmt.Errorf("query: insights real trees: %w", err)
+		}
 		if subagents, err = service.store.InsightsSubagentCounts(ctx, rootFilter); err != nil {
 			return insights.SessionsResponse{}, fmt.Errorf("query: insights subagent counts: %w", err)
 		}
@@ -461,7 +476,6 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 		card := insights.SessionCard{
 			SessionID:    row.SessionID,
 			SessionLink:  row.Link,
-			TreeID:       treeIDOf(row.Root),
 			Protocol:     row.Protocol,
 			Client:       row.Client,
 			Role:         row.Role,
@@ -478,8 +492,11 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 			card.Models = []string{}
 		}
 		card.ContextWindow = service.prices.ContextWindow(row.Model)
-		if row.Role == insights.RoleMain {
-			card.Subagents = subagents[string(row.Root)]
+		if realRoots[string(row.Root)] {
+			card.TreeID = treeIDOf(row.Root)
+			if row.Role == insights.RoleMain {
+				card.Subagents = subagents[string(row.Root)]
+			}
 		}
 		if request.Scope == nil && (row.Username != "" || row.TokenName != "") {
 			card.Caller = &insights.SessionCaller{Username: row.Username, TokenName: row.TokenName}
@@ -563,7 +580,8 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 	var turn int64
 	for index := range rows {
 		row := &rows[index]
-		if row.TurnStart {
+		turnStart := row.TurnStart && !isAuxiliaryRole(row.Role)
+		if turnStart {
 			turn++
 		}
 		usage := insights.Usage{
@@ -574,7 +592,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 			AuditID:       row.AuditID,
 			StartedAtNS:   row.StartedAtNS,
 			Turn:          turn,
-			TurnStart:     row.TurnStart,
+			TurnStart:     turnStart,
 			Model:         row.Model,
 			Role:          row.Role,
 			Estimate:      estimateValues(row.Estimate),
@@ -597,7 +615,15 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 		response.Steps = append(response.Steps, step)
 	}
 	last := rows[len(rows)-1]
-	response.TreeID = treeIDOf(last.Root)
+	if len(last.Root) != 0 {
+		real, err := service.store.InsightsRealRoots(ctx, sqlite.InsightsFilter{Scope: filter.Scope, RootFPRs: [][]byte{last.Root}})
+		if err != nil {
+			return insights.TrendResponse{}, fmt.Errorf("query: insights real trees: %w", err)
+		}
+		if real[string(last.Root)] {
+			response.TreeID = treeIDOf(last.Root)
+		}
+	}
 	response.ContextWindow = service.prices.ContextWindow(last.Model)
 	return response, nil
 }

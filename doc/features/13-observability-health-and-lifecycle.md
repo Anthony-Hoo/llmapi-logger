@@ -27,6 +27,18 @@ writer 检测到存量内容/二进制对象或引用的身份损坏时，即使
 
 writer 整批失败、审计 begin/finish、解析保存/release、保留清理和捕获恢复的失败日志增加固定白名单 `storage_error`：可区分 `sqlite_full`、`sqlite_busy`、`sqlite_read_only`、`sqlite_io_error`、`sqlite_corrupt`、`sqlite_constraint`、`object_integrity`、`queue_full`、`recovery_overflow` 等；无法分类时为 `unknown`，不输出底层错误文本。后台恢复成功只报告完成条目数，失败报告稳定类别及待恢复数量。
 
+上下文洞察（[模块 20](20-context-insights.md)）在 parser goroutine 内派生数据，失败只写 Warn 日志，且从不改变已提交的解析状态。日志字段限于 `audit_id`、固定 `error_code`（可附固定枚举 `reason` 与 `storage_error` 类别），不含消息、工具名、路径、原始 Agent ID 或底层错误文本：
+
+| `error_code` | 含义 |
+| --- | --- |
+| `analysis_failed` | 派生计算或链接阶段失败；行不写入，由回填补算 |
+| `analysis_save_failed` | `audit_analysis` 写入失败（附 `storage_error` 类别） |
+| `analysis_panic` | 分析器 panic 被捕获 |
+| `request_headers_load_failed` | 解密白名单入站请求 Header 失败；仅丢弃 Agent 标识 Header，不降级解析状态 |
+| `analysis_backfill_skipped` | 回填跳过该 audit，附 `reason`：`audit_missing`、`parser_not_registered`、`no_body`、`raw_unavailable`、`no_turn_graph`、`parse_not_usable`、`no_request_body`；同一进程内不再重试 |
+| `analysis_backfill_failed` | 回填失败，附 `reason`（如 `list_failed`、`audit_load_failed`、`evidence_read_failed`、`reconstruction_failed`、`analysis_failed`、`analysis_save_failed`、`analysis_panic`）与 `storage_error`；同一进程内不再重试 |
+
+回填不引入新的健康状态或指标端点：它只在 parser 队列为空时每个扫描周期最多处理 20 条，不影响 `/readyz`。
 可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。
 
 `/v1/models` 等安全非 LLM 请求即使经本程序 passthrough，也不创建 audit、不执行 interceptor，并且不写 `llm request completed`。错误 Method、受保护路径族和危险路径在分发边界 fail-closed，也不伪装成 LLM audit。
@@ -110,3 +122,4 @@ NewAPI 管理集成包含两个轻量后台任务：用户目录在监听前刷�
 - 只有实际恢复记录时生成聚合 process_exit gap。
 - available 启动依赖故障仍可转发，strict 返回 `503`；修复启动依赖后通过重启恢复。
 - 优雅关闭不会把仍未完成的证据标成 complete。
+- 洞察分析与回填失败只产生上表的固定错误码日志，不改变 `parse_status`，日志不含内容、工具名、路径或原始 Agent ID。

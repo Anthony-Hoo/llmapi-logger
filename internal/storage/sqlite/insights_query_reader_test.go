@@ -131,7 +131,7 @@ func seedSharedWorld(t *testing.T, store *Store) (day time.Time) {
 	seedInsights(t, store, insightsSeed{id: "c1", at: day.Add(30 * time.Second), key: keyA, token: 1, session: sessionSub, root: rootA, node: node3, parent: node1,
 		role: "subagent", uncached: 10, cacheRead: 20, output: 5, turnStart: true, system: 10})
 	seedInsights(t, store, insightsSeed{id: "c2", at: day.Add(40 * time.Second), key: keyA, token: 1, session: sessionSub, root: rootA, node: node3, parent: node1,
-		role: "compaction", uncached: 1, cacheRead: 2, output: 3, system: 1})
+		role: "compaction", uncached: 1, cacheRead: 2, output: 3, system: 1, turnStart: true})
 	seedInsights(t, store, insightsSeed{id: "d1", at: day.Add(50 * time.Second), key: keyB, token: 2, session: sessionForeig, root: rootB, node: node4,
 		uncached: 4000, output: 400, system: 4000})
 	// A step without a session (never grouped into cards) and without usage.
@@ -174,7 +174,7 @@ func TestInsightsUsageAggregatesAndAppliesScope(t *testing.T) {
 		t.Fatalf("scoped distinct = %d %d %v", distinctSessions, trees, err)
 	}
 	distinctSessions, trees, err = store.InsightsDistinct(ctx, windowFilter(day, nil))
-	if err != nil || distinctSessions != 3 || trees != 2 {
+	if err != nil || distinctSessions != 3 || trees != 1 {
 		t.Fatalf("unscoped distinct = %d %d %v", distinctSessions, trees, err)
 	}
 
@@ -237,7 +237,7 @@ func TestInsightsSessionsKeysetScopeAndLastStep(t *testing.T) {
 	}
 	// Most recent first: the subagent session ends after the shared one.
 	sub, shared := page.Rows[0], page.Rows[1]
-	if sub.SessionID != sessionSub || sub.Steps != 2 || sub.Turns != 1 || sub.Role != "compaction" {
+	if sub.SessionID != sessionSub || sub.Steps != 2 || sub.Turns != 1 || sub.Role != "subagent" || sub.LastPrompt == nil || *sub.LastPrompt != 30 || sub.Estimate.System != 10 {
 		t.Fatalf("sub session = %+v", sub)
 	}
 	if shared.SessionID != sessionShared || shared.Steps != 2 || shared.Turns != 1 || shared.Tokens != 1050+1070 {
@@ -291,6 +291,11 @@ func TestInsightsSessionsKeysetScopeAndLastStep(t *testing.T) {
 	counts, err = store.InsightsSubagentCounts(ctx, InsightsFilter{FromNS: windowFilter(day, nil).FromNS, ToNS: windowFilter(day, nil).ToNS, RootFPRs: [][]byte{rootA}})
 	if err != nil || counts[string(rootA)] != 2 {
 		t.Fatalf("unscoped subagents = %v %v", counts, err)
+	}
+	// Only rootA has two distinct nodes; rootB is a lone synthetic node.
+	real, err := store.InsightsRealRoots(ctx, InsightsFilter{RootFPRs: [][]byte{rootA, rootB}})
+	if err != nil || !real[string(rootA)] || real[string(rootB)] {
+		t.Fatalf("real roots = %v %v", real, err)
 	}
 	if _, err := store.InsightsSessions(ctx, windowFilter(day, nil), "bogus", nil, 1); err == nil {
 		t.Fatal("unknown sort accepted")

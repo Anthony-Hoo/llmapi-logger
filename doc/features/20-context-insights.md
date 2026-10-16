@@ -1,9 +1,9 @@
-# 模块 20：上下文分析与用量洞察（设计草案）
+# 模块 20：上下文分析与用量洞察
 
-> 状态：设计草案，未实现
+> 状态：已实现（首版）。与最初草案不同之处见 §13；用户接入指南见[部署：洞察与 Agent 接入](../deployment/insights-and-agent-headers.md)
 > 日期：2026-10-16
 > 参考：[bowenliang123/dsh-context](https://github.com/bowenliang123/dsh-context)（Apache-2.0，DeepSeek Harness 插件）
-> 文中新增的配置字段、表和 API 均为提案；落地时分别并入 [01](01-configuration-and-route-boundary.md)、[04](04-sqlite-storage-and-migrations.md)、[10](10-query-api-and-minimal-web-ui.md)，以那里为唯一来源。
+> 文中的配置字段、表和 API 已分别并入 [01](01-configuration-and-route-boundary.md)、[04](04-sqlite-storage-and-migrations.md)、[10](10-query-api-and-minimal-web-ui.md)，以那里为唯一来源；本文保留设计动机与算法。
 
 ## 1. 目标与边界
 
@@ -90,7 +90,7 @@ parser worker 已经持有解密后的请求/响应 Body，在同一次解析中
 - retention 物化的 `retention_checkpoint` 会截断链条，趋势序列从截断点开始，UI 标注“更早步骤已过期”。
 - 推断键在“同一 Key、同一系统提示词、同一开场白”的并行会话上会误合并，这类会话在趋势图上表现为锯齿。差异计算选公共前缀最长的候选，可以减轻但不能消除，文档与 UI 都按“推断”标注。
 
-## 4. 数据模型（提案，待并入 04）
+## 4. 数据模型（已并入 04 §3.4）
 
 > 实现以 `internal/storage/sqlite/migrations/008_audit_analysis.sql` 为准（含 Agent 树列与 `agent_spawn_hints` 表），下文 SQL 为早期草图。
 
@@ -312,7 +312,7 @@ insights:
 
 默认词表编译进二进制，覆盖文件按键合并，启动时校验，非法时拒绝启动。
 
-## 7. 管理 API（提案，待并入 10）
+## 7. 管理 API（已并入 10 §11）
 
 全部走既有鉴权，响应 `Cache-Control: no-store`，时间范围上限 400 天。JSON 结构以 `internal/insights/apitypes.go` 为唯一契约，前端 `src/types.ts` 与之镜像；另有 `GET /api/v1/insights/agent-trees/{tree_id}` 返回 `TreeResponse`（§5.8）。
 
@@ -335,11 +335,16 @@ insights:
 
 ## 9. 回填
 
-- 新增后台任务：扫描 `audit_analysis` 缺失或 `analysis_version` 过旧的已解析记录，每轮有界、低优先级、可取消，复用 parser worker 的只读解密路径。
-- OpenAI：从内容对象图重建请求/响应。`response_envelope` 保留 usage，可补全缓存与推理 Token。
-- Anthropic / Gemini：当前保留 full raw，可直接重解析。
-- 已被 retention 删除的记录不回填；raw 与对象都不可用的记录跳过，并计数到健康信息。
+已实现为 parser worker 内的后台步骤（`internal/parser/backfill.go`），不新增 writer 并发：
 
+- **触发**：parser 唯一的 worker goroutine 每次扫描 tick（默认 30 秒）在 pending 扫描之后调用；仅当 `insights` 启用（已安装分析器）且实时队列为空时才运行，处理过程中一旦实时队列出现新项立即让出。每个 tick 最多处理 20 条，随 `ctx` 取消，永远不阻塞实时解析。
+- **候选**：`parse_status IN ('ok','partial')` 且已结束，`LEFT JOIN audit_analysis` 后缺行或 `analysis_version < AnalysisVersion`，按开始时间从新到旧；以 `(started_at_ns, audit_id)` keyset 游标向前推进。游标走完后暂停 10 分钟再从最新重扫，避免对同一批不可处理的记录空转。
+- **正文来源**：raw 分块仍在（`retention_state` 非 metadata）时复用实时路径的 `loadInput`。已转为 metadata 的 OpenAI audit 通过注入的 `parser.Reconstructor`（由 query 服务实现，复用 `ReconstructTurn` 的已验证重建）取得请求与响应 JSON。其余情形（Anthropic/Gemini 的 raw 已被 retention 清除、没有 turn graph 等）跳过。
+- **重新解析**：在内存中重跑协议 parser 的 `Parse` 取得 Conversation 与归一化用量，**不**重写 `parsed_results`；再读取白名单 Header，调用与实时路径相同的分析器钩子（`runAnalyzer`），行按 `audit_id` upsert。
+- **流式响应的限制**：metadata 保留的 OpenAI 流式响应无法还原成 SSE。回填改用 response envelope 中保存的 usage 摘要与重建的 conversation，因此缓存读/写和推理 Token 拆分不可恢复（只有 uncached input 与 output），停止原因也可能缺失；非流式响应的重建 JSON 保留完整 usage。
+- **防空转**：进程内有界（4096）的跳过集合记录跳过或失败的 audit，同一进程不再重试；满后清空重建。日志码 `analysis_backfill_skipped`（附 `reason` 枚举）与 `analysis_backfill_failed`，见[模块 13](13-observability-health-and-lifecycle.md)。暂时性失败（如存储繁忙）也要到进程重启才会再试。
+- 已被 retention 删除的记录不在候选里；没有现成的健康计数器，因此未新增 `analysis_backfill_pending` 之类的指标（项目目前无 metrics 面）。
+- `AnalysisVersion` 为 2：版本 2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0，旧行会被回填重算。
 ## 10. 阶段与风险
 
 | 阶段 | 内容 | 工作量 | 主要风险 |
@@ -409,3 +414,13 @@ Header 名称可以在词表覆盖文件中改成你框架已有的名字（`con
 - 用四家客户端的录制样本（脱敏）构造父子与孙级请求：显式标识层还原的树与真实结构一致；附属请求（压缩、标题）不出现为子 Agent。
 - 去掉全部 Header 后，内容匹配层只在唯一命中时连边，并标为推断；两个子 Agent 使用相同 prompt 时不连边。
 - 原始 Agent ID 不以明文出现在 DB/WAL 中。
+
+## 13. 实现偏差与已知限制
+
+- **合成节点指纹**：没有客户端 Agent ID 的会话（普通 OpenAI/Anthropic 客户端）也会得到一个由 `analysis_session_id` 派生的合成 `agent_node_fpr`（`SyntheticAgentFPR`），使会话链接、根聚合和 Agent 树查询走同一条路径。合成指纹不带 `agent_link_source`。
+- **真实树规则**：因此 `agent_root_fpr` 非空并不代表这是一棵 Agent 树。查询层只在根满足以下任一条件时才视为真实树：作用域内有 ≥ 2 个不同的 `agent_node_fpr`，或该根的任一行带非空 `agent_link_source`。`OverviewResponse.trees`、`SessionCard.tree_id`（非树为空）与 `subagents` 都按此判定；`agent-trees` 端点仍可读取单节点根。总览按所选时间窗口内的行判定，会话卡片与趋势按作用域内全部行判定。
+- **卡片取值口径**：会话卡片的角色、末步构成/prompt 总量取最新的 main/subagent 步骤；附属请求不开始 turn（`turn_start` 在统计和趋势序号中被忽略），其 `event_flags` 为 0（`prev_audit_id`/增删条目数仍保留）。
+- **趋势估算保持原始值**：`/trend` 返回未锚定的构成估算与真实 usage，锚定到 prompt 总量由前端完成（会话卡片与树节点由服务端锚定）。
+- **价格表**：内嵌快照 `internal/insights/pricing/prices.json`，可由 `insights.pricing_file` 覆盖。JSON 顶层为 `snapshot`、`note`、`models`、`schedules`，禁止未知字段。`models` 的键为小写 `provider/model`（或裸模型名），值为每百万 Token 美元价：`input`、`output` 必填，`cache_read`、`cache_write` 缺省回落到 `input`，`context` 为上下文窗口（0 表示未知）。`schedules` 是按 UTC 时段的成本倍率（`model` glob、`weekdays` 0=周日、`start`/`end` 为 `HH:MM`、`multiplier` ∈ (0,100]），首个匹配生效，跨午夜的窗口按开始日计星期。覆盖文件的同键条目替换内嵌条目，`schedules` 追加。查找链：完整 id（大小写不敏感）→ 去掉厂商前缀后的裸名（唯一才命中）→ 最长的已知族名加 `-`/`@`/`:` 后缀（带日期的发行版本，跨厂商共享则视为未知）→ 未知价格，不计价并计入 `unpriced_requests`。
+- **请求体被多次解析**：一次 audit 的请求体会被协议 parser、OpenAI normalizer、insights 分析器（`Analyze`、`IdentifyAgent`、`SpawnPrompts`、`OpeningUserHints`）各自反序列化一次。输入受 `MaxDecodedBodyBytes`（64 MiB）限制且全部在异步 worker 中，不影响代理字节路径；合并为一次解码是后续优化，目前不做。
+- **回填速率**：每个扫描 tick 最多 20 条，历史量大时需要数小时到数天，期间洞察页展示的是已分析部分。

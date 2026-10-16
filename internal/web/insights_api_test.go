@@ -163,12 +163,12 @@ func TestInsightsEndpointsAreScopedForDevelopers(t *testing.T) {
 	if overview.Code != http.StatusOK || json.Unmarshal(overview.Body.Bytes(), &overviewBody) != nil {
 		t.Fatalf("overview = %d %s", overview.Code, overview.Body.String())
 	}
-	if overviewBody.Totals.Requests != 1 || overviewBody.Sessions != 1 || overviewBody.Trees != 1 {
+	if overviewBody.Totals.Requests != 1 || overviewBody.Sessions != 1 || overviewBody.Trees != 0 {
 		t.Fatalf("developer overview leaked other key rows: %+v", overviewBody)
 	}
 	admin := fixture.get("/api/v1/insights/overview?"+fixture.window(), false)
 	var adminBody insights.OverviewResponse
-	if admin.Code != http.StatusOK || json.Unmarshal(admin.Body.Bytes(), &adminBody) != nil || adminBody.Totals.Requests != 3 || adminBody.Sessions != 2 {
+	if admin.Code != http.StatusOK || json.Unmarshal(admin.Body.Bytes(), &adminBody) != nil || adminBody.Totals.Requests != 3 || adminBody.Sessions != 2 || adminBody.Trees != 1 {
 		t.Fatalf("admin overview = %d %s", admin.Code, admin.Body.String())
 	}
 

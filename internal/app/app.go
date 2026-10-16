@@ -230,6 +230,11 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 			_ = runtime.store.Close()
 			return nil, fmt.Errorf("assemble insights analyzer: %w", err)
 		}
+		if vocabulary != nil {
+			// Metadata-retention OpenAI audits are backfilled from the
+			// verified turn graph instead of released raw chunks.
+			application.parserWorker.SetReconstructor(queryService)
+		}
 		if runtime.manager != nil {
 			runtime.manager.SetCompletionNotifier(application.parserWorker.Notify)
 		}

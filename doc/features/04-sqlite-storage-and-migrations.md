@@ -42,7 +42,7 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 
 `007_parse_retries.sql` 就地增加 `parse_save_failures` 和 `parse_next_at_ns`，分别保存解析写入失败次数和下一次允许重试的时间。这两列是可变调度元数据，不进入历史 HTTP 证据摘要，也不改变 schema generation。
 
-当前最终 schema 共 20 张表，按职责分组如下。
+当前最终 schema 共 22 张表（schema generation 仍为 2），按职责分组如下。`008_audit_analysis.sql` 就地新增 `audit_analysis` 与 `agent_spawn_hints` 两张派生表，不重建、不修改任何既有表。
 
 ### 3.1 HTTP 审计与身份
 
@@ -87,6 +87,19 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 时间线最多保存前 100,000 个事件时间点，但 `event_count` 保留实际总数；`timeline_complete=false` 明确表示时间点序列被截断，或观察到的 SSE 在最后一个事件结束前中断；它由观察到的字节决定，与 raw 分块是否落盘无关。有事件但未能封存时间线的 Body 同样把 `stream_timeline_complete` 记为 false。网络 read/write chunk 不作为长期 SSE 事件行。
 
+### 3.4 派生分析（上下文洞察）
+
+| 表 | 用途 |
+| --- | --- |
+| audit_analysis | 每个已解析 audit 至多一行：归一化用量各桶、构成估算、停止原因、会话与上一步、事件位图、Agent 树指纹、加密的 `detail_enc` |
+| agent_spawn_hints | 响应中子 Agent 派生提示词的 keyed 指纹，供内容匹配兜底连边 |
+
+两张表都以 `audit_id` 外键 `ON DELETE CASCADE` 挂在 `audit_records` 上，随 retention 删除自动清理。完整列定义以 `internal/storage/sqlite/migrations/008_audit_analysis.sql` 为准，语义见[模块 20](20-context-insights.md)。
+
+- **不在完整性链内**：这两张表是可重算的派生数据，**不得**进入 `capturePayloadDigest`、`appendParsedResultDigest` 或任何完整性事件；一旦加入，旧库中每条历史记录的重算摘要都会改变，启动校验会失败。测试锁定：写入、更新、删除 `audit_analysis` 行不改变任何已签名摘要。
+- **明文列只有数值、枚举、计数 JSON 和 keyed HMAC 指纹**。消息正文、工具名、文件路径和原始 Agent ID 只存在 `detail_enc`（AES-256-GCM，AAD 标签 `analysis_detail`，绑定 audit id 与 `analysis_version`），日志同样不得出现。
+- `analysis_version` 随算法升级递增；后台回填（模块 20 §9）按版本重算，不触碰 `parse_status`。索引 `audit_analysis_version_idx` 支撑“缺失或过旧”扫描。
+- 写入走既有单 writer 的 `SaveAnalysis`（按 `audit_id` upsert，并整体替换该 audit 的 spawn hints）；失败只记录日志，不影响解析结果。
 ## 4. HTTP Body 保存方式
 
 每个阶段仍保存自己的 observed length、SHA-256、状态和时间。流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并：
@@ -208,3 +221,4 @@ GC 使用 `NOT EXISTS` 可达性检查和对象引用索引，不维护可漂移
 - SSE 大于 100,000 个事件时保留总数和截断语义，完整时间线严格校验首末点。
 - recovery、integrity event 篡改、缺 event 和重复恢复测试通过。
 - DB/WAL 扫描不到测试 Header、Body、二进制和主密钥明文。
+- `audit_analysis` 的写入、更新和级联删除不改变任何完整性摘要；明文列扫描不到消息、工具名、路径和原始 Agent ID。

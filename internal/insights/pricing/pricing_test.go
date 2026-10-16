@@ -202,3 +202,15 @@ func TestLoadRejectsInvalidOverrides(t *testing.T) {
 }
 
 func ptr(value int64) *int64 { return &value }
+
+func TestExamplePricingFileLoads(t *testing.T) {
+	t.Parallel()
+	table := mustLoad(t, filepath.Join("..", "..", "..", "configs", "insights-pricing.example.json"))
+	entry, ok := table.Lookup("example-provider/example-large")
+	if !ok || entry.Input != 3.0 || entry.ContextWindow != 200000 {
+		t.Fatalf("example entry = %+v ok=%v", entry, ok)
+	}
+	if _, ok := table.Lookup("my-gateway-alias"); !ok || !table.HasSchedules() {
+		t.Fatal("example aliases or schedules were not loaded")
+	}
+}

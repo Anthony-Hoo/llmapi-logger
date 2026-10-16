@@ -261,6 +261,11 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 	if prev != nil {
 		row.PrevAuditID = optionalText(prev.AuditID)
 		row.EventFlags, row.AppendedItems, row.RemovedItems = diffEvents(analysis, prev, prevDetail)
+		if auxiliaryRole(identity.Role) {
+			// Compaction, title and review requests rebuild their context on
+			// purpose; their diffs are not events of the main conversation.
+			row.EventFlags = 0
+		}
 	}
 
 	// Content links: inherit from the previous step of the same session, or

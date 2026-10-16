@@ -36,6 +36,12 @@ type Worker struct {
 	// Guarded by mu; read once per audit by the parser goroutine.
 	headerAllowlist []string
 	analyzer        AuditAnalyzer
+	reconstructor   Reconstructor
+
+	// Only the parser goroutine accesses the insights backfill state.
+	backfillCursor   *sqlite.AnalysisBackfillCursor
+	backfillSkipped  map[string]struct{}
+	backfillNextScan time.Time
 
 	mu      sync.Mutex
 	started bool
@@ -227,6 +233,7 @@ func (worker *Worker) run(ctx context.Context) {
 		case <-ticker.C:
 			worker.retryProcessingReleases(ctx)
 			worker.scan(ctx)
+			worker.backfill(ctx)
 		}
 	}
 }
@@ -305,16 +312,32 @@ func (worker *Worker) analyze(ctx context.Context, audit sqlite.ParserAudit, inp
 		!input.Request.Present || len(input.Request.Data) == 0 {
 		return
 	}
+	err := runAnalyzer(ctx, analyzer, audit, input, result)
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	if errors.Is(err, errAnalyzerPanic) {
+		worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", "analysis_panic")
+		return
+	}
+	worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", insights.ErrorCode(err), "storage_error", sqlite.ErrorClass(err))
+}
+
+var errAnalyzerPanic = errors.New("parser: analyzer panic")
+
+// runAnalyzer invokes the analyzer hook shared by live parsing and the
+// insights backfill, converting a panic into errAnalyzerPanic.
+func runAnalyzer(ctx context.Context, analyzer AuditAnalyzer, audit sqlite.ParserAudit, input Input, result Result) (err error) {
 	defer func() {
 		if recover() != nil {
-			worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", "analysis_panic")
+			err = errAnalyzerPanic
 		}
 	}()
 	endpoint := audit.ParserName
 	if _, suffix, found := strings.Cut(endpoint, "."); found {
 		endpoint = suffix
 	}
-	err := analyzer.AnalyzeAudit(ctx, insights.Input{
+	return analyzer.AnalyzeAudit(ctx, insights.Input{
 		AuditID:          audit.AuditID,
 		Protocol:         audit.Protocol,
 		Endpoint:         endpoint,
@@ -329,10 +352,6 @@ func (worker *Worker) analyze(ctx context.Context, audit sqlite.ParserAudit, inp
 		Usage:            result.Normalized,
 		Conversation:     result.Conversation,
 	})
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return
-	}
-	worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", insights.ErrorCode(err), "storage_error", sqlite.ErrorClass(err))
 }
 
 func (worker *Worker) releaseProcessing(ctx context.Context, auditID string) bool {

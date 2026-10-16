@@ -227,7 +227,7 @@ func TestInsightsOverviewTotalsCostAndDays(t *testing.T) {
 
 	// An administrator sees every key, and may group by caller.
 	admin, err := fixture.service.Overview(context.Background(), OverviewQuery{FromNS: from, ToNS: to, GroupBy: "caller"})
-	if err != nil || admin.Totals.Requests != 5 || admin.Sessions != 3 || admin.Trees != 2 {
+	if err != nil || admin.Totals.Requests != 5 || admin.Sessions != 3 || admin.Trees != 1 {
 		t.Fatalf("admin overview = %+v %v", admin, err)
 	}
 }
@@ -570,5 +570,82 @@ func TestInsightsScheduleAwareCostUsesSlots(t *testing.T) {
 	}
 	if got, want := *response.Totals.EstimatedCostUSD, 1.0+2.0; got < want-1e-9 || got > want+1e-9 {
 		t.Fatalf("cost = %v, want %v", got, want)
+	}
+}
+
+func TestInsightsAuxiliaryStepsDoNotDefineSessionsAndPlainSessionsAreNotTrees(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	const (
+		sessionMain  = "agt_eeeeeeeeeeeeeeeeeeeeeeee"
+		sessionChild = "agt_ffffffffffffffffffffffff"
+		sessionPlain = "agt_999999999999999999999999"
+	)
+	rootTree, rootPlain := fingerprint(0xc0), fingerprint(0xd0)
+	fixture.seed(stepSeed{id: "m1", offset: 100 * time.Second, key: keyOwn, session: sessionMain, root: rootTree, node: fingerprint(0x21),
+		uncached: i64(500), output: i64(5), turnStart: true, system: 50})
+	fixture.seed(stepSeed{id: "m2", offset: 110 * time.Second, key: keyOwn, session: sessionMain, root: rootTree, node: fingerprint(0x21),
+		uncached: i64(600), output: i64(5), prev: "m1", system: 60})
+	fixture.seed(stepSeed{id: "s1", offset: 120 * time.Second, key: keyOwn, session: sessionChild, root: rootTree, node: fingerprint(0x22), parent: fingerprint(0x21),
+		role: "subagent", uncached: i64(300), output: i64(5), turnStart: true, system: 30})
+	// Auxiliary steps come last in time, claim to start a turn and carry the
+	// "128 of 128k" shape of a compaction request.
+	fixture.seed(stepSeed{id: "c-main", offset: 130 * time.Second, key: keyOwn, session: sessionMain, root: rootTree, node: fingerprint(0x21),
+		role: "compaction", uncached: i64(128), output: i64(5), turnStart: true, prev: "m2", system: 5})
+	fixture.seed(stepSeed{id: "c-child", offset: 140 * time.Second, key: keyOwn, session: sessionChild, root: rootTree, node: fingerprint(0x22), parent: fingerprint(0x21),
+		role: "compaction", uncached: i64(128), output: i64(5), turnStart: true, prev: "s1", system: 5})
+	fixture.seed(stepSeed{id: "p1", offset: 150 * time.Second, key: keyOwn, session: sessionPlain, root: rootPlain, node: fingerprint(0xd1),
+		uncached: i64(40), output: i64(5), turnStart: true, system: 4})
+	ctx := context.Background()
+	from, to := fixture.rangeNS()
+
+	page, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards := map[string]insights.SessionCard{}
+	for _, card := range page.Items {
+		cards[card.SessionID] = card
+	}
+	main, child, plain := cards[sessionMain], cards[sessionChild], cards[sessionPlain]
+	if main.Role != "main" || main.Turns != 1 || main.Steps != 3 || main.Subagents != 1 || main.TreeID == "" {
+		t.Fatalf("main card = %+v", main)
+	}
+	if main.LastPrompt == nil || *main.LastPrompt != 600 || main.LastEstimate.Sum() != 600 {
+		t.Fatalf("main card must show its latest main step: %+v", main)
+	}
+	if child.Role != "subagent" || child.Turns != 1 || child.LastPrompt == nil || *child.LastPrompt != 300 || child.LastEstimate.Sum() != 300 {
+		t.Fatalf("child card = %+v", child)
+	}
+	if plain.TreeID != "" || plain.Subagents != 0 || plain.Turns != 1 {
+		t.Fatalf("a lone node is not an agent tree: %+v", plain)
+	}
+
+	trend, err := fixture.service.Trend(ctx, sessionMain, nil)
+	if err != nil || len(trend.Steps) != 3 {
+		t.Fatalf("trend = %+v %v", trend, err)
+	}
+	last := trend.Steps[2]
+	if last.AuditID != "c-main" || last.TurnStart || last.Turn != 1 || trend.TreeID == "" {
+		t.Fatalf("auxiliary step must not start a turn: %+v", last)
+	}
+	plainTrend, err := fixture.service.Trend(ctx, sessionPlain, nil)
+	if err != nil || plainTrend.TreeID != "" {
+		t.Fatalf("plain trend tree = %q %v", plainTrend.TreeID, err)
+	}
+
+	tree, err := fixture.service.Tree(ctx, "c0c0c0c0c0c0c0c0c0c0c0c0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range tree.Nodes {
+		if node.NodeID == "222222222222222222222222" && (node.LastPrompt == nil || *node.LastPrompt != 300 || node.AuxRequests != 1) {
+			t.Fatalf("child node must show its main step: %+v", node)
+		}
+	}
+
+	overview, err := fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to})
+	if err != nil || overview.Trees != 1 {
+		t.Fatalf("overview trees = %d %v", overview.Trees, err)
 	}
 }

@@ -281,12 +281,66 @@ func (store *Store) InsightsDistinct(ctx context.Context, filter InsightsFilter)
 		return 0, 0, err
 	}
 	err = store.readerDB.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT x.analysis_session_id), COUNT(DISTINCT x.agent_root_fpr)`+insightsFrom+where,
-		arguments...).Scan(&sessions, &trees)
+		`SELECT COUNT(DISTINCT x.analysis_session_id)`+insightsFrom+where,
+		arguments...).Scan(&sessions)
 	if err != nil {
 		return 0, 0, fmt.Errorf("sqlite: insights distinct: %w", err)
 	}
+	err = store.readerDB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM (
+  SELECT x.agent_root_fpr`+insightsFrom+where+`
+    AND x.agent_root_fpr IS NOT NULL
+  GROUP BY x.agent_root_fpr
+  HAVING `+insightsRealTreeHaving+`
+)`, arguments...).Scan(&trees)
+	if err != nil {
+		return 0, 0, fmt.Errorf("sqlite: insights distinct trees: %w", err)
+	}
 	return sessions, trees, nil
+}
+
+// insightsRealTreeHaving is the rule that makes an agent root a real tree:
+// two or more distinct agent nodes, or any step linked by a header, body or
+// content back-reference. Every session without a client agent id carries a
+// synthetic node fingerprint, so a lone node is not a tree.
+const insightsRealTreeHaving = `(COUNT(DISTINCT x.agent_node_fpr) >= 2 OR SUM(CASE WHEN x.agent_link_source IS NOT NULL THEN 1 ELSE 0 END) > 0)`
+
+// InsightsRealRoots returns, keyed by raw root fingerprint, which of
+// filter.RootFPRs are real agent trees within the filter's scope. The time
+// range is ignored: a tree is judged by all of its in-scope steps.
+func (store *Store) InsightsRealRoots(ctx context.Context, filter InsightsFilter) (map[string]bool, error) {
+	if err := store.insightsReady(ctx); err != nil {
+		return nil, err
+	}
+	if len(filter.RootFPRs) == 0 {
+		return map[string]bool{}, nil
+	}
+	filter.FromNS, filter.ToNS = 0, 0
+	filter.SessionIDs, filter.RootPrefix = nil, nil
+	where, arguments, err := filter.where()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT x.agent_root_fpr`+insightsFrom+where+`
+GROUP BY x.agent_root_fpr
+HAVING `+insightsRealTreeHaving, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: insights real roots: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]bool)
+	for rows.Next() {
+		var root []byte
+		if err := rows.Scan(&root); err != nil {
+			return nil, fmt.Errorf("sqlite: scan insights real roots: %w", err)
+		}
+		result[string(root)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate insights real roots: %w", err)
+	}
+	return result, nil
 }
 
 // InsightsDayCounts returns requests and distinct sessions per local day.
@@ -383,9 +437,13 @@ func (store *Store) InsightsSessions(ctx context.Context, filter InsightsFilter,
 		return InsightsSessionPage{}, err
 	}
 	last := func(column string) string { return "MAX(CASE WHEN rn = 1 THEN " + column + " END)" }
+	// node picks the latest main/subagent step, falling back to the latest
+	// auxiliary one only when the session has nothing else.
+	node := func(column string) string { return "MAX(CASE WHEN rn_node = 1 THEN " + column + " END)" }
 	statement := `
 WITH s AS (
-  SELECT x.analysis_session_id AS sid, x.started_at_ns AS ts, x.turn_start AS turn_start,
+  SELECT x.analysis_session_id AS sid, x.started_at_ns AS ts,
+         CASE WHEN x.agent_role IN ` + insightsAuxRoles + ` THEN 0 ELSE x.turn_start END AS turn_start,
          ` + insightsPromptSQL + ` + COALESCE(x.u_output, 0) AS tokens,
          x.protocol AS protocol, COALESCE(x.model, '') AS model, COALESCE(x.agent_client, 'unknown') AS client,
          COALESCE(x.agent_role, 'main') AS role, COALESCE(x.session_link, '') AS link, x.agent_root_fpr AS root,
@@ -393,18 +451,20 @@ WITH s AS (
          CASE WHEN ` + insightsHasUsage + ` THEN ` + insightsPromptSQL + ` END AS prompt,
          x.est_system AS e1, x.est_tools AS e2, x.est_user AS e3, x.est_injected AS e4,
          x.est_assistant AS e5, x.est_reasoning AS e6, x.est_tool_result AS e7, x.est_media AS e8,
-         ROW_NUMBER() OVER (PARTITION BY x.analysis_session_id ORDER BY x.started_at_ns DESC, x.audit_id DESC) AS rn` +
+         ROW_NUMBER() OVER (PARTITION BY x.analysis_session_id ORDER BY x.started_at_ns DESC, x.audit_id DESC) AS rn,
+         ROW_NUMBER() OVER (PARTITION BY x.analysis_session_id ORDER BY
+           CASE WHEN x.agent_role IN ` + insightsAuxRoles + ` THEN 1 ELSE 0 END, x.started_at_ns DESC, x.audit_id DESC) AS rn_node` +
 		insightsFrom + where + `
     AND x.analysis_session_id IS NOT NULL
 ), g AS (
   SELECT sid, MIN(ts) AS first_ns, MAX(ts) AS last_ns, COUNT(*) AS steps, SUM(turn_start) AS turns, SUM(tokens) AS tokens,
-         ` + last("protocol") + ` AS protocol, ` + last("model") + ` AS model, ` + last("client") + ` AS client,
-         ` + last("role") + ` AS role, ` + last("link") + ` AS link, ` + last("root") + ` AS root,
+         ` + last("protocol") + ` AS protocol, ` + node("model") + ` AS model, ` + last("client") + ` AS client,
+         MAX(CASE WHEN rn_node = 1 THEN role END) AS role, ` + last("link") + ` AS link, ` + last("root") + ` AS root,
          ` + last("username") + ` AS username, ` + last("token_name") + ` AS token_name,
-         ` + last("prompt") + ` AS last_prompt,
-         ` + last("e1") + ` AS e1, ` + last("e2") + ` AS e2, ` + last("e3") + ` AS e3, ` + last("e4") + ` AS e4,
-         ` + last("e5") + ` AS e5, ` + last("e6") + ` AS e6, ` + last("e7") + ` AS e7, ` + last("e8") + ` AS e8,
-         ` + last("e1+e2+e3+e4+e5+e6+e7+e8") + ` AS last_est
+         ` + node("prompt") + ` AS last_prompt,
+         ` + node("e1") + ` AS e1, ` + node("e2") + ` AS e2, ` + node("e3") + ` AS e3, ` + node("e4") + ` AS e4,
+         ` + node("e5") + ` AS e5, ` + node("e6") + ` AS e6, ` + node("e7") + ` AS e7, ` + node("e8") + ` AS e8,
+         ` + node("e1+e2+e3+e4+e5+e6+e7+e8") + ` AS last_est
   FROM s GROUP BY sid
 )
 SELECT sid, first_ns, last_ns, steps, turns, tokens, ` + sortExpr + ` AS sort_value,
