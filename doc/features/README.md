@@ -140,6 +140,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 17 | [入站请求拦截链](17-request-interceptor-chain.md) |
 | 18 | [内容寻址的对话、轮次与多模态审计存储](18-content-addressed-conversation-storage.md) |
 | 19 | [开发者 API Key 会话](19-developer-key-session.md) |
+| 20 | [上下文分析与用量洞察（设计草案）](20-context-insights.md) |
 
 ## 10. 当前实现范围
 
