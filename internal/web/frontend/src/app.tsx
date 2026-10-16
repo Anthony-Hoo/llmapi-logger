@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -19,7 +21,11 @@ import { Separator } from "./components/ui/separator";
 import { Skeleton } from "./components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
 import { ConversationView } from "./components/conversation-view";
+// Recharts is only needed by the insights charts, so keep it out of the main chunk.
+const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
+import { CompositionSection } from "./components/insights/composition-section";
 import { buildConversationExport } from "./lib/conversation-export";
+import { errorMessage, isAbortError } from "./lib/errors";
 import {
   displayValue,
   formatBytes,
@@ -289,7 +295,7 @@ function Dashboard({
   // A developer session is scoped to one API key server side. The UI hides the
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
-  const [view, setView] = useState<"audits" | "rules">("audits");
+  const [view, setView] = useState<"audits" | "rules" | "insights">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -439,7 +445,7 @@ function Dashboard({
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-20 border-b bg-white/85 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-[1920px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
+        <div className="mx-auto flex max-w-[1920px] flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3">
             <BrandMark compact />
             <div>
@@ -447,18 +453,18 @@ function Dashboard({
               <p className="hidden text-xs text-muted-foreground sm:block">本地 LLM 请求与响应证据</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {isDeveloper ? (
-              <DeveloperBadge identity={session?.identity ?? null} />
-            ) : (
-              <>
-                <Button variant={view === "audits" ? "secondary" : "ghost"} size="sm" onClick={() => setView("audits")}>
-                  审计记录
-                </Button>
-                <Button variant={view === "rules" ? "secondary" : "ghost"} size="sm" onClick={() => setView("rules")}>
-                  UA 拦截规则
-                </Button>
-              </>
+          <div className="flex flex-wrap items-center gap-2">
+            {isDeveloper ? <DeveloperBadge identity={session?.identity ?? null} /> : null}
+            <Button variant={view === "audits" ? "secondary" : "ghost"} size="sm" onClick={() => setView("audits")}>
+              审计记录
+            </Button>
+            <Button variant={view === "insights" ? "secondary" : "ghost"} size="sm" onClick={() => setView("insights")}>
+              用量洞察
+            </Button>
+            {isDeveloper ? null : (
+              <Button variant={view === "rules" ? "secondary" : "ghost"} size="sm" onClick={() => setView("rules")}>
+                UA 拦截规则
+              </Button>
             )}
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
@@ -474,6 +480,15 @@ function Dashboard({
       <main className="mx-auto max-w-[1920px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
         {view === "rules" && !isDeveloper ? (
           <UserAgentRulesPanel client={client} />
+        ) : view === "insights" ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <InsightsView
+              client={client}
+              isDeveloper={isDeveloper}
+              refreshKey={refreshKey}
+              renderAuditDetail={(auditID) => <AuditDetailPanel key={auditID} client={client} auditID={auditID} />}
+            />
+          </Suspense>
         ) : (
           <>
         <AuditFiltersPanel
@@ -1397,6 +1412,7 @@ function AuditDetailPanel({
         {!loading && detail ? (
           <AuditDetailBody
             detail={detail}
+            client={client}
             onFilterConversation={onFilterConversation}
             onExportConversation={exportConversation}
             exportNote={exportNote}
@@ -1426,6 +1442,7 @@ function AuditDetailPanel({
  */
 export function AuditDetailBody({
   detail,
+  client,
   onFilterConversation,
   onExportConversation,
   exportNote,
@@ -1444,6 +1461,8 @@ export function AuditDetailBody({
   onClearRaw,
 }: {
   detail: AuditDetail;
+  /** Enables the lazily loaded 上下文构成 section; omitted in static renders. */
+  client?: ApiClient;
   onFilterConversation?: (conversationID: string) => void;
   onExportConversation: () => void;
   exportNote: string | null;
@@ -1523,6 +1542,12 @@ export function AuditDetailBody({
         <ConversationView conversation={detail.conversation} />
       </Section>
 
+      {client ? (
+        <Section title="上下文构成">
+          <CompositionSection key={audit.audit_id} client={client} auditID={audit.audit_id} />
+        </Section>
+      ) : null}
+
       <Section title="HTTP 请求概览">
         <DefinitionGrid
           columnsClassName="sm:grid-cols-2 lg:grid-cols-3"
@@ -1542,16 +1567,24 @@ export function AuditDetailBody({
       </Section>
 
       <Section title="解析摘要">
-        {detail.parsed_result ? (
-          <DefinitionGrid
-            columnsClassName="sm:grid-cols-2 lg:grid-cols-3"
-            items={Object.entries(detail.parsed_result)
-              .filter(([, value]) => value !== null && value !== "")
-              .map(([key, value]) => [key, displayValue(value)])}
-          />
-        ) : (
-          <EmptyValue>当前没有解析摘要。</EmptyValue>
-        )}
+        <details className="overflow-hidden rounded-lg border bg-slate-50/60">
+          <summary className="cursor-pointer px-4 py-3 text-sm font-semibold hover:bg-slate-100/80">
+            原始解析键值
+            <span className="ml-2 text-xs font-normal text-muted-foreground">默认折叠</span>
+          </summary>
+          <div className="border-t bg-white/80 p-4">
+            {detail.parsed_result ? (
+              <DefinitionGrid
+                columnsClassName="sm:grid-cols-2 lg:grid-cols-3"
+                items={Object.entries(detail.parsed_result)
+                  .filter(([, value]) => value !== null && value !== "")
+                  .map(([key, value]) => [key, displayValue(value)])}
+              />
+            ) : (
+              <EmptyValue>当前没有解析摘要。</EmptyValue>
+            )}
+          </div>
+        </details>
       </Section>
 
       <Section title="流式响应时序">
@@ -2298,13 +2331,3 @@ function downloadMessage(side: RawSide, download: RawBodyDownload): string {
   return `${side === "request" ? "请求" : "响应"}原始 Body 已下载（${formatBytes(download.storedLength)}，${download.complete ? "完整" : "不完整"}）。`;
 }
 
-function isAbortError(cause: unknown): boolean {
-  return cause instanceof DOMException && cause.name === "AbortError";
-}
-
-function errorMessage(cause: unknown): string {
-  if (cause instanceof Error && cause.message) {
-    return cause.message;
-  }
-  return "请求失败，请检查本地管理服务。";
-}

@@ -3,7 +3,14 @@ import type {
   AuditDetail,
   AuditFilters,
   AuditListPage,
+  CompositionResponse,
   NewAPIUserList,
+  OverviewQuery,
+  OverviewResponse,
+  SessionsQuery,
+  SessionsResponse,
+  TreeResponse,
+  TrendResponse,
   RawBodyDownload,
   RawSide,
   ReconstructedBodyDownload,
@@ -49,6 +56,12 @@ export interface ApiClient {
   createUserAgentRule: (input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
   updateUserAgentRule: (id: number, input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
   deleteUserAgentRule: (id: number, signal?: AbortSignal) => Promise<void>;
+  getInsightsOverview: (query: OverviewQuery, signal?: AbortSignal) => Promise<OverviewResponse>;
+  listInsightsSessions: (query: SessionsQuery, signal?: AbortSignal) => Promise<SessionsResponse>;
+  getSessionTrend: (sessionID: string, signal?: AbortSignal) => Promise<TrendResponse>;
+  getAgentTree: (treeID: string, signal?: AbortSignal) => Promise<TreeResponse>;
+  /** Rejects with ApiError(404) while the audit has not been analyzed yet. */
+  getComposition: (auditID: string, signal?: AbortSignal) => Promise<CompositionResponse>;
 }
 
 export function createApiClient(
@@ -237,6 +250,73 @@ export function createApiClient(
         blob: await response.blob(),
         filename: filenameFromResponse(response, `${auditID}-reconstructed-${side}.json`),
         contentType: response.headers.get("Content-Type") ?? "application/json",
+      };
+    },
+
+    // The insights payloads come from Go structs, where an empty slice can be
+    // serialized as null; normalize so callers can map without guards.
+    async getInsightsOverview(query, signal) {
+      const params = new URLSearchParams({
+        from_ns: query.from_ns,
+        to_ns: query.to_ns,
+        tz_offset_min: String(query.tz_offset_min),
+        group_by: query.group_by,
+      });
+      const result = await requestJSON<OverviewResponse>(`${API_BASE}/insights/overview?${params}`, signal);
+      return { ...result, daily: result.daily ?? [], heatmap: result.heatmap ?? [], groups: result.groups ?? [] };
+    },
+
+    async listInsightsSessions(query, signal) {
+      const params = new URLSearchParams();
+      if (query.from_ns) {
+        params.set("from_ns", query.from_ns);
+      }
+      if (query.to_ns) {
+        params.set("to_ns", query.to_ns);
+      }
+      params.set("sort", query.sort ?? "recent");
+      params.set("limit", String(query.limit ?? 20));
+      if (query.cursor) {
+        params.set("cursor", query.cursor);
+      }
+      const result = await requestJSON<SessionsResponse>(`${API_BASE}/insights/sessions?${params}`, signal);
+      return { ...result, items: (result.items ?? []).map((item) => ({ ...item, models: item.models ?? [] })) };
+    },
+
+    async getSessionTrend(sessionID, signal) {
+      const result = await requestJSON<TrendResponse>(
+        `${API_BASE}/insights/sessions/${encodeURIComponent(sessionID)}/trend`,
+        signal,
+      );
+      return {
+        ...result,
+        steps: (result.steps ?? []).map((step) => ({
+          ...step,
+          events: step.events ?? [],
+          response_kinds: step.response_kinds ?? [],
+        })),
+      };
+    },
+
+    async getAgentTree(treeID, signal) {
+      const result = await requestJSON<TreeResponse>(
+        `${API_BASE}/insights/agent-trees/${encodeURIComponent(treeID)}`,
+        signal,
+      );
+      return { ...result, nodes: result.nodes ?? [] };
+    },
+
+    async getComposition(auditID, signal) {
+      const result = await requestJSON<CompositionResponse>(
+        `${API_BASE}/audits/${encodeURIComponent(auditID)}/composition`,
+        signal,
+      );
+      return {
+        ...result,
+        items: result.items ?? [],
+        tools: result.tools ?? [],
+        file_ops: result.file_ops ?? [],
+        events: result.events ?? [],
       };
     },
 
