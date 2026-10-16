@@ -760,3 +760,23 @@ func TestInsightsHeaderIdentifiedSingleNodeIsNotATree(t *testing.T) {
 		t.Fatalf("parented trend tree = %q %v", pairTrend.TreeID, err)
 	}
 }
+
+func TestInsightsSubagentCountIgnoresTheTimeRange(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	root := fingerprint(0xc0)
+	fixture.seed(stepSeed{id: "main-1", offset: 0, key: keyOwn, session: testSessionShared, root: root, node: fingerprint(0x21),
+		uncached: i64(10), output: i64(5), turnStart: true, system: 10})
+	// The subagent ran before the selected range but belongs to the same tree.
+	fixture.seed(stepSeed{id: "sub-1", offset: -3 * time.Hour, key: keyOwn, session: "agt_cccccccccccccccccccccccc", root: root,
+		node: fingerprint(0x22), parent: fingerprint(0x21), role: "subagent", uncached: i64(10), output: i64(5), system: 10})
+	from, to := fixture.rangeNS()
+
+	page, err := fixture.service.Sessions(context.Background(), SessionsQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOwn)})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("sessions = %+v %v", page, err)
+	}
+	if card := page.Items[0]; card.TreeID == "" || card.Subagents != 1 {
+		t.Fatalf("card tree/subagents = %q/%d, want a tree with 1 subagent", card.TreeID, card.Subagents)
+	}
+}

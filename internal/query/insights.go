@@ -471,6 +471,9 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 		if realRoots, err = service.store.InsightsRealRoots(ctx, rootFilter); err != nil {
 			return insights.SessionsResponse{}, fmt.Errorf("query: insights real trees: %w", err)
 		}
+		// The tree check above ignores the range, so the count must too or
+		// a card could show a tree with zero subagents.
+		rootFilter.FromNS, rootFilter.ToNS = 0, 0
 		if subagents, err = service.store.InsightsSubagentCounts(ctx, rootFilter); err != nil {
 			return insights.SessionsResponse{}, fmt.Errorf("query: insights subagent counts: %w", err)
 		}
