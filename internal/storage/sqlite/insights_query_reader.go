@@ -762,7 +762,7 @@ WITH s AS (
 		insightsFrom+where+`
     AND x.agent_node_fpr IS NOT NULL
 ), g AS (
-  SELECT node, MAX(parent) AS parent, MIN(ts) AS first_ns, MAX(ts) AS last_ns,
+  SELECT node, `+last("parent")+` AS parent, MIN(ts) AS first_ns, MAX(ts) AS last_ns,
          SUM(1 - aux) AS steps, SUM(aux) AS aux_requests,
          `+last("role")+` AS role, `+last("client")+` AS client, `+last("model")+` AS model,
          `+last("sid")+` AS sid, `+last("link")+` AS link, `+last("confidence")+` AS confidence,

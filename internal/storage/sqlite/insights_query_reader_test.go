@@ -378,6 +378,23 @@ func TestInsightsTreeNodesScopeAndTruncation(t *testing.T) {
 	}
 }
 
+func TestInsightsTreeNodeParentComesFromTheLatestStep(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	day := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	root, node := fill(0xc0), fill(0x15)
+	inferred, header := fill(0xee), fill(0x05) // the later header parent sorts lower
+	seedInsights(t, store, insightsSeed{id: "p1", at: day, key: keyA, session: sessionSub, root: root, node: node, parent: inferred, role: "subagent"})
+	seedInsights(t, store, insightsSeed{id: "p2", at: day.Add(time.Minute), key: keyA, session: sessionSub, root: root, node: node, parent: header, role: "subagent"})
+
+	nodes, _, err := store.InsightsTree(context.Background(), InsightsFilter{RootPrefix: root[:12]}, 10)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("nodes = %+v %v", nodes, err)
+	}
+	if !bytes.Equal(nodes[0].ParentFPR, header) {
+		t.Fatalf("parent = %x, want the latest step's %x", nodes[0].ParentFPR, header)
+	}
+}
 func TestInsightsScopeAdmitsTokenLinkedRowsAndRejectsMalformedScope(t *testing.T) {
 	t.Parallel()
 	store, _ := openTestStore(t)
