@@ -262,7 +262,7 @@ CREATE INDEX audit_analysis_model_idx   ON audit_analysis(model, started_at_ns);
 
 **第三层：内容匹配（推断，兜底）**
 
-适用于旧版客户端、dsh 第三方适配器和未知客户端：
+适用于旧版客户端、dsh 第三方适配器和未知客户端。是否进入内容匹配只看本次请求实际携带了什么：没有父 id，且（角色为子 Agent，或客户端/节点未知）；已知客户端带节点 id 的主 Agent 请求不做内容匹配。旧版 Codex 只发 	hread-id 和 x-openai-subagent: collab_spawn、没有 x-codex-parent-thread-id，因此按此层连边。另外仅限会话内首个请求、非附属角色、同一非空 pi_key_fpr：
 
 1. 父请求的响应中出现派生工具调用：工具名在词表里（`Agent`/`Task`、`spawn_agent`、`subagent`/`task`），取其 `prompt`/`message` 参数。
 2. 子候选：同一 `api_key_fpr`、出现新的节点键、首次请求的开始时间落在“父响应结束”到“父请求带回该工具结果”之间。

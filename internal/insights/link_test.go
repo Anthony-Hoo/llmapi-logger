@@ -205,3 +205,49 @@ func TestLinkNeverInheritsRootOfAnotherAPIKey(t *testing.T) {
 		t.Fatalf("same-key parent root not inherited: %x", row.AgentRootFPR)
 	}
 }
+
+func TestLinkContentMatchesSubagentWithoutParentHeader(t *testing.T) {
+	t.Parallel()
+	key := testKey(0xa1)
+	parentNode, parentRoot := testKey(0x31), testKey(0x32)
+	prompt := "investigate the failing build"
+	store := &fakeLinkStore{hints: []fakeSpawnHint{{
+		auditID: "audit-parent", hint: HintFPR(testFingerprinter{}, prompt), node: parentNode,
+		root: parentRoot, session: "agt_parent", apiKey: key,
+	}}}
+	linker := newTestLinker(t, store, nil)
+	link := func(identity AgentIdentity) sqlite.AnalysisRow {
+		t.Helper()
+		row, err := linker.Link(context.Background(), LinkInput{
+			Meta:         sqlite.AnalysisAuditMeta{AuditID: "audit-child", StartedAtNS: 200, APIKeyFPR: key},
+			Protocol:     "openai",
+			Identity:     identity,
+			OpeningHints: []OpeningHint{{Text: prompt}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+
+	// Older Codex: thread-id and x-openai-subagent: collab_spawn, but no
+	// x-codex-parent-thread-id.
+	child := link(AgentIdentity{
+		Client: "codex", Role: RoleSubagent, NodeID: "child-thread", RootID: "",
+		LinkSource: LinkHeader, Confidence: 100,
+	})
+	if child.AgentLinkSource == nil || *child.AgentLinkSource != LinkContent || !bytes.Equal(child.AgentParentFPR, parentNode) ||
+		!bytes.Equal(child.AgentRootFPR, parentRoot) || child.AgentLinkConfidence == nil || *child.AgentLinkConfidence != contentLinkConfidence {
+		t.Fatalf("old Codex child not content linked: source=%v parent=%x root=%x", child.AgentLinkSource, child.AgentParentFPR, child.AgentRootFPR)
+	}
+
+	// A main request of a known client with a node id is a root: it never runs
+	// content matching, even when its opener equals a spawn prompt.
+	main := link(AgentIdentity{
+		Client: "claude_code", Role: RoleMain, NodeID: "session-root", RootID: "session-root",
+		LinkSource: LinkHeader, Confidence: 100,
+	})
+	if main.AgentParentFPR != nil || (main.AgentLinkSource != nil && *main.AgentLinkSource == LinkContent) {
+		t.Fatalf("main request was content linked: source=%v parent=%x", main.AgentLinkSource, main.AgentParentFPR)
+	}
+}

@@ -439,11 +439,16 @@ func commonPrefix(left, right []string) int {
 	return count
 }
 
-// contentMatchApplies reports whether the request has no way of naming its
-// parent itself: an unknown client, no node id, or a client without any
-// parent mechanism.
+// contentMatchApplies reports whether content matching may look for the
+// parent of a request that carried no parent id. It judges what this request
+// showed, not what its client could have sent: an unknown client or a request
+// without a node id cannot name a parent; a subagent that sent no parent id
+// (older Codex sends thread-id and collab_spawn but no parent header) is a
+// child whose parent is missing; a client without any parent mechanism has
+// nothing else to go by. A main-role request of a known client with a node id
+// is a root and is never content matched.
 func (linker *Linker) contentMatchApplies(identity AgentIdentity) bool {
-	if identity.Client == ClientUnknown || identity.NodeID == "" {
+	if identity.Client == ClientUnknown || identity.NodeID == "" || identity.Role == RoleSubagent {
 		return true
 	}
 	rule, ok := linker.vocab.Clients[identity.Client]
