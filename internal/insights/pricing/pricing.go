@@ -117,6 +117,9 @@ func decode(data []byte) (file, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return file{}, errors.New("unexpected trailing data")
 	}
+	if err := requireRates(data); err != nil {
+		return file{}, err
+	}
 	normalized := make(map[string]Entry, len(parsed.Models))
 	for id, entry := range parsed.Models {
 		key := strings.ToLower(strings.TrimSpace(id))
@@ -387,4 +390,23 @@ func deref(value *int64) int64 {
 		return 0
 	}
 	return *value
+}
+
+// requireRates rejects entries that omit input or output (or set them to null):
+// decoding into plain floats cannot tell an omitted rate from an explicit 0.
+func requireRates(data []byte) error {
+	var raw struct {
+		Models map[string]map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for id, fields := range raw.Models {
+		for _, name := range []string{"input", "output"} {
+			if value, ok := fields[name]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return fmt.Errorf("model %q: missing required %s rate", id, name)
+			}
+		}
+	}
+	return nil
 }

@@ -192,6 +192,9 @@ func TestLoadRejectsInvalidOverrides(t *testing.T) {
 		"bad weekday":       `{"schedules":[{"model":"a","weekdays":[7],"start":"01:00","end":"02:00","multiplier":1}]}`,
 		"off-grid start":    `{"schedules":[{"model":"a","start":"12:15","end":"13:00","multiplier":1}]}`,
 		"off-grid end":      `{"schedules":[{"model":"a","start":"12:00","end":"13:45","multiplier":1}]}`,
+		"missing output":    `{"models":{"x/model":{"input":1}}}`,
+		"missing input":     `{"models":{"x/model":{"output":1}}}`,
+		"null input":        `{"models":{"x/model":{"input":null,"output":1}}}`,
 		"trailing document": `{"models":{}} {}`,
 		"trailing garbage":  `{"models":{}} garbage`,
 	} {
@@ -226,5 +229,16 @@ func TestLoadRejectsOffGridScheduleBoundaryWithClearError(t *testing.T) {
 	}
 	if _, err := Load(writeOverride(t, `{"schedules":[{"model":"a","start":"12:30","end":"13:00","multiplier":1}]}`)); err != nil {
 		t.Fatalf("half-hour boundaries must load: %v", err)
+	}
+}
+
+func TestOverrideRequiresInputAndOutputButAllowsExplicitZero(t *testing.T) {
+	t.Parallel()
+	if _, err := Load(writeOverride(t, `{"models":{"x/model":{"input":1}}}`)); err == nil || !strings.Contains(err.Error(), "output") {
+		t.Fatalf("entry without output = %v, want a missing-output error", err)
+	}
+	table := mustLoad(t, writeOverride(t, `{"models":{"x/model":{"input":0,"output":0}}}`))
+	if _, ok := table.entries["x/model"]; !ok {
+		t.Fatal("explicit zero rates were rejected")
 	}
 }
