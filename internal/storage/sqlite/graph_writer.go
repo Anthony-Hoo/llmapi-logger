@@ -22,6 +22,7 @@ type turnParent struct {
 	Reason         string
 	Confidence     int
 	Base           []auditmodel.ObjectRef
+	cost           int
 }
 
 type storedTurnHeader struct {
@@ -437,20 +438,41 @@ func chooseTurnParent(transaction *sql.Tx, turn auditmodel.PreparedTurn) (*turnP
 			return nil, err
 		}
 		if candidate != nil {
-			return evaluateCandidate(transaction, turn, *candidate, "previous_response_id", 100, true)
+			return evaluateCandidate(transaction, turn, *candidate, "previous_response_id", 100, linkForced, make(map[string][]auditmodel.ObjectRef))
 		}
 	}
 	if len(turn.ConversationKeyHash) == 32 {
-		candidate, err := loadCandidateByConversationKey(transaction, turn.Protocol, turn.ConversationKeyHash)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		candidates, err := listTurnCandidates(transaction, `
+SELECT t.turn_id, t.conversation_id
+FROM turns AS t
+JOIN conversations AS c ON c.conversation_id = t.conversation_id
+WHERE c.protocol = ? AND c.key_hash = ? AND t.created_at_ns < ?
+ORDER BY t.created_at_ns DESC, t.turn_id DESC
+LIMIT ?`, turn.Protocol, turn.ConversationKeyHash, turn.CreatedAtNS, parentCandidateLimit)
+		if err != nil {
 			return nil, err
 		}
-		if candidate != nil {
-			return evaluateCandidate(transaction, turn, *candidate, "conversation_key", 95, true)
+		// A provider-side conversation is one chain whose requests carry only
+		// the new input, so content cannot confirm the link; follow the latest
+		// earlier turn as the provider does.
+		if turn.ServerManagedContext {
+			if len(candidates) == 0 {
+				return nil, nil
+			}
+			return evaluateCandidate(transaction, turn, candidates[0], "conversation_key", 95, linkForced, make(map[string][]auditmodel.ObjectRef))
 		}
+		// A conversation key groups a client session, not one agent: Codex and
+		// OpenCode send the root session id as prompt_cache_key for the parent
+		// and every sub-agent, so the latest keyed turn may belong to a
+		// concurrent sibling. Rank the session's recent turns by content
+		// instead. When none qualifies, including the key's first turn, the
+		// turn starts a new root in its own keyed conversation: the
+		// protocol-wide search below would attach it to another session and
+		// drop the key, so later turns with this key could not find it.
+		return bestTurnParent(transaction, turn, candidates, linkConversationKey)
 	}
 
-	rows, err := transaction.Query(`
+	candidates, err := listTurnCandidates(transaction, `
 SELECT t.turn_id, t.conversation_id
 FROM turns AS t
 JOIN conversations AS c ON c.conversation_id = t.conversation_id
@@ -458,13 +480,34 @@ WHERE c.protocol = ? AND t.created_at_ns < ?
 ORDER BY t.created_at_ns DESC, t.turn_id DESC
 LIMIT ?`, turn.Protocol, turn.CreatedAtNS, parentCandidateLimit)
 	if err != nil {
+		return nil, err
+	}
+	return bestTurnParent(transaction, turn, candidates, linkInferred)
+}
+
+type turnCandidate struct{ turnID, conversationID string }
+
+type linkMode int
+
+const (
+	// linkForced accepts the candidate whatever its content.
+	linkForced linkMode = iota
+	// linkConversationKey accepts a turn from the keyed conversation on the
+	// same content evidence as linkInferred, but records conversation_key.
+	linkConversationKey
+	// linkInferred accepts only a strong context relationship.
+	linkInferred
+)
+
+func listTurnCandidates(transaction *sql.Tx, query string, arguments ...any) ([]turnCandidate, error) {
+	rows, err := transaction.Query(query, arguments...)
+	if err != nil {
 		return nil, fmt.Errorf("sqlite writer: list turn parent candidates: %w", err)
 	}
 	defer rows.Close()
-	type candidate struct{ turnID, conversationID string }
-	var candidates []candidate
+	var candidates []turnCandidate
 	for rows.Next() {
-		var item candidate
+		var item turnCandidate
 		if err := rows.Scan(&item.turnID, &item.conversationID); err != nil {
 			return nil, err
 		}
@@ -473,27 +516,30 @@ LIMIT ?`, turn.Protocol, turn.CreatedAtNS, parentCandidateLimit)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	return candidates, nil
+}
+
+// bestTurnParent returns the accepted candidate with the lowest delta cost.
+// Candidates arrive newest first, so ties go to the most recent turn.
+func bestTurnParent(transaction *sql.Tx, turn auditmodel.PreparedTurn, candidates []turnCandidate, mode linkMode) (*turnParent, error) {
+	// Candidates usually share most of their ancestry, so one memo spares each
+	// of them a full walk back to its root.
+	memo := make(map[string][]auditmodel.ObjectRef)
 	var best *turnParent
-	bestCost := int(^uint(0) >> 1)
 	for _, candidate := range candidates {
-		evaluated, err := evaluateCandidate(transaction, turn, candidate, "", 0, false)
+		evaluated, err := evaluateCandidate(transaction, turn, candidate, "", 0, mode, memo)
 		if err != nil {
 			return nil, err
 		}
-		if evaluated == nil {
-			continue
-		}
-		cost := auditmodel.DeltaCost(auditmodel.BuildDelta(evaluated.Base, turn.RequestRefs))
-		if best == nil || cost < bestCost {
+		if evaluated != nil && (best == nil || evaluated.cost < best.cost) {
 			best = evaluated
-			bestCost = cost
 		}
 	}
 	return best, nil
 }
 
-func loadCandidateByResponseID(transaction *sql.Tx, protocol, responseID string) (*struct{ turnID, conversationID string }, error) {
-	var value struct{ turnID, conversationID string }
+func loadCandidateByResponseID(transaction *sql.Tx, protocol, responseID string) (*turnCandidate, error) {
+	var value turnCandidate
 	err := transaction.QueryRow(`
 SELECT t.turn_id, t.conversation_id
 FROM turns AS t
@@ -506,22 +552,7 @@ ORDER BY t.created_at_ns DESC, t.turn_id DESC LIMIT 1`, protocol, responseID).Sc
 	return &value, nil
 }
 
-func loadCandidateByConversationKey(transaction *sql.Tx, protocol string, keyHash []byte) (*struct{ turnID, conversationID string }, error) {
-	var value struct{ turnID, conversationID string }
-	err := transaction.QueryRow(`
-SELECT t.turn_id, t.conversation_id
-FROM turns AS t
-JOIN conversations AS c ON c.conversation_id = t.conversation_id
-WHERE c.protocol = ? AND c.key_hash = ?
-ORDER BY t.created_at_ns DESC, t.turn_id DESC LIMIT 1`, protocol, keyHash).Scan(&value.turnID, &value.conversationID)
-	if err != nil {
-		return nil, err
-	}
-	return &value, nil
-}
-
-func evaluateCandidate(transaction *sql.Tx, turn auditmodel.PreparedTurn, candidate struct{ turnID, conversationID string }, forcedReason string, forcedConfidence int, force bool) (*turnParent, error) {
-	memo := make(map[string][]auditmodel.ObjectRef)
+func evaluateCandidate(transaction *sql.Tx, turn auditmodel.PreparedTurn, candidate turnCandidate, forcedReason string, forcedConfidence int, mode linkMode, memo map[string][]auditmodel.ObjectRef) (*turnParent, error) {
 	request, err := loadRequestRefs(transaction, candidate.turnID, memo, make(map[string]bool))
 	if err != nil {
 		return nil, err
@@ -535,19 +566,23 @@ func evaluateCandidate(transaction *sql.Tx, turn auditmodel.PreparedTurn, candid
 	postCost := auditmodel.DeltaCost(auditmodel.BuildDelta(post, turn.RequestRefs))
 	baseKind := "post_turn"
 	base := post
+	cost := postCost
 	if requestCost <= postCost {
 		baseKind = "request"
 		base = request
+		cost = requestCost
 	}
 	reason := forcedReason
 	confidence := forcedConfidence
-	if !force {
+	if mode != linkForced {
 		accepted, inferredReason, inferredConfidence := strongContextRelationship(request, response, turn.RequestRefs)
 		if !accepted {
 			return nil, nil
 		}
-		reason = inferredReason
-		confidence = inferredConfidence
+		reason, confidence = inferredReason, inferredConfidence
+		if mode == linkConversationKey {
+			reason, confidence = "conversation_key", 95
+		}
 	}
 	if reason == "" {
 		reason = "context_edit"
@@ -577,7 +612,7 @@ SELECT EXISTS(
 	}
 	return &turnParent{
 		TurnID: candidate.turnID, ConversationID: candidate.conversationID,
-		BaseKind: baseKind, Reason: reason, Confidence: confidence, Base: cloneObjectRefs(base),
+		BaseKind: baseKind, Reason: reason, Confidence: confidence, Base: cloneObjectRefs(base), cost: cost,
 	}, nil
 }
 
