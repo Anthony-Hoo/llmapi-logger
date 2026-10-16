@@ -7,7 +7,11 @@
 // package inside Detail, which callers must encrypt before storage.
 package insights
 
-import "net/http"
+import (
+	"net/http"
+
+	"llmapi-logger/internal/conversation"
+)
 
 // AnalysisVersion is bumped whenever stored analysis would change for the same
 // evidence. The backfill job recomputes rows with an older version.
@@ -168,6 +172,10 @@ type Input struct {
 	Usage            Usage
 	FirstEventNS     *int64 // relative to StartedAtNS, from the stream timeline
 	LastEventNS      *int64
+	// Conversation is the protocol parser's DTO. Its response-phase messages
+	// describe this response (already decoded from SSE); the request side is
+	// re-read from Request because the DTO drops tool definitions and media.
+	Conversation *conversation.Conversation
 }
 
 // Fingerprinter produces keyed, non-reversible 32-byte tags. Implementations
