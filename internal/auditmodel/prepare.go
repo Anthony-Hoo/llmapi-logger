@@ -121,6 +121,7 @@ func Prepare(turn Turn, cipher security.Cipher) (PreparedTurn, error) {
 		PreviousResponseID:         turn.PreviousResponseID,
 		ResponseID:                 turn.ResponseID,
 		ConversationKeyHash:        ConversationKeyHash(turn.ConversationKey),
+		ServerManagedContext:       turn.ServerManagedContext,
 		CreatedAtNS:                turn.CreatedAtNS,
 		Objects:                    objectValues,
 		Binaries:                   binaries,
