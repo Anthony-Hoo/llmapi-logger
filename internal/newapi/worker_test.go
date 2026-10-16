@@ -16,7 +16,7 @@ func TestCallerWorkerRetriesDelayedLogAndResolves(t *testing.T) {
 	store := &fakeCallerStore{pending: []sqlite.CallerLookup{{AuditID: "audit-1", RequestID: "req-1"}}}
 	lookup := &fakeIdentityLookup{results: []lookupResult{
 		{},
-		{found: true, identity: RequestIdentity{RequestID: "req-1", UserID: 7, Username: "alice", TokenID: 42, TokenName: "codex"}},
+		{found: true, record: RequestLog{RequestID: "req-1", UserID: 7, Username: "alice", TokenID: 42, TokenName: "codex", Complete: true}},
 	}}
 	worker, err := NewWorker(store, lookup, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -33,6 +33,10 @@ func TestCallerWorkerRetriesDelayedLogAndResolves(t *testing.T) {
 	worker.process(context.Background(), item)
 	if len(store.links) != 1 || store.links[0].NewAPIUserID != 7 || store.links[0].NewAPITokenID != 42 || store.links[0].Attempts != 2 {
 		t.Fatalf("links = %+v", store.links)
+	}
+	// No status was recorded for the audit, so an error-only log is final.
+	if store.links[0].BillingState != sqlite.BillingUnbilled || store.links[0].Quota != nil {
+		t.Fatalf("billing = %+v", store.links[0])
 	}
 }
 
@@ -75,37 +79,75 @@ func TestCallerWorkerPersistsRetryForLookupError(t *testing.T) {
 }
 
 type lookupResult struct {
-	identity RequestIdentity
-	found    bool
-	err      error
+	record RequestLog
+	found  bool
+	err    error
 }
 
 type fakeIdentityLookup struct {
-	mu      sync.Mutex
-	results []lookupResult
+	mu           sync.Mutex
+	results      []lookupResult
+	quotaPerUnit float64 // 0: not read yet
+	calls        []string
 }
 
-func (lookup *fakeIdentityLookup) LookupRequest(context.Context, string) (RequestIdentity, bool, error) {
+func (lookup *fakeIdentityLookup) LookupRequest(_ context.Context, requestID string) (RequestLog, bool, error) {
 	lookup.mu.Lock()
 	defer lookup.mu.Unlock()
+	lookup.calls = append(lookup.calls, requestID)
 	if len(lookup.results) == 0 {
-		return RequestIdentity{}, false, nil
+		return RequestLog{}, false, nil
 	}
 	result := lookup.results[0]
 	lookup.results = lookup.results[1:]
-	return result.identity, result.found, result.err
+	return result.record, result.found, result.err
+}
+
+func (lookup *fakeIdentityLookup) QuotaPerUnit() (float64, bool) {
+	lookup.mu.Lock()
+	defer lookup.mu.Unlock()
+	return lookup.quotaPerUnit, lookup.quotaPerUnit > 0
 }
 
 type fakeCallerStore struct {
-	mu      sync.Mutex
-	pending []sqlite.CallerLookup
-	links   []sqlite.TokenLink
-	retries []sqlite.CallerRetry
+	mu        sync.Mutex
+	pending   []sqlite.CallerLookup
+	links     []sqlite.TokenLink
+	retries   []sqlite.CallerRetry
+	unchecked []sqlite.BillingBackfillItem
+	updates   []sqlite.BillingUpdate
+	events    []string
+}
+
+func (store *fakeCallerStore) NextBillingBackfill(context.Context) (sqlite.BillingBackfillItem, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.events = append(store.events, "backfill")
+	if len(store.unchecked) == 0 {
+		return sqlite.BillingBackfillItem{}, false, nil
+	}
+	return store.unchecked[0], true, nil
+}
+
+func (store *fakeCallerStore) UpdateTokenLinkBilling(_ context.Context, update sqlite.BillingUpdate) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.updates = append(store.updates, update)
+	if len(store.unchecked) == 0 || store.unchecked[0].AuditID != update.AuditID {
+		return errors.New("not unchecked")
+	}
+	if update.State == sqlite.BillingUnchecked {
+		store.unchecked[0].Attempts = update.Attempts
+	} else {
+		store.unchecked = store.unchecked[1:]
+	}
+	return nil
 }
 
 func (store *fakeCallerStore) ListDueCallerLookups(context.Context, int64, int) ([]sqlite.CallerLookup, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.events = append(store.events, "scan")
 	return append([]sqlite.CallerLookup(nil), store.pending...), nil
 }
 

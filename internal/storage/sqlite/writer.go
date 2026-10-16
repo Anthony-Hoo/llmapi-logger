@@ -39,6 +39,7 @@ const (
 	writeUpdateUserAgentRule
 	writeDeleteUserAgentRule
 	writeSaveAnalysis
+	writeUpdateTokenLinkBilling
 )
 
 type writeRequest struct {
@@ -462,6 +463,8 @@ WHERE audit_id=? AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID);
 		return upsertTokenLink(transaction, request.data.(TokenLink))
 	case writeRetryCallerLookup:
 		return retryCallerLookup(transaction, request.data.(CallerRetry))
+	case writeUpdateTokenLinkBilling:
+		return updateTokenLinkBilling(transaction, request.data.(BillingUpdate))
 	case writeCreateUserAgentRule:
 		return createUserAgentRule(transaction, request.data.(uaguard.Rule))
 	case writeUpdateUserAgentRule:

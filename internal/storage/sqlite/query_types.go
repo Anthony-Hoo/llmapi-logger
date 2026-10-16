@@ -123,6 +123,14 @@ type TokenLinkSummary struct {
 	NewAPITokenID   int64
 	TokenName       string
 	LinkedAtNS      int64
+
+	// Billing from the same NewAPI log rows; the values are non-nil exactly
+	// when BillingState is BillingBilled.
+	BillingState           string
+	Quota                  *int64
+	QuotaPerUnit           *float64
+	BilledPromptTokens     *int64
+	BilledCompletionTokens *int64
 }
 
 // AuditQueryDetail is the encrypted evidence projection used only by the
