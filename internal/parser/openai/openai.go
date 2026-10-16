@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"llmapi-logger/internal/insights"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
 )
@@ -200,6 +201,32 @@ func applyUsage(usage map[string]any, result *base.Result) {
 	result.Usage.Input = firstInt64(usage["input_tokens"], usage["prompt_tokens"])
 	result.Usage.Output = firstInt64(usage["output_tokens"], usage["completion_tokens"])
 	result.Usage.Total = protocolutil.Int64(usage["total_tokens"])
+	result.Normalized = normalizeUsage(usage)
+}
+
+// normalizeUsage maps Chat (prompt_/completion_) and Responses (input_/
+// output_) usage into exclusive buckets. Prompt totals include cached tokens;
+// OpenAI does not report cache writes, so they are zero whenever the prompt
+// total is known. The latest usage object replaces earlier ones.
+func normalizeUsage(usage map[string]any) insights.Usage {
+	prompt := firstInt64(usage["input_tokens"], usage["prompt_tokens"])
+	cached := firstInt64(
+		protocolutil.Map(usage["input_tokens_details"])["cached_tokens"],
+		protocolutil.Map(usage["prompt_tokens_details"])["cached_tokens"],
+	)
+	normalized := insights.Usage{
+		UncachedInput: protocolutil.NonNegativeDifference(prompt, cached),
+		CacheRead:     cached,
+		Output:        firstInt64(usage["output_tokens"], usage["completion_tokens"]),
+		Reasoning: firstInt64(
+			protocolutil.Map(usage["output_tokens_details"])["reasoning_tokens"],
+			protocolutil.Map(usage["completion_tokens_details"])["reasoning_tokens"],
+		),
+	}
+	if prompt != nil {
+		normalized.CacheWrite = protocolutil.Int64Pointer(0)
+	}
+	return normalized
 }
 
 func countRequestToolCalls(root map[string]any) int {
