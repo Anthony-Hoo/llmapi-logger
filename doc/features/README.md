@@ -141,6 +141,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 18 | [内容寻址的对话、轮次与多模态审计存储](18-content-addressed-conversation-storage.md) |
 | 19 | [开发者 API Key 会话](19-developer-key-session.md) |
 | 20 | [上下文分析与用量洞察](20-context-insights.md) |
+| 21 | [NewAPI 实际计费](21-newapi-billing.md) |
 
 ## 10. 当前实现范围
 
