@@ -345,6 +345,7 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 	)
 	var userRequests atomic.Int32
 	var logRequests atomic.Int32
+	var statusRequests atomic.Int32
 
 	upstreamProxy := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -386,9 +387,17 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 					"items": []map[string]any{{
 						"request_id": requestID, "user_id": 7, "username": "alice",
 						"token_id": 42, "token_name": "codex", "model_name": "gpt-test",
+						"type": 2, "quota": 125000, "prompt_tokens": 900, "completion_tokens": 100,
 					}},
 				},
 			})
+		case "/api/status":
+			statusRequests.Add(1)
+			if request.Header.Get("Authorization") != "" || request.Header.Get("New-Api-User") != "" {
+				t.Error("public status request carried management credentials")
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
 		case "/v1/chat/completions":
 			response.Header().Set("Content-Type", "application/json")
 			response.Header().Set("X-Oneapi-Request-Id", requestID)
@@ -428,8 +437,11 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 	}
 
 	application.refreshUserCatalog(context.Background())
-	if userRequests.Load() != 1 {
-		t.Fatalf("user requests = %d, want 1", userRequests.Load())
+	if userRequests.Load() != 1 || statusRequests.Load() != 1 {
+		t.Fatalf("user requests = %d, status requests = %d, want 1 each", userRequests.Load(), statusRequests.Load())
+	}
+	if rate, ok := application.newAPIClient.QuotaPerUnit(); !ok || rate != 500000 {
+		t.Fatalf("quota_per_unit = %v %v", rate, ok)
 	}
 	snapshot := application.newAPIClient.Snapshot()
 	if len(snapshot.Users) != 1 || snapshot.Users[0].ID != 7 || snapshot.Users[0].Username != "alice" {
@@ -485,6 +497,15 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 				snapshot.Audit.CallerStatus != sqlite.CallerResolved {
 				t.Fatalf("resolved audit state = %+v", snapshot.Audit)
 			}
+			detail, detailErr := application.auditStore.QueryAuditDetail(context.Background(), page.Rows[0].AuditID, nil)
+			if detailErr != nil || detail.TokenLink == nil {
+				t.Fatalf("read resolved detail: %+v %v", detail.TokenLink, detailErr)
+			}
+			link := detail.TokenLink
+			if link.BillingState != sqlite.BillingBilled || link.Quota == nil || *link.Quota != 125000 ||
+				link.QuotaPerUnit == nil || *link.QuotaPerUnit != 500000 || link.BilledPromptTokens == nil || *link.BilledPromptTokens != 900 {
+				t.Fatalf("billing = %+v", link)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -499,9 +520,13 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 
 func TestUserCatalogRefreshLoopRetriesAfterInitialFailureAndStops(t *testing.T) {
 	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		attempt := requests.Add(1)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/api/status" {
+			_, _ = response.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
+			return
+		}
+		attempt := requests.Add(1)
 		if attempt == 1 {
 			_, _ = response.Write([]byte(`{"success":false,"message":"temporary"}`))
 			return

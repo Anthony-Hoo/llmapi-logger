@@ -212,12 +212,71 @@ func TestInsightsUsageGroupings(t *testing.T) {
 		t.Fatalf("caller groups = %+v %v", rows, err)
 	}
 	for _, dimension := range []string{InsightsDimModel, InsightsDimProtocol, InsightsDimClient, InsightsDimSession, InsightsDimNode} {
-		if _, err := store.InsightsUsage(ctx, windowFilter(day, nil), InsightsUsageSpec{Dimension: dimension, SlotNS: int64(30 * time.Minute)}); err != nil {
+		if _, err := store.InsightsUsage(ctx, windowFilter(day, nil), InsightsUsageSpec{Dimension: dimension}); err != nil {
 			t.Fatalf("dimension %s: %v", dimension, err)
 		}
 	}
 	if _, err := store.InsightsUsage(ctx, windowFilter(day, nil), InsightsUsageSpec{Dimension: "bogus"}); err == nil {
 		t.Fatal("unknown dimension accepted")
+	}
+}
+
+func TestInsightsUsageSumsActualBillingWithinScope(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	day := seedSharedWorld(t, store)
+	ctx := context.Background()
+	bill := func(auditID string, quota int64, quotaPerUnit float64) {
+		t.Helper()
+		if err := store.UpdateTokenLinkBilling(ctx, BillingUpdate{
+			AuditID: auditID, State: BillingBilled, Attempts: 1, Quota: &quota, QuotaPerUnit: &quotaPerUnit,
+			BilledPromptTokens: new(int64), BilledCompletionTokens: new(int64),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bill("a1", 250000, 500000) // 0.5 USD
+	bill("a2", 100000, 400000) // 0.25 USD, a different conversion snapshot
+	bill("b1", 500000, 500000) // 1 USD, key B
+	if err := store.UpdateTokenLinkBilling(ctx, BillingUpdate{AuditID: "c1", State: BillingUnbilled, Attempts: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := store.InsightsUsage(ctx, windowFilter(day, nil), InsightsUsageSpec{Dimension: InsightsDimTotal})
+	if err != nil || len(rows) != 1 || rows[0].BilledRequests != 3 || rows[0].CostUSD == nil || *rows[0].CostUSD != 1.75 {
+		t.Fatalf("unscoped billing = %+v %v", rows, err)
+	}
+	rows, err = store.InsightsUsage(ctx, windowFilter(day, &AuditScope{Fingerprint: keyA}), InsightsUsageSpec{Dimension: InsightsDimTotal})
+	if err != nil || len(rows) != 1 || rows[0].Requests != 5 || rows[0].BilledRequests != 2 || rows[0].CostUSD == nil || *rows[0].CostUSD != 0.75 {
+		t.Fatalf("scoped billing = %+v %v", rows, err)
+	}
+	rows, err = store.InsightsUsage(ctx, windowFilter(day, &AuditScope{Fingerprint: keyB}), InsightsUsageSpec{Dimension: InsightsDimSession})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		switch row.Key {
+		case sessionShared:
+			if row.BilledRequests != 1 || row.CostUSD == nil || *row.CostUSD != 1 {
+				t.Fatalf("key B shared session = %+v", row)
+			}
+		case sessionForeig:
+			if row.BilledRequests != 0 || row.CostUSD != nil {
+				t.Fatalf("unbilled session must have no cost: %+v", row)
+			}
+		}
+	}
+
+	trend, _, err := store.InsightsTrend(ctx, InsightsFilter{SessionIDs: []string{sessionShared}}, 10)
+	if err != nil || len(trend) != 3 {
+		t.Fatalf("trend = %+v %v", trend, err)
+	}
+	if trend[0].CostUSD == nil || *trend[0].CostUSD != 0.5 || trend[1].CostUSD == nil || *trend[1].CostUSD != 0.25 {
+		t.Fatalf("trend costs = %v %v", trend[0].CostUSD, trend[1].CostUSD)
+	}
+	trend, _, err = store.InsightsTrend(ctx, InsightsFilter{SessionIDs: []string{sessionSub}}, 10)
+	if err != nil || len(trend) != 2 || trend[0].CostUSD != nil || trend[1].CostUSD != nil {
+		t.Fatalf("unbilled trend = %+v %v", trend, err)
 	}
 }
 

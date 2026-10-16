@@ -5,14 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"llmapi-logger/internal/insights"
-	"llmapi-logger/internal/insights/pricing"
+	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -36,7 +35,9 @@ type insightsFixture struct {
 	base    time.Time
 }
 
-func newInsightsFixture(t *testing.T, prices *pricing.Table) *insightsFixture {
+// newInsightsFixture builds a billing-enabled service; windows overrides the
+// embedded context windows like insights.context_windows.
+func newInsightsFixture(t *testing.T, windows map[string]int64) *insightsFixture {
 	t.Helper()
 	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
@@ -47,12 +48,11 @@ func newInsightsFixture(t *testing.T, prices *pricing.Table) *insightsFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prices == nil {
-		if prices, err = pricing.Load(""); err != nil {
-			t.Fatal(err)
-		}
+	table, err := models.Load(windows)
+	if err != nil {
+		t.Fatal(err)
 	}
-	service, err := NewInsights(store, cipher, prices)
+	service, err := NewInsights(store, cipher, table, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,11 @@ type stepSeed struct {
 	detail    *insights.Detail
 	version   int
 	link      string // agent_link_source
+	// billing, when set, resolves the caller through a token link with this
+	// NewAPI billing; quota is only used when billing is "billed".
+	billing      string
+	quota        int64
+	quotaPerUnit float64
 }
 
 func i64(value int64) *int64 { return &value }
@@ -102,11 +107,29 @@ func (fixture *insightsFixture) seed(seed stepSeed) {
 	if length == 0 {
 		length = 2 * time.Second
 	}
-	if err := fixture.store.FinishAudit(ctx, sqlite.AuditFinish{
+	finish := sqlite.AuditFinish{
 		AuditID: seed.id, EndedAtNS: startedAt + int64(length), StatusCode: &status,
 		ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParseOK,
-	}); err != nil {
+	}
+	requestID := "req-" + seed.id
+	if seed.billing != "" {
+		finish.NewAPIRequestID = &requestID
+	}
+	if err := fixture.store.FinishAudit(ctx, finish); err != nil {
 		fixture.t.Fatal(err)
+	}
+	if seed.billing != "" {
+		link := sqlite.TokenLink{
+			AuditID: seed.id, NewAPIRequestID: requestID, NewAPIUserID: 9, Username: "user-" + seed.id,
+			NewAPITokenID: 3, TokenName: "token", LinkedAtNS: startedAt + 1, Attempts: 1, BillingState: seed.billing,
+		}
+		if seed.billing == sqlite.BillingBilled {
+			quota, quotaPerUnit, prompt, completion := seed.quota, seed.quotaPerUnit, int64(1), int64(1)
+			link.Quota, link.QuotaPerUnit, link.BilledPromptTokens, link.BilledCompletionTokens = &quota, &quotaPerUnit, &prompt, &completion
+		}
+		if err := fixture.store.UpsertTokenLink(ctx, link); err != nil {
+			fixture.t.Fatal(err)
+		}
 	}
 	model := seed.model
 	if model == "" {
@@ -175,16 +198,18 @@ var (
 func (fixture *insightsFixture) seedWorld() {
 	rootOwn, rootOther := fingerprint(0xa0), fingerprint(0xb0)
 	fixture.seed(stepSeed{id: "own-1", offset: 0, key: keyOwn, session: testSessionShared, root: rootOwn, node: fingerprint(0x11),
-		uncached: i64(100), cacheRead: i64(900), output: i64(50), turnStart: true, stop: "tool_use", system: 300, user: 100, length: 4 * time.Second})
+		uncached: i64(100), cacheRead: i64(900), output: i64(50), turnStart: true, stop: "tool_use", system: 300, user: 100, length: 4 * time.Second,
+		billing: sqlite.BillingBilled, quota: 250000, quotaPerUnit: 500000})
 	fixture.seed(stepSeed{id: "own-2", offset: 10 * time.Second, key: keyOwn, session: testSessionShared, root: rootOwn, node: fingerprint(0x11),
 		uncached: i64(50), cacheRead: i64(1000), output: i64(20), prev: "own-1", events: insights.EventModelSwitch | insights.EventCompaction,
-		system: 300, user: 150, model: "mystery-model"})
+		system: 300, user: 150, model: "mystery-model", billing: sqlite.BillingUnbilled})
 	fixture.seed(stepSeed{id: "other-1", offset: 20 * time.Second, key: keyOther, session: testSessionShared, root: rootOwn, node: fingerprint(0x12),
-		parent: fingerprint(0x11), role: "subagent", uncached: i64(7000), output: i64(700), system: 5000})
+		parent: fingerprint(0x11), role: "subagent", uncached: i64(7000), output: i64(700), system: 5000,
+		billing: sqlite.BillingBilled, quota: 1000000, quotaPerUnit: 500000})
 	fixture.seed(stepSeed{id: "own-sub", offset: 30 * time.Second, key: keyOwn, session: "agt_bbbbbbbbbbbbbbbbbbbbbbbb", root: rootOwn, node: fingerprint(0x13),
 		parent: fingerprint(0x99), role: "subagent", turnStart: true, uncached: i64(10), cacheRead: i64(20), output: i64(5), system: 10})
 	fixture.seed(stepSeed{id: "other-2", offset: 40 * time.Second, key: keyOther, session: testSessionForeign, root: rootOther, node: fingerprint(0x14),
-		uncached: i64(4000), output: i64(400), system: 4000})
+		uncached: i64(4000), output: i64(400), system: 4000, billing: sqlite.BillingBilled, quota: 200000, quotaPerUnit: 400000})
 }
 
 func TestInsightsOverviewTotalsCostAndDays(t *testing.T) {
@@ -204,13 +229,13 @@ func TestInsightsOverviewTotalsCostAndDays(t *testing.T) {
 	if totals.CacheHitRate == nil || *totals.CacheHitRate != 1920.0/2080.0 {
 		t.Fatalf("cache hit rate = %v", totals.CacheHitRate)
 	}
-	// own-2 uses a model without a price; the other two are gpt-4.1.
-	if totals.UnpricedRequests != 1 || totals.EstimatedCostUSD == nil {
-		t.Fatalf("pricing = %+v", totals)
+	// Only own-1 is billed (250000 / 500000); own-2 is unbilled and own-sub
+	// has no caller link. The other key's billing is out of scope.
+	if totals.BilledRequests != 1 || totals.UnbilledRequests != 2 || totals.CostUSD == nil || *totals.CostUSD != 0.5 {
+		t.Fatalf("billing = %+v", totals)
 	}
-	want := (100*2.0 + 900*0.5 + 50*8.0 + 10*2.0 + 20*0.5 + 5*8.0) / 1e6
-	if diff := *totals.EstimatedCostUSD - want; diff > 1e-12 || diff < -1e-12 {
-		t.Fatalf("cost = %v, want %v", *totals.EstimatedCostUSD, want)
+	if !response.BillingEnabled {
+		t.Fatal("billing_enabled = false")
 	}
 	if response.Sessions != 2 || response.Trees != 1 {
 		t.Fatalf("sessions/trees = %d %d", response.Sessions, response.Trees)
@@ -233,6 +258,23 @@ func TestInsightsOverviewTotalsCostAndDays(t *testing.T) {
 	admin, err := fixture.service.Overview(context.Background(), OverviewQuery{FromNS: from, ToNS: to, GroupBy: "caller"})
 	if err != nil || admin.Totals.Requests != 5 || admin.Sessions != 3 || admin.Trees != 1 {
 		t.Fatalf("admin overview = %+v %v", admin, err)
+	}
+	// Cost is exactly the sum of quota / quota_per_unit over billed requests,
+	// each with its own conversion snapshot: 0.5 + 2 + 0.5.
+	if admin.Totals.BilledRequests != 3 || admin.Totals.UnbilledRequests != 2 || admin.Totals.CostUSD == nil || *admin.Totals.CostUSD != 3 {
+		t.Fatalf("admin billing = %+v", admin.Totals)
+	}
+	var groupCost float64
+	for _, group := range admin.Groups {
+		if group.Usage.CostUSD != nil {
+			groupCost += *group.Usage.CostUSD
+		}
+		if group.Usage.BilledRequests+group.Usage.UnbilledRequests != group.Usage.Requests {
+			t.Fatalf("group counts = %+v", group)
+		}
+	}
+	if groupCost != 3 {
+		t.Fatalf("group costs sum to %v", groupCost)
 	}
 }
 
@@ -355,11 +397,11 @@ func TestInsightsTrendTurnsEventsGapsAndScope(t *testing.T) {
 	if len(first.ResponseKinds) != 2 || first.ResponseKinds[0] != "tool_call" || first.ResponseKinds[1] != "text" {
 		t.Fatalf("kinds = %v", first.ResponseKinds)
 	}
-	if first.PromptTotal == nil || *first.PromptTotal != 1000 || first.CostUSD == nil || second.CostUSD != nil {
+	if first.PromptTotal == nil || *first.PromptTotal != 1000 || first.CostUSD == nil || *first.CostUSD != 0.5 || second.CostUSD != nil {
 		t.Fatalf("usage/cost = %+v / %+v", first, second)
 	}
 	if trend.ContextWindow != nil {
-		t.Fatalf("unpriced last model must have no window: %v", *trend.ContextWindow)
+		t.Fatalf("unknown last model must have no window: %v", *trend.ContextWindow)
 	}
 
 	// The other key's session is not found for the caller, and the shared one
@@ -552,31 +594,53 @@ func TestInsightsCompositionRejectsTamperedDetail(t *testing.T) {
 	}
 }
 
-func TestInsightsScheduleAwareCostUsesSlots(t *testing.T) {
+func TestInsightsContextWindowOverrides(t *testing.T) {
 	t.Parallel()
-	override := filepath.Join(t.TempDir(), "prices.json")
-	content := `{"schedules":[{"model":"gpt-4.1","start":"12:00","end":"12:30","multiplier":0.5}]}`
-	if err := os.WriteFile(override, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+	fixture := newInsightsFixture(t, map[string]int64{"mystery-model": 32000, "openai/gpt-4.1": 500000})
+	fixture.seedWorld()
+	ctx := context.Background()
+	trend, err := fixture.service.Trend(ctx, testSessionShared, scopeFor(keyOwn))
+	if err != nil || trend.ContextWindow == nil || *trend.ContextWindow != 32000 {
+		t.Fatalf("override window = %v %v", trend.ContextWindow, err)
 	}
-	prices, err := pricing.Load(override)
+	from, to := fixture.rangeNS()
+	page, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := newInsightsFixture(t, prices)
-	// 12:00 is inside the discounted window, 12:40 is not.
-	fixture.seed(stepSeed{id: "inside", key: keyOwn, session: testSessionShared, uncached: i64(1_000_000)})
-	fixture.seed(stepSeed{id: "outside", offset: 40 * time.Minute, key: keyOwn, session: testSessionShared, uncached: i64(1_000_000)})
-	from, to := fixture.rangeNS()
-	response, err := fixture.service.Overview(context.Background(), OverviewQuery{FromNS: from, ToNS: to})
-	if err != nil || response.Totals.EstimatedCostUSD == nil {
-		t.Fatalf("overview = %+v %v", response, err)
-	}
-	if got, want := *response.Totals.EstimatedCostUSD, 1.0+2.0; got < want-1e-9 || got > want+1e-9 {
-		t.Fatalf("cost = %v, want %v", got, want)
+	for _, card := range page.Items {
+		if card.SessionID == testSessionForeign && (card.ContextWindow == nil || *card.ContextWindow != 500000) {
+			t.Fatalf("overridden embedded window = %v", card.ContextWindow)
+		}
 	}
 }
 
+func TestInsightsBillingDisabledIsReported(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	service, err := NewInsights(fixture.store, fixture.cipher, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, to := fixture.rangeNS()
+	ctx := context.Background()
+	overview, err := service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to})
+	if err != nil || overview.BillingEnabled || overview.Totals.CostUSD != nil {
+		t.Fatalf("overview = %+v %v", overview, err)
+	}
+	sessions, err := service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to})
+	if err != nil || sessions.BillingEnabled {
+		t.Fatalf("sessions = %+v %v", sessions, err)
+	}
+	encoded, err := json.Marshal(sessions)
+	if err != nil || !bytes.Contains(encoded, []byte(`"billing_enabled":false`)) {
+		t.Fatalf("sessions JSON = %s %v", encoded, err)
+	}
+	enabled, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to})
+	if err != nil || !enabled.BillingEnabled {
+		t.Fatalf("enabled sessions = %+v %v", enabled, err)
+	}
+}
 func TestInsightsAuxiliaryStepsDoNotDefineSessionsAndPlainSessionsAreNotTrees(t *testing.T) {
 	t.Parallel()
 	fixture := newInsightsFixture(t, nil)
@@ -781,29 +845,35 @@ func TestInsightsSubagentCountIgnoresTheTimeRange(t *testing.T) {
 	}
 }
 
-func TestInsightsRequestsWithoutUsageAreUnpricedNotFree(t *testing.T) {
+func TestInsightsUnbilledRequestsAreCountedNotPriced(t *testing.T) {
 	t.Parallel()
 	fixture := newInsightsFixture(t, nil)
 	root, node := fingerprint(0xc0), fingerprint(0x21)
-	fixture.seed(stepSeed{id: "priced", offset: 0, key: keyOwn, session: testSessionShared, root: root, node: node,
-		uncached: i64(100), output: i64(10), turnStart: true})
-	fixture.seed(stepSeed{id: "no-usage", offset: 10 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node, prev: "priced"})
-	fixture.seed(stepSeed{id: "only-no-usage", offset: 20 * time.Second, key: keyOwn, session: "agt_bbbbbbbbbbbbbbbbbbbbbbbb",
-		root: fingerprint(0xc1), node: fingerprint(0x22)})
+	// Billing does not depend on reported usage: a billed request without
+	// usage still costs, and a request with usage but no billing does not.
+	fixture.seed(stepSeed{id: "billed", offset: 0, key: keyOwn, session: testSessionShared, root: root, node: node,
+		turnStart: true, billing: sqlite.BillingBilled, quota: 1000, quotaPerUnit: 500000})
+	fixture.seed(stepSeed{id: "no-link", offset: 10 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node, prev: "billed",
+		uncached: i64(100), output: i64(10)})
+	fixture.seed(stepSeed{id: "unbilled", offset: 20 * time.Second, key: keyOwn, session: "agt_bbbbbbbbbbbbbbbbbbbbbbbb",
+		root: fingerprint(0xc1), node: fingerprint(0x22), uncached: i64(5), billing: sqlite.BillingUnbilled})
 	ctx := context.Background()
 	from, to := fixture.rangeNS()
-	want := (100*2.0 + 10*8.0) / 1e6
+	want := 1000.0 / 500000.0
 
 	overview, err := fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to, GroupBy: "model", Scope: scopeFor(keyOwn)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	totals := overview.Totals
-	if totals.Requests != 3 || totals.UnpricedRequests != 2 || totals.EstimatedCostUSD == nil || *totals.EstimatedCostUSD-want > 1e-12 || want-*totals.EstimatedCostUSD > 1e-12 {
+	if totals.Requests != 3 || totals.BilledRequests != 1 || totals.UnbilledRequests != 2 || totals.CostUSD == nil || *totals.CostUSD != want {
 		t.Fatalf("totals = %+v", totals)
 	}
-	if day := overview.Daily[len(overview.Daily)-1].Usage; day.UnpricedRequests != 2 {
+	if day := overview.Daily[len(overview.Daily)-1].Usage; day.UnbilledRequests != 2 || day.BilledRequests != 1 {
 		t.Fatalf("daily = %+v", day)
+	}
+	if empty := overview.Daily[0].Usage; len(overview.Daily) > 1 && (empty.CostUSD != nil || empty.UnbilledRequests != 0) {
+		t.Fatalf("empty day = %+v", empty)
 	}
 	sessions, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOwn)})
 	if err != nil {
@@ -812,18 +882,18 @@ func TestInsightsRequestsWithoutUsageAreUnpricedNotFree(t *testing.T) {
 	for _, card := range sessions.Items {
 		switch card.SessionID {
 		case testSessionShared:
-			if card.Usage.UnpricedRequests != 1 || card.Usage.EstimatedCostUSD == nil {
+			if card.Usage.BilledRequests != 1 || card.Usage.UnbilledRequests != 1 || card.Usage.CostUSD == nil || *card.Usage.CostUSD != want {
 				t.Fatalf("shared card = %+v", card.Usage)
 			}
 		default:
-			if card.Usage.UnpricedRequests != 1 || card.Usage.EstimatedCostUSD != nil {
-				t.Fatalf("usage-less card = %+v", card.Usage)
+			if card.Usage.BilledRequests != 0 || card.Usage.UnbilledRequests != 1 || card.Usage.CostUSD != nil {
+				t.Fatalf("unbilled card = %+v", card.Usage)
 			}
 		}
 	}
 
 	tree, err := fixture.service.Tree(ctx, "c0c0c0c0c0c0c0c0c0c0c0c0", scopeFor(keyOwn))
-	if err != nil || len(tree.Nodes) != 1 || tree.Nodes[0].Usage.UnpricedRequests != 1 || tree.Nodes[0].Usage.EstimatedCostUSD == nil {
+	if err != nil || len(tree.Nodes) != 1 || tree.Nodes[0].Usage.UnbilledRequests != 1 || tree.Nodes[0].Usage.CostUSD == nil || *tree.Nodes[0].Usage.CostUSD != want {
 		t.Fatalf("tree = %+v %v", tree, err)
 	}
 
@@ -831,11 +901,51 @@ func TestInsightsRequestsWithoutUsageAreUnpricedNotFree(t *testing.T) {
 	if err != nil || len(trend.Steps) != 2 {
 		t.Fatalf("trend = %+v %v", trend, err)
 	}
-	if trend.Steps[0].CostUSD == nil || trend.Steps[1].CostUSD != nil {
+	if trend.Steps[0].CostUSD == nil || *trend.Steps[0].CostUSD != want || trend.Steps[1].CostUSD != nil {
 		t.Fatalf("step costs = %v / %v", trend.Steps[0].CostUSD, trend.Steps[1].CostUSD)
 	}
 }
 
+func TestInsightsDeveloperScopeHidesOtherKeysBilling(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	fixture.seedWorld()
+	ctx := context.Background()
+	from, to := fixture.rangeNS()
+	// The other key owns a billed step inside the caller's shared session and
+	// tree; the caller sees neither its cost nor its billed count.
+	sessions, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOwn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, card := range sessions.Items {
+		if card.SessionID == testSessionShared && (card.Usage.BilledRequests != 1 || card.Usage.CostUSD == nil || *card.Usage.CostUSD != 0.5) {
+			t.Fatalf("shared card leaks billing: %+v", card.Usage)
+		}
+	}
+	tree, err := fixture.service.Tree(ctx, treeIDOf(fingerprint(0xa0)), scopeFor(keyOwn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range tree.Nodes {
+		if node.Usage.CostUSD != nil && *node.Usage.CostUSD != 0.5 {
+			t.Fatalf("tree node leaks billing: %+v", node)
+		}
+	}
+	trend, err := fixture.service.Trend(ctx, testSessionShared, scopeFor(keyOwn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range trend.Steps {
+		if step.AuditID == "other-1" {
+			t.Fatal("trend exposes the other key's step")
+		}
+	}
+	other, err := fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOther)})
+	if err != nil || other.Totals.BilledRequests != 2 || other.Totals.CostUSD == nil || *other.Totals.CostUSD != 2.5 {
+		t.Fatalf("other key overview = %+v %v", other.Totals, err)
+	}
+}
 func TestInsightsTrendContextWindowIgnoresAuxiliaryModel(t *testing.T) {
 	t.Parallel()
 	fixture := newInsightsFixture(t, nil)
@@ -849,7 +959,7 @@ func TestInsightsTrendContextWindowIgnoresAuxiliaryModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := fixture.service.prices.ContextWindow("gpt-4.1")
+	want := fixture.service.windows.ContextWindow("gpt-4.1")
 	if want == nil || trend.ContextWindow == nil || *trend.ContextWindow != *want {
 		t.Fatalf("context window = %v, want %v", trend.ContextWindow, want)
 	}

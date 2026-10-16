@@ -29,12 +29,16 @@ developer_login:
 shutdown_timeout_seconds: 30
 retention_days: 30
 # Derived context and usage analysis computed by the asynchronous parser.
-# The optional override files must already exist when set; keep them outside
-# this repository, e.g. pricing_file: /etc/audit-proxy/prices.json
+# Cost is NewAPI's actual billing and needs newapi.access_token/user_id; the
+# old pricing_file setting is deprecated and ignored. The optional vocabulary
+# file must already exist when set; keep it outside this repository, e.g.
+# vocabulary_file: /etc/audit-proxy/vocabulary.yaml
 insights:
   enabled: true
-  pricing_file: ""
   vocabulary_file: ""
+  # Optional per-model context-window overrides in tokens, e.g.
+  # my-gateway-alias: 200000
+  context_windows: {}
 
 interceptors:
   require-client-credential:

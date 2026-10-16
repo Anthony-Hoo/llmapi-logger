@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/insights"
-	"llmapi-logger/internal/insights/pricing"
+	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -30,7 +30,6 @@ const (
 	MaxTreeNodes          = 40
 	HeatmapDays           = 56
 	maxTimezoneOffsetMin  = 840
-	priceScheduleSlotNS   = int64(pricing.ScheduleGranularityMinutes * time.Minute)
 	treeIDHexLength       = 24
 	nanosecondsPerSecond  = int64(time.Second)
 	secondsPerDay         = int64(24 * 60 * 60)
@@ -62,24 +61,30 @@ type InsightsStore interface {
 // Insights builds the context-insights API responses. Aggregate endpoints read
 // plaintext derived columns only; Composition is the single decrypting call.
 type Insights struct {
-	store  InsightsStore
-	cipher security.Cipher
-	prices *pricing.Table
-	now    func() time.Time
+	store   InsightsStore
+	cipher  security.Cipher
+	windows *models.Table
+	// billingEnabled reports whether NewAPI billing can be collected at all.
+	billingEnabled bool
+	now            func() time.Time
 	// trendLimit bounds the steps of one trend; tests lower it.
 	trendLimit int
 }
 
-// NewInsights constructs the service. prices may be nil, in which case every
-// model is unpriced.
-func NewInsights(store InsightsStore, cipher security.Cipher, prices *pricing.Table) (*Insights, error) {
+// NewInsights constructs the service. windows may be nil, in which case every
+// context window is unknown. billingEnabled is true when the NewAPI
+// management credential is configured (doc/features/21-newapi-billing.md).
+func NewInsights(store InsightsStore, cipher security.Cipher, windows *models.Table, billingEnabled bool) (*Insights, error) {
 	if store == nil {
 		return nil, errors.New("query: nil insights store")
 	}
 	if cipher == nil {
 		return nil, errors.New("query: nil cipher")
 	}
-	return &Insights{store: store, cipher: cipher, prices: prices, now: time.Now, trendLimit: MaxTrendSteps}, nil
+	return &Insights{
+		store: store, cipher: cipher, windows: windows, billingEnabled: billingEnabled,
+		now: time.Now, trendLimit: MaxTrendSteps,
+	}, nil
 }
 
 // OverviewQuery is the validated input of Overview. FromNS and ToNS default to
@@ -124,18 +129,10 @@ func (service *Insights) resolveRange(fromNS, toNS *int64) (int64, int64, error)
 	return from, to, nil
 }
 
-func (service *Insights) slotNS() int64 {
-	if service.prices.HasSchedules() {
-		return priceScheduleSlotNS
-	}
-	return 0
-}
-
 type usageAccumulator struct {
 	label  string
 	totals insights.UsageTotals
 	cost   float64
-	priced bool
 	mix    sqlite.InsightsMix
 }
 
@@ -167,21 +164,9 @@ func (service *Insights) fold(rows []sqlite.InsightsUsageRow) usageFold {
 		accumulator.mix.Reasoning += row.Mix.Reasoning
 		accumulator.mix.ToolResult += row.Mix.ToolResult
 		accumulator.mix.Media += row.Mix.Media
-		var at time.Time
-		if row.SlotNS > 0 {
-			at = time.Unix(0, row.SlotNS)
-		}
-		cost := service.prices.CostTokens(row.Model, at, row.UncachedInput, row.CacheRead, row.CacheWrite, row.Output)
-		if cost == nil {
-			accumulator.totals.UnpricedRequests += row.Requests
-			continue
-		}
-		// Requests without any reported usage sum to zero in SQL; they are
-		// unpriced rather than free.
-		accumulator.totals.UnpricedRequests += row.Requests - row.UsageRequests
-		if row.UsageRequests > 0 {
-			accumulator.cost += *cost
-			accumulator.priced = true
+		accumulator.totals.BilledRequests += row.BilledRequests
+		if row.CostUSD != nil {
+			accumulator.cost += *row.CostUSD
 		}
 	}
 	return result
@@ -197,9 +182,10 @@ func (accumulator *usageAccumulator) usage() insights.UsageTotals {
 		rate := float64(totals.CacheRead) / float64(totals.PromptTotal)
 		totals.CacheHitRate = &rate
 	}
-	if accumulator.priced {
+	totals.UnbilledRequests = totals.Requests - totals.BilledRequests
+	if totals.BilledRequests > 0 {
 		cost := accumulator.cost
-		totals.EstimatedCostUSD = &cost
+		totals.CostUSD = &cost
 	}
 	return totals
 }
@@ -271,9 +257,8 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 		return insights.OverviewResponse{}, err
 	}
 	filter := service.filter(request.Scope, from, to)
-	slot := service.slotNS()
 	spec := func(dimension string) sqlite.InsightsUsageSpec {
-		return sqlite.InsightsUsageSpec{Dimension: dimension, TZOffsetMin: request.TZOffsetMin, SlotNS: slot}
+		return sqlite.InsightsUsageSpec{Dimension: dimension, TZOffsetMin: request.TZOffsetMin}
 	}
 
 	totalRows, err := service.store.InsightsUsage(ctx, filter, spec(sqlite.InsightsDimTotal))
@@ -293,7 +278,10 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 		return insights.OverviewResponse{}, fmt.Errorf("query: insights overview distinct: %w", err)
 	}
 
-	response := insights.OverviewResponse{FromNS: from, ToNS: to, Sessions: sessions, Trees: trees, GroupBy: groupBy}
+	response := insights.OverviewResponse{
+		FromNS: from, ToNS: to, Sessions: sessions, Trees: trees, GroupBy: groupBy,
+		BillingEnabled: service.billingEnabled,
+	}
 	total := service.fold(totalRows).byKey[""]
 	response.Totals = total.usage()
 	if total != nil {
@@ -442,7 +430,7 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 	if err != nil {
 		return insights.SessionsResponse{}, fmt.Errorf("query: insights sessions: %w", err)
 	}
-	response := insights.SessionsResponse{Items: make([]insights.SessionCard, 0, len(page.Rows))}
+	response := insights.SessionsResponse{Items: make([]insights.SessionCard, 0, len(page.Rows)), BillingEnabled: service.billingEnabled}
 	if len(page.Rows) == 0 {
 		return response, nil
 	}
@@ -459,7 +447,7 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 	}
 	pageFilter := filter
 	pageFilter.SessionIDs = ids
-	usageRows, err := service.store.InsightsUsage(ctx, pageFilter, sqlite.InsightsUsageSpec{Dimension: sqlite.InsightsDimSession, SlotNS: service.slotNS()})
+	usageRows, err := service.store.InsightsUsage(ctx, pageFilter, sqlite.InsightsUsageSpec{Dimension: sqlite.InsightsDimSession})
 	if err != nil {
 		return insights.SessionsResponse{}, fmt.Errorf("query: insights session usage: %w", err)
 	}
@@ -503,7 +491,7 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 		if card.Models == nil {
 			card.Models = []string{}
 		}
-		card.ContextWindow = service.prices.ContextWindow(row.Model)
+		card.ContextWindow = service.windows.ContextWindow(row.Model)
 		if realRoots[string(row.Root)] {
 			card.TreeID = treeIDOf(row.Root)
 			if row.Role == insights.RoleMain {
@@ -624,9 +612,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 			ResponseKinds: bitNames(row.RespKinds, kindNames),
 			FirstEventMS:  milliseconds(row.FirstEventNS),
 			GenerationMS:  milliseconds(row.GenerationNS),
-		}
-		if usage.UncachedInput != nil || usage.CacheRead != nil || usage.CacheWrite != nil || usage.Output != nil || usage.Reasoning != nil {
-			step.CostUSD = service.prices.Cost(usage, row.Model, time.Unix(0, row.StartedAtNS))
+			CostUSD:       row.CostUSD,
 		}
 		if previous := byID[row.PrevAuditID]; previous != nil && previous.StopReason == insights.StopToolUse &&
 			previous.EndedAtNS != nil && row.StartedAtNS >= *previous.EndedAtNS {
@@ -654,7 +640,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 			break
 		}
 	}
-	response.ContextWindow = service.prices.ContextWindow(windowModel)
+	response.ContextWindow = service.windows.ContextWindow(windowModel)
 	return response, nil
 }
 
@@ -681,7 +667,7 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 	if len(rows) == 0 {
 		return insights.TreeResponse{}, ErrNotFound
 	}
-	usageRows, err := service.store.InsightsUsage(ctx, filter, sqlite.InsightsUsageSpec{Dimension: sqlite.InsightsDimNode, SlotNS: service.slotNS()})
+	usageRows, err := service.store.InsightsUsage(ctx, filter, sqlite.InsightsUsageSpec{Dimension: sqlite.InsightsDimNode})
 	if err != nil {
 		return insights.TreeResponse{}, fmt.Errorf("query: insights tree usage: %w", err)
 	}
@@ -710,7 +696,7 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 			Usage:          usage.byKey[hex.EncodeToString(row.NodeFPR)].usage(),
 			LastEstimate:   displayComposition(estimateValues(row.Estimate), row.LastPrompt),
 			LastPrompt:     row.LastPrompt,
-			ContextWindow:  service.prices.ContextWindow(row.Model),
+			ContextWindow:  service.windows.ContextWindow(row.Model),
 			LinkSource:     row.LinkSource,
 			LinkConfidence: row.LinkConfidence,
 		}
@@ -825,7 +811,7 @@ func (service *Insights) Composition(ctx context.Context, auditID string, scope 
 		Usage:           usage,
 		PromptTotal:     usage.PromptTotal(),
 		Estimate:        estimate,
-		ContextWindow:   service.prices.ContextWindow(model),
+		ContextWindow:   service.windows.ContextWindow(model),
 		Items:           make([]insights.CompositionItem, 0, len(detail.Items)),
 		Tools:           detail.Tools,
 		FileOps:         detail.FileOps,

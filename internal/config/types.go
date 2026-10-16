@@ -32,13 +32,18 @@ type Config struct {
 }
 
 // InsightsConfig controls derived context and usage analysis
-// (doc/features/20-context-insights.md). The optional files are local
-// overrides for the embedded price snapshot and the tool/agent vocabulary;
-// startup only checks that they exist, their owners parse them.
+// (doc/features/20-context-insights.md). VocabularyFile optionally overrides
+// the tool/agent vocabulary; startup only checks that it exists, its owner
+// parses it. ContextWindows overrides the embedded per-model context windows.
+//
+// PricingFile is deprecated and ignored: cost now comes from NewAPI's actual
+// billing (doc/features/21-newapi-billing.md). It still parses so old
+// configurations start, and startup logs one warning when it is set.
 type InsightsConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	PricingFile    string `yaml:"pricing_file"`
-	VocabularyFile string `yaml:"vocabulary_file"`
+	Enabled        bool             `yaml:"enabled"`
+	PricingFile    string           `yaml:"pricing_file"`
+	VocabularyFile string           `yaml:"vocabulary_file"`
+	ContextWindows map[string]int64 `yaml:"context_windows"`
 }
 
 // NewAPIConfig contains both the data-plane upstream settings and the

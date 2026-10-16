@@ -4,7 +4,10 @@ package insights
 // The web frontend mirrors these shapes in src/types.ts. All token fields are
 // integers; nullable numbers mean "not reported" or "unknown price".
 
-// UsageTotals aggregates normalized usage over many requests.
+// UsageTotals aggregates normalized usage over many requests. Cost is NewAPI's
+// actual billing (doc/features/21-newapi-billing.md): CostUSD sums
+// quota / quota_per_unit over the BilledRequests and is never mixed with an
+// estimate; every other request counts as unbilled.
 type UsageTotals struct {
 	Requests         int64    `json:"requests"`
 	UncachedInput    int64    `json:"uncached_input"`
@@ -13,9 +16,10 @@ type UsageTotals struct {
 	Output           int64    `json:"output"`
 	Reasoning        int64    `json:"reasoning"`
 	PromptTotal      int64    `json:"prompt_total"`
-	CacheHitRate     *float64 `json:"cache_hit_rate"`     // nil when prompt_total is 0
-	EstimatedCostUSD *float64 `json:"estimated_cost_usd"` // nil when nothing was priced
-	UnpricedRequests int64    `json:"unpriced_requests"`
+	CacheHitRate     *float64 `json:"cache_hit_rate"` // nil when prompt_total is 0
+	CostUSD          *float64 `json:"cost_usd"`       // nil when no request is billed
+	BilledRequests   int64    `json:"billed_requests"`
+	UnbilledRequests int64    `json:"unbilled_requests"` // requests - billed_requests
 }
 
 // OverviewResponse is GET /api/v1/insights/overview.
@@ -35,6 +39,10 @@ type OverviewResponse struct {
 	GroupBy  string         `json:"group_by"`
 	Groups   []GroupUsage   `json:"groups"`
 	Mix      CategoryValues `json:"composition"` // summed estimates anchored to prompt totals
+	// BillingEnabled is true when the NewAPI management credential is
+	// configured, so unbilled requests are genuinely unbilled rather than
+	// unknowable.
+	BillingEnabled bool `json:"billing_enabled"`
 }
 
 // DailyUsage is one local calendar day (tz_offset_min query parameter).
@@ -86,8 +94,9 @@ type SessionCaller struct {
 
 // SessionsResponse is GET /api/v1/insights/sessions.
 type SessionsResponse struct {
-	Items      []SessionCard `json:"items"`
-	NextCursor string        `json:"next_cursor,omitempty"`
+	Items          []SessionCard `json:"items"`
+	NextCursor     string        `json:"next_cursor,omitempty"`
+	BillingEnabled bool          `json:"billing_enabled"` // see OverviewResponse
 }
 
 // TrendStep is one request of a session trend.
@@ -109,7 +118,7 @@ type TrendStep struct {
 	FirstEventMS  *float64       `json:"first_event_ms"`
 	GenerationMS  *float64       `json:"generation_ms"`
 	ClientGapMS   *float64       `json:"client_gap_ms"` // previous tool_use response end -> this request start
-	CostUSD       *float64       `json:"cost_usd"`
+	CostUSD       *float64       `json:"cost_usd"`      // this request's actual NewAPI billing; nil when not billed
 }
 
 // TrendResponse is GET /api/v1/insights/sessions/{session_id}/trend.

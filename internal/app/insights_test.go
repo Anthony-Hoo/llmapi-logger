@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -142,7 +144,7 @@ func TestInsightsWiringFollowsConfiguration(t *testing.T) {
 	})
 }
 
-func TestValidateConfigChecksInsightsOverrides(t *testing.T) {
+func TestDeprecatedPricingFileOnlyWarnsOnce(t *testing.T) {
 	write := func(t *testing.T, name, contents string) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), name)
@@ -151,27 +153,101 @@ func TestValidateConfigChecksInsightsOverrides(t *testing.T) {
 		}
 		return path
 	}
+	// The old setting is ignored entirely: neither a malformed nor a missing
+	// file fails validation or startup.
 	malformed := write(t, "pricing.json", `{"models":`)
-	valid := write(t, "valid-pricing.json", `{"models":{"x/model":{"input":0,"output":0}}}`)
-
-	validate := func(t *testing.T, enabled bool, pricingFile string) error {
-		t.Helper()
-		configuration := insightsTestConfig(t, "http://upstream.example.com", enabled, "")
+	missing := filepath.Join(t.TempDir(), "missing-pricing.json")
+	for _, pricingFile := range []string{malformed, missing} {
+		configuration := insightsTestConfig(t, "http://upstream.example.com", true, "")
 		configuration.Insights.PricingFile = pricingFile
 		data, err := yaml.Marshal(configuration)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ValidateConfig(write(t, "config.yaml", string(data)))
+		if err := ValidateConfig(write(t, "config.yaml", string(data))); err != nil {
+			t.Fatalf("ValidateConfig with pricing_file %q: %v", pricingFile, err)
+		}
 	}
 
-	if err := validate(t, true, valid); err != nil {
-		t.Fatalf("valid pricing override rejected: %v", err)
+	var logs bytes.Buffer
+	configuration := insightsTestConfig(t, "http://upstream.example.com", true, "")
+	configuration.Insights.PricingFile = missing
+	application, err := New(configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := validate(t, true, malformed); err == nil || !strings.Contains(err.Error(), "insights pricing") {
-		t.Fatalf("malformed pricing override = %v, want pricing error", err)
+	_ = application.Close()
+	if count := strings.Count(logs.String(), `"config_key":"insights.pricing_file"`); count != 1 {
+		t.Fatalf("deprecation warnings = %d, logs:\n%s", count, logs.String())
 	}
-	if err := validate(t, false, malformed); err != nil {
-		t.Fatalf("disabled insights must not read the pricing override: %v", err)
+	if strings.Contains(logs.String(), "missing-pricing.json") {
+		t.Fatal("the deprecated path was logged")
+	}
+
+	logs.Reset()
+	application, err = New(insightsTestConfig(t, "http://upstream.example.com", true, ""), slog.New(slog.NewJSONHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = application.Close()
+	if strings.Contains(logs.String(), "pricing_file") {
+		t.Fatalf("warning without pricing_file:\n%s", logs.String())
+	}
+}
+
+func TestValidateConfigChecksContextWindows(t *testing.T) {
+	configuration := insightsTestConfig(t, "http://upstream.example.com", true, "")
+	configuration.Insights.ContextWindows = map[string]int64{"my-gateway-alias": 200000}
+	data, err := yaml.Marshal(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateConfig(path); err != nil {
+		t.Fatalf("valid context_windows rejected: %v", err)
+	}
+	configuration.Insights.ContextWindows = map[string]int64{"my-gateway-alias": 0}
+	if data, err = yaml.Marshal(configuration); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateConfig(path); err == nil || !strings.Contains(err.Error(), "context_windows") {
+		t.Fatalf("zero context window = %v", err)
+	}
+}
+
+func TestInsightsReportBillingEnabledFromNewAPICredentials(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, credentials := range []bool{false, true} {
+		configuration := insightsTestConfig(t, "http://newapi.example.com", true, "")
+		if credentials {
+			configuration.NewAPI.AccessToken = "billing-access-canary"
+			configuration.NewAPI.UserID = 1
+		}
+		application, err := New(configuration, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{"/api/v1/insights/overview", "/api/v1/insights/sessions"} {
+			request := httptest.NewRequest(http.MethodGet, "http://admin"+path, nil)
+			request.Header.Set("Authorization", "Bearer "+configuration.AdminToken)
+			response := httptest.NewRecorder()
+			application.adminServer.Handler().ServeHTTP(response, request)
+			var body struct {
+				BillingEnabled *bool `json:"billing_enabled"`
+			}
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.BillingEnabled == nil {
+				t.Fatalf("%s = %d %s", path, response.Code, response.Body.String())
+			}
+			if *body.BillingEnabled != credentials {
+				t.Fatalf("%s billing_enabled = %v with credentials=%v", path, *body.BillingEnabled, credentials)
+			}
+		}
+		_ = application.Close()
 	}
 }
