@@ -193,6 +193,7 @@ func TestLoadRejectsInvalidOverrides(t *testing.T) {
 		"off-grid start":    `{"schedules":[{"model":"a","start":"12:15","end":"13:00","multiplier":1}]}`,
 		"off-grid end":      `{"schedules":[{"model":"a","start":"12:00","end":"13:45","multiplier":1}]}`,
 		"trailing document": `{"models":{}} {}`,
+		"trailing garbage":  `{"models":{}} garbage`,
 	} {
 		if _, err := Load(writeOverride(t, content)); err == nil {
 			t.Errorf("%s: Load succeeded", name)

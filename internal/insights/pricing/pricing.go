@@ -114,7 +114,7 @@ func decode(data []byte) (file, error) {
 		return file{}, err
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err == nil {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return file{}, errors.New("unexpected trailing data")
 	}
 	normalized := make(map[string]Entry, len(parsed.Models))
