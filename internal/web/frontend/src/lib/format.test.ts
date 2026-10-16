@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatBytes, formatDurationNS, humanizeStage, statusVariant } from "./format";
+import { formatBytes, formatDurationNS, formatNanoTime, humanizeStage, statusVariant } from "./format";
 
 describe("display formatters", () => {
   it("makes capture sizes and stage names readable", () => {
@@ -19,5 +19,10 @@ describe("display formatters", () => {
     expect(formatDurationNS(12_500)).toBe("12.5 µs");
     expect(formatDurationNS(125_000_000)).toBe("125 ms");
     expect(formatDurationNS("1500000000")).toBe("1.50 s");
+  });
+  it("formats epoch-nanosecond strings beyond the safe integer range", () => {
+    const text = formatNanoTime("1760000000123456789");
+    expect(text).toMatch(/^2025/);
+    expect(text).toBe(formatNanoTime("1760000000123000000"));
   });
 });

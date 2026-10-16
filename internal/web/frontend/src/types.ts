@@ -288,9 +288,9 @@ export interface ReconstructedBodyDownload {
 
 // ---------------------------------------------------------------------------
 // Context insights (doc/features/20-context-insights.md). Mirrors the JSON tags
-// of internal/insights/apitypes.go and types.go. Nanosecond timestamps are plain
-// JSON numbers there, hence NanoTime; nullable numbers mean "not reported" or
-// "unknown price".
+// of internal/insights/apitypes.go and types.go. Nanosecond timestamps are JSON
+// strings there (like the audit API; epoch ns exceed 2^53), hence NanoTime;
+// nullable numbers mean "not reported" or "unknown price".
 // ---------------------------------------------------------------------------
 
 export type CategoryKey =

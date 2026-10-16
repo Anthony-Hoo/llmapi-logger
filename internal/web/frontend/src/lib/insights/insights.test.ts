@@ -31,7 +31,7 @@ function values(partial: Partial<CategoryValues>): CategoryValues {
 function step(id: string, turn: number, estimate: Partial<CategoryValues>, extra: Partial<TrendStep> = {}): TrendStep {
   return {
     audit_id: id,
-    started_at_ns: 1,
+    started_at_ns: "1",
     turn,
     turn_start: false,
     model: "m",

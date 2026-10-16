@@ -136,8 +136,8 @@ describe("composition bar", () => {
 
 describe("overview", () => {
   const overview: OverviewResponse = {
-    from_ns: 1,
-    to_ns: 2,
+    from_ns: "1",
+    to_ns: "2",
     totals: usage({ requests: 1234, unpriced_requests: 7 }),
     sessions: 12,
     trees: 3,
@@ -187,8 +187,8 @@ describe("session card", () => {
     protocol: "anthropic",
     client: "claude_code",
     role: "main",
-    first_ns: 1,
-    last_ns: 2,
+    first_ns: "1",
+    last_ns: "2",
     steps: 10,
     turns: 3,
     models: ["claude-test"],
@@ -224,7 +224,7 @@ describe("trend tooltip", () => {
   function step(extra: Partial<TrendStep> = {}): TrendStep {
     return {
       audit_id: "a1",
-      started_at_ns: 1,
+      started_at_ns: "1",
       turn: 1,
       turn_start: true,
       model: "m1",
@@ -275,8 +275,8 @@ describe("agent tree", () => {
       session_id: `ses_${id}`,
       client: "codex",
       role: parent ? "subagent" : "main",
-      first_ns: 1,
-      last_ns: 2,
+      first_ns: "1",
+      last_ns: "2",
       steps: 5,
       aux_requests: 1,
       usage: usage(),

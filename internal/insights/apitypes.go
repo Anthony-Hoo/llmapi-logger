@@ -25,8 +25,8 @@ type UsageTotals struct {
 // calendar days of Daily and Heatmap. Heatmap is always the trailing 56 local
 // days ending at the day that contains to_ns, independent of from_ns.
 type OverviewResponse struct {
-	FromNS   int64          `json:"from_ns"`
-	ToNS     int64          `json:"to_ns"`
+	FromNS   int64          `json:"from_ns,string"`
+	ToNS     int64          `json:"to_ns,string"`
 	Totals   UsageTotals    `json:"totals"`
 	Sessions int64          `json:"sessions"`
 	Trees    int64          `json:"trees"`
@@ -65,8 +65,8 @@ type SessionCard struct {
 	Protocol      string         `json:"protocol"`
 	Client        string         `json:"client"`
 	Role          string         `json:"role"`
-	FirstNS       int64          `json:"first_ns"`
-	LastNS        int64          `json:"last_ns"`
+	FirstNS       int64          `json:"first_ns,string"`
+	LastNS        int64          `json:"last_ns,string"`
 	Steps         int64          `json:"steps"`
 	Turns         int64          `json:"turns"`
 	Models        []string       `json:"models"`
@@ -93,7 +93,7 @@ type SessionsResponse struct {
 // TrendStep is one request of a session trend.
 type TrendStep struct {
 	AuditID       string         `json:"audit_id"`
-	StartedAtNS   int64          `json:"started_at_ns"`
+	StartedAtNS   int64          `json:"started_at_ns,string"`
 	Turn          int64          `json:"turn"`
 	TurnStart     bool           `json:"turn_start"`
 	Model         string         `json:"model"`
@@ -129,8 +129,8 @@ type TreeNode struct {
 	SessionID      string         `json:"session_id,omitempty"`
 	Client         string         `json:"client"`
 	Role           string         `json:"role"`
-	FirstNS        int64          `json:"first_ns"`
-	LastNS         int64          `json:"last_ns"`
+	FirstNS        int64          `json:"first_ns,string"`
+	LastNS         int64          `json:"last_ns,string"`
 	Steps          int64          `json:"steps"`
 	AuxRequests    int64          `json:"aux_requests"` // compaction/title/review/auxiliary steps of this node
 	Usage          UsageTotals    `json:"usage"`
