@@ -74,6 +74,7 @@ type Options struct {
 	AdminToken string
 	Developer  DeveloperLogin
 	Query      AuditQuery
+	Insights   InsightsQuery
 	Users      UserCatalog
 	Rules      UserAgentRules
 	Assets     fs.FS
@@ -93,6 +94,7 @@ func NewHandler(options Options) (http.Handler, error) {
 
 	handler := &managementHandler{
 		query:     options.Query,
+		insights:  options.Insights,
 		users:     options.Users,
 		rules:     options.Rules,
 		developer: options.Developer,
@@ -108,6 +110,7 @@ func NewHandler(options Options) (http.Handler, error) {
 
 type managementHandler struct {
 	query         AuditQuery
+	insights      InsightsQuery
 	users         UserCatalog
 	rules         UserAgentRules
 	developer     DeveloperLogin
@@ -157,6 +160,8 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveAuditList(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/audits/"):
 		handler.serveAuditResource(writer, request)
+	case strings.HasPrefix(request.URL.Path, insightsPathPrefix):
+		handler.serveInsights(writer, request)
 	case !handler.requireAdmin(writer, request):
 		return
 	case request.URL.Path == "/healthz":

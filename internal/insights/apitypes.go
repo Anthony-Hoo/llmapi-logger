@@ -19,6 +19,11 @@ type UsageTotals struct {
 }
 
 // OverviewResponse is GET /api/v1/insights/overview.
+//
+// The tz_offset_min query parameter is minutes EAST of UTC (UTC+8 sends 480),
+// the negation of JavaScript's Date.getTimezoneOffset(); it defines the local
+// calendar days of Daily and Heatmap. Heatmap is always the trailing 56 local
+// days ending at the day that contains to_ns, independent of from_ns.
 type OverviewResponse struct {
 	FromNS   int64          `json:"from_ns"`
 	ToNS     int64          `json:"to_ns"`

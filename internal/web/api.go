@@ -360,6 +360,10 @@ func (handler *managementHandler) serveAuditResource(writer http.ResponseWriter,
 		handler.serveAuditDetail(writer, request, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[1] == "composition" {
+		handler.serveComposition(writer, request, parts[0])
+		return
+	}
 	if len(parts) == 3 && parts[1] == "raw" {
 		handler.serveRaw(writer, request, parts[0], query.Side(parts[2]))
 		return
