@@ -3,6 +3,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -2263,21 +2264,31 @@ export function DeveloperBadge({ identity }: { identity: DeveloperIdentity | nul
   );
 }
 
+// Same artwork as public/favicon.svg: an LLM conversation bubble with log
+// lines, inspected by a magnifier.
 function BrandMark({ compact = false }: { compact?: boolean }) {
+  const gradientId = useId();
+  const size = compact ? 36 : 48;
   return (
-    <div
-      className={
-        compact
-          ? "grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-950 text-white shadow-xs"
-          : "grid h-12 w-12 place-items-center rounded-xl bg-slate-950 text-white shadow-lg"
-      }
+    <svg
       aria-hidden="true"
+      className={compact ? "shrink-0 rounded-lg shadow-xs" : "rounded-xl shadow-lg"}
+      viewBox="0 0 64 64"
+      width={size}
+      height={size}
     >
-      <svg viewBox="0 0 24 24" width={compact ? 20 : 26} height={compact ? 20 : 26} fill="none">
-        <path d="M5 7.5h14M7.5 12h9M9.5 16.5h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-        <path d="M4 4h16v16H4z" stroke="currentColor" strokeWidth="1.3" opacity=".5" />
-      </svg>
-    </div>
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#3b6e9e" />
+          <stop offset="1" stopColor="#2c5378" />
+        </linearGradient>
+      </defs>
+      <rect width="64" height="64" rx="14" fill={`url(#${gradientId})`} />
+      <path d="M14 16h28a6 6 0 0 1 6 6v12a6 6 0 0 1-6 6H26l-8 7v-7h-4a6 6 0 0 1-6-6V22a6 6 0 0 1 6-6z" fill="#fff" />
+      <path d="M17 24h20M17 30h14" stroke="#2c5378" strokeWidth="3.5" strokeLinecap="round" />
+      <circle cx="43" cy="41" r="9" fill="#1d3b57" stroke="#fff" strokeWidth="4" />
+      <path d="M49.5 47.5l6 6" stroke="#fff" strokeWidth="5" strokeLinecap="round" />
+    </svg>
   );
 }
 

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>LLM API Audit</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b6e9e"/>
+      <stop offset="1" stop-color="#2c5378"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <path d="M14 16h28a6 6 0 0 1 6 6v12a6 6 0 0 1-6 6H26l-8 7v-7h-4a6 6 0 0 1-6-6V22a6 6 0 0 1 6-6z" fill="#fff"/>
+  <path d="M17 24h20M17 30h14" stroke="#2c5378" stroke-width="3.5" stroke-linecap="round"/>
+  <circle cx="43" cy="41" r="9" fill="#1d3b57" stroke="#fff" stroke-width="4"/>
+  <path d="M49.5 47.5l6 6" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+</svg>
