@@ -800,3 +800,20 @@ func TestFingerprintHexLooksLikeHex(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestAnalyzeRejectsTrailingDataAfterRequestJSON(t *testing.T) {
+	t.Parallel()
+	valid := `{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}`
+	if _, err := Analyze(Input{Protocol: "anthropic", Endpoint: "messages", Request: []byte(valid + " \n")}, nil, testFingerprinter{}); err != nil {
+		t.Fatalf("trailing whitespace must be accepted: %v", err)
+	}
+	for name, body := range map[string]string{
+		"second object": valid + `{"model":"other"}`,
+		"garbage":       valid + ` trailing`,
+		"second value":  valid + ` 1`,
+	} {
+		if _, err := Analyze(Input{Protocol: "anthropic", Endpoint: "messages", Request: []byte(body)}, nil, testFingerprinter{}); err == nil {
+			t.Fatalf("%s: request with trailing data was accepted", name)
+		}
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,6 +21,14 @@ func decodeJSON(data []byte) (any, error) {
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	// Exactly one JSON value: a second Decode must hit the end of input, so
+	// trailing data (a second object, garbage) is rejected instead of ignored.
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		if err == nil {
+			err = errors.New("insights: trailing data after JSON value")
+		}
 		return nil, err
 	}
 	return value, nil
