@@ -338,13 +338,15 @@ insights:
 已实现为 parser worker 内的后台步骤（`internal/parser/backfill.go`），不新增 writer 并发：
 
 - **触发**：parser 唯一的 worker goroutine 每次扫描 tick（默认 30 秒）在 pending 扫描之后调用；仅当 `insights` 启用（已安装分析器）且实时队列为空时才运行，处理过程中一旦实时队列出现新项立即让出。每个 tick 最多处理 20 条，随 `ctx` 取消，永远不阻塞实时解析。
-- **候选**：`parse_status IN ('ok','partial')` 且已结束，`LEFT JOIN audit_analysis` 后缺行或 `analysis_version < AnalysisVersion`，按开始时间从新到旧；以 `(started_at_ns, audit_id)` keyset 游标向前推进。游标走完后暂停 10 分钟再从最新重扫，避免对同一批不可处理的记录空转。
+- **候选**：`parse_status IN ('ok','partial')` 且已结束，`LEFT JOIN audit_analysis` 后缺行或 `analysis_version < AnalysisVersion`，按 `started_at_ns, audit_id` 升序，即**从旧到新**；以 `(started_at_ns, audit_id)` keyset 游标向前推进，游标为空时从最旧的一条开始（`ListAnalysisBackfillCandidates`）。游标走完后暂停 10 分钟再从最旧重扫，避免对同一批不可处理的记录空转。**必须由旧到新**的原因：后继行（`prev_audit_id`、轮次与会话拼接）需要链接到前驱行的分析结果，先分析前驱才能让后继在同一轮回填里拿到正确的链接；若由新到旧，后继会先于前驱落库而缺少前驱链接。
 - **正文来源**：raw 分块仍在（`retention_state` 非 metadata）时复用实时路径的 `loadInput`。已转为 metadata 的 OpenAI audit 通过注入的 `parser.Reconstructor`（由 query 服务实现，复用 `ReconstructTurn` 的已验证重建）取得请求与响应 JSON。其余情形（Anthropic/Gemini 的 raw 已被 retention 清除、没有 turn graph 等）跳过。
 - **重新解析**：在内存中重跑协议 parser 的 `Parse` 取得 Conversation 与归一化用量，**不**重写 `parsed_results`；再读取白名单 Header，调用与实时路径相同的分析器钩子（`runAnalyzer`），行按 `audit_id` upsert。
 - **流式响应的限制**：metadata 保留的 OpenAI 流式响应无法还原成 SSE。回填改用 response envelope 中保存的 usage 摘要与重建的 conversation，因此缓存读/写和推理 Token 拆分不可恢复（只有 uncached input 与 output），停止原因也可能缺失；非流式响应的重建 JSON 保留完整 usage。
 - **防空转**：进程内有界（4096）的跳过集合记录跳过或失败的 audit，同一进程不再重试；满后清空重建。日志码 `analysis_backfill_skipped`（附 `reason` 枚举）与 `analysis_backfill_failed`，见[模块 13](13-observability-health-and-lifecycle.md)。暂时性失败（如存储繁忙）也要到进程重启才会再试。
 - 已被 retention 删除的记录不在候选里；没有现成的健康计数器，因此未新增 `analysis_backfill_pending` 之类的指标（项目目前无 metrics 面）。
 - `AnalysisVersion` 为 4：版本 2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0；版本 4 起 user 角色的图片/文档计入会话键推断的首条用户项与 `turn_start`，旧行会被回填重算。
+- **词表覆盖只影响新分析**：修改 `insights.vocabulary_file` 只对之后新分析的记录生效；已有行保持原有分类，直到 `AnalysisVersion` 变化触发回填重算。
+
 ## 10. 阶段与风险
 
 | 阶段 | 内容 | 工作量 | 主要风险 |

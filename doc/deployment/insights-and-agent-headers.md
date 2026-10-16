@@ -41,7 +41,7 @@ insights:
 
 ## 3. 词表覆盖
 
-工具分类、注入标记和各客户端的 Agent 标识 Header 来自编译进二进制的默认词表。要调整，复制 [`configs/insights-vocabulary.example.yaml`](../../configs/insights-vocabulary.example.yaml)，只保留要改的键，把 `insights.vocabulary_file` 指向它。覆盖按键合并，示例文件头部列有合并规则；非法时拒绝启动。典型用途：自研框架已经有自己的 Header 名，直接在词表里给 `custom` 客户端改名，而不用改框架。
+工具分类、注入标记和各客户端的 Agent 标识 Header 来自编译进二进制的默认词表。要调整，复制 [`configs/insights-vocabulary.example.yaml`](../../configs/insights-vocabulary.example.yaml)，只保留要改的键，把 `insights.vocabulary_file` 指向它。覆盖按键合并，示例文件头部列有合并规则；非法时拒绝启动。典型用途：自研框架已经有自己的 Header 名，直接在词表里给 `custom` 客户端改名，而不用改框架。修改词表覆盖只影响之后新分析的记录；已有行保持原有分类，直到 `AnalysisVersion` 变化才会被回填重算。
 
 ## 4. 各客户端
 
