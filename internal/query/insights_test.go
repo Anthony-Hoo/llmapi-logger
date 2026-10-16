@@ -649,3 +649,20 @@ func TestInsightsAuxiliaryStepsDoNotDefineSessionsAndPlainSessionsAreNotTrees(t 
 		t.Fatalf("overview trees = %d %v", overview.Trees, err)
 	}
 }
+
+func TestInsightsOverviewHeatmapEndsOnDayContainingExclusiveBoundary(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	fixture.seedWorld()
+	from := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC).UnixNano()
+	to := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC).UnixNano()
+
+	response, err := fixture.service.Overview(context.Background(), OverviewQuery{FromNS: &from, ToNS: &to, GroupBy: "model", Scope: scopeFor(keyOwn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := response.Heatmap[HeatmapDays-1]
+	if len(response.Heatmap) != HeatmapDays || last.Day != "2026-10-10" || last.Requests != 3 || response.Heatmap[0].Day != "2026-08-16" {
+		t.Fatalf("heatmap = first %+v last %+v", response.Heatmap[0], last)
+	}
+}

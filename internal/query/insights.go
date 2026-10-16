@@ -318,7 +318,8 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 		return response.Groups[i].Key < response.Groups[j].Key
 	})
 
-	endDay := localDayIndex(to, request.TZOffsetMin)
+	// to is an exclusive boundary, so the last day is the one containing to-1.
+	endDay := lastDay
 	heatmapFrom := localDayStartNS(endDay-(HeatmapDays-1), request.TZOffsetMin)
 	heatmapTo := localDayStartNS(endDay+1, request.TZOffsetMin)
 	counts, err := service.store.InsightsDayCounts(ctx, service.filter(request.Scope, max(heatmapFrom, 0), heatmapTo), request.TZOffsetMin)
