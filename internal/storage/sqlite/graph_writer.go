@@ -438,7 +438,7 @@ func chooseTurnParent(transaction *sql.Tx, turn auditmodel.PreparedTurn) (*turnP
 			return nil, err
 		}
 		if candidate != nil {
-			return evaluateCandidate(transaction, turn, *candidate, "previous_response_id", 100, linkForced)
+			return evaluateCandidate(transaction, turn, *candidate, "previous_response_id", 100, linkForced, make(map[string][]auditmodel.ObjectRef))
 		}
 	}
 	if len(turn.ConversationKeyHash) == 32 {
@@ -523,9 +523,12 @@ func listTurnCandidates(transaction *sql.Tx, query string, arguments ...any) ([]
 // bestTurnParent returns the accepted candidate with the lowest delta cost.
 // Candidates arrive newest first, so ties go to the most recent turn.
 func bestTurnParent(transaction *sql.Tx, turn auditmodel.PreparedTurn, candidates []turnCandidate, mode linkMode) (*turnParent, error) {
+	// Candidates usually share most of their ancestry, so one memo spares each
+	// of them a full walk back to its root.
+	memo := make(map[string][]auditmodel.ObjectRef)
 	var best *turnParent
 	for _, candidate := range candidates {
-		evaluated, err := evaluateCandidate(transaction, turn, candidate, "", 0, mode)
+		evaluated, err := evaluateCandidate(transaction, turn, candidate, "", 0, mode, memo)
 		if err != nil {
 			return nil, err
 		}
@@ -550,8 +553,7 @@ ORDER BY t.created_at_ns DESC, t.turn_id DESC LIMIT 1`, protocol, responseID).Sc
 	return &value, nil
 }
 
-func evaluateCandidate(transaction *sql.Tx, turn auditmodel.PreparedTurn, candidate turnCandidate, forcedReason string, forcedConfidence int, mode linkMode) (*turnParent, error) {
-	memo := make(map[string][]auditmodel.ObjectRef)
+func evaluateCandidate(transaction *sql.Tx, turn auditmodel.PreparedTurn, candidate turnCandidate, forcedReason string, forcedConfidence int, mode linkMode, memo map[string][]auditmodel.ObjectRef) (*turnParent, error) {
 	request, err := loadRequestRefs(transaction, candidate.turnID, memo, make(map[string]bool))
 	if err != nil {
 		return nil, err
