@@ -1,0 +1,29 @@
+{
+  "model": "claude-test",
+  "max_tokens": 8192,
+  "stream": true,
+  "metadata": {"user_id": "{\"device_id\":\"dev-1\",\"account_uuid\":\"\",\"session_id\":\"cc-session-1\"}"},
+  "system": [
+    {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3; cch=abc123;"},
+    {"type": "text", "text": "You are a coding agent."}
+  ],
+  "tools": [
+    {"name": "Read", "description": "Read a file", "input_schema": {"type": "object"}},
+    {"name": "Edit", "description": "Edit a file", "input_schema": {"type": "object"}},
+    {"name": "mcp__my__server__do_thing", "description": "Do a thing", "input_schema": {"type": "object"}}
+  ],
+  "messages": [
+    {"role": "user", "content": [
+      {"type": "text", "text": "<system-reminder>\nToday is a day.\n</system-reminder>"},
+      {"type": "text", "text": "Fix the bug in main.go"}
+    ]},
+    {"role": "assistant", "content": [
+      {"type": "thinking", "thinking": "Let me look", "signature": "c2ln"},
+      {"type": "text", "text": "Reading the file."},
+      {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "/work/main.go"}}
+    ]},
+    {"role": "user", "content": [
+      {"type": "tool_result", "tool_use_id": "toolu_1", "content": "package main"}
+    ]}
+  ]
+}

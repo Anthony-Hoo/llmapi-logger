@@ -1,0 +1,9 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","name":"shell"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"r1","status":"completed","model":"gpt-test"}}
+
