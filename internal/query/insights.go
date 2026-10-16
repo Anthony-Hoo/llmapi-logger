@@ -645,7 +645,16 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 			response.TreeID = treeIDOf(last.Root)
 		}
 	}
-	response.ContextWindow = service.prices.ContextWindow(last.Model)
+	// An auxiliary request may use a different model; the window belongs to the
+	// latest main/subagent step when there is one.
+	windowModel := last.Model
+	for index := len(rows) - 1; index >= 0; index-- {
+		if !isAuxiliaryRole(rows[index].Role) {
+			windowModel = rows[index].Model
+			break
+		}
+	}
+	response.ContextWindow = service.prices.ContextWindow(windowModel)
 	return response, nil
 }
 

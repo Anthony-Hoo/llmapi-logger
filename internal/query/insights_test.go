@@ -835,3 +835,30 @@ func TestInsightsRequestsWithoutUsageAreUnpricedNotFree(t *testing.T) {
 		t.Fatalf("step costs = %v / %v", trend.Steps[0].CostUSD, trend.Steps[1].CostUSD)
 	}
 }
+
+func TestInsightsTrendContextWindowIgnoresAuxiliaryModel(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	root, node := fingerprint(0xd0), fingerprint(0x31)
+	fixture.seed(stepSeed{id: "main", offset: 0, key: keyOwn, session: testSessionShared, root: root, node: node, uncached: i64(10), turnStart: true})
+	fixture.seed(stepSeed{id: "title", offset: 10 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node,
+		role: "title", model: "mystery-model", uncached: i64(1)})
+	ctx := context.Background()
+
+	trend, err := fixture.service.Trend(ctx, testSessionShared, scopeFor(keyOwn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fixture.service.prices.ContextWindow("gpt-4.1")
+	if want == nil || trend.ContextWindow == nil || *trend.ContextWindow != *want {
+		t.Fatalf("context window = %v, want %v", trend.ContextWindow, want)
+	}
+
+	// Only auxiliary steps: fall back to the last row.
+	fixture.seed(stepSeed{id: "only-aux", offset: 20 * time.Second, key: keyOwn, session: "agt_bbbbbbbbbbbbbbbbbbbbbbbb",
+		root: fingerprint(0xd1), node: fingerprint(0x32), role: "title", uncached: i64(1)})
+	trend, err = fixture.service.Trend(ctx, "agt_bbbbbbbbbbbbbbbbbbbbbbbb", scopeFor(keyOwn))
+	if err != nil || trend.ContextWindow == nil || *trend.ContextWindow != *want {
+		t.Fatalf("aux-only window = %v %v", trend.ContextWindow, err)
+	}
+}
