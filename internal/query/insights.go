@@ -53,6 +53,7 @@ type InsightsStore interface {
 	InsightsSubagentCounts(context.Context, sqlite.InsightsFilter) (map[string]int64, error)
 	InsightsRealRoots(context.Context, sqlite.InsightsFilter) (map[string]bool, error)
 	InsightsTrend(context.Context, sqlite.InsightsFilter, int) ([]sqlite.InsightsTrendRow, bool, error)
+	InsightsTurnStartsBefore(context.Context, sqlite.InsightsFilter, int64, string) (int64, error)
 	InsightsTree(context.Context, sqlite.InsightsFilter, int) ([]sqlite.InsightsTreeNodeRow, bool, error)
 	LoadAnalysis(context.Context, string) (sqlite.AnalysisRow, error)
 	QueryAuditScope(context.Context, string) (sqlite.AuditScopeRow, error)
@@ -65,6 +66,8 @@ type Insights struct {
 	cipher security.Cipher
 	prices *pricing.Table
 	now    func() time.Time
+	// trendLimit bounds the steps of one trend; tests lower it.
+	trendLimit int
 }
 
 // NewInsights constructs the service. prices may be nil, in which case every
@@ -76,7 +79,7 @@ func NewInsights(store InsightsStore, cipher security.Cipher, prices *pricing.Ta
 	if cipher == nil {
 		return nil, errors.New("query: nil cipher")
 	}
-	return &Insights{store: store, cipher: cipher, prices: prices, now: time.Now}, nil
+	return &Insights{store: store, cipher: cipher, prices: prices, now: time.Now, trendLimit: MaxTrendSteps}, nil
 }
 
 // OverviewQuery is the validated input of Overview. FromNS and ToNS default to
@@ -566,7 +569,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 		return insights.TrendResponse{}, err
 	}
 	filter := sqlite.InsightsFilter{Scope: storageScope(scope), SessionIDs: []string{sessionID}}
-	rows, truncated, err := service.store.InsightsTrend(ctx, filter, MaxTrendSteps)
+	rows, truncated, err := service.store.InsightsTrend(ctx, filter, service.trendLimit)
 	if err != nil {
 		return insights.TrendResponse{}, fmt.Errorf("query: insights trend: %w", err)
 	}
@@ -578,7 +581,14 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 		byID[rows[index].AuditID] = &rows[index]
 	}
 	response := insights.TrendResponse{SessionID: sessionID, Truncated: truncated, Steps: make([]insights.TrendStep, 0, len(rows))}
+	// A truncated trend starts mid-session; seed the counter with the turns that
+	// were left out so numbering stays absolute.
 	var turn int64
+	if truncated {
+		if turn, err = service.store.InsightsTurnStartsBefore(ctx, filter, rows[0].StartedAtNS, rows[0].AuditID); err != nil {
+			return insights.TrendResponse{}, fmt.Errorf("query: insights trend turns: %w", err)
+		}
+	}
 	for index := range rows {
 		row := &rows[index]
 		turnStart := row.TurnStart && !isAuxiliaryRole(row.Role)

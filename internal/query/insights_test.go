@@ -666,3 +666,48 @@ func TestInsightsOverviewHeatmapEndsOnDayContainingExclusiveBoundary(t *testing.
 		t.Fatalf("heatmap = first %+v last %+v", response.Heatmap[0], last)
 	}
 }
+
+func TestInsightsTrendTruncationKeepsAbsoluteTurnNumbers(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	root, node := fingerprint(0xa0), fingerprint(0x11)
+	steps := []stepSeed{
+		{id: "t-1", turnStart: true},
+		{id: "t-2", turnStart: true, role: insights.RoleCompaction}, // auxiliary: never a turn
+		{id: "t-3", turnStart: true},
+		{id: "t-4"},
+		{id: "t-5", turnStart: true},
+		{id: "t-6"},
+	}
+	for index, step := range steps {
+		step.offset = time.Duration(index) * time.Minute
+		step.key, step.session, step.root, step.node = keyOwn, testSessionShared, root, node
+		fixture.seed(step)
+	}
+	fixture.service.trendLimit = 3
+
+	trend, err := fixture.service.Trend(context.Background(), testSessionShared, scopeFor(keyOwn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trend.Truncated || len(trend.Steps) != 3 {
+		t.Fatalf("trend = truncated %v with %d steps, want 3 truncated", trend.Truncated, len(trend.Steps))
+	}
+	want := []struct {
+		id        string
+		turn      int64
+		turnStart bool
+	}{{"t-4", 2, false}, {"t-5", 3, true}, {"t-6", 3, false}}
+	for index, step := range trend.Steps {
+		if step.AuditID != want[index].id || step.Turn != want[index].turn || step.TurnStart != want[index].turnStart {
+			t.Errorf("step %d = %s turn %d start %v, want %+v", index, step.AuditID, step.Turn, step.TurnStart, want[index])
+		}
+	}
+
+	// Without truncation the numbering is unchanged.
+	fixture.service.trendLimit = MaxTrendSteps
+	full, err := fixture.service.Trend(context.Background(), testSessionShared, scopeFor(keyOwn))
+	if err != nil || full.Truncated || full.Steps[3].Turn != 2 || full.Steps[4].Turn != 3 {
+		t.Fatalf("full trend = %+v %v", full, err)
+	}
+}

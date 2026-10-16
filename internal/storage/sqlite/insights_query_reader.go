@@ -675,6 +675,35 @@ LIMIT ?`, arguments...)
 	return rows, truncated, nil
 }
 
+// InsightsTurnStartsBefore counts the in-scope turn-start steps of
+// filter.SessionIDs[0] that InsightsTrend orders before the step
+// (startedAtNS, auditID), so a truncated trend can keep absolute turn numbers.
+// Auxiliary roles never start a turn, as in every other turn count.
+func (store *Store) InsightsTurnStartsBefore(ctx context.Context, filter InsightsFilter, startedAtNS int64, auditID string) (int64, error) {
+	if err := store.insightsReady(ctx); err != nil {
+		return 0, err
+	}
+	if len(filter.SessionIDs) != 1 {
+		return 0, errors.New("sqlite: insights turn count needs exactly one session")
+	}
+	filter.FromNS, filter.ToNS = 0, 0
+	where, arguments, err := filter.where()
+	if err != nil {
+		return 0, err
+	}
+	arguments = append(arguments, startedAtNS, startedAtNS, auditID)
+	var count int64
+	err = store.readerDB.QueryRowContext(ctx, `
+SELECT COUNT(*)`+insightsFrom+where+`
+  AND x.turn_start != 0
+  AND COALESCE(x.agent_role, 'main') NOT IN `+insightsAuxRoles+`
+  AND (x.started_at_ns < ? OR (x.started_at_ns = ? AND x.audit_id < ?))`, arguments...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: insights turn count: %w", err)
+	}
+	return count, nil
+}
+
 // InsightsTreeNodeRow is one agent of a tree. Steps excludes auxiliary
 // requests, which are counted in AuxRequests; the last-step values come from
 // the node's latest non-auxiliary request when it has one.
