@@ -452,6 +452,15 @@ LIMIT ?`, turn.Protocol, turn.ConversationKeyHash, turn.CreatedAtNS, parentCandi
 		if err != nil {
 			return nil, err
 		}
+		// A provider-side conversation is one chain whose requests carry only
+		// the new input, so content cannot confirm the link; follow the latest
+		// earlier turn as the provider does.
+		if turn.ServerManagedContext {
+			if len(candidates) == 0 {
+				return nil, nil
+			}
+			return evaluateCandidate(transaction, turn, candidates[0], "conversation_key", 95, linkForced, make(map[string][]auditmodel.ObjectRef))
+		}
 		// A conversation key groups a client session, not one agent: Codex and
 		// OpenCode send the root session id as prompt_cache_key for the parent
 		// and every sub-agent, so the latest keyed turn may belong to a

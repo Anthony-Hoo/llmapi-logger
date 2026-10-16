@@ -43,6 +43,7 @@ func (implementation *Parser) NormalizeAudit(_ context.Context, input base.Input
 		turn.RequestOriginal = request.original
 		turn.PreviousResponseID = protocolutil.String(root["previous_response_id"])
 		turn.ConversationKey = conversationKey(root)
+		turn.ServerManagedContext = serverManagedConversation(root)
 	}
 	if input.Response.Present {
 		if base.LooksLikeSSE(input.Response.ContentType, input.Response.Data) {
@@ -380,6 +381,21 @@ func conversationKey(root map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// serverManagedConversation reports a request bound to a provider-side
+// conversation, whose stored items the provider prepends, so the request holds
+// only the new input. prompt_cache_key, thread_id and metadata ids only group
+// requests; their clients resend the context themselves.
+func serverManagedConversation(root map[string]any) bool {
+	if protocolutil.String(root["conversation_id"]) != "" {
+		return true
+	}
+	value := root["conversation"]
+	if protocolutil.String(value) != "" {
+		return true
+	}
+	return protocolutil.String(protocolutil.Map(value)["id"]) != ""
 }
 
 func cloneMap(value map[string]any) (map[string]any, error) {
