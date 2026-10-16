@@ -152,3 +152,45 @@ func TestJSONArrayStreamMatchesEquivalentSSE(t *testing.T) {
 		t.Fatalf("truncated array status = %q", broken.Status)
 	}
 }
+
+func TestNormalizedUsageAddsToolUsePromptTokens(t *testing.T) {
+	t.Parallel()
+	first := `{"responseId":"gem-t","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"a"}]}}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":40,"candidatesTokenCount":2,"totalTokenCount":112}}`
+	last := `{"candidates":[{"index":0,"finishReason":"STOP","content":{"role":"model","parts":[{"text":"b"}]}}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":40,"toolUsePromptTokenCount":25,"candidatesTokenCount":5,"thoughtsTokenCount":3,"totalTokenCount":133}}`
+	want := insights.Usage{UncachedInput: tokens(85), CacheRead: tokens(40), CacheWrite: tokens(0), Output: tokens(8), Reasoning: tokens(3)}
+
+	for _, test := range []struct {
+		name, parser, contentType, body string
+		want                            insights.Usage
+	}{
+		{"json", GenerateContent, "application/json", last, want},
+		{"sse", StreamGenerateContent, "text/event-stream", "data: " + first + "\n\ndata: " + last + "\n\n", want},
+		{"json array", StreamGenerateContent, "application/json", "[" + first + "," + last + "]", want},
+		{
+			"clamped with cached above prompt", GenerateContent, "application/json",
+			`{"candidates":[],"usageMetadata":{"promptTokenCount":3,"cachedContentTokenCount":8,"toolUsePromptTokenCount":6}}`,
+			insights.Usage{UncachedInput: tokens(6), CacheRead: tokens(8), CacheWrite: tokens(0)},
+		},
+		{
+			"tool use only", GenerateContent, "application/json",
+			`{"candidates":[],"usageMetadata":{"toolUsePromptTokenCount":6}}`,
+			insights.Usage{UncachedInput: tokens(6)},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			implementation, err := New(test.parser)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := implementation.Parse(context.Background(), base.Input{
+				Endpoint: "/v1beta/models/gemini-example:generateContent",
+				Response: base.BodySource{Present: true, Complete: true, ContentType: test.contentType, Data: []byte(test.body)},
+			})
+			if !reflect.DeepEqual(result.Normalized, test.want) {
+				t.Fatalf("normalized = %s, want %s", formatUsage(result.Normalized), formatUsage(test.want))
+			}
+		})
+	}
+}

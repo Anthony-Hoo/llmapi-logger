@@ -164,7 +164,7 @@ CREATE INDEX audit_analysis_model_idx   ON audit_analysis(model, started_at_ns);
 | OpenAI Chat | `prompt_tokens − prompt_tokens_details.cached_tokens` | `cached_tokens` | 0 | `completion_tokens` | `completion_tokens_details.reasoning_tokens` |
 | OpenAI Responses | `input_tokens − input_tokens_details.cached_tokens` | `cached_tokens` | 0 | `output_tokens` | `output_tokens_details.reasoning_tokens` |
 | Anthropic | `input_tokens`（本身已不含缓存） | `cache_read_input_tokens` | `cache_creation_input_tokens` | `output_tokens` | 不单独报告，NULL |
-| Gemini | `promptTokenCount − cachedContentTokenCount` | `cachedContentTokenCount` | 0 | `candidatesTokenCount + thoughtsTokenCount` | `thoughtsTokenCount` |
+| Gemini | `promptTokenCount − cachedContentTokenCount + toolUsePromptTokenCount`（服务端工具结果回填的输入，不含在 `promptTokenCount` 内；下限 0） | `cachedContentTokenCount` | 0 | `candidatesTokenCount + thoughtsTokenCount` | `thoughtsTokenCount` |
 
 - 流式响应取最后一个带 usage 的事件；Anthropic 合并 `message_start` 与 `message_delta` 的 usage。
 - 缓存命中率 = `Σcache_read / Σ(uncached + cache_read + cache_write)`。

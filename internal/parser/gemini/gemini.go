@@ -225,13 +225,20 @@ func parseArrayStream(data []byte, result *base.Result) error {
 
 // normalizeUsage splits promptTokenCount, which includes cached content, into
 // exclusive buckets. candidatesTokenCount excludes thinking, so output adds
-// thoughtsTokenCount back. Gemini does not report cache writes.
+// thoughtsTokenCount back. toolUsePromptTokenCount counts the results of
+// server-side tools (for example Google Search) that are fed back as input and
+// is not part of promptTokenCount, so it joins the uncached bucket. Gemini does
+// not report cache writes.
 func normalizeUsage(usage map[string]any) insights.Usage {
 	prompt := protocolutil.Int64(usage["promptTokenCount"])
 	cached := protocolutil.Int64(usage["cachedContentTokenCount"])
+	toolUse := protocolutil.Int64(usage["toolUsePromptTokenCount"])
 	thoughts := protocolutil.Int64(usage["thoughtsTokenCount"])
+	if toolUse != nil {
+		toolUse = protocolutil.Int64Pointer(max(*toolUse, 0))
+	}
 	normalized := insights.Usage{
-		UncachedInput: protocolutil.NonNegativeDifference(prompt, cached),
+		UncachedInput: protocolutil.SumReported(protocolutil.NonNegativeDifference(prompt, cached), toolUse),
 		CacheRead:     cached,
 		Output:        protocolutil.SumReported(protocolutil.Int64(usage["candidatesTokenCount"]), thoughts),
 		Reasoning:     thoughts,
