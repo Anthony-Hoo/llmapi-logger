@@ -4,7 +4,7 @@ import type { DailyUsage } from "../../types";
 import { formatRatio, formatTokens, formatUSD } from "../../lib/insights/format";
 import { axisTick, chartColors } from "../../lib/tokens";
 import { tooltipClassName } from "../ui/styles";
-import { EmptyNote } from "./ui-bits";
+import { EmptyNote, UnbilledNote } from "./ui-bits";
 
 const TOKEN_COLOR = chartColors.series1;
 const COST_COLOR = chartColors.series2;
@@ -22,12 +22,12 @@ export function dailyRows(daily: readonly DailyUsage[]): DailyRow[] {
     day: entry.day,
     label: entry.day.slice(5),
     tokens: entry.usage.prompt_total + entry.usage.output,
-    cost: entry.usage.estimated_cost_usd,
+    cost: entry.usage.cost_usd,
     usage: entry.usage,
   }));
 }
 
-/** Paired bars per day: tokens (left axis) next to estimated cost (right axis). */
+/** Paired bars per day: tokens (left axis) next to actual billed cost (right axis). */
 export function DailyChart({ daily }: { daily: readonly DailyUsage[] }) {
   const rows = dailyRows(daily);
   if (rows.length === 0) {
@@ -42,7 +42,7 @@ export function DailyChart({ daily }: { daily: readonly DailyUsage[] }) {
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block h-2.5 w-2.5 rounded-xs" style={{ backgroundColor: COST_COLOR }} />
-          估算成本（右轴）
+          实际计费（右轴）
         </span>
       </div>
       <div className="h-64 w-full" data-testid="daily-chart">
@@ -61,7 +61,7 @@ export function DailyChart({ daily }: { daily: readonly DailyUsage[] }) {
             />
             <Tooltip content={<DailyTooltip />} cursor={{ fill: chartColors.cursor }} />
             <Bar yAxisId="tokens" dataKey="tokens" name="Token" fill={TOKEN_COLOR} radius={[2, 2, 0, 0]} isAnimationActive={false} />
-            <Bar yAxisId="cost" dataKey="cost" name="估算成本" fill={COST_COLOR} radius={[2, 2, 0, 0]} isAnimationActive={false} />
+            <Bar yAxisId="cost" dataKey="cost" name="实际计费" fill={COST_COLOR} radius={[2, 2, 0, 0]} isAnimationActive={false} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -87,10 +87,10 @@ function DailyTooltip({ active, payload }: { active?: boolean; payload?: Readonl
         <dd className="text-right tabular-nums">{formatTokens(usage.output)}</dd>
         <dt className="text-subtle">缓存命中率</dt>
         <dd className="text-right tabular-nums">{formatRatio(usage.cache_hit_rate)}</dd>
-        <dt className="text-subtle">估算成本</dt>
+        <dt className="text-subtle">实际计费</dt>
         <dd className="text-right tabular-nums">
-          {formatUSD(usage.estimated_cost_usd)}
-          {usage.unpriced_requests > 0 ? "（部分未知价格）" : ""}
+          {formatUSD(usage.cost_usd)}
+          <UnbilledNote count={usage.unbilled_requests} className="ml-1" />
         </dd>
       </dl>
     </div>

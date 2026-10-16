@@ -59,3 +59,12 @@ export const EVENT_INFO: Record<string, { label: string; glyph: string; color: s
 export function eventLabel(event: string): string {
   return EVENT_INFO[event]?.label ?? event;
 }
+
+
+/** Muted "含 N 条未计费" note shown next to a cost when some requests have no billing result. */
+export function UnbilledNote({ count, className }: { count: number; className?: string }) {
+  if (count <= 0) {
+    return null;
+  }
+  return <span className={cn("text-label text-subtle", className)}>含 {count.toLocaleString("zh-CN")} 条未计费</span>;
+}

@@ -31,7 +31,7 @@ import { CategoryLegend, CompositionBar } from "./composition-bar";
 import { DailyChart } from "./daily-chart";
 import { ActivityHeatmap } from "./heatmap";
 import { SessionCardView } from "./session-card";
-import { EmptyNote, PanelTitle, Segmented } from "./ui-bits";
+import { EmptyNote, PanelTitle, Segmented, UnbilledNote } from "./ui-bits";
 
 const ALL_GROUPS: ReadonlyArray<{ value: InsightsGroupBy; label: string; adminOnly: boolean }> = [
   { value: "model", label: "按模型", adminOnly: false },
@@ -46,6 +46,9 @@ const SESSION_SORTS: ReadonlyArray<{ value: InsightsSessionSort; label: string }
   { value: "tokens", label: "Token 用量" },
   { value: "context", label: "上下文占用" },
 ];
+
+const BILLING_DESCRIPTION =
+  "成本为 NewAPI 的实际扣费（quota / quota_per_unit，折算为美元），不反映退款；需要配置 newapi.access_token 与 newapi.user_id 才能获取。";
 
 export function groupOptions(isDeveloper: boolean) {
   return ALL_GROUPS.filter((option) => !(isDeveloper && option.adminOnly));
@@ -109,6 +112,7 @@ export function OverviewPage({
   const [cardsLoading, setCardsLoading] = useState(true);
   const [moreLoading, setMoreLoading] = useState(false);
   const [cardsError, setCardsError] = useState<string | null>(null);
+  const [cardsBilling, setCardsBilling] = useState(true);
 
   // Advanced whenever the first page is reloaded (day filter, sort or range
   // change), so a "加载更多" response of an older list is discarded.
@@ -125,6 +129,7 @@ export function OverviewPage({
       .then((page) => {
         setCards(page.items);
         setNextCursor(page.next_cursor || null);
+        setCardsBilling(page.billing_enabled !== false);
       })
       .catch((cause: unknown) => {
         if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
@@ -171,7 +176,7 @@ export function OverviewPage({
     <div className="space-y-section">
       <PageHeader
         title="用量洞察"
-        description="成本为按内置价格快照的估算，不含 NewAPI 的实际计费倍率。"
+        description={BILLING_DESCRIPTION}
         actions={
           <>
             <Segmented
@@ -221,7 +226,7 @@ export function OverviewPage({
 
           <Card>
             <CardContent className="space-y-stack pt-card">
-              <PanelTitle title="每日用量" hint="每天一对柱：Token 与估算成本" />
+              <PanelTitle title="每日用量" hint="每天一对柱：Token 与实际计费" />
               <DailyChart daily={overview.daily} />
             </CardContent>
           </Card>
@@ -244,7 +249,7 @@ export function OverviewPage({
           <Card>
             <CardContent className="space-y-stack pt-card">
               <PanelTitle title="分组统计" />
-              <GroupTable groups={overview.groups} />
+              <GroupTable groups={overview.groups} billingEnabled={overview.billing_enabled !== false} />
             </CardContent>
           </Card>
         </>
@@ -295,7 +300,7 @@ export function OverviewPage({
         ) : (
           <div className="grid gap-section md:grid-cols-2 2xl:grid-cols-3">
             {cards.map((card) => (
-              <SessionCardView key={card.session_id} card={card} onOpenSession={onOpenSession} onOpenTree={onOpenTree} />
+              <SessionCardView key={card.session_id} card={card} billingEnabled={cardsBilling} onOpenSession={onOpenSession} onOpenTree={onOpenTree} />
             ))}
           </div>
         )}
@@ -326,7 +331,8 @@ function OverviewSkeleton() {
 
 export function KpiBar({ overview }: { overview: OverviewResponse }) {
   const totals = overview.totals;
-  const partial = totals.unpriced_requests > 0;
+  const billingEnabled = overview.billing_enabled !== false;
+  const unbilled = totals.unbilled_requests;
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7" aria-label="关键指标">
       <Kpi label="请求数" value={totals.requests.toLocaleString("zh-CN")} />
@@ -336,10 +342,15 @@ export function KpiBar({ overview }: { overview: OverviewResponse }) {
       <Kpi label="输出" value={formatTokens(totals.output)} hint={`含推理 ${formatTokens(totals.reasoning)}`} />
       <Kpi label="缓存命中率" value={formatRatio(totals.cache_hit_rate)} />
       <Kpi
-        label="估算成本"
-        value={formatUSD(totals.estimated_cost_usd)}
-        hint={partial ? `部分模型未知价格（${totals.unpriced_requests} 次请求未计价）` : "估算，非实际账单"}
-        warn={partial}
+        label="实际计费"
+        value={billingEnabled ? formatUSD(totals.cost_usd) : "—"}
+        hint={
+          !billingEnabled
+            ? "未配置 NewAPI 管理凭据"
+            : unbilled > 0
+              ? `${unbilled.toLocaleString("zh-CN")} 次请求未计费`
+              : "来自 NewAPI 消费日志"
+        }
       />
     </div>
   );
@@ -368,7 +379,7 @@ function MixPanel({ mix }: { mix: OverviewResponse["composition"] }) {
   );
 }
 
-export function GroupTable({ groups }: { groups: readonly GroupUsage[] }) {
+export function GroupTable({ groups, billingEnabled = true }: { groups: readonly GroupUsage[]; billingEnabled?: boolean }) {
   if (groups.length === 0) {
     return <EmptyNote>没有可分组的数据。</EmptyNote>;
   }
@@ -382,7 +393,7 @@ export function GroupTable({ groups }: { groups: readonly GroupUsage[] }) {
             <TableHead className="text-right">prompt</TableHead>
             <TableHead className="text-right">输出</TableHead>
             <TableHead className="text-right">缓存命中率</TableHead>
-            <TableHead className="text-right">估算成本</TableHead>
+            <TableHead className="text-right">实际计费</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -391,7 +402,7 @@ export function GroupTable({ groups }: { groups: readonly GroupUsage[] }) {
               <TableCell className="max-w-72 truncate font-medium" title={group.label || group.key}>
                 {group.label || group.key || "（空）"}
               </TableCell>
-              <GroupNumbers usage={group.usage} />
+              <GroupNumbers usage={group.usage} billingEnabled={billingEnabled} />
             </TableRow>
           ))}
         </TableBody>
@@ -400,7 +411,7 @@ export function GroupTable({ groups }: { groups: readonly GroupUsage[] }) {
   );
 }
 
-function GroupNumbers({ usage }: { usage: UsageTotals }): ReactNode {
+function GroupNumbers({ usage, billingEnabled }: { usage: UsageTotals; billingEnabled: boolean }): ReactNode {
   return (
     <>
       <TableCell className="text-right tabular-nums">{usage.requests.toLocaleString("zh-CN")}</TableCell>
@@ -408,8 +419,8 @@ function GroupNumbers({ usage }: { usage: UsageTotals }): ReactNode {
       <TableCell className="text-right tabular-nums">{formatTokens(usage.output)}</TableCell>
       <TableCell className="text-right tabular-nums">{formatRatio(usage.cache_hit_rate)}</TableCell>
       <TableCell className="text-right tabular-nums">
-        {formatUSD(usage.estimated_cost_usd)}
-        {usage.unpriced_requests > 0 ? <span className="ml-1 text-label text-warning-fg">部分未知价格</span> : null}
+        {billingEnabled ? formatUSD(usage.cost_usd) : "—"}
+        {billingEnabled ? <UnbilledNote count={usage.unbilled_requests} className="ml-1" /> : null}
       </TableCell>
     </>
   );

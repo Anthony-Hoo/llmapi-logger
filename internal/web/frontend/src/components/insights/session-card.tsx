@@ -5,14 +5,17 @@ import { formatRatio, formatTokens, formatUSD } from "../../lib/insights/format"
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { CompositionBar, OccupancyText } from "./composition-bar";
-import { clientLabel, protocolLabel, roleLabel } from "./ui-bits";
+import { clientLabel, protocolLabel, roleLabel, UnbilledNote } from "./ui-bits";
 
 export function SessionCardView({
   card,
+  billingEnabled = true,
   onOpenSession,
   onOpenTree,
 }: {
   card: SessionCardData;
+  /** False when the server has no NewAPI credentials: cost is unavailable, not unbilled. */
+  billingEnabled?: boolean;
   onOpenSession: (card: SessionCardData) => void;
   onOpenTree: (treeID: string) => void;
 }) {
@@ -53,12 +56,16 @@ export function SessionCardView({
           <Stat label="输出" value={formatTokens(usage.output)} />
           <Stat label="缓存命中" value={formatRatio(usage.cache_hit_rate)} />
           <Stat
-            label="估算成本"
+            label="实际计费"
             value={
-              <>
-                {formatUSD(usage.estimated_cost_usd)}
-                {usage.unpriced_requests > 0 ? <span className="text-warning-fg">（部分未知价格）</span> : null}
-              </>
+              billingEnabled ? (
+                <>
+                  {formatUSD(usage.cost_usd)}
+                  {usage.unbilled_requests > 0 ? <UnbilledNote count={usage.unbilled_requests} className="ml-1" /> : null}
+                </>
+              ) : (
+                "—"
+              )
             }
           />
           {callerText ? <Stat label="调用者" value={callerText} /> : null}

@@ -24,6 +24,8 @@ export interface AuditCursor {
   before_id: string;
 }
 
+export type BillingState = "unchecked" | "billed" | "unbilled";
+
 export interface AuditSummary {
   audit_id: string;
   started_at_ns: NanoTime;
@@ -54,6 +56,12 @@ export interface AuditSummary {
   user_agent?: string | null;
   conversation_id?: string | null;
   conversation_turns?: number | string | null;
+  /** null when the audit has no NewAPI link. */
+  billing_state?: BillingState | null;
+  newapi_quota?: number | null;
+  cost_usd?: number | null;
+  billed_prompt_tokens?: number | null;
+  billed_completion_tokens?: number | null;
 }
 
 export interface AuditListPage {
@@ -322,8 +330,11 @@ export interface UsageTotals {
   reasoning: number;
   prompt_total: number;
   cache_hit_rate: number | null;
-  estimated_cost_usd: number | null;
-  unpriced_requests: number;
+  /** Actual NewAPI billing in USD of the billed requests; null when none is billed. */
+  cost_usd: number | null;
+  billed_requests: number;
+  /** Requests without a billing result (not looked up, pending, unresolved, or no consume log). */
+  unbilled_requests: number;
 }
 
 export type InsightsGroupBy = "model" | "protocol" | "client" | "caller" | "token";
@@ -357,6 +368,8 @@ export interface OverviewResponse {
   group_by: string;
   groups: GroupUsage[];
   composition: CategoryValues;
+  /** False when the server has no NewAPI admin credentials, so no cost is available. */
+  billing_enabled: boolean;
 }
 
 export interface SessionCaller {
@@ -387,6 +400,7 @@ export interface SessionCard {
 export interface SessionsResponse {
   items: SessionCard[];
   next_cursor?: string;
+  billing_enabled: boolean;
 }
 
 export type InsightsEvent =
