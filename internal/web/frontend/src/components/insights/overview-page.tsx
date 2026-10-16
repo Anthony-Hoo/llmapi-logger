@@ -23,13 +23,15 @@ import type {
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
+import { PageHeader } from "../ui/page-header";
+import { Select } from "../ui/select";
 import { Skeleton } from "../ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { CategoryLegend, CompositionBar } from "./composition-bar";
 import { DailyChart } from "./daily-chart";
 import { ActivityHeatmap } from "./heatmap";
 import { SessionCardView } from "./session-card";
-import { EmptyNote, PanelTitle, Segmented, selectClassName } from "./ui-bits";
+import { EmptyNote, PanelTitle, Segmented } from "./ui-bits";
 
 const ALL_GROUPS: ReadonlyArray<{ value: InsightsGroupBy; label: string; adminOnly: boolean }> = [
   { value: "model", label: "按模型", adminOnly: false },
@@ -166,10 +168,12 @@ export function OverviewPage({
   const groups = groupOptions(isDeveloper);
 
   return (
-    <div className="space-y-5">
-      <Card className="bg-white/90">
-        <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-4">
-          <div className="flex flex-wrap items-center gap-3">
+    <div className="space-y-section">
+      <PageHeader
+        title="用量洞察"
+        description="成本为按内置价格快照的估算，不含 NewAPI 的实际计费倍率。"
+        actions={
+          <>
             <Segmented
               label="时间范围"
               value={rangeKey}
@@ -183,11 +187,11 @@ export function OverviewPage({
                 setSelectedDay(null);
               }}
             />
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <label className="flex items-center gap-2 text-label text-muted">
               分组
-              <select
+              <Select
                 aria-label="分组方式"
-                className={selectClassName}
+                className="w-auto"
                 value={groupBy}
                 onChange={(event) => setGroupBy(event.target.value as InsightsGroupBy)}
               >
@@ -196,17 +200,16 @@ export function OverviewPage({
                     {option.label}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
-          </div>
-          <p className="text-xs text-muted-foreground">成本为按内置价格快照的估算，不含 NewAPI 的实际计费倍率。</p>
-        </CardContent>
-      </Card>
+          </>
+        }
+      />
 
       {overviewError ? (
-        <Alert className="border-red-200">
-          <AlertTitle className="text-red-900">无法读取用量洞察</AlertTitle>
-          <AlertDescription className="text-red-800">{overviewError}</AlertDescription>
+        <Alert variant="danger">
+          <AlertTitle>无法读取用量洞察</AlertTitle>
+          <AlertDescription>{overviewError}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -216,30 +219,30 @@ export function OverviewPage({
         <>
           <KpiBar overview={overview} />
 
-          <Card className="bg-white/90">
-            <CardContent className="space-y-3 pt-4">
+          <Card>
+            <CardContent className="space-y-stack pt-card">
               <PanelTitle title="每日用量" hint="每天一对柱：Token 与估算成本" />
               <DailyChart daily={overview.daily} />
             </CardContent>
           </Card>
 
-          <div className="grid gap-5 lg:grid-cols-2">
-            <Card className="bg-white/90">
-              <CardContent className="space-y-3 pt-4">
+          <div className="grid gap-section lg:grid-cols-2">
+            <Card>
+              <CardContent className="space-y-stack pt-card">
                 <PanelTitle title="近 8 周活动" hint="颜色按当前最忙一天的四分位分级" />
                 <ActivityHeatmap days={overview.heatmap} today={today} selectedDay={selectedDay} onSelectDay={setSelectedDay} />
               </CardContent>
             </Card>
-            <Card className="bg-white/90">
-              <CardContent className="space-y-3 pt-4">
+            <Card>
+              <CardContent className="space-y-stack pt-card">
                 <PanelTitle title="上下文构成" hint="范围内各请求的估算，已按 prompt 总量锚定" />
                 <MixPanel mix={overview.composition} />
               </CardContent>
             </Card>
           </div>
 
-          <Card className="bg-white/90">
-            <CardContent className="space-y-3 pt-4">
+          <Card>
+            <CardContent className="space-y-stack pt-card">
               <PanelTitle title="分组统计" />
               <GroupTable groups={overview.groups} />
             </CardContent>
@@ -247,7 +250,7 @@ export function OverviewPage({
         </>
       ) : null}
 
-      <section className="space-y-3" aria-label="会话">
+      <section className="space-y-stack" aria-label="会话">
         <PanelTitle
           title="会话"
           hint={selectedDay ? undefined : "每个 Agent 一张卡片，点击查看逐步趋势"}
@@ -258,11 +261,11 @@ export function OverviewPage({
                   仅 {selectedDay} · 清除
                 </Button>
               ) : null}
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <label className="flex items-center gap-2 text-label text-muted">
                 排序
-                <select
+                <Select
                   aria-label="会话排序"
-                  className={selectClassName}
+                  className="w-auto"
                   value={sort}
                   onChange={(event) => setSort(event.target.value as InsightsSessionSort)}
                 >
@@ -271,18 +274,18 @@ export function OverviewPage({
                       {option.label}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
             </div>
           }
         />
         {cardsError ? (
-          <Alert className="border-red-200">
-            <AlertDescription className="text-red-800">{cardsError}</AlertDescription>
+          <Alert variant="danger">
+            <AlertDescription>{cardsError}</AlertDescription>
           </Alert>
         ) : null}
         {cardsLoading ? (
-          <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid gap-section md:grid-cols-2 2xl:grid-cols-3">
             {Array.from({ length: 3 }, (_, index) => (
               <Skeleton key={index} className="h-40 w-full" />
             ))}
@@ -290,7 +293,7 @@ export function OverviewPage({
         ) : cards.length === 0 && !cardsError ? (
           <EmptyNote>所选范围内没有已分析的会话。新请求解析完成后会出现在这里。</EmptyNote>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid gap-section md:grid-cols-2 2xl:grid-cols-3">
             {cards.map((card) => (
               <SessionCardView key={card.session_id} card={card} onOpenSession={onOpenSession} onOpenTree={onOpenTree} />
             ))}
@@ -310,7 +313,7 @@ export function OverviewPage({
 
 function OverviewSkeleton() {
   return (
-    <div className="space-y-4">
+    <div className="space-y-section">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         {Array.from({ length: 7 }, (_, index) => (
           <Skeleton key={index} className="h-20 w-full" />
@@ -344,10 +347,10 @@ export function KpiBar({ overview }: { overview: OverviewResponse }) {
 
 function Kpi({ label, value, hint, warn }: { label: string; value: string; hint?: string; warn?: boolean }) {
   return (
-    <div className="min-w-0 rounded-lg border bg-white/90 p-3 shadow-xs">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 truncate text-xl font-semibold tabular-nums">{value}</p>
-      {hint ? <p className={`mt-0.5 text-[11px] leading-4 ${warn ? "text-amber-700" : "text-muted-foreground"}`}>{hint}</p> : null}
+    <div className="min-w-0 rounded-lg border bg-surface p-3 shadow-card">
+      <p className="text-label text-muted">{label}</p>
+      <p className="mt-1 truncate text-heading font-semibold tabular-nums">{value}</p>
+      {hint ? <p className={`mt-0.5 text-caption ${warn ? "text-warning-fg" : "text-subtle"}`}>{hint}</p> : null}
     </div>
   );
 }
@@ -370,7 +373,7 @@ export function GroupTable({ groups }: { groups: readonly GroupUsage[] }) {
     return <EmptyNote>没有可分组的数据。</EmptyNote>;
   }
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
@@ -385,7 +388,7 @@ export function GroupTable({ groups }: { groups: readonly GroupUsage[] }) {
         <TableBody>
           {groups.map((group) => (
             <TableRow key={group.key}>
-              <TableCell className="max-w-[18rem] truncate font-medium" title={group.label || group.key}>
+              <TableCell className="max-w-72 truncate font-medium" title={group.label || group.key}>
                 {group.label || group.key || "（空）"}
               </TableCell>
               <GroupNumbers usage={group.usage} />
@@ -406,7 +409,7 @@ function GroupNumbers({ usage }: { usage: UsageTotals }): ReactNode {
       <TableCell className="text-right tabular-nums">{formatRatio(usage.cache_hit_rate)}</TableCell>
       <TableCell className="text-right tabular-nums">
         {formatUSD(usage.estimated_cost_usd)}
-        {usage.unpriced_requests > 0 ? <span className="ml-1 text-xs text-amber-700">部分未知价格</span> : null}
+        {usage.unpriced_requests > 0 ? <span className="ml-1 text-label text-warning-fg">部分未知价格</span> : null}
       </TableCell>
     </>
   );

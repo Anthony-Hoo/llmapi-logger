@@ -2,13 +2,14 @@ import type { KeyboardEvent } from "react";
 
 import type { HeatmapDay } from "../../types";
 import { buildHeatGrid, WEEKDAY_LABELS, type HeatLevel } from "../../lib/insights/heatmap";
+import { chartColors, chartFont, colorVar } from "../../lib/tokens";
 
 export const HEAT_COLORS: Record<HeatLevel, string> = {
-  0: "#e2e8f0",
-  1: "#bfdbfe",
-  2: "#60a5fa",
-  3: "#2563eb",
-  4: "#1e3a8a",
+  0: colorVar("neutral-200"),
+  1: colorVar("primary-200"),
+  2: colorVar("primary-400"),
+  3: colorVar("primary-600"),
+  4: colorVar("primary-800"),
 };
 
 const CELL = 16;
@@ -52,8 +53,8 @@ export function ActivityHeatmap({
               key={name}
               x={0}
               y={row * (CELL + GAP) + CELL - 4}
-              fontSize="10"
-              fill="#64748b"
+              fontSize={chartFont.caption}
+              fill={chartColors.textSubtle}
             >
               {row % 2 === 1 ? name : ""}
             </text>
@@ -78,7 +79,7 @@ export function ActivityHeatmap({
                   height={CELL}
                   rx={3}
                   fill={HEAT_COLORS[cell.level]}
-                  stroke={selected ? "#0f172a" : "none"}
+                  stroke={selected ? chartColors.text : "none"}
                   strokeWidth={selected ? 2 : 0}
                   style={{ cursor: "pointer" }}
                   onClick={() => activate(cell.day)}
@@ -96,10 +97,10 @@ export function ActivityHeatmap({
           )}
         </svg>
       </div>
-      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <div className="flex items-center gap-1.5 text-caption text-subtle">
         <span>少</span>
         {([0, 1, 2, 3, 4] as HeatLevel[]).map((level) => (
-          <span key={level} className="inline-block h-3 w-3 rounded-sm" style={{ backgroundColor: HEAT_COLORS[level] }} />
+          <span key={level} className="inline-block h-3 w-3 rounded-xs" style={{ backgroundColor: HEAT_COLORS[level] }} />
         ))}
         <span>多</span>
         <span className="ml-2">点击某天可筛选当天会话</span>

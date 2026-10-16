@@ -96,7 +96,7 @@ export function statusVariant(status: string | null | undefined): BadgeVariant {
     case "error":
     case "proxy_error":
     case "newapi_error":
-      return "destructive";
+      return "danger";
     case "partial":
     case "interrupted":
     case "client_cancelled":
@@ -104,7 +104,7 @@ export function statusVariant(status: string | null | undefined): BadgeVariant {
     case "pending":
     case "processing":
     case "in_progress":
-      return "default";
+      return "info";
     default:
       return "outline";
   }

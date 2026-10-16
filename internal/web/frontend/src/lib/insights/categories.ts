@@ -1,4 +1,5 @@
 import type { CategoryKey, CategoryValues } from "../../types";
+import { colorVar } from "../tokens";
 
 export interface CategoryInfo {
   key: CategoryKey;
@@ -7,25 +8,26 @@ export interface CategoryInfo {
 }
 
 /**
- * The eight composition categories in display order. Labels and colors are
- * defined here once and reused by every chart, bar, treemap and legend.
+ * The eight composition categories in display order. Labels are defined here
+ * once; colors reference the `--color-cat-*` tokens in index.css, so every
+ * chart, bar, treemap, legend and CSS utility (e.g. `bg-cat-user`) agrees.
  */
 export const CATEGORIES: readonly CategoryInfo[] = [
-  { key: "system", label: "系统提示", color: "#6366f1" },
-  { key: "tools", label: "工具定义", color: "#0ea5e9" },
-  { key: "user", label: "用户", color: "#10b981" },
-  { key: "injected", label: "注入上下文", color: "#f59e0b" },
-  { key: "assistant", label: "助手", color: "#8b5cf6" },
-  { key: "reasoning", label: "推理", color: "#ec4899" },
-  { key: "tool_result", label: "工具结果", color: "#14b8a6" },
-  { key: "media", label: "多媒体", color: "#f97316" },
+  { key: "system", label: "系统提示", color: colorVar("cat-system") },
+  { key: "tools", label: "工具定义", color: colorVar("cat-tools") },
+  { key: "user", label: "用户", color: colorVar("cat-user") },
+  { key: "injected", label: "注入上下文", color: colorVar("cat-injected") },
+  { key: "assistant", label: "助手", color: colorVar("cat-assistant") },
+  { key: "reasoning", label: "推理", color: colorVar("cat-reasoning") },
+  { key: "tool_result", label: "工具结果", color: colorVar("cat-tool-result") },
+  { key: "media", label: "多媒体", color: colorVar("cat-media") },
 ];
 
 export const CATEGORY_KEYS: readonly CategoryKey[] = CATEGORIES.map((category) => category.key);
 
 const byKey = new Map<string, CategoryInfo>(CATEGORIES.map((category) => [category.key, category]));
 
-export const UNKNOWN_CATEGORY_COLOR = "#94a3b8";
+export const UNKNOWN_CATEGORY_COLOR = colorVar("cat-unknown");
 
 export function categoryInfo(key: string): CategoryInfo {
   return byKey.get(key) ?? { key: key as CategoryKey, label: key, color: UNKNOWN_CATEGORY_COLOR };

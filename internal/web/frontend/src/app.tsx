@@ -3,6 +3,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -17,7 +18,17 @@ import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import { Input } from "./components/ui/input";
+import { PageHeader } from "./components/ui/page-header";
+import { segmentedItemClassName, segmentedTrackClassName } from "./components/ui/segmented";
+import { Select } from "./components/ui/select";
 import { Separator } from "./components/ui/separator";
+import {
+  blockLabelClassName,
+  codeBlockClassName,
+  emptyStateClassName,
+  insetPanelClassName,
+  summaryClassName,
+} from "./components/ui/styles";
 import { Skeleton } from "./components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
 import { ConversationView } from "./components/conversation-view";
@@ -26,6 +37,7 @@ const InsightsView = lazy(() => import("./components/insights/insights-view").th
 import { CompositionSection } from "./components/insights/composition-section";
 import { buildConversationExport } from "./lib/conversation-export";
 import { errorMessage, isAbortError } from "./lib/errors";
+import { cn } from "./lib/utils";
 import {
   displayValue,
   formatBytes,
@@ -211,32 +223,32 @@ function TokenGate({
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-5 py-12">
-      <Card className="w-full max-w-md overflow-hidden bg-white/90 backdrop-blur">
-        <div className="h-1.5 bg-gradient-to-r from-blue-600 via-indigo-500 to-cyan-400" />
-        <CardHeader className="space-y-4 pb-5">
+    <main className="flex min-h-screen items-center justify-center px-gutter py-12">
+      <Card className="w-full max-w-md overflow-hidden">
+        <div className="h-1 bg-primary" />
+        <CardHeader className="gap-4 p-6 pb-4">
           <BrandMark />
-          <div className="space-y-2">
-            <CardTitle>LLM API Audit</CardTitle>
+          <div className="space-y-1.5">
+            <CardTitle className="text-display">LLM API Audit</CardTitle>
             <CardDescription>
               建立安全会话后进入审计页面。登录完成后页面不会继续保留凭据，也不会写入浏览器存储。
             </CardDescription>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="p-6 pt-0">
           {message ? (
-            <Alert className="mb-5 border-amber-200">
-              <AlertTitle className="text-amber-900">需要重新认证</AlertTitle>
+            <Alert variant="warning" className="mb-4">
+              <AlertTitle>需要重新认证</AlertTitle>
               <AlertDescription>{message}</AlertDescription>
             </Alert>
           ) : null}
           {submitError ? (
-            <Alert className="mb-5 border-red-200">
-              <AlertTitle className="text-red-900">登录失败</AlertTitle>
-              <AlertDescription className="text-red-800">{submitError}</AlertDescription>
+            <Alert variant="danger" className="mb-4">
+              <AlertTitle>登录失败</AlertTitle>
+              <AlertDescription>{submitError}</AlertDescription>
             </Alert>
           ) : null}
-          <div className="mb-5 grid grid-cols-2 gap-2 rounded-lg bg-slate-100 p-1" role="tablist">
+          <div className={cn(segmentedTrackClassName, "mb-4 grid w-full grid-cols-2")} role="tablist">
             {loginModes.map((option) => (
               <button
                 key={option.id}
@@ -245,19 +257,15 @@ function TokenGate({
                 aria-selected={option.id === mode}
                 onClick={() => switchMode(option.id)}
                 disabled={submitting}
-                className={
-                  option.id === mode
-                    ? "rounded-md bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-xs"
-                    : "rounded-md px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
-                }
+                className={segmentedItemClassName(option.id === mode, "h-8")}
               >
                 {option.label}
               </button>
             ))}
           </div>
           <form className="space-y-4" onSubmit={submit}>
-            <div className="space-y-2">
-              <label htmlFor="login-credential" className="text-sm font-medium">
+            <div className="space-y-1.5">
+              <label htmlFor="login-credential" className="text-label font-medium text-muted">
                 {active.field}
               </label>
               <Input
@@ -271,13 +279,13 @@ function TokenGate({
                 placeholder={active.placeholder}
                 disabled={submitting}
               />
-              <p className="text-xs leading-relaxed text-muted-foreground">{active.hint}</p>
+              <p className="text-label text-subtle">{active.hint}</p>
             </div>
-            <Button className="w-full" type="submit" disabled={!draft.trim() || submitting}>
+            <Button className="w-full" size="lg" type="submit" disabled={!draft.trim() || submitting}>
               {submitting ? "正在登录…" : "进入审计页面"}
             </Button>
           </form>
-          <p className="mt-5 text-center text-xs leading-relaxed text-muted-foreground">
+          <p className="mt-5 text-center text-caption text-subtle">
             登录成功后仅使用服务端设置的 HttpOnly Cookie；页面不会使用 localStorage 或 sessionStorage 保存凭据。
           </p>
         </CardContent>
@@ -450,33 +458,35 @@ function Dashboard({
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-20 border-b bg-white/85 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-[1920px] flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 sm:px-6 lg:px-8">
+      <header className="sticky top-0 z-20 border-b bg-surface">
+        <div className="mx-auto flex min-h-header max-w-page flex-wrap items-center justify-between gap-x-4 gap-y-2 px-gutter py-2">
           <div className="flex items-center gap-3">
             <BrandMark compact />
             <div>
-              <h1 className="text-sm font-semibold sm:text-base">LLM API Audit</h1>
-              <p className="hidden text-xs text-muted-foreground sm:block">本地 LLM 请求与响应证据</p>
+              <h1 className="text-title font-semibold">LLM API Audit</h1>
+              <p className="hidden text-caption text-subtle sm:block">本地 LLM 请求与响应证据</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {isDeveloper ? <DeveloperBadge identity={session?.identity ?? null} /> : null}
-            <Button variant={view === "audits" ? "secondary" : "ghost"} size="sm" onClick={() => setView("audits")}>
-              审计记录
-            </Button>
-            {hasInsights ? (
-              <Button variant={view === "insights" ? "secondary" : "ghost"} size="sm" onClick={() => setView("insights")}>
-                用量洞察
-              </Button>
-            ) : null}
-            {isDeveloper ? null : (
-              <Button variant={view === "rules" ? "secondary" : "ghost"} size="sm" onClick={() => setView("rules")}>
-                UA 拦截规则
-              </Button>
-            )}
+            <nav className={segmentedTrackClassName} aria-label="主导航">
+              <button type="button" className={segmentedItemClassName(view === "audits")} aria-current={view === "audits" ? "page" : undefined} onClick={() => setView("audits")}>
+                审计记录
+              </button>
+              {hasInsights ? (
+                <button type="button" className={segmentedItemClassName(view === "insights")} aria-current={view === "insights" ? "page" : undefined} onClick={() => setView("insights")}>
+                  用量洞察
+                </button>
+              ) : null}
+              {isDeveloper ? null : (
+                <button type="button" className={segmentedItemClassName(view === "rules")} aria-current={view === "rules" ? "page" : undefined} onClick={() => setView("rules")}>
+                  UA 拦截规则
+                </button>
+              )}
+            </nav>
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
-              <span className="ml-2 hidden sm:inline">刷新</span>
+              <span className="hidden sm:inline">刷新</span>
             </Button>
             <Button variant="ghost" size="sm" onClick={() => void onLogOut()}>
               退出
@@ -485,7 +495,7 @@ function Dashboard({
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1920px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
+      <main className="mx-auto max-w-page space-y-section px-gutter py-section">
         {view === "rules" && !isDeveloper ? (
           <UserAgentRulesPanel client={client} />
         ) : view === "insights" && hasInsights ? (
@@ -526,10 +536,10 @@ function Dashboard({
         />
 
         {filters.conversation ? (
-          <Alert className="border-blue-200">
+          <Alert variant="info">
             <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
               <span className="min-w-0 truncate">
-                仅显示同一会话：<span className="font-mono text-xs" title={filters.conversation}>{filters.conversation}</span>
+                仅显示同一会话：<span className="font-mono text-label" title={filters.conversation}>{filters.conversation}</span>
               </span>
               <Button variant="outline" size="sm" onClick={clearConversationFilter}>
                 清除会话筛选
@@ -539,15 +549,15 @@ function Dashboard({
         ) : null}
 
         {checkingSession ? (
-          <Alert className="border-blue-200">
+          <Alert variant="info">
             <AlertDescription>正在检查已有管理会话…</AlertDescription>
           </Alert>
         ) : null}
 
         {error ? (
-          <Alert className="border-red-200">
-            <AlertTitle className="text-red-900">无法读取审计列表</AlertTitle>
-            <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-red-800">
+          <Alert variant="danger">
+            <AlertTitle>无法读取审计列表</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
               <span>{error}</span>
               <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)}>
                 重试
@@ -558,7 +568,7 @@ function Dashboard({
 
         {/* The conversation is the primary reading surface, so the list is a
             compact rail and the detail takes the remaining width. */}
-        <div className="grid items-start gap-5 pb-5 xl:grid-cols-[minmax(320px,25rem)_minmax(0,1fr)]">
+        <div className="grid items-start gap-section xl:grid-cols-[minmax(320px,25rem)_minmax(0,1fr)]">
           <AuditList
             items={page.items}
             loading={loading}
@@ -568,7 +578,7 @@ function Dashboard({
             onCollapseChange={filters.conversation || rowFilterActive ? undefined : setCollapseConversations}
             footer={
               <div className="flex items-center justify-between gap-2">
-                <p className="text-xs text-muted-foreground">当前页 {page.items.length} 条</p>
+                <p className="text-caption text-subtle">当前页 {page.items.length} 条</p>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" disabled={loading || cursorHistory.length === 0} onClick={previousPage}>
                     上一页
@@ -716,32 +726,33 @@ export function UserAgentRulesPanel({ client }: { client: ApiClient }) {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-section">
+      <PageHeader
+        title="UA 拦截规则"
+        description="当模型正则命中时，请求的 User-Agent 必须命中对应正则，否则返回 HTTP 401。多条命中规则全部需要通过。"
+      />
       <Card>
         <CardHeader>
-          <CardTitle>UA 拦截规则</CardTitle>
-          <CardDescription>
-            当模型正则命中时，请求的 User-Agent 必须命中对应正则，否则返回 HTTP 401。多条命中规则全部需要通过。
-          </CardDescription>
+          <CardTitle>{editingID === null ? "新增规则" : "编辑规则"}</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <Alert className="border-blue-200">
+        <CardContent className="space-y-stack">
+          <Alert variant="info">
             <AlertDescription>
               正则使用 Go RE2 语法，默认区分大小写；修改成功后无需重启。无效正则会被拒绝，当前生效规则保持不变。
             </AlertDescription>
           </Alert>
           {error ? (
-            <Alert className="border-red-200">
-              <AlertTitle className="text-red-900">操作失败</AlertTitle>
-              <AlertDescription className="text-red-800">{error}</AlertDescription>
+            <Alert variant="danger">
+              <AlertTitle>操作失败</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
             </Alert>
           ) : null}
           {notice ? (
-            <Alert className="border-emerald-200">
+            <Alert variant="success">
               <AlertDescription>{notice}</AlertDescription>
             </Alert>
           ) : null}
-          <form className="grid gap-4 lg:grid-cols-[minmax(180px,0.8fr)_minmax(220px,1fr)_minmax(220px,1fr)_auto]" onSubmit={save}>
+          <form className="grid gap-3 lg:grid-cols-[minmax(180px,0.8fr)_minmax(220px,1fr)_minmax(220px,1fr)_auto]" onSubmit={save}>
             <FilterField label="规则名称" htmlFor="rule-name">
               <Input
                 id="rule-name"
@@ -775,8 +786,9 @@ export function UserAgentRulesPanel({ client }: { client: ApiClient }) {
               />
             </FilterField>
             <div className="flex flex-wrap items-end gap-2">
-              <label className="flex h-10 items-center gap-2 rounded-md border bg-white/90 px-3 text-sm">
+              <label className="flex h-9 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 text-body shadow-xs">
                 <input
+                  className="accent-primary"
                   type="checkbox"
                   checked={draft.enabled}
                   onChange={(event) => setDraft((current) => ({ ...current, enabled: event.target.checked }))}
@@ -795,12 +807,14 @@ export function UserAgentRulesPanel({ client }: { client: ApiClient }) {
       </Card>
 
       <Card>
-        <CardHeader className="items-center justify-between">
-          <div>
-            <CardTitle>当前规则</CardTitle>
-            <CardDescription>{rules.length} 条 · 启用的规则即时参与请求判断</CardDescription>
-          </div>
-          <Button variant="outline" size="sm" onClick={() => setReloadKey((value) => value + 1)} disabled={loading}>刷新</Button>
+        <CardHeader>
+          <PageHeader
+            level="panel"
+            as="h2"
+            title="当前规则"
+            description={`${rules.length} 条 · 启用的规则即时参与请求判断`}
+            actions={<Button variant="outline" size="sm" onClick={() => setReloadKey((value) => value + 1)} disabled={loading}>刷新</Button>}
+          />
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -808,7 +822,7 @@ export function UserAgentRulesPanel({ client }: { client: ApiClient }) {
           ) : rules.length === 0 ? (
             <EmptyValue>当前没有 UA 拦截规则。</EmptyValue>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -824,13 +838,13 @@ export function UserAgentRulesPanel({ client }: { client: ApiClient }) {
                     <TableRow key={rule.id}>
                       <TableCell><Badge variant={rule.enabled ? "success" : "outline"}>{rule.enabled ? "启用" : "停用"}</Badge></TableCell>
                       <TableCell className="font-medium">{rule.name}</TableCell>
-                      <TableCell className="font-mono text-xs">{rule.model_pattern}</TableCell>
-                      <TableCell className="font-mono text-xs">{rule.user_agent_pattern}</TableCell>
+                      <TableCell className="font-mono text-label">{rule.model_pattern}</TableCell>
+                      <TableCell className="font-mono text-label">{rule.user_agent_pattern}</TableCell>
                       <TableCell>
                         <div className="flex justify-end gap-2">
                           <Button variant="outline" size="sm" onClick={() => edit(rule)}>编辑</Button>
                           <Button variant="outline" size="sm" onClick={() => void toggle(rule)}>{rule.enabled ? "停用" : "启用"}</Button>
-                          <Button variant="destructive" size="sm" onClick={() => void remove(rule)}>删除</Button>
+                          <Button variant="danger" size="sm" onClick={() => void remove(rule)}>删除</Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -890,15 +904,14 @@ export function AuditFiltersPanel({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
-    <Card className="bg-white/85">
-      <CardContent className="!p-3">
+    <Card>
+      <CardContent className="p-3">
         <form className="space-y-2" aria-label="审计筛选" onSubmit={onSubmit}>
           <div className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1.2fr)_minmax(160px,0.8fr)_minmax(240px,1.25fr)_auto]">
 			{showCallerFilters ? (
 			<FilterField label="调用者" htmlFor="filter-caller">
-              <select
+              <Select
 				id="filter-caller"
-                className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-xs outline-hidden focus:ring-2 focus:ring-ring"
 				value={newAPIUserID}
 				onChange={(event) => onNewAPIUserIDChange(event.target.value)}
               >
@@ -908,13 +921,12 @@ export function AuditFiltersPanel({
 					{user.display_name?.trim() || user.username} · @{user.username}
                   </option>
                 ))}
-              </select>
+              </Select>
             </FilterField>
 			) : null}
             <FilterField label="模型" htmlFor="filter-model">
               <Input
                 id="filter-model"
-                className="h-9"
                 value={model}
                 onChange={(event) => onModelChange(event.target.value)}
                 placeholder="如 gpt-4o"
@@ -923,28 +935,26 @@ export function AuditFiltersPanel({
             <FilterField label="User-Agent" htmlFor="filter-user-agent">
               <Input
                 id="filter-user-agent"
-                className="h-9"
                 value={userAgent}
                 onChange={(event) => onUserAgentChange(event.target.value)}
                 placeholder="客户端标识"
               />
             </FilterField>
             <div className="flex h-9 items-center xl:justify-end">
-              <Button className="h-9 w-full sm:w-auto" size="sm" type="submit">
+              <Button className="w-full sm:w-auto" type="submit">
                 应用筛选
               </Button>
             </div>
           </div>
 
-          <details className="rounded-md border bg-slate-50/60">
-            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+          <details className={insetPanelClassName}>
+            <summary className="cursor-pointer px-3 py-2 text-label font-medium text-muted hover:text-foreground">
 			  {showCallerFilters ? "高级筛选（路径、Token ID、转发状态、HTTP 状态）" : "高级筛选（路径、转发状态、HTTP 状态）"}
             </summary>
 			<div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-2 xl:grid-cols-4">
               <FilterField label="路径" htmlFor="filter-path">
                 <Input
                   id="filter-path"
-                  className="h-9"
                   value={path}
                   onChange={(event) => onPathChange(event.target.value)}
                   placeholder="/v1/chat/completions"
@@ -954,7 +964,6 @@ export function AuditFiltersPanel({
 			  <FilterField label="NewAPI Token ID" htmlFor="filter-token-id">
 				<Input
 				  id="filter-token-id"
-				  className="h-9"
 				  inputMode="numeric"
 				  value={newAPITokenID}
 				  onChange={(event) => onNewAPITokenIDChange(event.target.value)}
@@ -963,9 +972,8 @@ export function AuditFiltersPanel({
 			  </FilterField>
 			  ) : null}
               <FilterField label="转发状态" htmlFor="filter-forward-status">
-                <select
+                <Select
                   id="filter-forward-status"
-                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-xs outline-hidden focus:ring-2 focus:ring-ring"
                   value={forwardStatus}
                   onChange={(event) => onForwardStatusChange(event.target.value)}
                 >
@@ -976,12 +984,11 @@ export function AuditFiltersPanel({
                   <option value="newapi_error">上游错误</option>
                   <option value="proxy_error">代理错误</option>
                   <option value="interrupted">意外中断</option>
-                </select>
+                </Select>
               </FilterField>
 			  <FilterField label="HTTP 状态" htmlFor="filter-status-class">
-				<select
+				<Select
 				  id="filter-status-class"
-				  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-xs outline-hidden focus:ring-2 focus:ring-ring"
 				  value={statusClass}
 				  onChange={(event) => onStatusClassChange(event.target.value)}
 				>
@@ -989,20 +996,19 @@ export function AuditFiltersPanel({
 				  <option value="error">≥400（4xx+5xx）</option>
 				  <option value="4xx">4xx</option>
 				  <option value="5xx">5xx</option>
-				</select>
+				</Select>
 			  </FilterField>
 			  <FilterField label="状态码" htmlFor="filter-status-code">
 				<Input
 				  id="filter-status-code"
                   aria-invalid={Boolean(statusCodeError)}
                   aria-describedby={statusCodeError ? "filter-status-code-error" : undefined}
-				  className="h-9"
 				  inputMode="numeric"
 				  value={statusCode}
 				  onChange={(event) => onStatusCodeChange(event.target.value)}
 				  placeholder="如 503"
 				/>
-                {statusCodeError ? <p id="filter-status-code-error" role="alert" className="text-xs text-red-700">{statusCodeError}</p> : null}
+                {statusCodeError ? <p id="filter-status-code-error" role="alert" className="text-label text-danger-fg">{statusCodeError}</p> : null}
 			  </FilterField>
             </div>
           </details>
@@ -1032,41 +1038,44 @@ export function AuditList({
   footer?: ReactNode;
 }) {
   return (
-    <Card className="flex min-w-0 flex-col overflow-hidden bg-white/90 xl:sticky xl:top-[4.5rem] xl:max-h-[calc(100vh-6rem)]">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2.5 text-left">
-        <div className="min-w-0">
-          <CardTitle>审计记录</CardTitle>
-          <CardDescription className="mt-0.5 truncate">按调用者、模型和客户端查看</CardDescription>
-        </div>
-        <div className="flex items-center gap-3">
-          {onCollapseChange ? (
-            <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                className="h-3.5 w-3.5 accent-blue-600"
-                checked={collapse}
-                onChange={(event) => onCollapseChange(event.target.checked)}
-              />
-              按会话折叠
-            </label>
-          ) : null}
-          {loading ? <Badge variant="secondary">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
-        </div>
-      </div>
-      <CardContent className="min-h-0 flex-1 overflow-y-auto">
+    <Card className="flex min-w-0 flex-col overflow-hidden xl:sticky xl:top-[calc(var(--spacing-header)+var(--spacing-section))] xl:max-h-[calc(100vh-var(--spacing-header)-2*var(--spacing-section))]">
+      <PageHeader
+        level="panel"
+        className="shrink-0 border-b px-card py-3"
+        title="审计记录"
+        description="按调用者、模型和客户端查看"
+        descriptionClassName="truncate"
+        actions={
+          <>
+            {onCollapseChange ? (
+              <label className="flex cursor-pointer select-none items-center gap-1.5 text-label text-muted">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-primary"
+                  checked={collapse}
+                  onChange={(event) => onCollapseChange(event.target.checked)}
+                />
+                按会话折叠
+              </label>
+            ) : null}
+            {loading ? <Badge variant="neutral">加载中</Badge> : <Badge variant="outline">{items.length} 条</Badge>}
+          </>
+        }
+      />
+      <CardContent className="min-h-0 flex-1 overflow-y-auto p-0">
         {loading ? (
           <div className="space-y-2 p-3">
             {Array.from({ length: 7 }, (_, index) => (
-              <Skeleton key={index} className="h-[5rem] w-full" />
+              <Skeleton key={index} className="h-20 w-full" />
             ))}
           </div>
         ) : items.length === 0 ? (
           <div className="flex min-h-64 flex-col items-center justify-center px-6 text-center">
-            <div className="mb-3 rounded-full bg-muted p-3 text-muted-foreground">
+            <div className="mb-3 rounded-full bg-surface-sunken p-3 text-subtle">
               <DocumentIcon />
             </div>
             <p className="font-medium">没有符合条件的审计记录</p>
-            <p className="mt-1 text-sm text-muted-foreground">发送一条白名单内的 LLM API 请求后再刷新。</p>
+            <p className="mt-1 text-body-sm text-muted">发送一条白名单内的 LLM API 请求后再刷新。</p>
           </div>
         ) : (
           <ul className="divide-y" aria-label="审计记录列表">
@@ -1080,30 +1089,30 @@ export function AuditList({
                   <button
                     type="button"
                     aria-current={selected ? "true" : undefined}
-                    className={`block w-full min-w-0 px-4 py-3 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
-                      selected ? "bg-blue-50/90 hover:bg-blue-50" : "hover:bg-slate-50"
+                    className={`block w-full min-w-0 border-l-2 px-card py-3 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
+                      selected ? "border-l-primary bg-primary-50" : "border-l-transparent hover:bg-surface-muted"
                     }`}
                     onClick={() => onSelect(audit.audit_id)}
                   >
                     <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                      <span className="text-caption tabular-nums text-subtle">
                         {formatNanoTime(audit.started_at_ns)}
                       </span>
-                      {status ? <span className="text-[11px] font-medium text-amber-700">{status}</span> : null}
+                      {status ? <span className="text-caption font-medium text-warning-fg">{status}</span> : null}
                       {audit.conversation_id ? (
-                        <span className="font-mono text-[11px] text-muted-foreground" title={audit.conversation_id}>
+                        <span className="font-mono text-caption text-subtle" title={audit.conversation_id}>
                           会话 {audit.conversation_id.startsWith("conv_") ? audit.conversation_id.slice(5, 15) : audit.conversation_id.slice(0, 10)}
                         </span>
                       ) : null}
                       {collapse && Number(audit.conversation_turns ?? 0) > 1 ? (
-                        <Badge variant="secondary">
+                        <Badge variant="neutral">
                           {String(audit.conversation_turns)} 轮
                         </Badge>
                       ) : null}
                     </span>
                     {/* Three columns while the list is full width, one stacked
                         column inside the narrow rail. */}
-                    <span className="mt-2 grid min-w-0 gap-x-5 gap-y-2 sm:grid-cols-[minmax(10rem,0.85fr)_minmax(6.5rem,0.4fr)_minmax(16rem,2fr)] xl:grid-cols-1">
+                    <span className="mt-2 grid min-w-0 gap-x-4 gap-y-2 sm:grid-cols-[minmax(10rem,0.85fr)_minmax(6.5rem,0.4fr)_minmax(16rem,2fr)] xl:grid-cols-1">
                       <CallerValue audit={audit} />
                       <ListValue label="模型" value={model} mono />
                       <ListValue label="User-Agent" value={userAgent} mono wrap />
@@ -1115,7 +1124,7 @@ export function AuditList({
           </ul>
         )}
       </CardContent>
-      {footer ? <div className="shrink-0 border-t bg-white/95 px-4 py-2.5">{footer}</div> : null}
+      {footer ? <div className="shrink-0 border-t bg-surface-muted px-card py-2">{footer}</div> : null}
     </Card>
   );
 }
@@ -1133,17 +1142,17 @@ function CallerValue({ audit }: { audit: AuditSummary }) {
 
   return (
     <span className="min-w-0">
-      <span className="block text-[10px] leading-none text-muted-foreground">调用者</span>
-      <span className="mt-1 block truncate text-sm font-medium" title={name || fallback}>
+      <span className="block text-caption text-subtle">调用者</span>
+      <span className="block truncate text-body font-medium" title={name || fallback}>
         {name || fallback}
       </span>
       {tokenName ? (
-        <span className="mt-1 block break-words text-xs leading-4 text-slate-600" title={tokenName}>
+        <span className="block break-words text-label text-muted" title={tokenName}>
           {tokenName}
         </span>
       ) : null}
       {hasTokenID ? (
-        <span className="block font-mono text-[11px] leading-4 text-muted-foreground">ID: {tokenID}</span>
+        <span className="block font-mono text-caption text-subtle">ID: {tokenID}</span>
       ) : null}
     </span>
   );
@@ -1162,10 +1171,10 @@ function ListValue({
 }) {
   return (
     <span className="min-w-0">
-      <span className="block text-[10px] leading-none text-muted-foreground">{label}</span>
+      <span className="block text-caption text-subtle">{label}</span>
       <span
-        className={`mt-1 block text-sm font-medium ${wrap ? "whitespace-normal break-words leading-5" : "truncate"} ${
-          mono ? "font-mono text-xs" : ""
+        className={`block font-medium ${wrap ? "whitespace-normal break-words" : "truncate"} ${
+          mono ? "font-mono text-label" : "text-body"
         }`}
         title={value}
       >
@@ -1403,8 +1412,8 @@ function AuditDetailPanel({
 
   if (!auditID) {
     return (
-      <Card className="min-w-0 bg-white/90">
-        <CardContent className="flex min-h-80 items-center justify-center p-8 pt-0 text-center text-sm text-muted-foreground">
+      <Card className="min-w-0">
+        <CardContent className="flex min-h-80 items-center justify-center p-8 text-center text-body-sm text-subtle">
           从左侧选择一条记录查看详情。
         </CardContent>
       </Card>
@@ -1412,13 +1421,13 @@ function AuditDetailPanel({
   }
 
   return (
-    <Card className="min-w-0 bg-white/90">
-      <CardContent className="space-y-5">
+    <Card className="min-w-0">
+      <CardContent className="space-y-section pt-card">
         {loading ? <DetailSkeleton /> : null}
         {error ? (
-          <Alert className="border-red-200">
-            <AlertTitle className="text-red-900">无法读取详情</AlertTitle>
-            <AlertDescription className="text-red-800">{error}</AlertDescription>
+          <Alert variant="danger">
+            <AlertTitle>无法读取详情</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
           </Alert>
         ) : null}
         {!loading && detail ? (
@@ -1496,43 +1505,45 @@ export function AuditDetailBody({
   const hasConversation = (detail.conversation?.messages.length ?? 0) > 0;
 
   return (
-    <div className="space-y-5">
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-semibold">审计详情</h2>
-            <StatusBadge value={audit.forward_status} />
-          </div>
-          <p className="mt-1 break-all font-mono text-xs text-muted-foreground" title={audit.audit_id}>
-            {audit.audit_id}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {audit.conversation_id && onFilterConversation ? (
-            <Button
-              variant="outline"
-              size="sm"
-              title={audit.conversation_id}
-              onClick={() => onFilterConversation(audit.conversation_id!)}
-            >
-              查看同会话
-            </Button>
-          ) : null}
-          <Button variant="outline" size="sm" onClick={onExportConversation} disabled={!hasConversation}>
-            <DownloadIcon />
-            <span className="ml-2">导出会话 JSON</span>
-          </Button>
-        </div>
+    <div className="space-y-section">
+      <header className="border-b pb-stack">
+        <PageHeader
+          level="panel"
+          as="h2"
+          title="审计详情"
+          badges={<StatusBadge value={audit.forward_status} />}
+          description={audit.audit_id}
+          descriptionTitle={audit.audit_id}
+          descriptionClassName="break-all font-mono text-label text-subtle"
+          actions={
+            <>
+              {audit.conversation_id && onFilterConversation ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  title={audit.conversation_id}
+                  onClick={() => onFilterConversation(audit.conversation_id!)}
+                >
+                  查看同会话
+                </Button>
+              ) : null}
+              <Button variant="outline" size="sm" onClick={onExportConversation} disabled={!hasConversation}>
+                <DownloadIcon />
+                <span>导出会话 JSON</span>
+              </Button>
+            </>
+          }
+        />
       </header>
-      {exportNote ? <p className="text-xs text-muted-foreground">{exportNote}</p> : null}
+      {exportNote ? <p className="text-caption text-subtle">{exportNote}</p> : null}
 
       {audit.forward_status === "rejected" ? (
-        <Alert className="border-red-200">
-          <AlertTitle className="flex flex-wrap items-center gap-2 text-red-900">
+        <Alert variant="danger">
+          <AlertTitle className="flex flex-wrap items-center gap-2">
             请求已在发送至 NewAPI 前被拦截
-            {audit.block_code ? <Badge variant="destructive">{audit.block_code}</Badge> : null}
+            {audit.block_code ? <Badge variant="danger">{audit.block_code}</Badge> : null}
           </AlertTitle>
-          <AlertDescription className="text-red-800">
+          <AlertDescription>
             拦截模块：{audit.blocked_by ?? "未知"}。该记录不会包含 NewAPI 请求或响应阶段。
           </AlertDescription>
         </Alert>
@@ -1579,12 +1590,12 @@ export function AuditDetailBody({
       </Section>
 
       <Section title="解析摘要">
-        <details className="overflow-hidden rounded-lg border bg-slate-50/60">
-          <summary className="cursor-pointer px-4 py-3 text-sm font-semibold hover:bg-slate-100/80">
+        <details className={cn(insetPanelClassName, "overflow-hidden")}>
+          <summary className={summaryClassName}>
             原始解析键值
-            <span className="ml-2 text-xs font-normal text-muted-foreground">默认折叠</span>
+            <span className="ml-2 text-label font-normal text-subtle">默认折叠</span>
           </summary>
-          <div className="border-t bg-white/80 p-4">
+          <div className="border-t bg-surface p-card">
             {detail.parsed_result ? (
               <DefinitionGrid
                 columnsClassName="sm:grid-cols-2 lg:grid-cols-3"
@@ -1611,12 +1622,12 @@ export function AuditDetailBody({
 
       <Section title="存储与原始证据">
         <div className="space-y-3">
-          <details className="overflow-hidden rounded-lg border bg-slate-50/60">
-            <summary className="cursor-pointer px-4 py-3 text-sm font-semibold hover:bg-slate-100/80">
+          <details className={cn(insetPanelClassName, "overflow-hidden")}>
+            <summary className={summaryClassName}>
               轮次与内容存储
-              <span className="ml-2 text-xs font-normal text-muted-foreground">重建校验与哈希 · 默认折叠</span>
+              <span className="ml-2 text-label font-normal text-subtle">重建校验与哈希 · 默认折叠</span>
             </summary>
-            <div className="border-t bg-white/80 p-4">
+            <div className="border-t bg-surface p-card">
               <TurnStoragePanel
                 detail={detail}
                 loading={reconstructedLoading}
@@ -1658,7 +1669,7 @@ export function TurnStoragePanel({
 
   return (
     <div className="space-y-4">
-      <Alert className={turn.reconstruction_status === "verified" ? "border-emerald-200" : "border-red-200"}>
+      <Alert variant={turn.reconstruction_status === "verified" ? "success" : "danger"}>
         <AlertTitle>{turn.reconstruction_status === "verified" ? "轮次已通过精确重建校验" : "轮次重建校验失败"}</AlertTitle>
         <AlertDescription>
           请求与响应由有序内容引用、二进制对象和协议 envelope 重建；哈希用于验证重建结果与当时的 HTTP Body 一致。
@@ -1690,7 +1701,7 @@ export function TurnStoragePanel({
           disabled={loading !== null || turn.reconstruction_status !== "verified"}
         >
           <DownloadIcon />
-          <span className="ml-2">{loading === "request" ? "重建中…" : "下载重建请求 JSON"}</span>
+          <span>{loading === "request" ? "重建中…" : "下载重建请求 JSON"}</span>
         </Button>
         <Button
           variant="outline"
@@ -1699,10 +1710,10 @@ export function TurnStoragePanel({
           disabled={loading !== null || turn.reconstruction_status !== "verified"}
         >
           <DownloadIcon />
-          <span className="ml-2">{loading === "response" ? "重建中…" : "下载重建响应 JSON"}</span>
+          <span>{loading === "response" ? "重建中…" : "下载重建响应 JSON"}</span>
         </Button>
       </div>
-      {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
+      {note ? <p className="text-caption text-subtle">{note}</p> : null}
     </div>
   );
 }
@@ -1733,14 +1744,14 @@ export function StreamTimingPanel({
         streams.map(({ side, body }) => {
           const timeline = timelines[side];
           return (
-            <div key={side} className="rounded-lg border bg-slate-50/60 p-3 text-xs">
+            <div key={side} className="rounded-md border bg-surface-muted p-3 text-label">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-semibold">{side === "request" ? "请求流" : "响应流"}</span>
                 <Badge variant={body.stream_timeline_complete ? "success" : "warning"}>
                   {body.stream_timeline_complete ? "时间线完整" : "时间点已截断"}
                 </Badge>
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground sm:grid-cols-4">
+              <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-subtle sm:grid-cols-4">
                 <span>逻辑事件</span>
                 <span className="text-right tabular-nums text-foreground">{body.stream_event_count}</span>
                 <span>已保存时间点</span>
@@ -1761,14 +1772,14 @@ export function StreamTimingPanel({
               {!timeline ? (
                 <Button variant="outline" size="sm" className="mt-3" onClick={() => onLoad(side)} disabled={loading !== null}>
                   <ViewIcon />
-                  <span className="ml-2">{loading === side ? "读取中…" : "读取并校验事件时间线"}</span>
+                  <span>{loading === side ? "读取中…" : "读取并校验事件时间线"}</span>
                 </Button>
               ) : null}
             </div>
           );
         })
       )}
-      {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
+      {note ? <p className="text-caption text-subtle">{note}</p> : null}
     </div>
   );
 }
@@ -1791,12 +1802,12 @@ export function HTTPAuditEvidence({
   onClear: (side: RawSide) => void;
 }) {
   return (
-    <details className="overflow-hidden rounded-lg border bg-slate-50/60">
-      <summary className="cursor-pointer px-4 py-3 text-sm font-semibold hover:bg-slate-100/80">
+    <details className={cn(insetPanelClassName, "overflow-hidden")}>
+      <summary className={summaryClassName}>
         原始 HTTP 证据与完整性
-        <span className="ml-2 text-xs font-normal text-muted-foreground">辅助证据 · 默认折叠</span>
+        <span className="ml-2 text-label font-normal text-subtle">辅助证据 · 默认折叠</span>
       </summary>
-      <div className="space-y-5 border-t bg-white/80 p-4">
+      <div className="space-y-section border-t bg-surface p-card">
         <Alert>
           <AlertDescription>
             这里按审计边界保存的字段重建 HTTP 视图，不是 TCP、TLS、HTTP/2 frame 或原始大小写/顺序级别的 wire dump。
@@ -1827,7 +1838,7 @@ export function HTTPAuditEvidence({
               onClear={() => onClear("response")}
             />
           </div>
-          {rawNote ? <p className="mt-2 text-xs text-muted-foreground">{rawNote}</p> : null}
+          {rawNote ? <p className="mt-2 text-caption text-subtle">{rawNote}</p> : null}
         </EvidenceSubsection>
 
         <EvidenceSubsection title="HTTP 阶段">
@@ -1849,7 +1860,7 @@ export function HTTPAuditEvidence({
 function EvidenceSubsection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section>
-      <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h4>
+      <h4 className="mb-2 text-label font-semibold text-muted">{title}</h4>
       {children}
     </section>
   );
@@ -1885,11 +1896,11 @@ function RawHTTPMessage({
   const envelopeText = [envelope.startLine, ...envelope.headerLines].join("\n");
 
   return (
-    <div className="min-w-0 rounded-lg border bg-white p-3 shadow-xs">
+    <div className="min-w-0 rounded-md border bg-surface p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <h4 className="text-sm font-semibold">{title}</h4>
-          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground" title={stageName}>
+          <h4 className="text-body font-semibold">{title}</h4>
+          <p className="truncate font-mono text-caption text-subtle" title={stageName}>
             {stageName}
           </p>
         </div>
@@ -1899,7 +1910,7 @@ function RawHTTPMessage({
         </div>
       </div>
 
-      <div className="mt-3 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
+      <div className="mt-3 grid gap-x-4 gap-y-2 text-label sm:grid-cols-2">
         {side === "request" ? (
           <>
             <EvidenceMeta label="Host" value={stage?.host || "—"} />
@@ -1916,10 +1927,10 @@ function RawHTTPMessage({
       </div>
 
       <div className="mt-3">
-        <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        <p className={cn(blockLabelClassName, "mb-1")}>
           起始行与 Header（重建）
         </p>
-        <pre className="max-h-64 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
+        <pre className={cn(codeBlockClassName, "max-h-64")}>
           {envelopeText}
           {"\n\n"}
         </pre>
@@ -1927,9 +1938,9 @@ function RawHTTPMessage({
 
       <div className="mt-3">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">原始 Body</p>
+          <p className={blockLabelClassName}>原始 Body</p>
           {loaded ? (
-            <div className="flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
+            <div className="flex flex-wrap gap-x-3 text-caption text-subtle">
               <span>{formatBytes(loaded.download.storedLength)}</span>
               <span>{loaded.preview.contentType}</span>
               <span>{loaded.download.complete ? "完整" : "不完整"}</span>
@@ -1938,7 +1949,7 @@ function RawHTTPMessage({
         </div>
 
         {body?.error_code === "capture_chunk_missing" ? (
-          <Alert className="border-amber-200">
+          <Alert variant="warning">
             <AlertTitle>原始证据存在缺失分块</AlertTitle>
             <AlertDescription>查看和下载仅包含按原顺序拼接的已保存片段，缺失字节无法恢复，不能视为完整的请求或响应。</AlertDescription>
           </Alert>
@@ -1946,7 +1957,7 @@ function RawHTTPMessage({
         {!body ? (
           <EmptyValue>该审计边界没有捕获 Body。</EmptyValue>
         ) : body.retention_state === "metadata" ? (
-          <Alert className="border-emerald-200">
+          <Alert variant="success">
             <AlertTitle>原始 Body 已完成校验并释放</AlertTitle>
             <AlertDescription>
               长期保留原始长度、SHA-256、Content-Type 和完整性链；请求与响应可从内容对象精确重建，因此不再提供会返回 410 的 raw 下载。
@@ -1961,7 +1972,7 @@ function RawHTTPMessage({
           loaded.preview.text ? (
             <pre
               aria-label={`${title}原始 Body`}
-              className="max-h-96 overflow-auto rounded-md border bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100"
+              className={cn(codeBlockClassName, "max-h-96")}
             >
               {loaded.preview.text}
             </pre>
@@ -1969,14 +1980,14 @@ function RawHTTPMessage({
             <EmptyValue>已捕获空 Body（0 B）。</EmptyValue>
           )
         ) : loaded?.preview.kind === "binary" ? (
-          <Alert className="border-amber-200">
-            <AlertTitle className="text-amber-900">二进制 Body 未在页面内渲染</AlertTitle>
+          <Alert variant="warning">
+            <AlertTitle>二进制 Body 未在页面内渲染</AlertTitle>
             <AlertDescription>
               {loaded.preview.reason} 可使用下方下载按钮保存原始字节。
             </AlertDescription>
           </Alert>
         ) : (
-          <div className="rounded-md border border-dashed bg-slate-50/60 px-4 py-4 text-sm text-muted-foreground">
+          <div className={emptyStateClassName}>
             Body 尚未加载。列表与详情切换不会自动请求原始 Body。
           </div>
         )}
@@ -1984,10 +1995,10 @@ function RawHTTPMessage({
 
       {trailers.length > 0 ? (
         <div className="mt-3">
-          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <p className={cn(blockLabelClassName, "mb-1")}>
             Trailer（独立捕获）
           </p>
-          <pre className="max-h-40 overflow-auto rounded-md border bg-slate-50 p-3 font-mono text-[11px] leading-5">
+          <pre className="max-h-40 overflow-auto rounded-md border bg-surface-muted p-3 font-mono text-code">
             {envelope.trailerLines.join("\n")}
           </pre>
         </div>
@@ -1997,7 +2008,7 @@ function RawHTTPMessage({
         {!loaded ? (
           <Button variant="outline" size="sm" onClick={onLoad} disabled={busy}>
             <ViewIcon />
-            <span className="ml-2">{loading ? "加载中…" : "加载并查看 Body"}</span>
+            <span>{loading ? "加载中…" : "加载并查看 Body"}</span>
           </Button>
         ) : (
           <Button variant="ghost" size="sm" onClick={onClear} disabled={busy}>
@@ -2006,7 +2017,7 @@ function RawHTTPMessage({
         )}
         <Button variant="outline" size="sm" onClick={onDownload} disabled={busy}>
           <DownloadIcon />
-          <span className="ml-2">{loading ? "读取中…" : "下载原始 Body"}</span>
+          <span>{loading ? "读取中…" : "下载原始 Body"}</span>
         </Button>
       </div> : null}
     </div>
@@ -2016,7 +2027,7 @@ function RawHTTPMessage({
 function EvidenceMeta({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div className="min-w-0">
-      <div className="text-muted-foreground">{label}</div>
+      <div className="text-subtle">{label}</div>
       <div className={`mt-0.5 break-all font-medium ${mono ? "font-mono" : ""}`}>{value}</div>
     </div>
   );
@@ -2038,11 +2049,11 @@ function StagesTable({ stages }: { stages: AuditStage[] }) {
       <TableBody>
         {stages.map((stage) => (
           <TableRow key={stage.stage}>
-            <TableCell className="px-2 py-3 text-xs">{humanizeStage(stage.stage)}</TableCell>
-            <TableCell className="px-2 py-3">
+            <TableCell className="text-label">{humanizeStage(stage.stage)}</TableCell>
+            <TableCell>
               <StatusBadge value={stage.state} />
             </TableCell>
-            <TableCell className="px-2 py-3 text-xs">{stage.status_code ?? "—"}</TableCell>
+            <TableCell className="text-label">{stage.status_code ?? "—"}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -2057,7 +2068,7 @@ function BodiesTable({ bodies }: { bodies: AuditBody[] }) {
   return (
     <div className="space-y-2">
       {bodies.map((body) => (
-        <div key={body.stage} className="rounded-md border bg-slate-50/60 p-3 text-xs">
+        <div key={body.stage} className="rounded-md border bg-surface-muted p-3 text-label">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <span className="font-medium">{humanizeStage(body.stage)}</span>
             <div className="flex flex-wrap gap-2">
@@ -2065,7 +2076,7 @@ function BodiesTable({ bodies }: { bodies: AuditBody[] }) {
               <StatusBadge value={body.state} />
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-subtle">
             <span>字节来源阶段</span>
             <span className="text-right text-foreground">{humanizeStage(body.source_stage)}</span>
             <span>观察长度</span>
@@ -2111,19 +2122,19 @@ function HeadersTable({ headers }: { headers: AuditHeader[] }) {
       <TableBody>
         {headers.map((header) => (
           <TableRow key={`${header.stage}-${header.kind}-${header.name}-${header.value_index}`}>
-            <TableCell className="max-w-32 truncate px-2 py-2 text-xs" title={humanizeStage(header.stage)}>
+            <TableCell className="max-w-32 truncate text-label" title={humanizeStage(header.stage)}>
               {humanizeStage(header.stage)}
             </TableCell>
-            <TableCell className="px-2 py-2 text-xs">
+            <TableCell className="text-label">
               <Badge variant="outline" className="font-mono">
                 {header.kind}
               </Badge>
             </TableCell>
-            <TableCell className="px-2 py-2 font-mono text-xs">{header.name}</TableCell>
-            <TableCell className="min-w-64 max-w-lg whitespace-pre-wrap break-all px-2 py-2 font-mono text-xs">
-              {header.value || <span className="text-muted-foreground">（空值）</span>}
+            <TableCell className="font-mono text-label">{header.name}</TableCell>
+            <TableCell className="min-w-64 max-w-lg whitespace-pre-wrap break-all font-mono text-label">
+              {header.value || <span className="text-subtle">（空值）</span>}
             </TableCell>
-            <TableCell className="px-2 py-2 text-right text-xs tabular-nums">{formatBytes(header.value_length)}</TableCell>
+            <TableCell className="text-right text-label tabular-nums">{formatBytes(header.value_length)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -2134,8 +2145,8 @@ function HeadersTable({ headers }: { headers: AuditHeader[] }) {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section>
-      <Separator className="mb-5" />
-      <h3 className="mb-3 text-sm font-semibold">{title}</h3>
+      <Separator className="mb-section" />
+      <h3 className="mb-3 text-title font-semibold">{title}</h3>
       {children}
     </section>
   );
@@ -2144,7 +2155,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 function FilterField({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
   return (
     <label htmlFor={htmlFor} className="min-w-0 space-y-1">
-      <span className="block text-[11px] font-medium leading-none text-muted-foreground">{label}</span>
+      <span className="block text-label font-medium text-muted">{label}</span>
       {children}
     </label>
   );
@@ -2161,11 +2172,11 @@ function DefinitionGrid({
     return <EmptyValue>没有可展示的数据。</EmptyValue>;
   }
   return (
-    <dl className={`grid gap-x-5 gap-y-3 text-sm ${columnsClassName}`}>
+    <dl className={`grid gap-x-4 gap-y-3 text-body ${columnsClassName}`}>
       {items.map(([label, value]) => (
         <div key={label} className="min-w-0">
-          <dt className="text-xs text-muted-foreground">{label}</dt>
-          <dd className="mt-1 break-words font-medium">{value}</dd>
+          <dt className="text-label text-subtle">{label}</dt>
+          <dd className="mt-0.5 break-words font-medium">{value}</dd>
         </div>
       ))}
     </dl>
@@ -2173,11 +2184,11 @@ function DefinitionGrid({
 }
 
 function monoValue(value: string): ReactNode {
-  return <span className="break-all font-mono text-xs" title={value}>{value}</span>;
+  return <span className="break-all font-mono text-label" title={value}>{value}</span>;
 }
 
 function hashValue(value: string): ReactNode {
-  return <span className="font-mono text-xs" title={value}>{shortHash(value)}</span>;
+  return <span className="font-mono text-label" title={value}>{shortHash(value)}</span>;
 }
 
 function turnLinkLabel(reason: string): string {
@@ -2220,7 +2231,7 @@ function callerStatusLabel(status: string | null | undefined): string {
 }
 
 function EmptyValue({ children }: { children: ReactNode }) {
-  return <div className="rounded-md border border-dashed bg-slate-50/60 px-4 py-5 text-center text-sm text-muted-foreground">{children}</div>;
+  return <div className={emptyStateClassName}>{children}</div>;
 }
 
 function StatusBadge({ value, labelPrefix }: { value: string | null | undefined; labelPrefix?: string }) {
@@ -2255,29 +2266,39 @@ export function DeveloperBadge({ identity }: { identity: DeveloperIdentity | nul
   const name = identity?.token_name?.trim() || identity?.username?.trim();
   return (
     <div className="flex items-center gap-2" title="仅显示该 API Key 产生的调用记录">
-      <Badge variant="secondary">开发者</Badge>
-      <span className="hidden max-w-[16rem] truncate text-xs text-muted-foreground sm:inline">
+      <Badge variant="info">开发者</Badge>
+      <span className="hidden max-w-64 truncate text-label text-muted sm:inline">
         {name ? `${name} 的调用记录` : "本 API Key 的调用记录"}
       </span>
     </div>
   );
 }
 
+// Same artwork as public/favicon.svg: an LLM conversation bubble with log
+// lines, inspected by a magnifier.
 function BrandMark({ compact = false }: { compact?: boolean }) {
+  const gradientId = useId();
+  const size = compact ? 36 : 48;
   return (
-    <div
-      className={
-        compact
-          ? "grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-950 text-white shadow-xs"
-          : "grid h-12 w-12 place-items-center rounded-xl bg-slate-950 text-white shadow-lg"
-      }
+    <svg
       aria-hidden="true"
+      className={compact ? "shrink-0 rounded-lg shadow-xs" : "rounded-xl shadow-lg"}
+      viewBox="0 0 64 64"
+      width={size}
+      height={size}
     >
-      <svg viewBox="0 0 24 24" width={compact ? 20 : 26} height={compact ? 20 : 26} fill="none">
-        <path d="M5 7.5h14M7.5 12h9M9.5 16.5h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-        <path d="M4 4h16v16H4z" stroke="currentColor" strokeWidth="1.3" opacity=".5" />
-      </svg>
-    </div>
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#3b6e9e" />
+          <stop offset="1" stopColor="#2c5378" />
+        </linearGradient>
+      </defs>
+      <rect width="64" height="64" rx="14" fill={`url(#${gradientId})`} />
+      <path d="M14 16h28a6 6 0 0 1 6 6v12a6 6 0 0 1-6 6H26l-8 7v-7h-4a6 6 0 0 1-6-6V22a6 6 0 0 1 6-6z" fill="#fff" />
+      <path d="M17 24h20M17 30h14" stroke="#2c5378" strokeWidth="3.5" strokeLinecap="round" />
+      <circle cx="43" cy="41" r="9" fill="#1d3b57" stroke="#fff" strokeWidth="4" />
+      <path d="M49.5 47.5l6 6" stroke="#fff" strokeWidth="5" strokeLinecap="round" />
+    </svg>
   );
 }
 

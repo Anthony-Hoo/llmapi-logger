@@ -57,7 +57,7 @@ export function InsightsView({
       {current ? (
         // Explicit margin: the overview wrapper above is display:none while a
         // sub-page is open, so a v4 `space-y` margin-bottom on it would not apply.
-        <div className="mt-5">
+        <div className="mt-section">
       {current?.kind === "trend" ? (
         <TrendPage
           key={`trend:${current.sessionID}`}

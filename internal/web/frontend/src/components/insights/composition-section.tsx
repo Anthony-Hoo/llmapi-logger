@@ -6,6 +6,7 @@ import { categoryInfo, CATEGORIES, normalizeCategoryValues } from "../../lib/ins
 import { buildDnaBands } from "../../lib/insights/dna";
 import { formatSignedTokens, formatTokens } from "../../lib/insights/format";
 import { buildTreemapData, layoutTreemap } from "../../lib/insights/treemap";
+import { chartColors, chartFont } from "../../lib/tokens";
 import type { AgentIdentity, CategoryKey, CompositionItem, CompositionResponse, FileOp, ToolDef } from "../../types";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -53,8 +54,8 @@ export function CompositionSection({ client, auditID }: { client: ApiClient; aud
   }
   if (state.status === "error") {
     return (
-      <Alert className="border-red-200">
-        <AlertDescription className="text-red-800">无法读取上下文构成：{state.message}</AlertDescription>
+      <Alert variant="danger">
+        <AlertDescription>无法读取上下文构成：{state.message}</AlertDescription>
       </Alert>
     );
   }
@@ -103,9 +104,9 @@ export function CompositionPanel({ data }: { data: CompositionResponse }) {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-section">
       <div className="space-y-2">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-label text-muted">
           <span>模型：<span className="font-mono">{data.model || "未记录"}</span></span>
           <span>
             prompt 总量：
@@ -119,27 +120,27 @@ export function CompositionPanel({ data }: { data: CompositionResponse }) {
         </div>
         <CompositionBar values={values} contextWindow={data.context_window} height={16} label="上下文构成" />
         <CategoryLegend values={values} />
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-caption text-subtle">
           {data.anchored
             ? "各类别为估算值，已按上游报告的 prompt 总量锚定；条目 Token 为未锚定的估算。"
             : "该请求没有 usage，显示原始估算（约 4 字符 / Token）。"}
         </p>
         {events.length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">事件</span>
+            <span className="text-label text-muted">事件</span>
             {events.map((event) => (
               <Badge key={event} variant="outline">{eventLabel(event)}</Badge>
             ))}
           </div>
         ) : null}
         {diff ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-label text-muted">
             相对上一步：新增 <span className="font-medium text-foreground">{diff.added_items}</span> 项，移除{" "}
             <span className="font-medium text-foreground">{diff.removed_items}</span> 项。
           </p>
         ) : null}
         {data.truncated ? (
-          <Alert className="border-amber-200">
+          <Alert variant="warning">
             <AlertDescription>条目清单已截断，部分条目未列出；类别合计仍为完整估算。</AlertDescription>
           </Alert>
         ) : null}
@@ -160,7 +161,7 @@ export function CompositionPanel({ data }: { data: CompositionResponse }) {
           <div className="space-y-2">
             {categoryOrder.some((key) => FILTERED_CATEGORIES.has(key)) ? (
               <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="助手内容筛选">
-                <span className="text-xs text-muted-foreground">助手 / 推理内容</span>
+                <span className="text-label text-muted">助手 / 推理内容</span>
                 {KIND_CHIPS.map((chip) => {
                   const on = !hiddenKinds.has(chip.kind);
                   return (
@@ -169,8 +170,8 @@ export function CompositionPanel({ data }: { data: CompositionResponse }) {
                       type="button"
                       aria-pressed={on}
                       onClick={() => toggleKind(chip.kind)}
-                      className={`rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors ${
-                        on ? "border-primary bg-primary/10 text-primary" : "border-border bg-white text-muted-foreground"
+                      className={`rounded-full border px-2.5 py-0.5 text-label font-medium transition-colors ${
+                        on ? "border-info-border bg-info-bg text-info-fg" : "border-border bg-surface text-subtle hover:text-foreground"
                       }`}
                     >
                       {chip.label}
@@ -217,8 +218,8 @@ function SubBlock({ title, hint, children }: { title: string; hint?: string; chi
   return (
     <div className="space-y-2">
       <div>
-        <h4 className="text-xs font-semibold text-foreground">{title}</h4>
-        {hint ? <p className="text-[11px] text-muted-foreground">{hint}</p> : null}
+        <h4 className="text-body font-semibold text-foreground">{title}</h4>
+        {hint ? <p className="text-caption text-subtle">{hint}</p> : null}
       </div>
       {children}
     </div>
@@ -257,11 +258,11 @@ function CategoryList({
   const visible = items.filter((item) => !hiddenKinds.has(item.kind));
   const shown = visible.slice(0, ITEM_RENDER_LIMIT);
   return (
-    <details className="overflow-hidden rounded-lg border bg-white/80">
-      <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50">
-        <span aria-hidden="true" className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: info.color }} />
+    <details className="overflow-hidden rounded-md border bg-surface">
+      <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-body hover:bg-surface-muted">
+        <span aria-hidden="true" className="inline-block h-2.5 w-2.5 rounded-xs" style={{ backgroundColor: info.color }} />
         <span className="font-medium">{info.label}</span>
-        <span className="text-xs tabular-nums text-muted-foreground">
+        <span className="text-label tabular-nums text-subtle">
           {formatTokens(total)} · {items.length} 项
         </span>
         {added > 0 ? <Badge variant="success">+{added} 项</Badge> : null}
@@ -271,35 +272,35 @@ function CategoryList({
           </Badge>
         ) : null}
       </summary>
-      <ul className="divide-y border-t text-xs">
+      <ul className="divide-y border-t text-label">
         {shown.map((item) => (
           <li key={item.index} className="flex items-start gap-3 px-3 py-1.5">
-            <span className="w-14 shrink-0 text-right tabular-nums text-muted-foreground">{formatTokens(item.tokens)}</span>
+            <span className="w-14 shrink-0 text-right tabular-nums text-subtle">{formatTokens(item.tokens)}</span>
             <span className="min-w-0 flex-1">
               <span className="inline-flex flex-wrap items-center gap-1.5">
                 <span className="font-medium">{item.label?.trim() || itemKindLabel(item.kind)}</span>
-                <span className="text-muted-foreground">{itemKindLabel(item.kind)}</span>
+                <span className="text-subtle">{itemKindLabel(item.kind)}</span>
                 {item.change === "added" ? <Badge variant="success">新增</Badge> : null}
               </span>
-              {item.summary ? <span className="mt-0.5 block break-words text-muted-foreground">{item.summary}</span> : null}
+              {item.summary ? <span className="mt-0.5 block break-words text-muted">{item.summary}</span> : null}
             </span>
           </li>
         ))}
-        {visible.length === 0 ? <li className="px-3 py-2 text-muted-foreground">筛选后没有条目。</li> : null}
+        {visible.length === 0 ? <li className="px-3 py-2 text-subtle">筛选后没有条目。</li> : null}
         {visible.length > shown.length ? (
-          <li className="px-3 py-2 text-muted-foreground">仅显示前 {ITEM_RENDER_LIMIT} 项，共 {visible.length} 项。</li>
+          <li className="px-3 py-2 text-subtle">仅显示前 {ITEM_RENDER_LIMIT} 项，共 {visible.length} 项。</li>
         ) : null}
       </ul>
     </details>
   );
 }
 
-export function toolSourceLabel(source: string): { label: string; variant: "secondary" | "outline" | "default" } {
+export function toolSourceLabel(source: string): { label: string; variant: "neutral" | "outline" | "info" } {
   if (source === "builtin") {
-    return { label: "内置", variant: "secondary" };
+    return { label: "内置", variant: "neutral" };
   }
   if (source.startsWith("mcp:")) {
-    return { label: `MCP · ${source.slice(4) || "未知服务"}`, variant: "default" };
+    return { label: `MCP · ${source.slice(4) || "未知服务"}`, variant: "info" };
   }
   if (source === "custom") {
     return { label: "自定义", variant: "outline" };
@@ -318,20 +319,20 @@ function ToolList({ tools }: { tools: readonly ToolDef[] }) {
   const sorted = sortTools(tools);
   const max = Math.max(...sorted.map((tool) => tool.tokens), 1);
   return (
-    <details className="overflow-hidden rounded-lg border bg-white/80">
-      <summary className="cursor-pointer px-3 py-2 text-sm hover:bg-slate-50">
+    <details className="overflow-hidden rounded-md border bg-surface">
+      <summary className="cursor-pointer px-3 py-2 text-body hover:bg-surface-muted">
         展开 {sorted.length} 个工具 · 共 {formatTokens(sorted.reduce((sum, tool) => sum + tool.tokens, 0))}
       </summary>
-      <ul className="divide-y border-t text-xs">
+      <ul className="divide-y border-t text-label">
         {sorted.map((tool) => {
           const source = toolSourceLabel(tool.source);
           return (
             <li key={`${tool.source}:${tool.name}`} className="flex items-center gap-3 px-3 py-1.5">
-              <span className="w-14 shrink-0 text-right tabular-nums text-muted-foreground">{formatTokens(tool.tokens)}</span>
+              <span className="w-14 shrink-0 text-right tabular-nums text-subtle">{formatTokens(tool.tokens)}</span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-mono" title={tool.name}>{tool.name}</span>
-                <span className="mt-1 block h-1 rounded-full bg-slate-100">
-                  <span className="block h-1 rounded-full bg-sky-400" style={{ width: `${(tool.tokens / max) * 100}%` }} />
+                <span className="mt-1 block h-1 rounded-full bg-surface-sunken">
+                  <span className="block h-1 rounded-full bg-cat-tools" style={{ width: `${(tool.tokens / max) * 100}%` }} />
                 </span>
               </span>
               <Badge variant={source.variant} className="shrink-0">{source.label}</Badge>
@@ -348,7 +349,7 @@ function FileOps({ ops }: { ops: readonly FileOp[] }) {
     return <EmptyNote>本次响应没有文件相关的工具调用。</EmptyNote>;
   }
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
@@ -365,10 +366,10 @@ function FileOps({ ops }: { ops: readonly FileOp[] }) {
               <TableCell>
                 <Badge variant="outline">{fileOpLabel(op.op)}</Badge>
               </TableCell>
-              <TableCell className="font-mono text-xs">{op.tool}</TableCell>
-              <TableCell className="max-w-[24rem] break-all font-mono text-xs">{op.path || "—"}</TableCell>
-              <TableCell className="text-right tabular-nums text-emerald-700">{op.added_lines ? `+${op.added_lines}` : "—"}</TableCell>
-              <TableCell className="text-right tabular-nums text-red-700">{op.removed_lines ? `−${op.removed_lines}` : "—"}</TableCell>
+              <TableCell className="font-mono text-label">{op.tool}</TableCell>
+              <TableCell className="max-w-96 break-all font-mono text-label">{op.path || "—"}</TableCell>
+              <TableCell className="text-right tabular-nums text-success-fg">{op.added_lines ? `+${op.added_lines}` : "—"}</TableCell>
+              <TableCell className="text-right tabular-nums text-danger-fg">{op.removed_lines ? `−${op.removed_lines}` : "—"}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -405,11 +406,11 @@ function AgentBlock({ agent }: { agent: AgentIdentity }) {
     ["根 ID", agent.root_id || "—", true],
   ];
   return (
-    <dl className="grid gap-x-5 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+    <dl className="grid gap-x-4 gap-y-3 text-body sm:grid-cols-2 lg:grid-cols-4">
       {rows.map(([label, value, mono]) => (
         <div key={label} className="min-w-0">
-          <dt className="text-xs text-muted-foreground">{label}</dt>
-          <dd className={`mt-0.5 break-all font-medium ${mono ? "font-mono text-xs" : ""}`}>{value}</dd>
+          <dt className="text-label text-subtle">{label}</dt>
+          <dd className={`mt-0.5 break-all font-medium ${mono ? "font-mono text-label" : ""}`}>{value}</dd>
         </div>
       ))}
     </dl>
@@ -450,7 +451,7 @@ export function TreemapView({ items }: { items: readonly CompositionItem[] }) {
               <title>{`${info.label} ${formatTokens(category.tokens)}`}</title>
             </rect>
             {showHeader ? (
-              <text x={category.rect.x + 4} y={category.rect.y + 12} fontSize="11" fontWeight="600" fill="#0f172a">
+              <text x={category.rect.x + 4} y={category.rect.y + 12} fontSize={chartFont.caption} fontWeight="600" fill={chartColors.text}>
                 {truncateText(`${info.label} ${formatTokens(category.tokens)}`, Math.floor(category.rect.w / 6.5))}
               </text>
             ) : null}
@@ -463,14 +464,14 @@ export function TreemapView({ items }: { items: readonly CompositionItem[] }) {
                   height={Math.max(group.rect.h - 1, 0)}
                   fill={info.color}
                   fillOpacity={group.other ? 0.4 : 0.78}
-                  stroke="#ffffff"
+                  stroke={chartColors.surface}
                   strokeWidth={1}
                 >
                   <title>{`${info.label} · ${group.name}：${formatTokens(group.tokens)}（${group.count} 项）`}</title>
                 </rect>
                 {group.rect.w > 46 && group.rect.h > 18 ? (
-                  <text x={group.rect.x + 4} y={group.rect.y + 13} fontSize="10" fill="#ffffff">
-                    {truncateText(`${group.name} ${formatTokens(group.tokens)}`, Math.floor((group.rect.w - 6) / 5.6))}
+                  <text x={group.rect.x + 4} y={group.rect.y + 13} fontSize={chartFont.caption} fill={chartColors.onColor}>
+                    {truncateText(`${group.name} ${formatTokens(group.tokens)}`, Math.floor((group.rect.w - 6) / 6.2))}
                   </text>
                 ) : null}
               </g>
@@ -516,12 +517,12 @@ export function DnaStrip({ items, compared }: { items: readonly CompositionItem[
               <rect x={band.x} y={8} width={band.width} height={DNA_H} fill={info.color}>
                 <title>{`#${band.index} ${info.label} · ${band.label}：${formatTokens(band.tokens)}${band.added ? "（新增）" : ""}`}</title>
               </rect>
-              {band.added ? <rect x={band.x} y={0} width={band.width} height={6} fill="#16a34a" data-added="true" /> : null}
+              {band.added ? <rect x={band.x} y={0} width={band.width} height={6} fill={chartColors.success} data-added="true" /> : null}
             </g>
           );
         })}
       </svg>
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-caption text-subtle">
         {compared
           ? `绿色标记表示相对上一步新增的条目（${addedCount} 段）。`
           : "没有上一步可对比，未标记新增条目。"}

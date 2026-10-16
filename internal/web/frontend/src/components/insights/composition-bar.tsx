@@ -1,6 +1,7 @@
 import type { CategoryValues } from "../../types";
 import { CATEGORIES, normalizeCategoryValues, sumCategories } from "../../lib/insights/categories";
 import { formatRatio, formatTokens, occupancy, occupancyLevel } from "../../lib/insights/format";
+import { chartColors } from "../../lib/tokens";
 
 /**
  * Stacked bar of the eight composition categories (custom SVG). When a context
@@ -35,7 +36,7 @@ export function CompositionBar({
       className={className}
       style={{ display: "block" }}
     >
-      <rect x="0" y="0" width="100%" height={height} rx={height / 2} fill="#e2e8f0" />
+      <rect x="0" y="0" width="100%" height={height} rx={height / 2} fill={chartColors.track} />
       <g>
         {CATEGORIES.map((category) => {
           const value = normalized[category.key];
@@ -65,10 +66,10 @@ export function CategoryLegend({
 }) {
   const normalized = values ? normalizeCategoryValues(values) : null;
   return (
-    <ul className={`flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground ${className ?? ""}`}>
+    <ul className={`flex flex-wrap gap-x-3 gap-y-1 text-label text-muted ${className ?? ""}`}>
       {CATEGORIES.map((category) => (
         <li key={category.key} className="inline-flex items-center gap-1.5">
-          <span aria-hidden="true" className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: category.color }} />
+          <span aria-hidden="true" className="inline-block h-2.5 w-2.5 rounded-xs" style={{ backgroundColor: category.color }} />
           <span>{category.label}</span>
           {normalized ? <span className="tabular-nums">{formatTokens(normalized[category.key])}</span> : null}
         </li>
@@ -87,10 +88,10 @@ export function OccupancyText({
 }) {
   const ratio = occupancy(lastPrompt, contextWindow);
   if (ratio === null) {
-    return <span className="text-muted-foreground">窗口未知</span>;
+    return <span className="text-subtle">窗口未知</span>;
   }
   const level = occupancyLevel(ratio);
-  const color = level === "danger" ? "text-red-600" : level === "warn" ? "text-amber-600" : "text-muted-foreground";
+  const color = level === "danger" ? "text-danger-fg" : level === "warn" ? "text-warning-fg" : "text-subtle";
   return (
     <span className={`tabular-nums ${color}`} data-level={level}>
       {formatTokens(lastPrompt)} / {formatTokens(contextWindow)} · {formatRatio(ratio)}
