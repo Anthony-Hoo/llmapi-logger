@@ -418,7 +418,7 @@ Header 名称可以在词表覆盖文件中改成你框架已有的名字（`con
 ## 13. 实现偏差与已知限制
 
 - **合成节点指纹**：没有客户端 Agent ID 的会话（普通 OpenAI/Anthropic 客户端）也会得到一个由 `analysis_session_id` 派生的合成 `agent_node_fpr`（`SyntheticAgentFPR`），使会话链接、根聚合和 Agent 树查询走同一条路径。合成指纹不带 `agent_link_source`。
-- **真实树规则**：因此 `agent_root_fpr` 非空并不代表这是一棵 Agent 树。查询层只在根满足以下任一条件时才视为真实树：作用域内有 ≥ 2 个不同的 `agent_node_fpr`，或该根的任一行带非空 `agent_link_source`。`OverviewResponse.trees`、`SessionCard.tree_id`（非树为空）与 `subagents` 都按此判定；`agent-trees` 端点仍可读取单节点根。总览按所选时间窗口内的行判定，会话卡片与趋势按作用域内全部行判定。
+- **真实树规则**：因此 `agent_root_fpr` 非空并不代表这是一棵 Agent 树。查询层只在根满足以下任一条件时才视为真实树：作用域内有 ≥ 2 个不同的 `agent_node_fpr`，或该根的任一行带非空 `agent_parent_fpr`。`agent_link_source` 不参与判定：只带节点头的主 Agent 也会记 `link_source=header`，不能据此认定为树。`OverviewResponse.trees`、`SessionCard.tree_id`（非树为空）与 `subagents` 都按此判定；`agent-trees` 端点仍可读取单节点根。总览按所选时间窗口内的行判定，会话卡片与趋势按作用域内全部行判定。
 - **卡片取值口径**：会话卡片的角色、末步构成/prompt 总量取最新的 main/subagent 步骤；附属请求不开始 turn（`turn_start` 在统计和趋势序号中被忽略），其 `event_flags` 为 0（`prev_audit_id`/增删条目数仍保留）。
 - **趋势估算保持原始值**：`/trend` 返回未锚定的构成估算与真实 usage，锚定到 prompt 总量由前端完成（会话卡片与树节点由服务端锚定）。
 - **价格表**：内嵌快照 `internal/insights/pricing/prices.json`，可由 `insights.pricing_file` 覆盖。JSON 顶层为 `snapshot`、`note`、`models`、`schedules`，禁止未知字段。`models` 的键为小写 `provider/model`（或裸模型名），值为每百万 Token 美元价：`input`、`output` 必填，`cache_read`、`cache_write` 缺省回落到 `input`，`context` 为上下文窗口（0 表示未知）。`schedules` 是按 UTC 时段的成本倍率（`model` glob、`weekdays` 0=周日、`start`/`end` 为 `HH:MM`、`multiplier` ∈ (0,100]），首个匹配生效，跨午夜的窗口按开始日计星期。覆盖文件的同键条目替换内嵌条目，`schedules` 追加。查找链：完整 id（大小写不敏感）→ 去掉厂商前缀后的裸名（唯一才命中）→ 最长的已知族名加 `-`/`@`/`:` 后缀（带日期的发行版本，跨厂商共享则视为未知）→ 未知价格，不计价并计入 `unpriced_requests`。

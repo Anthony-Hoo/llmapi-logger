@@ -81,6 +81,7 @@ type stepSeed struct {
 	user      int64
 	detail    *insights.Detail
 	version   int
+	link      string // agent_link_source
 }
 
 func i64(value int64) *int64 { return &value }
@@ -129,6 +130,9 @@ func (fixture *insightsFixture) seed(seed stepSeed) {
 	}
 	if seed.session != "" {
 		row.AnalysisSessionID = &seed.session
+	}
+	if seed.link != "" {
+		row.AgentLinkSource = &seed.link
 	}
 	if seed.stop != "" {
 		row.StopReason = &seed.stop
@@ -709,5 +713,50 @@ func TestInsightsTrendTruncationKeepsAbsoluteTurnNumbers(t *testing.T) {
 	full, err := fixture.service.Trend(context.Background(), testSessionShared, scopeFor(keyOwn))
 	if err != nil || full.Truncated || full.Steps[3].Turn != 2 || full.Steps[4].Turn != 3 {
 		t.Fatalf("full trend = %+v %v", full, err)
+	}
+}
+
+func TestInsightsHeaderIdentifiedSingleNodeIsNotATree(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	const lone, pair = "agt_eeeeeeeeeeeeeeeeeeeeeeee", "agt_ffffffffffffffffffffffff"
+	rootLone, rootPair := fingerprint(0xe0), fingerprint(0xf0)
+	// A main agent that only sent a node header: link_source is "header" but the
+	// root has one node and no parent.
+	fixture.seed(stepSeed{id: "lone-1", offset: 0, key: keyOwn, session: lone, root: rootLone, node: fingerprint(0xe1), link: "header", turnStart: true, uncached: i64(10), output: i64(1)})
+	fixture.seed(stepSeed{id: "lone-2", offset: time.Minute, key: keyOwn, session: lone, root: rootLone, node: fingerprint(0xe1), link: "header", uncached: i64(10), output: i64(1)})
+	// A real tree: a subagent names its parent.
+	fixture.seed(stepSeed{id: "pair-1", offset: 2 * time.Minute, key: keyOwn, session: pair, root: rootPair, node: fingerprint(0xf1), link: "header", turnStart: true, uncached: i64(10), output: i64(1)})
+	fixture.seed(stepSeed{id: "pair-2", offset: 3 * time.Minute, key: keyOwn, session: pair, root: rootPair, node: fingerprint(0xf1), parent: fingerprint(0x99), link: "header", role: "subagent", uncached: i64(10), output: i64(1)})
+	ctx := context.Background()
+	from, to := fixture.rangeNS()
+
+	overview, err := fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to})
+	if err != nil || overview.Trees != 1 || overview.Sessions != 2 {
+		t.Fatalf("overview trees/sessions = %d/%d %v, want 1/2", overview.Trees, overview.Sessions, err)
+	}
+	page, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, card := range page.Items {
+		switch card.SessionID {
+		case lone:
+			if card.TreeID != "" || card.Subagents != 0 {
+				t.Errorf("lone header node card = %+v, want no tree", card)
+			}
+		case pair:
+			if card.TreeID == "" {
+				t.Errorf("parented node card = %+v, want a tree", card)
+			}
+		}
+	}
+	loneTrend, err := fixture.service.Trend(ctx, lone, nil)
+	if err != nil || loneTrend.TreeID != "" {
+		t.Fatalf("lone trend tree = %q %v", loneTrend.TreeID, err)
+	}
+	pairTrend, err := fixture.service.Trend(ctx, pair, nil)
+	if err != nil || pairTrend.TreeID == "" {
+		t.Fatalf("parented trend tree = %q %v", pairTrend.TreeID, err)
 	}
 }

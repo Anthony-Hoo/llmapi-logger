@@ -300,10 +300,12 @@ SELECT COUNT(*) FROM (
 }
 
 // insightsRealTreeHaving is the rule that makes an agent root a real tree:
-// two or more distinct agent nodes, or any step linked by a header, body or
-// content back-reference. Every session without a client agent id carries a
-// synthetic node fingerprint, so a lone node is not a tree.
-const insightsRealTreeHaving = `(COUNT(DISTINCT x.agent_node_fpr) >= 2 OR SUM(CASE WHEN x.agent_link_source IS NOT NULL THEN 1 ELSE 0 END) > 0)`
+// two or more distinct agent nodes, or any step that names a parent node.
+// agent_link_source is deliberately not part of the rule: a main agent that only
+// sent a node header is also tagged link_source='header', and every session
+// without a client agent id carries a synthetic node fingerprint, so a lone
+// node is not a tree.
+const insightsRealTreeHaving = `(COUNT(DISTINCT x.agent_node_fpr) >= 2 OR SUM(CASE WHEN x.agent_parent_fpr IS NOT NULL THEN 1 ELSE 0 END) > 0)`
 
 // InsightsRealRoots returns, keyed by raw root fingerprint, which of
 // filter.RootFPRs are real agent trees within the filter's scope. The time
