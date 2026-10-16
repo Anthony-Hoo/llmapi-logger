@@ -39,7 +39,8 @@ export interface TrendBar {
 
 /**
  * Collapses runs of consecutive steps with an equal `turn` into one bar. The
- * composition is a snapshot, so the last step's values win; generation time,
+ * composition is a snapshot, so the last non-auxiliary step's values win (the
+ * last step only if every step is auxiliary); generation time,
  * client gap and cost are summed, events are unioned in first-seen order.
  */
 export function aggregateByTurn(steps: readonly TrendStep[]): TrendBar[] {
@@ -70,8 +71,19 @@ export function buildBars(steps: readonly TrendStep[], granularity: TrendGranula
   return granularity === "turn" ? aggregateByTurn(steps) : stepBars(steps);
 }
 
+const AUXILIARY_ROLES: ReadonlySet<string> = new Set(["compaction", "title", "review", "auxiliary"]);
+
 function barFromRun(run: readonly TrendStep[], position: number): TrendBar {
-  const last = run[run.length - 1];
+  // Auxiliary requests (compaction/title/review/auxiliary) stay on the current
+  // turn but must not replace its snapshot; fall back to the last step only
+  // when the turn has no main/subagent step at all.
+  let last = run[run.length - 1];
+  for (let index = run.length - 1; index >= 0; index--) {
+    if (!AUXILIARY_ROLES.has(run[index].role)) {
+      last = run[index];
+      break;
+    }
+  }
   const events: string[] = [];
   for (const step of run) {
     for (const event of step.events ?? []) {

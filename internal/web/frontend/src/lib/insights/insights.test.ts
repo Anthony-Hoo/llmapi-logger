@@ -131,6 +131,33 @@ describe("turn aggregation", () => {
     expect(bars.reduce((total, bar) => total + bar.steps, 0)).toBe(steps.length);
   });
 
+  it("keeps the snapshot on the last non-auxiliary step while summing all steps", () => {
+    const bars = aggregateByTurn([
+      step("m1", 1, { user: 10 }, { model: "main-1", generation_ms: 10, cost_usd: 0.01 }),
+      step("m2", 1, { user: 10, tool_result: 30 }, { model: "main-2", generation_ms: 20, cost_usd: 0.02 }),
+      step("t1", 1, { user: 1 }, { role: "title", model: "small", generation_ms: 5, cost_usd: 0.001 }),
+      step("c1", 1, { user: 2 }, { role: "compaction", model: "small", generation_ms: 7, events: ["compaction"] }),
+    ]);
+    expect(bars).toHaveLength(1);
+    expect(bars[0].auditID).toBe("m2");
+    expect(bars[0].model).toBe("main-2");
+    expect(bars[0].estimate.tool_result).toBe(30);
+    expect(bars[0].steps).toBe(4);
+    expect(bars[0].generationMS).toBe(42);
+    expect(bars[0].costUSD).toBeCloseTo(0.031);
+    expect(bars[0].events).toEqual(["compaction"]);
+  });
+
+  it("falls back to the last step when a turn has only auxiliary steps", () => {
+    const bars = aggregateByTurn([
+      step("t1", 1, { user: 1 }, { role: "title" }),
+      step("r1", 1, { user: 2 }, { role: "review" }),
+    ]);
+    expect(bars).toHaveLength(1);
+    expect(bars[0].auditID).toBe("r1");
+    expect(bars[0].steps).toBe(2);
+  });
+
   it("only folds runs, not repeated turn numbers elsewhere", () => {
     const bars = aggregateByTurn([step("a", 1, {}), step("b", 2, {}), step("c", 1, {})]);
     expect(bars.map((bar) => bar.auditID)).toEqual(["a", "b", "c"]);
