@@ -1,7 +1,9 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -53,6 +55,14 @@ func (implementation *Parser) Parse(_ context.Context, input base.Input) base.Re
 	if input.Response.Present {
 		if base.LooksLikeSSE(input.Response.ContentType, input.Response.Data) {
 			if err := parseStream(input.Response.Data, &result); err != nil {
+				partial = true
+			} else {
+				parsedSides++
+			}
+		} else if looksLikeJSONArray(input.Response.Data) {
+			// streamGenerateContent without alt=sse answers with one JSON array of
+			// the same chunk objects an SSE stream would carry.
+			if err := parseArrayStream(input.Response.Data, &result); err != nil {
 				partial = true
 			} else {
 				parsedSides++
@@ -137,21 +147,10 @@ func parseStream(data []byte, result *base.Result) error {
 	}
 	observed := true
 	result.ObservedStream = &observed
-	valid := 0
-	malformed := false
-	for _, event := range events {
-		root, err := protocolutil.Object(event.Data)
-		if err != nil {
-			malformed = true
-			continue
-		}
-		valid++
-		parseResponse(root, result)
-	}
-	if valid == 0 {
+	if !accumulateStream(events, result) {
 		return errors.New("gemini parser: no valid SSE event")
 	}
-	if malformed || !tailClosed {
+	if malformed := streamMalformed(events); malformed || !tailClosed {
 		result.Status = base.StatusPartial
 		if result.ErrorCode == "" {
 			if malformed {
@@ -159,6 +158,65 @@ func parseStream(data []byte, result *base.Result) error {
 			} else {
 				result.ErrorCode = "unterminated_sse_event"
 			}
+		}
+	}
+	appendStreamConversation(events, result)
+	return nil
+}
+
+// accumulateStream folds every chunk object into result, so the last usage
+// snapshot wins and tool calls add up. It reports whether any chunk was valid.
+func accumulateStream(events []base.SSEEvent, result *base.Result) bool {
+	valid := 0
+	for _, event := range events {
+		root, err := protocolutil.Object(event.Data)
+		if err != nil {
+			continue
+		}
+		valid++
+		parseResponse(root, result)
+	}
+	return valid > 0
+}
+
+func streamMalformed(events []base.SSEEvent) bool {
+	for _, event := range events {
+		if _, err := protocolutil.Object(event.Data); err != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeJSONArray(data []byte) bool {
+	trimmed := bytes.TrimLeft(data, " \t\r\n\ufeff")
+	return len(trimmed) > 0 && trimmed[0] == '['
+}
+
+// parseArrayStream handles a streamGenerateContent response delivered as a JSON
+// array. Each element is treated exactly like one SSE event, so the result
+// matches an equivalent SSE stream.
+func parseArrayStream(data []byte, result *base.Result) error {
+	var elements []json.RawMessage
+	if err := base.DecodeJSON(data, &elements); err != nil {
+		return err
+	}
+	if len(elements) == 0 {
+		return errors.New("gemini parser: empty JSON array stream")
+	}
+	events := make([]base.SSEEvent, len(elements))
+	for index, element := range elements {
+		events[index] = base.SSEEvent{Data: element}
+	}
+	observed := true
+	result.ObservedStream = &observed
+	if !accumulateStream(events, result) {
+		return errors.New("gemini parser: no valid JSON array element")
+	}
+	if streamMalformed(events) {
+		result.Status = base.StatusPartial
+		if result.ErrorCode == "" {
+			result.ErrorCode = "invalid_event"
 		}
 	}
 	appendStreamConversation(events, result)
