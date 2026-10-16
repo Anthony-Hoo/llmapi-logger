@@ -9,6 +9,7 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
+import { PageHeader } from "../ui/page-header";
 import { Skeleton } from "../ui/skeleton";
 import { CategoryLegend, CompositionBar, OccupancyText } from "./composition-bar";
 import { clientLabel, EmptyNote, PanelTitle, roleLabel } from "./ui-bits";
@@ -116,36 +117,36 @@ export function TreePage({
   }, [client, treeID, refreshKey]);
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center gap-3">
-        <Button variant="outline" size="sm" onClick={onBack}>
-          ← 返回
-        </Button>
-        <div className="min-w-0">
-          <h2 className="text-base font-semibold">Agent 树</h2>
-          <p className="truncate font-mono text-xs text-muted-foreground" title={treeID}>
-            {treeID}
-          </p>
-        </div>
-      </div>
+    <div className="space-y-section">
+      <PageHeader
+        leading={
+          <Button variant="outline" size="sm" onClick={onBack}>
+            ← 返回
+          </Button>
+        }
+        title="Agent 树"
+        description={treeID}
+        descriptionTitle={treeID}
+        descriptionClassName="truncate font-mono text-label text-subtle"
+      />
 
       {error ? (
-        <Alert className="border-red-200">
-          <AlertTitle className="text-red-900">无法读取 Agent 树</AlertTitle>
-          <AlertDescription className="text-red-800">{error}</AlertDescription>
+        <Alert variant="danger">
+          <AlertTitle>无法读取 Agent 树</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
       {loading ? <Skeleton className="h-64 w-full" /> : null}
 
       {tree && !loading ? (
-        <Card className="bg-white/90">
-          <CardContent className="space-y-4 pt-4">
+        <Card>
+          <CardContent className="space-y-stack pt-card">
             <PanelTitle
               title={`共 ${tree.nodes.length} 个节点`}
               hint="点击节点查看该 Agent 的会话趋势；附属请求（压缩、标题等）计在发起它的节点上"
             />
             {tree.truncated ? (
-              <Alert className="border-amber-200">
+              <Alert variant="warning">
                 <AlertDescription>节点过多，仅显示最多 40 个。</AlertDescription>
               </Alert>
             ) : null}
@@ -219,13 +220,13 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
   if (!node.visible) {
     return (
       <div
-        className="h-full rounded-lg border border-dashed bg-slate-100/70 p-3 text-slate-500"
+        className="h-full rounded-md border border-dashed bg-surface-sunken p-3 text-subtle"
         style={{ borderLeft: `4px solid ${color}` }}
         data-placeholder="true"
       >
-        <p className="text-sm font-medium">不可见的父 Agent</p>
-        <p className="mt-1 text-xs">该节点不在当前身份的可见范围内，仅用于保持树结构。</p>
-        <p className="mt-2 truncate font-mono text-[11px]" title={node.node_id}>
+        <p className="text-body font-medium">不可见的父 Agent</p>
+        <p className="mt-1 text-label">该节点不在当前身份的可见范围内，仅用于保持树结构。</p>
+        <p className="mt-2 truncate font-mono text-caption" title={node.node_id}>
           {node.node_id}
         </p>
       </div>
@@ -234,7 +235,7 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
 
   const ratio = occupancy(node.last_prompt_total, node.context_window);
   const level = ratio === null ? "ok" : occupancyLevel(ratio);
-  const borderClass = level === "danger" ? "border-red-400" : level === "warn" ? "border-amber-400" : "border-border";
+  const borderClass = level === "danger" ? "border-danger" : level === "warn" ? "border-warning" : "border-border";
   const link = linkSourceLabel(node);
   const clickable = Boolean(node.session_id);
   const usage = node.usage;
@@ -244,8 +245,8 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
       role={clickable ? "button" : undefined}
       tabIndex={clickable ? 0 : undefined}
       aria-label={clickable ? `查看 ${clientLabel(node.client)} ${roleLabel(node.role)} 的会话趋势` : undefined}
-      className={`h-full space-y-1.5 overflow-hidden rounded-lg border bg-white p-3 shadow-xs ${borderClass} ${
-        clickable ? "cursor-pointer outline-hidden transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring" : ""
+      className={`h-full space-y-1.5 overflow-hidden rounded-md border bg-surface p-3 shadow-xs ${borderClass} ${
+        clickable ? "cursor-pointer outline-hidden transition-colors hover:border-primary-400 focus-visible:ring-2 focus-visible:ring-ring" : ""
       }`}
       style={{ borderLeft: `4px solid ${color}` }}
       data-occupancy={level}
@@ -262,10 +263,10 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
       }
     >
       <div className="flex flex-wrap items-center gap-1">
-        <Badge variant="secondary">
+        <Badge variant="neutral">
           {clientLabel(node.client)}
         </Badge>
-        <Badge variant={node.role === "main" ? "default" : "outline"}>
+        <Badge variant={node.role === "main" ? "info" : "outline"}>
           {roleLabel(node.role)}
         </Badge>
         {link ? (
@@ -274,15 +275,15 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
           </Badge>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-label text-muted">
         {node.steps} 步
         {node.aux_requests > 0 ? ` · 附属请求 ${node.aux_requests}` : ""}
       </p>
-      <p className="truncate text-xs tabular-nums">
+      <p className="truncate text-label tabular-nums">
         prompt {formatTokens(usage.prompt_total)} · 输出 {formatTokens(usage.output)} · {formatUSD(usage.estimated_cost_usd)}
       </p>
       <CompositionBar values={node.last_composition} contextWindow={node.context_window} height={8} label="末步上下文构成" />
-      <p className="text-[11px]">
+      <p className="text-caption">
         <OccupancyText lastPrompt={node.last_prompt_total} contextWindow={node.context_window} />
       </p>
     </div>

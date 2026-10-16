@@ -9,7 +9,9 @@ describe("display formatters", () => {
   });
 
   it("makes rejected records visually destructive", () => {
-    expect(statusVariant("rejected")).toBe("destructive");
+    expect(statusVariant("rejected")).toBe("danger");
+    expect(statusVariant("pending")).toBe("info");
+    expect(statusVariant("partial")).toBe("warning");
     expect(statusVariant("completed")).toBe("success");
   });
 

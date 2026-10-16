@@ -33,13 +33,13 @@ export function ImageAttachments({
         {images.map((image, index) => (
           <li key={index}>
             {broken[index] ? (
-              <span className="inline-flex h-24 items-center rounded-md border border-dashed bg-slate-50 px-3 text-xs text-muted-foreground">
+              <span className="inline-flex h-24 items-center rounded-md border border-dashed bg-surface-muted px-3 text-label text-subtle">
                 图片无法解码（{image.mediaType}，{formatBytes(image.bytes)}）
               </span>
             ) : (
               <button
                 type="button"
-                className="group block overflow-hidden rounded-md border bg-white shadow-xs transition-shadow hover:shadow-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                className="group block overflow-hidden rounded-md border bg-surface shadow-xs transition-colors hover:border-border-strong focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 title="点击放大查看"
                 onClick={() => setOpenIndex(index)}
               >
@@ -50,7 +50,7 @@ export function ImageAttachments({
                   className="max-h-40 max-w-[16rem] cursor-zoom-in object-contain"
                   onError={() => setBroken((current) => ({ ...current, [index]: true }))}
                 />
-                <span className="block border-t bg-slate-50/80 px-2 py-1 text-left text-[11px] tabular-nums text-muted-foreground">
+                <span className="block border-t bg-surface-muted px-2 py-1 text-left text-caption tabular-nums text-subtle">
                   #{index + 1} · {image.mediaType} · {formatBytes(image.bytes)}
                 </span>
               </button>
@@ -59,7 +59,7 @@ export function ImageAttachments({
         ))}
       </ul>
       {omitted > 0 ? (
-        <p className="mt-1.5 text-[11px] text-muted-foreground">
+        <p className="mt-1.5 text-caption text-subtle">
           另有 {omitted} 张图片超出缩略图上限，未渲染；其占位符仍保留在下方文本中。
         </p>
       ) : null}
@@ -226,10 +226,10 @@ function ImageLightbox({
       role="dialog"
       aria-modal="true"
       aria-label="图片放大查看"
-      className="fixed inset-0 z-50 flex flex-col bg-slate-950/90 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex flex-col bg-scrim/90 backdrop-blur-sm"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-slate-100">
-        <p className="min-w-0 truncate text-xs text-slate-300">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-neutral-100">
+        <p className="min-w-0 truncate text-label text-neutral-300">
           {count > 1 ? `第 ${index + 1} / ${count} 张 · ` : ""}
           {image.mediaType} · {formatBytes(image.bytes)}
           {zoomPercent !== null ? ` · ${zoomPercent}%` : ""}
@@ -285,7 +285,7 @@ function ImageLightbox({
           </>
         ) : null}
       </div>
-      <p className="px-4 pb-3 text-center text-[11px] text-slate-400">
+      <p className="px-4 pb-3 text-center text-caption text-neutral-400">
         滚轮缩放 · 拖动平移 · 双击在适应屏幕与原始大小间切换{count > 1 ? " · ←/→ 切换图片" : ""} · Esc 关闭
       </p>
     </div>,
@@ -300,7 +300,7 @@ function NavigationArrow({ direction, onClick }: { direction: "previous" | "next
       type="button"
       aria-label={isPrevious ? "上一张图片" : "下一张图片"}
       title={isPrevious ? "上一张（←）" : "下一张（→）"}
-      className={`absolute top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-slate-600 bg-slate-800/80 text-slate-100 shadow-lg transition-colors hover:bg-slate-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-300 ${
+      className={`absolute top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-neutral-600 bg-neutral-800/80 text-neutral-100 shadow-overlay transition-colors hover:bg-neutral-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-neutral-300 ${
         isPrevious ? "left-4" : "right-4"
       }`}
       onPointerDown={(event) => event.stopPropagation()}
@@ -333,7 +333,7 @@ function LightboxButton({
     <button
       type="button"
       autoFocus={autoFocus}
-      className="rounded-md border border-slate-600 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-100 hover:bg-slate-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-300"
+      className="rounded-md border border-neutral-600 bg-neutral-800/80 px-2.5 py-1 text-label text-neutral-100 hover:bg-neutral-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-neutral-300"
       onClick={onClick}
     >
       {children}

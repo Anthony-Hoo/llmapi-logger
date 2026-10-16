@@ -8,6 +8,7 @@ import type { TrendResponse } from "../../types";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
+import { PageHeader } from "../ui/page-header";
 import { Skeleton } from "../ui/skeleton";
 import { CategoryLegend } from "./composition-bar";
 import { TrendChart } from "./trend-chart";
@@ -64,38 +65,38 @@ export function TrendPage({
   const bars = useMemo(() => buildBars(trend?.steps ?? [], granularity), [trend, granularity]);
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
+    <div className="space-y-section">
+      <PageHeader
+        leading={
           <Button variant="outline" size="sm" onClick={onBack}>
             ← 返回洞察
           </Button>
-          <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold">会话趋势</h2>
-            <p className="truncate font-mono text-xs text-muted-foreground" title={sessionID}>
-              {title || sessionID}
-            </p>
-          </div>
-        </div>
-        {trend?.tree_id ? (
-          <Button variant="outline" size="sm" onClick={() => onOpenTree(trend.tree_id!)}>
-            查看 Agent 树
-          </Button>
-        ) : null}
-      </div>
+        }
+        title="会话趋势"
+        description={title || sessionID}
+        descriptionTitle={sessionID}
+        descriptionClassName="truncate font-mono text-label text-subtle"
+        actions={
+          trend?.tree_id ? (
+            <Button variant="outline" size="sm" onClick={() => onOpenTree(trend.tree_id!)}>
+              查看 Agent 树
+            </Button>
+          ) : undefined
+        }
+      />
 
       {error ? (
-        <Alert className="border-red-200">
-          <AlertTitle className="text-red-900">无法读取会话趋势</AlertTitle>
-          <AlertDescription className="text-red-800">{error}</AlertDescription>
+        <Alert variant="danger">
+          <AlertTitle>无法读取会话趋势</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
 
       {loading ? <Skeleton className="h-80 w-full" /> : null}
 
       {trend && !loading ? (
-        <Card className="bg-white/90">
-          <CardContent className="space-y-4 pt-4">
+        <Card>
+          <CardContent className="space-y-stack pt-card">
             <PanelTitle
               title="上下文构成趋势"
               hint={
@@ -127,7 +128,7 @@ export function TrendPage({
               }
             />
             {trend.truncated ? (
-              <Alert className="border-amber-200">
+              <Alert variant="warning">
                 <AlertDescription>更早步骤已截断，仅显示最近的步骤。</AlertDescription>
               </Alert>
             ) : null}
@@ -145,11 +146,11 @@ export function TrendPage({
                   onSelectBar={setSelectedAuditID}
                 />
                 <CategoryLegend />
-                <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground" aria-label="事件图例">
+                <ul className="flex flex-wrap gap-x-4 gap-y-1 text-label text-muted" aria-label="事件图例">
                   {Object.entries(EVENT_INFO).map(([key, info]) => (
                     <li key={key} className="inline-flex items-center gap-1.5">
                       <span
-                        className="grid h-4 w-4 place-items-center rounded-full text-[9px] text-white"
+                        className="grid size-4.5 place-items-center rounded-full text-caption text-white"
                         style={{ backgroundColor: info.color }}
                         aria-hidden="true"
                       >
@@ -159,7 +160,7 @@ export function TrendPage({
                     </li>
                   ))}
                 </ul>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-caption text-subtle">
                   {mode === "delta"
                     ? "增量：每类相对上一柱的有符号变化，增加向上堆叠、减少向下堆叠；提示中给出净变化。"
                     : "总量：估算值按该请求上游报告的 prompt 总量锚定；没有 usage 时显示原始估算。"}
@@ -172,13 +173,16 @@ export function TrendPage({
       ) : null}
 
       {selectedAuditID ? (
-        <section className="space-y-2" aria-label="审计详情">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">所选请求的审计详情</h3>
-            <Button variant="ghost" size="sm" onClick={() => setSelectedAuditID(null)}>
-              关闭
-            </Button>
-          </div>
+        <section className="space-y-stack" aria-label="审计详情">
+          <PageHeader
+            level="panel"
+            title="所选请求的审计详情"
+            actions={
+              <Button variant="ghost" size="sm" onClick={() => setSelectedAuditID(null)}>
+                关闭
+              </Button>
+            }
+          />
           {renderAuditDetail(selectedAuditID)}
         </section>
       ) : null}

@@ -21,7 +21,7 @@ export function SessionCardView({
     ? [card.caller.username, card.caller.token_name].filter(Boolean).join(" · ")
     : "";
   return (
-    <article className="min-w-0 rounded-lg border bg-white/90 p-4 shadow-xs transition-colors hover:border-primary/40">
+    <article className="min-w-0 rounded-lg border bg-surface p-card shadow-card transition-colors hover:border-primary-300">
       <div
         role="button"
         tabIndex={0}
@@ -36,18 +36,18 @@ export function SessionCardView({
         }}
       >
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="secondary">{clientLabel(card.client)}</Badge>
-          <Badge variant={card.role === "main" ? "default" : "outline"}>{roleLabel(card.role)}</Badge>
+          <Badge variant="neutral">{clientLabel(card.client)}</Badge>
+          <Badge variant={card.role === "main" ? "info" : "outline"}>{roleLabel(card.role)}</Badge>
           <Badge variant="outline">{protocolLabel(card.protocol)}</Badge>
           {card.subagents > 0 ? <Badge variant="warning">含 {card.subagents} 个子 Agent</Badge> : null}
-          <span className="ml-auto text-xs text-muted-foreground">{formatNanoTime(card.last_ns)}</span>
+          <span className="ml-auto text-caption text-subtle">{formatNanoTime(card.last_ns)}</span>
         </div>
 
-        <p className="break-words text-sm font-medium" title={card.models.join(", ")}>
+        <p className="break-words text-body font-medium" title={card.models.join(", ")}>
           {card.models.length > 0 ? card.models.join(" · ") : "未记录模型"}
         </p>
 
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-label sm:grid-cols-4">
           <Stat label="步 / 轮" value={`${card.steps} / ${card.turns}`} />
           <Stat label="prompt" value={formatTokens(usage.prompt_total)} />
           <Stat label="输出" value={formatTokens(usage.output)} />
@@ -57,7 +57,7 @@ export function SessionCardView({
             value={
               <>
                 {formatUSD(usage.estimated_cost_usd)}
-                {usage.unpriced_requests > 0 ? <span className="text-amber-700">（部分未知价格）</span> : null}
+                {usage.unpriced_requests > 0 ? <span className="text-warning-fg">（部分未知价格）</span> : null}
               </>
             }
           />
@@ -66,8 +66,8 @@ export function SessionCardView({
 
         <div className="space-y-1">
           <CompositionBar values={card.last_composition} contextWindow={card.context_window} height={8} label="末步上下文构成" />
-          <p className="text-[11px]">
-            <span className="text-muted-foreground">末步上下文：</span>
+          <p className="text-caption">
+            <span className="text-subtle">末步上下文：</span>
             <OccupancyText lastPrompt={card.last_prompt_total} contextWindow={card.context_window} />
           </p>
         </div>
@@ -87,7 +87,7 @@ export function SessionCardView({
 function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-muted-foreground">{label}</dt>
+      <dt className="text-subtle">{label}</dt>
       <dd className="truncate font-medium tabular-nums">{value}</dd>
     </div>
   );
