@@ -247,7 +247,7 @@ function TokenGate({
                 disabled={submitting}
                 className={
                   option.id === mode
-                    ? "rounded-md bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-sm"
+                    ? "rounded-md bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-xs"
                     : "rounded-md px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
                 }
               >
@@ -890,7 +890,7 @@ export function AuditFiltersPanel({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
-    <Card className="bg-white/85 shadow-sm">
+    <Card className="bg-white/85 shadow-xs">
       <CardContent className="!p-3">
         <form className="space-y-2" aria-label="审计筛选" onSubmit={onSubmit}>
           <div className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1.2fr)_minmax(160px,0.8fr)_minmax(240px,1.25fr)_auto]">
@@ -898,7 +898,7 @@ export function AuditFiltersPanel({
 			<FilterField label="调用者" htmlFor="filter-caller">
               <select
 				id="filter-caller"
-                className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+                className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-xs outline-hidden focus:ring-2 focus:ring-ring"
 				value={newAPIUserID}
 				onChange={(event) => onNewAPIUserIDChange(event.target.value)}
               >
@@ -965,7 +965,7 @@ export function AuditFiltersPanel({
               <FilterField label="转发状态" htmlFor="filter-forward-status">
                 <select
                   id="filter-forward-status"
-                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+                  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-xs outline-hidden focus:ring-2 focus:ring-ring"
                   value={forwardStatus}
                   onChange={(event) => onForwardStatusChange(event.target.value)}
                 >
@@ -981,7 +981,7 @@ export function AuditFiltersPanel({
 			  <FilterField label="HTTP 状态" htmlFor="filter-status-class">
 				<select
 				  id="filter-status-class"
-				  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+				  className="h-9 w-full rounded-md border border-input bg-white px-3 text-sm shadow-xs outline-hidden focus:ring-2 focus:ring-ring"
 				  value={statusClass}
 				  onChange={(event) => onStatusClassChange(event.target.value)}
 				>
@@ -1032,7 +1032,7 @@ export function AuditList({
   footer?: ReactNode;
 }) {
   return (
-    <Card className="flex min-w-0 flex-col overflow-hidden bg-white/90 shadow-sm xl:sticky xl:top-[4.5rem] xl:max-h-[calc(100vh-6rem)]">
+    <Card className="flex min-w-0 flex-col overflow-hidden bg-white/90 shadow-xs xl:sticky xl:top-[4.5rem] xl:max-h-[calc(100vh-6rem)]">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2.5 text-left">
         <div className="min-w-0">
           <CardTitle className="text-sm leading-5">审计记录</CardTitle>
@@ -1080,7 +1080,7 @@ export function AuditList({
                   <button
                     type="button"
                     aria-current={selected ? "true" : undefined}
-                    className={`block w-full min-w-0 px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
+                    className={`block w-full min-w-0 px-4 py-3 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
                       selected ? "bg-blue-50/90 hover:bg-blue-50" : "hover:bg-slate-50"
                     }`}
                     onClick={() => onSelect(audit.audit_id)}
@@ -1403,7 +1403,7 @@ function AuditDetailPanel({
 
   if (!auditID) {
     return (
-      <Card className="min-w-0 bg-white/90 shadow-sm">
+      <Card className="min-w-0 bg-white/90 shadow-xs">
         <CardContent className="flex min-h-80 items-center justify-center p-8 text-center text-sm text-muted-foreground">
           从左侧选择一条记录查看详情。
         </CardContent>
@@ -1412,7 +1412,7 @@ function AuditDetailPanel({
   }
 
   return (
-    <Card className="min-w-0 bg-white/90 shadow-sm">
+    <Card className="min-w-0 bg-white/90 shadow-xs">
       <CardContent className="space-y-5 p-5">
         {loading ? <DetailSkeleton /> : null}
         {error ? (
@@ -1885,7 +1885,7 @@ function RawHTTPMessage({
   const envelopeText = [envelope.startLine, ...envelope.headerLines].join("\n");
 
   return (
-    <div className="min-w-0 rounded-lg border bg-white p-3 shadow-sm">
+    <div className="min-w-0 rounded-lg border bg-white p-3 shadow-xs">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <h4 className="text-sm font-semibold">{title}</h4>
@@ -2268,7 +2268,7 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
     <div
       className={
         compact
-          ? "grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-950 text-white shadow-sm"
+          ? "grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-950 text-white shadow-xs"
           : "grid h-12 w-12 place-items-center rounded-xl bg-slate-950 text-white shadow-lg"
       }
       aria-hidden="true"

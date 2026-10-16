@@ -86,7 +86,7 @@ const markdownComponents: Components = {
   ),
   code: ({ className, children, node: _node, ...props }) => (
     <code
-      className={className ? `${className} font-mono` : "rounded bg-slate-200/80 px-1 py-0.5 font-mono text-[0.9em]"}
+      className={className ? `${className} font-mono` : "rounded-[0.25rem] bg-slate-200/80 px-1 py-0.5 font-mono text-[0.9em]"}
       {...props}
     >
       {children}
@@ -108,7 +108,7 @@ const markdownComponents: Components = {
       <span className="break-all">{children}</span>
     ),
   img: ({ alt, src }) => (
-    <span className="inline-flex max-w-full flex-wrap items-baseline gap-1 rounded bg-slate-200/70 px-1.5 py-0.5 text-xs text-muted-foreground">
+    <span className="inline-flex max-w-full flex-wrap items-baseline gap-1 rounded-[0.25rem] bg-slate-200/70 px-1.5 py-0.5 text-xs text-muted-foreground">
       <span>图片：{alt || "未命名"}</span>
       {src ? <code className="break-all font-mono">{src}</code> : null}
     </span>
@@ -163,7 +163,7 @@ function ConversationMessageView({ message, displayIndex }: { message: Conversat
       />
       <article
         aria-label={`第 ${displayIndex} 条：${presentation.label}`}
-        className={`min-w-0 rounded-lg border p-3 shadow-sm ${presentation.classes}`}
+        className={`min-w-0 rounded-lg border p-3 shadow-xs ${presentation.classes}`}
       >
         <header className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">{presentation.label}</span>
@@ -307,7 +307,7 @@ function UnknownPartView({ data }: { data: string }) {
       <summary className="cursor-pointer text-xs font-medium text-muted-foreground">未识别内容块</summary>
       <div className="mt-2">
         <ImageAttachments images={contentView.images} omitted={contentView.omittedImages} ownerLabel="未识别内容块" />
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-[0.25rem] bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
           {contentView.text || "（空）"}
         </pre>
       </div>

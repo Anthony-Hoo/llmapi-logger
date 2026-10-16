@@ -138,7 +138,7 @@ export function TreePage({
       {loading ? <Skeleton className="h-64 w-full" /> : null}
 
       {tree && !loading ? (
-        <Card className="bg-white/90 shadow-sm">
+        <Card className="bg-white/90 shadow-xs">
           <CardContent className="space-y-4 p-4 pt-4">
             <PanelTitle
               title={`共 ${tree.nodes.length} 个节点`}
@@ -244,8 +244,8 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
       role={clickable ? "button" : undefined}
       tabIndex={clickable ? 0 : undefined}
       aria-label={clickable ? `查看 ${clientLabel(node.client)} ${roleLabel(node.role)} 的会话趋势` : undefined}
-      className={`h-full space-y-1.5 overflow-hidden rounded-lg border bg-white p-3 shadow-sm ${borderClass} ${
-        clickable ? "cursor-pointer outline-none transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring" : ""
+      className={`h-full space-y-1.5 overflow-hidden rounded-lg border bg-white p-3 shadow-xs ${borderClass} ${
+        clickable ? "cursor-pointer outline-hidden transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring" : ""
       }`}
       style={{ borderLeft: `4px solid ${color}` }}
       data-occupancy={level}

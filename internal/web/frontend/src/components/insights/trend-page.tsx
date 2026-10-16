@@ -94,7 +94,7 @@ export function TrendPage({
       {loading ? <Skeleton className="h-80 w-full" /> : null}
 
       {trend && !loading ? (
-        <Card className="bg-white/90 shadow-sm">
+        <Card className="bg-white/90 shadow-xs">
           <CardContent className="space-y-4 p-4 pt-4">
             <PanelTitle
               title="上下文构成趋势"

@@ -1,6 +1,36 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/*
+ * CSS-first Tailwind v4 config. shadcn-style tokens stay as bare HSL channel
+ * triplets on :root (unchanged from v3) and are wrapped in hsl() here, so
+ * `bg-primary/90` style opacity modifiers keep working.
+ */
+@theme {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  /* Same values the v3 config produced for rounded-lg/md/sm (sm stays 8px). */
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  --shadow-soft: 0 18px 50px -24px rgb(15 23 42 / 0.28);
+}
 
 @layer base {
   :root {
@@ -24,8 +54,25 @@
     --radius: 0.75rem;
   }
 
-  * {
-    @apply border-border;
+  /* v4 defaults borders to currentColor; keep the v3 themed border color. */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-border);
+  }
+
+  /* v4 preflight no longer sets a pointer cursor on buttons (v3 did). */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* v4 placeholder defaults to currentColor at 50%; v3 used gray-400. */
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
   }
 
   body {
@@ -39,11 +86,5 @@
   input,
   select {
     font: inherit;
-  }
-}
-
-@layer utilities {
-  .tabular-nums {
-    font-variant-numeric: tabular-nums;
   }
 }

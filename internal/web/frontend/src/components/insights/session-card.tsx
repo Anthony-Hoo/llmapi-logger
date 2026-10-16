@@ -21,11 +21,11 @@ export function SessionCardView({
     ? [card.caller.username, card.caller.token_name].filter(Boolean).join(" · ")
     : "";
   return (
-    <article className="min-w-0 rounded-lg border bg-white/90 p-4 shadow-sm transition-colors hover:border-primary/40">
+    <article className="min-w-0 rounded-lg border bg-white/90 p-4 shadow-xs transition-colors hover:border-primary/40">
       <div
         role="button"
         tabIndex={0}
-        className="cursor-pointer space-y-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="cursor-pointer space-y-3 outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         aria-label={`查看会话趋势 ${card.session_id}`}
         onClick={() => onOpenSession(card)}
         onKeyDown={(event) => {

@@ -39,7 +39,7 @@ export function ImageAttachments({
             ) : (
               <button
                 type="button"
-                className="group block overflow-hidden rounded-md border bg-white shadow-sm transition-shadow hover:shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="group block overflow-hidden rounded-md border bg-white shadow-xs transition-shadow hover:shadow-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 title="点击放大查看"
                 onClick={() => setOpenIndex(index)}
               >
@@ -300,7 +300,7 @@ function NavigationArrow({ direction, onClick }: { direction: "previous" | "next
       type="button"
       aria-label={isPrevious ? "上一张图片" : "下一张图片"}
       title={isPrevious ? "上一张（←）" : "下一张（→）"}
-      className={`absolute top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-slate-600 bg-slate-800/80 text-slate-100 shadow-lg transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 ${
+      className={`absolute top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-slate-600 bg-slate-800/80 text-slate-100 shadow-lg transition-colors hover:bg-slate-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-300 ${
         isPrevious ? "left-4" : "right-4"
       }`}
       onPointerDown={(event) => event.stopPropagation()}
@@ -333,7 +333,7 @@ function LightboxButton({
     <button
       type="button"
       autoFocus={autoFocus}
-      className="rounded-md border border-slate-600 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-100 hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+      className="rounded-md border border-slate-600 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-100 hover:bg-slate-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-300"
       onClick={onClick}
     >
       {children}
