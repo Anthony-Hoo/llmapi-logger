@@ -17,7 +17,7 @@ func (worker *Worker) BackfillForTest(ctx context.Context) int {
 	return worker.backfill(ctx)
 }
 
-// ResetBackfillForTest restarts the backfill scan from the newest audit and
+// ResetBackfillForTest restarts the backfill scan from the oldest audit and
 // clears the rescan pause, keeping the in-memory skip set.
 func (worker *Worker) ResetBackfillForTest() {
 	worker.backfillCursor = nil

@@ -210,3 +210,26 @@ func TestInsightsAuxiliaryRequestsCarryNoEvents(t *testing.T) {
 		t.Fatalf("auxiliary step event flags = %d, want 0", compaction.EventFlags)
 	}
 }
+
+func TestInsightsBackfillRunsOldestFirstSoNewerAuditsLinkPredecessors(t *testing.T) {
+	t.Parallel()
+	harness := newInsightsHarness(t, nil)
+	ctx := context.Background()
+	send := func(user string) string {
+		h := headers("Authorization", "Bearer sk-backfill-order", "X-Agent-Session-Id", "raw-order-tree", "X-Agent-Id", "raw-order-main")
+		return harness.send("/v1/chat/completions", h, chatBody("model-example", "You are an agent.", user), chatResponse("model-example", "ok"))
+	}
+	older := send("first task")
+	newer := send("second task")
+	harness.enableInsights(true)
+	if got := harness.worker.BackfillForTest(ctx); got != 2 {
+		t.Fatalf("backfill attempted %d audits, want 2", got)
+	}
+	olderRow, newerRow := harness.analysis(older), harness.analysis(newer)
+	if olderRow.PrevAuditID != nil {
+		t.Fatalf("oldest audit prev = %q, want none", *olderRow.PrevAuditID)
+	}
+	if newerRow.PrevAuditID == nil || *newerRow.PrevAuditID != older {
+		t.Fatalf("newer audit prev = %v, want %s", newerRow.PrevAuditID, older)
+	}
+}

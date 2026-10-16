@@ -7,7 +7,7 @@ import (
 )
 
 // AnalysisBackfillCursor is the keyset position after which the next backfill
-// page continues. Pages run newest first, so the cursor only moves backwards.
+// page continues. Pages run oldest first, so the cursor only moves forwards.
 type AnalysisBackfillCursor struct {
 	StartedAtNS int64
 	AuditID     string
@@ -22,9 +22,9 @@ type AnalysisBackfillCandidate struct {
 
 // ListAnalysisBackfillCandidates returns up to limit ended audits whose parse
 // status is ok or partial and whose audit_analysis row is missing or older than
-// version, newest first. The LEFT JOIN uses the primary key, and the
+// version, oldest first, so a session's earlier audits are analysed before the\n// later ones that link to them. The LEFT JOIN uses the primary key, and the
 // audit_analysis_version_idx index keeps the version predicate cheap.
-// A nil after starts from the newest audit.
+// A nil after starts from the oldest audit.
 func (store *Store) ListAnalysisBackfillCandidates(ctx context.Context, version int, after *AnalysisBackfillCursor, limit int) ([]AnalysisBackfillCandidate, error) {
 	if ctx == nil {
 		return nil, errors.New("sqlite: nil context")
@@ -46,11 +46,11 @@ WHERE ar.ended_at_ns IS NOT NULL
 	arguments := []any{version}
 	if after != nil {
 		query += `
-  AND (ar.started_at_ns < ? OR (ar.started_at_ns = ? AND ar.audit_id < ?))`
+  AND (ar.started_at_ns > ? OR (ar.started_at_ns = ? AND ar.audit_id > ?))`
 		arguments = append(arguments, after.StartedAtNS, after.StartedAtNS, after.AuditID)
 	}
 	query += `
-ORDER BY ar.started_at_ns DESC, ar.audit_id DESC
+ORDER BY ar.started_at_ns ASC, ar.audit_id ASC
 LIMIT ?`
 	arguments = append(arguments, limit)
 

@@ -19,7 +19,7 @@ const (
 	// analysed, so a permanently unusable audit is not retried in a tight loop.
 	backfillSkipCap = 4096
 	// backfillRescanInterval is the pause after the candidate list is
-	// exhausted, before the next pass starts again from the newest audit.
+	// exhausted, before the next pass starts again from the oldest audit.
 	backfillRescanInterval = 10 * time.Minute
 )
 
