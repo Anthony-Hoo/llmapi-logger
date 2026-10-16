@@ -359,19 +359,12 @@ func itemKind(value map[string]any, fallback string) string {
 }
 
 func conversationKey(root map[string]any) string {
-	for _, key := range []string{"conversation_id", "prompt_cache_key", "thread_id"} {
+	if key := managedConversationKey(root); key != "" {
+		return key
+	}
+	for _, key := range []string{"prompt_cache_key", "thread_id"} {
 		if value := protocolutil.String(root[key]); value != "" {
 			return key + "\x00" + value
-		}
-	}
-	if value := root["conversation"]; value != nil {
-		if text := protocolutil.String(value); text != "" {
-			return "conversation\x00" + text
-		}
-		if object := protocolutil.Map(value); object != nil {
-			if id := protocolutil.String(object["id"]); id != "" {
-				return "conversation.id\x00" + id
-			}
 		}
 	}
 	metadata := protocolutil.Map(root["metadata"])
@@ -383,19 +376,27 @@ func conversationKey(root map[string]any) string {
 	return ""
 }
 
-// serverManagedConversation reports a request bound to a provider-side
-// conversation, whose stored items the provider prepends, so the request holds
-// only the new input. prompt_cache_key, thread_id and metadata ids only group
-// requests; their clients resend the context themselves.
-func serverManagedConversation(root map[string]any) bool {
-	if protocolutil.String(root["conversation_id"]) != "" {
-		return true
+// managedConversationKey returns the key of a provider-side conversation,
+// whose stored items the provider prepends, so the request holds only the new
+// input. It outranks prompt_cache_key, thread_id and metadata ids, which only
+// group requests whose clients resend the context themselves: several provider
+// conversations may share one cache key.
+func managedConversationKey(root map[string]any) string {
+	if value := protocolutil.String(root["conversation_id"]); value != "" {
+		return "conversation_id\x00" + value
 	}
 	value := root["conversation"]
-	if protocolutil.String(value) != "" {
-		return true
+	if text := protocolutil.String(value); text != "" {
+		return "conversation\x00" + text
 	}
-	return protocolutil.String(protocolutil.Map(value)["id"]) != ""
+	if id := protocolutil.String(protocolutil.Map(value)["id"]); id != "" {
+		return "conversation.id\x00" + id
+	}
+	return ""
+}
+
+func serverManagedConversation(root map[string]any) bool {
+	return managedConversationKey(root) != ""
 }
 
 func cloneMap(value map[string]any) (map[string]any, error) {

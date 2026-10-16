@@ -82,6 +82,42 @@ func TestServerManagedConversationLinksTurnsWithoutRepeatedContext(t *testing.T)
 	})
 }
 
+// TestServerManagedConversationsSharingACacheKeyStaySeparate keeps two
+// provider conversations apart when their requests reuse one prompt_cache_key:
+// the conversation id, not the cache key, decides which chain a turn joins.
+func TestServerManagedConversationsSharingACacheKeyStaySeparate(t *testing.T) {
+	t.Parallel()
+	fixture := newResponsesTurnFixture(t, map[string]any{"prompt_cache_key": "shared-cache-key"})
+	sendTo := func(conversation, auditID string, createdAtNS int64, text string) {
+		t.Helper()
+		fixture.fields["conversation"] = conversation
+		fixture.send(auditID, createdAtNS, []any{responsesMessage("user", text)}, responsesMessage("assistant", "answer to "+text))
+	}
+
+	sendTo("conv-first", "audit-first-1", 100, "first conversation opens")
+	sendTo("conv-second", "audit-second-1", 200, "second conversation opens")
+	sendTo("conv-first", "audit-first-2", 300, "first conversation continues")
+	sendTo("conv-second", "audit-second-2", 400, "second conversation continues")
+
+	for _, chain := range [][]expectedTurn{
+		{{"audit-first-1", "", "root"}, {"audit-first-2", "audit-first-1", "conversation_key"}},
+		{{"audit-second-1", "", "root"}, {"audit-second-2", "audit-second-1", "conversation_key"}},
+	} {
+		fixture.assertTurns(chain)
+	}
+	first, err := fixture.store.QueryAuditDetail(fixture.ctx, "audit-first-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.store.QueryAuditDetail(fixture.ctx, "audit-second-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TurnGraph.ConversationID == second.TurnGraph.ConversationID {
+		t.Fatalf("both provider conversations stored in %q", first.TurnGraph.ConversationID)
+	}
+}
+
 type expectedTurn struct{ auditID, parent, reason string }
 
 type responsesTurnFixture struct {
