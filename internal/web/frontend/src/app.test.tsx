@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { AuditDetail, AuditSummary, NewAPIUser, SessionInfo } from "./types";
+import type { AuditDetail, AuditSummary, NewAPIUser, SessionInfo, TokenLink } from "./types";
 import type { ApiClient } from "./api";
 import {
   AuditDetailBody,
@@ -133,6 +133,37 @@ describe("audit detail layout", () => {
     const withoutConversation = renderDetailBody({ ...conversationDetail, conversation: null });
     expect(withoutConversation).toContain("导出会话 JSON");
     expect(withoutConversation).toContain('disabled=""');
+  });
+});
+
+describe("audit detail billing", () => {
+  function withBilling(extra: Partial<TokenLink> | null): AuditDetail {
+    return { ...detail, token_link: extra === null ? null : { newapi_user_id: 7, username: "alice", token_name: "laptop", ...extra } };
+  }
+
+  it("shows the actual cost, quota and billed tokens for a billed request", () => {
+    const html = renderDetailBody(
+      withBilling({
+        billing_state: "billed",
+        cost_usd: 0.0123,
+        newapi_quota: 6150,
+        billed_prompt_tokens: 1200,
+        billed_completion_tokens: 340,
+      }),
+    );
+    expect(html).toContain("实际计费");
+    expect(html).toContain("$0.01");
+    expect(html).toContain("6,150");
+    expect(html).toContain("1,200");
+    expect(html).toContain("340");
+  });
+
+  it("explains unbilled and unchecked states and hides billing without a NewAPI link", () => {
+    expect(renderDetailBody(withBilling({ billing_state: "unbilled" }))).toContain("无消费记录");
+    expect(renderDetailBody(withBilling({ billing_state: "unchecked" }))).toContain("待补查");
+    const none = renderDetailBody(withBilling(null));
+    expect(none).not.toContain("NewAPI 计费");
+    expect(none).not.toContain("实际计费");
   });
 });
 

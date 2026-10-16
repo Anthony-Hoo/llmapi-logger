@@ -16,7 +16,7 @@ import (
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/insights"
-	"llmapi-logger/internal/insights/pricing"
+	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/parser"
@@ -91,7 +91,7 @@ func ValidateConfig(path string) error {
 	return validateInsights(configuration.Insights)
 }
 
-// validateInsights loads every insights override file so that --validate-config
+// validateInsights loads every insights override so that --validate-config
 // rejects what startup would reject. Disabled insights read nothing.
 func validateInsights(configuration config.InsightsConfig) error {
 	if !configuration.Enabled {
@@ -100,10 +100,23 @@ func validateInsights(configuration config.InsightsConfig) error {
 	if _, err := loadInsightsVocabulary(configuration); err != nil {
 		return err
 	}
-	if _, err := pricing.Load(configuration.PricingFile); err != nil {
-		return fmt.Errorf("load insights pricing: %w", err)
+	if _, err := models.Load(configuration.ContextWindows); err != nil {
+		return fmt.Errorf("load insights context windows: %w", err)
 	}
 	return nil
+}
+
+// warnDeprecatedInsights logs once at startup that insights.pricing_file no
+// longer has any effect (doc/features/21-newapi-billing.md). The path itself
+// is not logged.
+func warnDeprecatedInsights(configuration config.InsightsConfig, logger *slog.Logger) {
+	if configuration.PricingFile == "" {
+		return
+	}
+	logger.Warn("insights.pricing_file is deprecated and ignored; cost comes from NewAPI billing",
+		"config_key", "insights.pricing_file",
+		"error_category", "deprecated_config",
+	)
 }
 
 // loadInsightsVocabulary returns nil when insights are disabled, so a disabled
@@ -162,6 +175,7 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 	if err != nil {
 		return nil, err
 	}
+	warnDeprecatedInsights(configuration.Insights, logger)
 	newAPIClient, err := assembleNewAPIClient(configuration.NewAPI, upstreamProxy)
 	if err != nil {
 		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)
@@ -266,12 +280,14 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 	// --- context insights (WP2) ---
 	var insightsService web.InsightsQuery
 	if configuration.Insights.Enabled && runtime.store != nil && runtime.cipher != nil {
-		prices, err := pricing.Load(configuration.Insights.PricingFile)
+		windows, err := models.Load(configuration.Insights.ContextWindows)
 		if err != nil {
 			_ = runtime.store.Close()
-			return nil, fmt.Errorf("load insights pricing: %w", err)
+			return nil, fmt.Errorf("load insights context windows: %w", err)
 		}
-		service, err := query.NewInsights(runtime.store, runtime.cipher, prices)
+		// Billing needs the NewAPI management credential; without it every
+		// request is unbilled by construction, which the UI says explicitly.
+		service, err := query.NewInsights(runtime.store, runtime.cipher, windows, newAPIClient != nil)
 		if err != nil {
 			_ = runtime.store.Close()
 			return nil, fmt.Errorf("assemble insights service: %w", err)
@@ -476,6 +492,13 @@ func (application *App) startUserCatalog(ctx context.Context) func() {
 func (application *App) refreshUserCatalog(ctx context.Context) {
 	if application == nil || application.newAPIClient == nil {
 		return
+	}
+	// The billing conversion factor is refreshed independently so a failure of
+	// either request never discards the other's last good value.
+	if err := application.newAPIClient.RefreshStatus(ctx); err != nil {
+		application.logger.Warn("NewAPI quota_per_unit refresh failed",
+			"error_category", "newapi_status_refresh_failed",
+		)
 	}
 	if err := application.newAPIClient.RefreshUsers(ctx); err != nil {
 		application.logger.Warn("NewAPI user catalog refresh failed",

@@ -28,8 +28,8 @@ shutdown_timeout_seconds: 30
 retention_days: 30
 insights:
   enabled: true
-  pricing_file: ""
   vocabulary_file: ""
+  context_windows: {}
 
 interceptors:
   require-client-credential:
@@ -92,7 +92,7 @@ routes:
 9. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
 10. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
 11. `developer_login.enabled` 默认 false。启用后开发者用 NewAPI 用户 API Key 登录并只读取自己 Key 的记录（[模块 19](19-developer-key-session.md)）；它只依赖已必填的 `newapi.url`，不需要 `newapi.access_token`/`user_id`。主密钥不可用时该登录自动保持关闭。
-12. `insights.enabled` 默认 true，控制上下文分析与用量洞察（[模块 20](20-context-insights.md)）；省略整个 `insights` 块或只写部分字段时保持默认。`insights.pricing_file`（本地价格覆盖）与 `insights.vocabulary_file`（工具词表 / 注入标记 / Agent 标识覆盖）可选，为空表示只用内嵌默认值；非空时不能带前后空白，且启动时必须已存在并且是普通文件。配置校验只检查文件存在，不读取内容，格式由各自的加载方解析。路径应放在仓库外。
+12. `insights.enabled` 默认 true，控制上下文分析与用量洞察（[模块 20](20-context-insights.md)）；省略整个 `insights` 块或只写部分字段时保持默认。`insights.vocabulary_file`（工具词表 / 注入标记 / Agent 标识覆盖）可选，为空表示只用内嵌默认值；非空时不能带前后空白，且启动时必须已存在并且是普通文件。配置校验只检查文件存在，不读取内容，格式由加载方解析。路径应放在仓库外。`insights.context_windows` 可选，按模型 id 覆盖内嵌的上下文窗口：键不能为空、不能含空白或 NUL，仅大小写不同的键视为重复；值必须为正整数。`insights.pricing_file` 已废弃（成本改为 NewAPI 实际计费，见[模块 21](21-newapi-billing.md)）：仍可解析以免旧配置启动失败，但不校验、不读取，启动时输出一次警告。
 13. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
 14. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
 15. match 只能是 exact 或 template，规则不得重叠。

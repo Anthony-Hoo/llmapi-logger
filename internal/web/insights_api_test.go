@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/insights"
-	"llmapi-logger/internal/insights/pricing"
+	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/security"
@@ -34,7 +34,9 @@ type insightsAPIFixture struct {
 
 func repeated(value byte) []byte { return bytes.Repeat([]byte{value}, sqlite.AnalysisFingerprintSize) }
 
-func seedAPIStep(t *testing.T, store *sqlite.Store, cipher security.Cipher, id string, at time.Time, key []byte, session string, root, node []byte, withDetail bool) {
+// seedAPIStep writes one analysed audit; quota > 0 also resolves its caller
+// with that NewAPI billing at 500000 quota per USD.
+func seedAPIStep(t *testing.T, store *sqlite.Store, cipher security.Cipher, id string, at time.Time, key []byte, session string, root, node []byte, withDetail bool, quota int64) {
 	t.Helper()
 	ctx := context.Background()
 	if err := store.BeginAudit(ctx, sqlite.AuditRecord{
@@ -44,11 +46,26 @@ func seedAPIStep(t *testing.T, store *sqlite.Store, cipher security.Cipher, id s
 		t.Fatal(err)
 	}
 	status := 200
-	if err := store.FinishAudit(ctx, sqlite.AuditFinish{
+	requestID := "req-" + id
+	finish := sqlite.AuditFinish{
 		AuditID: id, EndedAtNS: at.UnixNano() + 1000, StatusCode: &status,
 		ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParseOK,
-	}); err != nil {
+	}
+	if quota > 0 {
+		finish.NewAPIRequestID = &requestID
+	}
+	if err := store.FinishAudit(ctx, finish); err != nil {
 		t.Fatal(err)
+	}
+	if quota > 0 {
+		quotaPerUnit, tokens := 500000.0, int64(1)
+		if err := store.UpsertTokenLink(ctx, sqlite.TokenLink{
+			AuditID: id, NewAPIRequestID: requestID, NewAPIUserID: 5, Username: "user", NewAPITokenID: 6, TokenName: "token",
+			LinkedAtNS: at.UnixNano() + 2, Attempts: 1, BillingState: sqlite.BillingBilled,
+			Quota: &quota, QuotaPerUnit: &quotaPerUnit, BilledPromptTokens: &tokens, BilledCompletionTokens: &tokens,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	model, role, client := "gpt-4.1", "main", "custom"
 	uncached, output := int64(100), int64(10)
@@ -89,17 +106,17 @@ func newInsightsAPIFixture(t *testing.T, enabled bool) *insightsAPIFixture {
 	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	own := testFingerprinter(t).Fingerprint(testDeveloperKey)
 	other := bytes.Repeat([]byte{0x77}, len(own))
-	seedAPIStep(t, store, cipher, "own-1", base, own, apiSessionShared, repeated(0xa0), repeated(0x11), true)
-	seedAPIStep(t, store, cipher, "other-in-shared", base.Add(time.Second), other, apiSessionShared, repeated(0xa0), repeated(0x12), true)
-	seedAPIStep(t, store, cipher, "other-only", base.Add(2*time.Second), other, apiSessionForeign, repeated(0xb0), repeated(0x14), true)
+	seedAPIStep(t, store, cipher, "own-1", base, own, apiSessionShared, repeated(0xa0), repeated(0x11), true, 250000)
+	seedAPIStep(t, store, cipher, "other-in-shared", base.Add(time.Second), other, apiSessionShared, repeated(0xa0), repeated(0x12), true, 1000000)
+	seedAPIStep(t, store, cipher, "other-only", base.Add(2*time.Second), other, apiSessionForeign, repeated(0xb0), repeated(0x14), true, 0)
 
 	options := Options{Developer: developerOptions(t, newapi.TokenIdentity{}, nil)}
 	if enabled {
-		prices, err := pricing.Load("")
+		windows, err := models.Load(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		service, err := query.NewInsights(store, cipher, prices)
+		service, err := query.NewInsights(store, cipher, windows, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -325,5 +342,59 @@ func TestSessionInfoReportsInsightsCapability(t *testing.T) {
 				t.Errorf("enabled=%v developer=%v: insights_enabled = %v", enabled, developer, decoded["insights_enabled"])
 			}
 		}
+	}
+}
+
+func TestInsightsAPIReportsActualBillingWithinScope(t *testing.T) {
+	fixture := newInsightsAPIFixture(t, true)
+	type totals struct {
+		CostUSD          *float64 `json:"cost_usd"`
+		BilledRequests   *int64   `json:"billed_requests"`
+		UnbilledRequests *int64   `json:"unbilled_requests"`
+	}
+	read := func(developer bool) (totals, map[string]json.RawMessage) {
+		t.Helper()
+		response := fixture.get("/api/v1/insights/overview?"+fixture.window(), developer)
+		if response.Code != http.StatusOK {
+			t.Fatalf("overview = %d %s", response.Code, response.Body.String())
+		}
+		var body struct {
+			Totals         json.RawMessage `json:"totals"`
+			BillingEnabled bool            `json:"billing_enabled"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || !body.BillingEnabled {
+			t.Fatalf("overview body = %s %v", response.Body.String(), err)
+		}
+		var parsed totals
+		var raw map[string]json.RawMessage
+		if json.Unmarshal(body.Totals, &parsed) != nil || json.Unmarshal(body.Totals, &raw) != nil {
+			t.Fatalf("totals = %s", body.Totals)
+		}
+		return parsed, raw
+	}
+	developer, raw := read(true)
+	if developer.CostUSD == nil || *developer.CostUSD != 0.5 || *developer.BilledRequests != 1 || *developer.UnbilledRequests != 0 {
+		t.Fatalf("developer totals = %+v", developer)
+	}
+	for _, removed := range []string{"estimated_cost_usd", "unpriced_requests"} {
+		if _, ok := raw[removed]; ok {
+			t.Fatalf("totals still carry %s", removed)
+		}
+	}
+	admin, _ := read(false)
+	if admin.CostUSD == nil || *admin.CostUSD != 2.5 || *admin.BilledRequests != 2 || *admin.UnbilledRequests != 1 {
+		t.Fatalf("admin totals = %+v", admin)
+	}
+
+	response := fixture.get("/api/v1/insights/sessions/"+apiSessionShared+"/trend", true)
+	var trend struct {
+		Steps []struct {
+			AuditID string   `json:"audit_id"`
+			CostUSD *float64 `json:"cost_usd"`
+		} `json:"steps"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &trend) != nil || len(trend.Steps) != 1 ||
+		trend.Steps[0].CostUSD == nil || *trend.Steps[0].CostUSD != 0.5 {
+		t.Fatalf("developer trend = %d %s", response.Code, response.Body.String())
 	}
 }

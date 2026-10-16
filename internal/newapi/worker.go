@@ -16,6 +16,13 @@ const (
 	callerScanLimit     = 128
 	defaultScanInterval = time.Second
 	lookupTimeout       = 10 * time.Second
+
+	// Historical billing backfill (doc/features/21-newapi-billing.md §4): one
+	// link at a time, at least backfillInterval apart, pausing for
+	// backfillPause once backfillPauseAfter attempts in a row have failed.
+	backfillInterval   = 500 * time.Millisecond
+	backfillPause      = time.Minute
+	backfillPauseAfter = 2
 )
 
 var retryDelays = [...]time.Duration{
@@ -33,23 +40,34 @@ type CallerStore interface {
 	ListDueCallerLookups(context.Context, int64, int) ([]sqlite.CallerLookup, error)
 	UpsertTokenLink(context.Context, sqlite.TokenLink) error
 	RetryCallerLookup(context.Context, sqlite.CallerRetry) error
+	NextBillingBackfill(context.Context) (sqlite.BillingBackfillItem, bool, error)
+	UpdateTokenLinkBilling(context.Context, sqlite.BillingUpdate) error
 }
 
-// IdentityLookup is implemented by Client and kept injectable for tests.
-type IdentityLookup interface {
-	LookupRequest(context.Context, string) (RequestIdentity, bool, error)
+// LogLookup is implemented by Client and kept injectable for tests.
+type LogLookup interface {
+	LookupRequest(context.Context, string) (RequestLog, bool, error)
+	EnsureQuotaPerUnit(context.Context) (float64, bool)
 }
 
-// Worker resolves completed audit request IDs through NewAPI's system log.
-// There is exactly one processing goroutine; retries are bounded and persisted.
+// Worker resolves completed audit request IDs through NewAPI's system log and
+// records NewAPI's actual billing with the caller identity. There is exactly
+// one processing goroutine; retries are bounded and persisted. Between caller
+// lookups the same goroutine backfills billing for links written before
+// billing existed.
 type Worker struct {
 	store  CallerStore
-	client IdentityLookup
+	client LogLookup
 	logger *slog.Logger
 	queue  chan string
 
 	scanInterval time.Duration
 	now          func() time.Time
+	after        func(time.Duration) <-chan time.Time
+
+	// backfillFailures counts consecutive failed backfill attempts. Only the
+	// worker goroutine touches it.
+	backfillFailures int
 
 	mu      sync.Mutex
 	started bool
@@ -59,7 +77,7 @@ type Worker struct {
 }
 
 // NewWorker constructs the optional caller-identification worker.
-func NewWorker(store CallerStore, client IdentityLookup, logger *slog.Logger) (*Worker, error) {
+func NewWorker(store CallerStore, client LogLookup, logger *slog.Logger) (*Worker, error) {
 	if store == nil || client == nil {
 		return nil, errors.New("newapi caller worker: nil dependency")
 	}
@@ -71,6 +89,7 @@ func NewWorker(store CallerStore, client IdentityLookup, logger *slog.Logger) (*
 		queue:        make(chan string, callerQueueCapacity),
 		scanInterval: defaultScanInterval,
 		now:          time.Now,
+		after:        time.After,
 	}, nil
 }
 
@@ -145,6 +164,7 @@ func (worker *Worker) run(ctx context.Context) {
 	defer worker.wait.Done()
 	ticker := time.NewTicker(worker.scanInterval)
 	defer ticker.Stop()
+	backfill := worker.after(backfillInterval)
 	for {
 		select {
 		case <-ctx.Done():
@@ -153,6 +173,18 @@ func (worker *Worker) run(ctx context.Context) {
 			worker.scan(ctx)
 		case <-ticker.C:
 			worker.scan(ctx)
+		case <-backfill:
+			// Due caller lookups always go first; the backfill only gets
+			// the gaps between them.
+			worker.scan(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			delay, more := worker.backfillStep(ctx)
+			backfill = nil
+			if more {
+				backfill = worker.after(delay)
+			}
 		}
 	}
 }
@@ -183,22 +215,51 @@ func (worker *Worker) scan(ctx context.Context) {
 
 func (worker *Worker) process(ctx context.Context, item sqlite.CallerLookup) {
 	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
-	identity, found, err := worker.client.LookupRequest(lookupCtx, item.RequestID)
+	record, found, err := worker.client.LookupRequest(lookupCtx, item.RequestID)
 	cancel()
 	attempts := item.Attempts + 1
-	now := worker.now()
+	final := attempts > len(retryDelays)
 	if err == nil && found {
-		if saveErr := worker.store.UpsertTokenLink(context.WithoutCancel(ctx), sqlite.TokenLink{
+		quotaPerUnit, haveRate := worker.client.EnsureQuotaPerUnit(ctx)
+		switch {
+		case record.Billed() && !haveRate && !final:
+			// Never store a billing row without its conversion factor.
+			worker.retry(ctx, item, attempts, "billing_rate_missing")
+			return
+		case !record.Billed() && record.ConsumeRows == 0 && record.Complete && successStatus(item.StatusCode) && !final:
+			// A 2xx response with only error rows: the consume row may
+			// not have been written yet.
+			worker.retry(ctx, item, attempts, "billing_not_found")
+			return
+		}
+		link := sqlite.TokenLink{
 			AuditID: item.AuditID, NewAPIRequestID: item.RequestID,
-			NewAPIUserID: identity.UserID, Username: identity.Username,
-			NewAPITokenID: identity.TokenID, TokenName: identity.TokenName,
-			LinkedAtNS: now.UnixNano(), Attempts: attempts,
-		}); saveErr != nil && ctx.Err() == nil {
+			NewAPIUserID: record.UserID, Username: record.Username,
+			NewAPITokenID: record.TokenID, TokenName: record.TokenName,
+			LinkedAtNS: worker.now().UnixNano(), Attempts: attempts,
+			BillingState: sqlite.BillingUnbilled,
+		}
+		if record.Billed() && haveRate {
+			setBilled(&link.BillingState, &link.Quota, &link.QuotaPerUnit, &link.BilledPromptTokens, &link.BilledCompletionTokens, record, quotaPerUnit)
+		} else if record.Billed() {
+			worker.logger.Warn("NewAPI billing stored as unbilled", "audit_id", item.AuditID, "error_code", "billing_rate_missing")
+		}
+		if saveErr := worker.store.UpsertTokenLink(context.WithoutCancel(ctx), link); saveErr != nil && ctx.Err() == nil {
 			worker.logger.Warn("NewAPI caller identity save failed", "audit_id", item.AuditID, "error_code", "caller_save_failed")
 		}
 		return
 	}
+	category := "caller_not_found"
+	if err != nil {
+		category = "caller_lookup_failed"
+	}
+	worker.retry(ctx, item, attempts, category)
+}
 
+// retry persists one unsuccessful attempt: rescheduled while attempts remain,
+// terminally unresolved afterwards.
+func (worker *Worker) retry(ctx context.Context, item sqlite.CallerLookup, attempts int, category string) {
+	now := worker.now()
 	var nextAt *int64
 	if attempts <= len(retryDelays) {
 		next := now.Add(retryDelays[attempts-1]).UnixNano()
@@ -216,10 +277,68 @@ func (worker *Worker) process(ctx context.Context, item sqlite.CallerLookup) {
 		return
 	}
 	if nextAt == nil {
-		category := "caller_not_found"
-		if err != nil {
-			category = "caller_lookup_failed"
-		}
 		worker.logger.Warn("NewAPI caller remained unresolved", "audit_id", item.AuditID, "error_code", category)
 	}
+}
+
+// backfillStep looks up the billing of the newest unchecked link. It returns
+// the delay before the next step, and false once no unchecked link is left.
+// It only ever writes billing columns: the caller identity and caller_status
+// stay as they are, whatever the lookup returns.
+func (worker *Worker) backfillStep(ctx context.Context) (time.Duration, bool) {
+	item, ok, err := worker.store.NextBillingBackfill(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return 0, false
+		}
+		worker.logger.Warn("NewAPI billing backfill scan failed", "error_code", "billing_backfill_scan_failed")
+		return backfillPause, true
+	}
+	if !ok {
+		worker.logger.Info("NewAPI billing backfill finished")
+		return 0, false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	record, found, lookupErr := worker.client.LookupRequest(lookupCtx, item.RequestID)
+	cancel()
+	if ctx.Err() != nil {
+		return 0, false
+	}
+	quotaPerUnit, haveRate := worker.client.EnsureQuotaPerUnit(ctx)
+	update := sqlite.BillingUpdate{AuditID: item.AuditID, Attempts: item.Attempts + 1, State: sqlite.BillingUnbilled}
+	failed := lookupErr != nil || (found && record.Billed() && !haveRate)
+	switch {
+	case failed:
+		if update.Attempts < sqlite.MaxBillingAttempts {
+			update.State = sqlite.BillingUnchecked
+		}
+	case found && record.Billed():
+		setBilled(&update.State, &update.Quota, &update.QuotaPerUnit, &update.BilledPromptTokens, &update.BilledCompletionTokens, record, quotaPerUnit)
+	}
+	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	saveErr := worker.store.UpdateTokenLinkBilling(writeCtx, update)
+	writeCancel()
+	if saveErr != nil {
+		worker.logger.Warn("NewAPI billing backfill save failed", "audit_id", item.AuditID, "error_code", "billing_backfill_save_failed")
+		failed = true
+	}
+	if !failed {
+		worker.backfillFailures = 0
+		return backfillInterval, true
+	}
+	worker.backfillFailures++
+	if worker.backfillFailures >= backfillPauseAfter {
+		return backfillPause, true
+	}
+	return backfillInterval, true
+}
+
+func setBilled(state *string, quota **int64, quotaPerUnit **float64, prompt, completion **int64, record RequestLog, rate float64) {
+	*state = sqlite.BillingBilled
+	quotaValue, promptValue, completionValue, rateValue := record.Quota, record.PromptTokens, record.CompletionTokens, rate
+	*quota, *quotaPerUnit, *prompt, *completion = &quotaValue, &rateValue, &promptValue, &completionValue
+}
+
+func successStatus(status *int) bool {
+	return status != nil && *status >= 200 && *status <= 299
 }

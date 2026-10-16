@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -59,16 +60,38 @@ type UserSnapshot struct {
 	RefreshedAt time.Time `json:"refreshed_at"`
 }
 
-// RequestIdentity is the non-secret ownership metadata recorded by NewAPI for
-// one request ID. It deliberately excludes log content, IP, quota, channel,
-// and every credential value.
-type RequestIdentity struct {
+// NewAPI log types used by the billing rules (doc/features/21-newapi-billing.md).
+const (
+	logTypeConsume = 2
+)
+
+// RequestLog is what this project keeps of NewAPI's log rows for one request
+// ID: the non-secret ownership metadata plus the actual billing of the consume
+// rows. It deliberately excludes log content, IP, channel, the "other"
+// diagnostics, and every credential value.
+type RequestLog struct {
 	RequestID string
 	UserID    int64
 	Username  string
 	TokenID   int64
 	TokenName string
 	ModelName string
+
+	// ConsumeRows counts the type 2 (consume) rows; Quota and the token
+	// counts are their sums. Zero consume rows means NewAPI has not billed
+	// the request (only error rows so far, or none at all).
+	ConsumeRows      int
+	Quota            int64
+	PromptTokens     int64
+	CompletionTokens int64
+	// Complete is false when NewAPI reported more rows than one lookup page
+	// returned, so the billing sums may be missing rows.
+	Complete bool
+}
+
+// Billed reports whether the log carries a complete consume record.
+func (log RequestLog) Billed() bool {
+	return log.ConsumeRows > 0 && log.Complete
 }
 
 type userSnapshot struct {
@@ -77,16 +100,25 @@ type userSnapshot struct {
 	refreshedAt time.Time
 }
 
-// Client performs the two read-only NewAPI operations needed by this project:
-// refreshing the global user directory and resolving a request ID through the
-// administrator log endpoint.
+// Client performs the read-only NewAPI operations needed by this project:
+// refreshing the global user directory, reading the public quota conversion
+// from /api/status, and resolving a request ID through the administrator log
+// endpoint.
 type Client struct {
 	baseURL     *url.URL
 	accessToken string
 	userID      string
 	client      *http.Client
 	users       atomic.Pointer[userSnapshot]
+	// quotaPerUnit holds math.Float64bits of the last valid quota_per_unit;
+	// zero means none has been read yet.
+	quotaPerUnit atomic.Uint64
+	// lastStatusTry is the UnixNano of the last on-demand /api/status read.
+	lastStatusTry atomic.Int64
 }
+
+// statusRetryInterval throttles on-demand quota_per_unit reads.
+const statusRetryInterval = 10 * time.Second
 
 // NewClient validates a read-only NewAPI management client configuration.
 func NewClient(config Config) (*Client, error) {
@@ -200,51 +232,123 @@ func (client *Client) fetchAllUsers(ctx context.Context) ([]User, error) {
 
 // LookupRequest resolves an exact NewAPI request ID through the global log
 // endpoint. A missing log is reported as found=false because log insertion can
-// lag behind delivery of the upstream response.
-func (client *Client) LookupRequest(ctx context.Context, requestID string) (RequestIdentity, bool, error) {
+// lag behind delivery of the upstream response. A log with only error rows is
+// found (the identity is known) but not billed; the caller decides whether to
+// wait for a consume row.
+func (client *Client) LookupRequest(ctx context.Context, requestID string) (RequestLog, bool, error) {
 	if client == nil || ctx == nil || !validRequestID(requestID) {
-		return RequestIdentity{}, false, ErrInvalidConfig
+		return RequestLog{}, false, ErrInvalidConfig
 	}
 	query := url.Values{"request_id": []string{requestID}}
 	var envelope apiEnvelope[apiPage[apiLog]]
 	if err := client.get(ctx, client.pageURL("/api/log/", 0, lookupPageSize, query), &envelope); err != nil {
-		return RequestIdentity{}, false, err
+		return RequestLog{}, false, err
 	}
 	page := envelope.Data
 	if !envelope.Success || page.Total < 0 || len(page.Items) > lookupPageSize || len(page.Items) > page.Total {
-		return RequestIdentity{}, false, ErrInvalidResponse
+		return RequestLog{}, false, ErrInvalidResponse
 	}
 	if page.Total == 0 {
 		if len(page.Items) != 0 {
-			return RequestIdentity{}, false, ErrInvalidResponse
+			return RequestLog{}, false, ErrInvalidResponse
 		}
-		return RequestIdentity{}, false, nil
+		return RequestLog{}, false, nil
 	}
 	if len(page.Items) == 0 {
-		return RequestIdentity{}, false, ErrInvalidResponse
+		return RequestLog{}, false, ErrInvalidResponse
 	}
 
-	var identity RequestIdentity
+	var record RequestLog
 	for _, item := range page.Items {
 		if item.RequestID != requestID || item.UserID <= 0 || item.TokenID < 0 ||
-			!safeText(item.Username, 512) || !safeText(item.TokenName, 512) || !safeText(item.ModelName, 512) {
-			return RequestIdentity{}, false, ErrInvalidResponse
+			!safeText(item.Username, 512) || !safeText(item.TokenName, 512) || !safeText(item.ModelName, 512) ||
+			item.Quota < 0 || item.PromptTokens < 0 || item.CompletionTokens < 0 {
+			return RequestLog{}, false, ErrInvalidResponse
 		}
-		candidate := RequestIdentity{
-			RequestID: item.RequestID,
-			UserID:    item.UserID, Username: item.Username,
-			TokenID: item.TokenID, TokenName: item.TokenName, ModelName: item.ModelName,
+		if record.RequestID == "" {
+			record = RequestLog{
+				RequestID: item.RequestID,
+				UserID:    item.UserID, Username: item.Username,
+				TokenID: item.TokenID, TokenName: item.TokenName, ModelName: item.ModelName,
+			}
+		} else if record.UserID != item.UserID || record.TokenID != item.TokenID ||
+			record.Username != item.Username || record.TokenName != item.TokenName {
+			return RequestLog{}, false, ErrInvalidResponse
 		}
-		if identity.RequestID == "" {
-			identity = candidate
+		if item.Type != logTypeConsume {
 			continue
 		}
-		if identity.UserID != candidate.UserID || identity.TokenID != candidate.TokenID ||
-			identity.Username != candidate.Username || identity.TokenName != candidate.TokenName {
-			return RequestIdentity{}, false, ErrInvalidResponse
+		quota, okQuota := addNonNegative(record.Quota, item.Quota)
+		prompt, okPrompt := addNonNegative(record.PromptTokens, item.PromptTokens)
+		completion, okCompletion := addNonNegative(record.CompletionTokens, item.CompletionTokens)
+		if !okQuota || !okPrompt || !okCompletion {
+			return RequestLog{}, false, ErrInvalidResponse
 		}
+		record.ConsumeRows++
+		record.Quota, record.PromptTokens, record.CompletionTokens = quota, prompt, completion
 	}
-	return identity, true, nil
+	record.Complete = len(page.Items) == page.Total
+	return record, true, nil
+}
+
+func addNonNegative(left, right int64) (int64, bool) {
+	if right > math.MaxInt64-left {
+		return 0, false
+	}
+	return left + right, true
+}
+
+// RefreshStatus reads quota_per_unit, the quota that equals one US dollar,
+// from NewAPI's public /api/status endpoint. The endpoint needs no credential
+// and none is sent. A failed or invalid read keeps the previous value.
+func (client *Client) RefreshStatus(ctx context.Context) error {
+	if client == nil || ctx == nil {
+		return ErrInvalidConfig
+	}
+	var envelope apiEnvelope[apiStatus]
+	if err := fetchJSON(ctx, client.client, client.pageEndpoint("/api/status"), nil, &envelope); err != nil {
+		return err
+	}
+	value := envelope.Data.QuotaPerUnit
+	if !envelope.Success || value == nil || !validQuotaPerUnit(*value) {
+		return ErrInvalidResponse
+	}
+	client.quotaPerUnit.Store(math.Float64bits(*value))
+	return nil
+}
+
+// QuotaPerUnit returns the last valid quota_per_unit, or false before one has
+// been read.
+func (client *Client) QuotaPerUnit() (float64, bool) {
+	if client == nil {
+		return 0, false
+	}
+	bits := client.quotaPerUnit.Load()
+	if bits == 0 {
+		return 0, false
+	}
+	return math.Float64frombits(bits), true
+}
+
+// EnsureQuotaPerUnit returns quota_per_unit, reading /api/status first when no
+// value is held yet. A failed startup read would otherwise leave billed lookups
+// without a rate until the next periodic refresh; the on-demand read is
+// throttled so an unreachable NewAPI is not asked once per lookup.
+func (client *Client) EnsureQuotaPerUnit(ctx context.Context) (float64, bool) {
+	if rate, ok := client.QuotaPerUnit(); ok || client == nil || ctx == nil {
+		return rate, ok
+	}
+	now := time.Now().UnixNano()
+	last := client.lastStatusTry.Load()
+	if now-last < int64(statusRetryInterval) || !client.lastStatusTry.CompareAndSwap(last, now) {
+		return 0, false
+	}
+	_ = client.RefreshStatus(ctx)
+	return client.QuotaPerUnit()
+}
+
+func validQuotaPerUnit(value float64) bool {
+	return value > 0 && !math.IsInf(value, 0) && !math.IsNaN(value)
 }
 
 func (client *Client) get(ctx context.Context, endpoint string, destination any) error {
@@ -338,6 +442,14 @@ func (err unexpectedStatusError) Error() string {
 
 func (unexpectedStatusError) Unwrap() error { return ErrUnexpectedStatus }
 
+func (client *Client) pageEndpoint(path string) string {
+	endpoint := *client.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+	endpoint.RawPath = ""
+	endpoint.RawQuery = ""
+	return endpoint.String()
+}
+
 func (client *Client) pageURL(path string, pageNumber, size int, extra url.Values) string {
 	endpoint := *client.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
@@ -417,12 +529,23 @@ type apiUser struct {
 	Group       string `json:"group"`
 }
 
+// apiLog decodes only the log fields this project uses. "other", "content",
+// "ip" and "channel" are deliberately absent so they are never read.
 type apiLog struct {
-	UserID    int64  `json:"user_id"`
-	Username  string `json:"username"`
-	TokenID   int64  `json:"token_id"`
-	TokenName string `json:"token_name"`
-	ModelName string `json:"model_name"`
-	RequestID string `json:"request_id"`
-	CreatedAt int64  `json:"created_at"`
+	UserID           int64  `json:"user_id"`
+	Username         string `json:"username"`
+	TokenID          int64  `json:"token_id"`
+	TokenName        string `json:"token_name"`
+	ModelName        string `json:"model_name"`
+	RequestID        string `json:"request_id"`
+	CreatedAt        int64  `json:"created_at"`
+	Type             int    `json:"type"`
+	Quota            int64  `json:"quota"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+}
+
+// apiStatus decodes only quota_per_unit from /api/status.
+type apiStatus struct {
+	QuotaPerUnit *float64 `json:"quota_per_unit"`
 }

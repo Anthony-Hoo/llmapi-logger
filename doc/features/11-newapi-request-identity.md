@@ -4,7 +4,7 @@
 
 本模块是个人部署中的可选增强：当 NewAPI 在 LLM 响应中返回 `X-Oneapi-Request-Id` 时，audit-proxy 用只读管理凭证查询 NewAPI 全站日志，把该请求关联到用户和访问令牌元数据。
 
-关联结果只用于审计展示与筛选，不参与鉴权、配额、路由、interceptor 或流量放行。
+关联结果只用于审计展示、筛选与用量洞察的实际计费，不参与鉴权、配额、路由、interceptor 或流量放行。同一次日志查询还会带回 NewAPI 对该请求的实际扣费，与身份写入同一条记录，规则见[模块 21](21-newapi-billing.md)。
 
 系统不保存也不展示用户完整或打码的 API Key。自[模块 19](19-developer-key-session.md)起，`audit_records.api_key_fpr` 保存由主密钥派生的 keyed 指纹，仅用于把开发者会话限定在自己 Key 的记录上；它无法还原 Key，没有主密钥也无法验证，且不出现在任何 API 响应、日志或错误文本中。
 
@@ -69,11 +69,13 @@ Accept: application/json
 ~~~text
 token_links(
   audit_id, newapi_user_id, username,
-  newapi_token_id, token_name, linked_at_ns
+  newapi_token_id, token_name, linked_at_ns,
+  billing_state, quota, quota_per_unit,
+  billed_prompt_tokens, billed_completion_tokens
 )
 ~~~
 
-并把 `caller_status` 改为 `resolved`。NewAPI 日志可能晚于响应落库，因此首次未找到或临时错误后，最多再按 500ms、1s、2s、5s、10s、30s 重试六次；尝试次数和下次时间保存在 SQLite，进程重启后继续。最后仍失败则标为 `unresolved`，不无限请求 NewAPI。
+并把 `caller_status` 改为 `resolved`。计费列来自同一批日志行中 `type=2`（consume）的求和；只有 error 行而响应为 2xx 时按“未找到”重试，重试耗尽或响应非 2xx 时身份照常写入、计费为 `unbilled`（[模块 21](21-newapi-billing.md) §2）。NewAPI 日志可能晚于响应落库，因此首次未找到或临时错误后，最多再按 500ms、1s、2s、5s、10s、30s 重试六次；尝试次数和下次时间保存在 SQLite，进程重启后继续。最后仍失败则标为 `unresolved`，不无限请求 NewAPI。
 
 `token_links` 中不定义用户 API Key 或打码 Key 字段；调用者关联只能由 request ID 日志查询产生。旧数据库不做兼容迁移，部署此基线时直接创建空库。
 
@@ -81,7 +83,7 @@ token_links(
 
 ## 6. 查询与前端
 
-列表和详情可返回 `newapi_request_id`、`caller_status`、`newapi_user_id`、`username`、`display_name`、`newapi_token_id` 和 `token_name`。其中 `display_name` 不写入数据库，而是管理 Web 层在响应前按 `newapi_user_id` 从最近一次成功的安全用户目录快照动态补充；目录缺失、显示名为空或用户不存在时回退到已保存的 `username`。主列表调用者显示规则：
+列表和详情可返回 `newapi_request_id`、`caller_status`、`newapi_user_id`、`username`、`display_name`、`newapi_token_id` 和 `token_name`；详情的 `token_link` 另带 `billing_state`、`newapi_quota`、`cost_usd`、`billed_prompt_tokens` 和 `billed_completion_tokens`。其中 `display_name` 不写入数据库，而是管理 Web 层在响应前按 `newapi_user_id` 从最近一次成功的安全用户目录快照动态补充；目录缺失、显示名为空或用户不存在时回退到已保存的 `username`。主列表调用者显示规则：
 
 - `resolved`：第一行显示 `display_name`（缺失时为 `username`），第二行显示 `token_name`，第三行显示 `ID: token_id`。
 - `pending`：识别中。

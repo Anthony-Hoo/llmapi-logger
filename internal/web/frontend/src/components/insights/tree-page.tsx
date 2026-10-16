@@ -280,7 +280,7 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
         {node.aux_requests > 0 ? ` · 附属请求 ${node.aux_requests}` : ""}
       </p>
       <p className="truncate text-label tabular-nums">
-        prompt {formatTokens(usage.prompt_total)} · 输出 {formatTokens(usage.output)} · {formatUSD(usage.estimated_cost_usd)}
+        prompt {formatTokens(usage.prompt_total)} · 输出 {formatTokens(usage.output)} · 实际计费 {formatUSD(usage.cost_usd)}
       </p>
       <CompositionBar values={node.last_composition} contextWindow={node.context_window} height={8} label="末步上下文构成" />
       <p className="text-caption">

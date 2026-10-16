@@ -546,9 +546,13 @@ WHERE audit_id = ?`, auditID).Scan(
 
 func readTokenLinkSummary(ctx context.Context, transaction *sql.Tx, auditID string) (*TokenLinkSummary, error) {
 	var result TokenLinkSummary
+	var quota, prompt, completion sql.NullInt64
+	var quotaPerUnit sql.NullFloat64
 	err := transaction.QueryRowContext(ctx, `
 SELECT a.newapi_request_id, t.newapi_user_id, t.username,
-       t.newapi_token_id, t.token_name, t.linked_at_ns
+       t.newapi_token_id, t.token_name, t.linked_at_ns,
+       t.billing_state, t.quota, t.quota_per_unit,
+       t.billed_prompt_tokens, t.billed_completion_tokens
 FROM token_links AS t
 JOIN audit_records AS a ON a.audit_id = t.audit_id
 WHERE t.audit_id = ?`, auditID).Scan(
@@ -558,7 +562,19 @@ WHERE t.audit_id = ?`, auditID).Scan(
 		&result.NewAPITokenID,
 		&result.TokenName,
 		&result.LinkedAtNS,
+		&result.BillingState,
+		&quota,
+		&quotaPerUnit,
+		&prompt,
+		&completion,
 	)
+	result.Quota = nullInt64Pointer(quota)
+	result.BilledPromptTokens = nullInt64Pointer(prompt)
+	result.BilledCompletionTokens = nullInt64Pointer(completion)
+	if quotaPerUnit.Valid {
+		value := quotaPerUnit.Float64
+		result.QuotaPerUnit = &value
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

@@ -141,10 +141,11 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 18 | [内容寻址的对话、轮次与多模态审计存储](18-content-addressed-conversation-storage.md) |
 | 19 | [开发者 API Key 会话](19-developer-key-session.md) |
 | 20 | [上下文分析与用量洞察](20-context-insights.md) |
+| 21 | [NewAPI 实际计费](21-newapi-billing.md) |
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树、估算成本），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 

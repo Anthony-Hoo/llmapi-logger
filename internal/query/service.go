@@ -402,6 +402,14 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 			NewAPITokenID:   token.NewAPITokenID,
 			TokenName:       token.TokenName,
 			LinkedAtNS:      token.LinkedAtNS,
+			BillingState:    token.BillingState,
+		}
+		if token.BillingState == sqlite.BillingBilled && token.Quota != nil && token.QuotaPerUnit != nil && *token.QuotaPerUnit > 0 {
+			quota, cost := *token.Quota, float64(*token.Quota)/(*token.QuotaPerUnit)
+			detail.TokenLink.NewAPIQuota = &quota
+			detail.TokenLink.CostUSD = &cost
+			detail.TokenLink.BilledPromptTokens = cloneInt64(token.BilledPromptTokens)
+			detail.TokenLink.BilledCompletionTokens = cloneInt64(token.BilledCompletionTokens)
 		}
 	}
 	return detail, nil
@@ -618,4 +626,12 @@ func validCaptureStatus(status string) bool {
 
 func invalid(detail string) error {
 	return fmt.Errorf("%w: %s", ErrInvalidQuery, detail)
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
 }

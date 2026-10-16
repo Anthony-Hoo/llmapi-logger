@@ -1,6 +1,6 @@
 # 上下文洞察与 Agent 接入指南
 
-本文面向部署者和客户端使用者：怎样开关上下文洞察、怎样覆盖价格与词表、各客户端需要做什么，以及自研 Agent 框架怎样通过 Header 被精确归入 Agent 树。设计与算法见[模块 20](../features/20-context-insights.md)，API 与页面见[模块 10](../features/10-query-api-and-minimal-web-ui.md) §11。
+本文面向部署者和客户端使用者：怎样开关上下文洞察、实际计费从哪里来、怎样覆盖上下文窗口与词表、各客户端需要做什么，以及自研 Agent 框架怎样通过 Header 被精确归入 Agent 树。设计与算法见[模块 20](../features/20-context-insights.md)，API 与页面见[模块 10](../features/10-query-api-and-minimal-web-ui.md) §11。
 
 洞察是只读的派生功能：它在异步 parser 中从已审计的请求/响应计算用量、上下文构成、会话和 Agent 树，不改写任何转发字节，失败也不影响审计与解析结果。
 
@@ -11,39 +11,41 @@
 ~~~yaml
 insights:
   enabled: true          # 默认 true；false 时不计算、不回填，洞察页与端点隐藏（404）
-  pricing_file: ""       # 可选：本地价格覆盖 JSON，路径放在仓库外
   vocabulary_file: ""    # 可选：工具词表 / 注入标记 / Agent 标识覆盖 YAML，路径放在仓库外
+  context_windows: {}    # 可选：按模型覆盖上下文窗口（Token）
 ~~~
 
 - **关闭**：设 `insights.enabled: false` 并重启。已有的 `audit_analysis` 行保留但不再更新，也不会被读取。重新开启后，后台回填会补齐关闭期间缺失的记录。
 - **开启**：默认即开启。启动后新请求在解析成功后立即分析；历史记录由后台回填逐步补齐（队列空闲时每个扫描周期最多 20 条，已被 retention 清除原始正文且无法重建的记录会跳过）。
-- `insights.enabled` 为 true 时，非空的 `pricing_file` / `vocabulary_file` 必须在启动时已存在且是普通文件；内容非法时拒绝启动。
+- `insights.enabled` 为 true 时，非空的 `vocabulary_file` 必须在启动时已存在且是普通文件；内容非法时拒绝启动。
+- 旧配置中的 `insights.pricing_file` 已废弃：仍可解析，不会导致启动失败，但不再生效，启动时输出一次警告。可以直接删除这一行。
 
-## 2. 价格覆盖
+## 2. 实际计费
 
-内嵌价格快照只是一份手写的公开标价估算，**不包含**网关倍率、折扣和长上下文阶梯，运行时不联网刷新。要使用自己的价格，复制 [`configs/insights-pricing.example.json`](../../configs/insights-pricing.example.json)，把 `insights.pricing_file` 指向它。文件中的价格都是占位示例，请换成你要估算的费率。
+洞察中的成本是 NewAPI 对每个请求的实际扣费，不是按价格表估算（设计见[模块 21](../features/21-newapi-billing.md)）。
 
-格式：
+- **前提**：配置了 `newapi.access_token` 与 `newapi.user_id`（[部署说明](README.md)中的 NewAPI 管理凭证）。不配置时洞察页说明“未配置 NewAPI 管理凭据，无法获取实际计费”，Token 用量照常统计。
+- **来源**：调用者识别查询 NewAPI 日志时，同时读取消费日志的 `quota`；换算系数 `quota_per_unit` 来自 NewAPI 公开的 `/api/status`，启动时读取并每 5 分钟刷新。成本（美元）= `quota / quota_per_unit`，写入时保存当时的系数，之后修改 NewAPI 设置不会改写历史成本。
+- **未计费**：没有消费日志的请求（上游失败、NewAPI 日志已清理、调用者未识别等）只计数，页面显示“含 N 条未计费”，不做估算。退款不会体现在成本中。
+- **升级前的记录**：升级后，已识别调用者的旧记录由后台逐条补查计费（最新优先，每条间隔至少 500ms，失败 3 次后记为未计费），不影响新请求。NewAPI 已清理的旧日志无法补回。
 
-| 字段 | 说明 |
-| --- | --- |
-| `models` | 键为小写模型 id（`provider/model` 或网关里实际使用的别名），值为每百万 Token 的美元价 |
-| `models.*.input`、`output` | 必填，非负 |
-| `models.*.cache_read`、`cache_write` | 可选，缺省回落到 `input` |
-| `models.*.context` | 可选，上下文窗口 Token 数，用于占用率；0 或缺省表示未知 |
-| `schedules` | 可选，按 UTC 时段对匹配模型的成本乘以倍率，如夜间折扣 |
-| `schedules.*.model` | 模型 glob（大小写不敏感），首个匹配的时段生效 |
-| `schedules.*.weekdays` | 0=周日 … 6=周六；空表示每天，跨午夜的窗口按开始日计 |
-| `schedules.*.start`、`end` | `HH:MM`（UTC），结束不晚于开始表示跨午夜，两者不能相等；分钟只能是 `00` 或 `30`（用量按 30 分钟时段聚合并按时段起点计价，其他边界会误计价，加载时直接报错） |
-| `schedules.*.multiplier` | (0, 100] |
+## 3. 上下文窗口覆盖
 
-覆盖文件按键并入内嵌快照：同名条目替换，`schedules` 追加。文件禁止未知字段，最大 4 MiB。查找模型价格的顺序：完整 id → 去掉厂商前缀后的唯一裸名 → 最长的已知族名加 `-`/`@`/`:` 后缀（带日期的发行版本）→ 未知（不计价，页面显示“未知价格”）。成本在查询时计算、不落库，修改文件并重启后立即对历史数据生效。
+占用率需要模型的上下文窗口。常见模型的窗口编译在二进制中；网关别名或内嵌表没有的模型，可以在 `insights.context_windows` 中按模型 id 指定：
 
-## 3. 词表覆盖
+~~~yaml
+insights:
+  context_windows:
+    my-gateway-alias: 200000
+    example-provider/example-large: 1000000
+~~~
+
+键的匹配方式与内嵌表相同：完整 id（大小写不敏感）→ 去掉厂商前缀后的唯一裸名 → 最长的已知族名加 `-`/`@`/`:` 后缀（带日期的发行版本）→ 未知。同名键替换内嵌条目；值必须是正整数，键不能为空或含空白，仅大小写不同的两个键视为重复，均在启动时校验。窗口未知的模型不显示占用率。
+## 4. 词表覆盖
 
 工具分类、注入标记和各客户端的 Agent 标识 Header 来自编译进二进制的默认词表。要调整，复制 [`configs/insights-vocabulary.example.yaml`](../../configs/insights-vocabulary.example.yaml)，只保留要改的键，把 `insights.vocabulary_file` 指向它。覆盖按键合并，示例文件头部列有合并规则；非法时拒绝启动。典型用途：自研框架已经有自己的 Header 名，直接在词表里给 `custom` 客户端改名，而不用改框架。修改词表覆盖只影响之后新分析的记录；已有行保持原有分类，直到 `AnalysisVersion` 变化才会被回填重算。
 
-## 4. 各客户端
+## 5. 各客户端
 
 | 客户端 | 需要做什么 | 说明 |
 | --- | --- | --- |
@@ -52,11 +54,11 @@ insights:
 | OpenCode | 不需要 | `x-opencode-session-id` 与父会话头默认携带（较旧版本的头语义不同，识别规则可在词表中调整） |
 | dsh（官方 DeepSeek Harness 适配器） | 不需要 | 默认携带 `x-deepseek-harness-session-id`，压缩请求带 `x-deepseek-harness-compact` |
 | dsh 经第三方 pi-ai 适配器 | 无法改善 | 该路径没有任何会话 Header，只能靠内容推断：用同一 Key、系统提示词与首条用户消息拼会话，子 Agent 仅在子 Agent 提示词里带 `Your parent agent id` 时才能连边。会话和树会标为“推断”，并行且开场白相同的会话可能被合并 |
-| 其他/自研 | 见 §5 | 在每个请求上加 `X-Agent-*` Header |
+| 其他/自研 | 见 §6 | 在每个请求上加 `X-Agent-*` Header |
 
 这些 Header 由客户端本身发送，代理只读取不改写，原样转发给 NewAPI 与上游。它们与其他 Header 一样被逐个 AES-256-GCM 加密存储，明文列里只有不可反查的 keyed 指纹。
 
-## 5. 自研 Agent 的 Header 约定
+## 6. 自研 Agent 的 Header 约定
 
 在发往代理的**每一个** LLM 请求上带下列 Header，即可被精确归入 Agent 树，不依赖任何内容推断（`custom` 客户端，优先级低于四家内置客户端的原生 Header）：
 
@@ -215,10 +217,10 @@ await anthropicChild.messages.create(
 );
 ~~~
 
-## 6. 验证与排错
+## 7. 验证与排错
 
 1. 发几个带 Header 的请求后打开管理页“洞察”视图：会话卡片应显示“含 N 个子 Agent”，点击进入 Agent 树能看到父子关系。
 2. 压缩/标题请求应出现在对应节点的“附属请求”计数里，而不是新的子 Agent。
 3. 树没有出现：确认 `X-Agent-Id` 在同一 Agent 内保持不变、`X-Agent-Session-Id` 在整棵树内相同；只有一个节点的会话不是树。
 4. 洞察页为空：检查 `insights.enabled`，以及日志中是否出现 `analysis_failed`、`analysis_save_failed`、`request_headers_load_failed`（见[模块 13](../features/13-observability-health-and-lifecycle.md)）。历史记录由后台回填补齐，大库需要一段时间。
-5. 成本显示“未知价格”：模型名不在价格表里，按 §2 添加覆盖条目。
+5. 成本为空或大量“未计费”：确认已配置 `newapi.access_token`/`user_id`，并检查日志中的 `newapi_status_refresh_failed`、`caller_lookup_failed`、`billing_rate_missing`；占用率为空时按 §3 补充 `context_windows`。

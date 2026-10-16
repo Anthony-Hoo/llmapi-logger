@@ -56,13 +56,10 @@ type InsightsFilter struct {
 	RootFPRs [][]byte
 }
 
-// InsightsUsageSpec chooses the grouping of InsightsUsage. SlotNS > 0 further
-// splits every group into fixed time slots so time-of-day price schedules can
-// be applied to aggregates.
+// InsightsUsageSpec chooses the grouping of InsightsUsage.
 type InsightsUsageSpec struct {
 	Dimension   string
 	TZOffsetMin int
-	SlotNS      int64
 }
 
 // InsightsMix is the per-category sum of estimates, each row anchored to its own
@@ -76,20 +73,21 @@ type InsightsEstimate struct {
 	System, Tools, User, Injected, Assistant, Reasoning, ToolResult, Media int64
 }
 
-// InsightsUsageRow is one (group, model, slot) aggregate.
+// InsightsUsageRow is one group aggregate.
 type InsightsUsageRow struct {
-	Key, Label, Model string
-	SlotNS            int64
-	Requests          int64
-	// UsageRequests counts the requests that reported any normalized usage;
-	// the others sum to zero and must not be priced.
-	UsageRequests int64
-	UncachedInput int64
-	CacheRead     int64
-	CacheWrite    int64
-	Output        int64
-	Reasoning     int64
-	Mix           InsightsMix
+	Key, Label string
+	Requests   int64
+	// BilledRequests counts the requests whose token link carries NewAPI's
+	// actual billing; CostUSD sums their quota / quota_per_unit and is nil
+	// when there is none (doc/features/21-newapi-billing.md).
+	BilledRequests int64
+	CostUSD        *float64
+	UncachedInput  int64
+	CacheRead      int64
+	CacheWrite     int64
+	Output         int64
+	Reasoning      int64
+	Mix            InsightsMix
 }
 
 // InsightsDayCount is the activity of one local calendar day.
@@ -108,11 +106,13 @@ WHERE 1 = 1`
 const (
 	insightsPromptSQL = `(COALESCE(x.u_uncached_input, 0) + COALESCE(x.u_cache_read, 0) + COALESCE(x.u_cache_write, 0))`
 	insightsHasUsage  = `(x.u_uncached_input IS NOT NULL OR x.u_cache_read IS NOT NULL OR x.u_cache_write IS NOT NULL)`
-	insightsAnyUsage  = `(` + insightsHasUsage + ` OR x.u_output IS NOT NULL OR x.u_reasoning IS NOT NULL)`
 	insightsEstSumSQL = `(x.est_system + x.est_tools + x.est_user + x.est_injected + x.est_assistant + x.est_reasoning + x.est_tool_result + x.est_media)`
 	insightsAnchorSQL = `(CASE WHEN ` + insightsHasUsage + ` AND ` + insightsEstSumSQL + ` > 0 THEN 1.0 * ` +
 		insightsPromptSQL + ` / ` + insightsEstSumSQL + ` ELSE 1.0 END)`
 	insightsAuxRoles = `('compaction', 'title', 'review', 'auxiliary')`
+	// insightsCostSQL is one request's actual NewAPI cost in USD, NULL unless
+	// its token link is billed.
+	insightsCostSQL = `(CASE WHEN t.billing_state = 'billed' THEN t.quota * 1.0 / t.quota_per_unit END)`
 )
 
 func (filter InsightsFilter) validate() error {
@@ -201,12 +201,12 @@ func dayExpression(tzOffsetMin int) string {
 	return "date(x.started_at_ns / 1000000000 + " + strconv.Itoa(tzOffsetMin*60) + ", 'unixepoch')"
 }
 
-// InsightsUsage sums normalized usage per (group, model, slot).
+// InsightsUsage sums normalized usage and actual billing per group.
 func (store *Store) InsightsUsage(ctx context.Context, filter InsightsFilter, spec InsightsUsageSpec) ([]InsightsUsageRow, error) {
 	if err := store.insightsReady(ctx); err != nil {
 		return nil, err
 	}
-	if spec.TZOffsetMin < -840 || spec.TZOffsetMin > 840 || spec.SlotNS < 0 {
+	if spec.TZOffsetMin < -840 || spec.TZOffsetMin > 840 {
 		return nil, errors.New("sqlite: invalid insights usage spec")
 	}
 	var key, label string
@@ -233,17 +233,14 @@ func (store *Store) InsightsUsage(ctx context.Context, filter InsightsFilter, sp
 	default:
 		return nil, errors.New("sqlite: unknown insights dimension")
 	}
-	slot := "0"
-	if spec.SlotNS > 0 {
-		slot = "(x.started_at_ns / " + strconv.FormatInt(spec.SlotNS, 10) + ") * " + strconv.FormatInt(spec.SlotNS, 10)
-	}
+
 	where, arguments, err := filter.where()
 	if err != nil {
 		return nil, err
 	}
 	statement := `
-SELECT ` + key + ` AS grp_key, ` + label + ` AS grp_label, COALESCE(x.model, '') AS grp_model, ` + slot + ` AS grp_slot,
-       COUNT(*), COALESCE(SUM(CASE WHEN ` + insightsAnyUsage + ` THEN 1 ELSE 0 END), 0),
+SELECT ` + key + ` AS grp_key, ` + label + ` AS grp_label,
+       COUNT(*), COALESCE(SUM(CASE WHEN t.billing_state = 'billed' THEN 1 ELSE 0 END), 0), SUM(` + insightsCostSQL + `),
        COALESCE(SUM(x.u_uncached_input), 0), COALESCE(SUM(x.u_cache_read), 0), COALESCE(SUM(x.u_cache_write), 0),
        COALESCE(SUM(x.u_output), 0), COALESCE(SUM(x.u_reasoning), 0),
        SUM(x.est_system * ` + insightsAnchorSQL + `), SUM(x.est_tools * ` + insightsAnchorSQL + `),
@@ -251,8 +248,8 @@ SELECT ` + key + ` AS grp_key, ` + label + ` AS grp_label, COALESCE(x.model, '')
        SUM(x.est_assistant * ` + insightsAnchorSQL + `), SUM(x.est_reasoning * ` + insightsAnchorSQL + `),
        SUM(x.est_tool_result * ` + insightsAnchorSQL + `), SUM(x.est_media * ` + insightsAnchorSQL + `)` +
 		insightsFrom + where + `
-GROUP BY grp_key, grp_model, grp_slot
-ORDER BY grp_key, grp_model, grp_slot`
+GROUP BY grp_key
+ORDER BY grp_key`
 	rows, err := store.readerDB.QueryContext(ctx, statement, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: insights usage: %w", err)
@@ -261,11 +258,16 @@ ORDER BY grp_key, grp_model, grp_slot`
 	result := make([]InsightsUsageRow, 0)
 	for rows.Next() {
 		var row InsightsUsageRow
-		if err := rows.Scan(&row.Key, &row.Label, &row.Model, &row.SlotNS, &row.Requests, &row.UsageRequests,
+		var cost sql.NullFloat64
+		if err := rows.Scan(&row.Key, &row.Label, &row.Requests, &row.BilledRequests, &cost,
 			&row.UncachedInput, &row.CacheRead, &row.CacheWrite, &row.Output, &row.Reasoning,
 			&row.Mix.System, &row.Mix.Tools, &row.Mix.User, &row.Mix.Injected,
 			&row.Mix.Assistant, &row.Mix.Reasoning, &row.Mix.ToolResult, &row.Mix.Media); err != nil {
 			return nil, fmt.Errorf("sqlite: scan insights usage: %w", err)
+		}
+		if cost.Valid && row.BilledRequests > 0 {
+			value := cost.Float64
+			row.CostUSD = &value
 		}
 		result = append(result, row)
 	}
@@ -613,6 +615,8 @@ type InsightsTrendRow struct {
 	FirstEventNS  *int64
 	GenerationNS  *int64
 	PrevAuditID   string
+	// CostUSD is this request's actual NewAPI cost, nil unless billed.
+	CostUSD *float64
 }
 
 // InsightsTrend returns the most recent in-scope steps of filter.SessionIDs[0]
@@ -640,7 +644,7 @@ SELECT x.audit_id, x.started_at_ns, a.ended_at_ns, x.protocol, COALESCE(x.model,
        x.est_system, x.est_tools, x.est_user, x.est_injected, x.est_assistant, x.est_reasoning, x.est_tool_result, x.est_media,
        x.u_uncached_input, x.u_cache_read, x.u_cache_write, x.u_output, x.u_reasoning,
        x.turn_start, x.event_flags, x.appended_items, x.removed_items, COALESCE(x.stop_reason, ''), x.resp_kinds,
-       x.first_event_ns, x.generation_ns, COALESCE(x.prev_audit_id, '')`+insightsFrom+where+`
+       x.first_event_ns, x.generation_ns, COALESCE(x.prev_audit_id, ''), `+insightsCostSQL+insightsFrom+where+`
 ORDER BY x.started_at_ns DESC, x.audit_id DESC
 LIMIT ?`, arguments...)
 	if err != nil {
@@ -651,12 +655,13 @@ LIMIT ?`, arguments...)
 		var row InsightsTrendRow
 		var ended, uncached, cacheRead, cacheWrite, output, reasoning, appended, removed, firstEvent, generation sql.NullInt64
 		var turnStart int
+		var cost sql.NullFloat64
 		if err := cursor.Scan(&row.AuditID, &row.StartedAtNS, &ended, &row.Protocol, &row.Model, &row.Role, &row.Root,
 			&row.Estimate.System, &row.Estimate.Tools, &row.Estimate.User, &row.Estimate.Injected,
 			&row.Estimate.Assistant, &row.Estimate.Reasoning, &row.Estimate.ToolResult, &row.Estimate.Media,
 			&uncached, &cacheRead, &cacheWrite, &output, &reasoning,
 			&turnStart, &row.EventFlags, &appended, &removed, &row.StopReason, &row.RespKinds,
-			&firstEvent, &generation, &row.PrevAuditID); err != nil {
+			&firstEvent, &generation, &row.PrevAuditID, &cost); err != nil {
 			return nil, false, fmt.Errorf("sqlite: scan insights trend: %w", err)
 		}
 		row.Root = cloneBytes(row.Root)
@@ -666,6 +671,10 @@ LIMIT ?`, arguments...)
 		row.TurnStart = turnStart != 0
 		row.AppendedItems, row.RemovedItems = nullInt64Pointer(appended), nullInt64Pointer(removed)
 		row.FirstEventNS, row.GenerationNS = nullInt64Pointer(firstEvent), nullInt64Pointer(generation)
+		if cost.Valid {
+			value := cost.Float64
+			row.CostUSD = &value
+		}
 		if len(rows) == limit {
 			truncated = true
 			break

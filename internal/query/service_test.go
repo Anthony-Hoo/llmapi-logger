@@ -544,6 +544,7 @@ func TestListHeaderFilterPaginationDoesNotSkipOrRepeatMatches(t *testing.T) {
 }
 
 func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
+	detailQuota, detailQuotaPerUnit, detailPrompt, detailCompletion := int64(750000), 500000.0, int64(1200), int64(80)
 	t.Parallel()
 
 	cipher := testCipher(t)
@@ -593,6 +594,8 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 		TokenLink: &sqlite.TokenLinkSummary{
 			NewAPIRequestID: "req-detail", NewAPIUserID: 7, Username: "alice",
 			NewAPITokenID: 42, TokenName: "personal", LinkedAtNS: 3,
+			BillingState: sqlite.BillingBilled, Quota: &detailQuota, QuotaPerUnit: &detailQuotaPerUnit,
+			BilledPromptTokens: &detailPrompt, BilledCompletionTokens: &detailCompletion,
 		},
 	}}
 	service, err := New(store, cipher)
@@ -618,6 +621,24 @@ func TestGetDecryptsRequestURIAndEveryHeaderValue(t *testing.T) {
 		detail.TokenLink.NewAPIUserID != 7 || detail.TokenLink.Username != "alice" ||
 		detail.TokenLink.NewAPITokenID != 42 || detail.TokenLink.TokenName != "personal" {
 		t.Fatalf("token link = %+v", detail.TokenLink)
+	}
+	if link := detail.TokenLink; link.BillingState != sqlite.BillingBilled || link.NewAPIQuota == nil || *link.NewAPIQuota != 750000 ||
+		link.CostUSD == nil || *link.CostUSD != 1.5 || link.BilledPromptTokens == nil || *link.BilledPromptTokens != 1200 ||
+		link.BilledCompletionTokens == nil || *link.BilledCompletionTokens != 80 {
+		t.Fatalf("token link billing = %+v", link)
+	}
+	linkJSON, err := json.Marshal(detail.TokenLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"billing_state":"billed"`, `"newapi_quota":750000`, `"cost_usd":1.5`, `"billed_prompt_tokens":1200`, `"billed_completion_tokens":80`} {
+		if !strings.Contains(string(linkJSON), field) {
+			t.Fatalf("token link JSON %s lacks %s", linkJSON, field)
+		}
+	}
+	unbilled := TokenLink{BillingState: sqlite.BillingUnbilled}
+	if encoded, _ := json.Marshal(unbilled); !strings.Contains(string(encoded), `"cost_usd":null`) || !strings.Contains(string(encoded), `"newapi_quota":null`) {
+		t.Fatalf("unbilled JSON = %s", encoded)
 	}
 
 	pageJSON, err := json.Marshal(Page{Items: []AuditSummary{detail.Audit}})

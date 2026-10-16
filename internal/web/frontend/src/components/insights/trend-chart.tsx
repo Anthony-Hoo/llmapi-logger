@@ -250,7 +250,7 @@ export function TrendTooltipBody({ row, mode, granularity }: { row: ChartRow; mo
       </div>
 
       <p className="flex justify-between">
-        <span className="text-subtle">估算成本{granularity === "turn" && bar.steps > 1 ? "（合计）" : ""}</span>
+        <span className="text-subtle">实际计费{granularity === "turn" && bar.steps > 1 ? "（合计）" : ""}</span>
         <span className="tabular-nums">{formatUSD(bar.costUSD)}</span>
       </p>
       {bar.events.length > 0 ? (

@@ -11,7 +11,7 @@
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
 internal/storage/sqlite/{graph_writer.go,graph_reader.go,timeline_reader.go,integrity.go}
-internal/storage/sqlite/migrations/{001_init.sql,...,007_parse_retries.sql}
+internal/storage/sqlite/migrations/{001_init.sql,...,009_newapi_billing.sql}
 ~~~
 
 固定连接参数：
@@ -42,7 +42,7 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 
 `007_parse_retries.sql` 就地增加 `parse_save_failures` 和 `parse_next_at_ns`，分别保存解析写入失败次数和下一次允许重试的时间。这两列是可变调度元数据，不进入历史 HTTP 证据摘要，也不改变 schema generation。
 
-当前最终 schema 共 22 张表（schema generation 仍为 2），按职责分组如下。`008_audit_analysis.sql` 就地新增 `audit_analysis` 与 `agent_spawn_hints` 两张派生表，不重建、不修改任何既有表。
+当前最终 schema 共 22 张表（schema generation 仍为 2），按职责分组如下。`008_audit_analysis.sql` 就地新增 `audit_analysis` 与 `agent_spawn_hints` 两张派生表，不重建、不修改任何既有表。`009_newapi_billing.sql` 重建 `token_links`，增加 `billing_state`、`quota`、`quota_per_unit`、`billed_prompt_tokens`、`billed_completion_tokens` 与 `billing_attempts`，用 CHECK 约束保证 `billed` 当且仅当计费值齐全；已有链接记为 `unchecked`，并为待补查的行建部分索引（[模块 21](21-newapi-billing.md)）。计费列与身份列一样不进入完整性证据链。
 
 ### 3.1 HTTP 审计与身份
 
@@ -55,7 +55,7 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 | body_streams | 每阶段长度、SHA-256、来源阶段、保留状态、分块数和 SSE 事件统计 |
 | body_chunks | `pending/full` 原始证据的大块压缩加密数据 |
 | parsed_results | 模型、usage、错误和计数等窄摘要；可选加密回退 conversation |
-| token_links | NewAPI 用户和 Token 名称关联，不保存完整 API Key |
+| token_links | NewAPI 用户和 Token 名称关联及该请求的 NewAPI 实际计费，不保存完整 API Key |
 | audit_gaps | 审计不可用或进程退出的聚合缺口 |
 | user_agent_rules | 动态 UA 正则规则 |
 

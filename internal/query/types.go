@@ -174,13 +174,22 @@ type ParsedResult struct {
 	ParsedAtNS      int64   `json:"parsed_at_ns,string"`
 }
 
+// TokenLink is the NewAPI caller identity and actual billing of one audit
+// (doc/features/11-newapi-request-identity.md, 21-newapi-billing.md).
+// BillingState is unchecked, billed or unbilled; the numeric billing fields
+// are non-null only when it is billed.
 type TokenLink struct {
-	NewAPIRequestID string `json:"newapi_request_id"`
-	NewAPIUserID    int64  `json:"newapi_user_id"`
-	Username        string `json:"username"`
-	NewAPITokenID   int64  `json:"newapi_token_id"`
-	TokenName       string `json:"token_name"`
-	LinkedAtNS      int64  `json:"linked_at_ns,string"`
+	NewAPIRequestID        string   `json:"newapi_request_id"`
+	NewAPIUserID           int64    `json:"newapi_user_id"`
+	Username               string   `json:"username"`
+	NewAPITokenID          int64    `json:"newapi_token_id"`
+	TokenName              string   `json:"token_name"`
+	LinkedAtNS             int64    `json:"linked_at_ns,string"`
+	BillingState           string   `json:"billing_state"`
+	NewAPIQuota            *int64   `json:"newapi_quota"`
+	CostUSD                *float64 `json:"cost_usd"`
+	BilledPromptTokens     *int64   `json:"billed_prompt_tokens"`
+	BilledCompletionTokens *int64   `json:"billed_completion_tokens"`
 }
 
 // Turn describes the graph relationship and verification hashes for one

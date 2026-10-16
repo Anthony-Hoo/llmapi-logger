@@ -38,8 +38,9 @@ function usage(overrides: Partial<UsageTotals> = {}): UsageTotals {
     reasoning: 50,
     prompt_total: 1000,
     cache_hit_rate: 0.8,
-    estimated_cost_usd: 0.1234,
-    unpriced_requests: 0,
+    cost_usd: 0.1234,
+    billed_requests: 4,
+    unbilled_requests: 0,
     ...overrides,
   };
 }
@@ -138,24 +139,45 @@ describe("overview", () => {
   const overview: OverviewResponse = {
     from_ns: "1",
     to_ns: "2",
-    totals: usage({ requests: 1234, unpriced_requests: 7 }),
+    totals: usage({ requests: 1234, billed_requests: 1227, unbilled_requests: 7 }),
     sessions: 12,
     trees: 3,
     daily: [{ day: "2026-10-16", usage: usage() }],
     heatmap: [],
     group_by: "model",
-    groups: [{ key: "m", label: "gpt-test", usage: usage({ unpriced_requests: 1 }) }],
+    groups: [{ key: "m", label: "gpt-test", usage: usage({ unbilled_requests: 1 }) }],
     composition: values({ user: 1 }),
+    billing_enabled: true,
   };
 
-  it("labels cost as an estimate and flags unpriced models", () => {
+  it("labels cost as actual billing and notes unbilled requests", () => {
     const html = renderToStaticMarkup(<KpiBar overview={overview} />);
-    for (const label of ["请求数", "会话数", "Agent 树数", "prompt 总量", "输出", "缓存命中率", "估算成本"]) {
+    for (const label of ["请求数", "会话数", "Agent 树数", "prompt 总量", "输出", "缓存命中率", "实际计费"]) {
       expect(html).toContain(label);
     }
-    expect(html).toContain("部分模型未知价格");
+    expect(html).toContain("7 次请求未计费");
+    expect(html).toContain("$0.12");
+    expect(html).not.toContain("估算成本");
     expect(html).toContain("80.0%");
-    expect(renderToStaticMarkup(<KpiBar overview={{ ...overview, totals: usage() }} />)).not.toContain("部分模型未知价格");
+    const billed = renderToStaticMarkup(<KpiBar overview={{ ...overview, totals: usage() }} />);
+    expect(billed).toContain("来自 NewAPI 消费日志");
+    expect(billed).not.toContain("未计费");
+  });
+
+  it("shows a dash and the credential hint when billing is not enabled", () => {
+    const html = renderToStaticMarkup(<KpiBar overview={{ ...overview, billing_enabled: false }} />);
+    expect(html).toContain("未配置 NewAPI 管理凭据");
+    expect(html).not.toContain("$0.12");
+    expect(html).not.toContain("未计费");
+    const table = renderToStaticMarkup(<GroupTable groups={overview.groups} billingEnabled={false} />);
+    expect(table).not.toContain("$0.12");
+    expect(table).not.toContain("未计费");
+  });
+
+  it("notes unbilled requests in the group table", () => {
+    const html = renderToStaticMarkup(<GroupTable groups={overview.groups} />);
+    expect(html).toContain("实际计费");
+    expect(html).toContain("含 1 条未计费");
   });
 
   it("hides caller and token grouping for developers", () => {
@@ -192,7 +214,7 @@ describe("session card", () => {
     steps: 10,
     turns: 3,
     models: ["claude-test"],
-    usage: usage({ unpriced_requests: 2 }),
+    usage: usage({ unbilled_requests: 2 }),
     last_composition: values({ user: 10 }),
     last_prompt_total: 95,
     context_window: 100,
@@ -206,10 +228,17 @@ describe("session card", () => {
     expect(html).toContain("主 Agent");
     expect(html).toContain("含 2 个子 Agent");
     expect(html).toContain("查看 Agent 树");
-    expect(html).toContain("部分未知价格");
+    expect(html).toContain("实际计费");
+    expect(html).toContain("含 2 条未计费");
     expect(html).toContain('data-level="danger"');
     expect(html).not.toContain("调用者");
     expect(renderToStaticMarkup(<SessionCardView card={card} onOpenSession={noop} onOpenTree={noop} />)).not.toContain("查看 Agent 树");
+  });
+
+  it("shows a dash instead of cost when billing is not enabled", () => {
+    const html = renderToStaticMarkup(<SessionCardView card={card} billingEnabled={false} onOpenSession={noop} onOpenTree={noop} />);
+    expect(html).not.toContain("$0.12");
+    expect(html).not.toContain("未计费");
   });
 
   it("shows the caller for administrators", () => {

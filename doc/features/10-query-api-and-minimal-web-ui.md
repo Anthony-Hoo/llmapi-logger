@@ -158,7 +158,7 @@ type AuditQuery interface {
 
 | 端点 | 参数 | 返回 |
 | --- | --- | --- |
-| `GET /api/v1/insights/overview` | `from_ns`、`to_ns`（默认近 7 天，范围上限 400 天）、`group_by=model\|protocol\|client\|caller\|token`（默认 `model`）、`tz_offset_min`（-840 到 840，用于按本地日分桶） | 请求数、会话数、Agent 树数、归一化用量各桶、缓存命中率、估算成本和未定价请求数，按日序列，近 8 周热力图，构成混合，分组小计 |
+| `GET /api/v1/insights/overview` | `from_ns`、`to_ns`（默认近 7 天，范围上限 400 天）、`group_by=model\|protocol\|client\|caller\|token`（默认 `model`）、`tz_offset_min`（-840 到 840，用于按本地日分桶） | 请求数、会话数、Agent 树数、归一化用量各桶、缓存命中率、实际计费（`cost_usd`、`billed_requests`、`unbilled_requests`）与 `billing_enabled`，按日序列，近 8 周热力图，构成混合，分组小计 |
 | `GET /api/v1/insights/sessions` | `from_ns`、`to_ns`、`sort=recent\|tokens\|context`、`cursor`（不透明 keyset，且绑定排序键）、`limit`（默认 20，最大 100） | 会话卡片：首末时间、步数/轮数、用量、末步构成与 prompt 总量、模型、窗口、`tree_id`、子 Agent 数、调用者 |
 | `GET /api/v1/insights/sessions/{session_id}/trend` | 无 | 逐步序列：构成、用量、事件、时间、turn 标号；最多 2000 步，超出时返回最近一段并标记 `truncated` |
 | `GET /api/v1/insights/agent-trees/{tree_id}` | 无 | Agent 树节点与边；父节点不在作用域内时返回不可见占位节点。单节点根也可读取（无害） |
@@ -170,7 +170,7 @@ type AuditQuery interface {
 
 - 会话卡片的角色、末步构成和 prompt 总量取该会话**最新的 main/subagent 步骤**；压缩、标题、review 等附属请求只在会话只有附属步骤时才作为兜底。附属请求不开启新 turn，也不产生事件。
 - `trees`、`tree_id` 与 `subagents` 只对**真实 Agent 树**计数：根在作用域内拥有 2 个及以上不同节点指纹，或其任一步骤带有 `agent_link_source`。没有客户端 Agent ID 的普通会话使用合成节点指纹，不算树，`tree_id` 为空。
-- 成本在查询时按价格表计算，不落库；趋势估算保持原始值，由前端按真实 prompt 总量锚定。
+- 成本是 NewAPI 实际计费，在查询时按 `token_links` 的 `quota / quota_per_unit` 求和（[模块 21](21-newapi-billing.md)）；趋势估算保持原始值，由前端按真实 prompt 总量锚定。
 
 洞察页是 Dashboard 的 `insights` 视图（不引入路由）：KPI 栏、日用量柱图、8 周热力图（点击某天筛选会话）、会话卡片（构成条、用量、子 Agent 数，可排序）；点击卡片进入会话趋势（Step/Turn、Total/Delta 切换和事件标记）与 Agent 树；审计详情新增“上下文构成”一节。开发者登录同样可见，但只含自己的数据。
 

@@ -69,15 +69,16 @@ func Validate(cfg Config) error {
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > 3650 {
 		return fmt.Errorf("retention_days must be 0 or between 1 and 3650, got %d", cfg.RetentionDays)
 	}
-	// The files are only read when insights are enabled, so a stale path in a
-	// disabled section must not block startup.
+	// The file is only read when insights are enabled, so a stale path in a
+	// disabled section must not block startup. insights.pricing_file is a
+	// deprecated no-op and is not checked at all.
 	if cfg.Insights.Enabled {
-		if err := validateOptionalFile("insights.pricing_file", cfg.Insights.PricingFile); err != nil {
-			return err
-		}
 		if err := validateOptionalFile("insights.vocabulary_file", cfg.Insights.VocabularyFile); err != nil {
 			return err
 		}
+	}
+	if err := validateContextWindows(cfg.Insights.ContextWindows); err != nil {
+		return err
 	}
 	if err := validateInterceptors(cfg.Interceptors); err != nil {
 		return err
@@ -309,6 +310,27 @@ func validateOptionalFile(name, value string) error {
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s must name a regular file: %q", name, value)
+	}
+	return nil
+}
+
+// validateContextWindows checks the per-model context-window overrides. Keys
+// are model ids matched case-insensitively, so two keys that differ only in
+// case name the same model and are rejected.
+func validateContextWindows(windows map[string]int64) error {
+	seen := make(map[string]string, len(windows))
+	for model, window := range windows {
+		if model == "" || strings.IndexFunc(model, unicode.IsSpace) >= 0 || strings.ContainsRune(model, '\x00') {
+			return fmt.Errorf("insights.context_windows key %q must be a non-empty model id without whitespace", model)
+		}
+		if window <= 0 {
+			return fmt.Errorf("insights.context_windows[%q] must be a positive token count, got %d", model, window)
+		}
+		key := strings.ToLower(model)
+		if previous, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("insights.context_windows keys %q and %q name the same model", previous, model)
+		}
+		seen[key] = model
 	}
 	return nil
 }

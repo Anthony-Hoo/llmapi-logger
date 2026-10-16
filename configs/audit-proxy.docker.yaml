@@ -21,12 +21,14 @@ developer_login:
   enabled: false
 shutdown_timeout_seconds: 30
 retention_days: 30
-# Optional override files must exist inside the container when set,
-# e.g. pricing_file: /config/prices.json
+# Cost comes from NewAPI's actual billing (needs newapi.access_token/user_id).
+# The optional vocabulary file must exist inside the container when set,
+# e.g. vocabulary_file: /config/vocabulary.yaml
 insights:
   enabled: true
-  pricing_file: ""
   vocabulary_file: ""
+  # Optional per-model context-window overrides in tokens.
+  context_windows: {}
 
 interceptors:
   require-client-credential:

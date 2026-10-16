@@ -82,6 +82,100 @@ func TestParseRetryMigrationPreservesExistingAuditAndIntegrity(t *testing.T) {
 	}
 }
 
+func TestBillingMigrationMarksExistingLinksUnchecked(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	database, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		if migration.version <= 8 {
+			if err := applyMigration(ctx, database, migration); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	key := bytes.Repeat([]byte{0x53}, security.KeySize)
+	signer, err := security.NewIntegritySigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	record := testAudit("audit-before-billing")
+	record.defaults()
+	if err := insertAudit(tx, record); err != nil {
+		t.Fatal(err)
+	}
+	requestID := "req-before-billing"
+	if err := finishAudit(tx, &AuditFinish{
+		AuditID: record.AuditID, EndedAtNS: 2, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete,
+		ParseStatus: ParsePending, NewAPIRequestID: &requestID,
+	}, signer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`
+INSERT INTO token_links (audit_id, newapi_user_id, username, newapi_token_id, token_name, linked_at_ns)
+VALUES (?, 5, 'carol', 6, 'agent', 3)`, record.AuditID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`
+UPDATE audit_records SET caller_status = 'resolved', caller_attempts = 1, caller_next_at_ns = NULL, caller_updated_at_ns = 3
+WHERE audit_id = ?`, record.AuditID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.EnableIntegrity(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	var state, username, callerStatus string
+	var quota, quotaPerUnit any
+	var attempts int
+	if err := store.readerDB.QueryRow(`
+SELECT t.billing_state, t.quota, t.quota_per_unit, t.billing_attempts, t.username, a.caller_status
+FROM token_links AS t JOIN audit_records AS a ON a.audit_id = t.audit_id
+WHERE t.audit_id = ?`, record.AuditID).Scan(&state, &quota, &quotaPerUnit, &attempts, &username, &callerStatus); err != nil {
+		t.Fatal(err)
+	}
+	if state != BillingUnchecked || quota != nil || quotaPerUnit != nil || attempts != 0 || username != "carol" || callerStatus != CallerResolved {
+		t.Fatalf("migrated link = %q %v %v %d %q %q", state, quota, quotaPerUnit, attempts, username, callerStatus)
+	}
+	if item, ok, err := store.NextBillingBackfill(ctx); err != nil || !ok || item.AuditID != record.AuditID || item.RequestID != requestID {
+		t.Fatalf("backfill item = %+v %v %v", item, ok, err)
+	}
+	// The billed-iff-values rule is enforced by the schema, not only in Go.
+	if _, err := store.writerDB.Exec("UPDATE token_links SET billing_state = 'billed' WHERE audit_id = ?", record.AuditID); err == nil {
+		t.Fatal("billed state without quota accepted")
+	}
+	if _, err := store.writerDB.Exec("UPDATE token_links SET quota = 1 WHERE audit_id = ?", record.AuditID); err == nil {
+		t.Fatal("quota on an unchecked link accepted")
+	}
+	if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatalf("billing migration changed historical evidence: %v", err)
+	}
+}
+
 func TestOpenAppliesBaselineMigrationAndPragmas(t *testing.T) {
 	t.Parallel()
 
@@ -157,6 +251,12 @@ ORDER BY name`)
 		"newapi_token_id",
 		"token_name",
 		"linked_at_ns",
+		"billing_state",
+		"quota",
+		"quota_per_unit",
+		"billed_prompt_tokens",
+		"billed_completion_tokens",
+		"billing_attempts",
 	}
 	if !reflect.DeepEqual(tokenLinkColumns, wantTokenLinkColumns) {
 		t.Fatalf("token_links columns = %v, want %v", tokenLinkColumns, wantTokenLinkColumns)
@@ -166,8 +266,8 @@ ORDER BY name`)
 	if err := store.readerDB.QueryRow("SELECT COUNT(*), MAX(version) FROM schema_migrations").Scan(&versionCount, &version); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 6 || version != 8 {
-		t.Fatalf("migration rows = %d max=%d, want versions 1, 4, 5, 6, 7 and 8", versionCount, version)
+	if versionCount != 7 || version != 9 {
+		t.Fatalf("migration rows = %d max=%d, want versions 1, 4, 5, 6, 7, 8 and 9", versionCount, version)
 	}
 	var quickCheck string
 	if err := store.readerDB.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil {
@@ -188,7 +288,7 @@ ORDER BY name`)
 	if err := reopened.readerDB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versionCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 6 {
+	if versionCount != 7 {
 		t.Fatalf("migration reran: row count = %d", versionCount)
 	}
 }
@@ -199,7 +299,7 @@ func TestOpenRejectsDatabaseNewerThanProgram(t *testing.T) {
 	store, path := openTestStore(t)
 	if _, err := store.writerDB.Exec(
 		"INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-		9,
+		10,
 		int64(2),
 	); err != nil {
 		t.Fatal(err)

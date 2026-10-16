@@ -5,6 +5,7 @@ package sqlite
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 )
@@ -192,8 +193,22 @@ type AuditGap struct {
 	CreatedAtNS  int64
 }
 
+// Billing states of a token link (doc/features/21-newapi-billing.md).
+// Unchecked only exists for links written before migration 009; new links are
+// always billed or unbilled.
+const (
+	BillingUnchecked = "unchecked"
+	BillingBilled    = "billed"
+	BillingUnbilled  = "unbilled"
+)
+
+// MaxBillingAttempts bounds the historical billing backfill of one link.
+const MaxBillingAttempts = 3
+
 // TokenLink stores the non-secret NewAPI caller snapshot associated with one
 // audit. It contains identifiers and names from the system log, never a key.
+// The billing fields come from the same log rows: they are set exactly when
+// BillingState is BillingBilled.
 type TokenLink struct {
 	AuditID         string
 	NewAPIRequestID string
@@ -203,13 +218,43 @@ type TokenLink struct {
 	TokenName       string
 	LinkedAtNS      int64
 	Attempts        int
+
+	BillingState           string
+	Quota                  *int64
+	QuotaPerUnit           *float64
+	BilledPromptTokens     *int64
+	BilledCompletionTokens *int64
 }
 
 // CallerLookup is one due caller-identification job read by the NewAPI worker.
+// StatusCode is the audit's response status, nil when no response was
+// recorded.
 type CallerLookup struct {
+	AuditID    string
+	RequestID  string
+	Attempts   int
+	StatusCode *int
+}
+
+// BillingBackfillItem is one pre-billing token link awaiting its historical
+// billing lookup.
+type BillingBackfillItem struct {
 	AuditID   string
 	RequestID string
 	Attempts  int
+}
+
+// BillingUpdate replaces only the billing columns of an unchecked token link.
+// State BillingUnchecked records one more failed attempt; the billing values
+// must then be nil, as for BillingUnbilled.
+type BillingUpdate struct {
+	AuditID                string
+	State                  string
+	Attempts               int
+	Quota                  *int64
+	QuotaPerUnit           *float64
+	BilledPromptTokens     *int64
+	BilledCompletionTokens *int64
 }
 
 // CallerRetry reschedules or terminates one caller lookup attempt.
@@ -448,7 +493,44 @@ func validateTokenLink(link TokenLink) error {
 			return errors.New("sqlite: invalid token link snapshot")
 		}
 	}
+	if link.BillingState != BillingBilled && link.BillingState != BillingUnbilled {
+		return errors.New("sqlite: new token link must be billed or unbilled")
+	}
+	return validateBillingValues(link.BillingState, link.Quota, link.QuotaPerUnit, link.BilledPromptTokens, link.BilledCompletionTokens)
+}
+
+// validateBillingValues mirrors the token_links CHECK: billing values are all
+// present and in range exactly when the state is billed.
+func validateBillingValues(state string, quota *int64, quotaPerUnit *float64, prompt, completion *int64) error {
+	if state != BillingBilled {
+		if quota != nil || quotaPerUnit != nil || prompt != nil || completion != nil {
+			return errors.New("sqlite: billing values require billed state")
+		}
+		return nil
+	}
+	if quota == nil || quotaPerUnit == nil || prompt == nil || completion == nil {
+		return errors.New("sqlite: billed state requires billing values")
+	}
+	if *quota < 0 || *prompt < 0 || *completion < 0 || !(*quotaPerUnit > 0) || math.IsInf(*quotaPerUnit, 0) {
+		return errors.New("sqlite: invalid billing values")
+	}
 	return nil
+}
+
+func validateBillingUpdate(update BillingUpdate) error {
+	if update.AuditID == "" || update.Attempts < 0 || update.Attempts > MaxBillingAttempts {
+		return errors.New("sqlite: invalid billing update")
+	}
+	switch update.State {
+	case BillingBilled, BillingUnbilled:
+	case BillingUnchecked:
+		if update.Attempts == 0 || update.Attempts >= MaxBillingAttempts {
+			return errors.New("sqlite: unchecked billing update must record a non-final attempt")
+		}
+	default:
+		return errors.New("sqlite: invalid billing state")
+	}
+	return validateBillingValues(update.State, update.Quota, update.QuotaPerUnit, update.BilledPromptTokens, update.BilledCompletionTokens)
 }
 
 func gapDetailForReason(reason string) (string, bool) {
