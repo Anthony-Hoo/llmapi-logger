@@ -15,6 +15,7 @@ import (
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/insights/pricing"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/parser"
@@ -199,6 +200,22 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 			}
 		}
 	}
+	// --- context insights (WP2) ---
+	var insightsService web.InsightsQuery
+	if configuration.Insights.Enabled && runtime.store != nil && runtime.cipher != nil {
+		prices, err := pricing.Load(configuration.Insights.PricingFile)
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("load insights pricing: %w", err)
+		}
+		service, err := query.NewInsights(runtime.store, runtime.cipher, prices)
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("assemble insights service: %w", err)
+		}
+		insightsService = service
+	}
+	// --- end context insights (WP2) ---
 	if runtime.store != nil && configuration.RetentionDays > 0 {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
 		if err != nil {
@@ -211,6 +228,7 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 		AdminToken: configuration.AdminToken,
 		Developer:  developerLoginOptions(configuration, runtime.fingerprints),
 		Query:      queryService,
+		Insights:   insightsService, // context insights (WP2)
 		Users:      newAPIClient,
 		Rules:      userAgentRules,
 		Assets:     web.EmbeddedAssets(),
