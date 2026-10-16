@@ -91,7 +91,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 ## 7. 数据与加密
 
-SQLite schema generation 2 共 20 张表。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines 和 integrity events。完整表定义以[模块 04](04-sqlite-storage-and-migrations.md)为准。
+SQLite schema generation 2 共 22 张表。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines、integrity events，以及不在完整性链内的派生表 `audit_analysis`、`agent_spawn_hints`（上下文洞察）。完整表定义以[模块 04](04-sqlite-storage-and-migrations.md)为准。
 
 采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw；以局部错误失败时不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
 
@@ -111,9 +111,9 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建。Anthropic/Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建。Anthropic/Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。只有 `retention_state=full` 的异常记录提供 raw Body；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。所有管理证据响应禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。只有 `retention_state=full` 的异常记录提供 raw Body；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域。所有管理证据响应禁止缓存。
 
 受保护页面另提供动态 User-Agent 规则管理：模型与 User-Agent 使用 Go RE2 正则，保存时编译校验，持久化成功后以原子快照立即替换；初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则在访问 NewAPI 前返回通用 `401 unauthorized`，精确拦截码仅保留在审计数据中。规则不会扩大 Matcher 的 LLM 路由范围。
 
@@ -140,10 +140,11 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 17 | [入站请求拦截链](17-request-interceptor-chain.md) |
 | 18 | [内容寻址的对话、轮次与多模态审计存储](18-content-addressed-conversation-storage.md) |
 | 19 | [开发者 API Key 会话](19-developer-key-session.md) |
+| 20 | [上下文分析与用量洞察](20-context-insights.md) |
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树、估算成本），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 

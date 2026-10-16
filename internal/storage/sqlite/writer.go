@@ -38,6 +38,7 @@ const (
 	writeCreateUserAgentRule
 	writeUpdateUserAgentRule
 	writeDeleteUserAgentRule
+	writeSaveAnalysis
 )
 
 type writeRequest struct {
@@ -467,6 +468,8 @@ WHERE audit_id=? AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID);
 		return updateUserAgentRule(transaction, request.data.(uaguard.Rule))
 	case writeDeleteUserAgentRule:
 		return deleteUserAgentRule(transaction, request.data.(int64))
+	case writeSaveAnalysis:
+		return saveAnalysis(transaction, request.data.(AnalysisRow))
 	default:
 		return fmt.Errorf("sqlite writer: unknown operation %d", request.kind)
 	}

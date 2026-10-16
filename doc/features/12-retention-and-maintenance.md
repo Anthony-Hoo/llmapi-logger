@@ -41,7 +41,7 @@
 
 1. 创建必要的 retention checkpoints；
 2. 在删除集合内按叶到根删除 turns；
-3. 删除目标 audit_records，由外键级联清理 HTTP、parsed result、token link 和 turn 子表；
+3. 删除目标 audit_records，由外键级联清理 HTTP、parsed result、token link、turn 子表以及派生的 `audit_analysis` 与 `agent_spawn_hints` 行（上下文洞察，不在完整性链内，也不需要任何额外清理步骤）；
 4. 删除不再包含 turn 的 conversations；
 5. 删除不再被 turn envelope、context op 或 response item 引用的 content objects；
 6. 删除不再被 content object 引用的 binary objects；
@@ -70,6 +70,7 @@ retention 失败不改变 data-plane admission；数据库 writer 本身不健�
 - 仅由过期 turns 引用的 content/binary objects 被清理，共享对象继续保留。
 - 事务中任何一步失败完整回滚。
 - 日志不包含 Header、Body、Query、Token、主密钥或底层数据库错误原文。
+- 删除 audit 后不残留 `audit_analysis` 与 `agent_spawn_hints` 行。
 
 ## 7. 运维
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -213,6 +214,70 @@ ORDER BY lower(name), value_index`, auditID, stageName)
 	}
 	if err := transaction.Commit(); err != nil {
 		return ParserStage{}, fmt.Errorf("sqlite: commit parser stage read: %w", err)
+	}
+	return result, nil
+}
+
+// maxParserHeaderNames bounds the allowlist so one lookup stays a single
+// small IN query.
+const maxParserHeaderNames = 128
+
+// LoadParserRequestHeaders returns the still-encrypted inbound request headers
+// whose names case-insensitively match the allowlist. Names keep their stored
+// casing because the value AAD was bound to it at capture time. An empty
+// allowlist reads nothing.
+func (store *Store) LoadParserRequestHeaders(ctx context.Context, auditID string, names []string) ([]HeaderEvidence, error) {
+	if ctx == nil {
+		return nil, errors.New("sqlite: nil context")
+	}
+	if auditID == "" {
+		return nil, errors.New("sqlite: empty audit id")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	seen := make(map[string]struct{}, len(names))
+	arguments := []any{auditID, StageRequestReceived}
+	for _, name := range names {
+		lowered := strings.ToLower(strings.TrimSpace(name))
+		if lowered == "" {
+			continue
+		}
+		if _, duplicate := seen[lowered]; duplicate {
+			continue
+		}
+		seen[lowered] = struct{}{}
+		arguments = append(arguments, lowered)
+	}
+	if len(seen) == 0 {
+		return []HeaderEvidence{}, nil
+	}
+	if len(seen) > maxParserHeaderNames {
+		return nil, fmt.Errorf("sqlite: parser header allowlist exceeds %d names", maxParserHeaderNames)
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT stage, kind, name, value_index, value_length, value_enc
+FROM http_headers
+WHERE audit_id = ?
+  AND stage = ?
+  AND kind = 'header'
+  AND lower(name) IN (`+placeholders(len(seen))+`)
+ORDER BY lower(name), value_index`, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: load parser request headers: %w", err)
+	}
+	defer rows.Close()
+	result := make([]HeaderEvidence, 0)
+	for rows.Next() {
+		var header HeaderEvidence
+		if err := rows.Scan(&header.Stage, &header.Kind, &header.Name, &header.ValueIndex, &header.ValueLength, &header.ValueEnc); err != nil {
+			return nil, fmt.Errorf("sqlite: scan parser request header: %w", err)
+		}
+		header.ValueEnc = cloneBytes(header.ValueEnc)
+		result = append(result, header)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate parser request headers: %w", err)
 	}
 	return result, nil
 }

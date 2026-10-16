@@ -1,0 +1,170 @@
+# Default insights vocabulary (doc/features/20-context-insights.md section 5.8, 5.7, 6, 11).
+# Compiled into the binary; an override file is merged on top (see
+# configs/insights-vocabulary.example.yaml). Header names are matched
+# case-insensitively. Role-header values are matched case-insensitively.
+
+clients:
+  codex:
+    priority: 10
+    detect:
+      user_agent_prefixes: ["codex_cli_rs/"]
+      headers_present: [originator, x-codex-parent-thread-id, x-openai-subagent]
+    root_headers: [session-id]
+    node_headers: [thread-id]
+    parent_headers: [x-codex-parent-thread-id]
+    parent_body_paths: [client_metadata.x-codex-parent-thread-id]
+    role_headers:
+      - header: x-openai-subagent
+        values:
+          collab_spawn: subagent
+          review: review
+          compact: compaction
+          memory_consolidation: auxiliary
+
+  claude_code:
+    priority: 20
+    detect:
+      user_agent_prefixes: ["claude-cli/"]
+      headers_present: [x-claude-code-session-id, x-claude-code-agent-id]
+      headers_equal:
+        x-app: cli
+    root_headers: [x-claude-code-session-id]
+    node_headers: [x-claude-code-agent-id]
+    parent_headers: [x-claude-code-parent-agent-id]
+    node_fallback: root    # no agent-id header: the main agent, whose node is the session root
+    parent_fallback: root  # agent-id present without a parent header: the parent is the main agent
+    role_headers:
+      - header: x-claude-code-request-class
+        values:
+          main: main
+          subagent: subagent
+          compaction: compaction
+          auxiliary: auxiliary
+          side_reply: auxiliary
+          workflow: auxiliary
+
+  opencode:
+    priority: 30
+    detect:
+      user_agent_prefixes: ["opencode/"]
+      headers_present: [x-opencode-client, x-opencode-session-id]
+    node_headers: [x-opencode-session-id]
+    parent_headers: [x-opencode-parent-session-id, x-parent-session-id]
+
+  dsh:
+    priority: 40
+    detect:
+      user_agent_prefixes: ["deepseek-harness/"]
+      headers_present: [x-deepseek-harness-session-id]
+    node_headers: [x-deepseek-harness-session-id]
+    parent_body_paths: [dsh_session_log.header.parentSession]
+    role_headers:
+      - header: x-deepseek-harness-compact
+        values:
+          "1": compaction
+
+  # Generic custom agent frameworks (doc section 11). Lowest priority: native
+  # client headers win.
+  custom:
+    priority: 100
+    detect:
+      headers_present: [x-agent-id, x-agent-session-id]
+    root_headers: [x-agent-session-id]
+    node_headers: [x-agent-id]
+    parent_headers: [x-agent-parent-id]
+    name_headers: [x-agent-name]
+    role_headers:
+      - header: x-agent-role
+        values:
+          main: main
+          subagent: subagent
+          compaction: compaction
+          title: title
+          review: review
+          auxiliary: auxiliary
+
+# A text part that starts (after leading whitespace) with one of these markers,
+# in a user or developer message, is counted as injected context.
+injection_markers:
+  - "<system-reminder>"
+  - "<environment_context>"
+  - "<user_instructions>"
+  - "<skill_content"
+  - "# AGENTS.md"
+  - "<user-prompt-submit-hook>"
+
+# System or message text starting with one of these prefixes changes on every
+# request without the context really changing; item fingerprints use the
+# prefix instead of the text so prefix matching keeps working.
+volatile_text_prefixes:
+  - "x-anthropic-billing-header:"
+
+# Lower-cased tool name -> tool kind (file_read, file_write, search, shell,
+# spawn, mcp, other).
+tool_kinds:
+  read: file_read
+  read_file: file_read
+  write: file_write
+  edit: file_write
+  multiedit: file_write
+  notebookedit: file_write
+  apply_patch: file_write
+  str_replace_editor: file_write
+  str_replace_based_edit_tool: file_write
+  grep: search
+  glob: search
+  bash: shell
+  shell: shell
+  exec_command: shell
+  agent: spawn
+  task: spawn
+  spawn_agent: spawn
+  subagent: spawn
+  subagent_fork: spawn
+
+# Lower-cased tool name prefix -> tool kind.
+tool_kind_prefixes:
+  "mcp__": mcp
+
+# Lower-cased spawn tool name -> argument names that carry the child prompt,
+# in priority order.
+spawn_tools:
+  agent: [prompt]
+  task: [prompt]
+  spawn_agent: [message, prompt]
+  subagent: [prompt, message]
+  subagent_fork: [prompt, message]
+
+# Fixed text some clients put in front of a child agent's opening prompt.
+subagent_prefixes:
+  - "You are a subagent spawned by another session.\n"
+
+# Requests that are not agent work: recognised from the request body.
+side_requests:
+  - role: title
+    system_prefixes: ["You are a title generator"]
+  - role: compaction
+    last_user_contains: ["You MUST use this format for your response"]
+
+file_ops:
+  path_keys: [file_path, filePath, path, notebook_path]
+  old_keys: [old_string, old_str]
+  new_keys: [new_string, new_str, new_source, insert_text]
+  content_keys: [content, file_text]
+  edits_keys: [edits]
+  patch_keys: [input, patch, diff, command]
+  tools:
+    read: {op: read}
+    read_file: {op: read}
+    write: {op: write, style: write}
+    edit: {op: write, style: edit}
+    multiedit: {op: write, style: multi_edit}
+    notebookedit: {op: write, style: edit}
+    apply_patch: {op: write, style: patch}
+    str_replace_editor: {op: write, style: editor}
+    str_replace_based_edit_tool: {op: write, style: editor}
+    grep: {op: search}
+    glob: {op: search}
+    bash: {op: shell}
+    shell: {op: shell}
+    exec_command: {op: shell}

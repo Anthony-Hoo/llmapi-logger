@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,13 @@ const (
 func (worker *Worker) loadInput(ctx context.Context, audit sqlite.ParserAudit) (Input, error) {
 	request, _, requestErr := worker.loadBody(ctx, audit.AuditID, sqlite.StageRequestReceived)
 	response, statusCode, responseErr := worker.loadBody(ctx, audit.AuditID, sqlite.StageResponseReceived)
+	// Headers only feed derived analysis. A failure here is logged and must
+	// not downgrade the body evidence status.
+	headers, err := worker.loadRequestHeaders(ctx, audit.AuditID, worker.headerNames())
+	if err != nil {
+		worker.logger.Warn("parser request headers load failed", "audit_id", audit.AuditID, "error_code", "request_headers_load_failed")
+		headers = nil
+	}
 	return Input{
 		AuditID:    audit.AuditID,
 		Protocol:   audit.Protocol,
@@ -32,7 +40,38 @@ func (worker *Worker) loadInput(ctx context.Context, audit sqlite.ParserAudit) (
 		Request:    request,
 		Response:   response,
 		StatusCode: statusCode,
+		Headers:    headers,
 	}, errors.Join(requestErr, responseErr)
+}
+
+// loadRequestHeaders decrypts the allowlisted inbound request headers with the
+// same AAD the query service verifies. Any failure discards the partial set.
+func (worker *Worker) loadRequestHeaders(ctx context.Context, auditID string, names []string) (http.Header, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	evidence, err := worker.store.LoadParserRequestHeaders(ctx, auditID, names)
+	if err != nil {
+		return nil, err
+	}
+	if len(evidence) == 0 {
+		return nil, nil
+	}
+	headers := make(http.Header, len(evidence))
+	for _, header := range evidence {
+		aad, err := security.AAD(auditID, "header", header.Stage, header.Kind, header.Name, strconv.Itoa(header.ValueIndex))
+		if err != nil {
+			return nil, fmt.Errorf("parser: request header AAD: %w", err)
+		}
+		plaintext, err := worker.cipher.Decrypt(aad, header.ValueEnc)
+		if err != nil || len(plaintext) != header.ValueLength {
+			clear(plaintext)
+			return nil, errors.New("parser: request header integrity failure")
+		}
+		headers.Add(header.Name, string(plaintext))
+		clear(plaintext)
+	}
+	return headers, nil
 }
 
 func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (BodySource, *int, error) {

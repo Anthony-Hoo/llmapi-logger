@@ -204,3 +204,7 @@ SQLite 数据库与 `audit.key` 必须作为一个备份集保存。运行中不
 普通 OpenAI 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、4xx/5xx、采集不完整、解析/normalization/重建失败和其他异常保持 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw 返回 410 误判为丢失。
 
 最终镜像只包含 distroless 运行环境、Go 二进制和空的数据/配置挂载目录，不包含 Node、pnpm、前端源码、Go 源码或构建工具。
+
+## 8. 上下文洞察
+
+insights 默认启用，无需额外部署步骤。开关、价格与词表覆盖文件、各客户端（Claude Code、Codex、OpenCode、dsh）的接入提示，以及自研 Agent 通过 X-Agent-* Header 归入 Agent 树的约定见[洞察与 Agent 接入指南](insights-and-agent-headers.md)。

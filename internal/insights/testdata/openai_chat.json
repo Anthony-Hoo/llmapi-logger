@@ -1,0 +1,24 @@
+{
+  "model": "gpt-test",
+  "max_completion_tokens": 4096,
+  "stream": true,
+  "metadata": {"session_id": "sess-explicit-1"},
+  "messages": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "developer", "content": "<environment_context>cwd=/work</environment_context>"},
+    {"role": "user", "content": [
+      {"type": "text", "text": "List the files"},
+      {"type": "image_url", "image_url": {"url": "https://example.invalid/a.png", "detail": "low"}}
+    ]},
+    {"role": "assistant", "content": null, "tool_calls": [
+      {"id": "call_1", "type": "function", "function": {"name": "shell", "arguments": "{\"cmd\":\"ls\"}"}}
+    ]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "a.txt\nb.txt"},
+    {"role": "user", "content": "Thanks, now summarize"}
+  ],
+  "tools": [
+    {"type": "function", "function": {"name": "shell", "description": "Run a shell command", "parameters": {"type": "object"}}},
+    {"type": "function", "function": {"name": "mcp__github__create_issue", "description": "Create an issue", "parameters": {"type": "object"}}},
+    {"type": "function", "function": {"name": "lookup_customer", "description": "Custom lookup", "parameters": {"type": "object"}}}
+  ]
+}

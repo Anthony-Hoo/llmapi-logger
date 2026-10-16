@@ -28,6 +28,13 @@ developer_login:
   enabled: false
 shutdown_timeout_seconds: 30
 retention_days: 30
+# Derived context and usage analysis computed by the asynchronous parser.
+# The optional override files must already exist when set; keep them outside
+# this repository, e.g. pricing_file: /etc/audit-proxy/prices.json
+insights:
+  enabled: true
+  pricing_file: ""
+  vocabulary_file: ""
 
 interceptors:
   require-client-credential:

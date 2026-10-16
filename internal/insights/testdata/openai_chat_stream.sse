@@ -1,0 +1,8 @@
+data: {"id":"c1","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}
+
+data: {"id":"c1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}
+
+data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}
+
+data: [DONE]
+

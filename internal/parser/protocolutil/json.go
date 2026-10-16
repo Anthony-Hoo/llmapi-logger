@@ -115,3 +115,37 @@ func IntPointer(value int) *int {
 	copy := value
 	return &copy
 }
+
+func Int64Pointer(value int64) *int64 {
+	copy := value
+	return &copy
+}
+
+// NonNegativeDifference returns total minus part, clamped at zero. A nil part
+// counts as zero; a nil total stays unreported.
+func NonNegativeDifference(total, part *int64) *int64 {
+	if total == nil {
+		return nil
+	}
+	difference := *total
+	if part != nil {
+		difference -= *part
+	}
+	return Int64Pointer(max(difference, 0))
+}
+
+// SumReported adds the reported values and returns nil only when none was
+// reported.
+func SumReported(values ...*int64) *int64 {
+	var sum *int64
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		if sum == nil {
+			sum = Int64Pointer(0)
+		}
+		*sum += *value
+	}
+	return sum
+}
