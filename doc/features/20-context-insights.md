@@ -347,7 +347,7 @@ insights:
 - **流式响应的限制**：metadata 保留的 OpenAI 流式响应无法还原成 SSE。回填改用 response envelope 中保存的 usage 摘要与重建的 conversation，因此缓存读/写和推理 Token 拆分不可恢复（只有 uncached input 与 output），停止原因也可能缺失；非流式响应的重建 JSON 保留完整 usage。
 - **防空转**：进程内有界（4096）的跳过集合记录跳过或失败的 audit，同一进程不再重试；满后清空重建。日志码 `analysis_backfill_skipped`（附 `reason` 枚举）与 `analysis_backfill_failed`，见[模块 13](13-observability-health-and-lifecycle.md)。暂时性失败（如存储繁忙）也要到进程重启才会再试。
 - 已被 retention 删除的记录不在候选里；没有现成的健康计数器，因此未新增 `analysis_backfill_pending` 之类的指标（项目目前无 metrics 面）。
-- `AnalysisVersion` 为 4：版本 2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0；版本 4 起 user 角色的图片/文档计入会话键推断的首条用户项与 `turn_start`，旧行会被回填重算。
+- `AnalysisVersion` 为 6，版本变化会让旧行被回填重算。版本历史：2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0；4 起 user 角色的图片/文档计入会话键推断的首条用户项与 `turn_start`；5 起 Gemini 的 `toolUsePromptTokenCount` 计入未缓存输入；6 起 `api_key_fpr` 为 NULL 的审计互相隔离（无 prev、不继承 root/父链接，见 §3.3），且 system/tools 从无到有或从有到无也记 `system_changed`/`tools_changed`。
 - **词表覆盖只影响新分析**：修改 `insights.vocabulary_file` 只对之后新分析的记录生效；已有行保持原有分类，直到 `AnalysisVersion` 变化触发回填重算。
 
 ## 10. 阶段与风险
