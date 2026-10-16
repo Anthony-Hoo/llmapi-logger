@@ -208,7 +208,7 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 | 事件 | 判定 | 置信度 |
 | --- | --- | --- |
 | model_switch | 本请求模型 ≠ prev 模型 | 精确 |
-| system_changed / tools_changed | `system_fpr` / `tools_fpr` 变化 | 精确 |
+| system_changed / tools_changed | `system_fpr` / `tools_fpr` 变化，包括从无到有、从有到无（空指纹与值互转） | 精确 |
 | compaction | 不是 prev 的前缀扩展，且估算总量较 prev 下降 ≥ 30%、prev 不小于 8k | 推断 |
 | prune | 公共前缀长度不变但其中 tool_result 条目指纹改变且估算变小 | 推断 |
 | injected | 新增条目中含命中注入标记的部分 | 推断 |

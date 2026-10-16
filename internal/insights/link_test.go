@@ -296,3 +296,31 @@ func TestLinkContentMatchesSubagentWithoutParentHeader(t *testing.T) {
 		t.Fatalf("main request was content linked: source=%v parent=%x", main.AgentLinkSource, main.AgentParentFPR)
 	}
 }
+
+func TestDiffEventsCountsSystemAndToolsAppearingOrDisappearing(t *testing.T) {
+	t.Parallel()
+	value := testKey(0x41)
+	for _, test := range []struct {
+		name       string
+		prev, next []byte
+		want       int
+	}{
+		{"added", nil, value, 1},
+		{"removed", value, nil, 1},
+		{"unchanged", value, value, 0},
+		{"both absent", nil, nil, 0},
+		{"replaced", value, testKey(0x42), 1},
+	} {
+		prev := &sqlite.AnalysisLinkCandidate{SystemFPR: test.prev, ToolsFPR: test.prev}
+		flags, _, _ := diffEvents(Analysis{SystemFPR: test.next, ToolsFPR: test.next}, prev, nil)
+		changed := 0
+		if flags&EventSystemChanged != 0 && flags&EventToolsChanged != 0 {
+			changed = 1
+		} else if flags&(EventSystemChanged|EventToolsChanged) != 0 {
+			t.Fatalf("%s: flags = %b, want both or neither", test.name, flags)
+		}
+		if changed != test.want {
+			t.Fatalf("%s: flags = %b, want changed=%d", test.name, flags, test.want)
+		}
+	}
+}

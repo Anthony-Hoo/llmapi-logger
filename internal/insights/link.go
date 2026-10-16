@@ -400,10 +400,12 @@ func diffEvents(analysis Analysis, prev *sqlite.AnalysisLinkCandidate, prevDetai
 	if prev.Model != nil && *prev.Model != "" && analysis.Model != "" && *prev.Model != analysis.Model {
 		flags |= EventModelSwitch
 	}
-	if prev.SystemFPR != nil && analysis.SystemFPR != nil && !bytes.Equal(prev.SystemFPR, analysis.SystemFPR) {
+	// A nil fingerprint means the prompt or tool set is absent, so adding or
+	// removing one is a change too.
+	if !bytes.Equal(prev.SystemFPR, analysis.SystemFPR) {
 		flags |= EventSystemChanged
 	}
-	if prev.ToolsFPR != nil && analysis.ToolsFPR != nil && !bytes.Equal(prev.ToolsFPR, analysis.ToolsFPR) {
+	if !bytes.Equal(prev.ToolsFPR, analysis.ToolsFPR) {
 		flags |= EventToolsChanged
 	}
 	if prevDetail == nil {
