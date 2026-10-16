@@ -32,9 +32,11 @@ type Worker struct {
 	scanInterval time.Duration
 	now          func() time.Time
 
-	mu              sync.Mutex
+	// Guarded by mu; read once per audit by the parser goroutine.
 	headerAllowlist []string
-	started         bool
+
+	mu      sync.Mutex
+	started bool
 	closed  bool
 	cancel  context.CancelFunc
 	wait    sync.WaitGroup
