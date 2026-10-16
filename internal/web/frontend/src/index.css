@@ -24,6 +24,10 @@
   --color-card: hsl(var(--card));
   --color-card-foreground: hsl(var(--card-foreground));
 
+  /* Tailwind 4.3 changed the default sans stack to -apple-system first; keep the v3 stack. */
+  --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
   /* Same values the v3 config produced for rounded-lg/md/sm (sm stays 8px). */
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);

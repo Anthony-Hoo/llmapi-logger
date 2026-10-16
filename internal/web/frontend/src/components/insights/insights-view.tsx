@@ -44,7 +44,7 @@ export function InsightsView({
   };
 
   return (
-    <div className="space-y-5">
+    <div>
       <div className={current ? "hidden" : undefined}>
         <OverviewPage
           client={client}
@@ -54,6 +54,10 @@ export function InsightsView({
           onOpenTree={openTree}
         />
       </div>
+      {current ? (
+        // Explicit margin: the overview wrapper above is display:none while a
+        // sub-page is open, so a v4 `space-y` margin-bottom on it would not apply.
+        <div className="mt-5">
       {current?.kind === "trend" ? (
         <TrendPage
           key={`trend:${current.sessionID}`}
@@ -68,6 +72,8 @@ export function InsightsView({
       ) : null}
       {current?.kind === "tree" ? (
         <TreePage key={`tree:${current.treeID}`} client={client} treeID={current.treeID} refreshKey={refreshKey} onBack={pop} onOpenSession={openNode} />
+      ) : null}
+        </div>
       ) : null}
     </div>
   );
