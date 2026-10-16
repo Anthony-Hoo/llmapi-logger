@@ -30,7 +30,7 @@ func TestConcurrentCodexAgentsSharingPromptCacheKeyKeepSeparateChains(t *testing
 
 	// Both agents share the base instructions and the environment context, as
 	// Codex sub-agents do; only the task and what follows differ.
-	environment := responsesMessage("user", "<environment_context>cwd=/workspace/example</environment_context>")
+	environment := responsesMessage("user", "<environment_context>cwd=example-project</environment_context>")
 	parentTask := responsesMessage("user", "plan the parser refactor")
 	parentAnswerOne := responsesMessage("assistant", "spawning a researcher for the parser")
 	parentTaskTwo := responsesMessage("user", "now draft the migration plan")
