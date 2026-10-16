@@ -88,8 +88,22 @@ func ValidateConfig(path string) error {
 	if _, _, _, _, err = assembleDataPlane(configuration); err != nil {
 		return err
 	}
-	_, err = loadInsightsVocabulary(configuration.Insights)
-	return err
+	return validateInsights(configuration.Insights)
+}
+
+// validateInsights loads every insights override file so that --validate-config
+// rejects what startup would reject. Disabled insights read nothing.
+func validateInsights(configuration config.InsightsConfig) error {
+	if !configuration.Enabled {
+		return nil
+	}
+	if _, err := loadInsightsVocabulary(configuration); err != nil {
+		return err
+	}
+	if _, err := pricing.Load(configuration.PricingFile); err != nil {
+		return fmt.Errorf("load insights pricing: %w", err)
+	}
+	return nil
 }
 
 // loadInsightsVocabulary returns nil when insights are disabled, so a disabled

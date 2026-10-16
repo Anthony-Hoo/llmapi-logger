@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -138,4 +140,38 @@ func TestInsightsWiringFollowsConfiguration(t *testing.T) {
 			t.Fatalf("New with invalid vocabulary = %v, want vocabulary error", err)
 		}
 	})
+}
+
+func TestValidateConfigChecksInsightsOverrides(t *testing.T) {
+	write := func(t *testing.T, name, contents string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	malformed := write(t, "pricing.json", `{"models":`)
+	valid := write(t, "valid-pricing.json", `{"models":{"x/model":{"input":0,"output":0}}}`)
+
+	validate := func(t *testing.T, enabled bool, pricingFile string) error {
+		t.Helper()
+		configuration := insightsTestConfig(t, "http://upstream.example.com", enabled, "")
+		configuration.Insights.PricingFile = pricingFile
+		data, err := yaml.Marshal(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ValidateConfig(write(t, "config.yaml", string(data)))
+	}
+
+	if err := validate(t, true, valid); err != nil {
+		t.Fatalf("valid pricing override rejected: %v", err)
+	}
+	if err := validate(t, true, malformed); err == nil || !strings.Contains(err.Error(), "insights pricing") {
+		t.Fatalf("malformed pricing override = %v, want pricing error", err)
+	}
+	if err := validate(t, false, malformed); err != nil {
+		t.Fatalf("disabled insights must not read the pricing override: %v", err)
+	}
 }
