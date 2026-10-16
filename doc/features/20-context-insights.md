@@ -82,7 +82,7 @@ parser worker 已经持有解密后的请求/响应 Body，在同一次解析中
   2. 推断键：`HMAC(派生子密钥, protocol ‖ api_key_fpr ‖ system 指纹 ‖ 首条用户消息 item 指纹)`。同一 Agent 会话的请求共享系统提示词和首条用户消息，主 Agent 与子 Agent 的系统提示词通常不同，因此天然分开。
 
   会话 ID 为 `ses_<hex>`，键里总是带 `api_key_fpr`，不会跨 Key 合并。
-- 上一步（prev step）= 同会话中时间早于本请求、item 指纹序列与本请求公共前缀最长的那一条，候选上限 32，与 `parentCandidateLimit` 一致。
+- 上一步（prev step）= 同会话、同 `api_key_fpr`（NULL 只匹配 NULL；会话 id 可能被多个 Key 共享）中时间早于本请求、item 指纹序列与本请求公共前缀最长的那一条，候选上限 32，与 `parentCandidateLimit` 一致。
 
 已知限制：
 

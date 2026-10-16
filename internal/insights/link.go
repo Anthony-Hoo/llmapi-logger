@@ -43,9 +43,9 @@ const (
 // LinkStore is the narrow read surface of the linker, implemented by
 // *sqlite.Store.
 type LinkStore interface {
-	LatestAgentRootFPR(ctx context.Context, nodeFPR []byte, excludeAuditID string) ([]byte, error)
-	HasEarlierAnalysisStep(ctx context.Context, sessionID string, startedAtNS int64, auditID string) (bool, error)
-	ListAnalysisPrevCandidates(ctx context.Context, sessionID string, startedAtNS int64, auditID string, limit int) ([]sqlite.AnalysisLinkCandidate, error)
+	LatestAgentRootFPR(ctx context.Context, nodeFPR, apiKeyFPR []byte, excludeAuditID string) ([]byte, error)
+	HasEarlierAnalysisStep(ctx context.Context, sessionID string, apiKeyFPR []byte, startedAtNS int64, auditID string) (bool, error)
+	ListAnalysisPrevCandidates(ctx context.Context, sessionID string, apiKeyFPR []byte, startedAtNS int64, auditID string, limit int) ([]sqlite.AnalysisLinkCandidate, error)
 	MatchSpawnHints(ctx context.Context, hintFPRs [][]byte, apiKeyFPR []byte, fromNS, toNS int64, excludeAuditID string) ([]sqlite.SpawnHintMatch, error)
 }
 
@@ -153,7 +153,8 @@ type LinkInput struct {
 //  3. A row without a client node but with a session gets the synthetic node
 //     SyntheticAgentFPR(analysis_session_id), so every agent is addressable
 //     by agent_node_fpr.
-//  4. prev_audit_id is the latest earlier main/subagent step of the session;
+//  4. prev_audit_id is the latest earlier main/subagent step of the session
+//     made with the same api key (a session id can be shared by keys);
 //     explicit and inferred sessions pick, among the last eight, the one with
 //     the longest common item prefix.
 //  5. A synthetic node without its own parent inherits a content link from
@@ -202,7 +203,7 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 	var prev *sqlite.AnalysisLinkCandidate
 	var prevDetail *Detail
 	if sessionID != "" {
-		earlier, err := linker.store.HasEarlierAnalysisStep(ctx, sessionID, meta.StartedAtNS, meta.AuditID)
+		earlier, err := linker.store.HasEarlierAnalysisStep(ctx, sessionID, meta.APIKeyFPR, meta.StartedAtNS, meta.AuditID)
 		if err != nil {
 			return sqlite.AnalysisRow{}, err
 		}
@@ -312,7 +313,7 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 			rootFPR = parentFPR
 		}
 	case parentFPR != nil:
-		stored, err := linker.store.LatestAgentRootFPR(ctx, parentFPR, meta.AuditID)
+		stored, err := linker.store.LatestAgentRootFPR(ctx, parentFPR, meta.APIKeyFPR, meta.AuditID)
 		if err != nil {
 			return sqlite.AnalysisRow{}, err
 		}
@@ -353,7 +354,7 @@ func (linker *Linker) choosePrev(ctx context.Context, sessionID, sessionLink str
 	if sessionLink == SessionLinkExplicit || sessionLink == SessionLinkInferred {
 		limit = inferredPrevCandidates
 	}
-	candidates, err := linker.store.ListAnalysisPrevCandidates(ctx, sessionID, meta.StartedAtNS, meta.AuditID, limit)
+	candidates, err := linker.store.ListAnalysisPrevCandidates(ctx, sessionID, meta.APIKeyFPR, meta.StartedAtNS, meta.AuditID, limit)
 	if err != nil || len(candidates) == 0 {
 		return nil, nil, err
 	}

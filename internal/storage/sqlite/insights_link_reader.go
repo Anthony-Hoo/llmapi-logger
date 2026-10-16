@@ -103,9 +103,11 @@ WHERE r.audit_id = ?`, StageResponseReceived, auditID).Scan(
 }
 
 // LatestAgentRootFPR returns the agent_root_fpr of the most recent analysis
-// row, other than excludeAuditID, whose node is nodeFPR. It returns nil when
+// row, other than excludeAuditID, whose node is nodeFPR and whose audit has the
+// same api_key_fpr (NULL only matches NULL): raw agent ids can be reused by
+// another key, so a root is never inherited across keys. It returns nil when
 // the node has no analysed request yet or its latest row has no root.
-func (store *Store) LatestAgentRootFPR(ctx context.Context, nodeFPR []byte, excludeAuditID string) ([]byte, error) {
+func (store *Store) LatestAgentRootFPR(ctx context.Context, nodeFPR, apiKeyFPR []byte, excludeAuditID string) ([]byte, error) {
 	if ctx == nil {
 		return nil, errors.New("sqlite: nil context")
 	}
@@ -117,11 +119,12 @@ func (store *Store) LatestAgentRootFPR(ctx context.Context, nodeFPR []byte, excl
 	}
 	var root []byte
 	err := store.readerDB.QueryRowContext(ctx, `
-SELECT agent_root_fpr
-FROM audit_analysis
-WHERE agent_node_fpr = ? AND audit_id <> ?
-ORDER BY started_at_ns DESC, audit_id DESC
-LIMIT 1`, nodeFPR, excludeAuditID).Scan(&root)
+SELECT a.agent_root_fpr
+FROM audit_analysis AS a
+JOIN audit_records AS r ON r.audit_id = a.audit_id
+WHERE a.agent_node_fpr = ? AND a.audit_id <> ? AND r.api_key_fpr IS ?
+ORDER BY a.started_at_ns DESC, a.audit_id DESC
+LIMIT 1`, nodeFPR, excludeAuditID, apiKeyFPR).Scan(&root)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -132,8 +135,9 @@ LIMIT 1`, nodeFPR, excludeAuditID).Scan(&root)
 }
 
 // HasEarlierAnalysisStep reports whether the session already has an analysis
-// row of any role ordered before (startedAtNS, auditID).
-func (store *Store) HasEarlierAnalysisStep(ctx context.Context, sessionID string, startedAtNS int64, auditID string) (bool, error) {
+// row of any role, from an audit with the same api_key_fpr (NULL only matches
+// NULL), ordered before (startedAtNS, auditID).
+func (store *Store) HasEarlierAnalysisStep(ctx context.Context, sessionID string, apiKeyFPR []byte, startedAtNS int64, auditID string) (bool, error) {
 	if ctx == nil {
 		return false, errors.New("sqlite: nil context")
 	}
@@ -146,10 +150,12 @@ func (store *Store) HasEarlierAnalysisStep(ctx context.Context, sessionID string
 	var exists int
 	err := store.readerDB.QueryRowContext(ctx, `
 SELECT EXISTS (
-    SELECT 1 FROM audit_analysis
-    WHERE analysis_session_id = ?
-      AND (started_at_ns < ? OR (started_at_ns = ? AND audit_id < ?))
-)`, sessionID, startedAtNS, startedAtNS, auditID).Scan(&exists)
+    SELECT 1 FROM audit_analysis AS a
+    JOIN audit_records AS r ON r.audit_id = a.audit_id
+    WHERE a.analysis_session_id = ?
+      AND r.api_key_fpr IS ?
+      AND (a.started_at_ns < ? OR (a.started_at_ns = ? AND a.audit_id < ?))
+)`, sessionID, apiKeyFPR, startedAtNS, startedAtNS, auditID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("sqlite: check earlier analysis step: %w", err)
 	}
@@ -157,11 +163,13 @@ SELECT EXISTS (
 }
 
 // ListAnalysisPrevCandidates returns up to limit earlier rows of the session,
-// newest first, ordered before (startedAtNS, auditID). Auxiliary steps
-// (compaction, title, review, auxiliary) are never candidates: they link to a
-// previous step themselves but must not become the previous step of the main
-// line.
-func (store *Store) ListAnalysisPrevCandidates(ctx context.Context, sessionID string, startedAtNS int64, auditID string, limit int) ([]AnalysisLinkCandidate, error) {
+// newest first, ordered before (startedAtNS, auditID). Only audits with the
+// same api_key_fpr (NULL only matches NULL) are candidates: a session id can be
+// shared by several keys, and a diff must never be derived from another key's
+// detail. Auxiliary steps (compaction, title, review, auxiliary) are never
+// candidates: they link to a previous step themselves but must not become the
+// previous step of the main line.
+func (store *Store) ListAnalysisPrevCandidates(ctx context.Context, sessionID string, apiKeyFPR []byte, startedAtNS int64, auditID string, limit int) ([]AnalysisLinkCandidate, error) {
 	if ctx == nil {
 		return nil, errors.New("sqlite: nil context")
 	}
@@ -172,17 +180,19 @@ func (store *Store) ListAnalysisPrevCandidates(ctx context.Context, sessionID st
 		return nil, ErrClosed
 	}
 	rows, err := store.readerDB.QueryContext(ctx, `
-SELECT audit_id, analysis_version, started_at_ns, model, system_fpr, tools_fpr,
-       est_system + est_tools + est_user + est_injected + est_assistant +
-       est_reasoning + est_tool_result + est_media,
-       agent_role, agent_node_fpr, agent_parent_fpr, agent_root_fpr,
-       agent_link_source, agent_link_confidence, detail_enc
-FROM audit_analysis
-WHERE analysis_session_id = ?
-  AND (started_at_ns < ? OR (started_at_ns = ? AND audit_id < ?))
-  AND (agent_role IS NULL OR agent_role IN ('main', 'subagent'))
-ORDER BY started_at_ns DESC, audit_id DESC
-LIMIT ?`, sessionID, startedAtNS, startedAtNS, auditID, limit)
+SELECT a.audit_id, a.analysis_version, a.started_at_ns, a.model, a.system_fpr, a.tools_fpr,
+       a.est_system + a.est_tools + a.est_user + a.est_injected + a.est_assistant +
+       a.est_reasoning + a.est_tool_result + a.est_media,
+       a.agent_role, a.agent_node_fpr, a.agent_parent_fpr, a.agent_root_fpr,
+       a.agent_link_source, a.agent_link_confidence, a.detail_enc
+FROM audit_analysis AS a
+JOIN audit_records AS r ON r.audit_id = a.audit_id
+WHERE a.analysis_session_id = ?
+  AND r.api_key_fpr IS ?
+  AND (a.started_at_ns < ? OR (a.started_at_ns = ? AND a.audit_id < ?))
+  AND (a.agent_role IS NULL OR a.agent_role IN ('main', 'subagent'))
+ORDER BY a.started_at_ns DESC, a.audit_id DESC
+LIMIT ?`, sessionID, apiKeyFPR, startedAtNS, startedAtNS, auditID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list analysis candidates: %w", err)
 	}
