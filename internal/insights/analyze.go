@@ -91,7 +91,7 @@ func Analyze(input Input, vocab *Vocabulary, fp Fingerprinter) (Analysis, error)
 	}
 	if n := len(items); n != 0 {
 		last := items[n-1]
-		analysis.TurnStart = last.Category == CategoryUser && last.Kind == "text"
+		analysis.TurnStart = (last.Category == CategoryUser && last.Kind == "text") || isUserMedia(last)
 	}
 
 	protocol := strings.ToLower(input.Protocol)
@@ -129,9 +129,18 @@ func Analyze(input Input, vocab *Vocabulary, fp Fingerprinter) (Analysis, error)
 	return analysis, nil
 }
 
+// isUserMedia reports a genuine user-role image or document, as opposed to the
+// images folded into a tool result or media a tool role carries.
+func isUserMedia(item ctxItem) bool {
+	return item.Category == CategoryMedia && item.Role == "user"
+}
+
 func firstUserItem(items []ctxItem) int {
 	fallback := -1
 	for index, item := range items {
+		if isUserMedia(item) {
+			return index
+		}
 		switch item.Category {
 		case CategoryUser:
 			return index

@@ -249,6 +249,56 @@ func TestAnalyzeAnthropicTurnStartAndInferredKey(t *testing.T) {
 	}
 }
 
+func TestAnalyzeMediaOnlyOpenerIsUserInput(t *testing.T) {
+	png := testPNG(t, 8, 8)
+	cases := []struct {
+		name     string
+		protocol string
+		endpoint string
+		opener   func(media string) string
+		result   string
+	}{
+		{"anthropic image", "anthropic", "messages", func(p string) string {
+			return `{"system":"sys","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + p + `"}}]}]}`
+		}, `{"system":"sys","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}]}`},
+		{"anthropic document", "anthropic", "messages", func(p string) string {
+			return `{"system":"sys","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"` + p + `"}}]}]}`
+		}, `{"system":"sys","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}]}`},
+		{"gemini image", "gemini", "generateContent", func(p string) string {
+			return `{"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"` + p + `"}}]}]}`
+		}, `{"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":"function","parts":[{"inlineData":{"mimeType":"image/png","data":"` + png + `"}}]}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			first := analyze(t, Input{Protocol: tc.protocol, Endpoint: tc.endpoint, Request: []byte(tc.opener(png))})
+			if !first.TurnStart {
+				t.Error("a user-role media opener is a turn start")
+			}
+			if first.SessionKeySource != SessionLinkInferred || first.SessionKeyFPR == nil {
+				t.Fatalf("session key = %q %x", first.SessionKeySource, first.SessionKeyFPR)
+			}
+			again := analyze(t, Input{Protocol: tc.protocol, Endpoint: tc.endpoint, Request: []byte(tc.opener(png))})
+			if !bytes.Equal(first.SessionKeyFPR, again.SessionKeyFPR) {
+				t.Error("same media opener must give the same inferred key")
+			}
+			other := analyze(t, Input{Protocol: tc.protocol, Endpoint: tc.endpoint, Request: []byte(tc.opener(testPNG(t, 16, 16)))})
+			if bytes.Equal(first.SessionKeyFPR, other.SessionKeyFPR) {
+				t.Error("different media opener must give a different inferred key")
+			}
+			if tc.protocol == "anthropic" {
+				result := analyze(t, Input{Protocol: tc.protocol, Endpoint: tc.endpoint, Request: []byte(tc.result)})
+				if result.TurnStart {
+					t.Error("a tool result is not a turn start")
+				}
+			}
+		})
+	}
+	toolMedia := analyze(t, Input{Protocol: "gemini", Endpoint: "generateContent", Request: []byte(cases[2].result)})
+	if toolMedia.TurnStart || toolMedia.SessionKeyFPR != nil {
+		t.Errorf("tool-role media must not count as user input: %v %x", toolMedia.TurnStart, toolMedia.SessionKeyFPR)
+	}
+}
+
 func TestAnalyzeGemini(t *testing.T) {
 	analysis := analyze(t, Input{
 		Protocol: "gemini", Endpoint: "generateContent",
