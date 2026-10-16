@@ -29,7 +29,7 @@
 
 额度换算：
 
-- `GET /api/status`（无需认证）返回 `quota_per_unit`，即 1 美元对应的额度（NewAPI 默认 500000）。客户端启动时读取，并随用户目录每 5 分钟刷新。
+- `GET /api/status`（无需认证）返回 `quota_per_unit`，即 1 美元对应的额度（NewAPI 默认 500000）。客户端启动时读取，并随用户目录每 5 分钟刷新；查到 consume 行时若尚无有效值，会按需再读一次（每 10 秒至多一次），避免启动时一次失败让之后几分钟的请求都缺少换算系数。
 - 成本（美元）= `quota / quota_per_unit`。`usd_exchange_rate`、`quota_display_type` 等只是 NewAPI 的显示设置，本服务统一以美元展示。
 - 查询成功但尚未得到有效的 `quota_per_unit`（> 0 且有限）时，按临时错误重试，不写入缺少换算系数的计费行。
 - 写入时保存当时的 `quota_per_unit` 快照，运营方日后修改该值不会改写历史成本。

@@ -128,7 +128,7 @@ NewAPI 相关配置统一放在 `newapi` 下：`url` 是唯一上游，`proxy_ur
 
 `shutdown_timeout_seconds` 控制收到 SIGINT/SIGTERM 后等待在途请求优雅结束的时间，默认 `30` 秒。承载长流式请求时应与上游响应头超时和容器的 stop grace period 一起增大。
 
-`newapi.access_token` 与 `newapi.user_id` 必须同时配置或同时留空。配置后，程序使用只读管理请求同步 NewAPI 全站用户的安全字段，并在每条已转发 LLM 响应返回 `X-Oneapi-Request-Id` 后异步查询 NewAPI 全站日志。查询成功只回填 `user_id`、`username`、`token_id` 和 `token_name`；日志暂未生成或请求失败时会有限重试，失败不影响原请求转发和响应。完整用户 API Key 从不进入该流程。详细说明见[部署说明](doc/deployment/README.md)和 [NewAPI 请求身份解析](doc/features/11-newapi-request-identity.md)。
+`newapi.access_token` 与 `newapi.user_id` 必须同时配置或同时留空。配置后，程序使用只读管理请求同步 NewAPI 全站用户的安全字段，并在每条已转发 LLM 响应返回 `X-Oneapi-Request-Id` 后异步查询 NewAPI 全站日志。查询成功回填 `user_id`、`username`、`token_id`、`token_name`，以及该请求在 NewAPI 的实际扣费（消费日志的 `quota`，按 `/api/status` 的 `quota_per_unit` 折算为美元）；日志暂未生成或请求失败时会有限重试，失败不影响原请求转发和响应。完整用户 API Key 从不进入该流程。详细说明见[部署说明](doc/deployment/README.md)和 [NewAPI 请求身份解析](doc/features/11-newapi-request-identity.md)。
 
 ## Docker Compose
 
@@ -159,7 +159,7 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 
 ## 上下文洞察
 
-默认启用的 `insights` 在异步解析后派生用量、上下文构成、会话与 Agent 树和估算成本，并提供洞察页。价格与词表覆盖、各客户端接入（含自研 Agent 的 `X-Agent-*` Header 约定及 curl/Python/TypeScript 示例）见[洞察与 Agent 接入指南](doc/deployment/insights-and-agent-headers.md)。
+默认启用的 `insights` 在异步解析后派生用量、上下文构成、会话与 Agent 树，成本直接取 NewAPI 实际计费（[模块 21](doc/features/21-newapi-billing.md)），并提供洞察页。词表与上下文窗口覆盖、各客户端接入（含自研 Agent 的 `X-Agent-*` Header 约定及 curl/Python/TypeScript 示例）见[洞察与 Agent 接入指南](doc/deployment/insights-and-agent-headers.md)。
 
 ## 项目边界
 

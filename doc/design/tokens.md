@@ -54,7 +54,7 @@
 | 场景 | 状态 |
 |---|---|
 | completed / complete / ok、verified、启用、时间线完整、精确/回链关联 | success |
-| partial / interrupted / client_cancelled、截断、推断关联、部分未知价格、占用 ≥70% | warning |
+| partial / interrupted / client_cancelled、截断、推断关联、占用 ≥70% | warning |
 | rejected / failed / error / proxy_error / newapi_error、校验失败、占用 ≥90% | danger |
 | pending / processing / in_progress、会话筛选提示、说明性提示 | info |
 | 其他（标签、计数、协议、客户端） | neutral / outline |
