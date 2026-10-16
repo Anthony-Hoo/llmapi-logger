@@ -21,6 +21,12 @@ developer_login:
   enabled: false
 shutdown_timeout_seconds: 30
 retention_days: 30
+# Optional override files must exist inside the container when set,
+# e.g. pricing_file: /config/prices.json
+insights:
+  enabled: true
+  pricing_file: ""
+  vocabulary_file: ""
 
 interceptors:
   require-client-credential:

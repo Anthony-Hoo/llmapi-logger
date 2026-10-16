@@ -69,6 +69,12 @@ func Validate(cfg Config) error {
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > 3650 {
 		return fmt.Errorf("retention_days must be 0 or between 1 and 3650, got %d", cfg.RetentionDays)
 	}
+	if err := validateOptionalFile("insights.pricing_file", cfg.Insights.PricingFile); err != nil {
+		return err
+	}
+	if err := validateOptionalFile("insights.vocabulary_file", cfg.Insights.VocabularyFile); err != nil {
+		return err
+	}
 	if err := validateInterceptors(cfg.Interceptors); err != nil {
 		return err
 	}
@@ -278,6 +284,29 @@ func validateDataPath(name, value string) error {
 		}
 		parent = next
 	}
+}
+
+// validateOptionalFile accepts an empty value. Otherwise, unlike data paths,
+// the file must already exist and be a regular file; its content is left to
+// the component that reads it.
+func validateOptionalFile(name, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("%s must not contain surrounding whitespace", name)
+	}
+	info, err := os.Stat(value)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s does not exist: %q", name, value)
+		}
+		return fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s must name a regular file: %q", name, value)
+	}
+	return nil
 }
 
 func validateInterceptors(interceptors map[string]InterceptorConfig) error {
