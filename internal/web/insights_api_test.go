@@ -307,3 +307,23 @@ func TestInsightsParameterValidation(t *testing.T) {
 		t.Fatalf("unauthenticated status = %d", unauthenticated.Code)
 	}
 }
+
+func TestSessionInfoReportsInsightsCapability(t *testing.T) {
+	t.Parallel()
+	for _, enabled := range []bool{false, true} {
+		fixture := newInsightsAPIFixture(t, enabled)
+		for _, developer := range []bool{false, true} {
+			response := fixture.get("/api/v1/session", developer)
+			if response.Code != http.StatusOK {
+				t.Fatalf("enabled=%v developer=%v: status = %d", enabled, developer, response.Code)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := decoded["insights_enabled"].(bool); !ok || got != enabled {
+				t.Errorf("enabled=%v developer=%v: insights_enabled = %v", enabled, developer, decoded["insights_enabled"])
+			}
+		}
+	}
+}

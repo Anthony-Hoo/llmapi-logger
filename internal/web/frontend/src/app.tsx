@@ -67,6 +67,11 @@ interface LoadedRawBody {
   preview: RawBodyPreview;
 }
 
+/** The insights views exist only when the server reports the capability. */
+export function insightsEnabled(session: SessionInfo | null): boolean {
+  return session?.insights_enabled === true;
+}
+
 export function App() {
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "anonymous">("checking");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
@@ -295,6 +300,7 @@ function Dashboard({
   // A developer session is scoped to one API key server side. The UI hides the
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
+  const hasInsights = insightsEnabled(session);
   const [view, setView] = useState<"audits" | "rules" | "insights">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
@@ -458,9 +464,11 @@ function Dashboard({
             <Button variant={view === "audits" ? "secondary" : "ghost"} size="sm" onClick={() => setView("audits")}>
               审计记录
             </Button>
-            <Button variant={view === "insights" ? "secondary" : "ghost"} size="sm" onClick={() => setView("insights")}>
-              用量洞察
-            </Button>
+            {hasInsights ? (
+              <Button variant={view === "insights" ? "secondary" : "ghost"} size="sm" onClick={() => setView("insights")}>
+                用量洞察
+              </Button>
+            ) : null}
             {isDeveloper ? null : (
               <Button variant={view === "rules" ? "secondary" : "ghost"} size="sm" onClick={() => setView("rules")}>
                 UA 拦截规则
@@ -480,13 +488,13 @@ function Dashboard({
       <main className="mx-auto max-w-[1920px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
         {view === "rules" && !isDeveloper ? (
           <UserAgentRulesPanel client={client} />
-        ) : view === "insights" ? (
+        ) : view === "insights" && hasInsights ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <InsightsView
               client={client}
               isDeveloper={isDeveloper}
               refreshKey={refreshKey}
-              renderAuditDetail={(auditID) => <AuditDetailPanel key={auditID} client={client} auditID={auditID} />}
+              renderAuditDetail={(auditID) => <AuditDetailPanel key={auditID} client={client} insightsEnabled auditID={auditID} />}
             />
           </Suspense>
         ) : (
@@ -575,6 +583,7 @@ function Dashboard({
           <AuditDetailPanel
             key={selectedID ?? "none"}
             client={client}
+            insightsEnabled={hasInsights}
             auditID={selectedID}
             onFilterConversation={filterByConversation}
           />
@@ -1190,10 +1199,13 @@ function auditStatusSummary(audit: AuditSummary): string | null {
 
 function AuditDetailPanel({
   client,
+  insightsEnabled: showComposition,
   auditID,
   onFilterConversation,
 }: {
   client: ApiClient;
+  /** Whether the lazily loaded 上下文构成 section may be requested. */
+  insightsEnabled: boolean;
   auditID: string | null;
   onFilterConversation?: (conversationID: string) => void;
 }) {
@@ -1412,7 +1424,7 @@ function AuditDetailPanel({
         {!loading && detail ? (
           <AuditDetailBody
             detail={detail}
-            client={client}
+            client={showComposition ? client : undefined}
             onFilterConversation={onFilterConversation}
             onExportConversation={exportConversation}
             exportNote={exportNote}

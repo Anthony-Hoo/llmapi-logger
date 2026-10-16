@@ -15,6 +15,8 @@ export interface SessionInfo {
   role: SessionRole;
   expires_at?: string;
   identity?: DeveloperIdentity | null;
+  /** False when the server runs without context insights; its routes would 404. */
+  insights_enabled?: boolean;
 }
 
 export interface AuditCursor {

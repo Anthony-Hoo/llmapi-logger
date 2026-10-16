@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { AuditDetail, AuditSummary, NewAPIUser } from "./types";
+import type { AuditDetail, AuditSummary, NewAPIUser, SessionInfo } from "./types";
 import type { ApiClient } from "./api";
 import {
   AuditDetailBody,
@@ -9,6 +9,7 @@ import {
   AuditList,
   DeveloperBadge,
   HTTPAuditEvidence,
+  insightsEnabled,
   StreamTimingPanel,
   TurnStoragePanel,
   UserAgentRulesPanel,
@@ -546,5 +547,43 @@ describe("User-Agent rule configuration", () => {
     expect(html).toContain("模型正则");
     expect(html).toContain("User-Agent 正则");
     expect(html).toContain("多条命中规则全部需要通过");
+  });
+});
+
+describe("insights capability", () => {
+  const base: SessionInfo = { status: "authenticated", role: "admin" };
+
+  it("is on only when the server reports insights_enabled", () => {
+    expect(insightsEnabled(null)).toBe(false);
+    expect(insightsEnabled(base)).toBe(false);
+    expect(insightsEnabled({ ...base, insights_enabled: false })).toBe(false);
+    expect(insightsEnabled({ ...base, insights_enabled: true })).toBe(true);
+  });
+
+  it("omits the 上下文构成 section without a client, which the dashboard withholds when disabled", () => {
+    const body = (client?: ApiClient) =>
+      renderToStaticMarkup(
+        <AuditDetailBody
+          detail={detail}
+          client={client}
+          onExportConversation={() => undefined}
+          exportNote={null}
+          reconstructedLoading={null}
+          reconstructedNote={null}
+          onDownloadReconstructed={() => undefined}
+          timelines={{}}
+          timelineLoading={null}
+          timelineNote={null}
+          onLoadTimeline={() => undefined}
+          rawBodies={{}}
+          rawLoading={null}
+          rawNote={null}
+          onLoadRaw={() => undefined}
+          onDownloadRaw={() => undefined}
+          onClearRaw={() => undefined}
+        />,
+      );
+    expect(body()).not.toContain("上下文构成");
+    expect(body({} as ApiClient)).toContain("上下文构成");
   });
 });
