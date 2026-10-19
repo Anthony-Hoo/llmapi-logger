@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 
 import type { ApiClient } from "../../api";
-import type { SessionCard, TreeNode } from "../../types";
+import type { ClientLabels, SessionCard, TreeNode } from "../../types";
 import { OverviewPage } from "./overview-page";
 import { TreePage } from "./tree-page";
 import { TrendPage } from "./trend-page";
@@ -34,12 +34,13 @@ export function InsightsView({
   const push = (page: InsightsPage) => setStack((pages) => [...pages, page]);
   const pop = () => setStack((pages) => pages.slice(0, -1));
 
-  const openSession = (card: SessionCard) =>
-    push({ kind: "trend", sessionID: card.session_id, title: `${clientLabel(card.client)} · ${roleLabel(card.role)} · ${card.session_id}` });
+  const openSession = (card: SessionCard, clientLabels?: ClientLabels) =>
+    push({ kind: "trend", sessionID: card.session_id, title: `${clientLabel(card.client, clientLabels)} · ${roleLabel(card.role)} · ${card.session_id}` });
   const openTree = (treeID: string) => push({ kind: "tree", treeID });
-  const openNode = (node: TreeNode) => {
+  const openNode = (node: TreeNode, clientLabels?: ClientLabels) => {
     if (node.session_id) {
-      push({ kind: "trend", sessionID: node.session_id, title: `${clientLabel(node.client)} · ${roleLabel(node.role)} · ${node.session_id}` });
+      const who = node.name ? `${node.name} · ` : "";
+      push({ kind: "trend", sessionID: node.session_id, title: `${who}${clientLabel(node.client, clientLabels)} · ${roleLabel(node.role)} · ${node.session_id}` });
     }
   };
 

@@ -775,18 +775,25 @@ func TestHintHelpers(t *testing.T) {
 
 func TestSideRequestRole(t *testing.T) {
 	cases := []struct {
-		name    string
-		request string
-		want    string
+		name     string
+		protocol string
+		endpoint string
+		request  string
+		want     string
 	}{
-		{"title", `{"messages":[{"role":"system","content":"You are a title generator. Output a title."},{"role":"user","content":"hello"}]}`, RoleTitle},
-		{"compaction trailer", `{"messages":[{"role":"system","content":"agent"},{"role":"user","content":"work"},{"role":"user","content":"Summarize. You MUST use this format for your response: ..."}]}`, RoleCompaction},
-		{"ordinary", `{"messages":[{"role":"system","content":"agent"},{"role":"user","content":"work"}]}`, ""},
-		{"invalid", `nope`, ""},
+		{"title", "openai", "chat_completions", `{"messages":[{"role":"system","content":"You are a title generator. Output a title."},{"role":"user","content":"hello"}]}`, RoleTitle},
+		{"compaction trailer", "openai", "chat_completions", `{"messages":[{"role":"system","content":"agent"},{"role":"user","content":"work"},{"role":"user","content":"Summarize. You MUST use this format for your response: ..."}]}`, RoleCompaction},
+		{"pi-ai compaction", "openai", "chat_completions", `{"messages":[{"role":"system","content":"You are a context summarization assistant. Summarize the conversation."},{"role":"user","content":"<conversation>...</conversation>"}]}`, RoleCompaction},
+		{"pi-ai compaction after leading whitespace", "openai", "chat_completions", `{"messages":[{"role":"system","content":"\n  You are a context summarization assistant."},{"role":"user","content":"x"}]}`, RoleCompaction},
+		{"pi-ai compaction on anthropic", "anthropic", "messages", `{"model":"m","max_tokens":1,"system":"You are a context summarization assistant. Summarize.","messages":[{"role":"user","content":"x"}]}`, RoleCompaction},
+		{"system prefix is case-sensitive", "openai", "chat_completions", `{"messages":[{"role":"system","content":"you are a context summarization assistant."},{"role":"user","content":"x"}]}`, ""},
+		{"prefix in a later system message does not count", "openai", "chat_completions", `{"messages":[{"role":"system","content":"agent"},{"role":"system","content":"You are a context summarization assistant."},{"role":"user","content":"x"}]}`, ""},
+		{"ordinary", "openai", "chat_completions", `{"messages":[{"role":"system","content":"agent"},{"role":"user","content":"work"}]}`, ""},
+		{"invalid", "openai", "chat_completions", `nope`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := SideRequestRole(Input{Protocol: "openai", Endpoint: "chat_completions", Request: []byte(tc.request)}, nil)
+			got := SideRequestRole(Input{Protocol: tc.protocol, Endpoint: tc.endpoint, Request: []byte(tc.request)}, nil)
 			if got != tc.want {
 				t.Errorf("role = %q, want %q", got, tc.want)
 			}

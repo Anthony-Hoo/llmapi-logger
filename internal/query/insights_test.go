@@ -52,7 +52,7 @@ func newInsightsFixture(t *testing.T, windows map[string]int64) *insightsFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewInsights(store, cipher, table, true)
+	service, err := NewInsights(store, cipher, table, true, map[string]string{"custom": "My Framework", "": "dropped", "blank": ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +80,10 @@ type stepSeed struct {
 	system    int64
 	user      int64
 	detail    *insights.Detail
-	version   int
-	link      string // agent_link_source
+	// corruptDetail stores an undecryptable detail_enc instead of detail.
+	corruptDetail bool
+	version       int
+	link          string // agent_link_source
 	// billing, when set, resolves the caller through a token link with this
 	// NewAPI billing; quota is only used when billing is "billed".
 	billing      string
@@ -176,6 +178,9 @@ func (fixture *insightsFixture) seed(seed stepSeed) {
 			fixture.t.Fatal(err)
 		}
 	}
+	if seed.corruptDetail {
+		row.DetailEnc = []byte("not a ciphertext")
+	}
 	if err := fixture.store.SaveAnalysis(ctx, row); err != nil {
 		fixture.t.Fatal(err)
 	}
@@ -207,7 +212,8 @@ func (fixture *insightsFixture) seedWorld() {
 		parent: fingerprint(0x11), role: "subagent", uncached: i64(7000), output: i64(700), system: 5000,
 		billing: sqlite.BillingBilled, quota: 1000000, quotaPerUnit: 500000})
 	fixture.seed(stepSeed{id: "own-sub", offset: 30 * time.Second, key: keyOwn, session: "agt_bbbbbbbbbbbbbbbbbbbbbbbb", root: rootOwn, node: fingerprint(0x13),
-		parent: fingerprint(0x99), role: "subagent", turnStart: true, uncached: i64(10), cacheRead: i64(20), output: i64(5), system: 10})
+		parent: fingerprint(0x99), role: "subagent", turnStart: true, uncached: i64(10), cacheRead: i64(20), output: i64(5), system: 10,
+		detail: &insights.Detail{Agent: insights.AgentIdentity{Client: "custom", Role: "subagent", NodeID: "raw-sub", ParentID: "raw-parent", Name: "researcher"}}})
 	fixture.seed(stepSeed{id: "other-2", offset: 40 * time.Second, key: keyOther, session: testSessionForeign, root: rootOther, node: fingerprint(0x14),
 		uncached: i64(4000), output: i64(400), system: 4000, billing: sqlite.BillingBilled, quota: 200000, quotaPerUnit: 400000})
 }
@@ -275,6 +281,24 @@ func TestInsightsOverviewTotalsCostAndDays(t *testing.T) {
 	}
 	if groupCost != 3 {
 		t.Fatalf("group costs sum to %v", groupCost)
+	}
+	// Client labels ride on the response, and group_by=client shows them in
+	// place of the key; the empty and blank entries were dropped.
+	if len(admin.ClientLabels) != 1 || admin.ClientLabels["custom"] != "My Framework" {
+		t.Fatalf("client labels = %v", admin.ClientLabels)
+	}
+	byClient, err := fixture.service.Overview(context.Background(), OverviewQuery{FromNS: from, ToNS: to, GroupBy: "client"})
+	if err != nil || len(byClient.Groups) != 1 || byClient.Groups[0].Key != "custom" || byClient.Groups[0].Label != "My Framework" {
+		t.Fatalf("client groups = %+v %v", byClient.Groups, err)
+	}
+	byModel, err := fixture.service.Overview(context.Background(), OverviewQuery{FromNS: from, ToNS: to, GroupBy: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range byModel.Groups {
+		if group.Label != group.Key {
+			t.Fatalf("model group label substituted: %+v", group)
+		}
 	}
 }
 
@@ -430,8 +454,11 @@ func TestInsightsTreeScopePlaceholdersAndAuxRequests(t *testing.T) {
 	t.Parallel()
 	fixture := newInsightsFixture(t, nil)
 	fixture.seedWorld()
+	// The compaction step is the subagent's latest request but carries another
+	// name: the node name comes from the latest non-auxiliary step.
 	fixture.seed(stepSeed{id: "own-compact", offset: 35 * time.Second, key: keyOwn, session: "agt_bbbbbbbbbbbbbbbbbbbbbbbb", root: fingerprint(0xa0),
-		node: fingerprint(0x13), parent: fingerprint(0x99), role: "compaction", uncached: i64(1)})
+		node: fingerprint(0x13), parent: fingerprint(0x99), role: "compaction", uncached: i64(1),
+		detail: &insights.Detail{Agent: insights.AgentIdentity{Client: "custom", Role: "compaction", Name: "compactor"}}})
 	ctx := context.Background()
 	treeID := "a0a0a0a0a0a0a0a0a0a0a0a0"
 
@@ -455,8 +482,15 @@ func TestInsightsTreeScopePlaceholdersAndAuxRequests(t *testing.T) {
 	if !sub.Visible || sub.Steps != 1 || sub.AuxRequests != 1 || sub.ParentNodeID != "999999999999999999999999" || sub.Role != "subagent" {
 		t.Fatalf("sub node = %+v", sub)
 	}
-	if placeholder.Visible || placeholder.NodeID == "" {
+	if placeholder.Visible || placeholder.NodeID == "" || placeholder.Name != "" {
 		t.Fatalf("placeholder = %+v", placeholder)
+	}
+	// own-sub's detail names the agent; the main node has no detail at all.
+	if sub.Name != "researcher" || main.Name != "" {
+		t.Fatalf("names = main %q sub %q", main.Name, sub.Name)
+	}
+	if len(tree.ClientLabels) != 1 || tree.ClientLabels["custom"] != "My Framework" {
+		t.Fatalf("tree client labels = %v", tree.ClientLabels)
 	}
 	if _, ok := byID["121212121212121212121212"]; ok {
 		t.Fatal("other key's node leaked into the developer tree")
@@ -472,6 +506,52 @@ func TestInsightsTreeScopePlaceholdersAndAuxRequests(t *testing.T) {
 		if _, err := fixture.service.Tree(ctx, bad, nil); !errors.Is(err, ErrInvalidQuery) {
 			t.Errorf("tree id %q: %v", bad, err)
 		}
+	}
+}
+
+func TestInsightsTreeNamesComeFromDetailsAndSurviveBadOnes(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	root := fingerprint(0xd0)
+	fixture.seed(stepSeed{id: "named-main", offset: 0, key: keyOwn, session: "agt_dddddddddddddddddddddd01", root: root, node: fingerprint(0x21), uncached: i64(1),
+		detail: &insights.Detail{Agent: insights.AgentIdentity{Client: "custom", Role: "main", Name: "planner"}}})
+	// The main agent's latest step carries no name: the name follows the latest step, not the first.
+	fixture.seed(stepSeed{id: "named-main-2", offset: time.Second, key: keyOwn, session: "agt_dddddddddddddddddddddd01", root: root, node: fingerprint(0x21), uncached: i64(1),
+		detail: &insights.Detail{Agent: insights.AgentIdentity{Client: "custom", Role: "main"}}})
+	fixture.seed(stepSeed{id: "corrupt-child", offset: 2 * time.Second, key: keyOwn, session: "agt_dddddddddddddddddddddd02", root: root, node: fingerprint(0x22),
+		parent: fingerprint(0x21), role: "subagent", uncached: i64(1), corruptDetail: true})
+	fixture.seed(stepSeed{id: "named-child", offset: 3 * time.Second, key: keyOwn, session: "agt_dddddddddddddddddddddd03", root: root, node: fingerprint(0x23),
+		parent: fingerprint(0x21), role: "subagent", uncached: i64(1),
+		detail: &insights.Detail{Agent: insights.AgentIdentity{Client: "custom", Role: "subagent", Name: "researcher"}}})
+
+	tree, err := fixture.service.Tree(context.Background(), treeIDOf(root), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{}
+	for _, node := range tree.Nodes {
+		names[node.NodeID] = node.Name
+	}
+	want := map[string]string{treeIDOf(fingerprint(0x21)): "", treeIDOf(fingerprint(0x22)): "", treeIDOf(fingerprint(0x23)): "researcher"}
+	if len(names) != len(want) {
+		t.Fatalf("nodes = %+v", tree.Nodes)
+	}
+	for id, name := range want {
+		if names[id] != name {
+			t.Errorf("node %s name = %q, want %q", id, names[id], name)
+		}
+	}
+	encoded, err := json.Marshal(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(encoded, []byte(`"name":`)) != 1 || !bytes.Contains(encoded, []byte(`"client_labels":{"custom":"My Framework"}`)) {
+		t.Fatalf("tree JSON = %s", encoded)
+	}
+	// Only the raw ids inside the detail are sensitive; the name is display data
+	// and the ids never leave the detail.
+	if bytes.Contains(encoded, []byte("raw-")) {
+		t.Fatalf("tree JSON leaks raw ids: %s", encoded)
 	}
 }
 
@@ -618,7 +698,7 @@ func TestInsightsContextWindowOverrides(t *testing.T) {
 func TestInsightsBillingDisabledIsReported(t *testing.T) {
 	t.Parallel()
 	fixture := newInsightsFixture(t, nil)
-	service, err := NewInsights(fixture.store, fixture.cipher, nil, false)
+	service, err := NewInsights(fixture.store, fixture.cipher, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,6 +715,10 @@ func TestInsightsBillingDisabledIsReported(t *testing.T) {
 	encoded, err := json.Marshal(sessions)
 	if err != nil || !bytes.Contains(encoded, []byte(`"billing_enabled":false`)) {
 		t.Fatalf("sessions JSON = %s %v", encoded, err)
+	}
+	// Without labels the field is omitted; the fixture service carries one.
+	if bytes.Contains(encoded, []byte(`"client_labels"`)) {
+		t.Fatalf("sessions JSON without labels = %s", encoded)
 	}
 	enabled, err := fixture.service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to})
 	if err != nil || !enabled.BillingEnabled {

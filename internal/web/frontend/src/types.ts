@@ -357,6 +357,9 @@ export interface GroupUsage {
   usage: UsageTotals;
 }
 
+/** Client key -> display name set by the vocabulary (`clients.<key>.label`); absent when none is set. */
+export type ClientLabels = Record<string, string>;
+
 export interface OverviewResponse {
   from_ns: NanoTime;
   to_ns: NanoTime;
@@ -370,6 +373,7 @@ export interface OverviewResponse {
   composition: CategoryValues;
   /** False when the server has no NewAPI admin credentials, so no cost is available. */
   billing_enabled: boolean;
+  client_labels?: ClientLabels;
 }
 
 export interface SessionCaller {
@@ -401,6 +405,7 @@ export interface SessionsResponse {
   items: SessionCard[];
   next_cursor?: string;
   billing_enabled: boolean;
+  client_labels?: ClientLabels;
 }
 
 export type InsightsEvent =
@@ -445,10 +450,13 @@ export interface TrendResponse {
 export interface TreeNode {
   node_id: string;
   parent_node_id?: string;
+  /** False: placeholder for a parent no in-scope row describes (out of scope, expired or not analysed yet). */
   visible: boolean;
   session_id?: string;
   client: string;
   role: string;
+  /** Client-declared agent name (e.g. X-Agent-Name) from the node's latest non-auxiliary step. */
+  name?: string;
   first_ns: NanoTime;
   last_ns: NanoTime;
   steps: number;
@@ -465,6 +473,7 @@ export interface TreeResponse {
   tree_id: string;
   truncated: boolean;
   nodes: TreeNode[];
+  client_labels?: ClientLabels;
 }
 
 export interface CompositionItem {
@@ -530,6 +539,7 @@ export interface CompositionResponse {
   diff: CompositionDiff | null;
   events: string[];
   truncated: boolean;
+  client_labels?: ClientLabels;
 }
 
 export interface OverviewQuery {

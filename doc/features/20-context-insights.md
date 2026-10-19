@@ -49,7 +49,7 @@ dsh-context 回答三个问题：Agent 的上下文窗口里装了什么、它�
 
 ### 3.1 解析时派生、明文数值、汇总不解密
 
-parser worker 已经持有解密后的请求/响应 Body，在同一次解析中顺带计算分析指标。指标只包含数值、计数、枚举和 keyed 指纹，作为明文列写入新的派生表。洞察页和趋势 API 只做 SQL 聚合，不解密任何内容。这延续了列表页“只定向解密 User-Agent”的姿态，也避免了 N 次详情重建。
+parser worker 已经持有解密后的请求/响应 Body，在同一次解析中顺带计算分析指标。指标只包含数值、计数、枚举和 keyed 指纹，作为明文列写入新的派生表。洞察页和趋势 API 只做 SQL 聚合，不解密任何内容；例外只有两处定向解密：composition 端点打开一条审计的 `detail_enc`，agent-trees 端点为读取节点显示名打开每个节点最新一条非附属分析的 `detail_enc`（单次最多 40 条）。这延续了列表页“只定向解密 User-Agent”的姿态，也避免了 N 次详情重建。
 
 明文边界：
 
@@ -273,7 +273,7 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 
 `fork` 类派生（Claude Code `subagent_type: fork`、Codex `fork_context`/`fork_turns: all`）的子请求以父历史开头，第三步改为“去掉公共前缀后的首条新增用户消息”。
 
-**附属请求不是 Agent。** 压缩、标题生成、记忆整理、Codex review 等请求挂在发起它的节点下，作为“附属请求”展示，不算子 Agent。
+**附属请求不是 Agent。** 压缩、标题生成、记忆整理、Codex review 等请求挂在发起它的节点下，作为“附属请求”展示，不算子 Agent。没有请求类别 Header 时按 Body 识别（词表 `side_requests`）：OpenCode 的标题生成器系统提示词与压缩尾部用户消息，以及 pi-ai / pi-coding-agent 自动压缩请求的系统提示词开头 `You are a context summarization assistant.`；系统提示词前缀匹配取首个 system 文本、左 trim、大小写敏感。这些规则对任何客户端生效，包括 `unknown`。
 
 **存储**：在 `audit_analysis` 增加以下列。
 
@@ -291,9 +291,10 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 
 **查询与 UI**：
 
-- `GET /api/v1/insights/agent-trees/{root}` 返回节点列表与边，节点上带聚合用量、构成末值、首末时间、状态、步数。
-- developer 作用域下只返回作用域内节点；父节点不在作用域内时显示为“不可见的父节点”占位。
-- 布局参考 dsh-context `agentTree.ts`：整洁树、单树最多 40 个节点、按血缘着色。点击节点进入该 Agent 的趋势页。
+- `GET /api/v1/insights/agent-trees/{root}` 返回节点列表与边，节点上带聚合用量、构成末值、首末时间、状态、步数，以及客户端声明的显示名 `name`（如 `X-Agent-Name`）。显示名只存在加密的 `detail_enc` 里，端点为每个节点解密其最新一条非附属分析的 detail 读出（与 composition 端点相同的解密路径），不新增明文列；detail 打不开时该节点无名字，不影响整棵树。
+- developer 作用域下只返回作用域内节点。某节点的父指纹没有任何作用域内的分析行时（父 Agent 不在作用域内、已过期，或其请求尚未分析），返回一个 `visible=false` 的占位节点，只用于保持树结构，UI 标注“父 Agent 不在范围内或尚未分析”。
+- 布局参考 dsh-context `agentTree.ts`：整洁树、单树最多 40 个节点、按血缘着色。有名字的节点以名字为主、短 id 为辅；没有名字时只显示客户端与角色。点击节点进入该 Agent 的趋势页。
+- 响应带 `client_labels`（客户端键 → 词表 `label`），UI 用它显示覆盖文件新增客户端的名字。
 - 会话卡片按根聚合，显示“含 N 个子 Agent”。
 
 **与 OpenAI 轮次图的关系**：Codex 的父子 Agent 共享 `prompt_cache_key`（都是根会话 ID），OpenCode v2.0.10 以后在 Responses 协议上也是这样，因此它们落在同一个 keyed conversation 中。轮次图（[18](18-content-addressed-conversation-storage.md)）命中这类只用于分组的 key 后，不再强制挂到最新一轮，而是在该 conversation 最近 32 轮中按内容关系选父轮次；都不匹配时作为同一 conversation 的新根，所以一个 keyed conversation 可以有每个 Agent 一条链。上游托管会话（顶层 `conversation_id`/`conversation`）仍按 key 挂最新一轮。
@@ -313,7 +314,7 @@ insights:
   context_windows: {}    # 可选：按模型覆盖上下文窗口（Token），如 my-gateway-alias: 200000
 ~~~
 
-默认词表编译进二进制，覆盖文件按键合并，启动时校验，非法时拒绝启动。`context_windows` 的键按 §5.5 的查找链匹配，值必须为正整数。旧配置中的 `pricing_file` 已废弃：仍可解析，但不再生效，启动时输出一次警告。
+默认词表编译进二进制，覆盖文件按键合并，启动时校验，非法时拒绝启动。客户端规则可带可选的 `label`（≤ 64 字节，去首尾空白，超长拒绝启动）作为显示名：它不改变写入 `agent_client` 的客户端键，只随洞察 API 的 `client_labels` 下发给 UI。`context_windows` 的键按 §5.5 的查找链匹配，值必须为正整数。旧配置中的 `pricing_file` 已废弃：仍可解析，但不再生效，启动时输出一次警告。
 
 ## 7. 管理 API（已并入 10 §11）
 
@@ -321,12 +322,12 @@ insights:
 
 | 端点 | 返回 | 作用域 |
 | --- | --- | --- |
-| `GET /api/v1/insights/overview?from_ns&to_ns&group_by=model\|protocol\|caller\|token` | KPI（请求数、会话数、各用量桶、缓存命中率、实际计费与已/未计费请求数）、按日序列、热力图（近 8 周）、分组小计、`billing_enabled` | developer 逐行套 `conditionWithAliases`，并禁用 `caller`/`token` 分组 |
-| `GET /api/v1/insights/sessions?from_ns&to_ns&sort=recent\|tokens\|context&cursor` | 会话卡片：首末时间、步数/轮数、各用量桶与实际计费、末步构成、主模型、调用者；响应带 `billing_enabled` | 只统计作用域内步骤；作用域内为空的会话不出现 |
+| `GET /api/v1/insights/overview?from_ns&to_ns&group_by=model\|protocol\|client\|caller\|token` | KPI（请求数、会话数、各用量桶、缓存命中率、实际计费与已/未计费请求数）、按日序列、热力图（近 8 周）、分组小计、`billing_enabled`、`client_labels`（`group_by=client` 的分组 `label` 已替换为词表显示名） | developer 逐行套 `conditionWithAliases`，并禁用 `caller`/`token` 分组 |
+| `GET /api/v1/insights/sessions?from_ns&to_ns&sort=recent\|tokens\|context&cursor` | 会话卡片：首末时间、步数/轮数、各用量桶与实际计费、末步构成、主模型、调用者；响应带 `billing_enabled` 与 `client_labels` | 只统计作用域内步骤；作用域内为空的会话不出现 |
 | `GET /api/v1/insights/sessions/{id}/trend` | 逐步序列：构成、usage、该步实际计费 `cost_usd`、事件、时间、turn 标号；最多 2000 步，超出时返回最近一段并标记截断 | 作用域内步骤为 0 时返回 404 |
-| `GET /api/v1/audits/{id}/composition` | 解密 `detail_enc`：逐条目清单（类别、估算、标签、摘要）、与 prev 的差异、文件活动 | 经 `authorizeAudit` |
+| `GET /api/v1/audits/{id}/composition` | 解密 `detail_enc`：逐条目清单（类别、估算、标签、摘要）、与 prev 的差异、文件活动、Agent 身份；响应带 `client_labels` | 经 `authorizeAudit` |
 
-会话卡片不展示 User-Agent 分组，因为那需要逐行解密。
+`client_labels` 是客户端键到词表 `label` 的映射，没有任何客户端设置 `label` 时省略；前端先查它（设置了 `label` 的客户端一律显示 `label`，包括 `custom` 等内置键），再退回内置中文名，最后原样显示键名；服务端对 `group_by=client` 的分组名做同样的替换，两处一致。会话卡片不展示 User-Agent 分组，因为那需要逐行解密。
 
 ## 8. Web UI
 
@@ -347,8 +348,8 @@ insights:
 - **流式响应的限制**：metadata 保留的 OpenAI 流式响应无法还原成 SSE。回填改用 response envelope 中保存的 usage 摘要与重建的 conversation，因此缓存读/写和推理 Token 拆分不可恢复（只有 uncached input 与 output），停止原因也可能缺失；非流式响应的重建 JSON 保留完整 usage。
 - **防空转**：进程内有界（4096）的跳过集合记录跳过或失败的 audit，同一进程不再重试；满后清空重建。日志码 `analysis_backfill_skipped`（附 `reason` 枚举）与 `analysis_backfill_failed`，见[模块 13](13-observability-health-and-lifecycle.md)。暂时性失败（如存储繁忙）也要到进程重启才会再试。
 - 已被 retention 删除的记录不在候选里；没有现成的健康计数器，因此未新增 `analysis_backfill_pending` 之类的指标（项目目前无 metrics 面）。
-- `AnalysisVersion` 为 6，版本变化会让旧行被回填重算。版本历史：2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0；4 起 user 角色的图片/文档计入会话键推断的首条用户项与 `turn_start`；5 起 Gemini 的 `toolUsePromptTokenCount` 计入未缓存输入；6 起 `api_key_fpr` 为 NULL 的审计互相隔离（无 prev、不继承 root/父链接，见 §3.3），且 system/tools 从无到有或从有到无也记 `system_changed`/`tools_changed`。
-- **词表覆盖只影响新分析**：修改 `insights.vocabulary_file` 只对之后新分析的记录生效；已有行保持原有分类，直到 `AnalysisVersion` 变化触发回填重算。
+- `AnalysisVersion` 为 7，版本变化会让旧行被回填重算。版本历史：2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0；4 起 user 角色的图片/文档计入会话键推断的首条用户项与 `turn_start`；5 起 Gemini 的 `toolUsePromptTokenCount` 计入未缓存输入；6 起 `api_key_fpr` 为 NULL 的审计互相隔离（无 prev、不继承 root/父链接，见 §3.3），且 system/tools 从无到有或从有到无也记 `system_changed`/`tools_changed`；7 起默认词表把系统提示词以 `You are a context summarization assistant.` 开头的请求（pi-ai / pi-coding-agent 自动压缩）识别为 `compaction` 附属请求——这是编译进二进制的词表变化，同样证据的 `agent_role`、`turn_start` 统计和事件会随之改变，所以提版本让旧行重算。
+- **词表覆盖只影响新分析**：修改 `insights.vocabulary_file` 只对之后新分析的记录生效；已有行保持原有分类，直到 `AnalysisVersion` 变化触发回填重算。反过来，版本变化触发的回填会用**当时生效**的覆盖文件（含其中新增的客户端）从旧到新重算历史记录。
 
 ## 10. 阶段与风险
 
@@ -366,15 +367,16 @@ insights:
 
 | Header | 必填 | 取值 | 含义 |
 | --- | --- | --- | --- |
-| `X-Agent-Session-Id` | 推荐 | 不透明字符串，≤ 256 字节，建议 UUID | 整棵 Agent 树的根标识。主 Agent 和它派生的所有子 Agent、孙 Agent 都填**同一个值** |
+| `X-Agent-Session-Id` | 推荐；三层及以上的树必填 | 不透明字符串，≤ 256 字节，建议 UUID | 整棵 Agent 树的根标识。主 Agent 和它派生的所有子 Agent、孙 Agent 都填**同一个值** |
 | `X-Agent-Id` | 是 | 同上 | 当前 Agent 自己的标识。同一 Agent 的所有请求保持不变，不同 Agent 必须不同 |
 | `X-Agent-Parent-Id` | 子 Agent 必填 | 同上 | 直接父 Agent 的 `X-Agent-Id`。主 Agent 不带此头 |
-| `X-Agent-Role` | 否 | `main` / `subagent` / `compaction` / `title` / `review` / `auxiliary` | 请求类别。缺省时：有 `X-Agent-Parent-Id` 的视为 `subagent`，否则视为 `main` |
-| `X-Agent-Name` | 否 | ≤ 64 字节的可读名，如 `researcher` | 只在详情页展示 |
+| `X-Agent-Role` | 否 | `main` / `subagent` / `compaction` / `title` / `review` / `auxiliary` | 请求类别。缺省时：有 `X-Agent-Parent-Id` 的视为 `subagent`，否则视为 `main`；再缺省时按 Body 识别附属请求（§5.8，含 pi-ai 自动压缩） |
+| `X-Agent-Name` | 否 | ≤ 64 字节的可读名，如 `researcher` | 在详情页和 Agent 树节点上展示（取该节点最新一条非附属请求的值），不进汇总 |
 
 规则：
 
-- **缺 `X-Agent-Session-Id`** 时，根由父链上溯得到；父 Agent 的请求晚到或已过期时，这棵子树会暂时显示为独立树，补齐后自动合并。
+- **带 `X-Agent-Session-Id`** 时，整棵树的根指纹直接来自该值，与请求到达和分析的先后顺序无关。
+- **缺 `X-Agent-Session-Id`** 时，根在分析时由父链上溯得到，且分析行一旦写入不再改写（晚到的父节点只在查询时按指纹连接）。两层树不受顺序影响：子请求先分析时根取父指纹，父请求后分析时根取自身指纹，二者相同。三层及以上的树则有顺序要求：孙节点若在中间节点之前被分析，其根只能是中间节点的指纹，之后不会改成真正的根，这棵孙子树会一直显示为独立的树（直到某次 `AnalysisVersion` 升级触发的从旧到新回填重算）。父 Agent 的请求已过期或不在作用域内时，子树显示占位父节点（§5.8）。所以三层及以上的框架请总是带 `X-Agent-Session-Id`。
 - **附属请求**（压缩、生成标题、总结）带发起它的那个 Agent 的 `X-Agent-Id`，并把 `X-Agent-Role` 设为对应类别。这样它们挂在该节点下，不会被当成子 Agent。
 - **透明转发**：代理不删除、不改写这些 Header，NewAPI 和上游会照常收到。上游若对未知 Header 敏感，请在 Nginx 之后、NewAPI 之前自行处理；代理本身不提供剥离功能。
 - **安全**：Header 值与其他 Header 一样逐个 AES-256-GCM 加密存储。明文列中只出现 keyed HMAC 指纹，指纹不可反查，所以填 UUID 或业务 ID 都可以。但不要放密钥、Token 或个人信息。
@@ -402,7 +404,7 @@ X-Agent-Parent-Id: 7d0c…-root
 X-Agent-Role: compaction
 ~~~
 
-Header 名称可以在词表覆盖文件中改成你框架已有的名字（`configs/insights-vocabulary.example.yaml`），不必修改框架。
+Header 名称可以在词表覆盖文件中改成你框架已有的名字（`configs/insights-vocabulary.example.yaml`），不必修改框架。也可以为自研框架单列一个客户端（按 User-Agent 前缀识别，可选 `label` 显示名），让它在总览的 `group_by=client` 中独立成列，见[部署指南 §6.4](../deployment/insights-and-agent-headers.md)。
 
 ## 12. 验收
 
@@ -413,7 +415,7 @@ Header 名称可以在词表覆盖文件中改成你框架已有的名字（`con
 - developer 作用域：共享 OpenAI conversation 中他人 Key 的步骤不出现在 overview、会话卡片和趋势中；他人会话 ID 返回 404。
 - `audit_analysis` 的增删改不改变任何完整性摘要，启动链校验通过（参照 `TestAPIKeyFingerprintStaysOutsideTheEvidenceChain`）。
 - DB/WAL 中没有测试 secret、消息正文、工具名、文件路径的明文；`detail_enc` 可正常解密。
-- 洞察相关 API 不触发 Body/对象解密（composition 端点除外），用查询计数或打桩验证。
+- 洞察相关 API 不触发 Body/对象解密，用查询计数或打桩验证；例外是 composition 端点（一条审计及其 prev 的 `detail_enc`）和 agent-trees 端点（每个节点最新一条非附属分析的 `detail_enc`，仅读取 Agent 名字，单次最多 40 条），二者都不解密 Body 或内容对象。
 - 回填任务可取消、幂等；版本升级后只重算旧版本行。
 - 成本等于已计费请求的 Σ`quota`/`quota_per_unit`，未计费请求只计数；上下文窗口未知的模型不报错，占用率留空；洞察查询没有外联请求。
 - 用四家客户端的录制样本（脱敏）构造父子与孙级请求：显式标识层还原的树与真实结构一致；附属请求（压缩、标题）不出现为子 Agent。
@@ -429,3 +431,6 @@ Header 名称可以在词表覆盖文件中改成你框架已有的名字（`con
 - **上下文窗口表**：内嵌表 `internal/insights/models/context_windows.json`，键为小写 `provider/model`（或裸模型名），值为上下文窗口 Token 数；`insights.context_windows` 的同键条目替换内嵌条目，新键追加。原价格表（`prices.json`、`pricing_file`、`schedules` 与 30 分钟时间槽聚合）已随[模块 21](21-newapi-billing.md) 删除。
 - **请求体被多次解析**：一次 audit 的请求体会被协议 parser、OpenAI normalizer、insights 分析器（`Analyze`、`IdentifyAgent`、`SpawnPrompts`、`OpeningUserHints`）各自反序列化一次。输入受 `MaxDecodedBodyBytes`（64 MiB）限制且全部在异步 worker 中，不影响代理字节路径；合并为一次解码是后续优化，目前不做。
 - **回填速率**：每个扫描 tick 最多 20 条，历史量大时需要数小时到数天，期间洞察页展示的是已分析部分。
+- **三层以上树依赖显式根标识**：分析行从不改写（`link.go`），没有根 Header 时根在分析时由父链上溯得到。两层树在任意到达顺序下都能按指纹合并；三层及以上的树中，孙节点先于中间节点被分析时，其 `agent_root_fpr` 停留在中间节点的指纹，会一直显示为独立的树，只有下一次 `AnalysisVersion` 升级触发的从旧到新回填才会修正（§11）。父节点请求尚未分析、已过期或不在作用域内时，树里出现 `visible=false` 的占位父节点，措辞为“父 Agent 不在范围内或尚未分析”，而不是断言权限问题。
+- **树节点名字来自解密**：`TreeNode.name` 由 agent-trees 端点解密每个节点最新一条非附属分析的 `detail_enc` 读出，不新增明文列（部署指南承诺 Header 只有指纹进明文列）。单次请求最多 40 次解密；detail 打不开只让该节点无名字。
+- **客户端显示名**：词表客户端规则的 `label` 只影响展示（`client_labels`、`group_by=client` 的分组 `label`），对内置键同样生效（给 `custom` 改名会覆盖"自定义"），`agent_client` 列仍写客户端键；改 `label` 不触发回填。

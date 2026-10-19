@@ -407,13 +407,13 @@ func TestInsightsTreeNodesScopeAndTruncation(t *testing.T) {
 		t.Fatalf("scoped nodes = %+v truncated=%v err=%v", nodes, truncated, err)
 	}
 	main, child := nodes[0], nodes[1]
-	if !bytes.Equal(main.NodeFPR, node1) || main.Steps != 2 || main.AuxRequests != 0 || main.Role != "main" {
+	if !bytes.Equal(main.NodeFPR, node1) || main.Steps != 2 || main.AuxRequests != 0 || main.Role != "main" || main.LastAuditID != "a2" {
 		t.Fatalf("main node = %+v", main)
 	}
 	// The compaction request belongs to node3 and counts as auxiliary only; the
-	// last composition comes from its non-auxiliary step.
+	// last composition and last audit come from its non-auxiliary step.
 	if !bytes.Equal(child.NodeFPR, node3) || child.Steps != 1 || child.AuxRequests != 1 || child.Role != "subagent" ||
-		!bytes.Equal(child.ParentFPR, node1) || child.Estimate.System != 10 {
+		!bytes.Equal(child.ParentFPR, node1) || child.Estimate.System != 10 || child.LastAuditID != "c1" {
 		t.Fatalf("child node = %+v", child)
 	}
 	all, _, err := store.InsightsTree(ctx, InsightsFilter{RootPrefix: prefix}, 40)

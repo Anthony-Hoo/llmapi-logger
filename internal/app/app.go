@@ -287,7 +287,7 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 		}
 		// Billing needs the NewAPI management credential; without it every
 		// request is unbilled by construction, which the UI says explicitly.
-		service, err := query.NewInsights(runtime.store, runtime.cipher, windows, newAPIClient != nil)
+		service, err := query.NewInsights(runtime.store, runtime.cipher, windows, newAPIClient != nil, vocabulary.ClientLabels())
 		if err != nil {
 			_ = runtime.store.Close()
 			return nil, fmt.Errorf("assemble insights service: %w", err)

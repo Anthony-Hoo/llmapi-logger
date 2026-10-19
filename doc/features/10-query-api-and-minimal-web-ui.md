@@ -158,11 +158,13 @@ type AuditQuery interface {
 
 | 端点 | 参数 | 返回 |
 | --- | --- | --- |
-| `GET /api/v1/insights/overview` | `from_ns`、`to_ns`（默认近 7 天，范围上限 400 天）、`group_by=model\|protocol\|client\|caller\|token`（默认 `model`）、`tz_offset_min`（-840 到 840，用于按本地日分桶） | 请求数、会话数、Agent 树数、归一化用量各桶、缓存命中率、实际计费（`cost_usd`、`billed_requests`、`unbilled_requests`）与 `billing_enabled`，按日序列，近 8 周热力图，构成混合，分组小计 |
-| `GET /api/v1/insights/sessions` | `from_ns`、`to_ns`、`sort=recent\|tokens\|context`、`cursor`（不透明 keyset，且绑定排序键）、`limit`（默认 20，最大 100） | 会话卡片：首末时间、步数/轮数、用量、末步构成与 prompt 总量、模型、窗口、`tree_id`、子 Agent 数、调用者 |
+| `GET /api/v1/insights/overview` | `from_ns`、`to_ns`（默认近 7 天，范围上限 400 天）、`group_by=model\|protocol\|client\|caller\|token`（默认 `model`）、`tz_offset_min`（-840 到 840，用于按本地日分桶） | 请求数、会话数、Agent 树数、归一化用量各桶、缓存命中率、实际计费（`cost_usd`、`billed_requests`、`unbilled_requests`）与 `billing_enabled`，按日序列，近 8 周热力图，构成混合，分组小计（`group_by=client` 时分组 `label` 为词表显示名），`client_labels` |
+| `GET /api/v1/insights/sessions` | `from_ns`、`to_ns`、`sort=recent\|tokens\|context`、`cursor`（不透明 keyset，且绑定排序键）、`limit`（默认 20，最大 100） | 会话卡片：首末时间、步数/轮数、用量、末步构成与 prompt 总量、模型、窗口、`tree_id`、子 Agent 数、调用者；响应带 `client_labels` |
 | `GET /api/v1/insights/sessions/{session_id}/trend` | 无 | 逐步序列：构成、用量、事件、时间、turn 标号；最多 2000 步，超出时返回最近一段并标记 `truncated` |
-| `GET /api/v1/insights/agent-trees/{tree_id}` | 无 | Agent 树节点与边；父节点不在作用域内时返回不可见占位节点。单节点根也可读取（无害） |
-| `GET /api/v1/audits/{audit_id}/composition` | 无 | 解密 `detail_enc`：逐条目清单、与上一步差异、文件活动；经 `authorizeAudit` |
+| `GET /api/v1/insights/agent-trees/{tree_id}` | 无 | Agent 树节点与边，节点带客户端声明的显示名 `name`（由该节点最新一条非附属分析的 `detail_enc` 解密读出，缺失时省略）；某节点的父指纹没有作用域内分析行时（父 Agent 不在作用域内、已过期或尚未分析）返回 `visible=false` 的占位节点。单节点根也可读取（无害）。响应带 `client_labels` |
+| `GET /api/v1/audits/{audit_id}/composition` | 无 | 解密 `detail_enc`：逐条目清单、与上一步差异、文件活动、Agent 身份；经 `authorizeAudit`；响应带 `client_labels` |
+
+`client_labels` 是客户端键到词表 `clients.<key>.label` 的映射（[模块 20](20-context-insights.md) §6），没有任何客户端设置 `label` 时整个字段省略。前端先查该映射（设置了 `label` 的客户端一律显示 `label`，包括内置键），再退回内置客户端的默认中文名，最后原样显示键名，与服务端 `group_by=client` 的分组名替换一致。
 
 作用域：作用域由会话身份决定，**从不**取自查询参数。管理员看到全部记录；开发者会话的每条 SQL 聚合都逐行套用与审计列表相同的 `conditionWithAliases` 条件，只统计自己 Key 产生的步骤。共享会话或 Agent 树只暴露调用者自己的步骤，作用域内没有步骤的会话、树和审计一律返回 `404`（不区分“不存在”和“无权访问”）。开发者不能使用 `caller` 与 `token` 分组，会话卡片的 `caller` 为 `null`。
 

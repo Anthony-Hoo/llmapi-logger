@@ -13,6 +13,7 @@ import {
   type RangeKey,
 } from "../../lib/insights/range";
 import type {
+  ClientLabels,
   GroupUsage,
   InsightsGroupBy,
   InsightsSessionSort,
@@ -64,7 +65,7 @@ export function OverviewPage({
   client: ApiClient;
   isDeveloper: boolean;
   refreshKey: number;
-  onOpenSession: (card: SessionCard) => void;
+  onOpenSession: (card: SessionCard, clientLabels?: ClientLabels) => void;
   onOpenTree: (treeID: string) => void;
 }) {
   const [rangeKey, setRangeKey] = useState<RangeKey>("7d");
@@ -113,6 +114,7 @@ export function OverviewPage({
   const [moreLoading, setMoreLoading] = useState(false);
   const [cardsError, setCardsError] = useState<string | null>(null);
   const [cardsBilling, setCardsBilling] = useState(true);
+  const [cardsLabels, setCardsLabels] = useState<ClientLabels | undefined>(undefined);
 
   // Advanced whenever the first page is reloaded (day filter, sort or range
   // change), so a "加载更多" response of an older list is discarded.
@@ -130,6 +132,7 @@ export function OverviewPage({
         setCards(page.items);
         setNextCursor(page.next_cursor || null);
         setCardsBilling(page.billing_enabled !== false);
+        setCardsLabels(page.client_labels);
       })
       .catch((cause: unknown) => {
         if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
@@ -300,7 +303,14 @@ export function OverviewPage({
         ) : (
           <div className="grid gap-section md:grid-cols-2 2xl:grid-cols-3">
             {cards.map((card) => (
-              <SessionCardView key={card.session_id} card={card} billingEnabled={cardsBilling} onOpenSession={onOpenSession} onOpenTree={onOpenTree} />
+              <SessionCardView
+                key={card.session_id}
+                card={card}
+                billingEnabled={cardsBilling}
+                clientLabels={cardsLabels}
+                onOpenSession={(opened) => onOpenSession(opened, cardsLabels)}
+                onOpenTree={onOpenTree}
+              />
             ))}
           </div>
         )}

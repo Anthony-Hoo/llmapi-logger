@@ -8,7 +8,9 @@
 #     merge by key; inside a client, scalars and maps merge and lists replace;
 #   - lists (injection_markers, subagent_prefixes, side_requests, header lists)
 #     replace the default list as a whole when present;
-#   - header names, tool names and prefixes are case-insensitive.
+#   - header names, tool names and prefixes are case-insensitive;
+#   - a client added here without `priority` gets 50: after the built-in
+#     native clients, before the generic `custom` one (100).
 # Unknown keys and unknown roles / tool kinds are rejected at startup.
 #
 # Roles: main, subagent, compaction, title, review, auxiliary.
@@ -18,7 +20,11 @@ clients:
   # Rename the generic custom-agent headers (defaults: X-Agent-Session-Id,
   # X-Agent-Id, X-Agent-Parent-Id, X-Agent-Role, X-Agent-Name) to the names your
   # framework already sends. Nothing else about the client needs repeating.
+  # `label` (optional, at most 64 bytes) is the display name the UI shows in
+  # place of the client key or its built-in name, everywhere including the
+  # group_by=client table; the stored agent_client stays the key.
   custom:
+    label: "My Framework"
     detect:
       headers_present: [x-myfw-agent, x-myfw-run]
     root_headers: [x-myfw-run]
@@ -32,7 +38,33 @@ clients:
           worker: subagent
           summarizer: compaction
 
-  # A new client can be added the same way; lower priority is tried first.
+  # Give an in-house framework its own client instead of sharing `custom`, so
+  # it gets its own column under group_by=client (deployment guide section
+  # 6.4). It is detected by its User-Agent prefix (case-insensitive prefix
+  # match: "MyAgent/1.2.0" and "myagent/2" both match) and reads the same
+  # X-Agent-* headers as `custom`. Requests that miss X-Agent-Id still belong
+  # to this client but fall back to content-inferred sessions. Drop the
+  # headers_present line when other X-Agent-* senders should stay in `custom`.
+  # my-agent:
+  #   label: "My Agent"
+  #   detect:
+  #     user_agent_prefixes: ["MyAgent/"]
+  #     headers_present: [x-agent-id]
+  #   root_headers: [x-agent-session-id]
+  #   node_headers: [x-agent-id]
+  #   parent_headers: [x-agent-parent-id]
+  #   name_headers: [x-agent-name]
+  #   role_headers:
+  #     - header: x-agent-role
+  #       values:
+  #         main: main
+  #         subagent: subagent
+  #         compaction: compaction
+  #         title: title
+  #         review: review
+  #         auxiliary: auxiliary
+
+  # Any other client can be added the same way; lower priority is tried first.
   # my_client:
   #   priority: 50
   #   detect:
