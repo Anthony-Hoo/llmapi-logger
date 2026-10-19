@@ -116,7 +116,7 @@ func newInsightsAPIFixture(t *testing.T, enabled bool) *insightsAPIFixture {
 		if err != nil {
 			t.Fatal(err)
 		}
-		service, err := query.NewInsights(store, cipher, windows, true)
+		service, err := query.NewInsights(store, cipher, windows, true, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

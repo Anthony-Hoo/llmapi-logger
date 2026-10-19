@@ -43,6 +43,10 @@ type OverviewResponse struct {
 	// configured, so unbilled requests are genuinely unbilled rather than
 	// unknowable.
 	BillingEnabled bool `json:"billing_enabled"`
+	// ClientLabels maps a client key to the display name its vocabulary rule
+	// sets (ClientRule.Label); absent when no client has one. Group labels of
+	// group_by=client already carry it.
+	ClientLabels map[string]string `json:"client_labels,omitempty"`
 }
 
 // DailyUsage is one local calendar day (tz_offset_min query parameter).
@@ -94,9 +98,10 @@ type SessionCaller struct {
 
 // SessionsResponse is GET /api/v1/insights/sessions.
 type SessionsResponse struct {
-	Items          []SessionCard `json:"items"`
-	NextCursor     string        `json:"next_cursor,omitempty"`
-	BillingEnabled bool          `json:"billing_enabled"` // see OverviewResponse
+	Items          []SessionCard     `json:"items"`
+	NextCursor     string            `json:"next_cursor,omitempty"`
+	BillingEnabled bool              `json:"billing_enabled"`         // see OverviewResponse
+	ClientLabels   map[string]string `json:"client_labels,omitempty"` // see OverviewResponse
 }
 
 // TrendStep is one request of a session trend.
@@ -132,12 +137,18 @@ type TrendResponse struct {
 
 // TreeNode is one agent of GET /api/v1/insights/agent-trees/{tree_id}.
 type TreeNode struct {
-	NodeID         string         `json:"node_id"` // hex fingerprint prefix
-	ParentNodeID   string         `json:"parent_node_id,omitempty"`
-	Visible        bool           `json:"visible"` // false: placeholder for an out-of-scope parent
-	SessionID      string         `json:"session_id,omitempty"`
-	Client         string         `json:"client"`
-	Role           string         `json:"role"`
+	NodeID       string `json:"node_id"` // hex fingerprint prefix
+	ParentNodeID string `json:"parent_node_id,omitempty"`
+	// Visible is false for a placeholder standing in for a parent that no
+	// in-scope row describes: it is out of scope, expired, or not analysed yet.
+	Visible   bool   `json:"visible"`
+	SessionID string `json:"session_id,omitempty"`
+	Client    string `json:"client"`
+	Role      string `json:"role"`
+	// Name is the client-declared agent name (X-Agent-Name and the like) read
+	// from the encrypted detail of the node's latest non-auxiliary step; empty
+	// when the client sent none or the detail could not be opened.
+	Name           string         `json:"name,omitempty"`
 	FirstNS        int64          `json:"first_ns,string"`
 	LastNS         int64          `json:"last_ns,string"`
 	Steps          int64          `json:"steps"`
@@ -152,9 +163,10 @@ type TreeNode struct {
 
 // TreeResponse is GET /api/v1/insights/agent-trees/{tree_id}. At most 40 nodes.
 type TreeResponse struct {
-	TreeID    string     `json:"tree_id"`
-	Truncated bool       `json:"truncated"`
-	Nodes     []TreeNode `json:"nodes"`
+	TreeID       string            `json:"tree_id"`
+	Truncated    bool              `json:"truncated"`
+	Nodes        []TreeNode        `json:"nodes"`
+	ClientLabels map[string]string `json:"client_labels,omitempty"` // see OverviewResponse
 }
 
 // CompositionResponse is GET /api/v1/audits/{audit_id}/composition.
@@ -175,6 +187,7 @@ type CompositionResponse struct {
 	Diff            *CompositionDiff  `json:"diff"`
 	Events          []string          `json:"events"`
 	Truncated       bool              `json:"truncated"`
+	ClientLabels    map[string]string `json:"client_labels,omitempty"` // see OverviewResponse
 }
 
 // CompositionItem is Item plus its relation to the previous step.

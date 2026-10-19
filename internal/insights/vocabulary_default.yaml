@@ -139,12 +139,19 @@ spawn_tools:
 subagent_prefixes:
   - "You are a subagent spawned by another session.\n"
 
-# Requests that are not agent work: recognised from the request body.
+# Requests that are not agent work: recognised from the request body. A
+# system prefix matches the first system text after leading whitespace is
+# trimmed, case-sensitively; last_user_contains is a substring of the last
+# user text.
 side_requests:
   - role: title
     system_prefixes: ["You are a title generator"]
   - role: compaction
     last_user_contains: ["You MUST use this format for your response"]
+  # pi-ai / pi-coding-agent automatic compaction: a fixed system prompt that
+  # asks the model to summarise the conversation so far.
+  - role: compaction
+    system_prefixes: ["You are a context summarization assistant."]
 
 file_ops:
   path_keys: [file_path, filePath, path, notebook_path]

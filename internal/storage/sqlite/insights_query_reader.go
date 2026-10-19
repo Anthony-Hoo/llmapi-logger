@@ -720,8 +720,9 @@ SELECT COUNT(*)`+insightsFrom+where+`
 }
 
 // InsightsTreeNodeRow is one agent of a tree. Steps excludes auxiliary
-// requests, which are counted in AuxRequests; the last-step values come from
-// the node's latest non-auxiliary request when it has one.
+// requests, which are counted in AuxRequests; the last-step values, including
+// LastAuditID, come from the node's latest non-auxiliary request when it has
+// one.
 type InsightsTreeNodeRow struct {
 	NodeFPR        []byte
 	ParentFPR      []byte
@@ -735,6 +736,7 @@ type InsightsTreeNodeRow struct {
 	SessionID      string
 	LinkSource     string
 	LinkConfidence int
+	LastAuditID    string
 	LastPrompt     *int64
 	Estimate       InsightsEstimate
 }
@@ -761,7 +763,7 @@ func (store *Store) InsightsTree(ctx context.Context, filter InsightsFilter, max
 	last := func(column string) string { return "MAX(CASE WHEN rn = 1 THEN " + column + " END)" }
 	cursor, err := store.readerDB.QueryContext(ctx, `
 WITH s AS (
-  SELECT x.agent_node_fpr AS node, x.agent_parent_fpr AS parent, x.started_at_ns AS ts,
+  SELECT x.agent_node_fpr AS node, x.agent_parent_fpr AS parent, x.started_at_ns AS ts, x.audit_id AS aid,
          COALESCE(x.agent_role, 'main') AS role,
          CASE WHEN x.agent_role IN `+insightsAuxRoles+` THEN 1 ELSE 0 END AS aux,
          COALESCE(x.agent_client, 'unknown') AS client, COALESCE(x.model, '') AS model,
@@ -779,12 +781,12 @@ WITH s AS (
          SUM(1 - aux) AS steps, SUM(aux) AS aux_requests,
          `+last("role")+` AS role, `+last("client")+` AS client, `+last("model")+` AS model,
          `+last("sid")+` AS sid, `+last("link")+` AS link, `+last("confidence")+` AS confidence,
-         `+last("prompt")+` AS last_prompt,
+         `+last("aid")+` AS last_audit_id, `+last("prompt")+` AS last_prompt,
          `+last("e1")+` AS e1, `+last("e2")+` AS e2, `+last("e3")+` AS e3, `+last("e4")+` AS e4,
          `+last("e5")+` AS e5, `+last("e6")+` AS e6, `+last("e7")+` AS e7, `+last("e8")+` AS e8
   FROM s GROUP BY node
 )
-SELECT node, parent, first_ns, last_ns, steps, aux_requests, role, client, model, sid, link, confidence, last_prompt,
+SELECT node, parent, first_ns, last_ns, steps, aux_requests, role, client, model, sid, link, confidence, last_audit_id, last_prompt,
        e1, e2, e3, e4, e5, e6, e7, e8
 FROM g
 ORDER BY first_ns, node
@@ -797,7 +799,7 @@ LIMIT ?`, arguments...)
 		var row InsightsTreeNodeRow
 		var prompt sql.NullInt64
 		if err := cursor.Scan(&row.NodeFPR, &row.ParentFPR, &row.FirstNS, &row.LastNS, &row.Steps, &row.AuxRequests,
-			&row.Role, &row.Client, &row.Model, &row.SessionID, &row.LinkSource, &row.LinkConfidence, &prompt,
+			&row.Role, &row.Client, &row.Model, &row.SessionID, &row.LinkSource, &row.LinkConfidence, &row.LastAuditID, &prompt,
 			&row.Estimate.System, &row.Estimate.Tools, &row.Estimate.User, &row.Estimate.Injected,
 			&row.Estimate.Assistant, &row.Estimate.Reasoning, &row.Estimate.ToolResult, &row.Estimate.Media); err != nil {
 			return nil, false, fmt.Errorf("sqlite: scan insights tree: %w", err)

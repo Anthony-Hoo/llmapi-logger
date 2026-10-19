@@ -59,14 +59,18 @@ type InsightsStore interface {
 }
 
 // Insights builds the context-insights API responses. Aggregate endpoints read
-// plaintext derived columns only; Composition is the single decrypting call.
+// plaintext derived columns only. Two calls decrypt: Composition opens one
+// audit's detail (and its predecessor's), and Tree opens the latest detail of
+// each of its at most MaxTreeNodes nodes to read the agent name.
 type Insights struct {
 	store   InsightsStore
 	cipher  security.Cipher
 	windows *models.Table
 	// billingEnabled reports whether NewAPI billing can be collected at all.
 	billingEnabled bool
-	now            func() time.Time
+	// clientLabels maps client keys to the display names the vocabulary sets.
+	clientLabels map[string]string
+	now          func() time.Time
 	// trendLimit bounds the steps of one trend; tests lower it.
 	trendLimit int
 }
@@ -74,17 +78,34 @@ type Insights struct {
 // NewInsights constructs the service. windows may be nil, in which case every
 // context window is unknown. billingEnabled is true when the NewAPI
 // management credential is configured (doc/features/21-newapi-billing.md).
-func NewInsights(store InsightsStore, cipher security.Cipher, windows *models.Table, billingEnabled bool) (*Insights, error) {
+// clientLabels is Vocabulary.ClientLabels of the vocabulary in effect; nil or
+// empty means no client has a display name.
+func NewInsights(store InsightsStore, cipher security.Cipher, windows *models.Table, billingEnabled bool, clientLabels map[string]string) (*Insights, error) {
 	if store == nil {
 		return nil, errors.New("query: nil insights store")
 	}
 	if cipher == nil {
 		return nil, errors.New("query: nil cipher")
 	}
+	labels := make(map[string]string, len(clientLabels))
+	for key, label := range clientLabels {
+		if key != "" && label != "" {
+			labels[key] = label
+		}
+	}
 	return &Insights{
 		store: store, cipher: cipher, windows: windows, billingEnabled: billingEnabled,
-		now: time.Now, trendLimit: MaxTrendSteps,
+		clientLabels: labels, now: time.Now, trendLimit: MaxTrendSteps,
 	}, nil
+}
+
+// labels returns the client label map for a response, or nil when empty so the
+// field is omitted. Responses share the map and must not modify it.
+func (service *Insights) labels() map[string]string {
+	if len(service.clientLabels) == 0 {
+		return nil
+	}
+	return service.clientLabels
 }
 
 // OverviewQuery is the validated input of Overview. FromNS and ToNS default to
@@ -280,7 +301,7 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 
 	response := insights.OverviewResponse{
 		FromNS: from, ToNS: to, Sessions: sessions, Trees: trees, GroupBy: groupBy,
-		BillingEnabled: service.billingEnabled,
+		BillingEnabled: service.billingEnabled, ClientLabels: service.labels(),
 	}
 	total := service.fold(totalRows).byKey[""]
 	response.Totals = total.usage()
@@ -301,6 +322,11 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 	for _, key := range groups.order {
 		accumulator := groups.byKey[key]
 		label := accumulator.label
+		if groupBy == sqlite.InsightsDimClient {
+			if named, ok := service.clientLabels[key]; ok {
+				label = named
+			}
+		}
 		if label == "" {
 			label = key
 		}
@@ -430,7 +456,9 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 	if err != nil {
 		return insights.SessionsResponse{}, fmt.Errorf("query: insights sessions: %w", err)
 	}
-	response := insights.SessionsResponse{Items: make([]insights.SessionCard, 0, len(page.Rows)), BillingEnabled: service.billingEnabled}
+	response := insights.SessionsResponse{
+		Items: make([]insights.SessionCard, 0, len(page.Rows)), BillingEnabled: service.billingEnabled, ClientLabels: service.labels(),
+	}
 	if len(page.Rows) == 0 {
 		return response, nil
 	}
@@ -644,7 +672,11 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 	return response, nil
 }
 
-// Tree returns the agent nodes of one tree visible to the caller.
+// Tree returns the agent nodes of one tree visible to the caller. Each node's
+// client-declared name is read by opening the encrypted detail of its latest
+// non-auxiliary step (the same decryption Composition performs), so one call
+// decrypts at most MaxTreeNodes details. A detail that cannot be opened only
+// leaves that node unnamed; raw agent ids stay inside the detail.
 func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) (insights.TreeResponse, error) {
 	if ctx == nil {
 		return insights.TreeResponse{}, invalid("nil context")
@@ -673,7 +705,7 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 	}
 	usage := service.fold(usageRows)
 
-	response := insights.TreeResponse{TreeID: treeID, Truncated: truncated, Nodes: make([]insights.TreeNode, 0, len(rows))}
+	response := insights.TreeResponse{TreeID: treeID, Truncated: truncated, Nodes: make([]insights.TreeNode, 0, len(rows)), ClientLabels: service.labels()}
 	known := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		known[treeIDOf(row.NodeFPR)] = true
@@ -682,6 +714,10 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 	placeholderSeen := make(map[string]bool)
 	for _, row := range rows {
 		nodeID := treeIDOf(row.NodeFPR)
+		name, err := service.agentName(ctx, row.LastAuditID)
+		if err != nil {
+			return insights.TreeResponse{}, err
+		}
 		node := insights.TreeNode{
 			NodeID:         nodeID,
 			ParentNodeID:   treeIDOf(row.ParentFPR),
@@ -689,6 +725,7 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 			SessionID:      row.SessionID,
 			Client:         row.Client,
 			Role:           row.Role,
+			Name:           name,
 			FirstNS:        row.FirstNS,
 			LastNS:         row.LastNS,
 			Steps:          row.Steps,
@@ -701,6 +738,8 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 			LinkConfidence: row.LinkConfidence,
 		}
 		response.Nodes = append(response.Nodes, node)
+		// A parent no in-scope row describes: out of scope, expired, or not
+		// analysed yet. The placeholder only keeps the tree shape.
 		if parent := node.ParentNodeID; parent != "" && parent != nodeID && !known[parent] && !placeholderSeen[parent] {
 			placeholderSeen[parent] = true
 			placeholders = append(placeholders, insights.TreeNode{NodeID: parent, Visible: false, Client: "unknown", Role: "unknown"})
@@ -708,6 +747,27 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 	}
 	response.Nodes = append(response.Nodes, placeholders...)
 	return response, nil
+}
+
+// agentName opens the detail of one analysis row and returns the agent name
+// the client declared. An empty audit id, a missing row, an empty detail or a
+// detail that fails to open yields ""; only storage errors are returned.
+func (service *Insights) agentName(ctx context.Context, auditID string) (string, error) {
+	if auditID == "" {
+		return "", nil
+	}
+	row, err := service.store.LoadAnalysis(ctx, auditID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query: insights tree node detail: %w", err)
+	}
+	detail, err := service.decryptDetail(row)
+	if err != nil {
+		return "", nil
+	}
+	return detail.Agent.Name, nil
 }
 
 // allowed reports whether scope may read one audit. A nil scope is an
@@ -818,6 +878,7 @@ func (service *Insights) Composition(ctx context.Context, auditID string, scope 
 		Agent:           detail.Agent,
 		Events:          bitNames(row.EventFlags, eventNames),
 		Truncated:       detail.Truncated,
+		ClientLabels:    service.labels(),
 	}
 	if response.Tools == nil {
 		response.Tools = []insights.ToolDef{}

@@ -71,8 +71,10 @@ func TestDefaultVocabularyContent(t *testing.T) {
 	if got := vocab.StripSubagentPrefix("You are a subagent spawned by another session.\nDo it"); got != "Do it" {
 		t.Errorf("strip = %q", got)
 	}
-	if vocab.SideRequests[0].SystemPrefixes[0] != "You are a title generator" ||
-		vocab.SideRequests[1].LastUserContains[0] != "You MUST use this format for your response" {
+	if len(vocab.SideRequests) != 3 ||
+		vocab.SideRequests[0].SystemPrefixes[0] != "You are a title generator" ||
+		vocab.SideRequests[1].LastUserContains[0] != "You MUST use this format for your response" ||
+		vocab.SideRequests[2].Role != RoleCompaction || vocab.SideRequests[2].SystemPrefixes[0] != "You are a context summarization assistant." {
 		t.Errorf("side requests = %+v", vocab.SideRequests)
 	}
 }
@@ -205,6 +207,65 @@ clients:
 	}
 }
 
+func TestLoadVocabularyClientLabels(t *testing.T) {
+	if labels := DefaultVocabulary().ClientLabels(); len(labels) != 0 {
+		t.Fatalf("built-in clients carry no labels: %v", labels)
+	}
+	if labels := (*Vocabulary)(nil).ClientLabels(); labels == nil || len(labels) != 0 {
+		t.Fatalf("nil vocabulary labels = %v", labels)
+	}
+	vocab, err := LoadVocabulary(writeVocabulary(t, `
+clients:
+  custom:
+    label: "  My Framework  "
+  my-agent:
+    label: "My Agent"
+    detect:
+      user_agent_prefixes: ["MyAgent/"]
+      headers_present: [x-agent-id]
+    root_headers: [x-agent-session-id]
+    node_headers: [x-agent-id]
+    parent_headers: [x-agent-parent-id]
+    name_headers: [x-agent-name]
+  unlabeled:
+    node_headers: [x-u]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := vocab.ClientLabels()
+	if len(labels) != 2 || labels["custom"] != "My Framework" || labels["my-agent"] != "My Agent" {
+		t.Fatalf("labels = %v", labels)
+	}
+	labels["custom"] = "mutated"
+	if vocab.ClientLabels()["custom"] != "My Framework" {
+		t.Error("ClientLabels must return a copy")
+	}
+	// The added client sits at the default priority, in front of custom, and
+	// matches its User-Agent prefix case-insensitively.
+	if rule := vocab.Clients["my-agent"]; rule.Priority != defaultClientPriority {
+		t.Errorf("priority = %d", rule.Priority)
+	}
+	for _, userAgent := range []string{"MyAgent/1.0", "myagent/2 (linux)"} {
+		got := IdentifyAgent(Input{Protocol: "openai", Endpoint: "chat_completions", Request: []byte(`{"messages":[]}`),
+			Headers: headerSet("User-Agent", userAgent, "X-Agent-Id", "a1", "X-Agent-Name", "worker")}, vocab)
+		if got.Client != "my-agent" || got.NodeID != "a1" || got.Name != "worker" {
+			t.Errorf("User-Agent %q: identity = %+v", userAgent, got)
+		}
+	}
+	// Without the User-Agent, the x-agent-id detect header still claims the
+	// request ahead of custom; without any node header the client is still
+	// recognised by its User-Agent.
+	if got := IdentifyAgent(Input{Protocol: "openai", Endpoint: "chat_completions", Request: []byte(`{"messages":[]}`),
+		Headers: headerSet("User-Agent", "curl/8", "X-Agent-Id", "a1")}, vocab); got.Client != "my-agent" {
+		t.Errorf("header-only identity = %+v", got)
+	}
+	if got := IdentifyAgent(Input{Protocol: "openai", Endpoint: "chat_completions", Request: []byte(`{"messages":[]}`),
+		Headers: headerSet("User-Agent", "MyAgent/1.0")}, vocab); got.Client != "my-agent" || got.NodeID != "" || got.Role != RoleMain {
+		t.Errorf("UA-only identity = %+v", got)
+	}
+}
+
 func TestLoadVocabularyEmptyFileKeepsDefaults(t *testing.T) {
 	vocab, err := LoadVocabulary(writeVocabulary(t, "# nothing\n"))
 	if err != nil {
@@ -231,6 +292,7 @@ func TestLoadVocabularyValidation(t *testing.T) {
 		{"empty marker", "injection_markers: [\"  \"]\n", "empty marker"},
 		{"empty ua prefix", "clients:\n  custom:\n    detect:\n      user_agent_prefixes: [\"\"]\n", "user_agent_prefixes"},
 		{"bad fallback", "clients:\n  custom:\n    node_fallback: parent\n", "fallback"},
+		{"label too long", "clients:\n  custom:\n    label: \"" + strings.Repeat("x", 65) + "\"\n", "label exceeds 64 bytes"},
 		{"spawn without args", "spawn_tools:\n  x: []\n", "prompt argument"},
 		{"bad side role", "side_requests:\n  - role: nope\n    system_prefixes: [a]\n", "unknown role"},
 		{"side without recogniser", "side_requests:\n  - role: title\n", "no recognisers"},
@@ -258,8 +320,11 @@ func TestExampleVocabularyLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	custom := vocab.Clients["custom"]
-	if !slices.Equal(custom.NodeHeaders, []string{"x-myfw-agent"}) || !slices.Equal(custom.ParentHeaders, []string{"x-myfw-parent"}) {
+	if !slices.Equal(custom.NodeHeaders, []string{"x-myfw-agent"}) || !slices.Equal(custom.ParentHeaders, []string{"x-myfw-parent"}) || custom.Label != "My Framework" {
 		t.Errorf("custom client = %+v", custom)
+	}
+	if labels := vocab.ClientLabels(); len(labels) != 1 || labels["custom"] != "My Framework" {
+		t.Errorf("example labels = %v", labels)
 	}
 	allowlist := vocab.HeaderAllowlist()
 	for _, want := range []string{"x-myfw-agent", "x-myfw-run", "x-myfw-kind", "x-myfw-label", "x-codex-parent-thread-id"} {

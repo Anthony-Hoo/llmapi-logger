@@ -58,6 +58,10 @@ type ClientRule struct {
 	// Priority orders detection: lower values are tried first.
 	Priority int          `yaml:"priority"`
 	Detect   ClientDetect `yaml:"detect"`
+	// Label is an optional display name (at most maxClientLabelBytes bytes)
+	// that the insights API hands to the UI; the stored agent_client stays the
+	// client key. Empty means the UI shows its own built-in name or the key.
+	Label string `yaml:"label"`
 	// RootHeaders carry the id shared by the whole agent tree.
 	RootHeaders []string `yaml:"root_headers"`
 	// NodeHeaders carry the id of this single agent.
@@ -129,6 +133,9 @@ type FileOpTool struct {
 // defaultClientPriority orders clients added by an override that sets no
 // priority: after the built-in native clients, before the generic custom one.
 const defaultClientPriority = 50
+
+// maxClientLabelBytes bounds ClientRule.Label, like the agent name header.
+const maxClientLabelBytes = 64
 
 var (
 	knownToolKinds = map[string]bool{
@@ -257,6 +264,9 @@ func mergeClient(base, override ClientRule) ClientRule {
 	if override.Priority != 0 {
 		base.Priority = override.Priority
 	}
+	if override.Label != "" {
+		base.Label = override.Label
+	}
 	replaceList(&base.Detect.UserAgentPrefixes, override.Detect.UserAgentPrefixes)
 	replaceList(&base.Detect.HeadersPresent, override.Detect.HeadersPresent)
 	if len(override.Detect.HeadersEqual) != 0 {
@@ -311,6 +321,7 @@ func (vocab *Vocabulary) normalize() error {
 		if trimmed == "" {
 			return errors.New("client name is empty")
 		}
+		rule.Label = strings.TrimSpace(rule.Label)
 		rule.Detect.UserAgentPrefixes = lowerList(rule.Detect.UserAgentPrefixes)
 		rule.Detect.HeadersPresent = lowerList(rule.Detect.HeadersPresent)
 		if rule.Detect.HeadersEqual != nil {
@@ -421,6 +432,9 @@ func (vocab *Vocabulary) validate() error {
 	}
 	for name, rule := range vocab.Clients {
 		owner := "client " + name
+		if len(rule.Label) > maxClientLabelBytes {
+			return fmt.Errorf("%s: label exceeds %d bytes", owner, maxClientLabelBytes)
+		}
 		if err := firstError(
 			headerList(owner, "detect.headers_present", rule.Detect.HeadersPresent),
 			headerList(owner, "root_headers", rule.RootHeaders),
@@ -557,6 +571,22 @@ func (vocab *Vocabulary) OrderedClients() []string {
 		return names[i] < names[j]
 	})
 	return names
+}
+
+// ClientLabels returns a fresh map of client key -> display label for every
+// client that sets one. The insights API attaches it to its responses so the
+// UI can name clients added by an override.
+func (vocab *Vocabulary) ClientLabels() map[string]string {
+	labels := map[string]string{}
+	if vocab == nil {
+		return labels
+	}
+	for name, rule := range vocab.Clients {
+		if rule.Label != "" {
+			labels[name] = rule.Label
+		}
+	}
+	return labels
 }
 
 // HeaderAllowlist returns the sorted, lower-cased union of every request

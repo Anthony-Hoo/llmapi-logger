@@ -110,6 +110,18 @@ func TestIdentifyAgentReadsNativeAndCustomHeaders(t *testing.T) {
 			request: []byte(`{"messages":[{"role":"system","content":"You are a title generator."},{"role":"user","content":"x"}]}`),
 			want:    AgentIdentity{Client: ClientUnknown, Role: RoleTitle},
 		},
+		{
+			name:    "unknown client pi-ai compaction request",
+			headers: headerSet("User-Agent", "node"),
+			request: []byte(`{"messages":[{"role":"system","content":"You are a context summarization assistant. Summarize the conversation."},{"role":"user","content":"x"}]}`),
+			want:    AgentIdentity{Client: ClientUnknown, Role: RoleCompaction},
+		},
+		{
+			name:    "custom agent pi-ai compaction without a role header",
+			headers: headerSet("X-Agent-Session-Id", "tree", "X-Agent-Id", "child", "X-Agent-Parent-Id", "tree"),
+			request: []byte(`{"messages":[{"role":"system","content":"You are a context summarization assistant."},{"role":"user","content":"x"}]}`),
+			want:    AgentIdentity{Client: "custom", Role: RoleCompaction, RootID: "tree", NodeID: "child", ParentID: "tree", LinkSource: LinkHeader, Confidence: 100},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := tc.request
