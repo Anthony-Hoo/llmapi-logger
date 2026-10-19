@@ -21,8 +21,9 @@ import { dailyRows } from "./daily-chart";
 import { ActivityHeatmap } from "./heatmap";
 import { GroupTable, groupOptions, KpiBar } from "./overview-page";
 import { SessionCardView } from "./session-card";
-import { AgentTree, linkSourceLabel, placeNodes } from "./tree-page";
+import { AgentTree, linkSourceLabel, placeNodes, shortNodeID } from "./tree-page";
 import { TrendTooltipBody } from "./trend-chart";
+import { clientLabel } from "./ui-bits";
 
 function values(partial: Partial<CategoryValues>): CategoryValues {
   return { ...emptyCategoryValues(), ...partial };
@@ -247,6 +248,27 @@ describe("session card", () => {
     );
     expect(html).toContain("alice · dev");
   });
+
+  it("names override clients from the response's client_labels", () => {
+    const labels = { "my-agent": "My Agent" };
+    const named = renderToStaticMarkup(<SessionCardView card={{ ...card, client: "my-agent" }} clientLabels={labels} onOpenSession={noop} onOpenTree={noop} />);
+    expect(named).toContain("My Agent");
+    expect(named).not.toContain("my-agent");
+    const bare = renderToStaticMarkup(<SessionCardView card={{ ...card, client: "my-agent" }} onOpenSession={noop} onOpenTree={noop} />);
+    expect(bare).toContain("my-agent");
+  });
+});
+
+describe("client labels", () => {
+  it("prefers built-in names, then the server map, then the key", () => {
+    const labels = { "my-agent": "My Agent", custom: "Renamed" };
+    expect(clientLabel("claude_code", labels)).toBe("Claude Code");
+    expect(clientLabel("custom", labels)).toBe("自定义");
+    expect(clientLabel("my-agent", labels)).toBe("My Agent");
+    expect(clientLabel("my-agent")).toBe("my-agent");
+    expect(clientLabel("my-agent", null)).toBe("my-agent");
+    expect(clientLabel("other", labels)).toBe("other");
+  });
 });
 
 describe("trend tooltip", () => {
@@ -359,7 +381,8 @@ describe("agent tree", () => {
         onOpenNode={noop}
       />,
     );
-    expect(html).toContain("不可见的父 Agent");
+    expect(html).toContain("父 Agent 不在范围内或尚未分析");
+    expect(html).not.toContain("不可见的父 Agent");
     expect(html).toContain('data-placeholder="true"');
     expect(html).toContain("精确");
     expect(html).toContain("推断 70%");
@@ -368,6 +391,30 @@ describe("agent tree", () => {
     expect(html).toContain("附属请求 1");
     expect(html).toContain('data-testid="agent-tree-list"');
     expect(html).toContain("md:hidden");
+    // Without a name the card looks as before: no name row.
+    expect(html).not.toContain('data-testid="node-name"');
+  });
+
+  it("shows the agent name first and the short id second, and applies client labels", () => {
+    const html = renderToStaticMarkup(
+      <AgentTree
+        nodes={[
+          node("0123456789abcdef01234567", undefined, { client: "my-agent", name: "planner" }),
+          node("b", "0123456789abcdef01234567", { client: "my-agent" }),
+        ]}
+        clientLabels={{ "my-agent": "My Agent" }}
+        onOpenNode={noop}
+      />,
+    );
+    expect(html).toContain('data-testid="node-name"');
+    expect(html).toContain("planner");
+    expect(html).toContain(">01234567<");
+    expect(html).toContain("My Agent");
+    expect(html).not.toContain(">my-agent<");
+    expect(html).toContain('aria-label="查看 planner（My Agent 主 Agent） 的会话趋势"');
+    expect(html).toContain('aria-label="查看 My Agent 子 Agent 的会话趋势"');
+    expect(shortNodeID("abc")).toBe("abc");
+    expect(shortNodeID("0123456789abcdef01234567")).toBe("01234567");
   });
 
   it("explains an empty tree", () => {
@@ -447,6 +494,10 @@ describe("audit composition panel", () => {
 
   it("shows file operations and the agent identity", () => {
     const html = renderToStaticMarkup(<CompositionPanel data={data} />);
+    const labelled = renderToStaticMarkup(
+      <CompositionPanel data={{ ...data, agent: { ...data.agent, client: "my-agent" }, client_labels: { "my-agent": "My Agent" } }} />,
+    );
+    expect(labelled).toContain("My Agent");
     expect(html).toContain("src/a.ts");
     expect(html).toContain("+4");
     expect(html).toContain("−1");

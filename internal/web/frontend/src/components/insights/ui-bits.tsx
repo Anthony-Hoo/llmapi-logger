@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { colorVar } from "../../lib/tokens";
 import { cn } from "../../lib/utils";
+import type { ClientLabels } from "../../types";
 import { PageHeader } from "../ui/page-header";
 import { emptyStateClassName } from "../ui/styles";
 
@@ -16,17 +17,21 @@ export function PanelTitle({ title, hint, actions }: { title: string; hint?: Rea
   return <PageHeader level="panel" title={title} description={hint} actions={actions} />;
 }
 
-export function clientLabel(client: string): string {
-  return (
-    ({
-      codex: "Codex",
-      claude_code: "Claude Code",
-      opencode: "OpenCode",
-      dsh: "DSH",
-      custom: "自定义",
-      unknown: "未知客户端",
-    } as Record<string, string>)[client] ?? client
-  );
+const BUILTIN_CLIENT_LABELS: Record<string, string> = {
+  codex: "Codex",
+  claude_code: "Claude Code",
+  opencode: "OpenCode",
+  dsh: "DSH",
+  custom: "自定义",
+  unknown: "未知客户端",
+};
+
+/**
+ * Display name of a client key: the built-in name, else the vocabulary label the
+ * server attached to the response (`client_labels`), else the key itself.
+ */
+export function clientLabel(client: string, labels?: ClientLabels | null): string {
+  return BUILTIN_CLIENT_LABELS[client] ?? labels?.[client] ?? client;
 }
 
 export function roleLabel(role: string): string {

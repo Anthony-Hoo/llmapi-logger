@@ -4,7 +4,7 @@ import { ApiError, type ApiClient } from "../../api";
 import { errorMessage, isAbortError } from "../../lib/errors";
 import { formatTokens, formatUSD, occupancy, occupancyLevel } from "../../lib/insights/format";
 import { lineageColor, tidyLayout, type TreeLayout } from "../../lib/insights/tree-layout";
-import type { TreeNode, TreeResponse } from "../../types";
+import type { ClientLabels, TreeNode, TreeResponse } from "../../types";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -15,7 +15,8 @@ import { CategoryLegend, CompositionBar, OccupancyText } from "./composition-bar
 import { clientLabel, EmptyNote, PanelTitle, roleLabel } from "./ui-bits";
 
 export const CARD_WIDTH = 264;
-export const CARD_HEIGHT = 148;
+// Tall enough for the optional name row above the badges.
+export const CARD_HEIGHT = 176;
 const GAP_X = 56;
 const GAP_Y = 14;
 
@@ -87,7 +88,7 @@ export function TreePage({
   treeID: string;
   refreshKey: number;
   onBack: () => void;
-  onOpenSession: (node: TreeNode) => void;
+  onOpenSession: (node: TreeNode, clientLabels?: ClientLabels) => void;
 }) {
   const [tree, setTree] = useState<TreeResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -150,7 +151,7 @@ export function TreePage({
                 <AlertDescription>节点过多，仅显示最多 40 个。</AlertDescription>
               </Alert>
             ) : null}
-            <AgentTree nodes={tree.nodes} onOpenNode={onOpenSession} />
+            <AgentTree nodes={tree.nodes} clientLabels={tree.client_labels} onOpenNode={(node) => onOpenSession(node, tree.client_labels)} />
             <CategoryLegend />
           </CardContent>
         </Card>
@@ -164,7 +165,16 @@ export function TreePage({
  * scroll inside its own box. Narrow screens: an indented list, so the page
  * itself never scrolls horizontally.
  */
-export function AgentTree({ nodes, onOpenNode }: { nodes: readonly TreeNode[]; onOpenNode: (node: TreeNode) => void }) {
+export function AgentTree({
+  nodes,
+  clientLabels,
+  onOpenNode,
+}: {
+  nodes: readonly TreeNode[];
+  /** `client_labels` of the tree response. */
+  clientLabels?: ClientLabels;
+  onOpenNode: (node: TreeNode) => void;
+}) {
   const { placed, width, height } = useMemo(() => placeNodes(nodes), [nodes]);
   const byID = useMemo(() => new Map(placed.map((entry) => [entry.node.node_id, entry])), [placed]);
   if (placed.length === 0) {
@@ -199,7 +209,7 @@ export function AgentTree({ nodes, onOpenNode }: { nodes: readonly TreeNode[]; o
           </svg>
           {placed.map((entry) => (
             <div key={entry.node.node_id} className="absolute" style={{ left: entry.left, top: entry.top, width: CARD_WIDTH, height: CARD_HEIGHT }}>
-              <NodeCard node={entry.node} color={lineageColor(entry.lineage)} onOpen={onOpenNode} />
+              <NodeCard node={entry.node} color={lineageColor(entry.lineage)} clientLabels={clientLabels} onOpen={onOpenNode} />
             </div>
           ))}
         </div>
@@ -208,7 +218,7 @@ export function AgentTree({ nodes, onOpenNode }: { nodes: readonly TreeNode[]; o
       <ul className="space-y-2 md:hidden" aria-label="Agent 树（列表）" data-testid="agent-tree-list">
         {placed.map((entry) => (
           <li key={entry.node.node_id} style={{ marginLeft: Math.min(entry.depth, 4) * 14 }}>
-            <NodeCard node={entry.node} color={lineageColor(entry.lineage)} onOpen={onOpenNode} />
+            <NodeCard node={entry.node} color={lineageColor(entry.lineage)} clientLabels={clientLabels} onOpen={onOpenNode} />
           </li>
         ))}
       </ul>
@@ -216,7 +226,22 @@ export function AgentTree({ nodes, onOpenNode }: { nodes: readonly TreeNode[]; o
   );
 }
 
-export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: string; onOpen: (node: TreeNode) => void }) {
+/** Short form of a node id for secondary display next to a name. */
+export function shortNodeID(nodeID: string): string {
+  return nodeID.length > 8 ? nodeID.slice(0, 8) : nodeID;
+}
+
+export function NodeCard({
+  node,
+  color,
+  clientLabels,
+  onOpen,
+}: {
+  node: TreeNode;
+  color: string;
+  clientLabels?: ClientLabels;
+  onOpen: (node: TreeNode) => void;
+}) {
   if (!node.visible) {
     return (
       <div
@@ -224,8 +249,8 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
         style={{ borderLeft: `4px solid ${color}` }}
         data-placeholder="true"
       >
-        <p className="text-body font-medium">不可见的父 Agent</p>
-        <p className="mt-1 text-label">该节点不在当前身份的可见范围内，仅用于保持树结构。</p>
+        <p className="text-body font-medium">父 Agent 不在范围内或尚未分析</p>
+        <p className="mt-1 text-label">没有可见的分析记录描述该父节点：它可能不在当前身份的可见范围内、已过期，或其请求尚未分析。占位仅用于保持树结构。</p>
         <p className="mt-2 truncate font-mono text-caption" title={node.node_id}>
           {node.node_id}
         </p>
@@ -239,12 +264,14 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
   const link = linkSourceLabel(node);
   const clickable = Boolean(node.session_id);
   const usage = node.usage;
+  const client = clientLabel(node.client, clientLabels);
+  const who = node.name ? `${node.name}（${client} ${roleLabel(node.role)}）` : `${client} ${roleLabel(node.role)}`;
 
   return (
     <div
       role={clickable ? "button" : undefined}
       tabIndex={clickable ? 0 : undefined}
-      aria-label={clickable ? `查看 ${clientLabel(node.client)} ${roleLabel(node.role)} 的会话趋势` : undefined}
+      aria-label={clickable ? `查看 ${who} 的会话趋势` : undefined}
       className={`h-full space-y-1.5 overflow-hidden rounded-md border bg-surface p-3 shadow-xs ${borderClass} ${
         clickable ? "cursor-pointer outline-hidden transition-colors hover:border-primary-400 focus-visible:ring-2 focus-visible:ring-ring" : ""
       }`}
@@ -262,9 +289,19 @@ export function NodeCard({ node, color, onOpen }: { node: TreeNode; color: strin
           : undefined
       }
     >
+      {node.name ? (
+        <p className="flex min-w-0 items-baseline gap-2" data-testid="node-name">
+          <span className="truncate text-body font-medium" title={node.name}>
+            {node.name}
+          </span>
+          <span className="shrink-0 font-mono text-caption text-subtle" title={node.node_id}>
+            {shortNodeID(node.node_id)}
+          </span>
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-center gap-1">
         <Badge variant="neutral">
-          {clientLabel(node.client)}
+          {client}
         </Badge>
         <Badge variant={node.role === "main" ? "info" : "outline"}>
           {roleLabel(node.role)}

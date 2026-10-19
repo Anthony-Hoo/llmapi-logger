@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { SessionCard as SessionCardData } from "../../types";
+import type { ClientLabels, SessionCard as SessionCardData } from "../../types";
 import { formatNanoTime } from "../../lib/format";
 import { formatRatio, formatTokens, formatUSD } from "../../lib/insights/format";
 import { Badge } from "../ui/badge";
@@ -10,12 +10,15 @@ import { clientLabel, protocolLabel, roleLabel, UnbilledNote } from "./ui-bits";
 export function SessionCardView({
   card,
   billingEnabled = true,
+  clientLabels,
   onOpenSession,
   onOpenTree,
 }: {
   card: SessionCardData;
   /** False when the server has no NewAPI credentials: cost is unavailable, not unbilled. */
   billingEnabled?: boolean;
+  /** `client_labels` of the sessions response that carried this card. */
+  clientLabels?: ClientLabels;
   onOpenSession: (card: SessionCardData) => void;
   onOpenTree: (treeID: string) => void;
 }) {
@@ -39,7 +42,7 @@ export function SessionCardView({
         }}
       >
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="neutral">{clientLabel(card.client)}</Badge>
+          <Badge variant="neutral">{clientLabel(card.client, clientLabels)}</Badge>
           <Badge variant={card.role === "main" ? "info" : "outline"}>{roleLabel(card.role)}</Badge>
           <Badge variant="outline">{protocolLabel(card.protocol)}</Badge>
           {card.subagents > 0 ? <Badge variant="warning">含 {card.subagents} 个子 Agent</Badge> : null}

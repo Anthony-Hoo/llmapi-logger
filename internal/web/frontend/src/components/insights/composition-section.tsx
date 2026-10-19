@@ -7,7 +7,7 @@ import { buildDnaBands } from "../../lib/insights/dna";
 import { formatSignedTokens, formatTokens } from "../../lib/insights/format";
 import { buildTreemapData, layoutTreemap } from "../../lib/insights/treemap";
 import { chartColors, chartFont } from "../../lib/tokens";
-import type { AgentIdentity, CategoryKey, CompositionItem, CompositionResponse, FileOp, ToolDef } from "../../types";
+import type { AgentIdentity, CategoryKey, ClientLabels, CompositionItem, CompositionResponse, FileOp, ToolDef } from "../../types";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
@@ -202,7 +202,7 @@ export function CompositionPanel({ data }: { data: CompositionResponse }) {
       </SubBlock>
 
       <SubBlock title="Agent 身份">
-        <AgentBlock agent={data.agent} />
+        <AgentBlock agent={data.agent} clientLabels={data.client_labels} />
       </SubBlock>
     </div>
   );
@@ -395,9 +395,9 @@ export function linkSourceText(agent: Pick<AgentIdentity, "link_source" | "confi
   }
 }
 
-function AgentBlock({ agent }: { agent: AgentIdentity }) {
+function AgentBlock({ agent, clientLabels }: { agent: AgentIdentity; clientLabels?: ClientLabels }) {
   const rows: Array<[string, string, boolean]> = [
-    ["客户端", clientLabel(agent.client), false],
+    ["客户端", clientLabel(agent.client, clientLabels), false],
     ["角色", roleLabel(agent.role), false],
     ["名称", agent.name || "—", false],
     ["关联方式", linkSourceText(agent), false],
