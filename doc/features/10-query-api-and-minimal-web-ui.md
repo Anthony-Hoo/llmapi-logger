@@ -164,7 +164,7 @@ type AuditQuery interface {
 | `GET /api/v1/insights/agent-trees/{tree_id}` | 无 | Agent 树节点与边，节点带客户端声明的显示名 `name`（由该节点最新一条非附属分析的 `detail_enc` 解密读出，缺失时省略）；某节点的父指纹没有作用域内分析行时（父 Agent 不在作用域内、已过期或尚未分析）返回 `visible=false` 的占位节点。单节点根也可读取（无害）。响应带 `client_labels` |
 | `GET /api/v1/audits/{audit_id}/composition` | 无 | 解密 `detail_enc`：逐条目清单、与上一步差异、文件活动、Agent 身份；经 `authorizeAudit`；响应带 `client_labels` |
 
-`client_labels` 是客户端键到词表 `clients.<key>.label` 的映射（[模块 20](20-context-insights.md) §6），没有任何客户端设置 `label` 时整个字段省略。前端对内置客户端键使用固定中文名，其余键先查该映射，再退回原样显示键名。
+`client_labels` 是客户端键到词表 `clients.<key>.label` 的映射（[模块 20](20-context-insights.md) §6），没有任何客户端设置 `label` 时整个字段省略。前端先查该映射（设置了 `label` 的客户端一律显示 `label`，包括内置键），再退回内置客户端的默认中文名，最后原样显示键名，与服务端 `group_by=client` 的分组名替换一致。
 
 作用域：作用域由会话身份决定，**从不**取自查询参数。管理员看到全部记录；开发者会话的每条 SQL 聚合都逐行套用与审计列表相同的 `conditionWithAliases` 条件，只统计自己 Key 产生的步骤。共享会话或 Agent 树只暴露调用者自己的步骤，作用域内没有步骤的会话、树和审计一律返回 `404`（不区分“不存在”和“无权访问”）。开发者不能使用 `caller` 与 `token` 分组，会话卡片的 `caller` 为 `null`。
 

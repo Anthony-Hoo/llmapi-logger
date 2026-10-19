@@ -260,10 +260,13 @@ describe("session card", () => {
 });
 
 describe("client labels", () => {
-  it("prefers built-in names, then the server map, then the key", () => {
+  it("prefers the server map, then built-in names, then the key", () => {
     const labels = { "my-agent": "My Agent", custom: "Renamed" };
     expect(clientLabel("claude_code", labels)).toBe("Claude Code");
-    expect(clientLabel("custom", labels)).toBe("自定义");
+    // A vocabulary label renames a built-in client too, matching the server's
+    // group_by=client substitution.
+    expect(clientLabel("custom", labels)).toBe("Renamed");
+    expect(clientLabel("custom")).toBe("自定义");
     expect(clientLabel("my-agent", labels)).toBe("My Agent");
     expect(clientLabel("my-agent")).toBe("my-agent");
     expect(clientLabel("my-agent", null)).toBe("my-agent");

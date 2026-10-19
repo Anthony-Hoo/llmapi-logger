@@ -60,7 +60,8 @@ type ClientRule struct {
 	Detect   ClientDetect `yaml:"detect"`
 	// Label is an optional display name (at most maxClientLabelBytes bytes)
 	// that the insights API hands to the UI; the stored agent_client stays the
-	// client key. Empty means the UI shows its own built-in name or the key.
+	// client key. A label wins over the UI's built-in name (so renaming custom
+	// shows everywhere); empty means the UI shows its built-in name or the key.
 	Label string `yaml:"label"`
 	// RootHeaders carry the id shared by the whole agent tree.
 	RootHeaders []string `yaml:"root_headers"`

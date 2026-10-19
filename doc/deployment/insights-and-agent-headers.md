@@ -45,7 +45,7 @@ insights:
 
 工具分类、注入标记和各客户端的 Agent 标识 Header 来自编译进二进制的默认词表。要调整，复制 [`configs/insights-vocabulary.example.yaml`](../../configs/insights-vocabulary.example.yaml)，只保留要改的键，把 `insights.vocabulary_file` 指向它。覆盖按键合并，示例文件头部列有合并规则；非法时拒绝启动。典型用途：自研框架已经有自己的 Header 名，直接在词表里给 `custom` 客户端改名，而不用改框架；或者按 User-Agent 前缀为自研框架单列一个客户端（§6.4）。修改词表覆盖只影响之后新分析的记录；已有行保持原有分类，直到 `AnalysisVersion` 变化才会被回填重算（回填用当时生效的覆盖文件）。
 
-每个客户端规则可以带可选的 `label`（≤ 64 字节的显示名，超长拒绝启动）。它只影响展示：洞察页、会话卡片、Agent 树和审计详情里用它代替客户端键，总览 `group_by=client` 的分组名也用它；写入数据库的 `agent_client` 仍是客户端键，改 `label` 不需要重算。内置四家客户端与 `custom` 在页面上有固定中文名，没有 `label` 的新客户端按键名原样显示。
+每个客户端规则可以带可选的 `label`（≤ 64 字节的显示名，超长拒绝启动）。它只影响展示：洞察页、会话卡片、Agent 树和审计详情里用它代替客户端键，总览 `group_by=client` 的分组名也用它；写入数据库的 `agent_client` 仍是客户端键，改 `label` 不需要重算。内置客户端有默认中文名（如 `custom` 显示"自定义"）；任何客户端设置 `label` 后页面一律显示 `label`，所以给 `custom` 改名也会体现在总览、卡片、树和详情里；没有 `label` 的新客户端按键名原样显示。
 
 ## 5. 各客户端
 

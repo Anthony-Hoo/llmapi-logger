@@ -21,7 +21,8 @@ clients:
   # X-Agent-Id, X-Agent-Parent-Id, X-Agent-Role, X-Agent-Name) to the names your
   # framework already sends. Nothing else about the client needs repeating.
   # `label` (optional, at most 64 bytes) is the display name the UI shows in
-  # place of the client key; the stored agent_client stays the key.
+  # place of the client key or its built-in name, everywhere including the
+  # group_by=client table; the stored agent_client stays the key.
   custom:
     label: "My Framework"
     detect:

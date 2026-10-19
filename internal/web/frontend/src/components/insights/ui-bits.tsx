@@ -27,11 +27,12 @@ const BUILTIN_CLIENT_LABELS: Record<string, string> = {
 };
 
 /**
- * Display name of a client key: the built-in name, else the vocabulary label the
- * server attached to the response (`client_labels`), else the key itself.
+ * Display name of a client key: the vocabulary label the server attached to the
+ * response (`client_labels`) wins, so renaming `custom` in the vocabulary shows
+ * everywhere; else the built-in name; else the key itself.
  */
 export function clientLabel(client: string, labels?: ClientLabels | null): string {
-  return BUILTIN_CLIENT_LABELS[client] ?? labels?.[client] ?? client;
+  return labels?.[client] ?? BUILTIN_CLIENT_LABELS[client] ?? client;
 }
 
 export function roleLabel(role: string): string {

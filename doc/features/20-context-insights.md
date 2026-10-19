@@ -327,7 +327,7 @@ insights:
 | `GET /api/v1/insights/sessions/{id}/trend` | 逐步序列：构成、usage、该步实际计费 `cost_usd`、事件、时间、turn 标号；最多 2000 步，超出时返回最近一段并标记截断 | 作用域内步骤为 0 时返回 404 |
 | `GET /api/v1/audits/{id}/composition` | 解密 `detail_enc`：逐条目清单（类别、估算、标签、摘要）、与 prev 的差异、文件活动、Agent 身份；响应带 `client_labels` | 经 `authorizeAudit` |
 
-`client_labels` 是客户端键到词表 `label` 的映射，没有任何客户端设置 `label` 时省略；前端对内置键之外的客户端先查它，再退回原样显示键名。会话卡片不展示 User-Agent 分组，因为那需要逐行解密。
+`client_labels` 是客户端键到词表 `label` 的映射，没有任何客户端设置 `label` 时省略；前端先查它（设置了 `label` 的客户端一律显示 `label`，包括 `custom` 等内置键），再退回内置中文名，最后原样显示键名；服务端对 `group_by=client` 的分组名做同样的替换，两处一致。会话卡片不展示 User-Agent 分组，因为那需要逐行解密。
 
 ## 8. Web UI
 
@@ -433,4 +433,4 @@ Header 名称可以在词表覆盖文件中改成你框架已有的名字（`con
 - **回填速率**：每个扫描 tick 最多 20 条，历史量大时需要数小时到数天，期间洞察页展示的是已分析部分。
 - **三层以上树依赖显式根标识**：分析行从不改写（`link.go`），没有根 Header 时根在分析时由父链上溯得到。两层树在任意到达顺序下都能按指纹合并；三层及以上的树中，孙节点先于中间节点被分析时，其 `agent_root_fpr` 停留在中间节点的指纹，会一直显示为独立的树，只有下一次 `AnalysisVersion` 升级触发的从旧到新回填才会修正（§11）。父节点请求尚未分析、已过期或不在作用域内时，树里出现 `visible=false` 的占位父节点，措辞为“父 Agent 不在范围内或尚未分析”，而不是断言权限问题。
 - **树节点名字来自解密**：`TreeNode.name` 由 agent-trees 端点解密每个节点最新一条非附属分析的 `detail_enc` 读出，不新增明文列（部署指南承诺 Header 只有指纹进明文列）。单次请求最多 40 次解密；detail 打不开只让该节点无名字。
-- **客户端显示名**：词表客户端规则的 `label` 只影响展示（`client_labels`、`group_by=client` 的分组 `label`），`agent_client` 列仍写客户端键；改 `label` 不触发回填。
+- **客户端显示名**：词表客户端规则的 `label` 只影响展示（`client_labels`、`group_by=client` 的分组 `label`），对内置键同样生效（给 `custom` 改名会覆盖"自定义"），`agent_client` 列仍写客户端键；改 `label` 不触发回填。
