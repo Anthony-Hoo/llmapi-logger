@@ -25,7 +25,7 @@ Client -> Nginx -> llmapi-logger
 - 三态数据面分发：配置的 LLM 路由审计、安全的非 LLM 路径直通、受保护或危险的未匹配路径 fail-closed。
 - 基于 `net/http/httputil.ReverseProxy` 的流式转发，支持 SSE 及时 flush，并可为 NewAPI 上游显式指定 HTTP(S) 代理。
 - 可插拔入站拦截器，首个拒绝立即短路且不会访问 NewAPI。
-- 可在受保护管理页面动态配置“模型正则 + User-Agent 正则”规则；规则持久化到 SQLite，保存后立即生效。初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则返回通用 `401 unauthorized`，具体原因仅保留在审计数据中。
+- 可在受保护管理页面动态配置“模型正则 + User-Agent 正则”规则；规则持久化到 PostgreSQL，保存后立即生效。初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则返回通用 `401 unauthorized`，具体原因仅保留在审计数据中。
 - 可在同一管理页面动态配置“模型正则 + 关键词 + 扫描范围”的内容拦截规则：命中后在访问 NewAPI 前返回本地 `400`，审计记录 `content_policy_blocked`；默认扫描全部请求文本类别，支持 `dry_run` 仅记录、按规则启停和即时热更新；空规则表不拦截。上游返回的 `cyber_policy` 等安全策略拒绝由 parser 派生 `upstream_error_class`，审计列表可按分类筛选。
 - 分别记录四个代理观察点：
   - Nginx 请求到达代理；
@@ -34,7 +34,7 @@ Client -> Nginx -> llmapi-logger
   - 代理响应写回 Nginx。
 - 保存各阶段的 Header、Trailer、长度、SHA-256、时间和完整性状态；约 1 MiB raw 聚合块先各阶段采集，终结时只对长度/hash 完全一致的成对阶段合并 `source_stage`。
 - 使用本地 AES-256-GCM key 加密敏感 Header、Query、raw Body、解析结果、content/binary object 和 SSE timeline。
-- SQLite WAL、单 writer、有界写队列、schema generation 2 和自动 migration。
+- PostgreSQL、带独占写者锁的有界写队列、独立 schema migration；SQLite 仅作为显式离线导入源。
 - OpenAI、Anthropic、Gemini 常见 JSON/SSE 的异步解析；OpenAI verified turn 支持内容对象复用、provider JSON 重建、分支上下文增量和多模态二进制去重。
 - React、TypeScript、Vite、Tailwind CSS 和 shadcn/ui 管理页面。
 - 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；调用者优先使用安全用户目录中的显示名，Token 名称与 ID 分行展示，长 User-Agent 自动换行；路径、状态和原始 HTTP 证据留在详情或高级筛选。
@@ -147,8 +147,8 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 
 ## 数据与安全
 
-- 默认数据库为 SQLite WAL，数据库和 `audit.key` 必须作为同一个备份集保存。
-- 在线备份必须使用 SQLite backup API，不能只复制正在使用的主 DB 文件。
+- 运行时必须配置 PostgreSQL `database_url`，数据库和 `audit.key` 必须作为同一个备份集保存。
+- PostgreSQL 使用一致快照备份；旧 SQLite 迁移见 [PostgreSQL 迁移指南](doc/deployment/postgresql-migration.md)，不要直接复制活动主 DB 文件。
 - OpenAI verified 2xx/3xx 请求在对象重建校验和语义完整性事件写入成功后删除 raw chunks；拦截、4xx/5xx、采集、解析、上游或重建异常保留 `full` raw。
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
 - 管理端即使只监听 loopback，也必须鉴权；支持 Bearer token 和 Web UI 的七天 HttpOnly Cookie。
@@ -196,3 +196,7 @@ pnpm build
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。
+
+## PostgreSQL 升级
+
+从 v0.6.0 升级前先阅读 [离线迁移与回滚](doc/deployment/postgresql-migration.md)。本版本不自动转换 SQLite，不接受旧 `db_path` 配置；需要 PostgreSQL 与原 `audit.key`。

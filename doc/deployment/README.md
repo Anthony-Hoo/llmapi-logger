@@ -1,3 +1,7 @@
+# 当前版本部署入口
+
+运行时已改为 PostgreSQL。请先按 [PostgreSQL 新部署/离线迁移](postgresql-migration.md) 配置并迁移；不得删除源 SQLite 审计数据来完成升级。当前备份步骤见 [备份与恢复](backup-and-restore.md)。
+
 # 单机部署
 
 本项目的生产形态是一个 Go 二进制。React 管理页面已经嵌入二进制，运行时不需要 Node、pnpm 或 Vite。
@@ -39,7 +43,7 @@ bin/audit-proxy-linux-amd64
 
 构建不会清空 `internal/web/dist`，以保留受跟踪的 `.gitkeep`。在同一工作区重复构建时，旧的哈希资源会一并嵌入二进制，但页面只引用最新资源。正式发布应使用干净 checkout 或 Docker 多阶段构建。
 
-宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token`。若 NewAPI 允许长时间等待首包，将 `newapi.response_header_timeout_seconds` 设置为高于 NewAPI 自身超时，并同步提高 `shutdown_timeout_seconds`、Nginx read/send timeout 与容器 stop grace period。只有需要让 NewAPI 继续观察公网域名时才启用 `newapi.preserve_host`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
+宿主机部署从 `configs/audit-proxy.example.yaml` 复制配置，至少替换 `admin_token` 并设置 `database_url`。若 NewAPI 允许长时间等待首包，将 `newapi.response_header_timeout_seconds` 设置为高于 NewAPI 自身超时，并同步提高 `shutdown_timeout_seconds`、Nginx read/send timeout 与容器 stop grace period。只有需要让 NewAPI 继续观察公网域名时才启用 `newapi.preserve_host`。如需识别“哪个 NewAPI 用户通过哪个 Token 发起请求”，再成对填写 `newapi.access_token` 与 `newapi.user_id`；它们只用于读取安全用户目录和按 request ID 查询全站日志。配置文件和 `audit.key` 只应允许运行账户读取。
 
 代理和 Body interceptor 的传输上限为 512 MiB；异步 parser 为限制单 worker 内存，当前请求侧和响应侧各最多解码 64 MiB。超过 parser 上限的请求仍按原字节转发并保留 `full` raw，但不会生成 verified turn，也不会获得 item/binary 内容寻址压缩。部署前应根据真实请求分布确认 64 MiB 是否覆盖正常流量，不能把 512 MiB 传输上限当成 normalizer 上限。
 
@@ -53,25 +57,9 @@ bin/audit-proxy-linux-amd64
 
 宿主机 Nginx 使用 `configs/nginx/llmapi-logger.conf` 时，把 `audit_proxy_backend` 从 Compose 服务名改成实际地址，通常是 `127.0.0.1:8080`。同时把应用配置的数据监听地址设为 `127.0.0.1:8080`。
 
-### 2.1 schema generation 2 的破坏性切换
+### 2.1 PostgreSQL 切换
 
-内容寻址存储是不可兼容的新审计 schema，不迁移旧 audit。若直接让 migration 005 作用于旧数据库，旧审计表会被重建，但 SQLite 主文件通常不会自动缩小；因此需要真正释放旧空间时，应在停机窗口创建新的空 `audit.db`，而不是只依赖 `DROP TABLE`。
-
-通用切换顺序：
-
-1. 在独立临时数据目录用候选二进制执行 `--validate-config`，再用 fake upstream 完成非流式、SSE、拦截、reconstructed、metadata/full raw smoke。
-2. 记录当前 UA 规则的非敏感配置；如果需要保留自定义规则，在新库启动后通过管理 API 重新写入。全新数据库会由 migration 创建默认规则。
-3. 预先放置候选二进制或镜像，但不要覆盖仍在运行的可执行文件。
-4. 停止入口流量并正常停止旧进程，确认进程已退出且没有连接继续打开数据库。
-5. 只处理精确的数据文件 `audit.db`、`audit.db-wal`、`audit.db-shm`；不要删除或替换 `audit.key`、运行时配置和凭据文件。需要回滚能力时，将旧数据库三件套与旧二进制作为同一回滚点保存。
-6. 原子替换二进制/镜像并启动。启动会创建 generation 2 schema、验证主密钥和空完整性链，再恢复后台 worker。
-7. 依次验证带凭证的 `/readyz`、schema generation/表集合、UA 规则、一个安全 passthrough、一个受审计 JSON 请求、一个 SSE 请求、reconstructed JSON、metadata raw 410、异常 full raw 和 NewAPI 调用者回填。
-
-旧二进制不得直接打开 generation 2 数据库；回滚必须同时恢复旧二进制及其匹配的旧数据库/主密钥备份集。若维护者明确接受无历史回滚，可省略旧审计库备份，但仍不得删除唯一的 `audit.key` 或运行时配置。
-
-完整性校验分两段，启动不再被历史规模拖住。启动段只验证 event chain（`audit integrity chain verification started/completed`），耗时随事件数线性增长，随后立即绑定监听器开始转发。重算历史证据摘要的那一段随会话深度增长，在后台执行并单独打日志（`audit integrity payload verification started/completed`）。容器 healthcheck 只需覆盖链校验时间，不必等待后台段。
-
-后台段完成前 readiness 保持正常，因为链校验已经通过；只有真的算出摘要不一致才会记 `audit integrity payload verification failed`，并把 readiness 的 database 降为 unavailable，需要人工核对是否有人改动过审计行。日志里出现 `interrupted` 表示进程在校验途中退出，不代表证据有问题，下次启动会重跑。需要中止时发送 SIGTERM，lifecycle context 会取消两段校验并退出。
+本版本不执行旧 generation 2 清库流程。保留原 SQLite 数据与密钥，按 [离线迁移](postgresql-migration.md) 导入空 PostgreSQL，验证后再切换。不要通过删除数据库来升级或释放空间。
 
 ## 3. Docker Compose
 
@@ -167,7 +155,7 @@ newapi:
 
 `newapi.access_token` 和 `newapi.user_id` 是一对可选的 NewAPI 管理凭证。配置后，audit-proxy 启动时读取一次 `/api/user/`，之后每五分钟刷新，只保留用户 ID、用户名、显示名、状态和分组等安全字段。刷新失败不影响 LLM 转发，并继续使用上一份成功快照。
 
-当 LLM 响应包含 `X-Oneapi-Request-Id` 时，后台 worker 通过 `/api/log/?request_id=...` 精确查询并回填用户 ID、用户名、Token ID 和 Token 名称。NewAPI 日志可能延迟，因此任务会有限重试并把状态保存在 SQLite；失败或最终未识别都不影响原请求。Web UI 按用户筛选，Token ID 放在高级筛选；系统不会读取、保存或展示用户完整 API Key。若不需要此功能，将 access_token 留空且 user_id 设为 0。
+当 LLM 响应包含 `X-Oneapi-Request-Id` 时，后台 worker 通过 `/api/log/?request_id=...` 精确查询并回填用户 ID、用户名、Token ID 和 Token 名称。NewAPI 日志可能延迟，因此任务会有限重试并把状态保存在 PostgreSQL；失败或最终未识别都不影响原请求。Web UI 按用户筛选，Token ID 放在高级筛选；系统不会读取、保存或展示用户完整 API Key。若不需要此功能，将 access_token 留空且 user_id 设为 0。
 
 ## 6. Nginx 路由保证
 
@@ -199,7 +187,7 @@ docker compose exec nginx nginx -t
 
 ## 7. 数据、保留状态和备份
 
-SQLite 数据库与 `audit.key` 必须作为一个备份集保存。运行中不能直接复制 `audit.db`；在线备份必须使用 SQLite `.backup`。具体流程见 [备份与恢复](backup-and-restore.md)。
+PostgreSQL 数据库与 `audit.key` 必须作为一个备份集保存，使用一致快照备份与已验证的恢复流程。具体流程见 [备份与恢复](backup-and-restore.md)。
 
 普通 OpenAI 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、4xx/5xx、采集不完整、解析/normalization/重建失败和其他异常保持 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw 返回 410 误判为丢失。
 

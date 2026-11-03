@@ -19,7 +19,7 @@
 - 让 `/v1/models` 等真正无关的 NewAPI 请求透明直通，不创建 audit，也不执行 interceptor。
 - 对配置路径的错误 Method、编码/双重编码变体、子路径、受保护模板路径族和危险路径 fail-closed，不能落入直通分支。
 - 在四个代理观察点流式采集客户端请求与 NewAPI 响应；普通成功请求经内容重建验证后释放长期 raw，异常记录保留完整原始证据。
-- 使用 SQLite、AES-256-GCM、内容寻址的 conversation/turn/multimodal object 和 React + shadcn/ui 提供本地审计、重建与异常证据查看。
+- 使用 PostgreSQL、AES-256-GCM、内容寻址的 conversation/turn/multimodal object 和 React + shadcn/ui 提供本地审计、重建与异常证据查看。
 - 解析或 available 模式下的审计失败不能篡改已经放行的请求和响应。
 
 本项目只能看到代理与 NewAPI 边界，无法看到 NewAPI 后方的渠道选择、厂商原始请求/响应、内部重试或渠道密钥。
@@ -45,7 +45,9 @@ internal/
   bodycodec/                    # raw/timeline 自适应压缩
   newapi/                       # NewAPI 安全用户目录与 request-id 调用者解析
   conversation/                 # 协议无关的消息、reasoning、工具调用与结果 DTO
-  storage/sqlite/               # SQLite 读写和内嵌 migration
+  storage/postgres/             # PostgreSQL 读写和内嵌 migration
+  storage/sqlite/               # 旧格式离线导入验证与兼容测试
+  storage/migrate/              # 只读 SQLite 到空 PostgreSQL 的离线迁移
   parser/                       # OpenAI/Anthropic/Gemini 摘要与 conversation 聚合
   security/                     # 本地 AES-GCM 加密
   query/                        # 受保护的查询与证据解密
@@ -70,7 +72,7 @@ tests/                          # 跨模块集成测试
 - passthrough 与审计代理共享 NewAPI rewrite 和显式上游代理设置，但 passthrough 不创建 audit、不解析、不执行 interceptor，也不写 LLM 请求完成日志。
 - `audit` 采集层只处理字节、长度、哈希、时间和完整性状态；四阶段先独立采集，只有终结事务确认成对 Body 完全一致才合并 `source_stage`。parser 在请求完成后异步生成摘要；OpenAI normalizer 再写可分支 turn、content/binary object、重建 hash 和 raw retention，失败不影响转发。
 - 可选的 `newapi` 集成只读同步安全用户目录，并用上游 `X-Oneapi-Request-Id` 查询全站日志回填用户与 Token 身份；不读取或保存完整 API Key，解析失败不影响转发。
-- SQLite 使用单 writer goroutine，查询使用独立只读连接。启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
+- PostgreSQL 使用持有 session advisory lock 的固定连接和单 writer goroutine，查询使用独立只读连接；多语句证据快照使用 repeatable read。启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
 - 管理 API、health 和 ready 在任何监听地址都必须鉴权：CLI 使用静态 Admin Token，Web UI 使用由该 Token 登录换取的七天 HttpOnly Cookie。可选的 `developer_login` 提供第二种身份：NewAPI 用户用自己的 API Key 登录，以同等只读深度只能看到该 Key 产生的记录；管理端点返回 403，他人记录与本地策略拦截记录返回 404。作用域由主密钥派生的 keyed 指纹加既有 token 关联判定，系统仍不保存完整或打码 API Key。审计主列表只展示调用者、时间、模型、入站 User-Agent、会话归属标识与 scope 内轮次计数；普通列表会逐条只解密该 User-Agent 供展示和子串筛选，不读取其他 Header、Request-URI、Body 或 conversation 内容。详情按需重建 verified conversation/provider JSON；raw request/response Body 只对 `retention_state=full` 开放；assistant 文本使用禁用原始 HTML 的安全 Markdown 展示。
 - 敏感 Header、raw Body、Query、fallback conversation、content/binary object 和 timeline 使用一个本地 AES-256-GCM key 加密；管理证据响应使用 `Cache-Control: no-store`。
 - 普通 JSON 日志只记录稳定状态和耗时，不记录 Query、Header value、Body、Token、key、密文或底层错误文本。
