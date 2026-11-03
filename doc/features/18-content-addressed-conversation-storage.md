@@ -68,7 +68,7 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 四阶段在传输期间先各自采集。终结事务只在 request-received/request-sent 或 response-received/response-sent 都完整、chunk 聚合自洽且长度/hash 一致时，删除后一阶段重复 chunks 并改为引用前一 payload source。每个阶段仍保留自己的开始/结束时间、长度、hash、状态和错误；短写、取消或字节不一致保留两份 raw 并标记 `body_stage_mismatch`/partial。
 
-采集缓冲按实际字节量惰性增长，上限约 1 MiB；即使单次 Read 返回更大的数据也按块处理。Body 结束时立即 flush 尾块并释放暂存容量，避免长 SSE 会话继续持有已结束请求阶段的缓冲。四个观察点仍独立采集，只有终结事务验证长度与 hash 一致后才合并。
+采集缓冲按实际字节量惰性增长，上限约 1 MiB；即使单次 Read 返回更大的数据也按块处理。Body 结束时立即 flush 尾块并释放暂存容量，避免长 SSE 会话继续持有已结束请求阶段的缓冲。四个观察点仍独立采集，只有终结事务验证长度与 hash 一致后才合并。 同一 Session 在已有互斥锁内复用最多一个 raw/timeline gzip writer，各块仍是独立可解码流；终结采集后立即释放 writer。该 writer 不跨请求共享，私有压缩缓冲只属于当前会话，可能保留部分明文直到复用或 GC，不声称安全擦除。
 
 flush 表示压缩、加密并向异步 writer 入队，不等于数据库事务已经提交，更不等于新增的 fsync 保证。进程崩溃可能丢失尚未 flush 的尾部，以及已经入队但仍未提交的块或批次；启动 recovery 将未完成记录标记 partial。FinishAudit 的同步完成屏障才确认终结事务处理完成，底层持久性仍服从数据库配置。
 

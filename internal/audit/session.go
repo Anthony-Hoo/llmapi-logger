@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -56,8 +57,8 @@ type TerminalSummary struct {
 	ErrorCode     string
 }
 
-// Session owns the small, concurrency-safe state for one audit. It never
-// retains complete request or response bodies.
+// Session owns the concurrency-safe state for one audit. Capture uses bounded
+// staging and codec working buffers instead of accumulating complete bodies.
 type Session struct {
 	auditID  string
 	routeID  string
@@ -75,6 +76,8 @@ type Session struct {
 	callerNotify    func(string) bool
 	gaps            *gapBuffer
 
+	// bodyEncoder is session-local and accessed only while holding mu.
+	bodyEncoder     *bodycodec.Encoder
 	mu              sync.Mutex
 	stages          map[string]*stageCapture
 	captureFault    bool
@@ -338,6 +341,11 @@ func (session *Session) finish() error {
 		if stage.persisted {
 			finishes = append(finishes, finish)
 		}
+	}
+
+	if session.bodyEncoder != nil {
+		session.bodyEncoder.Release()
+		session.bodyEncoder = nil
 	}
 
 	forwardStatus := session.forwardStatus

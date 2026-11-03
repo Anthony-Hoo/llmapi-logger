@@ -331,7 +331,7 @@ func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, 
 	sequence := body.nextSeq
 	offset := body.storedLength
 	body.nextSeq++
-	compression, encoded, err := bodycodec.Encode(plaintext, stage.contentType)
+	compression, encoded, err := session.encodeBodyLocked(plaintext, stage.contentType)
 	if err != nil {
 		clear(plaintext)
 		body.faulted = true
@@ -379,6 +379,13 @@ func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, 
 	body.storedLength += int64(len(plaintext))
 	body.chunkCount++
 	clear(plaintext)
+}
+
+func (session *Session) encodeBodyLocked(plaintext []byte, contentType string) (string, []byte, error) {
+	if session.bodyEncoder == nil {
+		session.bodyEncoder = &bodycodec.Encoder{}
+	}
+	return session.bodyEncoder.Encode(plaintext, contentType)
 }
 
 func isEventStream(contentType string) bool {
@@ -464,7 +471,7 @@ func (session *Session) sealStreamTimelineLocked(stage *stageCapture, body *body
 		return nil, err
 	}
 	plaintextLength := int64(len(plaintext))
-	compression, encoded, err := bodycodec.Encode(plaintext, "application/x-llmapi-stream-timeline")
+	compression, encoded, err := session.encodeBodyLocked(plaintext, "application/x-llmapi-stream-timeline")
 	clear(plaintext)
 	if err != nil {
 		return nil, err
