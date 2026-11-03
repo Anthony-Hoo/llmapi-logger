@@ -38,7 +38,7 @@ CREATE TABLE audit_records (
         newapi_request_id IS NULL OR (
             length(newapi_request_id) BETWEEN 1 AND 128
             AND trim(newapi_request_id) = newapi_request_id
-            
+
             AND position(chr(10) in newapi_request_id) = 0
             AND position(chr(13) in newapi_request_id) = 0
         )
