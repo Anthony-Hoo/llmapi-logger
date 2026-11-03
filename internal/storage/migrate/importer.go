@@ -248,8 +248,15 @@ func scanRow(rows *sql.Rows, t tableSpec) ([]any, error) {
 				return nil, Error("invalid_source_integer")
 			}
 		case "BLOB":
-			if _, ok := x.([]byte); !ok {
+			blob, ok := x.([]byte)
+			if !ok {
 				return nil, Error("invalid_source_blob")
+			}
+			// modernc may represent SQL X'' as a typed nil []byte. pgx binds
+			// that representation as NULL, so preserve the non-NULL SQL value
+			// with a nonnil empty slice before passing it to PostgreSQL.
+			if blob == nil {
+				v[i] = []byte{}
 			}
 		}
 	}

@@ -295,3 +295,152 @@ func TestTypedDigestDistinguishesNullEmptyAndValues(t *testing.T) {
 		seen[sum] = true
 	}
 }
+
+// The evidence schema deliberately admits no valid empty BYTEA: hashes have a
+// 32-byte constraint, and encrypted fields require an authenticated ciphertext.
+// Exercise the real transfer primitive using a test-only nullable BLOB column;
+// this does not add anything to the production import allowlist.
+func TestCopyTableRoundTripsNullEmptyAndUnicode(t *testing.T) {
+	ctx := context.Background()
+	source, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "typed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if _, err = source.Exec(`CREATE TABLE roundtrip_fixture (id TEXT PRIMARY KEY, payload BLOB, value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"Z", "a", "é", "Ω", "中", "😀"}
+	payloads := []any{nil, []byte{}, []byte{0, 1, 255}, nil, []byte{}, []byte{2}}
+	values := []any{nil, "", "é", nil, "", "中文😀"}
+	for i, id := range ids {
+		if _, err = source.Exec(`INSERT INTO roundtrip_fixture VALUES(?,?,?)`, id, payloads[i], values[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src, err := source.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Rollback()
+	_, target := pgTarget(t)
+	dst, err := target.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Rollback()
+	if _, err = dst.Exec(`CREATE TABLE roundtrip_fixture (id TEXT COLLATE "C" PRIMARY KEY, payload BYTEA, value TEXT COLLATE "C")`); err != nil {
+		t.Fatal(err)
+	}
+	spec := tableSpec{name: "roundtrip_fixture", columns: []string{"id", "payload", "value"}, types: []string{"TEXT", "BLOB", "TEXT"}, order: `"id"`}
+	n, sourceDigest, err := copyTable(ctx, src, dst, spec, bytes.Repeat([]byte{0x51}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied, targetDigest, err := digestTable(ctx, dst, spec)
+	if err != nil || n != 6 || copied != n || !bytes.Equal(sourceDigest, targetDigest) {
+		t.Fatal("typed transfer digest/count mismatch", err)
+	}
+	if err = dst.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := target.Query(`SELECT id,payload,payload IS NULL,octet_length(payload),value,value IS NULL FROM roundtrip_fixture ORDER BY id COLLATE "C"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		var id string
+		var payload []byte
+		var payloadNull, valueNull bool
+		var length sql.NullInt64
+		var value sql.NullString
+		if err = rows.Scan(&id, &payload, &payloadNull, &length, &value, &valueNull); err != nil {
+			t.Fatal(err)
+		}
+		if index >= len(ids) || id != ids[index] {
+			t.Fatal("Unicode C ordering mismatch")
+		}
+		if payloadNull != (payloads[index] == nil) || valueNull != (values[index] == nil) {
+			t.Fatal("NULL collapsed into empty value")
+		}
+		if payloads[index] != nil {
+			want := payloads[index].([]byte)
+			if !length.Valid || length.Int64 != int64(len(want)) || !bytes.Equal(payload, want) {
+				t.Fatal("BYTEA bytes or empty length changed")
+			}
+		}
+		if values[index] != nil && (!value.Valid || value.String != values[index].(string)) {
+			t.Fatal("TEXT bytes or empty string changed")
+		}
+		index++
+	}
+	if err = rows.Err(); err != nil || index != len(ids) {
+		t.Fatal("roundtrip rows", err)
+	}
+}
+
+func TestImportUnicodeAndNullableText(t *testing.T) {
+	path, key := sourceFixture(t)
+	ctx := context.Background()
+	cipher, _ := security.NewAESGCM(key)
+	store, err := sqlite.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"Z", "a", "é", "Ω", "中", "😀"}
+	for _, id := range ids {
+		uri, err := cipher.Encrypt([]byte(id+"\x00request_uri"), []byte{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = store.BeginAudit(ctx, sqlite.AuditRecord{AuditID: id, StartedAtNS: 5, RouteID: "测试", Protocol: "openai", ParserName: "openai.chat_completions", Method: "POST", Path: "/v1/chat/completions", RequestURIEnc: uri, Mode: "available"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if _, err = source.Exec(`UPDATE audit_records SET error_code='' WHERE audit_id IN ('a','Ω','😀')`); err != nil {
+		t.Fatal(err)
+	}
+	dsn, target := pgTarget(t)
+	if _, err = Run(ctx, Options{SourcePath: path, DatabaseURL: dsn, Key: key, ServiceStopped: true}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := target.Query(`SELECT audit_id,error_code,request_uri_enc FROM audit_records WHERE route_id='测试' ORDER BY audit_id COLLATE "C"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		var id string
+		var code sql.NullString
+		var ciphertext []byte
+		if err = rows.Scan(&id, &code, &ciphertext); err != nil {
+			t.Fatal(err)
+		}
+		if index >= len(ids) || id != ids[index] {
+			t.Fatal("Unicode IDs changed or reordered")
+		}
+		if code.Valid != (index%2 == 1) || code.String != "" {
+			t.Fatal("nullable/empty TEXT distinction changed")
+		}
+		plain, err := cipher.Decrypt([]byte(id+"\x00request_uri"), ciphertext)
+		if err != nil || len(plain) != 0 {
+			t.Fatal("empty plaintext failed authenticated roundtrip")
+		}
+		clear(plain)
+		index++
+	}
+	if err = rows.Err(); err != nil || index != len(ids) {
+		t.Fatal("roundtrip rows", err)
+	}
+}
