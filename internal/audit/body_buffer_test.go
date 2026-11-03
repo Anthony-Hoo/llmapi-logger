@@ -199,3 +199,42 @@ func TestBodyEncoderConcurrentStages(t *testing.T) {
 		t.Fatal("retained shared encoder")
 	}
 }
+
+type failingFinalizeStore struct {
+	*bufferStore
+	session *Session
+	t       *testing.T
+}
+
+func (s *failingFinalizeStore) FinishStage(context.Context, sqlite.StageFinish) error {
+	if s.session.bodyEncoder != nil {
+		s.t.Fatal("encoder retained during final persistence")
+	}
+	return io.ErrClosedPipe
+}
+func (s *failingFinalizeStore) FinishAuditWithResult(_ context.Context, value sqlite.AuditFinish) (sqlite.AuditFinish, error) {
+	return value, io.ErrClosedPipe
+}
+
+func TestBodyEncoderReleasedAfterDeferredFlushAndFailedFinish(t *testing.T) {
+	session, stage, store := bufferSession(t)
+	session.store = &failingFinalizeStore{bufferStore: store, session: session, t: t}
+	session.observeRead(stage.name, bytes.Repeat([]byte("x"), 1024), nil)
+	if len(store.chunks) != 0 {
+		t.Fatal("small body flushed prematurely")
+	}
+	if err := session.Finish(); err == nil {
+		t.Fatal("finalization failure suppressed")
+	}
+	if len(store.chunks) != 1 || stage.body.pending != nil || session.bodyEncoder != nil {
+		t.Fatal("final pending chunk not flushed/released before failed persistence")
+	}
+	// A deferred upstream Close or repeated Finish must not recreate a codec.
+	session.closeReadBody(stage.name, nil)
+	if err := session.Finish(); err == nil {
+		t.Fatal("repeated finish lost failure")
+	}
+	if session.bodyEncoder != nil {
+		t.Fatal("deferred close retained codec")
+	}
+}
