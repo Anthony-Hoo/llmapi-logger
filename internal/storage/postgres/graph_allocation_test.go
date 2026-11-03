@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"llmapi-logger/internal/auditmodel"
 	"os"
@@ -94,6 +95,16 @@ func TestGraphIterativeReconstructionAllocation(t *testing.T) {
 	}
 	defer tx.Rollback()
 	leaf := fmt.Sprintf("allocation-%03d", depth-1)
+	if _, err := preloadAncestorHeaders(tx, leaf, nil, 2); err == nil {
+		t.Fatal("header limit silently truncated chain")
+	}
+	if _, _, err := preloadAncestorReferences(tx, []string{"allocation-000"}, nil, 2); err == nil {
+		t.Fatal("reference limit silently truncated operations")
+	}
+	if _, err := loadRequestRefs(tx, "missing-turn", make(map[string][]auditmodel.ObjectRef), nil); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing turn error=%v", err)
+	}
+
 	measure := func(legacy bool) (uint64, int, []auditmodel.ObjectRef, int) {
 		counted := &graphCountingTransaction{dbTransaction: tx}
 		runtime.GC()
@@ -124,6 +135,9 @@ func TestGraphIterativeReconstructionAllocation(t *testing.T) {
 		t.Fatalf("memo endpoints=%d legacy=%d depth=%d", newMemo, oldMemo, depth)
 	}
 	t.Logf("depth=%d refs=64 legacy_total_alloc=%d iterative_total_alloc=%d ratio=%.3f legacy_memo=%d iterative_memo=%d legacy_queries=%d iterative_queries=%d", depth, oldBytes, newBytes, float64(newBytes)/float64(oldBytes), oldMemo, newMemo, oldQueries, newQueries)
+	if newQueries > 3 {
+		t.Fatalf("ancestor queries=%d want<=3", newQueries)
+	}
 	if newBytes >= oldBytes {
 		t.Fatal("iterative reconstruction did not reduce allocation")
 	}

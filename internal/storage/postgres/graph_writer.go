@@ -663,6 +663,10 @@ func loadRequestRefs(transaction dbTransaction, turnID string, memo map[string][
 	if cached, ok := memo[turnID]; ok {
 		return cloneObjectRefs(cached), nil
 	}
+	headers, err := preloadAncestorHeaders(transaction, turnID, memo, maxAncestorHeaders)
+	if err != nil {
+		return nil, err
+	}
 	type frame struct {
 		id     string
 		header storedTurnHeader
@@ -680,13 +684,17 @@ func loadRequestRefs(transaction dbTransaction, turnID string, memo map[string][
 			result = cached
 			break
 		}
-		var header storedTurnHeader
-		var parent sql.NullString
-		if err := transaction.QueryRow(`SELECT parent_turn_id, parent_base, request_item_count, request_sequence_hash FROM turns WHERE turn_id = $1`, current).Scan(&parent, &header.ParentBase, &header.RequestItemCount, &header.RequestSequenceHash); err != nil {
-			return nil, fmt.Errorf("postgres writer: load turn header: %w", err)
+		header, exists := headers[current]
+		if !exists {
+			return nil, fmt.Errorf("postgres writer: load turn header: %w", sql.ErrNoRows)
 		}
-		if parent.Valid {
-			header.ParentTurnID = &parent.String
+		parent := sql.NullString{}
+		if header.ParentTurnID != nil {
+			parent.String = *header.ParentTurnID
+			parent.Valid = true
+		}
+		if header.RequestItemCount > maxAncestorReferenceRows {
+			return nil, localWriteError("postgres writer: reconstructed reference limit exceeded")
 		}
 		if parent.Valid && header.ParentBase != "request" && header.ParentBase != "post_turn" {
 			return nil, localWriteError("postgres writer: invalid non-root parent base")
@@ -700,21 +708,27 @@ func loadRequestRefs(transaction dbTransaction, turnID string, memo map[string][
 		}
 		current = parent.String
 	}
+	ids := make([]string, 0, len(path))
+	responseIDs := make([]string, 0, len(path))
+	for _, frame := range path {
+		ids = append(ids, frame.id)
+		if frame.header.ParentBase == "post_turn" {
+			responseIDs = append(responseIDs, *frame.header.ParentTurnID)
+		}
+	}
+	operationsByTurn, responsesByTurn, err := preloadAncestorReferences(transaction, ids, responseIDs, maxAncestorReferenceRows)
+	if err != nil {
+		return nil, err
+	}
 	for i := len(path) - 1; i >= 0; i-- {
 		frame := path[i]
 		base := result
 		if frame.header.ParentBase == "post_turn" {
-			response, err := loadResponseRefs(transaction, *frame.header.ParentTurnID)
-			if err != nil {
-				return nil, err
-			}
+			response := responsesByTurn[*frame.header.ParentTurnID]
 			// Do not append into a memoized ancestor's backing array.
 			base = append(append([]auditmodel.ObjectRef(nil), base...), response...)
 		}
-		operations, err := loadContextOperations(transaction, frame.id)
-		if err != nil {
-			return nil, err
-		}
+		operations := operationsByTurn[frame.id]
 		result, err = applyImmutableRefs(base, operations)
 		if err != nil {
 			return nil, err
