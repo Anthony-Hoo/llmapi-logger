@@ -19,7 +19,7 @@ newapi:
   access_token: ""
   user_id: 0
 mode: available
-db_path: ./data/audit.db
+database_url: postgresql://audit_proxy:REPLACE_WITH_PASSWORD@127.0.0.1:5432/audit_proxy?sslmode=disable
 key_path: ./data/audit.key
 admin_token: "replace-with-a-random-token"
 developer_login:
@@ -70,7 +70,7 @@ routes:
 | NewAPI response header | 300 s，可配置 1–86400 s |
 | 审计 Body 聚合块 | 约 1 MiB，自适应压缩后独立加密 |
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
-| SQLite busy timeout | 5 s |
+| PostgreSQL lock timeout | 5 s |
 | parser workers | 1 |
 | NewAPI 管理请求 / 用户目录刷新 | 10 s / 5 min |
 | graceful shutdown | 30 s，可配置 1–86400 s |
@@ -87,7 +87,7 @@ routes:
 4. `newapi.response_header_timeout_seconds` 为 1–86400；默认 300 秒。
 5. `newapi.access_token` 与 `newapi.user_id` 成对可选：前者为空时后者必须为 0；前者非空时不能包含空白，且 user_id 必须为正整数。
 6. mode 只能是 available 或 strict。
-7. db_path、key_path 非空，父目录可创建。
+7. database_url 为 PostgreSQL URL，key_path 非空且父目录可创建；旧 YAML db_path 被拒绝。
 8. `shutdown_timeout_seconds` 为 1–86400；默认 30 秒。
 9. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
 10. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。

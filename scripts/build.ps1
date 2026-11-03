@@ -46,9 +46,14 @@ try {
         & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-proxy-windows-amd64.exe") ./cmd/audit-proxy
         if ($LASTEXITCODE -ne 0) { throw "Windows build failed with exit code $LASTEXITCODE" }
 
+        & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-import-windows-amd64.exe") ./cmd/audit-import
+        if ($LASTEXITCODE -ne 0) { throw "Windows importer build failed" }
+
         $env:GOOS = "linux"
         & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-proxy-linux-amd64") ./cmd/audit-proxy
         if ($LASTEXITCODE -ne 0) { throw "Linux build failed with exit code $LASTEXITCODE" }
+        & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-import-linux-amd64") ./cmd/audit-import
+        if ($LASTEXITCODE -ne 0) { throw "Linux importer build failed" }
     }
     finally {
         Pop-Location
@@ -63,3 +68,6 @@ finally {
 Write-Host "Built:"
 Write-Host "  $(Join-Path $outputPath 'audit-proxy-windows-amd64.exe')"
 Write-Host "  $(Join-Path $outputPath 'audit-proxy-linux-amd64')"
+
+Write-Host "  $(Join-Path $outputPath 'audit-import-windows-amd64.exe')"
+Write-Host "  $(Join-Path $outputPath 'audit-import-linux-amd64')"

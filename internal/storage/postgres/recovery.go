@@ -1,0 +1,192 @@
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"llmapi-logger/internal/security"
+)
+
+type recoveryRequest struct {
+	NowNS     int64
+	Recovered int
+}
+
+// RecoverInterruptedAudits atomically finalizes audits left open by a prior
+// process, repairs the recoverable body lengths from committed chunks, and
+// inserts one aggregate process-exit gap. Repeating it is a no-op.
+func (store *Store) RecoverInterruptedAudits(ctx context.Context, nowNS int64) (int, error) {
+	if nowNS <= 0 {
+		return 0, errors.New("postgres: invalid recovery time")
+	}
+	request := &recoveryRequest{NowNS: nowNS}
+	if err := store.submitSync(ctx, writeRequest{kind: writeRecoverInterruptedAudits, data: request}); err != nil {
+		return 0, err
+	}
+	return request.Recovered, nil
+}
+
+func recoverInterruptedAudits(transaction dbTransaction, request *recoveryRequest, signer *security.IntegritySigner) error {
+	if request == nil || request.NowNS <= 0 {
+		return errors.New("postgres writer: invalid recovery request")
+	}
+
+	var count int
+	var startedAtNS sql.NullInt64
+	if err := transaction.QueryRow(`
+SELECT COUNT(*), MIN(started_at_ns)
+FROM audit_records
+WHERE ended_at_ns IS NULL`).Scan(&count, &startedAtNS); err != nil {
+		return fmt.Errorf("postgres writer: inspect interrupted audits: %w", err)
+	}
+	if count == 0 {
+		request.Recovered = 0
+		return nil
+	}
+	interruptedRows, err := transaction.Query(`
+SELECT audit_id, capture_status
+FROM audit_records
+WHERE ended_at_ns IS NULL
+ORDER BY started_at_ns, audit_id`)
+	if err != nil {
+		return fmt.Errorf("postgres writer: list interrupted audits: %w", err)
+	}
+	auditIDs := make([]string, 0, count)
+	failedAuditIDs := make([]string, 0)
+	for interruptedRows.Next() {
+		var auditID, captureStatus string
+		if err := interruptedRows.Scan(&auditID, &captureStatus); err != nil {
+			_ = interruptedRows.Close()
+			return fmt.Errorf("postgres writer: scan interrupted audit: %w", err)
+		}
+		auditIDs = append(auditIDs, auditID)
+		if captureStatus == CaptureFailed {
+			failedAuditIDs = append(failedAuditIDs, auditID)
+		}
+	}
+	if err := closeRows(interruptedRows); err != nil {
+		return fmt.Errorf("postgres writer: close interrupted audits: %w", err)
+	}
+	// Use the same reconciliation as normal finalization before generic exit
+	// recovery can overwrite a known missing-chunk marker. Completed bodies may
+	// also contain uncommitted chunks in their collector-supplied totals.
+	for _, auditID := range failedAuditIDs {
+		if err := finalizeIncompleteCapture(transaction, auditID, request.NowNS); err != nil {
+			return err
+		}
+	}
+
+	if _, err := transaction.Exec(`
+WITH chunk_lengths AS (
+    SELECT audit_id, stage,
+           SUM(plaintext_length) AS stored_length,
+           MAX("offset" + plaintext_length) AS observed_length,
+           COUNT(*) AS chunk_count
+    FROM body_chunks
+    GROUP BY audit_id, stage
+)
+UPDATE body_streams
+SET stored_length = COALESCE((
+        SELECT lengths.stored_length
+        FROM chunk_lengths AS lengths
+        WHERE lengths.audit_id = body_streams.audit_id
+          AND lengths.stage = body_streams.source_stage
+    ), 0),
+    observed_length = GREATEST(
+        COALESCE((
+            SELECT lengths.stored_length
+            FROM chunk_lengths AS lengths
+            WHERE lengths.audit_id = body_streams.audit_id
+              AND lengths.stage = body_streams.source_stage
+        ), 0),
+        COALESCE((
+            SELECT lengths.observed_length
+            FROM chunk_lengths AS lengths
+            WHERE lengths.audit_id = body_streams.audit_id
+              AND lengths.stage = body_streams.source_stage
+        ), 0)
+    ),
+    sha256 = NULL,
+    hash_complete = 0,
+    eof_seen = 0,
+    state = 'partial',
+    retention_state = 'full',
+    chunk_count = COALESCE((
+        SELECT lengths.chunk_count
+        FROM chunk_lengths AS lengths
+        WHERE lengths.audit_id = body_streams.audit_id
+          AND lengths.stage = body_streams.source_stage
+    ), 0),
+    stream_timeline_complete = 0,
+    error_code = 'process_exit'
+WHERE state = 'streaming'
+  AND EXISTS (
+      SELECT 1
+      FROM audit_records AS audit
+      WHERE audit.audit_id = body_streams.audit_id
+        AND audit.ended_at_ns IS NULL
+  )`); err != nil {
+		return fmt.Errorf("postgres writer: recover body streams: %w", err)
+	}
+
+	if _, err := transaction.Exec(`
+UPDATE http_stages
+SET state = 'partial',
+    ended_at_ns = COALESCE(ended_at_ns, $1),
+    error_code = 'process_exit'
+WHERE state = 'streaming'
+  AND EXISTS (
+      SELECT 1
+      FROM audit_records AS audit
+      WHERE audit.audit_id = http_stages.audit_id
+        AND audit.ended_at_ns IS NULL
+  )`, request.NowNS); err != nil {
+		return fmt.Errorf("postgres writer: recover HTTP stages: %w", err)
+	}
+
+	result, err := transaction.Exec(`
+UPDATE audit_records
+SET ended_at_ns = $1,
+    forward_status = 'interrupted',
+    capture_status = CASE WHEN capture_status = 'failed' THEN 'failed' ELSE 'partial' END,
+    error_code = CASE WHEN capture_status = 'failed' THEN COALESCE(error_code, 'capture_write_failed') ELSE 'process_exit' END
+WHERE ended_at_ns IS NULL`, request.NowNS)
+	if err != nil {
+		return fmt.Errorf("postgres writer: recover interrupted audits: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres writer: count recovered audits: %w", err)
+	}
+	if rows != int64(count) {
+		return fmt.Errorf("postgres writer: recovered %d audits after selecting %d", rows, count)
+	}
+
+	gap := AuditGap{
+		StartedAtNS:  startedAtNS.Int64,
+		EndedAtNS:    request.NowNS,
+		Reason:       GapReasonProcessExit,
+		RequestCount: count,
+		Detail:       GapDetailProcessExit,
+		CreatedAtNS:  request.NowNS,
+	}
+	if err := insertAuditGaps(transaction, []AuditGap{gap}); err != nil {
+		return fmt.Errorf("postgres writer: record recovery gap: %w", err)
+	}
+	for _, auditID := range auditIDs {
+		if _, err := transaction.Exec("UPDATE body_streams SET retention_state = 'full' WHERE audit_id = $1", auditID); err != nil {
+			return fmt.Errorf("postgres writer: retain recovered raw evidence: %w", err)
+		}
+		payloadDigest, err := capturePayloadDigest(context.Background(), transaction, auditID)
+		if err != nil {
+			return err
+		}
+		if err := appendIntegrityEvent(transaction, signer, auditID, integrityCaptureFinalized, payloadDigest, request.NowNS); err != nil {
+			return err
+		}
+	}
+	request.Recovered = count
+	return nil
+}

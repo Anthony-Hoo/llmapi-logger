@@ -381,7 +381,7 @@ admin_listen: 127.0.0.1:18081
 newapi:
   url: '%s'
 mode: available
-db_path: '%s'
+database_url: '%s'
 key_path: '%s'
 admin_token: integration-admin-token
 retention_days: 0
@@ -391,7 +391,7 @@ retention_days: 0
     path: '%s'
     match: exact
     parser: openai.chat_completions%s
-`, yamlQuote(upstreamURL), yamlQuote(filepath.ToSlash(filepath.Join(tempDir, "audit.db"))), yamlQuote(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))), interceptorYAML, yamlQuote(routePath), routeInterceptorYAML)
+`, yamlQuote(upstreamURL), yamlQuote(newIntegrationDatabaseURL(t)), yamlQuote(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))), interceptorYAML, yamlQuote(routePath), routeInterceptorYAML)
 
 	path := filepath.Join(tempDir, "config.yaml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
@@ -399,7 +399,7 @@ retention_days: 0
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		t.Fatalf("load config: %v\nconfig:\n%s", err, contents)
+		t.Fatalf("load config: %v", err)
 	}
 	return cfg
 }

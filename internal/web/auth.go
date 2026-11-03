@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/query"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -245,7 +245,7 @@ func decodeDeveloperPayload(encoded string) (developerSessionPayload, bool) {
 	if err := decoder.Decode(&payload); err != nil {
 		return developerSessionPayload{}, false
 	}
-	if len(payload.Fingerprint) != sqlite.APIKeyFingerprintSize {
+	if len(payload.Fingerprint) != storage.APIKeyFingerprintSize {
 		return developerSessionPayload{}, false
 	}
 	if payload.TokenID != nil && *payload.TokenID < 0 {

@@ -6,11 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strconv"
 
-	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 // Linking places one analysed audit into its session and agent tree
@@ -41,12 +38,12 @@ const (
 )
 
 // LinkStore is the narrow read surface of the linker, implemented by
-// *sqlite.Store.
+// *storage.Store.
 type LinkStore interface {
 	LatestAgentRootFPR(ctx context.Context, nodeFPR, apiKeyFPR []byte, excludeAuditID string) ([]byte, error)
 	HasEarlierAnalysisStep(ctx context.Context, sessionID string, apiKeyFPR []byte, startedAtNS int64, auditID string) (bool, error)
-	ListAnalysisPrevCandidates(ctx context.Context, sessionID string, apiKeyFPR []byte, startedAtNS int64, auditID string, limit int) ([]sqlite.AnalysisLinkCandidate, error)
-	MatchSpawnHints(ctx context.Context, hintFPRs [][]byte, apiKeyFPR []byte, fromNS, toNS int64, excludeAuditID string) ([]sqlite.SpawnHintMatch, error)
+	ListAnalysisPrevCandidates(ctx context.Context, sessionID string, apiKeyFPR []byte, startedAtNS int64, auditID string, limit int) ([]storage.AnalysisLinkCandidate, error)
+	MatchSpawnHints(ctx context.Context, hintFPRs [][]byte, apiKeyFPR []byte, fromNS, toNS int64, excludeAuditID string) ([]storage.SpawnHintMatch, error)
 }
 
 // DetailCodec seals a Detail for storage and opens earlier rows' details.
@@ -55,58 +52,6 @@ type LinkStore interface {
 type DetailCodec interface {
 	SealDetail(auditID string, detail Detail) ([]byte, error)
 	OpenDetail(auditID string, version int, sealed []byte) (Detail, error)
-}
-
-// CipherDetailCodec encrypts Detail JSON with the audit cipher under AAD
-// (audit_id, "analysis_detail", analysis_version).
-type CipherDetailCodec struct {
-	Cipher security.Cipher
-}
-
-func detailAAD(auditID string, version int) ([]byte, error) {
-	return security.AAD(auditID, "analysis_detail", strconv.Itoa(version))
-}
-
-// SealDetail encrypts detail for the current AnalysisVersion. The plaintext
-// JSON is cleared before returning.
-func (codec CipherDetailCodec) SealDetail(auditID string, detail Detail) ([]byte, error) {
-	if codec.Cipher == nil {
-		return nil, errors.New("insights: nil detail cipher")
-	}
-	aad, err := detailAAD(auditID, AnalysisVersion)
-	if err != nil {
-		return nil, err
-	}
-	plaintext, err := json.Marshal(detail)
-	if err != nil {
-		return nil, fmt.Errorf("insights: encode detail: %w", err)
-	}
-	defer clear(plaintext)
-	return codec.Cipher.Encrypt(aad, plaintext)
-}
-
-// OpenDetail decrypts and decodes one stored detail blob.
-func (codec CipherDetailCodec) OpenDetail(auditID string, version int, sealed []byte) (Detail, error) {
-	if codec.Cipher == nil {
-		return Detail{}, errors.New("insights: nil detail cipher")
-	}
-	if len(sealed) == 0 {
-		return Detail{}, errors.New("insights: empty detail")
-	}
-	aad, err := detailAAD(auditID, version)
-	if err != nil {
-		return Detail{}, err
-	}
-	plaintext, err := codec.Cipher.Decrypt(aad, sealed)
-	if err != nil {
-		return Detail{}, fmt.Errorf("insights: decrypt detail: %w", err)
-	}
-	defer clear(plaintext)
-	var detail Detail
-	if err := json.Unmarshal(plaintext, &detail); err != nil {
-		return Detail{}, fmt.Errorf("insights: decode detail: %w", err)
-	}
-	return detail, nil
 }
 
 // Linker turns an Analysis and AgentIdentity into the stored row.
@@ -130,7 +75,7 @@ func NewLinker(store LinkStore, fp Fingerprinter, codec DetailCodec, vocab *Voca
 
 // LinkInput is everything the linker needs about one audit.
 type LinkInput struct {
-	Meta         sqlite.AnalysisAuditMeta
+	Meta         storage.AnalysisAuditMeta
 	Protocol     string
 	Analysis     Analysis
 	Identity     AgentIdentity
@@ -162,13 +107,13 @@ type LinkInput struct {
 //     content matched to a unique parent spawn call.
 //  6. agent_root_fpr: the explicit root header; else the parent's stored root;
 //     else the parent tag; else the node tag.
-func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRow, error) {
+func (linker *Linker) Link(ctx context.Context, in LinkInput) (storage.AnalysisRow, error) {
 	if linker == nil {
-		return sqlite.AnalysisRow{}, errors.New("insights: nil linker")
+		return storage.AnalysisRow{}, errors.New("insights: nil linker")
 	}
 	analysis, identity, meta := in.Analysis, in.Identity, in.Meta
 	if meta.AuditID == "" {
-		return sqlite.AnalysisRow{}, errors.New("insights: link input without audit id")
+		return storage.AnalysisRow{}, errors.New("insights: link input without audit id")
 	}
 	client := firstNonEmpty(identity.Client, ClientUnknown)
 	identity.Client = client
@@ -208,23 +153,23 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 	keyed := len(meta.APIKeyFPR) != 0
 
 	first := true
-	var prev *sqlite.AnalysisLinkCandidate
+	var prev *storage.AnalysisLinkCandidate
 	var prevDetail *Detail
 	if sessionID != "" && keyed {
 		earlier, err := linker.store.HasEarlierAnalysisStep(ctx, sessionID, meta.APIKeyFPR, meta.StartedAtNS, meta.AuditID)
 		if err != nil {
-			return sqlite.AnalysisRow{}, err
+			return storage.AnalysisRow{}, err
 		}
 		first = !earlier
 		if earlier {
 			prev, prevDetail, err = linker.choosePrev(ctx, sessionID, sessionLink, meta, analysis.Detail.ItemFPRs)
 			if err != nil {
-				return sqlite.AnalysisRow{}, err
+				return storage.AnalysisRow{}, err
 			}
 		}
 	}
 
-	row := sqlite.AnalysisRow{
+	row := storage.AnalysisRow{
 		AuditID:         meta.AuditID,
 		AnalysisVersion: analysis.Version,
 		AnalyzedAtNS:    in.AnalyzedAtNS,
@@ -293,7 +238,7 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 	} else if identity.ParentID == "" && first && !auxiliaryRole(identity.Role) && linker.contentMatchApplies(identity) {
 		match, confidence, err := linker.matchParent(ctx, meta, in.OpeningHints)
 		if err != nil {
-			return sqlite.AnalysisRow{}, err
+			return storage.AnalysisRow{}, err
 		}
 		if match != nil {
 			parentFPR = match.AgentNodeFPR
@@ -325,7 +270,7 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 		if keyed {
 			stored, err := linker.store.LatestAgentRootFPR(ctx, parentFPR, meta.APIKeyFPR, meta.AuditID)
 			if err != nil {
-				return sqlite.AnalysisRow{}, err
+				return storage.AnalysisRow{}, err
 			}
 			if len(stored) != 0 {
 				rootFPR = stored
@@ -349,17 +294,25 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (sqlite.AnalysisRo
 
 	detail := analysis.Detail
 	detail.Agent = identity
-	sealed, err := linker.codec.SealDetail(meta.AuditID, detail)
-	if err != nil {
-		return sqlite.AnalysisRow{}, err
+	if codec, ok := linker.codec.(CipherDetailCodec); ok {
+		var err error
+		row.DetailEnc, row.DetailRoot, row.DetailObjects, err = codec.SealDetailRow(ctx, meta.AuditID, detail)
+		if err != nil {
+			return storage.AnalysisRow{}, err
+		}
+	} else {
+		sealed, err := linker.codec.SealDetail(meta.AuditID, detail)
+		if err != nil {
+			return storage.AnalysisRow{}, err
+		}
+		row.DetailEnc = sealed
 	}
-	row.DetailEnc = sealed
 	return row, nil
 }
 
 // choosePrev picks the previous step and opens its detail once. A detail that
 // cannot be opened leaves only the fingerprint-level events computable.
-func (linker *Linker) choosePrev(ctx context.Context, sessionID, sessionLink string, meta sqlite.AnalysisAuditMeta, itemFPRs []string) (*sqlite.AnalysisLinkCandidate, *Detail, error) {
+func (linker *Linker) choosePrev(ctx context.Context, sessionID, sessionLink string, meta storage.AnalysisAuditMeta, itemFPRs []string) (*storage.AnalysisLinkCandidate, *Detail, error) {
 	limit := 1
 	if sessionLink == SessionLinkExplicit || sessionLink == SessionLinkInferred {
 		limit = inferredPrevCandidates
@@ -370,7 +323,7 @@ func (linker *Linker) choosePrev(ctx context.Context, sessionID, sessionLink str
 	}
 	if limit == 1 {
 		chosen := candidates[0]
-		if detail, err := linker.codec.OpenDetail(chosen.AuditID, chosen.AnalysisVersion, chosen.DetailEnc); err == nil {
+		if detail, err := linker.openDetail(ctx, chosen.AuditID, chosen.AnalysisVersion, chosen.DetailEnc); err == nil {
 			return &chosen, &detail, nil
 		}
 		return &chosen, nil, nil
@@ -380,7 +333,7 @@ func (linker *Linker) choosePrev(ctx context.Context, sessionID, sessionLink str
 	best, bestPrefix := -1, -1
 	var bestDetail *Detail
 	for index := range candidates {
-		detail, err := linker.codec.OpenDetail(candidates[index].AuditID, candidates[index].AnalysisVersion, candidates[index].DetailEnc)
+		detail, err := linker.openDetail(ctx, candidates[index].AuditID, candidates[index].AnalysisVersion, candidates[index].DetailEnc)
 		if err != nil {
 			continue
 		}
@@ -395,7 +348,7 @@ func (linker *Linker) choosePrev(ctx context.Context, sessionID, sessionLink str
 }
 
 // diffEvents compares this step with its previous step (doc section 5.4).
-func diffEvents(analysis Analysis, prev *sqlite.AnalysisLinkCandidate, prevDetail *Detail) (int, *int, *int) {
+func diffEvents(analysis Analysis, prev *storage.AnalysisLinkCandidate, prevDetail *Detail) (int, *int, *int) {
 	flags := 0
 	if prev.Model != nil && *prev.Model != "" && analysis.Model != "" && *prev.Model != analysis.Model {
 		flags |= EventModelSwitch
@@ -472,7 +425,7 @@ func (linker *Linker) contentMatchApplies(identity AgentIdentity) bool {
 
 // matchParent looks up spawn hints of the same api key within the window
 // before this request. Only exactly one distinct parent audit links.
-func (linker *Linker) matchParent(ctx context.Context, meta sqlite.AnalysisAuditMeta, hints []OpeningHint) (*sqlite.SpawnHintMatch, int, error) {
+func (linker *Linker) matchParent(ctx context.Context, meta storage.AnalysisAuditMeta, hints []OpeningHint) (*storage.SpawnHintMatch, int, error) {
 	if len(meta.APIKeyFPR) == 0 || len(hints) == 0 {
 		return nil, 0, nil
 	}
@@ -499,7 +452,7 @@ func (linker *Linker) matchParent(ctx context.Context, meta sqlite.AnalysisAudit
 	if err != nil || len(matches) == 0 {
 		return nil, 0, err
 	}
-	var chosen *sqlite.SpawnHintMatch
+	var chosen *storage.SpawnHintMatch
 	viaOriginal := false
 	for index := range matches {
 		match := &matches[index]
@@ -533,4 +486,11 @@ func optionalText(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+func (linker *Linker) openDetail(ctx context.Context, auditID string, version int, sealed []byte) (Detail, error) {
+	if codec, ok := linker.codec.(CipherDetailCodec); ok {
+		return codec.OpenDetailContext(ctx, auditID, version, sealed)
+	}
+	return linker.codec.OpenDetail(auditID, version, sealed)
 }

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 // Stable error codes for analysis failures. They are logged by the parser
@@ -43,11 +43,11 @@ func ErrorCode(err error) string {
 }
 
 // RunnerStore is the persistence surface of Runner, implemented by
-// *sqlite.Store.
+// *storage.Store.
 type RunnerStore interface {
 	LinkStore
-	LoadAnalysisAuditMeta(ctx context.Context, auditID string) (sqlite.AnalysisAuditMeta, error)
-	SaveAnalysis(ctx context.Context, row sqlite.AnalysisRow) error
+	LoadAnalysisAuditMeta(ctx context.Context, auditID string) (storage.AnalysisAuditMeta, error)
+	SaveAnalysis(ctx context.Context, row storage.AnalysisRow) error
 }
 
 // Runner analyses, links and stores one parsed audit. It is called by the
@@ -68,13 +68,14 @@ func NewRunner(store RunnerStore, cipher security.Cipher, vocab *Vocabulary, fp 
 	}
 	// A typed nil fingerprinter inside the interface returns nil tags, which
 	// would silently store rows without any fingerprint.
-	if len(fp.Fingerprint(DomainItem, nil)) != sqlite.AnalysisFingerprintSize {
+	if len(fp.Fingerprint(DomainItem, nil)) != storage.AnalysisFingerprintSize {
 		return nil, errors.New("insights: fingerprinter must produce 32-byte tags")
 	}
 	if vocab == nil {
 		vocab = defaultVocabulary()
 	}
-	linker, err := NewLinker(store, fp, CipherDetailCodec{Cipher: cipher}, vocab)
+	compactStore, _ := store.(CompactDetailStore)
+	linker, err := NewLinker(store, fp, CipherDetailCodec{Cipher: cipher, Store: compactStore, Fingerprinter: fp}, vocab)
 	if err != nil {
 		return nil, err
 	}

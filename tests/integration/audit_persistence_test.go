@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -28,7 +27,7 @@ import (
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -67,7 +66,25 @@ type persistedBody struct {
 	state          string
 }
 
+type synchronizedLogBuffer struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(p)
+}
+
+func (b *synchronizedLogBuffer) snapshot() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.data.Bytes())
+}
+
 type runningApp struct {
+	logs     *synchronizedLogBuffer
 	baseURL  string
 	adminURL string
 	cancel   context.CancelFunc
@@ -168,7 +185,7 @@ func TestNonLLMPassthroughDoesNotBypassAuditedRoutes(t *testing.T) {
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("upstream calls after models request = %d, want 1", got)
 	}
-	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+	if got := auditRecordCount(t, cfg.DatabaseURL); got != 0 {
 		t.Fatalf("audit records after models passthrough = %d, want 0", got)
 	}
 
@@ -192,7 +209,7 @@ func TestNonLLMPassthroughDoesNotBypassAuditedRoutes(t *testing.T) {
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("encoded route reached upstream: calls = %d, want 1", got)
 	}
-	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+	if got := auditRecordCount(t, cfg.DatabaseURL); got != 0 {
 		t.Fatalf("encoded rejected route created %d audit records, want 0", got)
 	}
 
@@ -226,7 +243,7 @@ func TestNonLLMPassthroughDoesNotBypassAuditedRoutes(t *testing.T) {
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("protected route variants reached upstream: calls = %d, want 1", got)
 	}
-	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+	if got := auditRecordCount(t, cfg.DatabaseURL); got != 0 {
 		t.Fatalf("protected rejected routes created %d audit records, want 0", got)
 	}
 
@@ -243,11 +260,11 @@ func TestNonLLMPassthroughDoesNotBypassAuditedRoutes(t *testing.T) {
 	if auditedResponse.StatusCode != http.StatusCreated {
 		t.Fatalf("audited route status = %d, want %d", auditedResponse.StatusCode, http.StatusCreated)
 	}
-	audit := waitForFinishedAudit(t, cfg.DBPath)
+	audit := waitForFinishedAudit(t, cfg.DatabaseURL)
 	if audit.forwardStatus != "completed" || !audit.statusCode.Valid || audit.statusCode.Int64 != http.StatusCreated {
 		t.Fatalf("audited route record = %+v, want completed 201", audit)
 	}
-	if got := auditRecordCount(t, cfg.DBPath); got != 1 {
+	if got := auditRecordCount(t, cfg.DatabaseURL); got != 1 {
 		t.Fatalf("audit records after audited route = %d, want 1", got)
 	}
 	if got := upstreamCalls.Load(); got != 2 {
@@ -288,7 +305,7 @@ func TestTrailingSlashNonLLMPathUsesPassthrough(t *testing.T) {
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
 	}
-	if got := auditRecordCount(t, cfg.DBPath); got != 0 {
+	if got := auditRecordCount(t, cfg.DatabaseURL); got != 0 {
 		t.Fatalf("trailing-slash passthrough created %d audit records, want 0", got)
 	}
 }
@@ -352,7 +369,7 @@ func TestAuditPersistsFourEncryptedBodyStages(t *testing.T) {
 		t.Fatal("response body changed while auditing")
 	}
 
-	audit := waitForFinishedAudit(t, cfg.DBPath)
+	audit := waitForFinishedAudit(t, cfg.DatabaseURL)
 	if audit.forwardStatus != "completed" {
 		t.Errorf("forward_status = %q, want completed", audit.forwardStatus)
 	}
@@ -366,7 +383,7 @@ func TestAuditPersistsFourEncryptedBodyStages(t *testing.T) {
 		t.Errorf("allowed audit block fields = %+v/%+v, want NULL/NULL", audit.blockedBy, audit.blockCode)
 	}
 
-	database := openAuditDatabase(t, cfg.DBPath)
+	database := openAuditDatabase(t, cfg.DatabaseURL)
 	defer database.Close()
 	stages := readStages(t, database, audit.auditID)
 	wantStages := []string{stageRequestReceived, stageRequestSent, stageResponseReceived, stageResponseSent}
@@ -423,7 +440,7 @@ func TestAuditPersistsFourEncryptedBodyStages(t *testing.T) {
 		}
 	}
 	var owningStages int
-	if err := database.QueryRow(`SELECT COUNT(DISTINCT stage) FROM body_chunks WHERE audit_id = ?`, audit.auditID).Scan(&owningStages); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(DISTINCT stage) FROM body_chunks WHERE audit_id = $1`, audit.auditID).Scan(&owningStages); err != nil {
 		t.Fatal(err)
 	}
 	if owningStages != 2 {
@@ -454,11 +471,21 @@ func TestAuditPersistsFourEncryptedBodyStages(t *testing.T) {
 		[]byte("response-header-plaintext-c37fd91a"),
 		[]byte(responseTrailerSecret),
 	}
-	assertSQLiteFilesDoNotContain(t, cfg.DBPath, markers)
+	assertPostgresRowsDoNotContain(t, cfg.DatabaseURL, markers)
+	for _, marker := range markers {
+		if bytes.Contains(running.logs.snapshot(), marker) {
+			t.Errorf("application logs contain plaintext marker %q", marker)
+		}
+	}
 	if err := running.stop(); err != nil {
 		t.Fatalf("stop audited app: %v", err)
 	}
-	assertSQLiteFilesDoNotContain(t, cfg.DBPath, markers)
+	assertPostgresRowsDoNotContain(t, cfg.DatabaseURL, markers)
+	for _, marker := range markers {
+		if bytes.Contains(running.logs.snapshot(), marker) {
+			t.Errorf("application logs contain plaintext marker %q", marker)
+		}
+	}
 }
 
 func TestAuditPersistsInterceptorRejectionWithoutUnreachedStages(t *testing.T) {
@@ -492,7 +519,7 @@ func TestAuditPersistsInterceptorRejectionWithoutUnreachedStages(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want 0", got)
 	}
 
-	audit := waitForFinishedAudit(t, cfg.DBPath)
+	audit := waitForFinishedAudit(t, cfg.DatabaseURL)
 	if audit.forwardStatus != "rejected" {
 		t.Errorf("forward_status = %q, want rejected", audit.forwardStatus)
 	}
@@ -509,7 +536,7 @@ func TestAuditPersistsInterceptorRejectionWithoutUnreachedStages(t *testing.T) {
 		t.Errorf("parse_status = %q, want skipped", audit.parseStatus)
 	}
 
-	database := openAuditDatabase(t, cfg.DBPath)
+	database := openAuditDatabase(t, cfg.DatabaseURL)
 	defer database.Close()
 	stages := readStages(t, database, audit.auditID)
 	if len(stages) != 1 {
@@ -526,8 +553,8 @@ func TestAuditPersistsInterceptorRejectionWithoutUnreachedStages(t *testing.T) {
 	var unreachedBodies, unreachedChunks int
 	if err := database.QueryRow(`
 SELECT
-    (SELECT count(*) FROM body_streams WHERE audit_id = ? AND stage IN (?, ?, ?)),
-    (SELECT count(*) FROM body_chunks WHERE audit_id = ? AND stage IN (?, ?, ?))
+    (SELECT count(*) FROM body_streams WHERE audit_id = $1 AND stage IN ($2, $3, $4)),
+    (SELECT count(*) FROM body_chunks WHERE audit_id = $5 AND stage IN ($6, $7, $8))
 `, audit.auditID, stageRequestSent, stageResponseReceived, stageResponseSent,
 		audit.auditID, stageRequestSent, stageResponseReceived, stageResponseSent,
 	).Scan(&unreachedBodies, &unreachedChunks); err != nil {
@@ -715,18 +742,18 @@ func TestMalformedInlineBinaryRetainsCompleteRawEvidence(t *testing.T) {
 		t.Fatalf("response = %d %q err=%v", response.StatusCode, gotResponse, err)
 	}
 
-	audit := waitForFinishedAudit(t, cfg.DBPath)
-	errorCode := waitForParserError(t, cfg.DBPath, audit.auditID)
+	audit := waitForFinishedAudit(t, cfg.DatabaseURL)
+	errorCode := waitForParserError(t, cfg.DatabaseURL, audit.auditID)
 	if errorCode != "normalization_failed" && errorCode != "reconstruction_failed" {
 		t.Fatalf("parser error_code = %q", errorCode)
 	}
-	database := openAuditDatabase(t, cfg.DBPath)
+	database := openAuditDatabase(t, cfg.DatabaseURL)
 	defer database.Close()
 	var nonFullBodies, chunkCount int
 	if err := database.QueryRow(`
 SELECT
-    (SELECT COUNT(*) FROM body_streams WHERE audit_id = ? AND retention_state <> 'full'),
-    (SELECT COUNT(*) FROM body_chunks WHERE audit_id = ?)
+    (SELECT COUNT(*) FROM body_streams WHERE audit_id = $1 AND retention_state <> 'full'),
+    (SELECT COUNT(*) FROM body_chunks WHERE audit_id = $2)
 `, audit.auditID, audit.auditID).Scan(&nonFullBodies, &chunkCount); err != nil {
 		t.Fatal(err)
 	}
@@ -841,7 +868,7 @@ func waitForParserError(t *testing.T, path, auditID string) string {
 SELECT a.parse_status, p.error_code
 FROM audit_records AS a
 LEFT JOIN parsed_results AS p ON p.audit_id = a.audit_id
-WHERE a.audit_id = ?`, auditID).Scan(&lastStatus, &errorCode)
+WHERE a.audit_id = $1`, auditID).Scan(&lastStatus, &errorCode)
 		if err == nil && (lastStatus == "partial" || lastStatus == "error") && errorCode.Valid {
 			return errorCode.String
 		}
@@ -900,13 +927,15 @@ func startApp(t *testing.T, cfg config.Config) *runningApp {
 	cfg.Listen = address
 	cfg.AdminListen = adminAddress
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logs := &synchronizedLogBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logs, nil))
 	application, err := app.New(cfg, logger)
 	if err != nil {
 		t.Fatalf("assemble audited app: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	running := &runningApp{
+		logs:     logs,
 		baseURL:  "http://" + address,
 		adminURL: "http://" + adminAddress,
 		cancel:   cancel,
@@ -979,12 +1008,7 @@ func waitForFinishedAudit(t *testing.T, path string) persistedAudit {
 	deadline := time.Now().Add(integrationTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err != nil {
-			lastErr = err
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		database, err := sql.Open("sqlite", path)
+		database, err := sql.Open("pgx", path)
 		if err != nil {
 			lastErr = err
 			time.Sleep(10 * time.Millisecond)
@@ -1016,18 +1040,18 @@ LIMIT 1
 		lastErr = err
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for finished audit in %s: %v", path, lastErr)
+	t.Fatalf("timed out waiting for finished audit: %v", lastErr)
 	return persistedAudit{}
 }
 
 func openAuditDatabase(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", path)
+	database, err := sql.Open("pgx", path)
 	if err != nil {
 		t.Fatalf("open audit database: %v", err)
 	}
 	database.SetMaxOpenConns(1)
-	if _, err := database.Exec("PRAGMA query_only=ON"); err != nil {
+	if _, err := database.Exec("SET default_transaction_read_only = on"); err != nil {
 		_ = database.Close()
 		t.Fatalf("enable query-only audit database: %v", err)
 	}
@@ -1050,7 +1074,7 @@ func readStages(t *testing.T, database *sql.DB, auditID string) map[string]persi
 	rows, err := database.Query(`
 SELECT stage, state, status_code
 FROM http_stages
-WHERE audit_id = ?
+WHERE audit_id = $1
 `, auditID)
 	if err != nil {
 		t.Fatalf("query audit stages: %v", err)
@@ -1075,7 +1099,7 @@ func readBodies(t *testing.T, database *sql.DB, auditID string) map[string]persi
 	rows, err := database.Query(`
 SELECT stage, source_stage, observed_length, stored_length, sha256, hash_complete, eof_seen, state
 FROM body_streams
-WHERE audit_id = ?
+WHERE audit_id = $1
 `, auditID)
 	if err != nil {
 		t.Fatalf("query audit bodies: %v", err)
@@ -1142,14 +1166,14 @@ func assertEncryptedChunks(
 	t.Helper()
 	var sourceStage string
 	if err := database.QueryRow(`
-SELECT source_stage FROM body_streams WHERE audit_id = ? AND stage = ?
+SELECT source_stage FROM body_streams WHERE audit_id = $1 AND stage = $2
 `, auditID, stage).Scan(&sourceStage); err != nil {
 		t.Fatalf("resolve %s chunk source: %v", stage, err)
 	}
 	rows, err := database.Query(`
 SELECT seq, "offset", plaintext_length, encoded_length, compression, data_enc
 FROM body_chunks
-WHERE audit_id = ? AND stage = ?
+WHERE audit_id = $1 AND stage = $2
 ORDER BY seq
 `, auditID, sourceStage)
 	if err != nil {
@@ -1233,7 +1257,7 @@ func assertEncryptedHeader(
 	err := database.QueryRow(`
 SELECT kind, name, value_index, value_length, value_enc
 FROM http_headers
-WHERE audit_id = ? AND stage = ? AND lower(name) = lower(?)
+WHERE audit_id = $1 AND stage = $2 AND lower(name) = lower($3)
 ORDER BY value_index
 LIMIT 1
 `, auditID, stage, name).Scan(&kind, &storedName, &valueIndex, &valueLength, &encrypted)
@@ -1279,7 +1303,7 @@ func assertEncryptedTrailer(
 	err := database.QueryRow(`
 SELECT name, value_index, value_length, value_enc
 FROM http_headers
-WHERE audit_id = ? AND stage = ? AND kind = 'trailer' AND lower(name) = lower(?)
+WHERE audit_id = $1 AND stage = $2 AND kind = 'trailer' AND lower(name) = lower($3)
 ORDER BY value_index
 LIMIT 1
 `, auditID, stage, name).Scan(&storedName, &valueIndex, &valueLength, &encrypted)
@@ -1309,24 +1333,79 @@ LIMIT 1
 	}
 }
 
-func assertSQLiteFilesDoNotContain(t *testing.T, databasePath string, markers [][]byte) {
+// Scan the raw values of every persisted column, including BYTEA ciphertext.
+// Text dumps alone would hex-escape BYTEA and could hide accidentally stored
+// plaintext. A repeatable-read snapshot checks all tables consistently while
+// the asynchronous parser may still be active. Repeat after application shutdown.
+func assertPostgresRowsDoNotContain(t *testing.T, dsn string, markers [][]byte) {
 	t.Helper()
-	for _, path := range []string{databasePath, databasePath + "-wal"} {
-		contents, err := os.ReadFile(path)
-		if err != nil {
-			if errorsIsNotExist(err) {
-				continue
-			}
-			t.Fatalf("read SQLite file %s: %v", filepath.Base(path), err)
-		}
-		for _, marker := range markers {
-			if bytes.Contains(contents, marker) {
-				t.Errorf("SQLite file %s contains plaintext marker %q", filepath.Base(path), marker)
-			}
-		}
+	db := openAuditDatabase(t, dsn)
+	defer db.Close()
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func errorsIsNotExist(err error) bool {
-	return os.IsNotExist(err)
+	defer tx.Rollback()
+	tables, err := tx.Query(`SELECT tablename FROM pg_tables WHERE schemaname = current_schema() ORDER BY tablename`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for tables.Next() {
+		var name string
+		if err := tables.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := tables.Err(); err != nil {
+		t.Fatal(err)
+	}
+	tables.Close()
+	if len(names) == 0 {
+		t.Fatal("privacy check found no persisted tables")
+	}
+	for _, name := range names {
+		rows, err := tx.Query(`SELECT * FROM "` + strings.ReplaceAll(name, `"`, `""`) + `"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			values := make([]any, len(columns))
+			pointers := make([]any, len(columns))
+			for i := range values {
+				pointers[i] = &values[i]
+			}
+			if err := rows.Scan(pointers...); err != nil {
+				t.Fatal(err)
+			}
+			for i, value := range values {
+				var raw []byte
+				switch value := value.(type) {
+				case []byte:
+					raw = value
+				case string:
+					raw = []byte(value)
+				default:
+					raw = []byte(fmt.Sprint(value))
+				}
+				for _, marker := range markers {
+					if bytes.Contains(raw, marker) {
+						t.Errorf("PostgreSQL %s.%s contains plaintext marker %q", name, columns[i], marker)
+					}
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 }

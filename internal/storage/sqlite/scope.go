@@ -1,7 +1,8 @@
 package sqlite
 
+import "llmapi-logger/internal/storage"
+
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -27,48 +28,12 @@ var developerVisibleBlockCodes = []string{"body_too_large"}
 // key. Fingerprint is required; TokenID additionally admits records that were
 // attributed through the NewAPI request log before this database ever stored
 // fingerprints.
-type AuditScope struct {
-	Fingerprint []byte
-	TokenID     *int64
-}
+type AuditScope = storage.AuditScope
 
 // AuditScopeRow is the minimal ownership and visibility projection of one audit,
 // read by the primary key so detail endpoints can authorize without paying for
 // the full detail projection.
-type AuditScopeRow struct {
-	APIKeyFPR     []byte
-	NewAPITokenID *int64
-	ForwardStatus string
-	BlockCode     *string
-}
-
-// Validate rejects a scope that could not have come from a real session.
-func (scope *AuditScope) Validate() error {
-	if scope == nil {
-		return errors.New("sqlite: nil audit scope")
-	}
-	if len(scope.Fingerprint) != APIKeyFingerprintSize {
-		return fmt.Errorf("sqlite: audit scope fingerprint must be %d bytes", APIKeyFingerprintSize)
-	}
-	if scope.TokenID != nil && *scope.TokenID < 0 {
-		return errors.New("sqlite: audit scope token id must not be negative")
-	}
-	return nil
-}
-
-// Allows reports whether one audit is readable in this scope. It is the Go
-// counterpart of condition and must stay in step with it: both combine
-// ownership with the policy-block exclusion, and neither may be applied alone.
-func (scope *AuditScope) Allows(row AuditScopeRow) bool {
-	if scope == nil {
-		return false
-	}
-	owned := len(row.APIKeyFPR) != 0 && bytes.Equal(row.APIKeyFPR, scope.Fingerprint)
-	if !owned && scope.TokenID != nil && row.NewAPITokenID != nil {
-		owned = *row.NewAPITokenID == *scope.TokenID
-	}
-	return owned && visibleToDeveloper(row.ForwardStatus, row.BlockCode)
-}
+type AuditScopeRow = storage.AuditScopeRow
 
 func visibleToDeveloper(forwardStatus string, blockCode *string) bool {
 	if forwardStatus != ForwardRejected {
@@ -87,11 +52,11 @@ func visibleToDeveloper(forwardStatus string, blockCode *string) bool {
 
 // condition renders the same rule as SQL, for the audit list query. The list
 // already joins token_links as t and audit_records as a.
-func (scope *AuditScope) condition() (string, []any) {
-	return scope.conditionWithAliases("a", "t")
+func scopeCondition(scope *AuditScope) (string, []any) {
+	return scopeConditionWithAliases(scope, "a", "t")
 }
 
-func (scope *AuditScope) conditionWithAliases(auditAlias, tokenAlias string) (string, []any) {
+func scopeConditionWithAliases(scope *AuditScope, auditAlias, tokenAlias string) (string, []any) {
 	arguments := []any{scope.Fingerprint}
 	ownership := auditAlias + ".api_key_fpr = ?"
 	if scope.TokenID != nil {

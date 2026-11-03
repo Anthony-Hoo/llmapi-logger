@@ -9,14 +9,14 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const (
-	StatusOK      = sqlite.ParseOK
-	StatusPartial = sqlite.ParsePartial
-	StatusError   = sqlite.ParseError
-	StatusSkipped = sqlite.ParseSkipped
+	StatusOK      = storage.ParseOK
+	StatusPartial = storage.ParsePartial
+	StatusError   = storage.ParseError
+	StatusSkipped = storage.ParseSkipped
 
 	MaxDecodedBodyBytes = 64 << 20
 	MaxGzipRatio        = 50
@@ -40,14 +40,14 @@ type AuditNormalizer interface {
 type Store interface {
 	ResetProcessingParses(context.Context) error
 	ListPendingParseIDs(context.Context, int) ([]string, error)
-	LoadParserAudit(context.Context, string) (sqlite.ParserAudit, error)
+	LoadParserAudit(context.Context, string) (storage.ParserAudit, error)
 	ClaimPendingParse(context.Context, string) (bool, error)
 	ReleaseProcessingParse(context.Context, string) error
-	LoadParserStage(context.Context, string, string) (sqlite.ParserStage, error)
-	ReadParserChunks(context.Context, string, string, int64, int) ([]sqlite.BodyChunk, error)
-	LoadParserRequestHeaders(context.Context, string, []string) ([]sqlite.HeaderEvidence, error)
-	SaveParsedResult(context.Context, sqlite.ParsedResult) error
-	SaveParsedAudit(context.Context, sqlite.ParsedAudit) error
+	LoadParserStage(context.Context, string, string) (storage.ParserStage, error)
+	ReadParserChunks(context.Context, string, string, int64, int) ([]storage.BodyChunk, error)
+	LoadParserRequestHeaders(context.Context, string, []string) ([]storage.HeaderEvidence, error)
+	SaveParsedResult(context.Context, storage.ParsedResult) error
+	SaveParsedAudit(context.Context, storage.ParsedAudit) error
 }
 
 // BodySource is one decoded request or response body. Complete reports that

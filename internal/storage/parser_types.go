@@ -1,0 +1,48 @@
+package storage
+
+// ParserAudit is the narrow audit metadata view required by the asynchronous
+// parser worker.
+type ParserAudit struct {
+	AuditID       string
+	Protocol      string
+	ParserName    string
+	Path          string
+	ForwardStatus string
+	CaptureStatus string
+	ParseStatus   string
+}
+
+// ParserStage is one parser-relevant HTTP stage plus its encrypted content
+// metadata. Body is nil when the stage had no observed body stream.
+type ParserStage struct {
+	Stage   HTTPStage
+	Body    *BodyStream
+	Headers []HTTPHeader
+}
+
+// ParsedResult is the latest compact protocol summary for one audit. Sensitive
+// structured details are accepted only as already encrypted ParsedJSONEnc.
+type ParsedResult struct {
+	AuditID         string
+	ParserName      string
+	ParserVersion   string
+	Status          string
+	RequestModel    *string
+	ResponseModel   *string
+	RequestedStream *bool
+	ObservedStream  *bool
+	ResponseID      *string
+	UsageInput      *int64
+	UsageOutput     *int64
+	UsageTotal      *int64
+	ErrorType       *string
+	ErrorCode       *string
+	// UpstreamErrorClass is derived, unsigned display metadata. It never
+	// participates in an integrity digest.
+	UpstreamErrorClass *string
+	MessageCount       *int
+	ToolCallCount      *int
+	HasToolCall        *bool
+	ParsedJSONEnc      []byte
+	ParsedAtNS         int64
+}

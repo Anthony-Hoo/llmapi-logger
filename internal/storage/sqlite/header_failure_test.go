@@ -18,7 +18,7 @@ func TestFailedHeaderGroupMarksOnlyAffectedStagesAcrossAudits(t *testing.T) {
 				}
 				for _, name := range []string{StageRequestReceived, StageResponseReceived} {
 					stage := HTTPStage{AuditID: id, Stage: name, StartedAtNS: 2}
-					stage.defaults()
+					stage.Defaults()
 					if err := store.submitSync(ctx, writeRequest{kind: writeStartStage, data: stage}); err != nil {
 						t.Fatal(err)
 					}

@@ -54,7 +54,7 @@ func Validate(cfg Config) error {
 	if cfg.Mode != "available" && cfg.Mode != "strict" {
 		return fmt.Errorf("mode must be available or strict, got %q", cfg.Mode)
 	}
-	if err := validateDataPath("db_path", cfg.DBPath); err != nil {
+	if err := validateDatabaseURL(cfg.DatabaseURL); err != nil {
 		return err
 	}
 	if err := validateDataPath("key_path", cfg.KeyPath); err != nil {
@@ -527,4 +527,19 @@ func validModel(model string) bool {
 		return false
 	}
 	return true
+}
+
+// validateDatabaseURL never includes the connection string in errors.
+func validateDatabaseURL(value string) error {
+	if value == "" {
+		return errors.New("database_url is required; migrate SQLite offline before switching to PostgreSQL")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") || parsed.Fragment != "" || parsed.Path == "" || parsed.Path == "/" {
+		return errors.New("database_url must be a PostgreSQL URL naming a database")
+	}
+	if strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+		return errors.New("database_url must not contain unescaped whitespace")
+	}
+	return nil
 }

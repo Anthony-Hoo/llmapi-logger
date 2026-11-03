@@ -1,5 +1,7 @@
 package sqlite
 
+import "llmapi-logger/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -9,31 +11,24 @@ import (
 	"strings"
 )
 
-// The insights read queries aggregate audit_analysis, the derived plaintext
-// table of doc/features/20-context-insights.md. They never touch an encrypted
-// column. Every query joins audit_records (and token_links, which the developer
-// scope rule and the caller/token groupings need) and applies the same
-// AuditScope condition as ListAudits to every row it counts, so a session or
-// agent tree shared with another API key only exposes the caller's own steps.
-
 // Insights usage groupings.
 const (
-	InsightsDimTotal    = "total"
-	InsightsDimDay      = "day"
-	InsightsDimModel    = "model"
-	InsightsDimProtocol = "protocol"
-	InsightsDimClient   = "client"
-	InsightsDimCaller   = "caller"
-	InsightsDimToken    = "token"
-	InsightsDimSession  = "session"
-	InsightsDimNode     = "node"
+	InsightsDimTotal    = storage.InsightsDimTotal
+	InsightsDimDay      = storage.InsightsDimDay
+	InsightsDimModel    = storage.InsightsDimModel
+	InsightsDimProtocol = storage.InsightsDimProtocol
+	InsightsDimClient   = storage.InsightsDimClient
+	InsightsDimCaller   = storage.InsightsDimCaller
+	InsightsDimToken    = storage.InsightsDimToken
+	InsightsDimSession  = storage.InsightsDimSession
+	InsightsDimNode     = storage.InsightsDimNode
 )
 
 // Session list orderings.
 const (
-	InsightsSortRecent  = "recent"
-	InsightsSortTokens  = "tokens"
-	InsightsSortContext = "context"
+	InsightsSortRecent  = storage.InsightsSortRecent
+	InsightsSortTokens  = storage.InsightsSortTokens
+	InsightsSortContext = storage.InsightsSortContext
 )
 
 const (
@@ -44,58 +39,23 @@ const (
 
 // InsightsFilter selects analysis rows. FromNS is inclusive and ToNS exclusive;
 // a zero ToNS disables the time condition (single session and tree reads).
-type InsightsFilter struct {
-	FromNS int64
-	ToNS   int64
-	Scope  *AuditScope
-	// SessionIDs restricts to these analysis sessions.
-	SessionIDs []string
-	// RootPrefix restricts to agent trees whose root fingerprint starts with it.
-	RootPrefix []byte
-	// RootFPRs restricts to these full agent root fingerprints.
-	RootFPRs [][]byte
-}
+type InsightsFilter = storage.InsightsFilter
 
 // InsightsUsageSpec chooses the grouping of InsightsUsage.
-type InsightsUsageSpec struct {
-	Dimension   string
-	TZOffsetMin int
-}
+type InsightsUsageSpec = storage.InsightsUsageSpec
 
 // InsightsMix is the per-category sum of estimates, each row anchored to its own
 // reported prompt total when usage exists (raw estimate otherwise).
-type InsightsMix struct {
-	System, Tools, User, Injected, Assistant, Reasoning, ToolResult, Media float64
-}
+type InsightsMix = storage.InsightsMix
 
 // InsightsEstimate is one request's raw composition estimate.
-type InsightsEstimate struct {
-	System, Tools, User, Injected, Assistant, Reasoning, ToolResult, Media int64
-}
+type InsightsEstimate = storage.InsightsEstimate
 
 // InsightsUsageRow is one group aggregate.
-type InsightsUsageRow struct {
-	Key, Label string
-	Requests   int64
-	// BilledRequests counts the requests whose token link carries NewAPI's
-	// actual billing; CostUSD sums their quota / quota_per_unit and is nil
-	// when there is none (doc/features/21-newapi-billing.md).
-	BilledRequests int64
-	CostUSD        *float64
-	UncachedInput  int64
-	CacheRead      int64
-	CacheWrite     int64
-	Output         int64
-	Reasoning      int64
-	Mix            InsightsMix
-}
+type InsightsUsageRow = storage.InsightsUsageRow
 
 // InsightsDayCount is the activity of one local calendar day.
-type InsightsDayCount struct {
-	Day      string
-	Requests int64
-	Sessions int64
-}
+type InsightsDayCount = storage.InsightsDayCount
 
 const insightsFrom = `
 FROM audit_analysis AS x
@@ -115,7 +75,7 @@ const (
 	insightsCostSQL = `(CASE WHEN t.billing_state = 'billed' THEN t.quota * 1.0 / t.quota_per_unit END)`
 )
 
-func (filter InsightsFilter) validate() error {
+func validateInsightsFilter(filter InsightsFilter) error {
 	if filter.FromNS < 0 || filter.ToNS < 0 || (filter.ToNS > 0 && filter.FromNS >= filter.ToNS) {
 		return errors.New("sqlite: invalid insights time range")
 	}
@@ -131,8 +91,8 @@ func (filter InsightsFilter) validate() error {
 }
 
 // where renders the filter against the aliases x, a and t.
-func (filter InsightsFilter) where() (string, []any, error) {
-	if err := filter.validate(); err != nil {
+func insightsWhere(filter InsightsFilter) (string, []any, error) {
+	if err := validateInsightsFilter(filter); err != nil {
 		return "", nil, err
 	}
 	var statement strings.Builder
@@ -168,7 +128,7 @@ func (filter InsightsFilter) where() (string, []any, error) {
 		add("x.agent_root_fpr IN ("+placeholders(len(values))+")", values...)
 	}
 	if filter.Scope != nil {
-		condition, values := filter.Scope.conditionWithAliases("a", "t")
+		condition, values := scopeConditionWithAliases(filter.Scope, "a", "t")
 		add(condition, values...)
 	}
 	return statement.String(), arguments, nil
@@ -234,7 +194,7 @@ func (store *Store) InsightsUsage(ctx context.Context, filter InsightsFilter, sp
 		return nil, errors.New("sqlite: unknown insights dimension")
 	}
 
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +242,7 @@ func (store *Store) InsightsDistinct(ctx context.Context, filter InsightsFilter)
 	if err := store.insightsReady(ctx); err != nil {
 		return 0, 0, err
 	}
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -325,7 +285,7 @@ func (store *Store) InsightsRealRoots(ctx context.Context, filter InsightsFilter
 	}
 	filter.FromNS, filter.ToNS = 0, 0
 	filter.SessionIDs, filter.RootPrefix = nil, nil
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +319,7 @@ func (store *Store) InsightsDayCounts(ctx context.Context, filter InsightsFilter
 	if tzOffsetMin < -840 || tzOffsetMin > 840 {
 		return nil, errors.New("sqlite: invalid insights timezone offset")
 	}
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -385,37 +345,13 @@ func (store *Store) InsightsDayCounts(ctx context.Context, filter InsightsFilter
 }
 
 // InsightsSessionCursor is the keyset position after the last returned card.
-type InsightsSessionCursor struct {
-	Value     int64
-	SessionID string
-}
+type InsightsSessionCursor = storage.InsightsSessionCursor
 
 // InsightsSessionRow is one session aggregate plus the values of its last step.
-type InsightsSessionRow struct {
-	SessionID  string
-	FirstNS    int64
-	LastNS     int64
-	Steps      int64
-	Turns      int64
-	Tokens     int64
-	SortValue  int64
-	Protocol   string
-	Model      string
-	Client     string
-	Role       string
-	Link       string
-	Root       []byte
-	Username   string
-	TokenName  string
-	LastPrompt *int64
-	Estimate   InsightsEstimate
-}
+type InsightsSessionRow = storage.InsightsSessionRow
 
 // InsightsSessionPage is one keyset page of session cards.
-type InsightsSessionPage struct {
-	Rows    []InsightsSessionRow
-	HasMore bool
-}
+type InsightsSessionPage = storage.InsightsSessionPage
 
 // InsightsSessions aggregates the in-scope steps of every analysis session that
 // has a step in the filter's time range, newest keyset first.
@@ -440,13 +376,12 @@ func (store *Store) InsightsSessions(ctx context.Context, filter InsightsFilter,
 	filter.SessionIDs = nil
 	filter.RootPrefix = nil
 	filter.RootFPRs = nil
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return InsightsSessionPage{}, err
 	}
 	last := func(column string) string { return "MAX(CASE WHEN rn = 1 THEN " + column + " END)" }
-	// node picks the latest main/subagent step, falling back to the latest
-	// auxiliary one only when the session has nothing else.
+
 	node := func(column string) string { return "MAX(CASE WHEN rn_node = 1 THEN " + column + " END)" }
 	statement := `
 WITH s AS (
@@ -527,7 +462,7 @@ func (store *Store) InsightsSessionModels(ctx context.Context, filter InsightsFi
 	if len(filter.SessionIDs) == 0 {
 		return map[string][]string{}, nil
 	}
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -564,7 +499,7 @@ func (store *Store) InsightsSubagentCounts(ctx context.Context, filter InsightsF
 	if len(filter.RootFPRs) == 0 {
 		return map[string]int64{}, nil
 	}
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -592,32 +527,7 @@ GROUP BY x.agent_root_fpr`, arguments...)
 }
 
 // InsightsTrendRow is one request of a session trend.
-type InsightsTrendRow struct {
-	AuditID       string
-	StartedAtNS   int64
-	EndedAtNS     *int64
-	Protocol      string
-	Model         string
-	Role          string
-	Root          []byte
-	Estimate      InsightsEstimate
-	UncachedInput *int64
-	CacheRead     *int64
-	CacheWrite    *int64
-	Output        *int64
-	Reasoning     *int64
-	TurnStart     bool
-	EventFlags    int
-	AppendedItems *int64
-	RemovedItems  *int64
-	StopReason    string
-	RespKinds     int
-	FirstEventNS  *int64
-	GenerationNS  *int64
-	PrevAuditID   string
-	// CostUSD is this request's actual NewAPI cost, nil unless billed.
-	CostUSD *float64
-}
+type InsightsTrendRow = storage.InsightsTrendRow
 
 // InsightsTrend returns the most recent in-scope steps of filter.SessionIDs[0]
 // in ascending time order, at most limit (<= 2000). truncated reports older
@@ -633,7 +543,7 @@ func (store *Store) InsightsTrend(ctx context.Context, filter InsightsFilter, li
 		return nil, false, errors.New("sqlite: insights trend needs exactly one session")
 	}
 	filter.FromNS, filter.ToNS = 0, 0
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return nil, false, err
 	}
@@ -702,7 +612,7 @@ func (store *Store) InsightsTurnStartsBefore(ctx context.Context, filter Insight
 		return 0, errors.New("sqlite: insights turn count needs exactly one session")
 	}
 	filter.FromNS, filter.ToNS = 0, 0
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return 0, err
 	}
@@ -723,23 +633,7 @@ SELECT COUNT(*)`+insightsFrom+where+`
 // requests, which are counted in AuxRequests; the last-step values, including
 // LastAuditID, come from the node's latest non-auxiliary request when it has
 // one.
-type InsightsTreeNodeRow struct {
-	NodeFPR        []byte
-	ParentFPR      []byte
-	FirstNS        int64
-	LastNS         int64
-	Steps          int64
-	AuxRequests    int64
-	Role           string
-	Client         string
-	Model          string
-	SessionID      string
-	LinkSource     string
-	LinkConfidence int
-	LastAuditID    string
-	LastPrompt     *int64
-	Estimate       InsightsEstimate
-}
+type InsightsTreeNodeRow = storage.InsightsTreeNodeRow
 
 // InsightsTree returns the in-scope nodes of the agent trees matching
 // filter.RootPrefix, oldest first, at most maxNodes; truncated reports more.
@@ -755,7 +649,7 @@ func (store *Store) InsightsTree(ctx context.Context, filter InsightsFilter, max
 	}
 	filter.FromNS, filter.ToNS = 0, 0
 	filter.SessionIDs, filter.RootFPRs = nil, nil
-	where, arguments, err := filter.where()
+	where, arguments, err := insightsWhere(filter)
 	if err != nil {
 		return nil, false, err
 	}

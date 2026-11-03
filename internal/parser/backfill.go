@@ -9,7 +9,7 @@ import (
 
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -60,7 +60,7 @@ type Reconstructor interface {
 // BackfillStore lists audits that need (re)analysis. The sqlite store
 // implements it; stores without it simply never backfill.
 type BackfillStore interface {
-	ListAnalysisBackfillCandidates(ctx context.Context, version int, after *sqlite.AnalysisBackfillCursor, limit int) ([]sqlite.AnalysisBackfillCandidate, error)
+	ListAnalysisBackfillCandidates(ctx context.Context, version int, after *storage.AnalysisBackfillCursor, limit int) ([]storage.AnalysisBackfillCandidate, error)
 }
 
 // SetReconstructor installs the optional body source for metadata-retention
@@ -95,7 +95,7 @@ func (worker *Worker) backfill(ctx context.Context) int {
 	candidates, err := store.ListAnalysisBackfillCandidates(ctx, insights.AnalysisVersion, worker.backfillCursor, backfillBatch)
 	if err != nil {
 		if ctx.Err() == nil {
-			worker.logger.Warn("insights backfill failed", "error_code", "analysis_backfill_failed", "reason", "list_failed", "storage_error", sqlite.ErrorClass(err))
+			worker.logger.Warn("insights backfill failed", "error_code", "analysis_backfill_failed", "reason", "list_failed", "storage_error", storage.ErrorClass(err))
 		}
 		return 0
 	}
@@ -113,7 +113,7 @@ func (worker *Worker) backfill(ctx context.Context) int {
 			worker.backfillOne(ctx, analyzer, store, candidate.AuditID)
 			attempted++
 		}
-		worker.backfillCursor = &sqlite.AnalysisBackfillCursor{StartedAtNS: candidate.StartedAtNS, AuditID: candidate.AuditID}
+		worker.backfillCursor = &storage.AnalysisBackfillCursor{StartedAtNS: candidate.StartedAtNS, AuditID: candidate.AuditID}
 	}
 	return attempted
 }
@@ -124,8 +124,9 @@ func (worker *Worker) backfillSkip(auditID, reason string) {
 }
 
 func (worker *Worker) backfillFail(auditID, reason string, err error) {
-	worker.rememberBackfillSkip(auditID)
-	worker.logger.Warn("insights backfill failed", "audit_id", auditID, "error_code", "analysis_backfill_failed", "reason", reason, "storage_error", sqlite.ErrorClass(err))
+	// Transient failures retry on the next bounded rescan. Only explicit permanent
+	// skips enter backfillSkipped; the cursor and scan interval prevent a hot loop.
+	worker.logger.Warn("insights backfill failed", "audit_id", auditID, "error_code", "analysis_backfill_failed", "reason", reason, "storage_error", storage.ErrorClass(err))
 }
 
 func (worker *Worker) rememberBackfillSkip(auditID string) {
@@ -198,15 +199,15 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, _
 
 // backfillInput loads the evidence of one audit. A non-empty reason means the
 // audit is skipped; a non-nil error means the load failed.
-func (worker *Worker) backfillInput(ctx context.Context, audit sqlite.ParserAudit) (Input, error, *Reconstruction, string, error) {
-	stage, err := worker.store.LoadParserStage(ctx, audit.AuditID, sqlite.StageRequestReceived)
+func (worker *Worker) backfillInput(ctx context.Context, audit storage.ParserAudit) (Input, error, *Reconstruction, string, error) {
+	stage, err := worker.store.LoadParserStage(ctx, audit.AuditID, storage.StageRequestReceived)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && stage.Body == nil) {
 		return Input{}, nil, nil, backfillSkipNoBody, nil
 	}
 	if err != nil {
 		return Input{}, nil, nil, "evidence_read_failed", err
 	}
-	if stage.Body.RetentionState != sqlite.RetentionMetadata {
+	if stage.Body.RetentionState != storage.RetentionMetadata {
 		input, evidenceErr := worker.loadInput(ctx, audit)
 		return input, evidenceErr, nil, "", nil
 	}

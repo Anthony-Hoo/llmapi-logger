@@ -10,7 +10,7 @@ import (
 )
 
 // Load reads one strict YAML document, applies scalar defaults, and validates
-// it without requiring either SQLite or NewAPI to be online.
+// it without requiring either PostgreSQL or NewAPI to be online.
 func Load(path string) (Config, error) {
 	cfg := Default()
 

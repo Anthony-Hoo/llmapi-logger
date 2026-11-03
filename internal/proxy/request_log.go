@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"llmapi-logger/internal/audit"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const clientClosedRequestStatus = 499
@@ -41,13 +41,13 @@ type requestCompletionSnapshot struct {
 
 func newRequestCompletionState(auditConfigured bool) *requestCompletionState {
 	state := &requestCompletionState{
-		forwardStatus: sqlite.ForwardInProgress,
-		captureStatus: sqlite.CaptureFailed,
-		parseStatus:   sqlite.ParseSkipped,
+		forwardStatus: storage.ForwardInProgress,
+		captureStatus: storage.CaptureFailed,
+		parseStatus:   storage.ParseSkipped,
 	}
 	if auditConfigured {
-		state.captureStatus = sqlite.CapturePending
-		state.parseStatus = sqlite.ParsePending
+		state.captureStatus = storage.CapturePending
+		state.parseStatus = storage.ParsePending
 	}
 	return state
 }
@@ -73,11 +73,11 @@ func (state *requestCompletionState) markAuditUnavailable(reject bool) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.captureStatus = sqlite.CaptureFailed
-	state.parseStatus = sqlite.ParseSkipped
+	state.captureStatus = storage.CaptureFailed
+	state.parseStatus = storage.ParseSkipped
 	state.errorCode = "audit_unavailable"
 	if reject {
-		state.forwardStatus = sqlite.ForwardRejected
+		state.forwardStatus = storage.ForwardRejected
 		state.statusCode = http.StatusServiceUnavailable
 	}
 }
@@ -88,9 +88,9 @@ func (state *requestCompletionState) markRejected(status int, blockedBy, blockCo
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.forwardStatus = sqlite.ForwardRejected
+	state.forwardStatus = storage.ForwardRejected
 	state.statusCode = status
-	state.parseStatus = sqlite.ParseSkipped
+	state.parseStatus = storage.ParseSkipped
 	state.blockedBy = blockedBy
 	state.blockCode = blockCode
 	if errorCode != "" {
@@ -104,10 +104,10 @@ func (state *requestCompletionState) markClientCancelled() {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.forwardStatus == sqlite.ForwardRejected {
+	if state.forwardStatus == storage.ForwardRejected {
 		return
 	}
-	state.forwardStatus = sqlite.ForwardClientCancelled
+	state.forwardStatus = storage.ForwardClientCancelled
 	state.blockedBy = ""
 	state.blockCode = ""
 	state.errorCode = "client_cancelled"
@@ -117,11 +117,11 @@ func (state *requestCompletionState) markClientCancelled() {
 }
 
 func (state *requestCompletionState) markNewAPIError(errorCode string) {
-	state.markForwardFailure(sqlite.ForwardNewAPIError, errorCode)
+	state.markForwardFailure(storage.ForwardNewAPIError, errorCode)
 }
 
 func (state *requestCompletionState) markProxyError(errorCode string) {
-	state.markForwardFailure(sqlite.ForwardProxyError, errorCode)
+	state.markForwardFailure(storage.ForwardProxyError, errorCode)
 }
 
 func (state *requestCompletionState) markForwardFailure(forwardStatus, errorCode string) {
@@ -130,7 +130,7 @@ func (state *requestCompletionState) markForwardFailure(forwardStatus, errorCode
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.forwardStatus == sqlite.ForwardRejected || state.forwardStatus == sqlite.ForwardClientCancelled {
+	if state.forwardStatus == storage.ForwardRejected || state.forwardStatus == storage.ForwardClientCancelled {
 		return
 	}
 	state.forwardStatus = forwardStatus
@@ -145,8 +145,8 @@ func (state *requestCompletionState) markCompleted() {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.forwardStatus == sqlite.ForwardInProgress {
-		state.forwardStatus = sqlite.ForwardCompleted
+	if state.forwardStatus == storage.ForwardInProgress {
+		state.forwardStatus = storage.ForwardCompleted
 	}
 }
 
@@ -167,7 +167,7 @@ func (state *requestCompletionState) applyTerminal(summary audit.TerminalSummary
 	}
 	if summary.ErrorCode != "" {
 		state.errorCode = summary.ErrorCode
-	} else if summary.ForwardStatus == sqlite.ForwardCompleted && state.errorCode == "client_cancelled" {
+	} else if summary.ForwardStatus == storage.ForwardCompleted && state.errorCode == "client_cancelled" {
 		// A benign post-terminal disconnect may have transiently recorded
 		// client_cancelled before the audit session reclassified the
 		// request as completed; the completion log must not mix the two.
@@ -184,18 +184,18 @@ func (state *requestCompletionState) finalize(ctx context.Context) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.forwardStatus != sqlite.ForwardInProgress {
+	if state.forwardStatus != storage.ForwardInProgress {
 		return
 	}
 	if ctx != nil && ctx.Err() != nil {
-		state.forwardStatus = sqlite.ForwardClientCancelled
+		state.forwardStatus = storage.ForwardClientCancelled
 		state.errorCode = "client_cancelled"
 		if state.statusCode == 0 {
 			state.statusCode = clientClosedRequestStatus
 		}
 		return
 	}
-	state.forwardStatus = sqlite.ForwardProxyError
+	state.forwardStatus = storage.ForwardProxyError
 	state.errorCode = "proxy_aborted"
 }
 

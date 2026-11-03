@@ -17,7 +17,7 @@ newapi:
   access_token: ""
   user_id: 0
 mode: available
-db_path: ./data/audit.db
+database_url: "postgresql://audit_proxy:REPLACE_WITH_DATABASE_PASSWORD@127.0.0.1:5432/audit_proxy?sslmode=disable"
 key_path: ./data/audit.key
 admin_token: "replace-with-a-random-token"
 # Second management identity. When enabled, a NewAPI user can sign in with their

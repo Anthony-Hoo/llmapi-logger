@@ -13,7 +13,7 @@ import (
 
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 var stableCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -23,13 +23,13 @@ const maxHeaderFilterScan = 2000
 // Store is the read-only storage surface used by Service.
 type Store interface {
 	Healthy() bool
-	ListAudits(context.Context, sqlite.AuditQueryFilter, sqlite.AuditQueryCursor, int) (sqlite.AuditListPage, error)
-	QueryRequestHeaderEvidence(context.Context, string) ([]sqlite.HeaderEvidence, error)
-	QueryAuditDetail(context.Context, string, *sqlite.AuditScope) (sqlite.AuditQueryDetail, error)
-	QueryAuditScope(context.Context, string) (sqlite.AuditScopeRow, error)
-	RawBodyMeta(context.Context, string, string) (sqlite.RawBodyMetadata, error)
-	StreamBodyChunks(context.Context, string, string, func(sqlite.BodyChunk) error) error
-	QueryStreamTimeline(context.Context, string, string) (sqlite.StoredStreamTimeline, error)
+	ListAudits(context.Context, storage.AuditQueryFilter, storage.AuditQueryCursor, int) (storage.AuditListPage, error)
+	QueryRequestHeaderEvidence(context.Context, string) ([]storage.HeaderEvidence, error)
+	QueryAuditDetail(context.Context, string, *storage.AuditScope) (storage.AuditQueryDetail, error)
+	QueryAuditScope(context.Context, string) (storage.AuditScopeRow, error)
+	RawBodyMeta(context.Context, string, string) (storage.RawBodyMetadata, error)
+	StreamBodyChunks(context.Context, string, string, func(storage.BodyChunk) error) error
+	QueryStreamTimeline(context.Context, string, string) (storage.StoredStreamTimeline, error)
 }
 
 // Service validates management queries and keeps ciphertext out of API DTOs.
@@ -63,7 +63,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		return Page{}, err
 	}
 
-	storageFilter := sqlite.AuditQueryFilter{
+	storageFilter := storage.AuditQueryFilter{
 		FromNS:                filter.FromNS,
 		ToNS:                  filter.ToNS,
 		Protocol:              filter.Protocol,
@@ -84,7 +84,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		CollapseConversations: filter.CollapseConversations && filter.Conversation == "" && !filter.hasRowFilters(),
 		Scope:                 storageScope(filter.Scope),
 	}
-	storageCursor := sqlite.AuditQueryCursor{
+	storageCursor := storage.AuditQueryCursor{
 		BeforeStartedAtNS: cursor.BeforeStartedAtNS,
 		BeforeID:          cursor.BeforeID,
 	}
@@ -125,7 +125,7 @@ func (filter Filter) hasRowFilters() bool {
 		filter.UpstreamErrorClass != ""
 }
 
-func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter sqlite.AuditQueryFilter, cursor sqlite.AuditQueryCursor, filter Filter, limit int) (Page, error) {
+func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter storage.AuditQueryFilter, cursor storage.AuditQueryCursor, filter Filter, limit int) (Page, error) {
 	page := Page{Items: make([]AuditSummary, 0, limit)}
 	scanned := 0
 	for scanned < maxHeaderFilterScan {
@@ -154,7 +154,7 @@ func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter
 					return page, nil
 				}
 			}
-			cursor = sqlite.AuditQueryCursor{BeforeStartedAtNS: row.StartedAtNS, BeforeID: row.AuditID}
+			cursor = storage.AuditQueryCursor{BeforeStartedAtNS: row.StartedAtNS, BeforeID: row.AuditID}
 		}
 		if !storagePage.HasMore {
 			return page, nil
@@ -194,7 +194,7 @@ func (service *Service) readUserAgent(ctx context.Context, auditID, needle strin
 	return userAgent, matched && userAgent != nil, nil
 }
 
-func (service *Service) decryptHeader(auditID string, header sqlite.HeaderEvidence) ([]byte, error) {
+func (service *Service) decryptHeader(auditID string, header storage.HeaderEvidence) ([]byte, error) {
 	aad, err := security.AAD(auditID, "header", header.Stage, header.Kind, header.Name, strconv.Itoa(header.ValueIndex))
 	if err != nil {
 		return nil, ErrIntegrity
@@ -207,15 +207,15 @@ func (service *Service) decryptHeader(auditID string, header sqlite.HeaderEviden
 	return plaintext, nil
 }
 
-func cursorForRow(row sqlite.AuditListRow) *Cursor {
+func cursorForRow(row storage.AuditListRow) *Cursor {
 	return &Cursor{BeforeStartedAtNS: row.StartedAtNS, BeforeID: row.AuditID}
 }
 
-func storageScope(scope *Scope) *sqlite.AuditScope {
+func storageScope(scope *Scope) *storage.AuditScope {
 	if scope == nil {
 		return nil
 	}
-	return &sqlite.AuditScope{Fingerprint: scope.Fingerprint, TokenID: scope.TokenID}
+	return &storage.AuditScope{Fingerprint: scope.Fingerprint, TokenID: scope.TokenID}
 }
 
 // Authorize reports whether a developer session may read one audit, and is the
@@ -407,7 +407,7 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 			LinkedAtNS:      token.LinkedAtNS,
 			BillingState:    token.BillingState,
 		}
-		if token.BillingState == sqlite.BillingBilled && token.Quota != nil && token.QuotaPerUnit != nil && *token.QuotaPerUnit > 0 {
+		if token.BillingState == storage.BillingBilled && token.Quota != nil && token.QuotaPerUnit != nil && *token.QuotaPerUnit > 0 {
 			quota, cost := *token.Quota, float64(*token.Quota)/(*token.QuotaPerUnit)
 			detail.TokenLink.NewAPIQuota = &quota
 			detail.TokenLink.CostUSD = &cost
@@ -478,20 +478,20 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 	if err != nil {
 		return RawMetadata{}, fmt.Errorf("query: read raw metadata: %w", err)
 	}
-	if metadata.State == sqlite.StageStateStreaming {
+	if metadata.State == storage.StageStateStreaming {
 		return RawMetadata{}, ErrNotReady
 	}
-	if metadata.RetentionState == sqlite.RetentionPending {
+	if metadata.RetentionState == storage.RetentionPending {
 		return RawMetadata{}, ErrNotReady
 	}
-	if metadata.RetentionState == sqlite.RetentionMetadata {
+	if metadata.RetentionState == storage.RetentionMetadata {
 		return RawMetadata{}, ErrNotRetained
 	}
 	encodedDigest := ""
 	if len(metadata.SHA256) != 0 {
 		encodedDigest = hex.EncodeToString(metadata.SHA256)
 	}
-	complete := metadata.State == sqlite.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
+	complete := metadata.State == storage.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
 	return RawMetadata{
 		MissingChunks:  rawHasMissingChunks(metadata),
 		ObservedLength: metadata.ObservedLength,
@@ -502,7 +502,7 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 	}, nil
 }
 
-func mapAudit(row sqlite.AuditListRow) AuditSummary {
+func mapAudit(row storage.AuditListRow) AuditSummary {
 	return AuditSummary{
 		AuditID:            row.AuditID,
 		StartedAtNS:        row.StartedAtNS,
@@ -615,9 +615,9 @@ func validateAuditID(auditID string) error {
 
 func validForwardStatus(status string) bool {
 	switch status {
-	case sqlite.ForwardInProgress, sqlite.ForwardCompleted, sqlite.ForwardRejected,
-		sqlite.ForwardClientCancelled, sqlite.ForwardNewAPIError, sqlite.ForwardProxyError,
-		sqlite.ForwardInterrupted:
+	case storage.ForwardInProgress, storage.ForwardCompleted, storage.ForwardRejected,
+		storage.ForwardClientCancelled, storage.ForwardNewAPIError, storage.ForwardProxyError,
+		storage.ForwardInterrupted:
 		return true
 	default:
 		return false
@@ -626,7 +626,7 @@ func validForwardStatus(status string) bool {
 
 func validCaptureStatus(status string) bool {
 	switch status {
-	case sqlite.CapturePending, sqlite.CaptureComplete, sqlite.CapturePartial, sqlite.CaptureFailed:
+	case storage.CapturePending, storage.CaptureComplete, storage.CapturePartial, storage.CaptureFailed:
 		return true
 	default:
 		return false

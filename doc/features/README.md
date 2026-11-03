@@ -6,7 +6,7 @@
 
 ## 1. 目标与边界
 
-本项目是部署在 Nginx 与 NewAPI 之间的个人审计代理：单用户、单机、一个 Go 二进制、一个 NewAPI 后端、一个 SQLite WAL 数据库和一个本地主密钥文件。
+本项目是部署在 Nginx 与 NewAPI 之间的个人审计代理：单用户、单机、一个 Go 二进制、一个 NewAPI 后端、一个 PostgreSQL 数据库和一个本地主密钥文件。
 
 数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI 成功记录经重建验证后释放长期 raw；异常记录保留 full 原字节。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
 
@@ -91,7 +91,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 ## 7. 数据与加密
 
-SQLite schema generation 2 共 23 张表。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines、integrity events、动态关键词规则表 `content_policy_rules`，以及不在完整性链内的派生数据 `audit_analysis`、`agent_spawn_hints`（上下文洞察）与 `parsed_results.upstream_error_class`（上游策略拒绝分类）。完整表定义以[模块 04](04-sqlite-storage-and-migrations.md)为准。
+PostgreSQL 使用独立 schema 版本，并保留旧证据模型的关系约束。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines、integrity events、动态关键词规则表 `content_policy_rules`，以及不在完整性链内的派生数据 `audit_analysis`、`agent_spawn_hints`（上下文洞察）与 `parsed_results.upstream_error_class`（上游策略拒绝分类）。当前表定义以 `internal/storage/postgres/migrations/001_init.sql` 为准；SQLite 模块仅记录离线导入源格式。迁移边界见 [PostgreSQL 方案](../design/postgres-history-storage.md) 和 [部署迁移](../deployment/postgresql-migration.md)。
 
 采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw；以局部错误失败时不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
 
@@ -181,3 +181,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 ## 12. 文档优先级
 
 本 README 说明总体方向；01 是配置字段的唯一来源，04 是 SQLite schema 的唯一来源，09 是鉴权和加密格式的唯一来源。其余模块只引用这些定义，不再各自扩展配置、表或安全机制。
+
+## PostgreSQL 与历史存储更新
+
+运行时采用 PostgreSQL 单写者锁、独立迁移及 repeatable-read 证据快照。capture 缓冲按需增长并释放；内容对象在压缩加密前批量查重并验证既有对象；insights v8 使用加密共享前缀节点，后台有界回填保留旧明细可读。图重建改为迭代复用引用数组，仍逐祖先验证重建 hash，不声称已消除所有历史长度相关 CPU 开销。具体边界和回滚见上述方案与部署文档。

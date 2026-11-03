@@ -2,6 +2,8 @@
 // database. All writes pass through one ordered writer goroutine.
 package sqlite
 
+import "llmapi-logger/internal/storage"
+
 import (
 	"errors"
 	"fmt"
@@ -11,399 +13,151 @@ import (
 )
 
 const (
-	StageRequestReceived  = "request_for_newapi_received_from_nginx"
-	StageRequestSent      = "request_sent_to_newapi"
-	StageResponseReceived = "response_received_from_newapi"
-	StageResponseSent     = "response_from_newapi_sent_to_nginx"
-
-	StageStateNotStarted = "not_started"
-	StageStateStreaming  = "streaming"
-	StageStateComplete   = "complete"
-	StageStatePartial    = "partial"
-
-	ForwardInProgress      = "in_progress"
-	ForwardCompleted       = "completed"
-	ForwardRejected        = "rejected"
-	ForwardClientCancelled = "client_cancelled"
-	ForwardNewAPIError     = "newapi_error"
-	ForwardProxyError      = "proxy_error"
-	ForwardInterrupted     = "interrupted"
-
-	CapturePending      = "pending"
-	CaptureComplete     = "complete"
-	CapturePartial      = "partial"
-	CaptureFailed       = "failed"
-	CaptureChunkMissing = "capture_chunk_missing"
-
-	ParsePending    = "pending"
-	ParseProcessing = "processing"
-	ParseOK         = "ok"
-	ParsePartial    = "partial"
-	ParseError      = "error"
-	ParseSkipped    = "skipped"
-
-	CallerNone       = "none"
-	CallerPending    = "pending"
-	CallerResolved   = "resolved"
-	CallerUnresolved = "unresolved"
-
-	HeaderKindHeader  = "header"
-	HeaderKindTrailer = "trailer"
-
-	RetentionPending  = "pending"
-	RetentionMetadata = "metadata"
-	RetentionFull     = "full"
-
-	ChunkCompressionNone = "none"
-	ChunkCompressionGZIP = "gzip"
-
-	GapReasonDBUnavailable = "db_unavailable"
-	GapReasonQueueFull     = "queue_full"
-	GapReasonEncryption    = "encryption_error"
-	GapReasonWrite         = "write_error"
-	GapReasonProcessExit   = "process_exit"
-
-	GapDetailDBUnavailable = "audit_storage_unavailable"
-	GapDetailQueueFull     = "audit_writer_queue_full"
-	GapDetailEncryption    = "audit_encryption_failed"
-	GapDetailWrite         = "audit_write_failed"
-	GapDetailProcessExit   = "interrupted_audits_recovered"
+	StageRequestReceived   = storage.StageRequestReceived
+	StageRequestSent       = storage.StageRequestSent
+	StageResponseReceived  = storage.StageResponseReceived
+	StageResponseSent      = storage.StageResponseSent
+	StageStateNotStarted   = storage.StageStateNotStarted
+	StageStateStreaming    = storage.StageStateStreaming
+	StageStateComplete     = storage.StageStateComplete
+	StageStatePartial      = storage.StageStatePartial
+	ForwardInProgress      = storage.ForwardInProgress
+	ForwardCompleted       = storage.ForwardCompleted
+	ForwardRejected        = storage.ForwardRejected
+	ForwardClientCancelled = storage.ForwardClientCancelled
+	ForwardNewAPIError     = storage.ForwardNewAPIError
+	ForwardProxyError      = storage.ForwardProxyError
+	ForwardInterrupted     = storage.ForwardInterrupted
+	CapturePending         = storage.CapturePending
+	CaptureComplete        = storage.CaptureComplete
+	CapturePartial         = storage.CapturePartial
+	CaptureFailed          = storage.CaptureFailed
+	CaptureChunkMissing    = storage.CaptureChunkMissing
+	ParsePending           = storage.ParsePending
+	ParseProcessing        = storage.ParseProcessing
+	ParseOK                = storage.ParseOK
+	ParsePartial           = storage.ParsePartial
+	ParseError             = storage.ParseError
+	ParseSkipped           = storage.ParseSkipped
+	CallerNone             = storage.CallerNone
+	CallerPending          = storage.CallerPending
+	CallerResolved         = storage.CallerResolved
+	CallerUnresolved       = storage.CallerUnresolved
+	HeaderKindHeader       = storage.HeaderKindHeader
+	HeaderKindTrailer      = storage.HeaderKindTrailer
+	RetentionPending       = storage.RetentionPending
+	RetentionMetadata      = storage.RetentionMetadata
+	RetentionFull          = storage.RetentionFull
+	ChunkCompressionNone   = storage.ChunkCompressionNone
+	ChunkCompressionGZIP   = storage.ChunkCompressionGZIP
+	GapReasonDBUnavailable = storage.GapReasonDBUnavailable
+	GapReasonQueueFull     = storage.GapReasonQueueFull
+	GapReasonEncryption    = storage.GapReasonEncryption
+	GapReasonWrite         = storage.GapReasonWrite
+	GapReasonProcessExit   = storage.GapReasonProcessExit
+	GapDetailDBUnavailable = storage.GapDetailDBUnavailable
+	GapDetailQueueFull     = storage.GapDetailQueueFull
+	GapDetailEncryption    = storage.GapDetailEncryption
+	GapDetailWrite         = storage.GapDetailWrite
+	GapDetailProcessExit   = storage.GapDetailProcessExit
 )
 
 // APIKeyFingerprintSize is the width of audit_records.api_key_fpr, matching the
 // HMAC-SHA-256 tag produced by security.CredentialFingerprinter.
-const APIKeyFingerprintSize = 32
+const APIKeyFingerprintSize = storage.APIKeyFingerprintSize
 
 const (
 	writerQueueCapacity = 1024
 	writerBatchSize     = 64
-
-	// RetentionBatchLimit keeps each maintenance write small enough for the
-	// normal audit writer to resume promptly.
-	RetentionBatchLimit = 200
+	RetentionBatchLimit = storage.RetentionBatchLimit
 )
 
 var (
-	ErrClosed           = errors.New("sqlite store is closed")
-	ErrQueueFull        = errors.New("sqlite writer queue is full")
-	ErrRecoveryOverflow = errors.New("sqlite capture recovery capacity exceeded; restart required")
+	ErrClosed           = storage.ErrClosed
+	ErrQueueFull        = storage.ErrQueueFull
+	ErrRecoveryOverflow = storage.ErrRecoveryOverflow
 )
 
 var stableBlockCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // AuditRecord is the parent row created before interceptor evaluation.
-type AuditRecord struct {
-	AuditID           string
-	StartedAtNS       int64
-	EndedAtNS         *int64
-	RouteID           string
-	Protocol          string
-	ParserName        string
-	Method            string
-	Path              string
-	RequestURIEnc     []byte
-	Mode              string
-	StatusCode        *int
-	TTFTNS            *int64
-	ForwardStatus     string
-	CaptureStatus     string
-	ParseStatus       string
-	BlockedBy         *string
-	BlockCode         *string
-	ErrorCode         *string
-	NewAPIRequestID   *string
-	CallerStatus      string
-	CallerAttempts    int
-	CallerNextAtNS    *int64
-	CallerUpdatedAtNS *int64
-	// APIKeyFPR scopes developer sessions to the audits their own key produced.
-	// It is nil when the request carried no credential.
-	APIKeyFPR []byte
-}
+type AuditRecord = storage.AuditRecord
 
 // HTTPStage represents one actually observed proxy boundary. Missing stages
 // are represented by absent rows, never placeholder rows.
-type HTTPStage struct {
-	AuditID       string
-	Stage         string
-	State         string
-	Proto         string
-	Method        string
-	Host          string
-	StatusCode    *int
-	ContentLength *int64
-	StartedAtNS   int64
-	EndedAtNS     *int64
-	ErrorCode     *string
-}
+type HTTPStage = storage.HTTPStage
 
 // HTTPHeader stores one encrypted Header or Trailer value.
-type HTTPHeader struct {
-	AuditID     string
-	Stage       string
-	Kind        string
-	Name        string
-	ValueIndex  int
-	ValueLength int
-	ValueEnc    []byte
-}
+type HTTPHeader = storage.HTTPHeader
 
 // BodyStream stores aggregate integrity state for one observed stage body.
-type BodyStream struct {
-	AuditID                string
-	Stage                  string
-	SourceStage            string
-	ObservedLength         int64
-	StoredLength           int64
-	SHA256                 []byte
-	HashComplete           bool
-	EOFSeen                bool
-	State                  string
-	RetentionState         string
-	FirstObservedAtNS      *int64
-	LastObservedAtNS       *int64
-	ChunkCount             int64
-	StreamEventCount       int64
-	StreamTimelineComplete bool
-	ErrorCode              *string
-}
+type BodyStream = storage.BodyStream
 
 // BodyChunk stores one independently encrypted owning chunk.
-type BodyChunk struct {
-	AuditID         string
-	Stage           string
-	Seq             int64
-	Offset          int64
-	PlaintextLength int
-	EncodedLength   int
-	ObservedAtNS    int64
-	Compression     string
-	DataEnc         []byte
-}
+type BodyChunk = storage.BodyChunk
 
 // AuditGap is an aggregate indication that complete per-request evidence was
 // unavailable. Reason and Detail are stable codes; arbitrary error text is
 // deliberately rejected before it can reach SQLite.
-type AuditGap struct {
-	StartedAtNS  int64
-	EndedAtNS    int64
-	Reason       string
-	RequestCount int
-	Detail       string
-	CreatedAtNS  int64
-}
+type AuditGap = storage.AuditGap
 
 // Billing states of a token link (doc/features/21-newapi-billing.md).
 // Unchecked only exists for links written before migration 009; new links are
 // always billed or unbilled.
 const (
-	BillingUnchecked = "unchecked"
-	BillingBilled    = "billed"
-	BillingUnbilled  = "unbilled"
+	BillingUnchecked = storage.BillingUnchecked
+	BillingBilled    = storage.BillingBilled
+	BillingUnbilled  = storage.BillingUnbilled
 )
 
 // MaxBillingAttempts bounds the historical billing backfill of one link.
-const MaxBillingAttempts = 3
+const MaxBillingAttempts = storage.MaxBillingAttempts
 
 // TokenLink stores the non-secret NewAPI caller snapshot associated with one
 // audit. It contains identifiers and names from the system log, never a key.
 // The billing fields come from the same log rows: they are set exactly when
 // BillingState is BillingBilled.
-type TokenLink struct {
-	AuditID         string
-	NewAPIRequestID string
-	NewAPIUserID    int64
-	Username        string
-	NewAPITokenID   int64
-	TokenName       string
-	LinkedAtNS      int64
-	Attempts        int
-
-	BillingState           string
-	Quota                  *int64
-	QuotaPerUnit           *float64
-	BilledPromptTokens     *int64
-	BilledCompletionTokens *int64
-}
+type TokenLink = storage.TokenLink
 
 // CallerLookup is one due caller-identification job read by the NewAPI worker.
 // StatusCode is the audit's response status, nil when no response was
 // recorded.
-type CallerLookup struct {
-	AuditID    string
-	RequestID  string
-	Attempts   int
-	StatusCode *int
-}
+type CallerLookup = storage.CallerLookup
 
 // BillingBackfillItem is one pre-billing token link awaiting its historical
 // billing lookup.
-type BillingBackfillItem struct {
-	AuditID   string
-	RequestID string
-	Attempts  int
-}
+type BillingBackfillItem = storage.BillingBackfillItem
 
 // BillingUpdate replaces only the billing columns of an unchecked token link.
 // State BillingUnchecked records one more failed attempt; the billing values
 // must then be nil, as for BillingUnbilled.
-type BillingUpdate struct {
-	AuditID                string
-	State                  string
-	Attempts               int
-	Quota                  *int64
-	QuotaPerUnit           *float64
-	BilledPromptTokens     *int64
-	BilledCompletionTokens *int64
-}
+type BillingUpdate = storage.BillingUpdate
 
 // CallerRetry reschedules or terminates one caller lookup attempt.
-type CallerRetry struct {
-	AuditID         string
-	RequestID       string
-	Attempts        int
-	NextAttemptAtNS *int64
-	UpdatedAtNS     int64
-}
+type CallerRetry = storage.CallerRetry
 
 // RetentionResult reports rows removed by one bounded writer transaction.
-type RetentionResult struct {
-	DeletedAudits int
-	DeletedGaps   int
-}
+type RetentionResult = storage.RetentionResult
 
 // BodyFinish is optionally included in StageFinish when a body stream was
 // actually opened for the stage.
-type BodyFinish struct {
-	ObservedLength         int64
-	StoredLength           int64
-	SHA256                 []byte
-	HashComplete           bool
-	EOFSeen                bool
-	State                  string
-	RetentionState         string
-	FirstObservedAtNS      *int64
-	LastObservedAtNS       *int64
-	ChunkCount             int64
-	StreamEventCount       int64
-	StreamTimelineComplete bool
-	Timeline               *StreamTimeline
-	ErrorCode              *string
-}
+type BodyFinish = storage.BodyFinish
 
 // StreamTimeline is one compressed and encrypted delta sequence of logical
 // SSE event completion offsets and observation times.
-type StreamTimeline struct {
-	EventCount      int64
-	FirstEventAtNS  *int64
-	LastEventAtNS   *int64
-	Complete        bool
-	Compression     string
-	PlaintextLength int64
-	DataEnc         []byte
-}
+type StreamTimeline = storage.StreamTimeline
 
 // StageFinish atomically finalizes stage metadata and, when non-nil, its body
 // aggregate within the writer batch transaction.
-type StageFinish struct {
-	AuditID       string
-	Stage         string
-	State         string
-	StatusCode    *int
-	ContentLength *int64
-	EndedAtNS     int64
-	ErrorCode     *string
-	Body          *BodyFinish
-}
+type StageFinish = storage.StageFinish
 
 // AuditFinish contains the terminal audit outcome. Rejected audits must carry
 // both BlockedBy and BlockCode and use ParseSkipped.
-type AuditFinish struct {
-	AuditID         string
-	EndedAtNS       int64
-	StatusCode      *int
-	TTFTNS          *int64
-	ForwardStatus   string
-	CaptureStatus   string
-	ParseStatus     string
-	BlockedBy       *string
-	BlockCode       *string
-	ErrorCode       *string
-	NewAPIRequestID *string
-}
+type AuditFinish = storage.AuditFinish
 
 // Snapshot is a consistent encrypted evidence view used by integration and
 // query layers. Ciphertext blobs are returned unchanged.
-type Snapshot struct {
-	Audit   AuditRecord
-	Stages  []HTTPStage
-	Headers []HTTPHeader
-	Bodies  []BodyStream
-	Chunks  []BodyChunk
-}
-
-func (record *AuditRecord) defaults() {
-	if record.ForwardStatus == "" {
-		record.ForwardStatus = ForwardInProgress
-	}
-	if record.CaptureStatus == "" {
-		record.CaptureStatus = CapturePending
-	}
-	if record.ParseStatus == "" {
-		record.ParseStatus = ParsePending
-	}
-	if record.CallerStatus == "" {
-		record.CallerStatus = CallerNone
-	}
-}
-
-func (stage *HTTPStage) defaults() {
-	if stage.State == "" {
-		stage.State = StageStateStreaming
-	}
-}
-
-func (body *BodyStream) defaults() {
-	if body.State == "" {
-		body.State = StageStateStreaming
-	}
-	if body.SourceStage == "" {
-		body.SourceStage = body.Stage
-	}
-	if body.RetentionState == "" {
-		body.RetentionState = RetentionPending
-	}
-	if !body.StreamTimelineComplete && body.StreamEventCount == 0 {
-		body.StreamTimelineComplete = true
-	}
-}
-
-func (chunk *BodyChunk) defaults() {
-	if chunk.Compression == "" {
-		chunk.Compression = ChunkCompressionNone
-	}
-	if chunk.EncodedLength == 0 && chunk.PlaintextLength > 0 {
-		chunk.EncodedLength = chunk.PlaintextLength
-	}
-}
-
-func (finish *AuditFinish) defaults() {
-	if finish.ForwardStatus == ForwardRejected && finish.ParseStatus == "" {
-		finish.ParseStatus = ParseSkipped
-	}
-}
-
-func (finish *StageFinish) defaults() {
-	if finish.Body == nil {
-		return
-	}
-	if finish.Body.RetentionState == "" {
-		finish.Body.RetentionState = RetentionPending
-	}
-	if !finish.Body.StreamTimelineComplete && finish.Body.StreamEventCount == 0 && finish.Body.Timeline == nil {
-		finish.Body.StreamTimelineComplete = true
-	}
-}
+type Snapshot = storage.Snapshot
 
 func validateAuditRecord(record AuditRecord) error {
 	if record.AuditID == "" || record.RouteID == "" || record.Protocol == "" || record.ParserName == "" || record.Method == "" || record.Path == "" {

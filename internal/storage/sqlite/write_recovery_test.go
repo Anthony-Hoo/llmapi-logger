@@ -75,7 +75,7 @@ func TestGlobalHeaderFailureCannotFinalizeComplete(t *testing.T) {
 		}
 	}
 	stage := HTTPStage{AuditID: "lost-header", Stage: StageRequestReceived, StartedAtNS: 2}
-	stage.defaults()
+	stage.Defaults()
 	if err := store.submitSync(ctx, writeRequest{kind: writeStartStage, data: stage}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestRecoveredBodylessStageGetsTerminalTimestamp(t *testing.T) {
 				t.Fatal(err)
 			}
 			stage := HTTPStage{AuditID: "bodyless-recovery", Stage: StageResponseReceived, StartedAtNS: 2}
-			stage.defaults()
+			stage.Defaults()
 			if err := store.submitSync(ctx, writeRequest{kind: writeStartStage, data: stage}); err != nil {
 				t.Fatal(err)
 			}
@@ -263,7 +263,7 @@ func TestCaptureRecoveryOverflowIsBoundedAndFailClosed(t *testing.T) {
 		t.Fatal("recovery retained ciphertext")
 	}
 	record := testAudit("overflow-new")
-	record.defaults()
+	record.Defaults()
 	finish := AuditFinish{AuditID: "overflow-active", EndedAtNS: 3, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}
 	results, _, err := writer.commitBatch([]writeRequest{{kind: writeBeginAudit, data: record}, {kind: writeFinishAudit, data: &finish}})
 	if err != nil || !errors.Is(results[0], ErrRecoveryOverflow) || results[1] != nil || finish.CaptureStatus != CaptureFailed {

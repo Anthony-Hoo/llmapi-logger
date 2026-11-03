@@ -27,7 +27,6 @@ import (
 	"llmapi-logger/internal/retention"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
 	"llmapi-logger/internal/uaguard"
 	"llmapi-logger/internal/web"
 )
@@ -49,7 +48,7 @@ type App struct {
 	retention       *retention.Runner
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
-	auditStore      *sqlite.Store
+	auditStore      runtimeStore
 	cipher          security.Cipher
 	newAPIClient    *newapi.Client
 	mode            string
@@ -137,7 +136,7 @@ func loadInsightsVocabulary(configuration config.InsightsConfig) (*insights.Voca
 // installInsights wires the analyzer into the parser worker: it narrows the
 // decrypted request headers to the vocabulary allowlist and links each parsed
 // audit with the analysis fingerprinter.
-func installInsights(worker *parser.Worker, store *sqlite.Store, cipher security.Cipher, vocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter) error {
+func installInsights(worker *parser.Worker, store runtimeStore, cipher security.Cipher, vocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter) error {
 	if worker == nil || vocabulary == nil {
 		return nil
 	}
@@ -163,6 +162,10 @@ func New(configuration config.Config, logger *slog.Logger) (*App, error) {
 // integrity verification grows with retained history and must either finish,
 // fail validation, or be explicitly cancelled.
 func NewContext(ctx context.Context, configuration config.Config, logger *slog.Logger) (*App, error) {
+	return newContextWithStore(ctx, configuration, logger, openPostgres)
+}
+
+func newContextWithStore(ctx context.Context, configuration config.Config, logger *slog.Logger, open storeOpener) (*App, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -187,7 +190,7 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 		return nil, err
 	}
 
-	runtime := assembleAudit(ctx, configuration, logger)
+	runtime := assembleAuditWithStore(ctx, configuration, logger, open)
 	if err := ctx.Err(); err != nil {
 		if runtime.store != nil {
 			_ = runtime.store.Close()
@@ -687,7 +690,7 @@ func developerLoginTransport(configuration config.NewAPIConfig) http.RoundTrippe
 type auditRuntime struct {
 	sink         audit.Sink
 	manager      *audit.Manager
-	store        *sqlite.Store
+	store        runtimeStore
 	cipher       security.Cipher
 	fingerprints *security.CredentialFingerprinter
 	// analysisFingerprints is nil when insights are disabled.
@@ -695,10 +698,14 @@ type auditRuntime struct {
 }
 
 func assembleAudit(ctx context.Context, configuration config.Config, logger *slog.Logger) auditRuntime {
+	return assembleAuditWithStore(ctx, configuration, logger, openPostgres)
+}
+
+func assembleAuditWithStore(ctx context.Context, configuration config.Config, logger *slog.Logger, open storeOpener) auditRuntime {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	store, err := sqlite.OpenWithLogger(ctx, configuration.DBPath, logger)
+	store, err := open(ctx, configuration.DatabaseURL, logger)
 	if err != nil {
 		logger.Warn("audit storage unavailable", "mode", configuration.Mode, "error_category", "db_unavailable")
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)

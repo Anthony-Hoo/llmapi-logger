@@ -47,7 +47,7 @@ func TestReadOnlyWriterFailsBatchAndRecoversAfterRealWrite(t *testing.T) {
 		acks := make([]chan error, len(ids))
 		for i, id := range ids {
 			record := testAudit(id)
-			record.defaults()
+			record.Defaults()
 			if id == "constraint-failure" {
 				record.Mode = "invalid"
 			}

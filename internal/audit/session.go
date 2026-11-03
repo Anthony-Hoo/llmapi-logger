@@ -13,9 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const bodyChunkSize = 1 << 20
@@ -56,8 +57,8 @@ type TerminalSummary struct {
 	ErrorCode     string
 }
 
-// Session owns the small, concurrency-safe state for one audit. It never
-// retains complete request or response bodies.
+// Session owns the concurrency-safe state for one audit. Capture uses bounded
+// staging and codec working buffers instead of accumulating complete bodies.
 type Session struct {
 	auditID  string
 	routeID  string
@@ -75,6 +76,8 @@ type Session struct {
 	callerNotify    func(string) bool
 	gaps            *gapBuffer
 
+	// bodyEncoder is session-local and accessed only while holding mu.
+	bodyEncoder     *bodycodec.Encoder
 	mu              sync.Mutex
 	stages          map[string]*stageCapture
 	captureFault    bool
@@ -105,7 +108,7 @@ func newSession(manager *Manager, requestContext context.Context, auditID, route
 		notify:        manager.completionNotifier(),
 		callerNotify:  manager.callerNotifier(),
 		stages:        make(map[string]*stageCapture, 4),
-		forwardStatus: sqlite.ForwardInProgress,
+		forwardStatus: storage.ForwardInProgress,
 	}
 	if manager.mode == ModeAvailable {
 		session.gaps = manager.gaps
@@ -141,7 +144,7 @@ func (session *Session) WrapRequestReceived(request *http.Request) {
 	if session == nil || request == nil {
 		return
 	}
-	stage := session.startStage(sqlite.StageRequestReceived, request.Proto, request.Method, request.Host, nil, contentLengthPointer(request.ContentLength), request.Header, hasBody(request.Body))
+	stage := session.startStage(storage.StageRequestReceived, request.Proto, request.Method, request.Host, nil, contentLengthPointer(request.ContentLength), request.Header, hasBody(request.Body))
 	if stage != nil && hasBody(request.Body) {
 		request.Body = newObservedReadCloser(request.Body, session, stage.name, func() http.Header { return request.Trailer })
 	}
@@ -153,7 +156,7 @@ func (session *Session) WrapRequestSent(request *http.Request) {
 	if session == nil || request == nil {
 		return
 	}
-	stage := session.startStage(sqlite.StageRequestSent, request.Proto, request.Method, request.Host, nil, contentLengthPointer(request.ContentLength), request.Header, hasBody(request.Body))
+	stage := session.startStage(storage.StageRequestSent, request.Proto, request.Method, request.Host, nil, contentLengthPointer(request.ContentLength), request.Header, hasBody(request.Body))
 	if stage != nil && hasBody(request.Body) {
 		request.Body = newObservedReadCloser(request.Body, session, stage.name, func() http.Header { return request.Trailer })
 	}
@@ -176,7 +179,7 @@ func (session *Session) WrapResponseReceived(response *http.Response) {
 		session.newAPIRequestID = stringPointer(requestID)
 		session.mu.Unlock()
 	}
-	stage := session.startStage(sqlite.StageResponseReceived, response.Proto, method, host, intPointer(response.StatusCode), contentLengthPointer(response.ContentLength), response.Header, hasBody(response.Body))
+	stage := session.startStage(storage.StageResponseReceived, response.Proto, method, host, intPointer(response.StatusCode), contentLengthPointer(response.ContentLength), response.Header, hasBody(response.Body))
 	if stage != nil && hasBody(response.Body) {
 		response.Body = newObservedReadCloser(response.Body, session, stage.name, func() http.Header { return response.Trailer })
 	}
@@ -203,10 +206,10 @@ func (session *Session) MarkRejected(status int, blockedBy, blockCode string) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.forwardStatus != sqlite.ForwardInProgress {
+	if session.forwardStatus != storage.ForwardInProgress {
 		return
 	}
-	session.forwardStatus = sqlite.ForwardRejected
+	session.forwardStatus = storage.ForwardRejected
 	session.statusCode = intPointer(status)
 	session.blockedBy = stringPointer(blockedBy)
 	session.blockCode = stringPointer(blockCode)
@@ -214,12 +217,12 @@ func (session *Session) MarkRejected(status int, blockedBy, blockCode string) {
 
 // MarkNewAPIError records a transport or upstream response-read failure.
 func (session *Session) MarkNewAPIError(errorCode string) {
-	session.markFailure(sqlite.ForwardNewAPIError, errorCode)
+	session.markFailure(storage.ForwardNewAPIError, errorCode)
 }
 
 // MarkProxyError records a downstream response-write failure.
 func (session *Session) MarkProxyError(errorCode string) {
-	session.markFailure(sqlite.ForwardProxyError, errorCode)
+	session.markFailure(storage.ForwardProxyError, errorCode)
 }
 
 // MarkClientCancelled records cancellation without block fields.
@@ -229,7 +232,7 @@ func (session *Session) MarkClientCancelled() {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.forwardStatus == sqlite.ForwardRejected {
+	if session.forwardStatus == storage.ForwardRejected {
 		return
 	}
 	if session.responseLogicallyCompleteLocked() {
@@ -238,7 +241,7 @@ func (session *Session) MarkClientCancelled() {
 		// cancellation; Finish will record the session as completed.
 		return
 	}
-	session.forwardStatus = sqlite.ForwardClientCancelled
+	session.forwardStatus = storage.ForwardClientCancelled
 	session.blockedBy = nil
 	session.blockCode = nil
 	code := "client_cancelled"
@@ -260,7 +263,7 @@ func (session *Session) MarkClientCancelled() {
 // encryption) intentionally do not change this transport classification;
 // they still surface through capture_status.
 func (session *Session) responseLogicallyCompleteLocked() bool {
-	received := session.stages[sqlite.StageResponseReceived]
+	received := session.stages[storage.StageResponseReceived]
 	if received == nil || received.body == nil {
 		return false
 	}
@@ -272,7 +275,7 @@ func (session *Session) responseLogicallyCompleteLocked() bool {
 		receivedBody.observedLength < *received.contentLength {
 		return false
 	}
-	sent := session.stages[sqlite.StageResponseSent]
+	sent := session.stages[storage.StageResponseSent]
 	if sent == nil || sent.body == nil || sent.body.writeFailed {
 		return false
 	}
@@ -285,11 +288,11 @@ func (session *Session) markFailure(status, errorCode string) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.forwardStatus == sqlite.ForwardRejected || session.forwardStatus == sqlite.ForwardClientCancelled {
+	if session.forwardStatus == storage.ForwardRejected || session.forwardStatus == storage.ForwardClientCancelled {
 		return
 	}
 	if session.request != nil && session.request.Err() != nil && !session.responseLogicallyCompleteLocked() {
-		session.forwardStatus = sqlite.ForwardClientCancelled
+		session.forwardStatus = storage.ForwardClientCancelled
 		code := "client_cancelled"
 		session.errorCode = &code
 		return
@@ -314,15 +317,15 @@ func (session *Session) Finish() error {
 
 func (session *Session) finish() error {
 	session.mu.Lock()
-	if session.forwardStatus == sqlite.ForwardInProgress {
+	if session.forwardStatus == storage.ForwardInProgress {
 		if session.request != nil && session.request.Err() != nil && !session.responseLogicallyCompleteLocked() {
-			session.forwardStatus = sqlite.ForwardClientCancelled
+			session.forwardStatus = storage.ForwardClientCancelled
 			session.errorCode = stringPointer("client_cancelled")
 		} else {
-			session.forwardStatus = sqlite.ForwardCompleted
+			session.forwardStatus = storage.ForwardCompleted
 		}
 	}
-	if session.forwardStatus == sqlite.ForwardClientCancelled || session.forwardStatus == sqlite.ForwardNewAPIError || session.forwardStatus == sqlite.ForwardProxyError {
+	if session.forwardStatus == storage.ForwardClientCancelled || session.forwardStatus == storage.ForwardNewAPIError || session.forwardStatus == storage.ForwardProxyError {
 		session.captureFault = true
 	}
 
@@ -331,7 +334,7 @@ func (session *Session) finish() error {
 		stageNames = append(stageNames, name)
 	}
 	sort.Slice(stageNames, func(left, right int) bool { return stageOrder(stageNames[left]) < stageOrder(stageNames[right]) })
-	finishes := make([]sqlite.StageFinish, 0, len(stageNames))
+	finishes := make([]storage.StageFinish, 0, len(stageNames))
 	for _, name := range stageNames {
 		stage := session.stages[name]
 		finish := session.finishStageLocked(stage)
@@ -340,19 +343,24 @@ func (session *Session) finish() error {
 		}
 	}
 
+	if session.bodyEncoder != nil {
+		session.bodyEncoder.Release()
+		session.bodyEncoder = nil
+	}
+
 	forwardStatus := session.forwardStatus
 	statusCode := cloneInt(session.statusCode)
 	blockedBy := cloneString(session.blockedBy)
 	blockCode := cloneString(session.blockCode)
 	errorCode := cloneString(session.errorCode)
 	newAPIRequestID := cloneString(session.newAPIRequestID)
-	captureStatus := sqlite.CaptureComplete
+	captureStatus := storage.CaptureComplete
 	if session.captureFault {
-		captureStatus = sqlite.CapturePartial
+		captureStatus = storage.CapturePartial
 	}
-	parseStatus := sqlite.ParsePending
-	if forwardStatus == sqlite.ForwardRejected {
-		parseStatus = sqlite.ParseSkipped
+	parseStatus := storage.ParsePending
+	if forwardStatus == storage.ForwardRejected {
+		parseStatus = storage.ParseSkipped
 	}
 	endedAtNS := session.now().UnixNano()
 	session.mu.Unlock()
@@ -361,7 +369,7 @@ func (session *Session) finish() error {
 	for _, finish := range finishes {
 		if err := session.store.FinishStage(session.writeCtx, finish); err != nil {
 			writeErrors = append(writeErrors, fmt.Errorf("finish stage %s: %w", finish.Stage, err))
-			captureStatus = sqlite.CapturePartial
+			captureStatus = storage.CapturePartial
 			session.recordGapReason(gapReasonForWrite(err))
 			session.logCaptureFailure(finish.Stage, "finish_stage_failed")
 		}
@@ -369,7 +377,7 @@ func (session *Session) finish() error {
 	if len(writeErrors) != 0 && errorCode == nil {
 		errorCode = stringPointer("audit_finalize_failed")
 	}
-	finish := sqlite.AuditFinish{
+	finish := storage.AuditFinish{
 		AuditID:         session.auditID,
 		EndedAtNS:       endedAtNS,
 		StatusCode:      statusCode,
@@ -381,7 +389,7 @@ func (session *Session) finish() error {
 		ErrorCode:       errorCode,
 		NewAPIRequestID: newAPIRequestID,
 	}
-	if responseStage := session.stages[sqlite.StageResponseSent]; responseStage != nil {
+	if responseStage := session.stages[storage.StageResponseSent]; responseStage != nil {
 		ttft := responseStage.startedAtNS - session.started.UnixNano()
 		if ttft < 0 {
 			ttft = 0
@@ -390,13 +398,13 @@ func (session *Session) finish() error {
 	}
 	if persisted, err := session.store.FinishAuditWithResult(session.writeCtx, finish); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
-		captureStatus = sqlite.CapturePartial
+		captureStatus = storage.CapturePartial
 		session.recordGapReason(gapReasonForWrite(err))
 		session.logCaptureFailure("", "finish_audit_failed")
 	} else {
 		captureStatus = persisted.CaptureStatus
 		errorCode = cloneString(persisted.ErrorCode)
-		if parseStatus == sqlite.ParsePending && session.notify != nil {
+		if parseStatus == storage.ParsePending && session.notify != nil {
 			_ = session.notify(session.auditID)
 		}
 	}
@@ -426,19 +434,19 @@ func (session *Session) finish() error {
 	return errors.Join(writeErrors...)
 }
 
-func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinish {
-	state := sqlite.StageStateComplete
+func (session *Session) finishStageLocked(stage *stageCapture) storage.StageFinish {
+	state := storage.StageStateComplete
 	errorCode := stage.errorCode
 	if stage.faulted || stage.expectsBody && stage.body == nil {
-		state = sqlite.StageStatePartial
+		state = storage.StageStatePartial
 		session.captureFault = true
 	}
 
-	var bodyFinish *sqlite.BodyFinish
+	var bodyFinish *storage.BodyFinish
 	if stage.body != nil {
 		body := stage.body
 		session.flushBodyLocked(stage, body, true)
-		if stage.name == sqlite.StageResponseSent && !body.closed && !stage.faulted && session.forwardStatus == sqlite.ForwardCompleted {
+		if stage.name == storage.StageResponseSent && !body.closed && !stage.faulted && session.forwardStatus == storage.ForwardCompleted {
 			body.eofSeen = true
 			body.hashComplete = true
 			body.closed = true
@@ -447,7 +455,7 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 		chunkCount := body.chunkCount
 		streamEventCount := body.streamEvents
 		streamTimelineComplete := true
-		var timeline *sqlite.StreamTimeline
+		var timeline *storage.StreamTimeline
 		if body.sourceStage == stage.name && body.streamEvents > 0 {
 			var timelineErr error
 			timeline, timelineErr = session.sealStreamTimelineLocked(stage, body)
@@ -471,10 +479,10 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 			}
 		}
 		errorCode = stage.errorCode
-		bodyState := sqlite.StageStateComplete
+		bodyState := storage.StageStateComplete
 		if body.faulted || !body.eofSeen || storedLength != body.observedLength {
-			bodyState = sqlite.StageStatePartial
-			state = sqlite.StageStatePartial
+			bodyState = storage.StageStatePartial
+			state = storage.StageStatePartial
 			session.captureFault = true
 		}
 		bodyError := body.errorCode
@@ -484,14 +492,14 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 		// A body whose start was rejected has no row to finish. Its fault is
 		// already on the stage; sending the body would fail as a writer error.
 		if body.persisted {
-			bodyFinish = &sqlite.BodyFinish{
+			bodyFinish = &storage.BodyFinish{
 				ObservedLength:         body.observedLength,
 				StoredLength:           storedLength,
 				SHA256:                 body.digest.Sum(nil),
 				HashComplete:           body.hashComplete,
 				EOFSeen:                body.eofSeen,
 				State:                  bodyState,
-				RetentionState:         sqlite.RetentionPending,
+				RetentionState:         storage.RetentionPending,
 				FirstObservedAtNS:      optionalInt64(body.firstAtNS),
 				LastObservedAtNS:       optionalInt64(body.lastAtNS),
 				ChunkCount:             chunkCount,
@@ -502,7 +510,7 @@ func (session *Session) finishStageLocked(stage *stageCapture) sqlite.StageFinis
 			}
 		}
 	}
-	return sqlite.StageFinish{
+	return storage.StageFinish{
 		AuditID:       session.auditID,
 		Stage:         stage.name,
 		State:         state,
@@ -534,10 +542,10 @@ func bytesEqual(left, right []byte) bool {
 
 func pairedBodySourceStage(stage string) string {
 	switch stage {
-	case sqlite.StageRequestSent:
-		return sqlite.StageRequestReceived
-	case sqlite.StageResponseSent:
-		return sqlite.StageResponseReceived
+	case storage.StageRequestSent:
+		return storage.StageRequestReceived
+	case storage.StageResponseSent:
+		return storage.StageResponseReceived
 	default:
 		return ""
 	}
@@ -570,10 +578,10 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 		session.statusCode = cloneInt(statusCode)
 	}
 
-	write := sqlite.HTTPStage{
+	write := storage.HTTPStage{
 		AuditID:       session.auditID,
 		Stage:         name,
-		State:         sqlite.StageStateStreaming,
+		State:         storage.StageStateStreaming,
 		Proto:         proto,
 		Method:        method,
 		Host:          host,
@@ -590,7 +598,7 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 		return stage
 	}
 	stage.persisted = true
-	session.addHeadersLocked(stage, sqlite.HeaderKindHeader, headers)
+	session.addHeadersLocked(stage, storage.HeaderKindHeader, headers)
 	return stage
 }
 
@@ -616,7 +624,7 @@ func (session *Session) addHeadersLocked(stage *stageCapture, kind string, heade
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	values := make([]sqlite.HTTPHeader, 0)
+	values := make([]storage.HTTPHeader, 0)
 	for _, name := range names {
 		for index, value := range headers.Values(name) {
 			aad, err := security.AAD(session.auditID, "header", stage.name, kind, name, strconv.Itoa(index))
@@ -629,7 +637,7 @@ func (session *Session) addHeadersLocked(stage *stageCapture, kind string, heade
 				session.markStageFaultLocked(stage, "header_encryption_failed")
 				continue
 			}
-			values = append(values, sqlite.HTTPHeader{
+			values = append(values, storage.HTTPHeader{
 				AuditID:     session.auditID,
 				Stage:       stage.name,
 				Kind:        kind,
@@ -653,7 +661,7 @@ func (session *Session) markStageFaultLocked(stage *stageCapture, errorCode stri
 	}
 	session.captureFault = true
 	if errorCode == "header_encryption_failed" || errorCode == "body_encryption_failed" {
-		session.recordGapReasonLocked(sqlite.GapReasonEncryption)
+		session.recordGapReasonLocked(storage.GapReasonEncryption)
 	}
 	session.logCaptureFailure(stage.name, errorCode)
 }
@@ -688,13 +696,13 @@ func (session *Session) logCaptureFailure(stage, errorCode string) {
 
 func stageOrder(stage string) int {
 	switch stage {
-	case sqlite.StageRequestReceived:
+	case storage.StageRequestReceived:
 		return 1
-	case sqlite.StageRequestSent:
+	case storage.StageRequestSent:
 		return 2
-	case sqlite.StageResponseReceived:
+	case storage.StageResponseReceived:
 		return 3
-	case sqlite.StageResponseSent:
+	case storage.StageResponseSent:
 		return 4
 	default:
 		return 5

@@ -8,13 +8,13 @@ import (
 	"sync"
 	"time"
 
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const gapFlushInterval = 30 * time.Second
 
 type gapWriter interface {
-	InsertAuditGaps(context.Context, []sqlite.AuditGap) error
+	InsertAuditGaps(context.Context, []storage.AuditGap) error
 }
 
 type gapAggregate struct {
@@ -182,7 +182,7 @@ func (buffer *gapBuffer) flush(ctx context.Context) error {
 	return nil
 }
 
-func (buffer *gapBuffer) take() []sqlite.AuditGap {
+func (buffer *gapBuffer) take() []storage.AuditGap {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	if len(buffer.pending) == 0 {
@@ -194,11 +194,11 @@ func (buffer *gapBuffer) take() []sqlite.AuditGap {
 	}
 	sort.Strings(reasons)
 	createdAtNS := buffer.now().UnixNano()
-	gaps := make([]sqlite.AuditGap, 0, len(reasons))
+	gaps := make([]storage.AuditGap, 0, len(reasons))
 	for _, reason := range reasons {
 		aggregate := buffer.pending[reason]
 		detail, _ := gapDetail(reason)
-		gaps = append(gaps, sqlite.AuditGap{
+		gaps = append(gaps, storage.AuditGap{
 			StartedAtNS:  aggregate.startedAtNS,
 			EndedAtNS:    aggregate.endedAtNS,
 			Reason:       reason,
@@ -211,7 +211,7 @@ func (buffer *gapBuffer) take() []sqlite.AuditGap {
 	return gaps
 }
 
-func (buffer *gapBuffer) merge(gaps []sqlite.AuditGap) {
+func (buffer *gapBuffer) merge(gaps []storage.AuditGap) {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	for _, gap := range gaps {
@@ -239,14 +239,14 @@ func (buffer *gapBuffer) pendingCount() int {
 
 func gapDetail(reason string) (string, bool) {
 	switch reason {
-	case sqlite.GapReasonDBUnavailable:
-		return sqlite.GapDetailDBUnavailable, true
-	case sqlite.GapReasonQueueFull:
-		return sqlite.GapDetailQueueFull, true
-	case sqlite.GapReasonEncryption:
-		return sqlite.GapDetailEncryption, true
-	case sqlite.GapReasonWrite:
-		return sqlite.GapDetailWrite, true
+	case storage.GapReasonDBUnavailable:
+		return storage.GapDetailDBUnavailable, true
+	case storage.GapReasonQueueFull:
+		return storage.GapDetailQueueFull, true
+	case storage.GapReasonEncryption:
+		return storage.GapDetailEncryption, true
+	case storage.GapReasonWrite:
+		return storage.GapDetailWrite, true
 	default:
 		return "", false
 	}

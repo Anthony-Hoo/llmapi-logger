@@ -1,5 +1,7 @@
 package sqlite
 
+import "llmapi-logger/internal/storage"
+
 import (
 	"bytes"
 	"errors"
@@ -9,10 +11,7 @@ import (
 
 // ParsedAudit atomically persists the narrow parser summary and, when
 // available, one verified content-addressed turn graph.
-type ParsedAudit struct {
-	Result ParsedResult
-	Turn   *auditmodel.PreparedTurn
-}
+type ParsedAudit = storage.ParsedAudit
 
 func validateParsedAudit(value ParsedAudit) error {
 	if err := validateParsedResult(value.Result); err != nil {

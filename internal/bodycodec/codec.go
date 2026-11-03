@@ -19,14 +19,41 @@ const (
 )
 
 func Encode(plaintext []byte, contentType string) (string, []byte, error) {
+	encoder := &Encoder{}
+	defer encoder.Release()
+	return encoder.Encode(plaintext, contentType)
+}
+
+// Encoder reuses at most one gzip writer within one capture session. The zero
+// value is ready to use. Callers serialize Encode/Release (Session uses its mu).
+// It is deliberately not a global pool: Reset detaches output and creates an
+// independent stream, but private flate buffers may retain plaintext until
+// reuse or GC. Release drops those buffers; it does not promise secure erasure.
+type Encoder struct{ writer *gzip.Writer }
+
+func (encoder *Encoder) Release() {
+	if encoder.writer != nil {
+		encoder.writer.Reset(io.Discard)
+		encoder.writer = nil
+	}
+}
+
+func (encoder *Encoder) Encode(plaintext []byte, contentType string) (string, []byte, error) {
 	if len(plaintext) < 128 || !compressible(contentType, plaintext) {
 		return CompressionNone, append([]byte(nil), plaintext...), nil
 	}
 	var output bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&output, gzip.BestSpeed)
-	if err != nil {
-		return "", nil, err
+	if encoder.writer == nil {
+		writer, err := gzip.NewWriterLevel(&output, gzip.BestSpeed)
+		if err != nil {
+			return "", nil, err
+		}
+		encoder.writer = writer
+	} else {
+		encoder.writer.Reset(&output)
 	}
+	writer := encoder.writer
+	defer writer.Reset(io.Discard)
 	writer.Header.ModTime = time.Unix(0, 0)
 	writer.Header.OS = 255
 	if _, err := writer.Write(plaintext); err != nil {
@@ -38,6 +65,7 @@ func Encode(plaintext []byte, contentType string) (string, []byte, error) {
 	}
 	compressed := output.Bytes()
 	if len(compressed)+32 >= len(plaintext) {
+		clear(compressed)
 		return CompressionNone, append([]byte(nil), plaintext...), nil
 	}
 	return CompressionGZIP, compressed, nil

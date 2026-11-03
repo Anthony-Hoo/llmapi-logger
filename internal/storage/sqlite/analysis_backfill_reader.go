@@ -1,5 +1,7 @@
 package sqlite
 
+import "llmapi-logger/internal/storage"
+
 import (
 	"context"
 	"errors"
@@ -8,17 +10,11 @@ import (
 
 // AnalysisBackfillCursor is the keyset position after which the next backfill
 // page continues. Pages run oldest first, so the cursor only moves forwards.
-type AnalysisBackfillCursor struct {
-	StartedAtNS int64
-	AuditID     string
-}
+type AnalysisBackfillCursor = storage.AnalysisBackfillCursor
 
 // AnalysisBackfillCandidate names one parsed audit that has no current
 // audit_analysis row.
-type AnalysisBackfillCandidate struct {
-	AuditID     string
-	StartedAtNS int64
-}
+type AnalysisBackfillCandidate = storage.AnalysisBackfillCandidate
 
 // ListAnalysisBackfillCandidates returns up to limit ended audits whose parse
 // status is ok or partial and whose audit_analysis row is missing or older than

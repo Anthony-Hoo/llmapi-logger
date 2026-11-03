@@ -13,7 +13,7 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const defaultScanInterval = 30 * time.Second
@@ -39,7 +39,7 @@ type Worker struct {
 	reconstructor   Reconstructor
 
 	// Only the parser goroutine accesses the insights backfill state.
-	backfillCursor   *sqlite.AnalysisBackfillCursor
+	backfillCursor   *storage.AnalysisBackfillCursor
 	backfillSkipped  map[string]struct{}
 	backfillNextScan time.Time
 
@@ -293,7 +293,7 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 			// recovery instead of spending the persistence-failure budget.
 			return
 		}
-		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", sqlite.ErrorClass(err))
+		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", storage.ErrorClass(err))
 		worker.releaseProcessing(ctx, audit.AuditID)
 		return
 	}
@@ -306,7 +306,7 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 // with a stable code and dropped: the parse status is already committed, and
 // the insights backfill recomputes missing rows later instead of retrying
 // here.
-func (worker *Worker) analyze(ctx context.Context, audit sqlite.ParserAudit, input Input, result Result, savedStatus string) {
+func (worker *Worker) analyze(ctx context.Context, audit storage.ParserAudit, input Input, result Result, savedStatus string) {
 	analyzer := worker.auditAnalyzer()
 	if analyzer == nil || (savedStatus != StatusOK && savedStatus != StatusPartial) ||
 		!input.Request.Present || len(input.Request.Data) == 0 {
@@ -320,14 +320,14 @@ func (worker *Worker) analyze(ctx context.Context, audit sqlite.ParserAudit, inp
 		worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", "analysis_panic")
 		return
 	}
-	worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", insights.ErrorCode(err), "storage_error", sqlite.ErrorClass(err))
+	worker.logger.Warn("insights analysis failed", "audit_id", audit.AuditID, "error_code", insights.ErrorCode(err), "storage_error", storage.ErrorClass(err))
 }
 
 var errAnalyzerPanic = errors.New("parser: analyzer panic")
 
 // runAnalyzer invokes the analyzer hook shared by live parsing and the
 // insights backfill, converting a panic into errAnalyzerPanic.
-func runAnalyzer(ctx context.Context, analyzer AuditAnalyzer, audit sqlite.ParserAudit, input Input, result Result) (err error) {
+func runAnalyzer(ctx context.Context, analyzer AuditAnalyzer, audit storage.ParserAudit, input Input, result Result) (err error) {
 	defer func() {
 		if recover() != nil {
 			err = errAnalyzerPanic
@@ -359,7 +359,7 @@ func (worker *Worker) releaseProcessing(ctx context.Context, auditID string) boo
 	defer cancel()
 	if err := worker.store.ReleaseProcessingParse(releaseContext, auditID); err != nil {
 		worker.pendingReleases[auditID] = struct{}{}
-		worker.logger.Warn("parser retry release failed", "audit_id", auditID, "error_code", "parse_release_failed", "storage_error", sqlite.ErrorClass(err))
+		worker.logger.Warn("parser retry release failed", "audit_id", auditID, "error_code", "parse_release_failed", "storage_error", storage.ErrorClass(err))
 		return false
 	}
 	delete(worker.pendingReleases, auditID)
@@ -376,7 +376,7 @@ func (worker *Worker) retryProcessingReleases(ctx context.Context) {
 	}
 }
 
-func (worker *Worker) prepareTurn(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, input Input, result *Result) *auditmodel.PreparedTurn {
+func (worker *Worker) prepareTurn(ctx context.Context, audit storage.ParserAudit, implementation Parser, input Input, result *Result) *auditmodel.PreparedTurn {
 	if implementation == nil || result == nil || result.Status != StatusOK || !input.Request.Complete || (input.Response.Present && !input.Response.Complete) {
 		return nil
 	}
@@ -396,7 +396,15 @@ func (worker *Worker) prepareTurn(ctx context.Context, audit sqlite.ParserAudit,
 	turn.ParserName = audit.ParserName
 	turn.ResponseID = result.ResponseID
 	turn.CreatedAtNS = worker.now().UnixNano()
-	prepared, err := auditmodel.Prepare(turn, worker.cipher)
+	var lookup auditmodel.ObjectLookup
+	if existing, ok := worker.store.(interface {
+		LookupAuditObjects(context.Context, [][]byte, [][]byte) ([]auditmodel.StoredContent, []auditmodel.StoredBinary, error)
+	}); ok {
+		lookup = func(contentHashes, binaryHashes [][]byte) ([]auditmodel.StoredContent, []auditmodel.StoredBinary, error) {
+			return existing.LookupAuditObjects(ctx, contentHashes, binaryHashes)
+		}
+	}
+	prepared, err := auditmodel.PrepareWithLookup(turn, worker.cipher, lookup)
 	if err != nil {
 		result.Status = StatusPartial
 		result.ErrorCode = "reconstruction_failed"
@@ -454,7 +462,7 @@ func (worker *Worker) normalizeResult(result *Result, input Input, evidenceErr e
 
 // persistResult saves the parse and returns the status it actually stored,
 // which encryption failures downgrade to error.
-func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudit, implementation Parser, result Result, prepared *auditmodel.PreparedTurn) (string, error) {
+func (worker *Worker) persistResult(ctx context.Context, audit storage.ParserAudit, implementation Parser, result Result, prepared *auditmodel.PreparedTurn) (string, error) {
 	parserVersion := "1"
 	if implementation != nil {
 		parserVersion = implementation.Version()
@@ -478,7 +486,7 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 	if generatedPlaintext {
 		clear(plaintext)
 	}
-	storageResult := sqlite.ParsedResult{
+	storageResult := storage.ParsedResult{
 		AuditID:            audit.AuditID,
 		ParserName:         audit.ParserName,
 		ParserVersion:      parserVersion,
@@ -500,7 +508,7 @@ func (worker *Worker) persistResult(ctx context.Context, audit sqlite.ParserAudi
 		ParsedJSONEnc:      encrypted,
 		ParsedAtNS:         worker.now().UnixNano(),
 	}
-	return result.Status, worker.store.SaveParsedAudit(ctx, sqlite.ParsedAudit{Result: storageResult, Turn: prepared})
+	return result.Status, worker.store.SaveParsedAudit(ctx, storage.ParsedAudit{Result: storageResult, Turn: prepared})
 }
 
 func parsedResultPlaintext(result Result, includeConversation bool) ([]byte, bool) {

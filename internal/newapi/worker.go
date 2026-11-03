@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -37,11 +37,11 @@ var retryDelays = [...]time.Duration{
 // CallerStore is the small persistence surface used by the single caller
 // worker. Pending work remains in SQLite when the in-memory wake queue fills.
 type CallerStore interface {
-	ListDueCallerLookups(context.Context, int64, int) ([]sqlite.CallerLookup, error)
-	UpsertTokenLink(context.Context, sqlite.TokenLink) error
-	RetryCallerLookup(context.Context, sqlite.CallerRetry) error
-	NextBillingBackfill(context.Context) (sqlite.BillingBackfillItem, bool, error)
-	UpdateTokenLinkBilling(context.Context, sqlite.BillingUpdate) error
+	ListDueCallerLookups(context.Context, int64, int) ([]storage.CallerLookup, error)
+	UpsertTokenLink(context.Context, storage.TokenLink) error
+	RetryCallerLookup(context.Context, storage.CallerRetry) error
+	NextBillingBackfill(context.Context) (storage.BillingBackfillItem, bool, error)
+	UpdateTokenLinkBilling(context.Context, storage.BillingUpdate) error
 }
 
 // LogLookup is implemented by Client and kept injectable for tests.
@@ -213,7 +213,7 @@ func (worker *Worker) scan(ctx context.Context) {
 	}
 }
 
-func (worker *Worker) process(ctx context.Context, item sqlite.CallerLookup) {
+func (worker *Worker) process(ctx context.Context, item storage.CallerLookup) {
 	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	record, found, err := worker.client.LookupRequest(lookupCtx, item.RequestID)
 	cancel()
@@ -232,12 +232,12 @@ func (worker *Worker) process(ctx context.Context, item sqlite.CallerLookup) {
 			worker.retry(ctx, item, attempts, "billing_not_found")
 			return
 		}
-		link := sqlite.TokenLink{
+		link := storage.TokenLink{
 			AuditID: item.AuditID, NewAPIRequestID: item.RequestID,
 			NewAPIUserID: record.UserID, Username: record.Username,
 			NewAPITokenID: record.TokenID, TokenName: record.TokenName,
 			LinkedAtNS: worker.now().UnixNano(), Attempts: attempts,
-			BillingState: sqlite.BillingUnbilled,
+			BillingState: storage.BillingUnbilled,
 		}
 		if record.Billed() && haveRate {
 			setBilled(&link.BillingState, &link.Quota, &link.QuotaPerUnit, &link.BilledPromptTokens, &link.BilledCompletionTokens, record, quotaPerUnit)
@@ -258,7 +258,7 @@ func (worker *Worker) process(ctx context.Context, item sqlite.CallerLookup) {
 
 // retry persists one unsuccessful attempt: rescheduled while attempts remain,
 // terminally unresolved afterwards.
-func (worker *Worker) retry(ctx context.Context, item sqlite.CallerLookup, attempts int, category string) {
+func (worker *Worker) retry(ctx context.Context, item storage.CallerLookup, attempts int, category string) {
 	now := worker.now()
 	var nextAt *int64
 	if attempts <= len(retryDelays) {
@@ -267,7 +267,7 @@ func (worker *Worker) retry(ctx context.Context, item sqlite.CallerLookup, attem
 	}
 	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer writeCancel()
-	if retryErr := worker.store.RetryCallerLookup(writeCtx, sqlite.CallerRetry{
+	if retryErr := worker.store.RetryCallerLookup(writeCtx, storage.CallerRetry{
 		AuditID: item.AuditID, RequestID: item.RequestID, Attempts: attempts,
 		NextAttemptAtNS: nextAt, UpdatedAtNS: now.UnixNano(),
 	}); retryErr != nil {
@@ -305,12 +305,12 @@ func (worker *Worker) backfillStep(ctx context.Context) (time.Duration, bool) {
 		return 0, false
 	}
 	quotaPerUnit, haveRate := worker.client.EnsureQuotaPerUnit(ctx)
-	update := sqlite.BillingUpdate{AuditID: item.AuditID, Attempts: item.Attempts + 1, State: sqlite.BillingUnbilled}
+	update := storage.BillingUpdate{AuditID: item.AuditID, Attempts: item.Attempts + 1, State: storage.BillingUnbilled}
 	failed := lookupErr != nil || (found && record.Billed() && !haveRate)
 	switch {
 	case failed:
-		if update.Attempts < sqlite.MaxBillingAttempts {
-			update.State = sqlite.BillingUnchecked
+		if update.Attempts < storage.MaxBillingAttempts {
+			update.State = storage.BillingUnchecked
 		}
 	case found && record.Billed():
 		setBilled(&update.State, &update.Quota, &update.QuotaPerUnit, &update.BilledPromptTokens, &update.BilledCompletionTokens, record, quotaPerUnit)
@@ -334,7 +334,7 @@ func (worker *Worker) backfillStep(ctx context.Context) (time.Duration, bool) {
 }
 
 func setBilled(state *string, quota **int64, quotaPerUnit **float64, prompt, completion **int64, record RequestLog, rate float64) {
-	*state = sqlite.BillingBilled
+	*state = storage.BillingBilled
 	quotaValue, promptValue, completionValue, rateValue := record.Quota, record.PromptTokens, record.CompletionTokens, rate
 	*quota, *quotaPerUnit, *prompt, *completion = &quotaValue, &rateValue, &promptValue, &completionValue
 }

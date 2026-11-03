@@ -25,6 +25,7 @@ import (
 func insightsTestConfig(t *testing.T, upstreamURL string, enabled bool, vocabularyFile string) config.Config {
 	t.Helper()
 	configuration := config.Default()
+	configuration.DatabaseURL = "postgres://localhost/test?sslmode=disable"
 	configuration.NewAPI.URL = upstreamURL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
@@ -89,7 +90,7 @@ func TestInsightsWiringFollowsConfiguration(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	t.Run("enabled analyses parsed audits", func(t *testing.T) {
-		application, err := New(insightsTestConfig(t, upstream.URL, true, ""), logger)
+		application, err := newSQLiteTest(insightsTestConfig(t, upstream.URL, true, ""), logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +116,7 @@ func TestInsightsWiringFollowsConfiguration(t *testing.T) {
 		// A disabled deployment never reads the override file, so even a
 		// missing one cannot fail startup.
 		missing := filepath.Join(t.TempDir(), "missing-vocabulary.yaml")
-		application, err := New(insightsTestConfig(t, upstream.URL, false, missing), logger)
+		application, err := newSQLiteTest(insightsTestConfig(t, upstream.URL, false, missing), logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +135,7 @@ func TestInsightsWiringFollowsConfiguration(t *testing.T) {
 		if err := os.WriteFile(invalid, []byte("clients:\n  custom:\n    node_fallback: sideways\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		application, err := New(insightsTestConfig(t, upstream.URL, true, invalid), logger)
+		application, err := newSQLiteTest(insightsTestConfig(t, upstream.URL, true, invalid), logger)
 		if application != nil {
 			_ = application.Close()
 		}
@@ -172,7 +173,7 @@ func TestDeprecatedPricingFileOnlyWarnsOnce(t *testing.T) {
 	var logs bytes.Buffer
 	configuration := insightsTestConfig(t, "http://upstream.example.com", true, "")
 	configuration.Insights.PricingFile = missing
-	application, err := New(configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestDeprecatedPricingFileOnlyWarnsOnce(t *testing.T) {
 	}
 
 	logs.Reset()
-	application, err = New(insightsTestConfig(t, "http://upstream.example.com", true, ""), slog.New(slog.NewJSONHandler(&logs, nil)))
+	application, err = newSQLiteTest(insightsTestConfig(t, "http://upstream.example.com", true, ""), slog.New(slog.NewJSONHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +230,7 @@ func TestInsightsReportBillingEnabledFromNewAPICredentials(t *testing.T) {
 			configuration.NewAPI.AccessToken = "billing-access-canary"
 			configuration.NewAPI.UserID = 1
 		}
-		application, err := New(configuration, logger)
+		application, err := newSQLiteTest(configuration, logger)
 		if err != nil {
 			t.Fatal(err)
 		}

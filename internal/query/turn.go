@@ -10,7 +10,7 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/parser/openai"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 func (service *Service) ReconstructTurn(ctx context.Context, auditID string) (ReconstructedTurn, error) {
@@ -33,7 +33,7 @@ func (service *Service) ReconstructTurn(ctx context.Context, auditID string) (Re
 	return reconstructTurnGraph(service.cipher, detail.Audit.ParserName, detail.TurnGraph)
 }
 
-func reconstructTurnGraph(cipher security.Cipher, parserName string, graph *sqlite.TurnGraph) (ReconstructedTurn, error) {
+func reconstructTurnGraph(cipher security.Cipher, parserName string, graph *storage.TurnGraph) (ReconstructedTurn, error) {
 	if cipher == nil || graph == nil || graph.ReconstructionStatus != "verified" {
 		return ReconstructedTurn{}, integrityAt("graph_header")
 	}
@@ -165,7 +165,7 @@ func verifiedReconstruction(value any, want []byte) bool {
 	return err == nil && auditmodel.EqualHash(auditmodel.ReconstructionHash(canonical), want)
 }
 
-func mapTurn(graph *sqlite.TurnGraph) Turn {
+func mapTurn(graph *storage.TurnGraph) Turn {
 	return Turn{
 		TurnID:                       graph.TurnID,
 		ConversationID:               graph.ConversationID,

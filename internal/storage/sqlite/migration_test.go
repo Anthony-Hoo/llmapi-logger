@@ -45,7 +45,7 @@ func TestParseRetryMigrationPreservesExistingAuditAndIntegrity(t *testing.T) {
 	}
 	defer tx.Rollback()
 	record := testAudit("audit-before-retry-migration")
-	record.defaults()
+	record.Defaults()
 	if err := insertAudit(tx, record); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestBillingMigrationMarksExistingLinksUnchecked(t *testing.T) {
 	}
 	defer tx.Rollback()
 	record := testAudit("audit-before-billing")
-	record.defaults()
+	record.Defaults()
 	if err := insertAudit(tx, record); err != nil {
 		t.Fatal(err)
 	}

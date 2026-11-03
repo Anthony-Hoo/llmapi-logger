@@ -1,3 +1,5 @@
+> 历史格式说明：本模块描述 v0.6.0 的 SQLite schema12，现仅用于离线导入和兼容验证。当前运行时采用 PostgreSQL，参见 [迁移方案](../design/postgres-history-storage.md) 与 [部署步骤](../deployment/postgresql-migration.md)。不要对生产旧库执行本文历史清库操作。
+
 # 模块 04：SQLite 存储与迁移
 
 ## 1. 目标
