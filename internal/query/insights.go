@@ -16,7 +16,7 @@ import (
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 // Insights query limits.
@@ -43,18 +43,18 @@ var (
 // InsightsStore is the storage surface of the insights service. It is separate
 // from Store so the audit list and detail paths do not depend on it.
 type InsightsStore interface {
-	InsightsUsage(context.Context, sqlite.InsightsFilter, sqlite.InsightsUsageSpec) ([]sqlite.InsightsUsageRow, error)
-	InsightsDistinct(context.Context, sqlite.InsightsFilter) (int64, int64, error)
-	InsightsDayCounts(context.Context, sqlite.InsightsFilter, int) ([]sqlite.InsightsDayCount, error)
-	InsightsSessions(context.Context, sqlite.InsightsFilter, string, *sqlite.InsightsSessionCursor, int) (sqlite.InsightsSessionPage, error)
-	InsightsSessionModels(context.Context, sqlite.InsightsFilter) (map[string][]string, error)
-	InsightsSubagentCounts(context.Context, sqlite.InsightsFilter) (map[string]int64, error)
-	InsightsRealRoots(context.Context, sqlite.InsightsFilter) (map[string]bool, error)
-	InsightsTrend(context.Context, sqlite.InsightsFilter, int) ([]sqlite.InsightsTrendRow, bool, error)
-	InsightsTurnStartsBefore(context.Context, sqlite.InsightsFilter, int64, string) (int64, error)
-	InsightsTree(context.Context, sqlite.InsightsFilter, int) ([]sqlite.InsightsTreeNodeRow, bool, error)
-	LoadAnalysis(context.Context, string) (sqlite.AnalysisRow, error)
-	QueryAuditScope(context.Context, string) (sqlite.AuditScopeRow, error)
+	InsightsUsage(context.Context, storage.InsightsFilter, storage.InsightsUsageSpec) ([]storage.InsightsUsageRow, error)
+	InsightsDistinct(context.Context, storage.InsightsFilter) (int64, int64, error)
+	InsightsDayCounts(context.Context, storage.InsightsFilter, int) ([]storage.InsightsDayCount, error)
+	InsightsSessions(context.Context, storage.InsightsFilter, string, *storage.InsightsSessionCursor, int) (storage.InsightsSessionPage, error)
+	InsightsSessionModels(context.Context, storage.InsightsFilter) (map[string][]string, error)
+	InsightsSubagentCounts(context.Context, storage.InsightsFilter) (map[string]int64, error)
+	InsightsRealRoots(context.Context, storage.InsightsFilter) (map[string]bool, error)
+	InsightsTrend(context.Context, storage.InsightsFilter, int) ([]storage.InsightsTrendRow, bool, error)
+	InsightsTurnStartsBefore(context.Context, storage.InsightsFilter, int64, string) (int64, error)
+	InsightsTree(context.Context, storage.InsightsFilter, int) ([]storage.InsightsTreeNodeRow, bool, error)
+	LoadAnalysis(context.Context, string) (storage.AnalysisRow, error)
+	QueryAuditScope(context.Context, string) (storage.AuditScopeRow, error)
 }
 
 // Insights builds the context-insights API responses. Aggregate endpoints read
@@ -153,7 +153,7 @@ type usageAccumulator struct {
 	label  string
 	totals insights.UsageTotals
 	cost   float64
-	mix    sqlite.InsightsMix
+	mix    storage.InsightsMix
 }
 
 type usageFold struct {
@@ -161,7 +161,7 @@ type usageFold struct {
 	byKey map[string]*usageAccumulator
 }
 
-func (service *Insights) fold(rows []sqlite.InsightsUsageRow) usageFold {
+func (service *Insights) fold(rows []storage.InsightsUsageRow) usageFold {
 	result := usageFold{byKey: make(map[string]*usageAccumulator)}
 	for _, row := range rows {
 		accumulator := result.byKey[row.Key]
@@ -210,7 +210,7 @@ func (accumulator *usageAccumulator) usage() insights.UsageTotals {
 	return totals
 }
 
-func roundMix(mix sqlite.InsightsMix) insights.CategoryValues {
+func roundMix(mix storage.InsightsMix) insights.CategoryValues {
 	round := func(value float64) int64 { return int64(value + 0.5) }
 	return insights.CategoryValues{
 		System: round(mix.System), Tools: round(mix.Tools), User: round(mix.User), Injected: round(mix.Injected),
@@ -218,8 +218,8 @@ func roundMix(mix sqlite.InsightsMix) insights.CategoryValues {
 	}
 }
 
-func (service *Insights) filter(scope *Scope, fromNS, toNS int64) sqlite.InsightsFilter {
-	return sqlite.InsightsFilter{FromNS: fromNS, ToNS: toNS, Scope: storageScope(scope)}
+func (service *Insights) filter(scope *Scope, fromNS, toNS int64) storage.InsightsFilter {
+	return storage.InsightsFilter{FromNS: fromNS, ToNS: toNS, Scope: storageScope(scope)}
 }
 
 func validateScope(scope *Scope) error {
@@ -261,11 +261,11 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 	}
 	groupBy := request.GroupBy
 	if groupBy == "" {
-		groupBy = sqlite.InsightsDimModel
+		groupBy = storage.InsightsDimModel
 	}
 	switch groupBy {
-	case sqlite.InsightsDimModel, sqlite.InsightsDimProtocol, sqlite.InsightsDimClient:
-	case sqlite.InsightsDimCaller, sqlite.InsightsDimToken:
+	case storage.InsightsDimModel, storage.InsightsDimProtocol, storage.InsightsDimClient:
+	case storage.InsightsDimCaller, storage.InsightsDimToken:
 		if request.Scope != nil {
 			return insights.OverviewResponse{}, invalid("group_by is not available to this session")
 		}
@@ -277,15 +277,15 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 		return insights.OverviewResponse{}, err
 	}
 	filter := service.filter(request.Scope, from, to)
-	spec := func(dimension string) sqlite.InsightsUsageSpec {
-		return sqlite.InsightsUsageSpec{Dimension: dimension, TZOffsetMin: request.TZOffsetMin}
+	spec := func(dimension string) storage.InsightsUsageSpec {
+		return storage.InsightsUsageSpec{Dimension: dimension, TZOffsetMin: request.TZOffsetMin}
 	}
 
-	totalRows, err := service.store.InsightsUsage(ctx, filter, spec(sqlite.InsightsDimTotal))
+	totalRows, err := service.store.InsightsUsage(ctx, filter, spec(storage.InsightsDimTotal))
 	if err != nil {
 		return insights.OverviewResponse{}, fmt.Errorf("query: insights overview totals: %w", err)
 	}
-	dayRows, err := service.store.InsightsUsage(ctx, filter, spec(sqlite.InsightsDimDay))
+	dayRows, err := service.store.InsightsUsage(ctx, filter, spec(storage.InsightsDimDay))
 	if err != nil {
 		return insights.OverviewResponse{}, fmt.Errorf("query: insights overview days: %w", err)
 	}
@@ -321,7 +321,7 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 	for _, key := range groups.order {
 		accumulator := groups.byKey[key]
 		label := accumulator.label
-		if groupBy == sqlite.InsightsDimClient {
+		if groupBy == storage.InsightsDimClient {
 			if named, ok := service.clientLabels[key]; ok {
 				label = named
 			}
@@ -347,7 +347,7 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 	if err != nil {
 		return insights.OverviewResponse{}, fmt.Errorf("query: insights overview heatmap: %w", err)
 	}
-	byDay := make(map[string]sqlite.InsightsDayCount, len(counts))
+	byDay := make(map[string]storage.InsightsDayCount, len(counts))
 	for _, count := range counts {
 		byDay[count.Day] = count
 	}
@@ -360,12 +360,12 @@ func (service *Insights) Overview(ctx context.Context, request OverviewQuery) (i
 	return response, nil
 }
 
-func encodeSessionCursor(sortKey string, cursor sqlite.InsightsSessionCursor) string {
+func encodeSessionCursor(sortKey string, cursor storage.InsightsSessionCursor) string {
 	raw := strings.Join([]string{insightsCursorVersion, sortKey, strconv.FormatInt(cursor.Value, 10), cursor.SessionID}, "|")
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
-func decodeSessionCursor(sortKey, encoded string) (*sqlite.InsightsSessionCursor, error) {
+func decodeSessionCursor(sortKey, encoded string) (*storage.InsightsSessionCursor, error) {
 	if encoded == "" {
 		return nil, nil
 	}
@@ -381,10 +381,10 @@ func decodeSessionCursor(sortKey, encoded string) (*sqlite.InsightsSessionCursor
 	if err != nil || value < 0 {
 		return nil, invalid("invalid cursor")
 	}
-	return &sqlite.InsightsSessionCursor{Value: value, SessionID: parts[3]}, nil
+	return &storage.InsightsSessionCursor{Value: value, SessionID: parts[3]}, nil
 }
 
-func estimateValues(estimate sqlite.InsightsEstimate) insights.CategoryValues {
+func estimateValues(estimate storage.InsightsEstimate) insights.CategoryValues {
 	return insights.CategoryValues{
 		System: estimate.System, Tools: estimate.Tools, User: estimate.User, Injected: estimate.Injected,
 		Assistant: estimate.Assistant, Reasoning: estimate.Reasoning, ToolResult: estimate.ToolResult, Media: estimate.Media,
@@ -428,10 +428,10 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 	}
 	sortKey := request.Sort
 	if sortKey == "" {
-		sortKey = sqlite.InsightsSortRecent
+		sortKey = storage.InsightsSortRecent
 	}
 	switch sortKey {
-	case sqlite.InsightsSortRecent, sqlite.InsightsSortTokens, sqlite.InsightsSortContext:
+	case storage.InsightsSortRecent, storage.InsightsSortTokens, storage.InsightsSortContext:
 	default:
 		return insights.SessionsResponse{}, invalid("invalid sort")
 	}
@@ -474,7 +474,7 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 	}
 	pageFilter := filter
 	pageFilter.SessionIDs = ids
-	usageRows, err := service.store.InsightsUsage(ctx, pageFilter, sqlite.InsightsUsageSpec{Dimension: sqlite.InsightsDimSession})
+	usageRows, err := service.store.InsightsUsage(ctx, pageFilter, storage.InsightsUsageSpec{Dimension: storage.InsightsDimSession})
 	if err != nil {
 		return insights.SessionsResponse{}, fmt.Errorf("query: insights session usage: %w", err)
 	}
@@ -532,7 +532,7 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 	}
 	if page.HasMore {
 		last := page.Rows[len(page.Rows)-1]
-		response.NextCursor = encodeSessionCursor(sortKey, sqlite.InsightsSessionCursor{Value: last.SortValue, SessionID: last.SessionID})
+		response.NextCursor = encodeSessionCursor(sortKey, storage.InsightsSessionCursor{Value: last.SortValue, SessionID: last.SessionID})
 	}
 	return response, nil
 }
@@ -591,7 +591,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 	if err := validateScope(scope); err != nil {
 		return insights.TrendResponse{}, err
 	}
-	filter := sqlite.InsightsFilter{Scope: storageScope(scope), SessionIDs: []string{sessionID}}
+	filter := storage.InsightsFilter{Scope: storageScope(scope), SessionIDs: []string{sessionID}}
 	rows, truncated, err := service.store.InsightsTrend(ctx, filter, service.trendLimit)
 	if err != nil {
 		return insights.TrendResponse{}, fmt.Errorf("query: insights trend: %w", err)
@@ -599,7 +599,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 	if len(rows) == 0 {
 		return insights.TrendResponse{}, ErrNotFound
 	}
-	byID := make(map[string]*sqlite.InsightsTrendRow, len(rows))
+	byID := make(map[string]*storage.InsightsTrendRow, len(rows))
 	for index := range rows {
 		byID[rows[index].AuditID] = &rows[index]
 	}
@@ -650,7 +650,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 	}
 	last := rows[len(rows)-1]
 	if len(last.Root) != 0 {
-		real, err := service.store.InsightsRealRoots(ctx, sqlite.InsightsFilter{Scope: filter.Scope, RootFPRs: [][]byte{last.Root}})
+		real, err := service.store.InsightsRealRoots(ctx, storage.InsightsFilter{Scope: filter.Scope, RootFPRs: [][]byte{last.Root}})
 		if err != nil {
 			return insights.TrendResponse{}, fmt.Errorf("query: insights real trees: %w", err)
 		}
@@ -690,7 +690,7 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 	if err != nil {
 		return insights.TreeResponse{}, invalid("invalid tree_id")
 	}
-	filter := sqlite.InsightsFilter{Scope: storageScope(scope), RootPrefix: prefix}
+	filter := storage.InsightsFilter{Scope: storageScope(scope), RootPrefix: prefix}
 	rows, truncated, err := service.store.InsightsTree(ctx, filter, MaxTreeNodes)
 	if err != nil {
 		return insights.TreeResponse{}, fmt.Errorf("query: insights tree: %w", err)
@@ -698,7 +698,7 @@ func (service *Insights) Tree(ctx context.Context, treeID string, scope *Scope) 
 	if len(rows) == 0 {
 		return insights.TreeResponse{}, ErrNotFound
 	}
-	usageRows, err := service.store.InsightsUsage(ctx, filter, sqlite.InsightsUsageSpec{Dimension: sqlite.InsightsDimNode})
+	usageRows, err := service.store.InsightsUsage(ctx, filter, storage.InsightsUsageSpec{Dimension: storage.InsightsDimNode})
 	if err != nil {
 		return insights.TreeResponse{}, fmt.Errorf("query: insights tree usage: %w", err)
 	}
@@ -762,7 +762,7 @@ func (service *Insights) agentName(ctx context.Context, auditID string) (string,
 	if err != nil {
 		return "", fmt.Errorf("query: insights tree node detail: %w", err)
 	}
-	detail, err := service.decryptDetail(row)
+	detail, err := (insights.CipherDetailCodec{Cipher: service.cipher}).OpenDetailMetadata(ctx, row.AuditID, row.AnalysisVersion, row.DetailEnc)
 	if err != nil {
 		return "", nil
 	}
@@ -785,19 +785,20 @@ func (service *Insights) allowed(ctx context.Context, auditID string, scope *Sco
 	return storageScope(scope).Allows(row), nil
 }
 
-func (service *Insights) decryptDetail(row sqlite.AnalysisRow) (insights.Detail, error) {
+func (service *Insights) decryptDetail(ctx context.Context, row storage.AnalysisRow) (insights.Detail, error) {
 	var detail insights.Detail
 	if len(row.DetailEnc) == 0 {
 		return detail, nil
 	}
-	detail, err := (insights.CipherDetailCodec{Cipher: service.cipher}).OpenDetail(row.AuditID, row.AnalysisVersion, row.DetailEnc)
+	compactStore, _ := service.store.(insights.CompactDetailStore)
+	detail, err := (insights.CipherDetailCodec{Cipher: service.cipher, Store: compactStore}).OpenDetailContext(ctx, row.AuditID, row.AnalysisVersion, row.DetailEnc)
 	if err != nil {
 		return insights.Detail{}, ErrIntegrity
 	}
 	return detail, nil
 }
 
-func rowEstimate(row sqlite.AnalysisRow) insights.CategoryValues {
+func rowEstimate(row storage.AnalysisRow) insights.CategoryValues {
 	return insights.CategoryValues{
 		System: row.EstSystem, Tools: row.EstTools, User: row.EstUser, Injected: row.EstInjected,
 		Assistant: row.EstAssistant, Reasoning: row.EstReasoning, ToolResult: row.EstToolResult, Media: row.EstMedia,
@@ -841,7 +842,7 @@ func (service *Insights) Composition(ctx context.Context, auditID string, scope 
 	if err != nil {
 		return insights.CompositionResponse{}, fmt.Errorf("query: insights load analysis: %w", err)
 	}
-	detail, err := service.decryptDetail(row)
+	detail, err := service.decryptDetail(ctx, row)
 	if err != nil {
 		return insights.CompositionResponse{}, err
 	}
@@ -888,7 +889,7 @@ func (service *Insights) Composition(ctx context.Context, auditID string, scope 
 		response.Anchored = &anchored
 	}
 
-	var previous *sqlite.AnalysisRow
+	var previous *storage.AnalysisRow
 	var previousDetail insights.Detail
 	if row.PrevAuditID != nil && *row.PrevAuditID != "" && *row.PrevAuditID != auditID {
 		allowed, err := service.allowed(ctx, *row.PrevAuditID, scope)
@@ -899,7 +900,7 @@ func (service *Insights) Composition(ctx context.Context, auditID string, scope 
 			candidate, err := service.store.LoadAnalysis(ctx, *row.PrevAuditID)
 			switch {
 			case err == nil:
-				if previousDetail, err = service.decryptDetail(candidate); err != nil {
+				if previousDetail, err = service.decryptDetail(ctx, candidate); err != nil {
 					return insights.CompositionResponse{}, err
 				}
 				previous = &candidate

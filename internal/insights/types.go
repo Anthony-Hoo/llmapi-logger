@@ -16,7 +16,7 @@ import (
 // AnalysisVersion is bumped whenever stored analysis would change for the same
 // evidence, including a change to the built-in vocabulary. The backfill job
 // recomputes rows with an older version.
-const AnalysisVersion = 7
+const AnalysisVersion = 8
 
 // Composition categories, in display order.
 const (

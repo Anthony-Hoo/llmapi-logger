@@ -64,8 +64,23 @@ type AnalysisRow struct {
 	AgentLinkConfidence *int
 
 	DetailEnc []byte
+	// DetailRoot references the encrypted persistent detail chain. Legacy rows
+	// have no root. DetailObjects are inserted atomically with this row, never
+	// serialized as part of the row or returned by ordinary overview queries.
+	DetailRoot    []byte
+	DetailObjects []AnalysisDetailObject
 
 	// SpawnHints replaces the audit's agent_spawn_hints rows. Duplicates are
 	// stored once; LoadAnalysis returns them in byte order.
 	SpawnHints [][]byte
+}
+
+// AnalysisDetailObject is one immutable, encrypted node in a derived detail
+// prefix chain. Hash and ParentHash are domain-separated keyed identities.
+// Nil ParentHash terminates the chain; PayloadEnc authenticates both identity
+// and parent. These objects are derived data, not integrity-chain evidence.
+type AnalysisDetailObject struct {
+	Hash       []byte
+	ParentHash []byte
+	PayloadEnc []byte
 }

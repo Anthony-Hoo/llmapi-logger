@@ -2,6 +2,7 @@ package insights
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,9 @@ import (
 // CipherDetailCodec encrypts Detail JSON with the audit cipher under AAD
 // (audit_id, "analysis_detail", analysis_version).
 type CipherDetailCodec struct {
-	Cipher security.Cipher
+	Cipher        security.Cipher
+	Store         CompactDetailStore
+	Fingerprinter Fingerprinter
 }
 
 func detailAAD(auditID string, version int) ([]byte, error) {
@@ -46,6 +49,27 @@ func (codec CipherDetailCodec) SealDetail(auditID string, detail Detail) ([]byte
 
 // OpenDetail decrypts and decodes one stored detail blob.
 func (codec CipherDetailCodec) OpenDetail(auditID string, version int, sealed []byte) (Detail, error) {
+	return codec.OpenDetailContext(context.Background(), auditID, version, sealed)
+}
+
+// OpenDetailContext resolves compact nodes only for an explicitly requested
+// detail. The caller must authorize the audit before invoking this method.
+func (codec CipherDetailCodec) OpenDetailContext(ctx context.Context, auditID string, version int, sealed []byte) (Detail, error) {
+	return codec.openDetail(ctx, auditID, version, sealed, true)
+}
+
+// OpenDetailMetadata reads per-response metadata without traversing the
+// request history. Tree labels and summaries must use this path.
+func (codec CipherDetailCodec) OpenDetailMetadata(ctx context.Context, auditID string, version int, sealed []byte) (Detail, error) {
+	return codec.openDetail(ctx, auditID, version, sealed, false)
+}
+func (codec CipherDetailCodec) openDetail(ctx context.Context, auditID string, version int, sealed []byte, resolve bool) (Detail, error) {
+	if ctx == nil {
+		return Detail{}, errors.New("insights: nil detail context")
+	}
+	if err := ctx.Err(); err != nil {
+		return Detail{}, err
+	}
 	if codec.Cipher == nil {
 		return Detail{}, errors.New("insights: nil detail cipher")
 	}
@@ -66,6 +90,25 @@ func (codec CipherDetailCodec) OpenDetail(auditID string, version int, sealed []
 		return Detail{}, err
 	}
 	defer clear(decoded)
+	var schema struct {
+		Schema int `json:"detail_schema"`
+	}
+	if err := json.Unmarshal(decoded, &schema); err != nil {
+		return Detail{}, err
+	}
+	if schema.Schema != 0 {
+		if !resolve {
+			if schema.Schema != 2 {
+				return Detail{}, errors.New("insights: unsupported detail schema")
+			}
+			var envelope compactDetailEnvelope
+			if err := json.Unmarshal(decoded, &envelope); err != nil {
+				return Detail{}, err
+			}
+			return envelope.Detail, nil
+		}
+		return codec.openCompact(ctx, decoded)
+	}
 	var detail Detail
 	if err := json.Unmarshal(decoded, &detail); err != nil {
 		return Detail{}, fmt.Errorf("insights: decode detail: %w", err)
@@ -84,11 +127,18 @@ func encodeDetailPayload(plain []byte) ([]byte, error) {
 	if len(plain) > maxDetailPayload {
 		return nil, errors.New("insights: detail exceeds limit")
 	}
-	compression, encoded, err := bodycodec.Encode(plain, "application/json")
-	if err != nil {
-		return nil, err
+	// Small DAG nodes should not each allocate a gzip writer. Compress only
+	// larger payloads, such as legacy snapshots and large tool definitions.
+	compression := bodycodec.CompressionNone
+	encoded := plain
+	if len(plain) >= 4096 {
+		var err error
+		compression, encoded, err = bodycodec.Encode(plain, "application/json")
+		if err != nil {
+			return nil, err
+		}
+		defer clear(encoded)
 	}
-	defer clear(encoded)
 	result := make([]byte, 9, 9+len(encoded))
 	copy(result, detailMagic)
 	if compression == bodycodec.CompressionGZIP {
