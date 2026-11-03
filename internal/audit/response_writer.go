@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 type observedResponseWriter struct {
@@ -45,7 +45,7 @@ func (writer *observedResponseWriter) Write(data []byte) (int, error) {
 	if observedErr == nil && observedCount < len(data) {
 		observedErr = io.ErrShortWrite
 	}
-	writer.session.observeWrite(sqlite.StageResponseSent, data[:observedCount], observedErr)
+	writer.session.observeWrite(storage.StageResponseSent, data[:observedCount], observedErr)
 	return written, err
 }
 
@@ -87,7 +87,7 @@ func (writer *observedResponseWriter) CaptureTrailers() {
 			trailers.Add(trailerName, value)
 		}
 	}
-	writer.session.addHeaders(sqlite.StageResponseSent, sqlite.HeaderKindTrailer, trailers)
+	writer.session.addHeaders(storage.StageResponseSent, storage.HeaderKindTrailer, trailers)
 }
 
 func (writer *observedResponseWriter) start(status int) {
@@ -100,7 +100,7 @@ func (writer *observedResponseWriter) start(status int) {
 			}
 		}
 		writer.session.startStage(
-			sqlite.StageResponseSent,
+			storage.StageResponseSent,
 			writer.proto,
 			"",
 			"",
