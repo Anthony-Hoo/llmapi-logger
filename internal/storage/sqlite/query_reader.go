@@ -44,7 +44,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
 		statement.WriteString(`
        (SELECT COUNT(*) FROM turns AS tc WHERE tc.conversation_id = tn.conversation_id)`)
 	} else {
-		condition, values := filter.Scope.conditionWithAliases("ac", "tlc")
+		condition, values := scopeConditionWithAliases(filter.Scope, "ac", "tlc")
 		statement.WriteString(`
        (SELECT COUNT(*)
         FROM turns AS tc
@@ -134,7 +134,7 @@ WHERE 1 = 1`)
       AND (a2.started_at_ns > a.started_at_ns
         OR (a2.started_at_ns = a.started_at_ns AND a2.audit_id > a.audit_id))`
 		if filter.Scope != nil {
-			scopeCondition, scopeValues := filter.Scope.conditionWithAliases("a2", "tl2")
+			scopeCondition, scopeValues := scopeConditionWithAliases(filter.Scope, "a2", "tl2")
 			condition += "\n      AND " + scopeCondition
 			values = scopeValues
 		}
@@ -142,7 +142,7 @@ WHERE 1 = 1`)
 		appendCondition(condition, values...)
 	}
 	if filter.Scope != nil {
-		condition, values := filter.Scope.condition()
+		condition, values := scopeCondition(filter.Scope)
 		appendCondition(condition, values...)
 	}
 	if cursor.BeforeID != "" {
@@ -216,7 +216,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
 		statement.WriteString(`
        (SELECT COUNT(*) FROM turns AS tc WHERE tc.conversation_id = tn.conversation_id)`)
 	} else {
-		condition, values := scope.conditionWithAliases("ac", "tlc")
+		condition, values := scopeConditionWithAliases(scope, "ac", "tlc")
 		statement.WriteString(`
        (SELECT COUNT(*)
         FROM turns AS tc

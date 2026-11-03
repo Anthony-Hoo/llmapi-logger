@@ -56,7 +56,7 @@ type writeRequest struct {
 
 // BeginAudit enqueues a parent audit row and waits until its batch commits.
 func (store *Store) BeginAudit(ctx context.Context, record AuditRecord) error {
-	record.defaults()
+	record.Defaults()
 	if err := validateAuditRecord(record); err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func (store *Store) BeginAudit(ctx context.Context, record AuditRecord) error {
 // StartStage non-blockingly appends an observed HTTP stage to the writer
 // queue. A nil error means accepted by the queue, not yet committed.
 func (store *Store) StartStage(ctx context.Context, stage HTTPStage) error {
-	stage.defaults()
+	stage.Defaults()
 	if err := validateStage(stage); err != nil {
 		return err
 	}
@@ -75,7 +75,7 @@ func (store *Store) StartStage(ctx context.Context, stage HTTPStage) error {
 
 // StartBody non-blockingly appends a lazily created body stream.
 func (store *Store) StartBody(ctx context.Context, body BodyStream) error {
-	body.defaults()
+	body.Defaults()
 	if err := validateBodyStream(body); err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func (store *Store) AddHeaders(ctx context.Context, headers []HTTPHeader) error 
 
 // AddChunk non-blockingly appends one encrypted owning body chunk.
 func (store *Store) AddChunk(ctx context.Context, chunk BodyChunk) error {
-	chunk.defaults()
+	chunk.Defaults()
 	if err := validateChunk(chunk); err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (store *Store) AddChunk(ctx context.Context, chunk BodyChunk) error {
 
 // FinishStage non-blockingly appends a stage and optional body finalization.
 func (store *Store) FinishStage(ctx context.Context, finish StageFinish) error {
-	finish.defaults()
+	finish.Defaults()
 	if err := validateStageFinish(finish); err != nil {
 		return err
 	}
@@ -129,7 +129,7 @@ func (store *Store) FinishAudit(ctx context.Context, finish AuditFinish) error {
 // downgrade the submitted status. No outcome is returned on a failed or
 // canceled acknowledgement, even if an accepted write later commits.
 func (store *Store) FinishAuditWithResult(ctx context.Context, finish AuditFinish) (AuditFinish, error) {
-	finish.defaults()
+	finish.Defaults()
 	if err := validateAuditFinish(finish); err != nil {
 		return AuditFinish{}, err
 	}

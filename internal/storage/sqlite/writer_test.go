@@ -252,7 +252,7 @@ func TestWriterRollsBackFailedOperationWithoutChangingHealth(t *testing.T) {
 		AuditID: record.AuditID, Stage: StageRequestReceived, Proto: "HTTP/1.1",
 		Method: "POST", Host: "newapi.local", StartedAtNS: 2,
 	}
-	stage.defaults()
+	stage.Defaults()
 	if err := store.submitSync(ctx, writeRequest{kind: writeStartStage, data: cloneHTTPStage(stage)}); err != nil {
 		t.Fatal(err)
 	}

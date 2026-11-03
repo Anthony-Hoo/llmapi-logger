@@ -391,7 +391,7 @@ func TestExecutingPolicyDeadlineDoesNotHangOrAffectAuditWrites(t *testing.T) {
 	}
 	writer.queue <- request
 	record := testAudit("after-expired-policy")
-	record.defaults()
+	record.Defaults()
 	audit := writeRequest{kind: writeBeginAudit, data: record, ack: make(chan error, 1)}
 	writer.queue <- audit
 	close(writer.queue)

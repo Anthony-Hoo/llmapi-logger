@@ -62,9 +62,9 @@ func TestCaptureFailureCannotBeFinalizedAsComplete(t *testing.T) {
 					}
 				}
 				stage := HTTPStage{AuditID: "failed-capture", Stage: StageRequestReceived, StartedAtNS: 2}
-				stage.defaults()
+				stage.Defaults()
 				body := BodyStream{AuditID: stage.AuditID, Stage: stage.Stage}
-				body.defaults()
+				body.Defaults()
 				if err := store.submitSync(ctx, writeRequest{kind: writeStartStage, data: stage}); err != nil {
 					t.Fatal(err)
 				}
@@ -72,7 +72,7 @@ func TestCaptureFailureCannotBeFinalizedAsComplete(t *testing.T) {
 					t.Fatal(err)
 				}
 				chunk := BodyChunk{AuditID: stage.AuditID, Stage: stage.Stage, PlaintextLength: 1, ObservedAtNS: 3, DataEnc: []byte{1}}
-				chunk.defaults()
+				chunk.Defaults()
 				if err := store.submitSync(ctx, writeRequest{kind: writeAddChunk, data: chunk}); err != nil {
 					t.Fatal(err)
 				}
@@ -152,13 +152,13 @@ func TestWriterIsolatesParsedSaveFailureFromQueuedCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := testAudit("capture-alongside-parser")
-	record.defaults()
+	record.Defaults()
 	stage := HTTPStage{AuditID: record.AuditID, Stage: StageRequestReceived, StartedAtNS: 2}
-	stage.defaults()
+	stage.Defaults()
 	body := BodyStream{AuditID: record.AuditID, Stage: stage.Stage}
-	body.defaults()
+	body.Defaults()
 	chunk := BodyChunk{AuditID: record.AuditID, Stage: stage.Stage, PlaintextLength: 1, ObservedAtNS: 3, DataEnc: []byte{1}}
-	chunk.defaults()
+	chunk.Defaults()
 	batch := []writeRequest{
 		{kind: writeBeginAudit, data: record, ack: make(chan error, 1)},
 		{kind: writeStartStage, data: stage},
@@ -211,7 +211,7 @@ WHEN NEW.audit_id = 'abort-batch' BEGIN SELECT RAISE(ROLLBACK, 'test transaction
 	acks := []chan error{make(chan error, 1), make(chan error, 1)}
 	for i, id := range []string{"rolled-back", "abort-batch"} {
 		record := testAudit(id)
-		record.defaults()
+		record.Defaults()
 		writer.queue <- writeRequest{kind: writeBeginAudit, data: record, ack: acks[i]}
 	}
 	close(writer.queue)
@@ -249,9 +249,9 @@ func TestWriterIsolatesStoredTurnGraphFailureFromQueuedCapture(t *testing.T) {
 				t.Fatal(err)
 			}
 			record := testAudit("capture-alongside-graph")
-			record.defaults()
+			record.Defaults()
 			stage := HTTPStage{AuditID: record.AuditID, Stage: StageRequestReceived, StartedAtNS: 2}
-			stage.defaults()
+			stage.Defaults()
 			batch := []writeRequest{
 				{kind: writeBeginAudit, data: record, ack: make(chan error, 1)},
 				{kind: writeStartStage, data: stage},
