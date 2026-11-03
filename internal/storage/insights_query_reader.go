@@ -1,10 +1,7 @@
 package storage
 
-const
-
 // Insights usage groupings.
-
-InsightsDimTotal = "total"
+const InsightsDimTotal = "total"
 
 // Insights usage groupings.
 
@@ -38,11 +35,8 @@ const InsightsDimSession = "session"
 
 const InsightsDimNode = "node"
 
-const
-
 // Session list orderings.
-
-InsightsSortRecent = "recent"
+const InsightsSortRecent = "recent"
 
 // Session list orderings.
 

@@ -166,13 +166,10 @@ type AuditGap struct {
 	CreatedAtNS  int64
 }
 
-const
-
 // Billing states of a token link (doc/features/21-newapi-billing.md).
 // Unchecked only exists for links written before migration 009; new links are
 // always billed or unbilled.
-
-BillingUnchecked = "unchecked"
+const BillingUnchecked = "unchecked"
 
 // Billing states of a token link (doc/features/21-newapi-billing.md).
 // Unchecked only exists for links written before migration 009; new links are
