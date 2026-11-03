@@ -22,7 +22,7 @@ Nginx -> data-plane dispatcher -> 进程内 Matcher
 规则：
 
 - 每个 route 配置一条有序 chain，数组顺序就是执行顺序。
-- 应用在每条已匹配 route 的配置 chain 末尾追加动态 UA 策略；它不修改 matcher 返回的配置 ID，也不能扩大路由范围。
+- 应用在每条已匹配 route 的配置 chain 末尾追加动态 UA 策略与动态关键词策略；它们不修改 matcher 返回的配置 ID，也不能扩大路由范围。
 - 第一个 reject 立即短路，后续模块和 NewAPI 都不再执行。
 - 未配置拦截器时行为与原透明代理相同。
 - available/strict 只控制审计故障；已启用拦截器的 error 或 panic 始终 fail-closed。
@@ -50,7 +50,7 @@ routes:
     interceptors: [require-client-credential]
 ~~~
 
-启动时必须拒绝重复 id、未知 type、未知配置字段、非法 Body 上限和 route 对不存在实例的引用。YAML 配置成功后 registry 与 route chain 不再变化；动态 UA 策略的规则内容由管理面更新，但拦截器实例与路由边界保持不变。
+启动时必须拒绝重复 id、未知 type、未知配置字段、非法 Body 上限和 route 对不存在实例的引用。YAML 配置成功后 registry 与 route chain 不再变化；动态 UA 策略的规则内容由管理面更新，但拦截器实例与路由边界保持不变。content_policy 规则同样不通过 YAML 定义，而是持久化在 `content_policy_rules` 并由管理面热更新；启动时若 SQLite 不可用则使用空规则快照（全部放行）。
 
 ## 4. 扩展接口
 
@@ -159,6 +159,8 @@ max_body_bytes 是 Body interceptor，配置 max_bytes；超过时返回 `413` �
 
 user_agent_policy 是所有匹配 LLM route 末尾的动态 Body interceptor。它从 JSON 顶层 `model` 提取模型，模板路由可回退到 `{model}` PathParams；模型缺失或 JSON 无法解析时不自行扩大阻断范围。每条启用规则包含模型 RE2 正则和 User-Agent RE2 正则：模型命中后 UA 必须命中，否则内部记录 `401` 和 `user_agent_not_allowed`，对外只返回通用 `unauthorized`；多条模型规则命中时全部需要通过。默认规则为 `^gpt` / `^(codex-tui|Codex Desktop)`，区分大小写并要求 UA 前缀匹配。
 
+content_policy 是所有匹配 LLM route 末尾的动态 Body interceptor，位于 user_agent_policy 之后（[模块 22](22-content-policy.md)）。它按模型 RE2 范围和规则关键词表扫描请求文本，默认扫描全部 7 类（system/最新用户/历史用户/助手/工具调用/工具返回/工具定义），命中 `block` 规则时返回 `400` 和 `content_policy_blocked`；`dry_run` 命中只写安全日志。规则未加载、模型不匹配、JSON 不可解析、content-encoded、超过 8 MiB 扫描上限或 parser 不受支持时放行并记录稳定日志码；扫描文本不包含 role 名、模型名、JSON 字段名或媒体字节。规则通过管理 API 动态维护并在保存后原子发布，不增加配置字段。
+
 ## 10. 最少测试
 
 - 只有 Matcher 精确命中的 LLM API route 进入 chain；`/v1/models` 等安全非 LLM 请求 passthrough，不审计也不拦截。
@@ -171,12 +173,13 @@ user_agent_policy 是所有匹配 LLM route 末尾的动态 Body interceptor。�
 - rejected audit 的 blocked_by、block_code、状态和四阶段缺失语义正确。
 - 默认 `^gpt` 规则只允许 UA 以 `codex-tui` 或 `Codex Desktop` 开头；缺失/错误 UA 对外返回通用 401、内部保存精确 BlockCode 且 NewAPI 零调用，非 gpt 模型不受该规则影响。
 - 管理 CRUD 受 Admin Token/Cookie 保护；有效规则热更新、无效正则不替换当前快照，重启后规则仍存在。
+- content_policy 默认空表放行；模型范围、扫描范围、block/dry_run、首个 block 规则短路；关键词规则 CRUD 保存即生效且无效规则保留旧快照；命中返回本地 400、审计记录 `content_policy_blocked`、NewAPI 零调用；gzip/非法 JSON/超过 8 MiB/未知 parser fail-open 并记录稳定日志码。
 - 响应、日志、SQLite 和 WAL 不泄露凭据或 Body。
 
 ## 11. 实现边界
 
 routing 决定哪些请求能进入 chain；app 负责三态分发；interceptor 只产生 allow/reject；proxy 负责本地拒绝响应和 NewAPI I/O；audit 记录 blocked_by/block_code。任一层都不能让 interceptor 扩大路由或把受保护路径降级为 passthrough。
 
-`blocked_by` 与 `block_code` 描述站点防护策略本身，属管理员可见信息。开发者会话按 fail-closed 允许清单排除本地拦截记录：默认隐藏全部 `forward_status=rejected`，只放行显式列出的非策略 block code（当前仅 `body_too_large`）。新增拦截器默认不可见，要放行必须显式修改该清单。详见[模块 19](19-developer-key-session.md)。
+`blocked_by` 与 `block_code` 描述站点防护策略本身，属管理员可见信息。开发者会话按 fail-closed 允许清单排除本地拦截记录：默认隐藏全部 `forward_status=rejected`，只放行显式列出的非策略 block code（当前仅 `body_too_large`）。新增拦截器默认不可见，要放行必须显式修改该清单。详见[模块 19](19-developer-key-session.md)。关键词拦截使用 `content_policy_blocked`，同样默认对开发者隐藏。
 
 `require_credential` 与审计指纹共用 `security` 中同一份入站凭据传输清单（`Authorization`、`X-Api-Key`、`X-Goog-Api-Key`、query `key`），新增传输方式只需改一处。两者判定语义不同：拦截器仍要求 `Authorization` 必须是 Bearer 方案。

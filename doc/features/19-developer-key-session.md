@@ -81,7 +81,7 @@ SQL 条件与 Go 侧 `AuditScope.Allows` 是同一规则的两种渲染，由 `T
 
 开发者可读：`GET /api/v1/audits` 及 `/api/v1/audits/{id}` 的 detail、`raw/{side}`、`reconstructed/{side}`、`timeline/{side}`，深度与管理员一致（解密 Header、Request-URI、conversation 重建、重建 JSON、时序、留存的 raw 证据）。
 
-管理员专属，开发者返回 403 `forbidden`：`/healthz`、`/readyz`、`/metrics`、`/api/v1/newapi/callers`、`/api/v1/user-agent-rules*`。
+管理员专属，开发者返回 403 `forbidden`：`/healthz`、`/readyz`、`/metrics`、`/api/v1/newapi/callers`、`/api/v1/user-agent-rules*`、`/api/v1/content-policy-rules*`。
 
 作用域在 `parseListQuery` 之后由服务端注入，任何 query string 都无法触及或替换它。开发者显式携带 `newapi_user_id`、`username`、`newapi_token_id`、`token_name` 返回 400 `invalid_query`，而不是静默覆盖。
 
@@ -91,7 +91,7 @@ detail 系列在 `serveAuditResource` 有唯一一处授权闸门（`query.Servi
 
 登录页提供「管理员令牌 / 开发者 API Key」双模式切换，两个输入都是密码框，仍不写 localStorage/sessionStorage。启动时调用 `GET /api/v1/session` 判定身份与角色，替代原先"乐观渲染 + 首次列表 401 探测"。
 
-开发者视图隐藏 UA 规则入口、调用者筛选下拉、NewAPI Token ID 筛选，header 显示身份 chip（token 名或用户名）。审计列表与详情组件本身不变。前端裁剪只为体验，边界一律由服务端强制。
+开发者视图隐藏 UA 规则入口、关键词拦截入口、调用者筛选下拉、NewAPI Token ID 筛选，header 显示身份 chip（token 名或用户名）。审计列表与详情组件本身不变。前端裁剪只为体验，边界一律由服务端强制。
 
 ## 9. 最少测试
 
@@ -99,10 +99,10 @@ detail 系列在 `serveAuditResource` 有唯一一处授权闸门（`query.Servi
 - `HasCredential` 保持拦截器既有语义（`Authorization` 必须 Bearer），不因共用传输清单而放宽。
 - 四种传输方式落同一指纹；无凭据与未装载指纹器写 NULL。
 - 旧库应用 006 后完整性链仍然通过；改写 `api_key_fpr` 不影响链校验。
-- 可见性矩阵：策略 401 不可见、`body_too_large` 可见、上游 401 可见、未知 block code 默认不可见；管理员对以上全部可见。
+- 可见性矩阵：策略 401 不可见、`body_too_large` 可见、`content_policy_blocked` 不可见、上游 401 可见、未知 block code 默认不可见；管理员对以上全部可见。
 - SQL 条件与 `Allows` 在同一矩阵上结论一致。
 - `ValidateTokenKey` 的有效/空数组/401 拒绝/不可达/超大响应/所有者冲突六态。
 - v2 Cookie 往返、篡改、过期、跨角色伪造；`developer_login` 关闭后 v2 Cookie 失效。
-- 角色门禁矩阵；作用域强制注入；调用者筛选 400；非归属 detail/raw/reconstructed/timeline 404。
+- 角色门禁矩阵；作用域强制注入；调用者筛选 400；非归属 detail/raw/reconstructed/timeline 404；关键词规则管理端点 403。
 - 登录限流 429 + `Retry-After`，成功登录清零。
 - 端到端：两把 Key 各自只看到自己的记录，管理员看到全部，跨租户详情 404，管理端点 403。

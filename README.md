@@ -26,6 +26,7 @@ Client -> Nginx -> llmapi-logger
 - 基于 `net/http/httputil.ReverseProxy` 的流式转发，支持 SSE 及时 flush，并可为 NewAPI 上游显式指定 HTTP(S) 代理。
 - 可插拔入站拦截器，首个拒绝立即短路且不会访问 NewAPI。
 - 可在受保护管理页面动态配置“模型正则 + User-Agent 正则”规则；规则持久化到 SQLite，保存后立即生效。初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则返回通用 `401 unauthorized`，具体原因仅保留在审计数据中。
+- 可在同一管理页面动态配置“模型正则 + 关键词 + 扫描范围”的内容拦截规则：命中后在访问 NewAPI 前返回本地 `400`，审计记录 `content_policy_blocked`；默认扫描全部请求文本类别，支持 `dry_run` 仅记录、按规则启停和即时热更新；空规则表不拦截。上游返回的 `cyber_policy` 等安全策略拒绝由 parser 派生 `upstream_error_class`，审计列表可按分类筛选。
 - 分别记录四个代理观察点：
   - Nginx 请求到达代理；
   - 代理请求发往 NewAPI；

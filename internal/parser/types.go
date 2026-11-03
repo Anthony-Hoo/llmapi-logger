@@ -97,11 +97,14 @@ type Result struct {
 	Normalized      insights.Usage
 	ErrorType       string
 	ErrorCode       string
-	MessageCount    *int
-	ToolCallCount   *int
-	HasToolCall     *bool
-	Conversation    *conversation.Conversation
-	ParsedJSON      []byte
+	// UpstreamErrorClass is a stable policy rejection classification derived
+	// from the provider error envelope; it never holds the provider message.
+	UpstreamErrorClass string
+	MessageCount       *int
+	ToolCallCount      *int
+	HasToolCall        *bool
+	Conversation       *conversation.Conversation
+	ParsedJSON         []byte
 }
 
 // IsUsable reports whether at least one trusted public field was extracted.
@@ -109,5 +112,5 @@ func (result Result) IsUsable() bool {
 	return result.RequestModel != "" || result.ResponseModel != "" || result.RequestedStream != nil ||
 		result.ObservedStream != nil || result.ResponseID != "" || result.Usage.Input != nil ||
 		result.Usage.Output != nil || result.Usage.Total != nil || result.ErrorType != "" ||
-		result.ErrorCode != "" || result.MessageCount != nil || result.ToolCallCount != nil || result.HasToolCall != nil
+		result.ErrorCode != "" || result.UpstreamErrorClass != "" || result.MessageCount != nil || result.ToolCallCount != nil || result.HasToolCall != nil
 }

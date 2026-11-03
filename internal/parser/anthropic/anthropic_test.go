@@ -7,6 +7,7 @@ import (
 
 	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
+	"llmapi-logger/internal/parser/policyclass"
 )
 
 func TestParseAnthropicJSON(t *testing.T) {
@@ -142,6 +143,39 @@ func TestAnthropicUnterminatedMessageStopIsPartial(t *testing.T) {
 		Response: base.BodySource{Present: true, Complete: true, ContentType: "text/event-stream", Data: []byte("data: {\"type\":\"message_stop\"}")},
 	})
 	if result.Status != base.StatusPartial || result.ErrorCode != "unterminated_sse_event" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestAnthropicJSONErrorClassifiesPolicyCode(t *testing.T) {
+	t.Parallel()
+
+	result := New().Parse(context.Background(), base.Input{
+		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"type":"error",
+			"error":{"type":"invalid_request_error","code":"content_policy_violation","message":"private detail"}
+		}`)},
+	})
+	if result.UpstreamErrorClass != policyclass.ClassContentPolicy {
+		t.Fatalf("upstream error class = %q, want %q", result.UpstreamErrorClass, policyclass.ClassContentPolicy)
+	}
+	if bytes.Contains(result.ParsedJSON, []byte("private detail")) {
+		t.Fatalf("parsed summary leaked error message: %s", result.ParsedJSON)
+	}
+}
+
+func TestAnthropicSSEErrorClassifiesCyberMessage(t *testing.T) {
+	t.Parallel()
+
+	data := "event: error\n" +
+		"data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your request was flagged for possible cybersecurity risk.\"}}\n\n"
+	result := New().Parse(context.Background(), base.Input{
+		Response: base.BodySource{Present: true, Complete: true, ContentType: "text/event-stream", Data: []byte(data)},
+	})
+	if result.UpstreamErrorClass != policyclass.ClassCyberPolicy {
+		t.Fatalf("upstream error class = %q, want %q", result.UpstreamErrorClass, policyclass.ClassCyberPolicy)
+	}
+	if result.Status != base.StatusPartial || result.ErrorType != "invalid_request_error" {
 		t.Fatalf("result = %+v", result)
 	}
 }

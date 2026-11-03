@@ -14,6 +14,7 @@ import {
   TurnStoragePanel,
   UserAgentRulesPanel,
 } from "./app";
+import { ContentPolicyPanel, parseKeywordLines } from "./components/content-policy-panel";
 
 const detail: AuditDetail = {
   audit: {
@@ -412,6 +413,33 @@ describe("audit list", () => {
     expect(html.match(/HTTP 403/g)).toHaveLength(1);
     expect(html).not.toContain("skipped");
   });
+
+  it("labels a derived upstream policy rejection with its stable class", () => {
+    const audit: AuditSummary = {
+      audit_id: "apx_cyber",
+      started_at_ns: "1",
+      route_id: "openai-responses",
+      protocol: "openai",
+      method: "POST",
+      path: "/v1/responses",
+      status_code: 400,
+      forward_status: "newapi_error",
+      capture_status: "complete",
+      parse_status: "ok",
+      parsed_error_type: "invalid_request_error",
+      parsed_error_code: "cyber_policy",
+      upstream_error_class: "cyber_policy",
+      request_model: "gpt-test",
+    };
+
+    const html = renderToStaticMarkup(
+      <AuditList items={[audit]} loading={false} selectedID={null} onSelect={() => undefined} />,
+    );
+
+    expect(html).toContain("上游安全拒绝: cyber_policy");
+    // The label stays a short hint; the full parsed envelope lives in the detail.
+    expect(html).not.toContain("invalid_request_error");
+  });
 });
 
 describe("audit filters", () => {
@@ -435,6 +463,7 @@ describe("audit filters", () => {
 		forwardStatus=""
 		statusClass=""
 		statusCode=""
+		upstreamErrorClass=""
 		users={users}
         onPathChange={() => undefined}
         onModelChange={() => undefined}
@@ -444,6 +473,7 @@ describe("audit filters", () => {
         onForwardStatusChange={() => undefined}
 		onStatusClassChange={() => undefined}
 		onStatusCodeChange={() => undefined}
+		onUpstreamErrorClassChange={() => undefined}
         onSubmit={() => undefined}
       />,
     );
@@ -472,6 +502,7 @@ describe("audit filters", () => {
         forwardStatus=""
 		statusClass=""
 		statusCode=""
+		upstreamErrorClass=""
         users={[]}
         showCallerFilters={false}
         onPathChange={() => undefined}
@@ -482,6 +513,7 @@ describe("audit filters", () => {
         onForwardStatusChange={() => undefined}
 		onStatusClassChange={() => undefined}
 		onStatusCodeChange={() => undefined}
+		onUpstreamErrorClassChange={() => undefined}
         onSubmit={() => undefined}
       />,
     );
@@ -508,6 +540,7 @@ describe("audit filters", () => {
         forwardStatus=""
         statusClass="5xx"
         statusCode="503"
+        upstreamErrorClass="cyber_policy"
         statusCodeError={statusCodeError}
         users={[]}
         onPathChange={() => undefined}
@@ -518,6 +551,7 @@ describe("audit filters", () => {
         onForwardStatusChange={() => undefined}
         onStatusClassChange={() => undefined}
         onStatusCodeChange={() => undefined}
+        onUpstreamErrorClassChange={() => undefined}
         onSubmit={() => undefined}
       />,
     );
@@ -537,6 +571,48 @@ describe("audit filters", () => {
     } else {
       expect(html).not.toContain('id="filter-status-code-error"');
     }
+  });
+
+  it("offers the stable upstream rejection classes as an exact advanced filter", () => {
+    const html = renderToStaticMarkup(
+      <AuditFiltersPanel
+        path=""
+        model=""
+        userAgent=""
+        newAPIUserID=""
+        newAPITokenID=""
+        forwardStatus=""
+        statusClass=""
+        statusCode=""
+        upstreamErrorClass="cyber_policy"
+        users={[]}
+        showCallerFilters={false}
+        onPathChange={() => undefined}
+        onModelChange={() => undefined}
+        onUserAgentChange={() => undefined}
+        onNewAPIUserIDChange={() => undefined}
+        onNewAPITokenIDChange={() => undefined}
+        onForwardStatusChange={() => undefined}
+        onStatusClassChange={() => undefined}
+        onStatusCodeChange={() => undefined}
+        onUpstreamErrorClassChange={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('id="filter-upstream-error-class"');
+    for (const upstreamClass of [
+      "cyber_policy",
+      "misalignment_policy",
+      "content_policy",
+      "content_filter",
+      "moderation_blocked",
+      "safety_policy",
+    ]) {
+      expect(html).toContain(`value="${upstreamClass}"`);
+    }
+    expect(html).toMatch(/<option(?=[^>]*value="cyber_policy")(?=[^>]*selected="")[^>]*>/);
+    expect(html).toContain("上游拒绝分类");
   });
 });
 
@@ -578,6 +654,45 @@ describe("User-Agent rule configuration", () => {
     expect(html).toContain("模型正则");
     expect(html).toContain("User-Agent 正则");
     expect(html).toContain("多条命中规则全部需要通过");
+  });
+});
+
+describe("content policy configuration", () => {
+  it("renders keyword editing, every scan class by default, and the false-positive warning", () => {
+    const client = {
+      listContentPolicyRules: async () => ({
+        items: [{
+          id: 1,
+          name: "cyber keywords",
+          enabled: true,
+          action: "dry_run",
+          model_pattern: "",
+          scan_scopes: ["system", "latest_user", "user_history", "assistant", "tool_calls", "tool_results", "tool_definitions"],
+          keywords: ["cybersecurity risk", "high-risk cyber activity"],
+          created_at_ns: "1",
+          updated_at_ns: "1",
+        }],
+      }),
+    } as ApiClient;
+    const html = renderToStaticMarkup(<ContentPolicyPanel client={client} />);
+
+    expect(html).toContain("关键词拦截");
+    expect(html).toContain("误报");
+    expect(html).toContain("仅记录");
+    expect(html).toContain("关键词（每行一个");
+    expect(html).toContain("模型正则（可选）");
+    expect(html).toContain("全部 7 类");
+    expect(html).toContain("当前关键词规则");
+    // A new rule defaults to scanning every supported class.
+    expect(html.match(/checked=""/g)?.length ?? 0).toBeGreaterThanOrEqual(7);
+    expect(html).toContain('value="block"');
+    expect(html).toContain('value="dry_run"');
+  });
+
+  it("rejects empty keyword lists and lines above the 200 byte budget", () => {
+    expect(parseKeywordLines("\n   \n\t\n")).toEqual({ keywords: [], error: "至少填写一个关键词" });
+    expect(parseKeywordLines("alpha\r\n beta \n\ngamma")).toEqual({ keywords: ["alpha", "beta", "gamma"], error: null });
+    expect(parseKeywordLines("中".repeat(67)).error).toContain("200 字节");
   });
 });
 

@@ -15,6 +15,7 @@ import (
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/interceptor"
@@ -44,6 +45,7 @@ type App struct {
 	parserWorker    *parser.Worker
 	callerWorker    *newapi.Worker
 	userAgentRules  uaguard.RuleSet
+	contentPolicies contentpolicy.RuleSet
 	retention       *retention.Runner
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
@@ -212,6 +214,26 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 		}
 		return nil, fmt.Errorf("assemble user agent interceptor: %w", err)
 	}
+	policyContext, cancelPolicy := context.WithTimeout(ctx, 10*time.Second)
+	var policyRepository contentpolicy.Repository
+	if runtime.store != nil {
+		policyRepository = runtime.store
+	}
+	contentPolicies, err := contentpolicy.New(policyContext, policyRepository, logger)
+	cancelPolicy()
+	if err != nil {
+		if runtime.store != nil {
+			_ = runtime.store.Close()
+		}
+		return nil, fmt.Errorf("assemble content policy rules: %w", err)
+	}
+	engine, err = engine.WithGlobal(contentpolicy.InterceptorID, contentPolicies)
+	if err != nil {
+		if runtime.store != nil {
+			_ = runtime.store.Close()
+		}
+		return nil, fmt.Errorf("assemble content policy interceptor: %w", err)
+	}
 	proxyOptions := proxy.Options{
 		Audit:                 runtime.sink,
 		UpstreamProxy:         upstreamProxy,
@@ -235,6 +257,7 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 		cipher:          runtime.cipher,
 		newAPIClient:    newAPIClient,
 		userAgentRules:  userAgentRules,
+		contentPolicies: contentPolicies,
 		mode:            configuration.Mode,
 		logger:          logger,
 		shutdownTimeout: time.Duration(configuration.ShutdownTimeoutSeconds) * time.Second,
@@ -310,6 +333,7 @@ func NewContext(ctx context.Context, configuration config.Config, logger *slog.L
 		Insights:   insightsService, // context insights (WP2)
 		Users:      newAPIClient,
 		Rules:      userAgentRules,
+		Policies:   contentPolicies,
 		Assets:     web.EmbeddedAssets(),
 		Readiness:  application.readiness,
 		Logger:     logger,

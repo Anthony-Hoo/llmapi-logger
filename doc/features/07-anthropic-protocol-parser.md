@@ -57,7 +57,7 @@ system、消息正文、工具名称/call id/参数/结果、thinking 和未知 
 
 content 文本、tool input/result 和 thinking 进入加密 conversation，signature 仍只存在于 raw Body。没有明确 total token 字段时，不在公共字段中伪造供应商报告的 total。
 
-常见错误对象中的 type 可查询，message 只存在于加密 raw Body，不进入 compact 摘要或 conversation。HTTP 200 的 SSE 中也可能出现协议 error，需与 HTTP 状态分别保留。
+常见错误对象中的 type 可查询，message 只存在于加密 raw Body，不进入 compact 摘要或 conversation。HTTP 200 的 SSE 中也可能出现协议 error，需与 HTTP 状态分别保留。错误 envelope 的明确策略 code 或 cyber/安全提示短语会在内存中派生 `upstream_error_class`（[模块 22](22-content-policy.md)），message 仍不落公共列。
 
 ## 5. SSE 基本状态机
 

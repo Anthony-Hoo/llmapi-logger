@@ -183,7 +183,7 @@ parser 只有在上述验证通过后才允许把 raw retention 从 pending 改�
 | turn_response_items | 当前响应 item 的有序引用 |
 | stream_timelines | TTFT/事件数量和压缩时间线 |
 | integrity_events | HMAC 防篡改链 |
-| token_links/audit_gaps/user_agent_rules | 保持既有职责 |
+| token_links/audit_gaps/user_agent_rules/content_policy_rules | 保持既有/独立职责 |
 
 retention 删除 audit/turn 引用后，在同一 writer 事务中删除已不可达 content object，再删除已不可达 binary object。任何 GC 都必须以外键和 NOT EXISTS 可达性检查为准，不能依赖可能失真的手工 ref_count。
 

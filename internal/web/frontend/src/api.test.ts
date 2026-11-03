@@ -57,6 +57,7 @@ describe("API client", () => {
       forward_status: "rejected",
       status_class: "5xx",
       status_code: " 503 ",
+      upstream_error_class: "cyber_policy",
     });
 
     expect(calledURL).toContain("limit=50");
@@ -68,6 +69,7 @@ describe("API client", () => {
     expect(calledURL).toContain("forward_status=rejected");
     expect(calledURL).toContain("status_class=5xx");
     expect(calledURL).toContain("status_code=503");
+    expect(calledURL).toContain("upstream_error_class=cyber_policy");
     expect(calledInit?.credentials).toBe("same-origin");
     expect(new Headers(calledInit?.headers).has("Authorization")).toBe(false);
   });
@@ -86,6 +88,16 @@ describe("API client", () => {
     await client.listAudits({ collapse: true, status_class: "5xx" });
 
     expect(calledURL).not.toContain("collapse=");
+  });
+
+  it("keeps a standalone upstream rejection class filter row-level", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({ items: [], next_cursor: null }));
+    await createApiClient(vi.fn(), fetcher).listAudits({ collapse: true, upstream_error_class: "cyber_policy" });
+    const url = String(fetcher.mock.calls[0]?.[0]);
+
+    expect(url).toContain("upstream_error_class=cyber_policy");
+    // A row-level filter must not silently collapse conversations away.
+    expect(url).not.toContain("collapse=");
   });
 
   it("loads the safe NewAPI caller catalog through the Cookie session", async () => {
@@ -170,6 +182,52 @@ describe("API client", () => {
       ["/api/v1/user-agent-rules/1", "PUT"],
       ["/api/v1/user-agent-rules/1", "DELETE"],
     ]);
+    for (const call of calls) {
+      expect(call.init?.credentials).toBe("same-origin");
+      expect(new Headers(call.init?.headers).has("Authorization")).toBe(false);
+    }
+  });
+
+  it("manages admin-only content policy rules through the Cookie session", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      if (!init?.method || init.method === "GET") {
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ id: 1, name: "policy", scan_scopes: [], keywords: [] }), {
+        status: init.method === "POST" ? 201 : 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const client = createApiClient(vi.fn(), fetcher);
+    const input = {
+      name: "cyber keywords",
+      enabled: true,
+      action: "block",
+      model_pattern: "^gpt",
+      scan_scopes: ["latest_user"],
+      keywords: ["cyber"],
+    };
+
+    await client.listContentPolicyRules();
+    await client.createContentPolicyRule(input);
+    await client.updateContentPolicyRule(1, { ...input, action: "dry_run" });
+    await client.deleteContentPolicyRule(1);
+
+    expect(calls.map((call) => [call.url, call.init?.method ?? "GET"])).toEqual([
+      ["/api/v1/content-policy-rules", "GET"],
+      ["/api/v1/content-policy-rules", "POST"],
+      ["/api/v1/content-policy-rules/1", "PUT"],
+      ["/api/v1/content-policy-rules/1", "DELETE"],
+    ]);
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual(input);
+    expect(JSON.parse(String(calls[2]?.init?.body))).toMatchObject({ action: "dry_run", keywords: ["cyber"] });
     for (const call of calls) {
       expect(call.init?.credentials).toBe("same-origin");
       expect(new Headers(call.init?.headers).has("Authorization")).toBe(false);

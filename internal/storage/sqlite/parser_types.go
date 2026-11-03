@@ -37,11 +37,14 @@ type ParsedResult struct {
 	UsageTotal      *int64
 	ErrorType       *string
 	ErrorCode       *string
-	MessageCount    *int
-	ToolCallCount   *int
-	HasToolCall     *bool
-	ParsedJSONEnc   []byte
-	ParsedAtNS      int64
+	// UpstreamErrorClass is derived, unsigned display metadata. It never
+	// participates in an integrity digest.
+	UpstreamErrorClass *string
+	MessageCount       *int
+	ToolCallCount      *int
+	HasToolCall        *bool
+	ParsedJSONEnc      []byte
+	ParsedAtNS         int64
 }
 
 type parseClaim struct {
@@ -82,6 +85,7 @@ func cloneParsedResult(result ParsedResult) ParsedResult {
 	result.UsageTotal = cloneInt64(result.UsageTotal)
 	result.ErrorType = cloneString(result.ErrorType)
 	result.ErrorCode = cloneString(result.ErrorCode)
+	result.UpstreamErrorClass = cloneString(result.UpstreamErrorClass)
 	result.MessageCount = cloneInt(result.MessageCount)
 	result.ToolCallCount = cloneInt(result.ToolCallCount)
 	result.HasToolCall = cloneBool(result.HasToolCall)

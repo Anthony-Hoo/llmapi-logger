@@ -7,6 +7,7 @@ import (
 
 	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
+	"llmapi-logger/internal/parser/policyclass"
 )
 
 func TestParseGeminiJSONUsesPathModel(t *testing.T) {
@@ -98,5 +99,69 @@ func TestGeminiUnterminatedTailEventIsPartial(t *testing.T) {
 	})
 	if result.Status != base.StatusPartial || result.ErrorCode != "unterminated_sse_event" || result.ResponseID != "gem-tail" {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestGeminiErrorEnvelopeClassifiesPolicyMessage(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(GenerateContent)
+	result := implementation.Parse(context.Background(), base.Input{
+		Endpoint: "/v1beta/models/gemini-test:generateContent",
+		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"error":{"code":400,"status":"INVALID_ARGUMENT","message":"This request violates our content policy."}
+		}`)},
+	})
+	if result.UpstreamErrorClass != policyclass.ClassContentPolicy {
+		t.Fatalf("upstream error class = %q, want %q", result.UpstreamErrorClass, policyclass.ClassContentPolicy)
+	}
+	if bytes.Contains(result.ParsedJSON, []byte("content policy")) {
+		t.Fatalf("parsed summary leaked error message: %s", result.ParsedJSON)
+	}
+}
+
+func TestGeminiPromptFeedbackBlocksAsContentFilter(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(GenerateContent)
+	result := implementation.Parse(context.Background(), base.Input{
+		Endpoint: "/v1beta/models/gemini-test:generateContent",
+		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"promptFeedback":{"blockReason":"SAFETY"},"candidates":[]
+		}`)},
+	})
+	if result.Status != base.StatusOK || result.UpstreamErrorClass != policyclass.ClassContentFilter {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestGeminiSafetyFinishReasonIsContentFilter(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(GenerateContent)
+	result := implementation.Parse(context.Background(), base.Input{
+		Endpoint: "/v1beta/models/gemini-test:generateContent",
+		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"responseId":"gem-safety",
+			"candidates":[{"finishReason":"SAFETY","content":{"parts":[]}}]
+		}`)},
+	})
+	if result.Status != base.StatusOK || result.UpstreamErrorClass != policyclass.ClassContentFilter {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestGeminiUnspecifiedBlockReasonHasNoClass(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(GenerateContent)
+	result := implementation.Parse(context.Background(), base.Input{
+		Endpoint: "/v1beta/models/gemini-test:generateContent",
+		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"},"candidates":[]
+		}`)},
+	})
+	if result.UpstreamErrorClass != "" {
+		t.Fatalf("upstream error class = %q, want empty", result.UpstreamErrorClass)
 	}
 }

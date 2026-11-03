@@ -79,6 +79,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		Username:              filter.Username,
 		NewAPITokenID:         filter.NewAPITokenID,
 		TokenName:             filter.TokenName,
+		UpstreamErrorClass:    filter.UpstreamErrorClass,
 		ConversationID:        filter.Conversation,
 		CollapseConversations: filter.CollapseConversations && filter.Conversation == "" && !filter.hasRowFilters(),
 		Scope:                 storageScope(filter.Scope),
@@ -120,7 +121,8 @@ func (filter Filter) hasRowFilters() bool {
 		filter.Path != "" || filter.Model != "" || filter.UserAgent != "" ||
 		filter.StatusCode != nil || filter.StatusClass != "" || filter.ForwardStatus != "" ||
 		filter.BlockedBy != "" || filter.BlockCode != "" || filter.CaptureStatus != "" ||
-		filter.NewAPIUserID != nil || filter.Username != "" || filter.NewAPITokenID != nil || filter.TokenName != ""
+		filter.NewAPIUserID != nil || filter.Username != "" || filter.NewAPITokenID != nil || filter.TokenName != "" ||
+		filter.UpstreamErrorClass != ""
 }
 
 func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter sqlite.AuditQueryFilter, cursor sqlite.AuditQueryCursor, filter Filter, limit int) (Page, error) {
@@ -348,23 +350,24 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 	}
 	if parsed := storageDetail.ParsedResult; parsed != nil {
 		detail.ParsedResult = &ParsedResult{
-			ParserName:      parsed.ParserName,
-			ParserVersion:   parsed.ParserVersion,
-			Status:          parsed.Status,
-			RequestModel:    parsed.RequestModel,
-			ResponseModel:   parsed.ResponseModel,
-			RequestedStream: parsed.RequestedStream,
-			ObservedStream:  parsed.ObservedStream,
-			ResponseID:      parsed.ResponseID,
-			UsageInput:      parsed.UsageInput,
-			UsageOutput:     parsed.UsageOutput,
-			UsageTotal:      parsed.UsageTotal,
-			ErrorType:       parsed.ErrorType,
-			ErrorCode:       parsed.ErrorCode,
-			MessageCount:    parsed.MessageCount,
-			ToolCallCount:   parsed.ToolCallCount,
-			HasToolCall:     parsed.HasToolCall,
-			ParsedAtNS:      parsed.ParsedAtNS,
+			ParserName:         parsed.ParserName,
+			ParserVersion:      parsed.ParserVersion,
+			Status:             parsed.Status,
+			RequestModel:       parsed.RequestModel,
+			ResponseModel:      parsed.ResponseModel,
+			RequestedStream:    parsed.RequestedStream,
+			ObservedStream:     parsed.ObservedStream,
+			ResponseID:         parsed.ResponseID,
+			UsageInput:         parsed.UsageInput,
+			UsageOutput:        parsed.UsageOutput,
+			UsageTotal:         parsed.UsageTotal,
+			ErrorType:          parsed.ErrorType,
+			ErrorCode:          parsed.ErrorCode,
+			UpstreamErrorClass: parsed.UpstreamErrorClass,
+			MessageCount:       parsed.MessageCount,
+			ToolCallCount:      parsed.ToolCallCount,
+			HasToolCall:        parsed.HasToolCall,
+			ParsedAtNS:         parsed.ParsedAtNS,
 		}
 		if len(parsed.ParsedJSONEnc) != 0 {
 			aad, aadErr := security.AAD(auditID, "parsed_json", parsed.ParserName)
@@ -501,33 +504,36 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 
 func mapAudit(row sqlite.AuditListRow) AuditSummary {
 	return AuditSummary{
-		AuditID:           row.AuditID,
-		StartedAtNS:       row.StartedAtNS,
-		EndedAtNS:         row.EndedAtNS,
-		RouteID:           row.RouteID,
-		Protocol:          row.Protocol,
-		ParserName:        row.ParserName,
-		Method:            row.Method,
-		Path:              row.Path,
-		Mode:              row.Mode,
-		StatusCode:        row.StatusCode,
-		TTFTNS:            row.TTFTNS,
-		ForwardStatus:     row.ForwardStatus,
-		CaptureStatus:     row.CaptureStatus,
-		ParseStatus:       row.ParseStatus,
-		BlockedBy:         row.BlockedBy,
-		BlockCode:         row.BlockCode,
-		ErrorCode:         row.ErrorCode,
-		RequestModel:      row.RequestModel,
-		ResponseModel:     row.ResponseModel,
-		NewAPIRequestID:   row.NewAPIRequestID,
-		CallerStatus:      row.CallerStatus,
-		NewAPIUserID:      row.NewAPIUserID,
-		Username:          row.Username,
-		NewAPITokenID:     row.NewAPITokenID,
-		TokenName:         row.TokenName,
-		ConversationID:    row.ConversationID,
-		ConversationTurns: row.ConversationTurns,
+		AuditID:            row.AuditID,
+		StartedAtNS:        row.StartedAtNS,
+		EndedAtNS:          row.EndedAtNS,
+		RouteID:            row.RouteID,
+		Protocol:           row.Protocol,
+		ParserName:         row.ParserName,
+		Method:             row.Method,
+		Path:               row.Path,
+		Mode:               row.Mode,
+		StatusCode:         row.StatusCode,
+		TTFTNS:             row.TTFTNS,
+		ForwardStatus:      row.ForwardStatus,
+		CaptureStatus:      row.CaptureStatus,
+		ParseStatus:        row.ParseStatus,
+		BlockedBy:          row.BlockedBy,
+		BlockCode:          row.BlockCode,
+		ErrorCode:          row.ErrorCode,
+		RequestModel:       row.RequestModel,
+		ResponseModel:      row.ResponseModel,
+		ParsedErrorType:    row.ParsedErrorType,
+		ParsedErrorCode:    row.ParsedErrorCode,
+		UpstreamErrorClass: row.UpstreamErrorClass,
+		NewAPIRequestID:    row.NewAPIRequestID,
+		CallerStatus:       row.CallerStatus,
+		NewAPIUserID:       row.NewAPIUserID,
+		Username:           row.Username,
+		NewAPITokenID:      row.NewAPITokenID,
+		TokenName:          row.TokenName,
+		ConversationID:     row.ConversationID,
+		ConversationTurns:  row.ConversationTurns,
 	}
 }
 
@@ -572,6 +578,9 @@ func validateList(filter Filter, cursor Cursor, limit int) error {
 	}
 	if filter.BlockCode != "" && !stableCode.MatchString(filter.BlockCode) {
 		return invalid("invalid block_code")
+	}
+	if filter.UpstreamErrorClass != "" && !stableCode.MatchString(filter.UpstreamErrorClass) {
+		return invalid("invalid upstream_error_class")
 	}
 	if filter.Path != "" && (!strings.HasPrefix(filter.Path, "/") || len(filter.Path) > 2048) {
 		return invalid("invalid path")

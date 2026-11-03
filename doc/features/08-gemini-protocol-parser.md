@@ -94,7 +94,7 @@ SSE event*
 {"error":{"code":400,"status":"INVALID_ARGUMENT","message":"..."}}
 ```
 
-status/code 可进入公共字段，message/details 只存在于加密 raw Body，不进入 compact 摘要或 conversation。非 JSON 错误只保留 HTTP 状态和安全错误码。
+status/code 可进入公共字段，message/details 只存在于加密 raw Body，不进入 compact 摘要或 conversation。非 JSON 错误只保留 HTTP 状态和安全错误码。错误 envelope 的策略标识，以及 HTTP 200 的 `promptFeedback.blockReason` / `finishReason=SAFETY`，会在内存中派生 `upstream_error_class`（[模块 22](22-content-policy.md)）。
 
 统一限额：
 

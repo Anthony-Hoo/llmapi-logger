@@ -7,6 +7,7 @@ import (
 
 	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
+	"llmapi-logger/internal/parser/policyclass"
 )
 
 func TestParseChatJSONExtractsOnlyCompactFields(t *testing.T) {
@@ -211,5 +212,71 @@ func TestResponsesRootErrorEventIsTerminalAndSafe(t *testing.T) {
 	}
 	if bytes.Contains(result.ParsedJSON, []byte("private provider detail")) {
 		t.Fatalf("parsed summary leaked error message: %s", result.ParsedJSON)
+	}
+}
+
+func TestOpenAIJSONErrorEnvelopeClassifiesUpstreamPolicy(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(ChatCompletions)
+	result := implementation.Parse(context.Background(), base.Input{
+		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
+			"error":{"type":"invalid_request_error","code":"cyber_policy","message":"flagged for possible cybersecurity risk"}
+		}`)},
+	})
+	if result.UpstreamErrorClass != policyclass.ClassCyberPolicy {
+		t.Fatalf("upstream error class = %q, want %q", result.UpstreamErrorClass, policyclass.ClassCyberPolicy)
+	}
+	if bytes.Contains(result.ParsedJSON, []byte("cybersecurity risk")) {
+		t.Fatalf("parsed summary leaked error message: %s", result.ParsedJSON)
+	}
+}
+
+func TestOpenAIErrorEventClassifiesMessageOnlyRejection(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(Responses)
+	result := implementation.Parse(context.Background(), base.Input{
+		Response: base.BodySource{Present: true, Complete: true, ContentType: "text/event-stream", Data: []byte(
+			"event: error\n" +
+				"data: {\"type\":\"error\",\"code\":\"invalid_request_error\",\"message\":\"This request involves high-risk cyber activity.\"}\n\n",
+		)},
+	})
+	if result.UpstreamErrorClass != policyclass.ClassCyberPolicy {
+		t.Fatalf("upstream error class = %q, want %q", result.UpstreamErrorClass, policyclass.ClassCyberPolicy)
+	}
+}
+
+func TestOpenAIFailedResponseClassifiesNestedError(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(Responses)
+	result := implementation.Parse(context.Background(), base.Input{
+		Response: base.BodySource{Present: true, Complete: true, ContentType: "text/event-stream", Data: []byte(
+			"event: response.failed\n" +
+				"data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp-failed\",\"error\":{\"type\":\"invalid_request_error\",\"code\":\"content_filter\",\"message\":\"private detail\"}}}\n\n",
+		)},
+	})
+	if result.UpstreamErrorClass != policyclass.ClassContentFilter {
+		t.Fatalf("upstream error class = %q, want %q", result.UpstreamErrorClass, policyclass.ClassContentFilter)
+	}
+	if bytes.Contains(result.ParsedJSON, []byte("private detail")) {
+		t.Fatalf("parsed summary leaked error message: %s", result.ParsedJSON)
+	}
+}
+
+func TestOpenAINestedErrorDoesNotReplaceMoreSpecificClass(t *testing.T) {
+	t.Parallel()
+
+	implementation, _ := New(Responses)
+	result := implementation.Parse(context.Background(), base.Input{
+		Response: base.BodySource{Present: true, Complete: true, ContentType: "text/event-stream", Data: []byte(
+			"event: response.failed\n" +
+				"data: {\"type\":\"response.failed\",\"error\":{\"type\":\"invalid_request_error\",\"code\":\"cyber_policy\"}," +
+				"\"response\":{\"id\":\"resp-mixed\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"request flagged\"}}}\n\n",
+		)},
+	})
+	if result.UpstreamErrorClass != policyclass.ClassCyberPolicy {
+		t.Fatalf("upstream error class = %q, want %q", result.UpstreamErrorClass, policyclass.ClassCyberPolicy)
 	}
 }

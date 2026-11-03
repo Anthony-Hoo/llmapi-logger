@@ -36,6 +36,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code, a.ttft_ns,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
+       p.error_type, p.error_code, p.upstream_error_class,
        a.newapi_request_id, a.caller_status,
        t.newapi_user_id, t.username, t.newapi_token_id, t.token_name,
        tn.conversation_id,`)
@@ -78,6 +79,9 @@ WHERE 1 = 1`)
 	}
 	if filter.Model != "" {
 		appendCondition("(p.request_model = ? OR p.response_model = ?)", filter.Model, filter.Model)
+	}
+	if filter.UpstreamErrorClass != "" {
+		appendCondition("p.upstream_error_class = ?", filter.UpstreamErrorClass)
 	}
 	if filter.StatusCode != nil {
 		appendCondition("a.status_code = ?", *filter.StatusCode)
@@ -204,6 +208,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        a.parser_name, a.method, a.path, a.mode, a.status_code, a.ttft_ns,
        a.forward_status, a.capture_status, a.parse_status, a.blocked_by,
        a.block_code, a.error_code, p.request_model, p.response_model,
+       p.error_type, p.error_code, p.upstream_error_class,
        a.newapi_request_id, a.caller_status,
        t.newapi_user_id, t.username, t.newapi_token_id, t.token_name,
        tn.conversation_id,`)
@@ -412,6 +417,7 @@ ORDER BY seq`, auditID, sourceStage)
 func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	var endedAt, statusCode, ttftNS, newAPIUserID, newAPITokenID, conversationTurns sql.NullInt64
 	var blockedBy, blockCode, errorCode, requestModel, responseModel, requestID, username, tokenName, conversationID sql.NullString
+	var parsedErrorType, parsedErrorCode, upstreamErrorClass sql.NullString
 	if err := row.Scan(
 		&destination.AuditID,
 		&destination.StartedAtNS,
@@ -432,6 +438,9 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 		&errorCode,
 		&requestModel,
 		&responseModel,
+		&parsedErrorType,
+		&parsedErrorCode,
+		&upstreamErrorClass,
 		&requestID,
 		&destination.CallerStatus,
 		&newAPIUserID,
@@ -451,6 +460,9 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	destination.ErrorCode = nullStringPointer(errorCode)
 	destination.RequestModel = nullStringPointer(requestModel)
 	destination.ResponseModel = nullStringPointer(responseModel)
+	destination.ParsedErrorType = nullStringPointer(parsedErrorType)
+	destination.ParsedErrorCode = nullStringPointer(parsedErrorCode)
+	destination.UpstreamErrorClass = nullStringPointer(upstreamErrorClass)
 	destination.NewAPIRequestID = nullStringPointer(requestID)
 	destination.ConversationID = nullStringPointer(conversationID)
 	if destination.ConversationID != nil {
@@ -492,14 +504,14 @@ ORDER BY `+stageOrderSQL+`, kind, name, value_index`, auditID)
 func readParsedResultSummary(ctx context.Context, transaction *sql.Tx, auditID string) (*ParsedResultSummary, error) {
 	var result ParsedResultSummary
 	var requestedStream, observedStream, hasToolCall sql.NullInt64
-	var requestModel, responseModel, responseID, errorType, errorCode sql.NullString
+	var requestModel, responseModel, responseID, errorType, errorCode, upstreamErrorClass sql.NullString
 	var usageInput, usageOutput, usageTotal, messageCount, toolCallCount sql.NullInt64
 	var parsedJSONEnc []byte
 	err := transaction.QueryRowContext(ctx, `
 SELECT parser_name, parser_version, status, request_model, response_model,
        requested_stream, observed_stream, response_id, usage_input,
-       usage_output, usage_total, error_type, error_code, message_count,
-       tool_call_count, has_tool_call, parsed_json_enc, parsed_at_ns
+       usage_output, usage_total, error_type, error_code, upstream_error_class,
+       message_count, tool_call_count, has_tool_call, parsed_json_enc, parsed_at_ns
 FROM parsed_results
 WHERE audit_id = ?`, auditID).Scan(
 		&result.ParserName,
@@ -515,6 +527,7 @@ WHERE audit_id = ?`, auditID).Scan(
 		&usageTotal,
 		&errorType,
 		&errorCode,
+		&upstreamErrorClass,
 		&messageCount,
 		&toolCallCount,
 		&hasToolCall,
@@ -537,6 +550,7 @@ WHERE audit_id = ?`, auditID).Scan(
 	result.UsageTotal = nullInt64Pointer(usageTotal)
 	result.ErrorType = nullStringPointer(errorType)
 	result.ErrorCode = nullStringPointer(errorCode)
+	result.UpstreamErrorClass = nullStringPointer(upstreamErrorClass)
 	result.MessageCount = nullInt64Pointer(messageCount)
 	result.ToolCallCount = nullInt64Pointer(toolCallCount)
 	result.HasToolCall = nullBoolPointer(hasToolCall)

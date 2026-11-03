@@ -11,6 +11,7 @@ import (
 
 	"llmapi-logger/internal/insights"
 	base "llmapi-logger/internal/parser"
+	"llmapi-logger/internal/parser/policyclass"
 	"llmapi-logger/internal/parser/protocolutil"
 )
 
@@ -131,11 +132,22 @@ func parseResponse(root map[string]any, result *base.Result) {
 	if errorObject := protocolutil.Map(root["error"]); errorObject != nil {
 		result.ErrorType = protocolutil.String(errorObject["status"])
 		result.ErrorCode = protocolutil.String(errorObject["code"])
+		applyUpstreamErrorClass(result, errorObject)
+	}
+	// A prompt-level safety block still arrives as HTTP 200, so the stable
+	// content_filter class comes from promptFeedback instead of an error body.
+	if feedback := protocolutil.Map(root["promptFeedback"]); feedback != nil {
+		if reason := protocolutil.String(feedback["blockReason"]); reason != "" && reason != "BLOCKED_REASON_UNSPECIFIED" {
+			result.UpstreamErrorClass = policyclass.Merge(result.UpstreamErrorClass, policyclass.ClassContentFilter)
+		}
 	}
 	toolCount := 0
 	for _, candidateValue := range protocolutil.Slice(root["candidates"]) {
 		candidate := protocolutil.Map(candidateValue)
 		toolCount += countFunctionCalls(protocolutil.Map(candidate["content"]))
+		if protocolutil.String(candidate["finishReason"]) == "SAFETY" {
+			result.UpstreamErrorClass = policyclass.Merge(result.UpstreamErrorClass, policyclass.ClassContentFilter)
+		}
 	}
 	mergeToolCount(result, toolCount)
 }
@@ -247,6 +259,12 @@ func normalizeUsage(usage map[string]any) insights.Usage {
 		normalized.CacheWrite = protocolutil.Int64Pointer(0)
 	}
 	return normalized
+}
+
+// applyUpstreamErrorClass records a policy class only when it does not replace
+// an already more specific class derived from another parse path.
+func applyUpstreamErrorClass(result *base.Result, errorObject map[string]any) {
+	result.UpstreamErrorClass = policyclass.Merge(result.UpstreamErrorClass, policyclass.Classify(errorObject))
 }
 
 func countFunctionCalls(content map[string]any) int {
