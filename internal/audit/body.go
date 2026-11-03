@@ -12,7 +12,7 @@ import (
 	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/streamtimeline"
 )
 
@@ -115,7 +115,7 @@ func (reader *observedReadCloser) Close() error {
 func (reader *observedReadCloser) captureTrailers() {
 	reader.trailerOnce.Do(func() {
 		if reader.trailers != nil {
-			reader.session.addHeaders(reader.stage, sqlite.HeaderKindTrailer, reader.trailers())
+			reader.session.addHeaders(reader.stage, storage.HeaderKindTrailer, reader.trailers())
 		}
 	})
 }
@@ -140,7 +140,7 @@ func (session *Session) observeRead(stageName string, data []byte, readErr error
 		return
 	}
 	if readErr != nil {
-		if stageName == sqlite.StageResponseReceived &&
+		if stageName == storage.StageResponseReceived &&
 			session.request != nil && session.request.Err() != nil &&
 			session.responseLogicallyCompleteLocked() {
 			// The client hung up after the stream's terminal event, which
@@ -158,12 +158,12 @@ func (session *Session) observeRead(stageName string, data []byte, readErr error
 		body.closed = true
 		body.errorCode = "body_read_error"
 		session.markStageFaultLocked(stage, body.errorCode)
-		if stageName == sqlite.StageResponseReceived {
+		if stageName == storage.StageResponseReceived {
 			if session.request != nil && session.request.Err() != nil {
-				session.forwardStatus = sqlite.ForwardClientCancelled
+				session.forwardStatus = storage.ForwardClientCancelled
 				session.errorCode = stringPointer("client_cancelled")
-			} else if session.forwardStatus == sqlite.ForwardInProgress {
-				session.forwardStatus = sqlite.ForwardNewAPIError
+			} else if session.forwardStatus == storage.ForwardInProgress {
+				session.forwardStatus = storage.ForwardNewAPIError
 				session.errorCode = stringPointer("upstream_body_read_error")
 			}
 		}
@@ -211,11 +211,11 @@ func (session *Session) observeWrite(stageName string, data []byte, writeErr err
 	session.markStageFaultLocked(stage, body.errorCode)
 	if session.request != nil && session.request.Err() != nil {
 		if !session.responseLogicallyCompleteLocked() {
-			session.forwardStatus = sqlite.ForwardClientCancelled
+			session.forwardStatus = storage.ForwardClientCancelled
 			session.errorCode = stringPointer("client_cancelled")
 		}
-	} else if session.forwardStatus == sqlite.ForwardInProgress {
-		session.forwardStatus = sqlite.ForwardProxyError
+	} else if session.forwardStatus == storage.ForwardInProgress {
+		session.forwardStatus = storage.ForwardProxyError
 		session.errorCode = stringPointer("downstream_write_error")
 	}
 }
@@ -230,7 +230,7 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 		sourceStage:    stage.name,
 		streamComplete: true,
 	}
-	body.stream = body.persistChunks && stage.name == sqlite.StageResponseReceived && isEventStream(stage.contentType)
+	body.stream = body.persistChunks && stage.name == storage.StageResponseReceived && isEventStream(stage.contentType)
 	if body.stream {
 		body.streamPoints = make([]streamtimeline.Point, 0, 256)
 		// The probe sees raw upstream bytes, so terminal detection is only
@@ -248,12 +248,12 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 		body.errorCode = "start_stage_failed"
 		return body
 	}
-	if err := session.store.StartBody(session.writeCtx, sqlite.BodyStream{
+	if err := session.store.StartBody(session.writeCtx, storage.BodyStream{
 		AuditID:        session.auditID,
 		Stage:          stage.name,
 		SourceStage:    stage.name,
-		State:          sqlite.StageStateStreaming,
-		RetentionState: sqlite.RetentionPending,
+		State:          storage.StageStateStreaming,
+		RetentionState: storage.RetentionPending,
 	}); err != nil {
 		body.faulted = true
 		body.errorCode = "start_body_failed"
@@ -358,7 +358,7 @@ func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, 
 		session.markStageFaultLocked(stage, body.errorCode)
 		return
 	}
-	if err := session.store.AddChunk(session.writeCtx, sqlite.BodyChunk{
+	if err := session.store.AddChunk(session.writeCtx, storage.BodyChunk{
 		AuditID:         session.auditID,
 		Stage:           stage.name,
 		Seq:             sequence,
@@ -454,7 +454,7 @@ func finishStreamLine(body *bodyCapture, offset, observedAtNS int64) {
 	body.streamLineData = false
 }
 
-func (session *Session) sealStreamTimelineLocked(stage *stageCapture, body *bodyCapture) (*sqlite.StreamTimeline, error) {
+func (session *Session) sealStreamTimelineLocked(stage *stageCapture, body *bodyCapture) (*storage.StreamTimeline, error) {
 	if body == nil || !body.stream || body.streamEvents == 0 {
 		return nil, nil
 	}
@@ -479,7 +479,7 @@ func (session *Session) sealStreamTimelineLocked(stage *stageCapture, body *body
 	if err != nil {
 		return nil, err
 	}
-	return &sqlite.StreamTimeline{
+	return &storage.StreamTimeline{
 		EventCount:      body.streamEvents,
 		FirstEventAtNS:  optionalInt64(body.firstEventAtNS),
 		LastEventAtNS:   optionalInt64(body.lastEventAtNS),

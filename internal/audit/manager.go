@@ -19,7 +19,7 @@ import (
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -34,14 +34,14 @@ var ErrUnavailable = errors.New("audit unavailable")
 // returns the effective committed outcome for the completion log.
 type Store interface {
 	Healthy() bool
-	BeginAudit(context.Context, sqlite.AuditRecord) error
-	StartStage(context.Context, sqlite.HTTPStage) error
-	StartBody(context.Context, sqlite.BodyStream) error
-	AddHeaders(context.Context, []sqlite.HTTPHeader) error
-	AddChunk(context.Context, sqlite.BodyChunk) error
-	FinishStage(context.Context, sqlite.StageFinish) error
-	FinishAuditWithResult(context.Context, sqlite.AuditFinish) (sqlite.AuditFinish, error)
-	InsertAuditGaps(context.Context, []sqlite.AuditGap) error
+	BeginAudit(context.Context, storage.AuditRecord) error
+	StartStage(context.Context, storage.HTTPStage) error
+	StartBody(context.Context, storage.BodyStream) error
+	AddHeaders(context.Context, []storage.HTTPHeader) error
+	AddChunk(context.Context, storage.BodyChunk) error
+	FinishStage(context.Context, storage.StageFinish) error
+	FinishAuditWithResult(context.Context, storage.AuditFinish) (storage.AuditFinish, error)
+	InsertAuditGaps(context.Context, []storage.AuditGap) error
 }
 
 // Sink is the proxy-facing audit admission interface. A nil Session always
@@ -207,7 +207,7 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 	}
 	if manager == nil || manager.store == nil || manager.cipher == nil || manager.cause != nil {
 		if manager != nil {
-			manager.recordGap(sqlite.GapReasonDBUnavailable)
+			manager.recordGap(storage.GapReasonDBUnavailable)
 		}
 		return nil, manager.unavailableError()
 	}
@@ -222,12 +222,12 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 	}
 	requestURIAdditionalData, err := security.AAD(auditID, "request_uri")
 	if err != nil {
-		manager.recordGap(sqlite.GapReasonEncryption)
+		manager.recordGap(storage.GapReasonEncryption)
 		return nil, fmt.Errorf("audit: request URI AAD: %w", err)
 	}
 	requestURIEncrypted, err := manager.cipher.Encrypt(requestURIAdditionalData, []byte(requestURI))
 	if err != nil {
-		manager.recordGap(sqlite.GapReasonEncryption)
+		manager.recordGap(storage.GapReasonEncryption)
 		return nil, fmt.Errorf("audit: encrypt request URI: %w", err)
 	}
 
@@ -240,7 +240,7 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		}
 		query = request.URL.Query()
 	}
-	record := sqlite.AuditRecord{
+	record := storage.AuditRecord{
 		AuditID:       auditID,
 		StartedAtNS:   started.UnixNano(),
 		RouteID:       match.RouteID,
@@ -250,9 +250,9 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		Path:          path,
 		RequestURIEnc: requestURIEncrypted,
 		Mode:          manager.mode,
-		ForwardStatus: sqlite.ForwardInProgress,
-		CaptureStatus: sqlite.CapturePending,
-		ParseStatus:   sqlite.ParsePending,
+		ForwardStatus: storage.ForwardInProgress,
+		CaptureStatus: storage.CapturePending,
+		ParseStatus:   storage.ParsePending,
 		// Tagging the credential here, before interceptors run, is what lets a
 		// developer session see its own rejected requests too.
 		APIKeyFPR: manager.fingerprints.FingerprintRequest(request.Header, query),
@@ -272,12 +272,12 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 
 func gapReasonForWrite(err error) string {
 	switch {
-	case errors.Is(err, sqlite.ErrQueueFull):
-		return sqlite.GapReasonQueueFull
-	case errors.Is(err, sqlite.ErrClosed):
-		return sqlite.GapReasonDBUnavailable
+	case errors.Is(err, storage.ErrQueueFull):
+		return storage.GapReasonQueueFull
+	case errors.Is(err, storage.ErrClosed):
+		return storage.GapReasonDBUnavailable
 	default:
-		return sqlite.GapReasonWrite
+		return storage.GapReasonWrite
 	}
 }
 
