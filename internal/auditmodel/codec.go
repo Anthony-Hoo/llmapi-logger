@@ -11,10 +11,17 @@ import (
 )
 
 func sealContent(cipher security.Cipher, hash []byte, kind string, plaintext []byte) (string, []byte, int64, error) {
-	compression, encoded, err := compressContent(plaintext)
+	encoder := &contentEncoder{}
+	defer encoder.release()
+	return sealContentWithEncoder(cipher, encoder, hash, kind, plaintext)
+}
+
+func sealContentWithEncoder(cipher security.Cipher, encoder *contentEncoder, hash []byte, kind string, plaintext []byte) (string, []byte, int64, error) {
+	compression, encoded, err := encoder.compress(plaintext)
 	if err != nil {
 		return "", nil, 0, err
 	}
+	defer clear(encoded)
 	aad, err := security.AAD("content_object", hashHex(hash), kind, compression)
 	if err != nil {
 		return "", nil, 0, err
@@ -27,10 +34,16 @@ func sealContent(cipher security.Cipher, hash []byte, kind string, plaintext []b
 }
 
 func sealBinary(cipher security.Cipher, candidate binaryCandidate) (BinaryObject, error) {
+	encoder := &contentEncoder{}
+	defer encoder.release()
+	return sealBinaryWithEncoder(cipher, encoder, candidate)
+}
+
+func sealBinaryWithEncoder(cipher security.Cipher, encoder *contentEncoder, candidate binaryCandidate) (BinaryObject, error) {
 	compression := CompressionNone
 	encoded := candidate.Data
 	if shouldCompressBinary(candidate.MediaType, candidate.Data) {
-		compressed, err := gzipBytes(candidate.Data)
+		compressed, err := encoder.gzipBytes(candidate.Data)
 		if err != nil {
 			return BinaryObject{}, err
 		}
@@ -61,25 +74,60 @@ func sealBinary(cipher security.Cipher, candidate binaryCandidate) (BinaryObject
 }
 
 func compressContent(plaintext []byte) (string, []byte, error) {
+	encoder := &contentEncoder{}
+	defer encoder.release()
+	return encoder.compress(plaintext)
+}
+
+// contentEncoder reuses compressor allocations within a single Prepare call.
+// It is intentionally not a global pool: gzip.Reset does not erase flate's
+// private plaintext history. The writer is detached and discarded at request
+// completion, limiting that residency to this operation's lifetime plus GC.
+// Reset prevents cross-object dictionary reuse; it is not secure zeroization.
+// An encoder has one owner and must never be used concurrently.
+type contentEncoder struct{ writer *gzip.Writer }
+
+func (encoder *contentEncoder) release() {
+	if encoder.writer != nil {
+		encoder.writer.Reset(io.Discard)
+		encoder.writer = nil
+	}
+}
+
+func (encoder *contentEncoder) compress(plaintext []byte) (string, []byte, error) {
 	if len(plaintext) < 128 {
 		return CompressionNone, append([]byte(nil), plaintext...), nil
 	}
-	compressed, err := gzipBytes(plaintext)
+	compressed, err := encoder.gzipBytes(plaintext)
 	if err != nil {
 		return "", nil, err
 	}
 	if !worthwhileCompression(len(plaintext), len(compressed)) {
+		clear(compressed)
 		return CompressionNone, append([]byte(nil), plaintext...), nil
 	}
 	return CompressionGZIP, compressed, nil
 }
 
 func gzipBytes(plaintext []byte) ([]byte, error) {
+	encoder := &contentEncoder{}
+	defer encoder.release()
+	return encoder.gzipBytes(plaintext)
+}
+
+func (encoder *contentEncoder) gzipBytes(plaintext []byte) ([]byte, error) {
 	var output bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&output, gzip.BestSpeed)
-	if err != nil {
-		return nil, fmt.Errorf("auditmodel: create gzip writer: %w", err)
+	if encoder.writer == nil {
+		writer, err := gzip.NewWriterLevel(&output, gzip.BestSpeed)
+		if err != nil {
+			return nil, fmt.Errorf("auditmodel: create gzip writer: %w", err)
+		}
+		encoder.writer = writer
+	} else {
+		encoder.writer.Reset(&output)
 	}
+	writer := encoder.writer
+	defer writer.Reset(io.Discard)
 	writer.Header.ModTime = time.Unix(0, 0)
 	writer.Header.OS = 255
 	if _, err := writer.Write(plaintext); err != nil {

@@ -9,14 +9,6 @@ import (
 	"llmapi-logger/internal/security"
 )
 
-type preparedPlainItem struct {
-	Item       Item
-	Object     ContentObject
-	Value      any
-	Canonical  []byte
-	BinaryRefs []BinaryReference
-}
-
 // Prepare canonicalizes, hashes, compresses, encrypts, and locally verifies a
 // normalized turn. It returns no plaintext provider values.
 func Prepare(turn Turn, cipher security.Cipher) (PreparedTurn, error) {
@@ -24,23 +16,25 @@ func Prepare(turn Turn, cipher security.Cipher) (PreparedTurn, error) {
 		return PreparedTurn{}, ErrInvalidModel
 	}
 	accumulator := newBinaryAccumulator()
+	encoder := &contentEncoder{}
+	defer encoder.release()
 	objects := make(map[string]ContentObject)
 
-	requestItems, requestRefs, err := prepareItems(cipher, accumulator, turn.RequestItems, objects)
+	requestItems, requestRefs, err := prepareItems(cipher, encoder, accumulator, turn.RequestItems, objects)
 	if err != nil {
 		return PreparedTurn{}, err
 	}
-	responseItems, responseRefs, err := prepareItems(cipher, accumulator, turn.ResponseItems, objects)
+	responseItems, responseRefs, err := prepareItems(cipher, encoder, accumulator, turn.ResponseItems, objects)
 	if err != nil {
 		return PreparedTurn{}, err
 	}
 
-	requestEnvelope, requestEnvelopeObject, err := prepareEnvelope(cipher, accumulator, "request_envelope", turn.RequestEnvelope)
+	requestEnvelope, requestEnvelopeObject, err := prepareEnvelope(cipher, encoder, accumulator, "request_envelope", turn.RequestEnvelope)
 	if err != nil {
 		return PreparedTurn{}, err
 	}
 	objects[hashHex(requestEnvelopeObject.Hash)] = requestEnvelopeObject
-	responseEnvelope, responseEnvelopeObject, err := prepareEnvelope(cipher, accumulator, "response_envelope", turn.ResponseEnvelope)
+	responseEnvelope, responseEnvelopeObject, err := prepareEnvelope(cipher, encoder, accumulator, "response_envelope", turn.ResponseEnvelope)
 	if err != nil {
 		return PreparedTurn{}, err
 	}
@@ -55,11 +49,11 @@ func Prepare(turn Turn, cipher security.Cipher) (PreparedTurn, error) {
 		return PreparedTurn{}, err
 	}
 
-	requestRebuilt, err := Assemble(turn.RequestLayout, requestEnvelope, plainItems(requestItems))
+	requestRebuilt, err := Assemble(turn.RequestLayout, requestEnvelope, requestItems)
 	if err != nil {
 		return PreparedTurn{}, fmt.Errorf("%w: request: %v", ErrReconstruction, err)
 	}
-	responseRebuilt, err := Assemble(turn.ResponseLayout, responseEnvelope, plainItems(responseItems))
+	responseRebuilt, err := Assemble(turn.ResponseLayout, responseEnvelope, responseItems)
 	if err != nil {
 		return PreparedTurn{}, fmt.Errorf("%w: response: %v", ErrReconstruction, err)
 	}
@@ -87,7 +81,7 @@ func Prepare(turn Turn, cipher security.Cipher) (PreparedTurn, error) {
 	}
 	sort.Strings(binaryKeys)
 	for _, key := range binaryKeys {
-		sealed, err := sealBinary(cipher, accumulator.objects[key])
+		sealed, err := sealBinaryWithEncoder(cipher, encoder, accumulator.objects[key])
 		if err != nil {
 			return PreparedTurn{}, err
 		}
@@ -128,8 +122,8 @@ func Prepare(turn Turn, cipher security.Cipher) (PreparedTurn, error) {
 	}, nil
 }
 
-func prepareItems(cipher security.Cipher, accumulator *binaryAccumulator, items []Item, objects map[string]ContentObject) ([]preparedPlainItem, []ObjectRef, error) {
-	prepared := make([]preparedPlainItem, 0, len(items))
+func prepareItems(cipher security.Cipher, encoder *contentEncoder, accumulator *binaryAccumulator, items []Item, objects map[string]ContentObject) ([]Item, []ObjectRef, error) {
+	prepared := make([]Item, 0, len(items))
 	refs := make([]ObjectRef, 0, len(items))
 	for _, item := range items {
 		if item.Slot == "" || item.Kind == "" {
@@ -149,42 +143,39 @@ func prepareItems(cipher security.Cipher, accumulator *binaryAccumulator, items 
 		if err != nil {
 			return nil, nil, err
 		}
-		compression, encrypted, encodedLength, err := sealContent(cipher, hash, item.Kind, canonical)
-		if err != nil {
-			return nil, nil, err
-		}
-		externalRefs, err := sealExternalRefs(cipher, hash, transformed.ExternalRefs)
-		if err != nil {
-			return nil, nil, err
-		}
-		object := ContentObject{
-			Hash:            hash,
-			SemanticHash:    semanticHash,
-			Kind:            item.Kind,
-			Compression:     compression,
-			PlaintextLength: int64(len(canonical)),
-			EncodedLength:   encodedLength,
-			DataEnc:         encrypted,
-			BinaryRefs:      cloneBinaryRefs(transformed.BinaryRefs),
-			ExternalRefs:    externalRefs,
-		}
 		key := hashHex(hash)
-		if existing, exists := objects[key]; exists && !EqualHash(existing.SemanticHash, semanticHash) {
-			return nil, nil, ErrIntegrity
+		object, exists := objects[key]
+		if exists {
+			// Identity is canonical plaintext, not codec output or nonce. This
+			// map is request-local and contains only objects sealed above.
+			if object.Kind != item.Kind || object.PlaintextLength != int64(len(canonical)) || !EqualHash(object.SemanticHash, semanticHash) {
+				return nil, nil, ErrIntegrity
+			}
+		} else {
+			compression, encrypted, encodedLength, err := sealContentWithEncoder(cipher, encoder, hash, item.Kind, canonical)
+			if err != nil {
+				return nil, nil, err
+			}
+			externalRefs, err := sealExternalRefs(cipher, hash, transformed.ExternalRefs)
+			if err != nil {
+				return nil, nil, err
+			}
+			object = ContentObject{
+				Hash: hash, SemanticHash: semanticHash, Kind: item.Kind,
+				Compression: compression, PlaintextLength: int64(len(canonical)),
+				EncodedLength: encodedLength, DataEnc: encrypted,
+				BinaryRefs: cloneBinaryRefs(transformed.BinaryRefs), ExternalRefs: externalRefs,
+			}
+			objects[key] = object
 		}
-		objects[key] = object
-		prepared = append(prepared, preparedPlainItem{
-			Item:      Item{Slot: item.Slot, Kind: item.Kind, Value: transformed.Value},
-			Object:    object,
-			Value:     transformed.Value,
-			Canonical: canonical,
-		})
+		clear(canonical)
+		prepared = append(prepared, Item{Slot: item.Slot, Kind: item.Kind, Value: transformed.Value})
 		refs = append(refs, ObjectRef{Slot: item.Slot, ObjectHash: append([]byte(nil), hash...), SemanticHash: append([]byte(nil), semanticHash...)})
 	}
 	return prepared, refs, nil
 }
 
-func prepareEnvelope(cipher security.Cipher, accumulator *binaryAccumulator, kind string, value any) (any, ContentObject, error) {
+func prepareEnvelope(cipher security.Cipher, encoder *contentEncoder, accumulator *binaryAccumulator, kind string, value any) (any, ContentObject, error) {
 	transformed, err := accumulator.transform(value)
 	if err != nil {
 		return nil, ContentObject{}, err
@@ -195,7 +186,7 @@ func prepareEnvelope(cipher security.Cipher, accumulator *binaryAccumulator, kin
 		return nil, ContentObject{}, err
 	}
 	hash := ContentHash(canonical)
-	compression, encrypted, encodedLength, err := sealContent(cipher, hash, kind, canonical)
+	compression, encrypted, encodedLength, err := sealContentWithEncoder(cipher, encoder, hash, kind, canonical)
 	if err != nil {
 		return nil, ContentObject{}, err
 	}
@@ -271,14 +262,6 @@ func SemanticHash(kind string, value any) ([]byte, error) {
 		return nil, err
 	}
 	return ContentHash(canonical), nil
-}
-
-func plainItems(values []preparedPlainItem) []Item {
-	items := make([]Item, 0, len(values))
-	for _, value := range values {
-		items = append(items, value.Item)
-	}
-	return items
 }
 
 func cloneBinaryRefs(values []BinaryReference) []BinaryReference {
