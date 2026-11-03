@@ -4,6 +4,9 @@ import type {
   AuditFilters,
   AuditListPage,
   CompositionResponse,
+  ContentPolicyRule,
+  ContentPolicyRuleInput,
+  ContentPolicyRuleList,
   NewAPIUserList,
   OverviewQuery,
   OverviewResponse,
@@ -56,6 +59,10 @@ export interface ApiClient {
   createUserAgentRule: (input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
   updateUserAgentRule: (id: number, input: UserAgentRuleInput, signal?: AbortSignal) => Promise<UserAgentRule>;
   deleteUserAgentRule: (id: number, signal?: AbortSignal) => Promise<void>;
+  listContentPolicyRules: (signal?: AbortSignal) => Promise<ContentPolicyRuleList>;
+  createContentPolicyRule: (input: ContentPolicyRuleInput, signal?: AbortSignal) => Promise<ContentPolicyRule>;
+  updateContentPolicyRule: (id: number, input: ContentPolicyRuleInput, signal?: AbortSignal) => Promise<ContentPolicyRule>;
+  deleteContentPolicyRule: (id: number, signal?: AbortSignal) => Promise<void>;
   getInsightsOverview: (query: OverviewQuery, signal?: AbortSignal) => Promise<OverviewResponse>;
   listInsightsSessions: (query: SessionsQuery, signal?: AbortSignal) => Promise<SessionsResponse>;
   getSessionTrend: (sessionID: string, signal?: AbortSignal) => Promise<TrendResponse>;
@@ -175,6 +182,28 @@ export function createApiClient(
       }
     },
 
+    listContentPolicyRules(signal) {
+      return requestJSON<ContentPolicyRuleList>(`${API_BASE}/content-policy-rules`, signal);
+    },
+
+    createContentPolicyRule(input, signal) {
+      return mutateJSON<ContentPolicyRule>(`${API_BASE}/content-policy-rules`, "POST", input, signal);
+    },
+
+    updateContentPolicyRule(id, input, signal) {
+      return mutateJSON<ContentPolicyRule>(`${API_BASE}/content-policy-rules/${encodeURIComponent(String(id))}`, "PUT", input, signal);
+    },
+
+    async deleteContentPolicyRule(id, signal) {
+      const response = await sessionFetch(
+        `${API_BASE}/content-policy-rules/${encodeURIComponent(String(id))}`,
+        { method: "DELETE", signal },
+      );
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+    },
+
     async listAudits(filters = {}, cursor = null, signal) {
       const query = new URLSearchParams({ limit: "50" });
       if (filters.path?.trim()) {
@@ -200,6 +229,9 @@ export function createApiClient(
       }
       if (filters.status_code?.trim()) {
         query.set("status_code", filters.status_code.trim());
+      }
+      if (filters.upstream_error_class?.trim()) {
+        query.set("upstream_error_class", filters.upstream_error_class.trim());
       }
       if (filters.conversation?.trim()) {
         query.set("conversation", filters.conversation.trim());

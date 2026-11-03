@@ -88,7 +88,7 @@ Compact 若返回 SSE，只按 Responses 风格事件解析；不能误当 Chat 
 {"error":{"message":"...","type":"...","code":"..."}}
 ```
 
-`type` 和 `code` 可进入公共字段，message 不进入 compact 摘要或 conversation；JSON error envelope 仍存在于加密 response envelope object 中，且非 2xx/3xx 记录同时保留 full raw。非 JSON 错误只保留 HTTP 状态、安全错误码和 full raw。
+`type` 和 `code` 可进入公共字段，message 不进入 compact 摘要或 conversation；JSON error envelope 仍存在于加密 response envelope object 中，且非 2xx/3xx 记录同时保留 full raw。非 JSON 错误只保留 HTTP 状态、安全错误码和 full raw。错误 envelope 中的明确策略 code 以及 cyber/安全提示短语会在内存中派生 `upstream_error_class`（`cyber_policy`/`content_policy`/`safety_policy` 等），message 本身仍不落公共列。
 
 统一限额：
 

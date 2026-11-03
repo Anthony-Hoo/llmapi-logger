@@ -259,6 +259,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *http.Request, match routing.
 func snapshotRequest(req *http.Request, match routing.Match) RequestView {
 	view := RequestView{
 		RouteID:       match.RouteID,
+		Parser:        match.Parser,
 		Method:        req.Method,
 		Host:          req.Host,
 		ContentLength: req.ContentLength,

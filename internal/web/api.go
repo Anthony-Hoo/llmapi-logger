@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/uaguard"
@@ -22,6 +23,11 @@ const queryTimeout = 10 * time.Second
 const maxLoginBodyBytes = 4096
 
 const maxRuleBodyBytes = 16 << 10
+
+// maxContentPolicyBodyBytes bounds one content policy rule body. The keywords
+// and scan scopes arrays are much larger than a User-Agent rule's patterns, so
+// this limit is deliberately separate (doc/features/22-content-policy.md).
+const maxContentPolicyBodyBytes = 96 << 10
 
 // sessionResponse describes the caller to the UI. It never carries the admin
 // token, the submitted API key, or the key fingerprint.
@@ -349,6 +355,113 @@ func (handler *managementHandler) writeRuleError(writer http.ResponseWriter, err
 	}
 }
 
+// serveContentPolicyRuleCollection lists or creates keyword policy rules. The
+// whole family is administrator-only: it is mounted after requireAdmin and a
+// missing service answers 503, never an empty list.
+func (handler *managementHandler) serveContentPolicyRuleCollection(writer http.ResponseWriter, request *http.Request) {
+	if handler.policies == nil || !handler.policies.Available() {
+		writeError(writer, http.StatusServiceUnavailable, "content_policy_unavailable", "content policy rules are unavailable")
+		return
+	}
+	switch request.Method {
+	case http.MethodGet:
+		rules := handler.policies.List()
+		if rules == nil {
+			rules = []contentpolicy.Rule{}
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"items": rules})
+	case http.MethodPost:
+		input, ok := decodeContentPolicyInput(writer, request)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+		defer cancel()
+		rule, err := handler.policies.Create(ctx, input)
+		if err != nil {
+			handler.writeContentPolicyError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusCreated, rule)
+	default:
+		methodNotAllowed(writer, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (handler *managementHandler) serveContentPolicyRuleResource(writer http.ResponseWriter, request *http.Request) {
+	if handler.policies == nil || !handler.policies.Available() {
+		writeError(writer, http.StatusServiceUnavailable, "content_policy_unavailable", "content policy rules are unavailable")
+		return
+	}
+	remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/content-policy-rules/")
+	if remainder == "" || strings.Contains(remainder, "/") {
+		http.NotFound(writer, request)
+		return
+	}
+	id, err := strconv.ParseInt(remainder, 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(writer, request)
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
+	switch request.Method {
+	case http.MethodPut:
+		input, ok := decodeContentPolicyInput(writer, request)
+		if !ok {
+			return
+		}
+		rule, err := handler.policies.Update(ctx, id, input)
+		if err != nil {
+			handler.writeContentPolicyError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, rule)
+	case http.MethodDelete:
+		if err := handler.policies.Delete(ctx, id); err != nil {
+			handler.writeContentPolicyError(writer, err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(writer, http.MethodPut, http.MethodDelete)
+	}
+}
+
+// decodeContentPolicyInput accepts exactly one JSON object. It never echoes the
+// submitted rule, because the keywords themselves are the sensitive part.
+func decodeContentPolicyInput(writer http.ResponseWriter, request *http.Request) (contentpolicy.RuleInput, bool) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxContentPolicyBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var input contentpolicy.RuleInput
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_rule", "invalid content policy rule")
+		return contentpolicy.RuleInput{}, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeError(writer, http.StatusBadRequest, "invalid_rule", "invalid content policy rule")
+		return contentpolicy.RuleInput{}, false
+	}
+	return input, true
+}
+
+func (handler *managementHandler) writeContentPolicyError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, contentpolicy.ErrInvalidRule):
+		writeError(writer, http.StatusBadRequest, "invalid_rule", "invalid content policy rule")
+	case errors.Is(err, contentpolicy.ErrNotFound):
+		writeError(writer, http.StatusNotFound, "not_found", "content policy rule not found")
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(writer, http.StatusServiceUnavailable, "content_policy_timeout", "content policy rule update timed out")
+	case errors.Is(err, context.Canceled):
+		return
+	default:
+		writeError(writer, http.StatusServiceUnavailable, "content_policy_unavailable", "content policy rules are unavailable")
+	}
+}
+
 func (handler *managementHandler) serveAuditResource(writer http.ResponseWriter, request *http.Request) {
 	remainder := strings.TrimPrefix(request.URL.Path, "/api/v1/audits/")
 	parts := strings.Split(remainder, "/")
@@ -600,6 +713,10 @@ func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor,
 		"newapi_user_id": true, "username": true,
 		"newapi_token_id": true, "token_name": true,
 		"conversation": true, "collapse": true,
+		// Derived upstream policy rejection class (doc/features/22 §9). The
+		// query layer validates the stable code alphabet; an invalid value is
+		// mapped to the same stable 400 as any other bad filter.
+		"upstream_error_class": true,
 	}
 	if scoped {
 		for _, key := range callerFilterKeys {
@@ -670,6 +787,7 @@ func parseListQuery(values url.Values, scoped bool) (query.Filter, query.Cursor,
 		Username:              values.Get("username"),
 		NewAPITokenID:         newAPITokenID,
 		TokenName:             values.Get("token_name"),
+		UpstreamErrorClass:    values.Get("upstream_error_class"),
 		Conversation:          values.Get("conversation"),
 		CollapseConversations: collapse == "conversation",
 	}

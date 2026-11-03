@@ -282,6 +282,7 @@ func TestDeveloperSessionIsDeniedAdministratorEndpoints(t *testing.T) {
 	handler := newDeveloperHandler(t, Options{
 		Developer: developerOptions(t, newapi.TokenIdentity{}, nil),
 		Rules:     rules,
+		Policies:  &fakeContentPolicyRules{},
 		Users:     fakeUserCatalog{},
 	})
 	cookie := developerSignIn(t, handler)
@@ -298,6 +299,10 @@ func TestDeveloperSessionIsDeniedAdministratorEndpoints(t *testing.T) {
 		{http.MethodPost, "/api/v1/user-agent-rules"},
 		{http.MethodPut, "/api/v1/user-agent-rules/1"},
 		{http.MethodDelete, "/api/v1/user-agent-rules/1"},
+		{http.MethodGet, "/api/v1/content-policy-rules"},
+		{http.MethodPost, "/api/v1/content-policy-rules"},
+		{http.MethodPut, "/api/v1/content-policy-rules/1"},
+		{http.MethodDelete, "/api/v1/content-policy-rules/1"},
 	}
 	for _, endpoint := range adminOnly {
 		request := httptest.NewRequest(endpoint.method, endpoint.path, nil)

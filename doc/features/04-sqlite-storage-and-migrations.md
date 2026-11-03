@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-个人单机版使用一个 SQLite WAL 数据库保存 HTTP 边界证据、内容寻址的对话轮次、多模态对象、NewAPI 调用者关联、动态 User-Agent 规则和完整性事件。所有写入继续经过单 writer goroutine；管理查询使用独立只读连接池。
+个人单机版使用一个 SQLite WAL 数据库保存 HTTP 边界证据、内容寻址的对话轮次、多模态对象、NewAPI 调用者关联、动态 User-Agent 规则、动态关键词规则和完整性事件。所有写入继续经过单 writer goroutine；管理查询使用独立只读连接池。
 
 当前 schema generation 为 2，不兼容旧审计数据。目标不是把旧的“每个请求保存一份完整上下文”原地转换，而是在升级时破坏性重建审计表，避免继续携带旧结构和 O(n²) 数据。
 
@@ -11,7 +11,7 @@
 ~~~text
 internal/storage/sqlite/{open.go,migrate.go,writer.go,reader.go,recovery.go}
 internal/storage/sqlite/{graph_writer.go,graph_reader.go,timeline_reader.go,integrity.go}
-internal/storage/sqlite/migrations/{001_init.sql,...,009_newapi_billing.sql}
+internal/storage/sqlite/migrations/{001_init.sql,...,009_newapi_billing.sql,010_content_policy_rules.sql,011_upstream_error_class.sql}
 ~~~
 
 固定连接参数：
@@ -42,7 +42,7 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 
 `007_parse_retries.sql` 就地增加 `parse_save_failures` 和 `parse_next_at_ns`，分别保存解析写入失败次数和下一次允许重试的时间。这两列是可变调度元数据，不进入历史 HTTP 证据摘要，也不改变 schema generation。
 
-当前最终 schema 共 22 张表（schema generation 仍为 2），按职责分组如下。`008_audit_analysis.sql` 就地新增 `audit_analysis` 与 `agent_spawn_hints` 两张派生表，不重建、不修改任何既有表。`009_newapi_billing.sql` 重建 `token_links`，增加 `billing_state`、`quota`、`quota_per_unit`、`billed_prompt_tokens`、`billed_completion_tokens` 与 `billing_attempts`，用 CHECK 约束保证 `billed` 当且仅当计费值齐全；已有链接记为 `unchecked`，并为待补查的行建部分索引（[模块 21](21-newapi-billing.md)）。计费列与身份列一样不进入完整性证据链。
+当前最终 schema 共 23 张表（schema generation 仍为 2），按职责分组如下。`008_audit_analysis.sql` 就地新增 `audit_analysis` 与 `agent_spawn_hints` 两张派生表，不重建、不修改任何既有表。`009_newapi_billing.sql` 重建 `token_links`，增加 `billing_state`、`quota`、`quota_per_unit`、`billed_prompt_tokens`、`billed_completion_tokens` 与 `billing_attempts`，用 CHECK 约束保证 `billed` 当且仅当计费值齐全；已有链接记为 `unchecked`，并为待补查的行建部分索引（[模块 21](21-newapi-billing.md)）。`010_content_policy_rules.sql` 新增动态关键词规则表 `content_policy_rules`（无种子行；空表等于不拦截，[模块 22](22-content-policy.md)）。`011_upstream_error_class.sql` 用 `ALTER TABLE` 为 `parsed_results` 增加可空的 `upstream_error_class`，保存上游策略拒绝的派生分类；该列**不得**进入任何完整性摘要，旧记录为 NULL。计费列与身份列一样不进入完整性证据链。
 
 ### 3.1 HTTP 审计与身份
 
@@ -54,10 +54,11 @@ reader 额外设置 `query_only=ON`。关闭时 best-effort 执行 `wal_checkpoi
 | http_headers | 独立加密的 Header/Trailer value |
 | body_streams | 每阶段长度、SHA-256、来源阶段、保留状态、分块数和 SSE 事件统计 |
 | body_chunks | `pending/full` 原始证据的大块压缩加密数据 |
-| parsed_results | 模型、usage、错误和计数等窄摘要；可选加密回退 conversation |
+| parsed_results | 模型、usage、错误、上游策略分类和计数等窄摘要；可选加密回退 conversation |
 | token_links | NewAPI 用户和 Token 名称关联及该请求的 NewAPI 实际计费，不保存完整 API Key |
 | audit_gaps | 审计不可用或进程退出的聚合缺口 |
 | user_agent_rules | 动态 UA 正则规则 |
+| content_policy_rules | 动态关键词/模型拦截规则 |
 
 `audit_records.ttft_ns` 保存从代理开始处理到收到上游首字节的时长。`blocked_by`、`block_code` 只允许在 `forward_status=rejected` 时出现。未触发的 HTTP 阶段不插入行，因此不存在 `request_sent_to_newapi` 是“没有访问 NewAPI”的权威证据。
 
@@ -155,7 +156,7 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 - audit 终态、调用者关联和 gap；
 - parser claim/release；
 - `SaveParsedAudit`；
-- retention 与 UA 规则 CRUD。
+- retention、UA 规则与关键词规则 CRUD。
 
 `SaveParsedAudit` 在同一事务内完成：
 
@@ -222,3 +223,5 @@ GC 使用 `NOT EXISTS` 可达性检查和对象引用索引，不维护可漂移
 - recovery、integrity event 篡改、缺 event 和重复恢复测试通过。
 - DB/WAL 扫描不到测试 Header、Body、二进制和主密钥明文。
 - `audit_analysis` 的写入、更新和级联删除不改变任何完整性摘要；明文列扫描不到消息、工具名、路径和原始 Agent ID。
+- 动态关键词规则跨重启持久化；删除不存在的规则返回领域 `ErrNotFound` 且不污染同一 writer 批次；`content_policy_rules` 不出现在完整性链中。
+- `upstream_error_class` 可空、可筛选；重写该列后重开数据库仍通过完整性校验。

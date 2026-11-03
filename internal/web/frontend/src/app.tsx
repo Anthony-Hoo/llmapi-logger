@@ -31,6 +31,7 @@ import {
 } from "./components/ui/styles";
 import { Skeleton } from "./components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
+import { ContentPolicyPanel } from "./components/content-policy-panel";
 import { ConversationView } from "./components/conversation-view";
 // Recharts is only needed by the insights charts, so keep it out of the main chunk.
 const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
@@ -311,7 +312,7 @@ function Dashboard({
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
   const hasInsights = insightsEnabled(session);
-  const [view, setView] = useState<"audits" | "rules" | "insights">("audits");
+  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -327,6 +328,7 @@ function Dashboard({
   const [draftForwardStatus, setDraftForwardStatus] = useState("");
   const [draftStatusClass, setDraftStatusClass] = useState("");
   const [draftStatusCode, setDraftStatusCode] = useState("");
+  const [draftUpstreamErrorClass, setDraftUpstreamErrorClass] = useState("");
   const [statusCodeError, setStatusCodeError] = useState<string | null>(null);
   const [newAPIUsers, setNewAPIUsers] = useState<NewAPIUser[]>([]);
   const [filters, setFilters] = useState<AuditFilters>({ collapse: true });
@@ -406,6 +408,7 @@ function Dashboard({
       collapse: filters.collapse,
       status_class: draftStatusClass || undefined,
       status_code: parsedStatusCode.value,
+      upstream_error_class: draftUpstreamErrorClass || undefined,
     });
   }
 
@@ -415,6 +418,7 @@ function Dashboard({
     setCursorHistory([]);
     setDraftStatusClass("");
     setDraftStatusCode("");
+    setDraftUpstreamErrorClass("");
     setStatusCodeError(null);
     setDraftPath("");
     setDraftModel("");
@@ -485,6 +489,11 @@ function Dashboard({
                   UA 拦截规则
                 </button>
               )}
+              {isDeveloper ? null : (
+                <button type="button" className={segmentedItemClassName(view === "content-policy")} aria-current={view === "content-policy" ? "page" : undefined} onClick={() => setView("content-policy")}>
+                  关键词拦截
+                </button>
+              )}
             </nav>
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
@@ -500,6 +509,8 @@ function Dashboard({
       <main className="mx-auto max-w-page space-y-section px-gutter py-section">
         {view === "rules" && !isDeveloper ? (
           <UserAgentRulesPanel client={client} />
+        ) : view === "content-policy" && !isDeveloper ? (
+          <ContentPolicyPanel client={client} />
         ) : view === "insights" && hasInsights ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <InsightsView
@@ -520,6 +531,7 @@ function Dashboard({
           forwardStatus={draftForwardStatus}
 		  statusClass={draftStatusClass}
 		  statusCode={draftStatusCode}
+		  upstreamErrorClass={draftUpstreamErrorClass}
 		  users={newAPIUsers}
           showCallerFilters={!isDeveloper}
           onPathChange={setDraftPath}
@@ -529,6 +541,7 @@ function Dashboard({
           onNewAPITokenIDChange={setDraftNewAPITokenID}
           onForwardStatusChange={setDraftForwardStatus}
 		  onStatusClassChange={setDraftStatusClass}
+		  onUpstreamErrorClassChange={setDraftUpstreamErrorClass}
           statusCodeError={statusCodeError}
           onStatusCodeChange={(value) => {
             setDraftStatusCode(value);
@@ -861,6 +874,16 @@ export function UserAgentRulesPanel({ client }: { client: ApiClient }) {
   );
 }
 
+/** Stable upstream policy rejection classes (doc/features/22-content-policy.md §9). */
+const upstreamErrorClassOptions = [
+  { value: "cyber_policy", label: "cyber_policy（网络安全策略）" },
+  { value: "misalignment_policy", label: "misalignment_policy（意图偏离策略）" },
+  { value: "content_policy", label: "content_policy（内容策略）" },
+  { value: "content_filter", label: "content_filter（内容过滤）" },
+  { value: "moderation_blocked", label: "moderation_blocked（审核拦截）" },
+  { value: "safety_policy", label: "safety_policy（安全策略）" },
+] as const;
+
 export function AuditFiltersPanel({
   path,
   model,
@@ -870,6 +893,7 @@ export function AuditFiltersPanel({
   forwardStatus,
 	statusClass,
 	statusCode,
+	upstreamErrorClass,
   statusCodeError = null,
 	users,
   showCallerFilters = true,
@@ -881,6 +905,7 @@ export function AuditFiltersPanel({
   onForwardStatusChange,
 	onStatusClassChange,
 	onStatusCodeChange,
+	onUpstreamErrorClassChange,
   onSubmit,
 }: {
   path: string;
@@ -891,6 +916,7 @@ export function AuditFiltersPanel({
   forwardStatus: string;
 	statusClass: string;
 	statusCode: string;
+	upstreamErrorClass: string;
   statusCodeError?: string | null;
 	users: NewAPIUser[];
   /** Hidden for a scoped session, whose caller is already fixed. */
@@ -903,6 +929,7 @@ export function AuditFiltersPanel({
   onForwardStatusChange: (value: string) => void;
 	onStatusClassChange: (value: string) => void;
 	onStatusCodeChange: (value: string) => void;
+	onUpstreamErrorClassChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -951,7 +978,7 @@ export function AuditFiltersPanel({
 
           <details className={insetPanelClassName}>
             <summary className="cursor-pointer px-3 py-2 text-label font-medium text-muted hover:text-foreground">
-			  {showCallerFilters ? "高级筛选（路径、Token ID、转发状态、HTTP 状态）" : "高级筛选（路径、转发状态、HTTP 状态）"}
+			  {showCallerFilters ? "高级筛选（路径、Token ID、转发状态、HTTP 状态、上游拒绝分类）" : "高级筛选（路径、转发状态、HTTP 状态、上游拒绝分类）"}
             </summary>
 			<div className="grid gap-2 border-t px-3 py-2.5 sm:grid-cols-2 xl:grid-cols-4">
               <FilterField label="路径" htmlFor="filter-path">
@@ -1011,6 +1038,18 @@ export function AuditFiltersPanel({
 				  placeholder="如 503"
 				/>
                 {statusCodeError ? <p id="filter-status-code-error" role="alert" className="text-label text-danger-fg">{statusCodeError}</p> : null}
+			  </FilterField>
+			  <FilterField label="上游拒绝分类" htmlFor="filter-upstream-error-class">
+				<Select
+				  id="filter-upstream-error-class"
+				  value={upstreamErrorClass}
+				  onChange={(event) => onUpstreamErrorClassChange(event.target.value)}
+				>
+				  <option value="">全部</option>
+				  {upstreamErrorClassOptions.map((option) => (
+					<option key={option.value} value={option.value}>{option.label}</option>
+				  ))}
+				</Select>
 			  </FilterField>
             </div>
           </details>
@@ -1101,6 +1140,11 @@ export function AuditList({
                         {formatNanoTime(audit.started_at_ns)}
                       </span>
                       {status ? <span className="text-caption font-medium text-warning-fg">{status}</span> : null}
+                      {audit.upstream_error_class ? (
+                        <Badge variant="danger" title={`上游安全拒绝: ${audit.upstream_error_class}`}>
+                          上游安全拒绝: {audit.upstream_error_class}
+                        </Badge>
+                      ) : null}
                       {audit.conversation_id ? (
                         <span className="font-mono text-caption text-subtle" title={audit.conversation_id}>
                           会话 {audit.conversation_id.startsWith("conv_") ? audit.conversation_id.slice(5, 15) : audit.conversation_id.slice(0, 10)}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
@@ -176,6 +178,98 @@ func TestUserAgentRuleBlocksGPTBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
 	response = send("gpt-test", "Approved Client/2.0")
 	if response.Code != http.StatusNoContent || upstreamRequests.Load() != 4 {
 		t.Fatalf("new UA after update: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+}
+
+func TestContentPolicyRuleBlocksBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
+	var upstreamRequests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		upstreamRequests.Add(1)
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	configuration := config.Default()
+	configuration.NewAPI.URL = upstream.URL
+	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
+	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	configuration.AdminToken = "app-test-admin-token"
+	configuration.Routes = []config.RouteConfig{{
+		ID: "chat", Method: http.MethodPost, Path: "/v1/chat/completions", Match: "exact", Parser: "openai.chat_completions",
+	}}
+	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("new application: %v", err)
+	}
+	t.Cleanup(func() { _ = application.Close() })
+
+	admin := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "http://admin"+path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+configuration.AdminToken)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		application.adminServer.Handler().ServeHTTP(response, request)
+		return response
+	}
+	send := func(prompt string) *httptest.ResponseRecorder {
+		body := `{"model":"deepseek-test","messages":[{"role":"user","content":"` + prompt + `"}]}`
+		request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		application.server.Handler.ServeHTTP(response, request)
+		return response
+	}
+
+	created := admin(http.MethodPost, "/api/v1/content-policy-rules",
+		`{"name":"cyber words","enabled":true,"action":"block","model_pattern":"","scan_scopes":["latest_user"],"keywords":["forbidden"]}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create rule: status=%d body=%q", created.Code, created.Body.String())
+	}
+	var rule contentpolicy.Rule
+	if err := json.Unmarshal(created.Body.Bytes(), &rule); err != nil || rule.ID <= 0 {
+		t.Fatalf("decode created rule: %v body=%q", err, created.Body.String())
+	}
+
+	blocked := send("forbidden")
+	if blocked.Code != http.StatusBadRequest || upstreamRequests.Load() != 0 ||
+		blocked.Body.String() != `{"error":{"code":"request_rejected","message":"request rejected"}}` {
+		t.Fatalf("blocked request: status=%d upstream=%d body=%q", blocked.Code, upstreamRequests.Load(), blocked.Body.String())
+	}
+	if strings.Contains(blocked.Body.String(), "forbidden") || strings.Contains(blocked.Body.String(), "content_policy") {
+		t.Fatalf("blocked response leaked policy details: %q", blocked.Body.String())
+	}
+
+	page, err := application.auditStore.ListAudits(context.Background(), sqlite.AuditQueryFilter{BlockCode: contentpolicy.BlockCode}, sqlite.AuditQueryCursor{}, 10)
+	if err != nil {
+		t.Fatalf("list blocked audits: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].BlockedBy == nil || *page.Rows[0].BlockedBy != contentpolicy.InterceptorID ||
+		page.Rows[0].StatusCode == nil || *page.Rows[0].StatusCode != http.StatusBadRequest {
+		t.Fatalf("blocked audit rows = %+v", page.Rows)
+	}
+
+	allowed := send("ordinary prompt")
+	if allowed.Code != http.StatusNoContent || upstreamRequests.Load() != 1 {
+		t.Fatalf("allowed request: status=%d upstream=%d", allowed.Code, upstreamRequests.Load())
+	}
+
+	updated := admin(http.MethodPut, "/api/v1/content-policy-rules/"+strconv.FormatInt(rule.ID, 10),
+		`{"name":"changed","enabled":true,"action":"block","model_pattern":"","scan_scopes":["latest_user"],"keywords":["another"]}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update rule: status=%d body=%q", updated.Code, updated.Body.String())
+	}
+	if response := send("forbidden"); response.Code != http.StatusNoContent || upstreamRequests.Load() != 2 {
+		t.Fatalf("old keyword after update: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+	if response := send("another"); response.Code != http.StatusBadRequest || upstreamRequests.Load() != 2 {
+		t.Fatalf("new keyword after update: status=%d upstream=%d", response.Code, upstreamRequests.Load())
+	}
+
+	if response := admin(http.MethodDelete, "/api/v1/content-policy-rules/"+strconv.FormatInt(rule.ID, 10), ""); response.Code != http.StatusNoContent {
+		t.Fatalf("delete rule: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := send("another"); response.Code != http.StatusNoContent || upstreamRequests.Load() != 3 {
+		t.Fatalf("deleted rule still applied: status=%d upstream=%d", response.Code, upstreamRequests.Load())
 	}
 }
 

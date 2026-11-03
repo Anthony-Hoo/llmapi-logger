@@ -175,7 +175,7 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情、verified reconstructed JSON、SSE timeline 和异常 raw Body。无论监听地址是否 loopback，所有管理 API 都必须鉴权。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。启用 `developer_login` 后另有一种身份：NewAPI 用户提交自己的 API Key 登录，只读取该 Key 产生的记录，且不能访问 health、ready、调用者目录与 UA 规则（[模块 19](19-developer-key-session.md)）。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值；raw request/response Body 只对 `retention_state=full` 按需读取，metadata 使用 reconstructed API。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情、verified reconstructed JSON、SSE timeline、异常 raw Body 和动态拦截规则。无论监听地址是否 loopback，所有管理 API 都必须鉴权。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。启用 `developer_login` 后另有一种身份：NewAPI 用户提交自己的 API Key 登录，只读取该 Key 产生的记录，且不能访问 health、ready、调用者目录、UA 规则与关键词规则（[模块 19](19-developer-key-session.md)）。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值；raw request/response Body 只对 `retention_state=full` 按需读取，metadata 使用 reconstructed API。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 
@@ -193,3 +193,5 @@ admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情
 - 未启用 body interceptor 时保持流式；启用后允许请求的 replay Body 与原字节一致。
 - health、登录、管理、模型列表和前端页面通过 passthrough 到达 NewAPI，不产生 audit 或 interceptor 调用。
 - Body 超限固定返回 `413`，审计记录 `block_code=body_too_large`。
+- 关键词规则动态 CRUD 保存即生效；命中在 NewAPI 前返回本地 `400`，规则表为空时不拦截；扫描失败按策略 fail-open。
+- 列表 API 支持 `upstream_error_class` 筛选并返回 `parsed_error_type`/`parsed_error_code`/`upstream_error_class`。

@@ -106,9 +106,10 @@ INSERT INTO parsed_results (
     audit_id, parser_name, parser_version, status,
     request_model, response_model, requested_stream, observed_stream,
     response_id, usage_input, usage_output, usage_total,
-    error_type, error_code, message_count, tool_call_count, has_tool_call,
+    error_type, error_code, upstream_error_class,
+    message_count, tool_call_count, has_tool_call,
     parsed_json_enc, parsed_at_ns
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(audit_id) DO UPDATE SET
     parser_name = excluded.parser_name,
     parser_version = excluded.parser_version,
@@ -123,6 +124,7 @@ ON CONFLICT(audit_id) DO UPDATE SET
     usage_total = excluded.usage_total,
     error_type = excluded.error_type,
     error_code = excluded.error_code,
+    upstream_error_class = excluded.upstream_error_class,
     message_count = excluded.message_count,
     tool_call_count = excluded.tool_call_count,
     has_tool_call = excluded.has_tool_call,
@@ -142,6 +144,7 @@ ON CONFLICT(audit_id) DO UPDATE SET
 		result.UsageTotal,
 		result.ErrorType,
 		result.ErrorCode,
+		result.UpstreamErrorClass,
 		result.MessageCount,
 		result.ToolCallCount,
 		boolDatabaseValue(result.HasToolCall),

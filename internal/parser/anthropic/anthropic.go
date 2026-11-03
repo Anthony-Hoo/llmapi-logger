@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	base "llmapi-logger/internal/parser"
+	"llmapi-logger/internal/parser/policyclass"
 	"llmapi-logger/internal/parser/protocolutil"
 )
 
@@ -101,6 +102,7 @@ func parseResponse(root map[string]any, result *base.Result) {
 	if errorObject := protocolutil.Map(root["error"]); errorObject != nil {
 		result.ErrorType = protocolutil.String(errorObject["type"])
 		result.ErrorCode = protocolutil.String(errorObject["code"])
+		applyUpstreamErrorClass(result, errorObject)
 	}
 	mergeToolCount(result, countToolBlocks(root["content"]))
 }
@@ -149,6 +151,7 @@ func parseStream(data []byte, result *base.Result) error {
 			errorObject := protocolutil.Map(root["error"])
 			result.ErrorType = protocolutil.String(errorObject["type"])
 			result.ErrorCode = protocolutil.String(errorObject["code"])
+			applyUpstreamErrorClass(result, errorObject)
 			result.Status = base.StatusPartial
 			terminal = true
 		}
@@ -201,6 +204,12 @@ func applyUsage(usage map[string]any, result *base.Result) {
 			*field.target = value
 		}
 	}
+}
+
+// applyUpstreamErrorClass records a policy class only when it does not replace
+// an already more specific class derived from another parse path.
+func applyUpstreamErrorClass(result *base.Result, errorObject map[string]any) {
+	result.UpstreamErrorClass = policyclass.Merge(result.UpstreamErrorClass, policyclass.Classify(errorObject))
 }
 
 func countToolBlocks(value any) int {

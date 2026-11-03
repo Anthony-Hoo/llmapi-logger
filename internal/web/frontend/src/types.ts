@@ -44,6 +44,11 @@ export interface AuditSummary {
   blocked_by?: string | null;
   block_code?: string | null;
   error_code?: string | null;
+  /** Derived from the response error envelope; null for old or unparsed rows. */
+  parsed_error_type?: string | null;
+  parsed_error_code?: string | null;
+  /** Stable upstream policy rejection class (doc/features/22 §9); unsigned metadata. */
+  upstream_error_class?: string | null;
   request_model?: string | null;
   response_model?: string | null;
   newapi_request_id?: string | null;
@@ -250,6 +255,38 @@ export interface UserAgentRuleList {
   items: UserAgentRule[];
 }
 
+/**
+ * A locally configured keyword policy rule (doc/features/22-content-policy.md).
+ * The action decides whether a keyword hit rejects the request locally or is
+ * only recorded; scan_scopes selects the request text classes to inspect.
+ */
+export interface ContentPolicyRule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  /** block rejects locally with HTTP 400; dry_run only logs and continues. */
+  action: string;
+  /** Go RE2 model pattern; empty scans every model. */
+  model_pattern: string;
+  scan_scopes: string[];
+  keywords: string[];
+  created_at_ns: NanoTime;
+  updated_at_ns: NanoTime;
+}
+
+export interface ContentPolicyRuleInput {
+  name: string;
+  enabled: boolean;
+  action: string;
+  model_pattern: string;
+  scan_scopes: string[];
+  keywords: string[];
+}
+
+export interface ContentPolicyRuleList {
+  items: ContentPolicyRule[];
+}
+
 export interface AuditDetail {
   audit: AuditSummary;
   request_uri?: string | null;
@@ -273,6 +310,8 @@ export interface AuditFilters {
   collapse?: boolean;
   status_class?: string;
   status_code?: string;
+  /** Exact stable upstream policy rejection class, e.g. cyber_policy. */
+  upstream_error_class?: string;
 }
 
 export type RawSide = "request" | "response";

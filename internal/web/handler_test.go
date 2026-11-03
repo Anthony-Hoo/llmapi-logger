@@ -9,10 +9,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/uaguard"
@@ -157,6 +159,253 @@ func TestUserAgentRuleCRUDRequiresAuthAndRejectsInvalidRegex(t *testing.T) {
 	if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "Codex Desktop") {
 		t.Fatalf("unauthorized response: status=%d body=%q", response.Code, response.Body.String())
 	}
+}
+
+func TestContentPolicyRuleCRUDFailsClosedAndNeverEchoesRuleContent(t *testing.T) {
+	t.Parallel()
+
+	rules := &fakeContentPolicyRules{}
+	handler := newTestHandler(t, Options{
+		AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}, Policies: rules,
+	})
+
+	// The endpoints require authentication like every other management path.
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/content-policy-rules", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unauthorized list: status=%d headers=%v", response.Code, response.Header())
+	}
+
+	request = authorizedRequest(http.MethodGet, "/api/v1/content-policy-rules")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "{\"items\":[]}\n" {
+		t.Fatalf("empty list: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	createBody := `{"name":"cyber keywords","enabled":true,"action":"block","model_pattern":"^gpt","scan_scopes":["latest_user","user_history"],"keywords":["cyber","malware"]}`
+	request = authorizedJSONRequest(http.MethodPost, "/api/v1/content-policy-rules", createBody)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	body := response.Body.String()
+	if response.Code != http.StatusCreated ||
+		!strings.Contains(body, `"created_at_ns":"100"`) || !strings.Contains(body, `"updated_at_ns":"101"`) ||
+		!strings.Contains(body, `"scan_scopes":["latest_user","user_history"]`) || !strings.Contains(body, `"keywords":["cyber","malware"]`) {
+		t.Fatalf("create response: status=%d body=%q", response.Code, body)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("create headers = %v", response.Header())
+	}
+
+	request = authorizedJSONRequest(http.MethodPut, "/api/v1/content-policy-rules/1", `{"name":"updated","enabled":false,"action":"dry_run","model_pattern":"","scan_scopes":["latest_user"],"keywords":["updated-keyword"]}`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"action":"dry_run"`) || !strings.Contains(response.Body.String(), `"enabled":false`) {
+		t.Fatalf("update response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	// An invalid rule must not echo the submitted keyword: it is exactly the
+	// material a rejected request was trying not to leak.
+	rules.createErr = contentpolicy.ErrInvalidRule
+	const secretKeyword = "TOP-SECRET-FRAGMENT"
+	request = authorizedJSONRequest(http.MethodPost, "/api/v1/content-policy-rules", `{"name":"leaky","enabled":true,"action":"block","keywords":["`+secretKeyword+`"]}`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"invalid_rule"`) || strings.Contains(response.Body.String(), secretKeyword) {
+		t.Fatalf("invalid rule response: status=%d body=%q", response.Code, response.Body.String())
+	}
+	rules.createErr = nil
+
+	for _, payload := range []string{
+		`{"name":"unknown","enabled":true,"action":"block","keywords":"boom"}`,
+		`{"name":"unknown","enabled":true,"action":"block","keywords":["boom"],"extra":true}`,
+		`{"name":"trailing","enabled":true,"action":"block","keywords":["boom"]}{}`,
+	} {
+		request = authorizedJSONRequest(http.MethodPost, "/api/v1/content-policy-rules", payload)
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"invalid_rule"`) || strings.Contains(response.Body.String(), "boom") {
+			t.Fatalf("malformed body %q: status=%d body=%q", payload, response.Code, response.Body.String())
+		}
+	}
+
+	// The 96 KiB limit is separate from the 16 KiB User-Agent limit: a body
+	// above the old limit but within the content policy budget must decode.
+	largeKeywords := make([]string, 0, 200)
+	for index := 0; index < 200; index++ {
+		largeKeywords = append(largeKeywords, strings.Repeat("k", 100)+strconv.Itoa(index))
+	}
+	encodedKeywords, err := json.Marshal(largeKeywords)
+	if err != nil {
+		t.Fatal(err)
+	}
+	largeBody := `{"name":"large","enabled":true,"action":"block","scan_scopes":["latest_user"],"keywords":` + string(encodedKeywords) + `}`
+	if len(largeBody) <= maxRuleBodyBytes || len(largeBody) >= maxContentPolicyBodyBytes {
+		t.Fatalf("test body size %d does not bracket the limit", len(largeBody))
+	}
+	request = authorizedJSONRequest(http.MethodPost, "/api/v1/content-policy-rules", largeBody)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("large valid body: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	oversized := strings.Repeat("x", maxContentPolicyBodyBytes+1024)
+	request = authorizedJSONRequest(http.MethodPost, "/api/v1/content-policy-rules", `{"name":"oversized","keywords":["`+oversized+`"]}`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"invalid_rule"`) {
+		t.Fatalf("oversized body: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	request = authorizedJSONRequest(http.MethodPut, "/api/v1/content-policy-rules/99", `{"name":"missing","enabled":true,"action":"block","keywords":["k"]}`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("missing rule update: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	for _, testCase := range []struct {
+		err  error
+		want int
+		code string
+	}{
+		{context.DeadlineExceeded, http.StatusServiceUnavailable, "content_policy_timeout"},
+		{errors.New("database ciphertext " + testAdminToken), http.StatusServiceUnavailable, "content_policy_unavailable"},
+	} {
+		rules.updateErr = testCase.err
+		request = authorizedJSONRequest(http.MethodPut, "/api/v1/content-policy-rules/1", `{"name":"updated","enabled":true,"action":"block","keywords":["k"]}`)
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != testCase.want || !strings.Contains(response.Body.String(), `"code":"`+testCase.code+`"`) ||
+			strings.Contains(response.Body.String(), testAdminToken) || strings.Contains(response.Body.String(), "database ciphertext") {
+			t.Fatalf("error mapping %v: status=%d body=%q", testCase.err, response.Code, response.Body.String())
+		}
+	}
+	rules.updateErr = nil
+
+	request = authorizedRequest(http.MethodDelete, "/api/v1/content-policy-rules/1")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("delete response: status=%d body=%q", response.Code, response.Body.String())
+	}
+	request = authorizedRequest(http.MethodDelete, "/api/v1/content-policy-rules/1")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("second delete response: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	// Unknown methods and malformed ids must not reach the service.
+	request = authorizedRequest(http.MethodPatch, "/api/v1/content-policy-rules/1")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != "PUT, DELETE" {
+		t.Fatalf("method response: status=%d allow=%q", response.Code, response.Header().Get("Allow"))
+	}
+	for _, path := range []string{"/api/v1/content-policy-rules/", "/api/v1/content-policy-rules/0", "/api/v1/content-policy-rules/abc", "/api/v1/content-policy-rules/1/extra"} {
+		request = authorizedRequest(http.MethodGet, path)
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d, want 404", path, response.Code)
+		}
+	}
+
+	// Without a wired service both the list and every mutation answer a stable
+	// 503 instead of pretending there are no rules.
+	unavailable := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}})
+	for _, testCase := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/content-policy-rules"},
+		{http.MethodPost, "/api/v1/content-policy-rules"},
+		{http.MethodPut, "/api/v1/content-policy-rules/1"},
+		{http.MethodDelete, "/api/v1/content-policy-rules/1"},
+	} {
+		request = authorizedRequest(testCase.method, testCase.path)
+		response = httptest.NewRecorder()
+		unavailable.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"content_policy_unavailable"`) {
+			t.Fatalf("%s %s status=%d body=%q", testCase.method, testCase.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+// fakeContentPolicyRules is an in-memory stand-in for the contentpolicy service.
+// It lets the handler tests exercise the stable error mapping without a database.
+type fakeContentPolicyRules struct {
+	items     []contentpolicy.Rule
+	createErr error
+	updateErr error
+	deleteErr error
+}
+
+func (rules *fakeContentPolicyRules) List() []contentpolicy.Rule {
+	return append([]contentpolicy.Rule(nil), rules.items...)
+}
+
+func (rules *fakeContentPolicyRules) Create(_ context.Context, input contentpolicy.RuleInput) (contentpolicy.Rule, error) {
+	if rules.createErr != nil {
+		return contentpolicy.Rule{}, rules.createErr
+	}
+	id := int64(1)
+	for _, existing := range rules.items {
+		if existing.ID >= id {
+			id = existing.ID + 1
+		}
+	}
+	rule := contentpolicy.Rule{
+		ID:           id,
+		Name:         input.Name,
+		Enabled:      input.Enabled,
+		Action:       input.Action,
+		ModelPattern: input.ModelPattern,
+		ScanScopes:   input.ScanScopes,
+		Keywords:     input.Keywords,
+		CreatedAtNS:  100,
+		UpdatedAtNS:  101,
+	}
+	rules.items = append(rules.items, rule)
+	return rule, nil
+}
+
+func (rules *fakeContentPolicyRules) Update(_ context.Context, id int64, input contentpolicy.RuleInput) (contentpolicy.Rule, error) {
+	if rules.updateErr != nil {
+		return contentpolicy.Rule{}, rules.updateErr
+	}
+	for index := range rules.items {
+		if rules.items[index].ID != id {
+			continue
+		}
+		updated := rules.items[index]
+		updated.Name = input.Name
+		updated.Enabled = input.Enabled
+		updated.Action = input.Action
+		updated.ModelPattern = input.ModelPattern
+		updated.ScanScopes = input.ScanScopes
+		updated.Keywords = input.Keywords
+		updated.UpdatedAtNS = updated.CreatedAtNS + 1
+		rules.items[index] = updated
+		return updated, nil
+	}
+	return contentpolicy.Rule{}, contentpolicy.ErrNotFound
+}
+
+func (rules *fakeContentPolicyRules) Delete(_ context.Context, id int64) error {
+	if rules.deleteErr != nil {
+		return rules.deleteErr
+	}
+	for index := range rules.items {
+		if rules.items[index].ID == id {
+			rules.items = append(rules.items[:index], rules.items[index+1:]...)
+			return nil
+		}
+	}
+	return contentpolicy.ErrNotFound
 }
 
 func TestSessionLoginAuthenticatesWithStrictSevenDayCookieAndLogoutClearsIt(t *testing.T) {
@@ -312,7 +561,7 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 			ID: 7, Username: "alice", DisplayName: "Alice", Status: 1, Group: "default",
 		}}}},
 	})
-	request := authorizedRequest(http.MethodGet, "/api/v1/audits?limit=25&protocol=openai&from_ns=9007199254740993&model=gpt-5&user_agent=Codex&newapi_user_id=7&newapi_token_id=42&status_class=error")
+	request := authorizedRequest(http.MethodGet, "/api/v1/audits?limit=25&protocol=openai&from_ns=9007199254740993&model=gpt-5&user_agent=Codex&upstream_error_class=cyber_policy&newapi_user_id=7&newapi_token_id=42&status_class=error")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -327,6 +576,7 @@ func TestAuditListUsesSafeIntegerStringsAndParsesFilters(t *testing.T) {
 	}
 	if queries.gotLimit != 25 || queries.gotFilter.Protocol != "openai" || queries.gotFilter.Model != "gpt-5" || queries.gotFilter.UserAgent != "Codex" ||
 		queries.gotFilter.FromNS == nil || *queries.gotFilter.FromNS != 9_007_199_254_740_993 ||
+		queries.gotFilter.UpstreamErrorClass != "cyber_policy" ||
 		queries.gotFilter.NewAPIUserID == nil || *queries.gotFilter.NewAPIUserID != 7 ||
 		queries.gotFilter.NewAPITokenID == nil || *queries.gotFilter.NewAPITokenID != 42 || queries.gotFilter.StatusClass != "error" {
 		t.Fatalf("parsed list query = filter %+v limit %d", queries.gotFilter, queries.gotLimit)
@@ -632,4 +882,25 @@ func authorizedJSONRequest(method, target, body string) *http.Request {
 	request.ContentLength = int64(len(body))
 	request.Header.Set("Content-Type", "application/json")
 	return request
+}
+
+func (*fakeContentPolicyRules) Available() bool { return true }
+func TestDegradedContentPolicyAdministrationReturnsUnavailable(t *testing.T) {
+	service, err := contentpolicy.New(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}, Policies: service})
+	for _, test := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/content-policy-rules"},
+		{http.MethodPost, "/api/v1/content-policy-rules"},
+		{http.MethodPut, "/api/v1/content-policy-rules/1"},
+		{http.MethodDelete, "/api/v1/content-policy-rules/1"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, authorizedRequest(test.method, test.path))
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "content_policy_unavailable") {
+			t.Fatalf("%s: %d %s", test.method, response.Code, response.Body.String())
+		}
+	}
 }

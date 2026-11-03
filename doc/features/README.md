@@ -91,7 +91,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 ## 7. 数据与加密
 
-SQLite schema generation 2 共 22 张表。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines、integrity events，以及不在完整性链内的派生表 `audit_analysis`、`agent_spawn_hints`（上下文洞察）。完整表定义以[模块 04](04-sqlite-storage-and-migrations.md)为准。
+SQLite schema generation 2 共 23 张表。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines、integrity events、动态关键词规则表 `content_policy_rules`，以及不在完整性链内的派生数据 `audit_analysis`、`agent_spawn_hints`（上下文洞察）与 `parsed_results.upstream_error_class`（上游策略拒绝分类）。完整表定义以[模块 04](04-sqlite-storage-and-migrations.md)为准。
 
 采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw；以局部错误失败时不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
 
@@ -116,6 +116,8 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。只有 `retention_state=full` 的异常记录提供 raw Body；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域；汇总端点只读明文派生列，只有单条审计的上下文构成和 Agent 树节点名字按需解密 `detail_enc`。所有管理证据响应禁止缓存。
 
 受保护页面另提供动态 User-Agent 规则管理：模型与 User-Agent 使用 Go RE2 正则，保存时编译校验，持久化成功后以原子快照立即替换；初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则在访问 NewAPI 前返回通用 `401 unauthorized`，精确拦截码仅保留在审计数据中。规则不会扩大 Matcher 的 LLM 路由范围。
+
+同一个管理页还提供动态关键词/模型拦截规则（[模块 22](22-content-policy.md)）。每条规则包含模型 RE2 范围、字面量关键词表和扫描范围（system/最新用户/历史用户/助手/工具调用/工具返回/工具定义，默认全部），命中后在访问 NewAPI 前返回固定 `400 request_rejected`，审计记录 `blocked_by=content_policy` 和 `block_code=content_policy_blocked`；规则保存后热生效，空规则表等于不拦截。规则失败、JSON 不可解析、请求体超过 8 MiB 或 content-encoded 时策略 fail-open 并记录稳定日志码。生成的关键词不会进入日志，也不对开发者会话展示被本地拦截的记录。上游返回的安全策略拒绝由 parser 派生 `upstream_error_class`（如 `cyber_policy`），列表 API 支持筛选，详情显示分类；该列是派生未签名数据，不参与完整性摘要。
 
 ## 9. 模块索引
 
@@ -142,10 +144,11 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 19 | [开发者 API Key 会话](19-developer-key-session.md) |
 | 20 | [上下文分析与用量洞察](20-context-insights.md) |
 | 21 | [NewAPI 实际计费](21-newapi-billing.md) |
+| 22 | [关键词/模型请求拦截与上游策略拒绝识别](22-content-policy.md) |
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。关键词/模型拦截规则与上游策略拒绝分类见[模块 22](22-content-policy.md)。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 
@@ -170,7 +173,10 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - healthy/degraded/not_ready 与 available/strict 语义一致。
 - 管理列表只返回紧凑摘要、TTFT 和解密后的入站 User-Agent；详情在 Admin Token 下返回 turn/conversation、Request-URI、Body retention 与逐项 Header/Trailer，reconstructed/timeline/raw 按各自状态按需读取，所有管理证据响应禁止缓存。
 - loopback 访问列表、详情、raw、health 和 ready 同样必须携带 Bearer token 或有效管理 Cookie。
-- 启用 `developer_login` 后，NewAPI 用户可用自己的 API Key 登录并以同等深度只读自己 Key 的记录；他人记录与被本地策略拦截的记录返回 404，health/ready/调用者目录/UA 规则返回 403，登录失败按来源地址限流。
+- 启用 `developer_login` 后，NewAPI 用户可用自己的 API Key 登录并以同等深度只读自己 Key 的记录；他人记录与被本地策略拦截的记录返回 404，health/ready/调用者目录/UA 规则/关键词规则返回 403，登录失败按来源地址限流。
+- 关键词/模型规则命中在访问 NewAPI 前返回本地 `400`，审计记录 `blocked_by/block_code` 且无后三阶段；规则 CRUD 保存即生效，冲突/编译失败不替换当前快照，DB 不可用时策略为空并放行。
+- 关键词扫描器只读请求字节，不修改请求；gzip/非法 JSON/超 8 MiB/未知 parser 均 fail-open 并记录稳定日志码；日志不含关键词或文本。
+- `upstream_error_class` 由 parser 从错误 envelope 派生，列表可筛选、详情可展示；该派生列不进入完整性摘要，旧记录升级后为 NULL。
 
 ## 12. 文档优先级
 

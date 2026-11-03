@@ -8,6 +8,7 @@ import (
 
 	"llmapi-logger/internal/insights"
 	base "llmapi-logger/internal/parser"
+	"llmapi-logger/internal/parser/policyclass"
 	"llmapi-logger/internal/parser/protocolutil"
 )
 
@@ -131,6 +132,9 @@ func parseResponseFields(root map[string]any, result *base.Result) {
 		result.ErrorType = errorType
 		result.ErrorCode = errorCode
 	}
+	if errorObject := protocolutil.Map(root["error"]); errorObject != nil {
+		applyUpstreamErrorClass(result, errorObject)
+	}
 }
 
 func parseStream(data []byte, parserName string, result *base.Result) error {
@@ -165,6 +169,13 @@ func parseStream(data []byte, parserName string, result *base.Result) error {
 			if code := protocolutil.String(root["code"]); code != "" {
 				result.ErrorCode = code
 			}
+			// The root of an error event carries type/code/message directly; a
+			// provider wrapper may instead nest the canonical error object.
+			errorObject := protocolutil.Map(root["error"])
+			if errorObject == nil {
+				errorObject = root
+			}
+			applyUpstreamErrorClass(result, errorObject)
 			terminal = true
 		} else if strings.HasSuffix(eventType, ".completed") || strings.HasSuffix(eventType, ".failed") || strings.HasSuffix(eventType, ".incomplete") {
 			terminal = true
@@ -338,6 +349,12 @@ func mergeToolCount(result *base.Result, count int) {
 
 func isToolType(value string) bool {
 	return value == "function_call" || value == "tool_call" || value == "computer_call" || value == "file_search_call" || value == "web_search_call"
+}
+
+// applyUpstreamErrorClass records a policy class only when it does not replace
+// an already more specific class derived from another parse path.
+func applyUpstreamErrorClass(result *base.Result, errorObject map[string]any) {
+	result.UpstreamErrorClass = policyclass.Merge(result.UpstreamErrorClass, policyclass.Classify(errorObject))
 }
 
 func firstInt64(values ...any) *int64 {

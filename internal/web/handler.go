@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode"
 
+	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/security"
@@ -43,6 +44,17 @@ type UserAgentRules interface {
 	List() []uaguard.Rule
 	Create(context.Context, uaguard.RuleInput) (uaguard.Rule, error)
 	Update(context.Context, int64, uaguard.RuleInput) (uaguard.Rule, error)
+	Delete(context.Context, int64) error
+}
+
+// ContentPolicyRules is the authenticated keyword policy surface. It is
+// deliberately narrower than contentpolicy.RuleSet: the management plane edits
+// rules and never evaluates a request, so Check/Requirements are omitted.
+type ContentPolicyRules interface {
+	Available() bool
+	List() []contentpolicy.Rule
+	Create(context.Context, contentpolicy.RuleInput) (contentpolicy.Rule, error)
+	Update(context.Context, int64, contentpolicy.RuleInput) (contentpolicy.Rule, error)
 	Delete(context.Context, int64) error
 }
 
@@ -77,9 +89,12 @@ type Options struct {
 	Insights   InsightsQuery
 	Users      UserCatalog
 	Rules      UserAgentRules
-	Assets     fs.FS
-	Readiness  func(context.Context) ReadyStatus
-	Logger     *slog.Logger
+	// Policies is the keyword policy CRUD surface wired by app. Nil keeps the
+	// management endpoints at a stable 503.
+	Policies  ContentPolicyRules
+	Assets    fs.FS
+	Readiness func(context.Context) ReadyStatus
+	Logger    *slog.Logger
 }
 
 // NewHandler constructs the complete management handler. It rejects an empty
@@ -97,6 +112,7 @@ func NewHandler(options Options) (http.Handler, error) {
 		insights:  options.Insights,
 		users:     options.Users,
 		rules:     options.Rules,
+		policies:  options.Policies,
 		developer: options.Developer,
 		readiness: options.Readiness,
 		static:    newStaticHandler(options.Assets),
@@ -113,6 +129,7 @@ type managementHandler struct {
 	insights      InsightsQuery
 	users         UserCatalog
 	rules         UserAgentRules
+	policies      ContentPolicyRules
 	developer     DeveloperLogin
 	readiness     func(context.Context) ReadyStatus
 	static        http.Handler
@@ -153,8 +170,8 @@ func protectedPath(path string) bool {
 func (handler *managementHandler) serveProtected(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
 	// Audit reads are scoped per session; everything else -- health, the
-	// caller directory and the User-Agent policy -- is site-wide operational
-	// surface and stays administrator-only.
+	// caller directory and the dynamic policy surfaces -- is site-wide
+	// operational surface and stays administrator-only.
 	switch {
 	case request.URL.Path == "/api/v1/audits":
 		handler.serveAuditList(writer, request)
@@ -174,6 +191,10 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveUserAgentRuleCollection(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/user-agent-rules/"):
 		handler.serveUserAgentRuleResource(writer, request)
+	case request.URL.Path == "/api/v1/content-policy-rules":
+		handler.serveContentPolicyRuleCollection(writer, request)
+	case strings.HasPrefix(request.URL.Path, "/api/v1/content-policy-rules/"):
+		handler.serveContentPolicyRuleResource(writer, request)
 	default:
 		http.NotFound(writer, request)
 	}

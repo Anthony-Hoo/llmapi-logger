@@ -46,6 +46,7 @@ type Factory func(id string, raw map[string]any) (Interceptor, error)
 // request or affect a later interceptor in the chain.
 type RequestView struct {
 	RouteID       string
+	Parser        string
 	Method        string
 	EscapedPath   string
 	Host          string

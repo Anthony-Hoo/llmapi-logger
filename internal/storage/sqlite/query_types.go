@@ -20,6 +20,9 @@ type AuditQueryFilter struct {
 	Username      string
 	NewAPITokenID *int64
 	TokenName     string
+	// UpstreamErrorClass narrows the list to one derived upstream rejection
+	// classification (`upstream_error_class`).
+	UpstreamErrorClass string
 	// ConversationID narrows the list to audits whose turn belongs to one
 	// content-addressed conversation (`conv_...`).
 	ConversationID string
@@ -41,32 +44,37 @@ type AuditQueryCursor struct {
 // AuditListRow is one non-secret audit summary. It intentionally excludes the
 // encrypted request URI, Header values, Body chunks, and parsed JSON.
 type AuditListRow struct {
-	AuditID         string
-	StartedAtNS     int64
-	EndedAtNS       *int64
-	RouteID         string
-	Protocol        string
-	ParserName      string
-	Method          string
-	Path            string
-	Mode            string
-	StatusCode      *int
-	TTFTNS          *int64
-	ForwardStatus   string
-	CaptureStatus   string
-	ParseStatus     string
-	BlockedBy       *string
-	BlockCode       *string
-	ErrorCode       *string
-	RequestModel    *string
-	ResponseModel   *string
-	NewAPIRequestID *string
-	CallerStatus    string
-	NewAPIUserID    *int64
-	Username        *string
-	NewAPITokenID   *int64
-	TokenName       *string
-	ConversationID  *string
+	AuditID       string
+	StartedAtNS   int64
+	EndedAtNS     *int64
+	RouteID       string
+	Protocol      string
+	ParserName    string
+	Method        string
+	Path          string
+	Mode          string
+	StatusCode    *int
+	TTFTNS        *int64
+	ForwardStatus string
+	CaptureStatus string
+	ParseStatus   string
+	BlockedBy     *string
+	BlockCode     *string
+	ErrorCode     *string
+	RequestModel  *string
+	ResponseModel *string
+	// ParsedErrorType, ParsedErrorCode and UpstreamErrorClass are the narrow,
+	// non-secret parsed-result error projection shown in the audit list.
+	ParsedErrorType    *string
+	ParsedErrorCode    *string
+	UpstreamErrorClass *string
+	NewAPIRequestID    *string
+	CallerStatus       string
+	NewAPIUserID       *int64
+	Username           *string
+	NewAPITokenID      *int64
+	TokenName          *string
+	ConversationID     *string
 	// ConversationTurns is the total number of turns in the row's
 	// conversation, or nil when the audit has no turn.
 	ConversationTurns *int64
@@ -107,11 +115,14 @@ type ParsedResultSummary struct {
 	UsageTotal      *int64
 	ErrorType       *string
 	ErrorCode       *string
-	MessageCount    *int64
-	ToolCallCount   *int64
-	HasToolCall     *bool
-	ParsedJSONEnc   []byte
-	ParsedAtNS      int64
+	// UpstreamErrorClass is derived, unsigned metadata; it is never part of
+	// any integrity digest.
+	UpstreamErrorClass *string
+	MessageCount       *int64
+	ToolCallCount      *int64
+	HasToolCall        *bool
+	ParsedJSONEnc      []byte
+	ParsedAtNS         int64
 }
 
 // TokenLinkSummary contains only the NewAPI request, user, and token identity
