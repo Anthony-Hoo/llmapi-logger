@@ -17,8 +17,8 @@ func TestValidateRejectsInvalidCoreFields(t *testing.T) {
 		{"same listeners", func(cfg *Config) { cfg.AdminListen = cfg.Listen }, "must be different"},
 		{"wildcard listeners", func(cfg *Config) { cfg.Listen = ":18080"; cfg.AdminListen = "0.0.0.0:18080" }, "must be different"},
 		{"invalid mode", func(cfg *Config) { cfg.Mode = "fast" }, "mode"},
-		{"empty db path", func(cfg *Config) { cfg.DBPath = "" }, "db_path"},
-		{"directory db path", func(cfg *Config) { cfg.DBPath = t.TempDir() }, "must name a file"},
+		{"empty database URL", func(cfg *Config) { cfg.DatabaseURL = "" }, "database_url"},
+		{"non PostgreSQL URL", func(cfg *Config) { cfg.DatabaseURL = "sqlite:///tmp/audit.db" }, "database_url"},
 		{"empty key path", func(cfg *Config) { cfg.KeyPath = " " }, "key_path"},
 		{"empty admin token", func(cfg *Config) { cfg.AdminToken = "\t" }, "admin_token"},
 		{"admin token whitespace", func(cfg *Config) { cfg.AdminToken = "token with spaces" }, "admin_token"},
@@ -209,6 +209,7 @@ func TestValidateRoutes(t *testing.T) {
 
 func testConfig() Config {
 	cfg := Default()
+	cfg.DatabaseURL = "postgres://localhost/test?sslmode=disable"
 	cfg.Listen = "127.0.0.1:18080"
 	cfg.AdminListen = "127.0.0.1:18081"
 	cfg.AdminToken = "test-token"

@@ -16,11 +16,13 @@ const (
 // process. Only deployment-critical upstream and lifecycle timeouts are
 // exposed; storage and worker tuning values remain internal defaults.
 type Config struct {
-	Listen                 string                       `yaml:"listen"`
-	AdminListen            string                       `yaml:"admin_listen"`
-	NewAPI                 NewAPIConfig                 `yaml:"newapi"`
-	Mode                   string                       `yaml:"mode"`
-	DBPath                 string                       `yaml:"db_path"`
+	Listen      string       `yaml:"listen"`
+	AdminListen string       `yaml:"admin_listen"`
+	NewAPI      NewAPIConfig `yaml:"newapi"`
+	Mode        string       `yaml:"mode"`
+	// DBPath is retained only for legacy fixture/import callers; YAML rejects db_path.
+	DBPath                 string                       `yaml:"-"`
+	DatabaseURL            string                       `yaml:"database_url"`
 	KeyPath                string                       `yaml:"key_path"`
 	AdminToken             string                       `yaml:"admin_token"`
 	DeveloperLogin         DeveloperLoginConfig         `yaml:"developer_login"`

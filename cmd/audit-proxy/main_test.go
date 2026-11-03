@@ -41,7 +41,7 @@ admin_listen: 127.0.0.1:18081
 newapi:
   url: http://127.0.0.1:3000
 mode: available
-db_path: '%s'
+database_url: postgres://localhost/test?sslmode=disable
 key_path: '%s'
 admin_token: test-admin-token
 retention_days: 0
@@ -52,7 +52,7 @@ routes:
     path: /v1/chat/completions
     match: exact
     parser: openai.chat_completions
-`, yamlString(filepath.ToSlash(filepath.Join(tempDir, "audit.db"))), yamlString(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))))
+`, yamlString(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))))
 	path := filepath.Join(tempDir, "config.yaml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)

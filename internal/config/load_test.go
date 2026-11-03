@@ -52,7 +52,7 @@ newapi:
   access_token: management-secret
   user_id: 42
 mode: strict
-db_path: ./state/audit.db
+database_url: postgres://localhost/test?sslmode=disable
 key_path: ./state/audit.key
 admin_token: secret
 shutdown_timeout_seconds: 3900
@@ -138,6 +138,9 @@ func TestExampleConfigsLoad(t *testing.T) {
 
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
+	if !strings.Contains(contents, "database_url:") {
+		contents = "database_url: postgres://localhost/test?sslmode=disable\n" + contents
+	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(strings.TrimLeft(contents, "\n")), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)

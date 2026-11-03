@@ -44,7 +44,7 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 		Match:  "exact",
 		Parser: "openai.chat_completions",
 	}}
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestNewContextRejectsCanceledStartup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	application, err := NewContext(ctx, configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTestContext(ctx, configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if application != nil {
 		_ = application.Close()
 		t.Fatal("NewContext returned an application after startup cancellation")
@@ -90,7 +90,7 @@ func TestNewKeepsAvailableModeRunningWhenAuditStoreUnavailable(t *testing.T) {
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	configuration.AdminToken = "app-test-admin-token"
 
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("New with unavailable audit store: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestUserAgentRuleBlocksGPTBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
 	configuration.Routes = []config.RouteConfig{{
 		ID: "chat", Method: http.MethodPost, Path: "/v1/chat/completions", Match: "exact", Parser: "openai.chat_completions",
 	}}
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestContentPolicyRuleBlocksBeforeNewAPIAndUpdatesImmediately(t *testing.T) 
 	configuration.Routes = []config.RouteConfig{{
 		ID: "chat", Method: http.MethodPost, Path: "/v1/chat/completions", Match: "exact", Parser: "openai.chat_completions",
 	}}
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestNewUsesConfiguredHostAndTimeoutOptions(t *testing.T) {
 		Match:  "exact",
 		Parser: "openai.chat_completions",
 	}}
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestNewRoutesNewAPIRequestsThroughConfiguredProxy(t *testing.T) {
 		Match:  "exact",
 		Parser: "openai.chat_completions",
 	}}
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestNewRoutesPassthroughThroughConfiguredProxyWithoutAudit(t *testing.T) {
 		Match:  "exact",
 		Parser: "openai.chat_completions",
 	}}
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 		Match:  "exact",
 		Parser: "openai.chat_completions",
 	}}
-	application, err := New(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new application: %v", err)
 	}
@@ -583,7 +583,9 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 		}
 		if len(page.Rows) == 1 && page.Rows[0].NewAPITokenID != nil && *page.Rows[0].NewAPITokenID == 42 &&
 			page.Rows[0].TokenName != nil && *page.Rows[0].TokenName == "codex" {
-			snapshot, snapshotErr := application.auditStore.Snapshot(context.Background(), page.Rows[0].AuditID)
+			snapshot, snapshotErr := application.auditStore.(interface {
+				Snapshot(context.Context, string) (sqlite.Snapshot, error)
+			}).Snapshot(context.Background(), page.Rows[0].AuditID)
 			if snapshotErr != nil {
 				t.Fatalf("read resolved audit: %v", snapshotErr)
 			}
@@ -732,7 +734,7 @@ END`); err != nil {
 			configuration.KeyPath = keyPath
 			var logs bytes.Buffer
 
-			runtime := assembleAudit(context.Background(), configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
+			runtime := assembleSQLiteTest(context.Background(), configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
 			if runtime.store != nil || runtime.cipher != nil {
 				t.Fatalf("runtime retained usable storage after recovery failure: store=%v cipher=%v", runtime.store != nil, runtime.cipher != nil)
 			}
