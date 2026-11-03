@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -791,16 +790,8 @@ func (service *Insights) decryptDetail(row sqlite.AnalysisRow) (insights.Detail,
 	if len(row.DetailEnc) == 0 {
 		return detail, nil
 	}
-	aad, err := security.AAD(row.AuditID, "analysis_detail", strconv.Itoa(row.AnalysisVersion))
+	detail, err := (insights.CipherDetailCodec{Cipher: service.cipher}).OpenDetail(row.AuditID, row.AnalysisVersion, row.DetailEnc)
 	if err != nil {
-		return insights.Detail{}, ErrIntegrity
-	}
-	plaintext, err := service.cipher.Decrypt(aad, row.DetailEnc)
-	if err != nil {
-		return insights.Detail{}, ErrIntegrity
-	}
-	defer clear(plaintext)
-	if err := json.Unmarshal(plaintext, &detail); err != nil {
 		return insights.Detail{}, ErrIntegrity
 	}
 	return detail, nil

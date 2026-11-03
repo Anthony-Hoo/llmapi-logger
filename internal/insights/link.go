@@ -6,10 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strconv"
 
-	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
@@ -55,58 +52,6 @@ type LinkStore interface {
 type DetailCodec interface {
 	SealDetail(auditID string, detail Detail) ([]byte, error)
 	OpenDetail(auditID string, version int, sealed []byte) (Detail, error)
-}
-
-// CipherDetailCodec encrypts Detail JSON with the audit cipher under AAD
-// (audit_id, "analysis_detail", analysis_version).
-type CipherDetailCodec struct {
-	Cipher security.Cipher
-}
-
-func detailAAD(auditID string, version int) ([]byte, error) {
-	return security.AAD(auditID, "analysis_detail", strconv.Itoa(version))
-}
-
-// SealDetail encrypts detail for the current AnalysisVersion. The plaintext
-// JSON is cleared before returning.
-func (codec CipherDetailCodec) SealDetail(auditID string, detail Detail) ([]byte, error) {
-	if codec.Cipher == nil {
-		return nil, errors.New("insights: nil detail cipher")
-	}
-	aad, err := detailAAD(auditID, AnalysisVersion)
-	if err != nil {
-		return nil, err
-	}
-	plaintext, err := json.Marshal(detail)
-	if err != nil {
-		return nil, fmt.Errorf("insights: encode detail: %w", err)
-	}
-	defer clear(plaintext)
-	return codec.Cipher.Encrypt(aad, plaintext)
-}
-
-// OpenDetail decrypts and decodes one stored detail blob.
-func (codec CipherDetailCodec) OpenDetail(auditID string, version int, sealed []byte) (Detail, error) {
-	if codec.Cipher == nil {
-		return Detail{}, errors.New("insights: nil detail cipher")
-	}
-	if len(sealed) == 0 {
-		return Detail{}, errors.New("insights: empty detail")
-	}
-	aad, err := detailAAD(auditID, version)
-	if err != nil {
-		return Detail{}, err
-	}
-	plaintext, err := codec.Cipher.Decrypt(aad, sealed)
-	if err != nil {
-		return Detail{}, fmt.Errorf("insights: decrypt detail: %w", err)
-	}
-	defer clear(plaintext)
-	var detail Detail
-	if err := json.Unmarshal(plaintext, &detail); err != nil {
-		return Detail{}, fmt.Errorf("insights: decode detail: %w", err)
-	}
-	return detail, nil
 }
 
 // Linker turns an Analysis and AgentIdentity into the stored row.
