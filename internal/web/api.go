@@ -359,7 +359,7 @@ func (handler *managementHandler) writeRuleError(writer http.ResponseWriter, err
 // whole family is administrator-only: it is mounted after requireAdmin and a
 // missing service answers 503, never an empty list.
 func (handler *managementHandler) serveContentPolicyRuleCollection(writer http.ResponseWriter, request *http.Request) {
-	if handler.policies == nil {
+	if handler.policies == nil || !handler.policies.Available() {
 		writeError(writer, http.StatusServiceUnavailable, "content_policy_unavailable", "content policy rules are unavailable")
 		return
 	}
@@ -389,7 +389,7 @@ func (handler *managementHandler) serveContentPolicyRuleCollection(writer http.R
 }
 
 func (handler *managementHandler) serveContentPolicyRuleResource(writer http.ResponseWriter, request *http.Request) {
-	if handler.policies == nil {
+	if handler.policies == nil || !handler.policies.Available() {
 		writeError(writer, http.StatusServiceUnavailable, "content_policy_unavailable", "content policy rules are unavailable")
 		return
 	}

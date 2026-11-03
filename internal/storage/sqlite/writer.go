@@ -51,6 +51,7 @@ type writeRequest struct {
 	data     any
 	ack      chan error
 	sequence uint64
+	policy   *policyWrite
 }
 
 // BeginAudit enqueues a parent audit row and waits until its batch commits.
@@ -186,17 +187,23 @@ func (store *Store) runWriter() {
 	defer close(store.done)
 	ticker := time.NewTicker(captureRecoveryInterval)
 	defer ticker.Stop()
+	var pending *writeRequest
 	for {
 		var first writeRequest
 		var open bool
-		select {
-		case first, open = <-store.queue:
-		case <-ticker.C:
-			store.recoverCaptureWrites()
-			continue
-		case <-store.recoveryWake:
-			store.recoverCaptureWrites()
-			continue
+		if pending != nil {
+			first, open = *pending, true
+			pending = nil
+		} else {
+			select {
+			case first, open = <-store.queue:
+			case <-ticker.C:
+				store.recoverCaptureWrites()
+				continue
+			case <-store.recoveryWake:
+				store.recoverCaptureWrites()
+				continue
+			}
 		}
 		if !open {
 			store.recoverCaptureWrites()
@@ -209,11 +216,15 @@ func (store *Store) runWriter() {
 		queueClosed := false
 
 	collect:
-		for len(batch) < writerBatchSize {
+		for first.policy == nil && len(batch) < writerBatchSize {
 			select {
 			case request, open := <-store.queue:
 				if !open {
 					queueClosed = true
+					break collect
+				}
+				if request.policy != nil {
+					pending = &request
 					break collect
 				}
 				batch = append(batch, request)
@@ -274,7 +285,15 @@ func (store *Store) runWriter() {
 // Known local errors can be isolated. Storage errors fail the whole batch even
 // when SQLite would allow rolling back the statement and committing no writes.
 func (store *Store) commitBatch(batch []writeRequest) ([]error, bool, error) {
-	transaction, err := store.writerDB.BeginTx(context.Background(), nil)
+	ctx := context.Background()
+	if len(batch) == 1 && batch[0].policy != nil {
+		operation := batch[0].policy
+		if !operation.state.CompareAndSwap(0, 1) {
+			return []error{operation.ctx.Err()}, false, nil
+		}
+		ctx = operation.ctx
+	}
+	transaction, err := store.writerDB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("sqlite writer: begin batch: %w", err)
 	}
@@ -476,7 +495,7 @@ WHERE audit_id=? AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID);
 	case writeDeleteUserAgentRule:
 		return deleteUserAgentRule(transaction, request.data.(int64))
 	case writeCreateContentPolicyRule:
-		return createContentPolicyRule(transaction, request.data.(contentpolicy.Rule))
+		return createContentPolicyRule(transaction, request.data.(*contentpolicy.Rule))
 	case writeUpdateContentPolicyRule:
 		return updateContentPolicyRule(transaction, request.data.(contentpolicy.Rule))
 	case writeDeleteContentPolicyRule:

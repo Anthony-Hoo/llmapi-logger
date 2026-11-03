@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	"llmapi-logger/internal/contentpolicy"
 )
@@ -63,7 +65,7 @@ ORDER BY id`)
 	return rules, nil
 }
 
-// CreateContentPolicyRule inserts one rule with the service-assigned stable ID.
+// CreateContentPolicyRule inserts one rule with the database-assigned, never-reused ID.
 func (store *Store) CreateContentPolicyRule(ctx context.Context, rule contentpolicy.Rule) (contentpolicy.Rule, error) {
 	if ctx == nil {
 		return contentpolicy.Rule{}, errors.New("sqlite: nil context")
@@ -72,7 +74,7 @@ func (store *Store) CreateContentPolicyRule(ctx context.Context, rule contentpol
 		return contentpolicy.Rule{}, ErrClosed
 	}
 	owned := cloneContentPolicyRule(rule)
-	if err := store.submitSync(ctx, writeRequest{kind: writeCreateContentPolicyRule, data: owned}); err != nil {
+	if err := store.submitPolicySync(ctx, writeRequest{kind: writeCreateContentPolicyRule, data: &owned}); err != nil {
 		return contentpolicy.Rule{}, err
 	}
 	return owned, nil
@@ -88,7 +90,7 @@ func (store *Store) UpdateContentPolicyRule(ctx context.Context, rule contentpol
 		return contentpolicy.Rule{}, ErrClosed
 	}
 	owned := cloneContentPolicyRule(rule)
-	if err := store.submitSync(ctx, writeRequest{kind: writeUpdateContentPolicyRule, data: owned}); err != nil {
+	if err := store.submitPolicySync(ctx, writeRequest{kind: writeUpdateContentPolicyRule, data: owned}); err != nil {
 		return contentpolicy.Rule{}, err
 	}
 	return owned, nil
@@ -102,7 +104,7 @@ func (store *Store) DeleteContentPolicyRule(ctx context.Context, id int64) error
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeDeleteContentPolicyRule, data: id})
+	return store.submitPolicySync(ctx, writeRequest{kind: writeDeleteContentPolicyRule, data: id})
 }
 
 func cloneContentPolicyRule(rule contentpolicy.Rule) contentpolicy.Rule {
@@ -137,19 +139,21 @@ func encodeContentPolicyRule(rule contentpolicy.Rule) (scanScopesJSON, keywordsJ
 	return string(scanScopes), string(keywords), nil
 }
 
-func createContentPolicyRule(transaction *sql.Tx, rule contentpolicy.Rule) error {
-	scanScopes, keywords, err := encodeContentPolicyRule(rule)
+func createContentPolicyRule(transaction *sql.Tx, rule *contentpolicy.Rule) error {
+	scanScopes, keywords, err := encodeContentPolicyRule(*rule)
 	if err != nil {
 		return err
 	}
-	if _, err := transaction.Exec(`
-INSERT INTO content_policy_rules (id, name, enabled, action, model_pattern, scan_scopes, keywords, created_at_ns, updated_at_ns)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rule.ID, rule.Name, boolInt(rule.Enabled), rule.Action, rule.ModelPattern,
-		scanScopes, keywords, rule.CreatedAtNS, rule.UpdatedAtNS); err != nil {
+	result, err := transaction.Exec(`
+INSERT INTO content_policy_rules (name, enabled, action, model_pattern, scan_scopes, keywords, created_at_ns, updated_at_ns)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		rule.Name, boolInt(rule.Enabled), rule.Action, rule.ModelPattern,
+		scanScopes, keywords, rule.CreatedAtNS, rule.UpdatedAtNS)
+	if err != nil {
 		return fmt.Errorf("sqlite writer: create content policy rule: %w", err)
 	}
-	return nil
+	rule.ID, err = result.LastInsertId()
+	return err
 }
 
 func updateContentPolicyRule(transaction *sql.Tx, rule contentpolicy.Rule) error {
@@ -175,4 +179,39 @@ func deleteContentPolicyRule(transaction *sql.Tx, id int64) error {
 		return fmt.Errorf("sqlite writer: delete content policy rule: %w", err)
 	}
 	return requireAffectedContentPolicyRule(result)
+}
+
+// Policy writes have a separate bounded lifecycle: caller cancellation prevents
+// admission, but after admission we wait for a definitive commit/rollback so the
+// service can publish the matching snapshot. Other writer APIs retain their
+// existing cancellation semantics. Expired queued operations cannot execute.
+const policyWriteTimeout = 30 * time.Second
+
+type policyWrite struct {
+	ctx   context.Context
+	state atomic.Int32 // 0 queued, 1 executing, 2 expired before execution
+}
+
+func (store *Store) submitPolicySync(ctx context.Context, request writeRequest) error {
+	operation, cancel := context.WithTimeout(context.Background(), policyWriteTimeout)
+	defer cancel()
+	return store.submitPolicyUntil(ctx, request, operation)
+}
+
+func (store *Store) submitPolicyUntil(ctx context.Context, request writeRequest, operation context.Context) error {
+	request.policy = &policyWrite{ctx: operation}
+	request.ack = make(chan error, 1)
+	if err := store.submitAsync(ctx, request); err != nil {
+		return err
+	}
+	select {
+	case err := <-request.ack:
+		return err
+	case <-operation.Done():
+		if request.policy.state.CompareAndSwap(0, 2) {
+			return operation.Err()
+		}
+		// An executing transaction owns this operation; its deadline rolls it back.
+		return <-request.ack
+	}
 }

@@ -883,3 +883,24 @@ func authorizedJSONRequest(method, target, body string) *http.Request {
 	request.Header.Set("Content-Type", "application/json")
 	return request
 }
+
+func (*fakeContentPolicyRules) Available() bool { return true }
+func TestDegradedContentPolicyAdministrationReturnsUnavailable(t *testing.T) {
+	service, err := contentpolicy.New(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandler(t, Options{AdminToken: testAdminToken, Query: &fakeQuery{healthy: true}, Policies: service})
+	for _, test := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/content-policy-rules"},
+		{http.MethodPost, "/api/v1/content-policy-rules"},
+		{http.MethodPut, "/api/v1/content-policy-rules/1"},
+		{http.MethodDelete, "/api/v1/content-policy-rules/1"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, authorizedRequest(test.method, test.path))
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "content_policy_unavailable") {
+			t.Fatalf("%s: %d %s", test.method, response.Code, response.Body.String())
+		}
+	}
+}

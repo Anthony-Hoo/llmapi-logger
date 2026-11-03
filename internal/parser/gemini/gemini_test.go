@@ -151,17 +151,40 @@ func TestGeminiSafetyFinishReasonIsContentFilter(t *testing.T) {
 	}
 }
 
-func TestGeminiUnspecifiedBlockReasonHasNoClass(t *testing.T) {
+func TestGeminiPromptFeedbackClassificationAcrossTransports(t *testing.T) {
 	t.Parallel()
 
-	implementation, _ := New(GenerateContent)
-	result := implementation.Parse(context.Background(), base.Input{
-		Endpoint: "/v1beta/models/gemini-test:generateContent",
-		Response: base.BodySource{Present: true, Complete: true, Data: []byte(`{
-			"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"},"candidates":[]
-		}`)},
-	})
-	if result.UpstreamErrorClass != "" {
-		t.Fatalf("upstream error class = %q, want empty", result.UpstreamErrorClass)
+	for _, transport := range []string{"json", "sse", "array"} {
+		for _, reason := range []string{"BLOCK_REASON_UNSPECIFIED", "SAFETY"} {
+			t.Run(transport+"/"+reason, func(t *testing.T) {
+				t.Parallel()
+				payload := `{"promptFeedback":{"blockReason":"` + reason + `"},"candidates":[]}`
+				variant := GenerateContent
+				contentType := "application/json"
+				switch transport {
+				case "sse":
+					variant = StreamGenerateContent
+					contentType = "text/event-stream"
+					payload = "data: " + payload + "\n\n"
+				case "array":
+					variant = StreamGenerateContent
+					payload = "[" + payload + "]"
+				}
+				implementation, err := New(variant)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result := implementation.Parse(context.Background(), base.Input{
+					Response: base.BodySource{Present: true, Complete: true, ContentType: contentType, Data: []byte(payload)},
+				})
+				want := ""
+				if reason == "SAFETY" {
+					want = policyclass.ClassContentFilter
+				}
+				if result.Status != base.StatusOK || result.UpstreamErrorClass != want {
+					t.Fatalf("status=%q, class=%q; want status=%q, class=%q", result.Status, result.UpstreamErrorClass, base.StatusOK, want)
+				}
+			})
+		}
 	}
 }

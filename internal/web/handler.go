@@ -51,6 +51,7 @@ type UserAgentRules interface {
 // deliberately narrower than contentpolicy.RuleSet: the management plane edits
 // rules and never evaluates a request, so Check/Requirements are omitted.
 type ContentPolicyRules interface {
+	Available() bool
 	List() []contentpolicy.Rule
 	Create(context.Context, contentpolicy.RuleInput) (contentpolicy.Rule, error)
 	Update(context.Context, int64, contentpolicy.RuleInput) (contentpolicy.Rule, error)

@@ -93,6 +93,12 @@ func addUserText(raw *[]rawSegment, text string, message int) {
 	*raw = append(*raw, rawSegment{text: text, userText: true, message: message})
 }
 
+// markUserMessage preserves chronology even when a user message has no
+// extractable text (for example, an image-only message).
+func markUserMessage(raw *[]rawSegment, message int) {
+	*raw = append(*raw, rawSegment{userText: true, message: message})
+}
+
 // appendContent splits a provider content value into text segments. Media and
 // unknown structural blocks are deliberately ignored; only explicit text
 // fields are scanned.
@@ -280,14 +286,20 @@ func extractOpenAIChat(root map[string]any) []rawSegment {
 		case "system", "developer":
 			appendContent(&raw, message["content"], ScopeSystem, index, false)
 		case "user":
+			markUserMessage(&raw, index)
 			appendContent(&raw, message["content"], "", index, true)
 		case "assistant", "model":
 			appendContent(&raw, message["content"], ScopeAssistant, index, false)
+			addSegment(&raw, ScopeAssistant, asString(message["refusal"]))
 			if reasoning := firstText(message["reasoning_content"], message["reasoning"], message["thinking"]); reasoning != "" {
 				addSegment(&raw, ScopeAssistant, reasoning)
 			}
 			for _, callValue := range asSlice(message["tool_calls"]) {
 				call := asMap(callValue)
+				if custom := asMap(call["custom"]); custom != nil {
+					addToolCall(&raw, asString(custom["name"]), asString(custom["input"]))
+					continue
+				}
 				function := asMap(call["function"])
 				if function == nil {
 					function = call
@@ -298,7 +310,7 @@ func extractOpenAIChat(root map[string]any) []rawSegment {
 				addToolCall(&raw, asString(function["name"]), firstValueText(function["arguments"]))
 			}
 		case "tool", "function":
-			addToolResult(&raw, firstText(message["name"], message["tool_call_id"]), flattenText(message["content"]))
+			addToolResult(&raw, asString(message["name"]), flattenText(message["content"]))
 		default:
 			appendContent(&raw, message["content"], ScopeAssistant, index, false)
 		}
@@ -313,10 +325,11 @@ func extractOpenAICompletions(root map[string]any) []rawSegment {
 	case string:
 		addUserText(&raw, prompt, 0)
 	case []any:
-		for index, value := range prompt {
+		// Each string is an independent current prompt, not conversation history.
+		for _, value := range prompt {
 			switch typed := value.(type) {
 			case string:
-				addUserText(&raw, typed, index)
+				addUserText(&raw, typed, 0)
 			case []any:
 				// Pre-tokenized prompts contain token ids rather than text.
 				continue
@@ -373,6 +386,7 @@ func appendResponseItem(raw *[]rawSegment, value any, index int) {
 		case "assistant":
 			appendContent(raw, item["content"], ScopeAssistant, index, false)
 		case "user":
+			markUserMessage(raw, index)
 			appendContent(raw, item["content"], "", index, true)
 		default:
 			appendContent(raw, item["content"], ScopeAssistant, index, false)
@@ -380,7 +394,7 @@ func appendResponseItem(raw *[]rawSegment, value any, index int) {
 	case itemType == "reasoning":
 		addSegment(raw, ScopeAssistant, reasoningText(item))
 	case strings.HasSuffix(itemType, "_call_output") || strings.HasSuffix(itemType, "_output"):
-		addToolResult(raw, asString(item["name"]), firstValueText(item["output"], item["result"], item["content"]))
+		addToolResult(raw, asString(item["name"]), responseToolOutputText(firstValue(item["output"], item["result"], item["content"])))
 	case strings.HasSuffix(itemType, "_call"):
 		addToolCall(raw, asString(item["name"]), firstValueText(item["arguments"], item["input"], item["action"]))
 	case itemType == "item_reference":
@@ -389,6 +403,7 @@ func appendResponseItem(raw *[]rawSegment, value any, index int) {
 		if role := strings.ToLower(asString(item["role"])); role != "" {
 			switch role {
 			case "user":
+				markUserMessage(raw, index)
 				appendContent(raw, item["content"], "", index, true)
 			case "system", "developer":
 				appendContent(raw, item["content"], ScopeSystem, index, false)
@@ -400,6 +415,33 @@ func appendResponseItem(raw *[]rawSegment, value any, index int) {
 		if text := asString(item["text"]); text != "" {
 			addSegment(raw, ScopeAssistant, text)
 		}
+	}
+}
+
+// responseToolOutputText reads explicit output text, including shell outputs,
+// without serializing image/file payloads, correlation IDs or other metadata.
+func responseToolOutputText(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []any:
+		var parts []string
+		for _, item := range typed {
+			if text := responseToolOutputText(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		var parts []string
+		for _, key := range []string{"text", "refusal", "content", "output", "result", "stdout", "stderr"} {
+			if text := responseToolOutputText(typed[key]); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
 	}
 }
 
@@ -439,6 +481,9 @@ func extractAnthropic(root map[string]any) []rawSegment {
 			continue
 		}
 		role := strings.ToLower(asString(message["role"]))
+		if role == "user" {
+			markUserMessage(&raw, index)
+		}
 		switch content := message["content"].(type) {
 		case string:
 			if role == "user" {
@@ -473,7 +518,7 @@ func extractAnthropic(root map[string]any) []rawSegment {
 					if text := asString(block["thinking"]); text != "" {
 						addSegment(&raw, ScopeAssistant, text)
 					}
-				case "tool_use":
+				case "tool_use", "server_tool_use":
 					addToolCall(&raw, asString(block["name"]), valueText(block["input"]))
 				case "tool_result":
 					addToolResult(&raw, asString(block["name"]), flattenText(block["content"]))
@@ -519,6 +564,13 @@ func extractGemini(root map[string]any) []rawSegment {
 			continue
 		}
 		role := strings.ToLower(asString(content["role"]))
+		// Gemini permits role omission for user content.
+		if role == "" {
+			role = "user"
+		}
+		if role == "user" {
+			markUserMessage(&raw, index)
+		}
 		for _, partValue := range asSlice(content["parts"]) {
 			part := asMap(partValue)
 			if part == nil {
@@ -568,7 +620,7 @@ func extractGemini(root map[string]any) []rawSegment {
 		}
 		for _, declaration := range declarations {
 			entry := asMap(declaration)
-			addToolDefinition(&raw, asString(entry["name"]), asString(entry["description"]), entry["parameters"])
+			addToolDefinition(&raw, asString(entry["name"]), asString(entry["description"]), firstValue(entry["parameters"], entry["parametersJsonSchema"]))
 		}
 	}
 	return raw
@@ -580,6 +632,10 @@ func addOpenAICompatibleToolDefinitions(raw *[]rawSegment, root map[string]any) 
 	for _, value := range asSlice(root["tools"]) {
 		tool := asMap(value)
 		if tool == nil {
+			continue
+		}
+		if custom := asMap(tool["custom"]); custom != nil {
+			addToolDefinition(raw, asString(custom["name"]), asString(custom["description"]), custom["format"])
 			continue
 		}
 		function := asMap(tool["function"])

@@ -81,9 +81,11 @@ data-plane dispatcher -> Matcher -> BeginAudit -> require_credential
 
 ## 7. 持久化
 
-migration `010_content_policy_rules.sql` 创建 `content_policy_rules`，不写入任何种子规则：空表等于不拦截。
+migration `010_content_policy_rules.sql` 创建 `content_policy_rules`，不写入任何种子规则：空表等于不拦截。`012_content_policy_ids.sql` 保留现存规则 ID，并改用数据库 AUTOINCREMENT 分配新 ID；删除最高 ID、更新其他规则、重启均不重用已分配的 ID。旧版本已删除且未保留的 ID 无法从现存规则表追溯恢复。
 
-Store 通过既有单 writer 提供 `ListContentPolicyRules`、`CreateContentPolicyRule`、`UpdateContentPolicyRule`、`DeleteContentPolicyRule`；`contentpolicy` 领域包定义 `Repository`、`RuleSet` 和编译快照。保存顺序固定为：校验/编译 → 持久化 → 重编译整份快照 → 原子发布。DB 不可用（available 模式）时 service 得到空快照，全部放行；管理 API 返回 503。
+Store 通过既有单 writer 提供 `ListContentPolicyRules`、`CreateContentPolicyRule`、`UpdateContentPolicyRule`、`DeleteContentPolicyRule`；`contentpolicy` 领域包定义 `Repository`、`RuleSet` 和编译快照。保存顺序固定为：校验/编译 → 持久化 → 重编译整份快照 → 原子发布。DB 不可用（available 模式）时 service 得到空快照，全部放行；管理 API 返回 503，领域层变更同样拒绝，不能保存仅存在于内存的规则。
+
+规则写入在入队前遵循请求取消；入队后使用独立的 30 秒生命周期，不因客户端断开而放弃提交结果。队列中过期且尚未执行的操作原子作废，不会稍后落库；开始执行的规则写入独占一个有截止时间的事务，等待确认提交或回滚后才返回并发布匹配快照。审计写入的原有取消语义不变，也不会被规则事务的截止时间回滚。
 
 ## 8. 管理 API 与 UI
 

@@ -137,7 +137,7 @@ func parseResponse(root map[string]any, result *base.Result) {
 	// A prompt-level safety block still arrives as HTTP 200, so the stable
 	// content_filter class comes from promptFeedback instead of an error body.
 	if feedback := protocolutil.Map(root["promptFeedback"]); feedback != nil {
-		if reason := protocolutil.String(feedback["blockReason"]); reason != "" && reason != "BLOCKED_REASON_UNSPECIFIED" {
+		if reason := protocolutil.String(feedback["blockReason"]); reason != "" && reason != "BLOCK_REASON_UNSPECIFIED" {
 			result.UpstreamErrorClass = policyclass.Merge(result.UpstreamErrorClass, policyclass.ClassContentFilter)
 		}
 	}

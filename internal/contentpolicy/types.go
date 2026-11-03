@@ -97,6 +97,9 @@ type RuleInput struct {
 }
 
 // Repository persists rules in the same local database as audit evidence.
+// Create allocates a durable, never-reused ID (the input ID is ignored).
+// Mutations must return the definitive commit/rollback outcome once accepted,
+// even if the caller cancels, so Service can publish the committed snapshot.
 type Repository interface {
 	ListContentPolicyRules(context.Context) ([]Rule, error)
 	CreateContentPolicyRule(context.Context, Rule) (Rule, error)
@@ -108,6 +111,7 @@ type Repository interface {
 // authenticated management API.
 type RuleSet interface {
 	interceptor.Interceptor
+	Available() bool
 	List() []Rule
 	Create(context.Context, RuleInput) (Rule, error)
 	Update(context.Context, int64, RuleInput) (Rule, error)
@@ -134,3 +138,6 @@ func ValidScanScope(scope string) bool {
 		return false
 	}
 }
+
+// ErrUnavailable means policy administration has no persistent repository.
+var ErrUnavailable = errors.New("content policy repository unavailable")

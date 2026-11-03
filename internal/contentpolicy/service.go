@@ -45,7 +45,6 @@ func (rule capturedRule) matches(segments []segment) bool {
 type snapshot struct {
 	rules  []capturedRule
 	public []Rule
-	nextID int64
 }
 
 // Service owns the compiled rule snapshot. It is the interceptor instance and
@@ -201,6 +200,9 @@ func (service *Service) skip(ctx context.Context, routeID, code, message string)
 	service.logger.WarnContext(ctx, message, "route_id", routeID, "error_code", code)
 }
 
+// Available reports whether administrator changes can be persisted.
+func (service *Service) Available() bool { return service != nil && service.repository != nil }
+
 // List returns an immutable copy of the active public rules.
 func (service *Service) List() []Rule {
 	if service == nil {
@@ -219,8 +221,8 @@ func (service *Service) List() []Rule {
 
 // Create validates, persists, and atomically activates one rule.
 func (service *Service) Create(ctx context.Context, input RuleInput) (Rule, error) {
-	if service == nil {
-		return Rule{}, fmt.Errorf("contentpolicy: nil service")
+	if !service.Available() {
+		return Rule{}, ErrUnavailable
 	}
 	if ctx == nil {
 		return Rule{}, fmt.Errorf("contentpolicy: nil context")
@@ -232,7 +234,6 @@ func (service *Service) Create(ctx context.Context, input RuleInput) (Rule, erro
 	if err != nil {
 		return Rule{}, err
 	}
-	current := service.current.Load()
 	now := service.timestamp()
 	rule := Rule{
 		Name:         normalized.Name,
@@ -243,9 +244,6 @@ func (service *Service) Create(ctx context.Context, input RuleInput) (Rule, erro
 		Keywords:     normalized.Keywords,
 		CreatedAtNS:  now,
 		UpdatedAtNS:  now,
-	}
-	if current != nil {
-		rule.ID = current.nextID
 	}
 	if _, err := compileRule(rule); err != nil {
 		return Rule{}, err
@@ -268,8 +266,8 @@ func (service *Service) Create(ctx context.Context, input RuleInput) (Rule, erro
 
 // Update replaces one rule and publishes it immediately after persistence.
 func (service *Service) Update(ctx context.Context, id int64, input RuleInput) (Rule, error) {
-	if service == nil {
-		return Rule{}, fmt.Errorf("contentpolicy: nil service")
+	if !service.Available() {
+		return Rule{}, ErrUnavailable
 	}
 	if ctx == nil {
 		return Rule{}, fmt.Errorf("contentpolicy: nil context")
@@ -321,8 +319,8 @@ func (service *Service) Update(ctx context.Context, id int64, input RuleInput) (
 
 // Delete removes one rule and immediately publishes the reduced snapshot.
 func (service *Service) Delete(ctx context.Context, id int64) error {
-	if service == nil {
-		return fmt.Errorf("contentpolicy: nil service")
+	if !service.Available() {
+		return ErrUnavailable
 	}
 	if ctx == nil {
 		return fmt.Errorf("contentpolicy: nil context")
@@ -351,11 +349,6 @@ func (service *Service) Delete(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	// Keep ids monotonic even when the highest rule is deleted; a later rule
-	// must not reuse an id that historical audits may still reference.
-	if previous := service.current.Load(); previous != nil && previous.nextID > compiled.nextID {
-		compiled.nextID = previous.nextID
-	}
 	service.current.Store(compiled)
 	return nil
 }
@@ -377,7 +370,6 @@ func compileSnapshot(rules []Rule) (*snapshot, error) {
 	result := &snapshot{
 		rules:  make([]capturedRule, 0, len(rules)),
 		public: make([]Rule, 0, len(rules)),
-		nextID: 1,
 	}
 	seen := make(map[int64]struct{}, len(rules))
 	for _, rule := range rules {
@@ -394,9 +386,6 @@ func compileSnapshot(rules []Rule) (*snapshot, error) {
 		}
 		result.rules = append(result.rules, compiled)
 		result.public = append(result.public, cloneRule(rule))
-		if rule.ID >= result.nextID {
-			result.nextID = rule.ID + 1
-		}
 	}
 	return result, nil
 }

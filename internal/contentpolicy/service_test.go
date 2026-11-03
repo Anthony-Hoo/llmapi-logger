@@ -292,7 +292,7 @@ func TestGeminiTemplateModelScope(t *testing.T) {
 	}}
 	logs := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	service, err := New(context.Background(), nil, logger)
+	service, err := New(context.Background(), &testPolicyRepository{}, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func newTestEngineWithLogger(t *testing.T, logs *bytes.Buffer) (*Service, *inter
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := New(context.Background(), nil, logger)
+	service, err := New(context.Background(), &testPolicyRepository{}, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,4 +398,43 @@ func mustMatch(t *testing.T, matcher *routing.Matcher, request *http.Request) ro
 		t.Fatal("route did not match")
 	}
 	return match
+}
+
+// Explicit test repository: nil repositories are degraded/read-only, not memory stores.
+type testPolicyRepository struct{ nextID int64 }
+
+func (*testPolicyRepository) ListContentPolicyRules(context.Context) ([]Rule, error) { return nil, nil }
+func (r *testPolicyRepository) CreateContentPolicyRule(_ context.Context, rule Rule) (Rule, error) {
+	r.nextID++
+	rule.ID = r.nextID
+	return rule, nil
+}
+func (*testPolicyRepository) UpdateContentPolicyRule(_ context.Context, rule Rule) (Rule, error) {
+	return rule, nil
+}
+func (*testPolicyRepository) DeleteContentPolicyRule(context.Context, int64) error { return nil }
+func TestDegradedServiceRejectsAdministration(t *testing.T) {
+	service, err := New(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Available() {
+		t.Fatal("degraded service is available")
+	}
+	if _, err := service.Create(context.Background(), RuleInput{}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	if _, err := service.Update(context.Background(), 1, RuleInput{}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	if err := service.Delete(context.Background(), 1); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	decision, err := service.Check(context.Background(), interceptor.RequestView{})
+	if err != nil || !decision.Allow {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+	if len(service.List()) != 0 {
+		t.Fatal("degraded snapshot mutated")
+	}
 }
