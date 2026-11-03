@@ -228,7 +228,6 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 		digest:         sha256.New(),
 		persistChunks:  true,
 		sourceStage:    stage.name,
-		pending:        make([]byte, 0, bodyChunkSize),
 		streamComplete: true,
 	}
 	body.stream = body.persistChunks && stage.name == sqlite.StageResponseReceived && isEventStream(stage.contentType)
@@ -283,33 +282,51 @@ func (session *Session) observeBodyLocked(stage *stageCapture, body *bodyCapture
 	if !body.persistChunks || !body.persisted {
 		return
 	}
-	if len(body.pending) == 0 {
-		body.pendingAtNS = observedAtNS
-	}
-	body.pending = append(body.pending, data...)
-	for len(body.pending) >= bodyChunkSize {
-		session.flushBodyLocked(stage, body, false)
+	// Bound staging memory even when an upstream Reader returns a very large
+	// buffer. Small bodies allocate only what they need, not a full chunk.
+	for len(data) > 0 {
+		if len(body.pending) == 0 {
+			body.pendingAtNS = observedAtNS
+		}
+		count := min(len(data), bodyChunkSize-len(body.pending))
+		needed := len(body.pending) + count
+		if needed > cap(body.pending) {
+			capacity := min(bodyChunkSize, max(needed, 2*cap(body.pending)))
+			next := make([]byte, len(body.pending), capacity)
+			copy(next, body.pending)
+			clear(body.pending)
+			body.pending = next
+		}
+		body.pending = append(body.pending, data[:count]...)
+		data = data[count:]
+		if len(body.pending) == bodyChunkSize {
+			session.flushBodyLocked(stage, body, false)
+		}
 	}
 }
 
 func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, force bool) {
-	if body == nil || !body.persistChunks || !body.persisted || len(body.pending) == 0 {
+	if body == nil {
+		return
+	}
+	if force {
+		// Completed request stages must not retain a chunk for the lifetime
+		// of a potentially long-running streaming response.
+		defer func() { clear(body.pending); body.pending = nil; body.pendingAtNS = 0 }()
+	}
+	if !body.persistChunks || !body.persisted || len(body.pending) == 0 {
 		return
 	}
 	if !force && len(body.pending) < bodyChunkSize {
 		return
 	}
-	length := min(len(body.pending), bodyChunkSize)
-	plaintext := append([]byte(nil), body.pending[:length]...)
-	remaining := append([]byte(nil), body.pending[length:]...)
-	clear(body.pending)
-	body.pending = append(body.pending[:0], remaining...)
+	// observeBodyLocked never stages more than one chunk. Encoding and
+	// encryption are synchronous; AddChunk receives only owned ciphertext.
+	plaintext := body.pending
 	observedAtNS := body.pendingAtNS
-	if len(body.pending) == 0 {
-		body.pendingAtNS = 0
-	} else {
-		body.pendingAtNS = body.lastAtNS
-	}
+	body.pending = body.pending[:0]
+	body.pendingAtNS = 0
+	defer clear(plaintext)
 
 	sequence := body.nextSeq
 	offset := body.storedLength
