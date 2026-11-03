@@ -51,6 +51,19 @@ func TestPostgresDayBucketsIgnoreServerTimezone(t *testing.T) {
 			t.Fatalf("offset %d: %+v %v", offset, rows, err)
 		}
 	}
+	// Adjacent nanoseconds must fall on opposite UTC days. Converting the
+	// nanosecond timestamp to float before integer division rounds the first
+	// request up to midnight, so test both aggregation APIs at the boundary.
+	seedInsights(t, store, insightsSeed{id: "midnight", at: at.Add(time.Nanosecond), key: keyA, session: sessionShared, system: 1})
+	counts, err := store.InsightsDayCounts(ctx, InsightsFilter{}, 0)
+	if err != nil || len(counts) != 2 || counts[0].Day != "2026-10-10" || counts[1].Day != "2026-10-11" || counts[0].Requests != 1 || counts[1].Requests != 1 {
+		t.Fatalf("UTC midnight nanosecond counts: %+v err=%v", counts, err)
+	}
+	usage, err := store.InsightsUsage(ctx, InsightsFilter{}, InsightsUsageSpec{Dimension: InsightsDimDay})
+	if err != nil || len(usage) != 2 || usage[0].Key != "2026-10-10" || usage[1].Key != "2026-10-11" || usage[0].Requests != 1 || usage[1].Requests != 1 {
+		t.Fatalf("UTC midnight nanosecond usage: %+v err=%v", usage, err)
+	}
+
 }
 
 func TestPostgresAuditOrderingUsesBinaryCollation(t *testing.T) {
