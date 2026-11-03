@@ -51,7 +51,7 @@ func preloadAncestorHeaders(tx dbTransaction, turnID string, memo map[string][]a
 func preloadAncestorReferences(tx dbTransaction, turnIDs, responseIDs []string, limit int) (map[string][]auditmodel.ContextOp, map[string][]auditmodel.ObjectRef, error) {
 	operations := make(map[string][]auditmodel.ContextOp, len(turnIDs))
 	responses := make(map[string][]auditmodel.ObjectRef, len(responseIDs))
-	rows, err := tx.Query(`SELECT turn_id,operation,item_count,slot,object_hash,semantic_hash FROM turn_context_ops WHERE turn_id=ANY($1::text[]) ORDER BY turn_id,op_index LIMIT $2`, turnIDs, limit+1)
+	rows, err := tx.Query(`SELECT turn_id,operation,item_count,slot,object_hash,semantic_hash FROM (SELECT turn_id,op_index,operation,item_count,slot,object_hash,semantic_hash FROM turn_context_ops WHERE turn_id=ANY($1::text[]) LIMIT $2) bounded ORDER BY turn_id,op_index`, turnIDs, limit+1)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -83,7 +83,7 @@ func preloadAncestorReferences(tx dbTransaction, turnIDs, responseIDs []string, 
 	if len(responseIDs) == 0 {
 		return operations, responses, nil
 	}
-	rows, err = tx.Query(`SELECT turn_id,slot,object_hash,semantic_hash FROM turn_response_items WHERE turn_id=ANY($1::text[]) ORDER BY turn_id,ordinal LIMIT $2`, responseIDs, limit-used+1)
+	rows, err = tx.Query(`SELECT turn_id,slot,object_hash,semantic_hash FROM (SELECT turn_id,ordinal,slot,object_hash,semantic_hash FROM turn_response_items WHERE turn_id=ANY($1::text[]) LIMIT $2) bounded ORDER BY turn_id,ordinal`, responseIDs, limit-used+1)
 	if err != nil {
 		return nil, nil, err
 	}
