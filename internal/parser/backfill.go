@@ -124,7 +124,8 @@ func (worker *Worker) backfillSkip(auditID, reason string) {
 }
 
 func (worker *Worker) backfillFail(auditID, reason string, err error) {
-	worker.rememberBackfillSkip(auditID)
+	// Transient failures retry on the next bounded rescan. Only explicit permanent
+	// skips enter backfillSkipped; the cursor and scan interval prevent a hot loop.
 	worker.logger.Warn("insights backfill failed", "audit_id", auditID, "error_code", "analysis_backfill_failed", "reason", reason, "storage_error", storage.ErrorClass(err))
 }
 
