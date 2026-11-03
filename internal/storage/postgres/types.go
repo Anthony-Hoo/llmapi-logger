@@ -1,0 +1,457 @@
+// PostgreSQL validation and ownership helpers for backend-neutral storage DTOs.
+package postgres
+
+import "llmapi-logger/internal/storage"
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"regexp"
+	"strings"
+)
+
+const (
+	StageRequestReceived   = storage.StageRequestReceived
+	StageRequestSent       = storage.StageRequestSent
+	StageResponseReceived  = storage.StageResponseReceived
+	StageResponseSent      = storage.StageResponseSent
+	StageStateNotStarted   = storage.StageStateNotStarted
+	StageStateStreaming    = storage.StageStateStreaming
+	StageStateComplete     = storage.StageStateComplete
+	StageStatePartial      = storage.StageStatePartial
+	ForwardInProgress      = storage.ForwardInProgress
+	ForwardCompleted       = storage.ForwardCompleted
+	ForwardRejected        = storage.ForwardRejected
+	ForwardClientCancelled = storage.ForwardClientCancelled
+	ForwardNewAPIError     = storage.ForwardNewAPIError
+	ForwardProxyError      = storage.ForwardProxyError
+	ForwardInterrupted     = storage.ForwardInterrupted
+	CapturePending         = storage.CapturePending
+	CaptureComplete        = storage.CaptureComplete
+	CapturePartial         = storage.CapturePartial
+	CaptureFailed          = storage.CaptureFailed
+	CaptureChunkMissing    = storage.CaptureChunkMissing
+	ParsePending           = storage.ParsePending
+	ParseProcessing        = storage.ParseProcessing
+	ParseOK                = storage.ParseOK
+	ParsePartial           = storage.ParsePartial
+	ParseError             = storage.ParseError
+	ParseSkipped           = storage.ParseSkipped
+	CallerNone             = storage.CallerNone
+	CallerPending          = storage.CallerPending
+	CallerResolved         = storage.CallerResolved
+	CallerUnresolved       = storage.CallerUnresolved
+	HeaderKindHeader       = storage.HeaderKindHeader
+	HeaderKindTrailer      = storage.HeaderKindTrailer
+	RetentionPending       = storage.RetentionPending
+	RetentionMetadata      = storage.RetentionMetadata
+	RetentionFull          = storage.RetentionFull
+	ChunkCompressionNone   = storage.ChunkCompressionNone
+	ChunkCompressionGZIP   = storage.ChunkCompressionGZIP
+	GapReasonDBUnavailable = storage.GapReasonDBUnavailable
+	GapReasonQueueFull     = storage.GapReasonQueueFull
+	GapReasonEncryption    = storage.GapReasonEncryption
+	GapReasonWrite         = storage.GapReasonWrite
+	GapReasonProcessExit   = storage.GapReasonProcessExit
+	GapDetailDBUnavailable = storage.GapDetailDBUnavailable
+	GapDetailQueueFull     = storage.GapDetailQueueFull
+	GapDetailEncryption    = storage.GapDetailEncryption
+	GapDetailWrite         = storage.GapDetailWrite
+	GapDetailProcessExit   = storage.GapDetailProcessExit
+)
+
+// APIKeyFingerprintSize is the width of audit_records.api_key_fpr, matching the
+// HMAC-SHA-256 tag produced by security.CredentialFingerprinter.
+const APIKeyFingerprintSize = storage.APIKeyFingerprintSize
+
+const (
+	writerQueueCapacity = 1024
+	writerBatchSize     = 64
+	RetentionBatchLimit = storage.RetentionBatchLimit
+)
+
+var (
+	ErrClosed           = storage.ErrClosed
+	ErrQueueFull        = storage.ErrQueueFull
+	ErrRecoveryOverflow = storage.ErrRecoveryOverflow
+)
+
+var stableBlockCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// AuditRecord is the parent row created before interceptor evaluation.
+type AuditRecord = storage.AuditRecord
+
+// HTTPStage represents one actually observed proxy boundary. Missing stages
+// are represented by absent rows, never placeholder rows.
+type HTTPStage = storage.HTTPStage
+
+// HTTPHeader stores one encrypted Header or Trailer value.
+type HTTPHeader = storage.HTTPHeader
+
+// BodyStream stores aggregate integrity state for one observed stage body.
+type BodyStream = storage.BodyStream
+
+// BodyChunk stores one independently encrypted owning chunk.
+type BodyChunk = storage.BodyChunk
+
+// AuditGap is an aggregate indication that complete per-request evidence was
+// unavailable. Reason and Detail are stable codes; arbitrary error text is
+// deliberately rejected before it can reach PostgreSQL.
+type AuditGap = storage.AuditGap
+
+// Billing states of a token link (doc/features/21-newapi-billing.md).
+// Unchecked only exists for links written before migration 009; new links are
+// always billed or unbilled.
+const (
+	BillingUnchecked = storage.BillingUnchecked
+	BillingBilled    = storage.BillingBilled
+	BillingUnbilled  = storage.BillingUnbilled
+)
+
+// MaxBillingAttempts bounds the historical billing backfill of one link.
+const MaxBillingAttempts = storage.MaxBillingAttempts
+
+// TokenLink stores the non-secret NewAPI caller snapshot associated with one
+// audit. It contains identifiers and names from the system log, never a key.
+// The billing fields come from the same log rows: they are set exactly when
+// BillingState is BillingBilled.
+type TokenLink = storage.TokenLink
+
+// CallerLookup is one due caller-identification job read by the NewAPI worker.
+// StatusCode is the audit's response status, nil when no response was
+// recorded.
+type CallerLookup = storage.CallerLookup
+
+// BillingBackfillItem is one pre-billing token link awaiting its historical
+// billing lookup.
+type BillingBackfillItem = storage.BillingBackfillItem
+
+// BillingUpdate replaces only the billing columns of an unchecked token link.
+// State BillingUnchecked records one more failed attempt; the billing values
+// must then be nil, as for BillingUnbilled.
+type BillingUpdate = storage.BillingUpdate
+
+// CallerRetry reschedules or terminates one caller lookup attempt.
+type CallerRetry = storage.CallerRetry
+
+// RetentionResult reports rows removed by one bounded writer transaction.
+type RetentionResult = storage.RetentionResult
+
+// BodyFinish is optionally included in StageFinish when a body stream was
+// actually opened for the stage.
+type BodyFinish = storage.BodyFinish
+
+// StreamTimeline is one compressed and encrypted delta sequence of logical
+// SSE event completion offsets and observation times.
+type StreamTimeline = storage.StreamTimeline
+
+// StageFinish atomically finalizes stage metadata and, when non-nil, its body
+// aggregate within the writer batch transaction.
+type StageFinish = storage.StageFinish
+
+// AuditFinish contains the terminal audit outcome. Rejected audits must carry
+// both BlockedBy and BlockCode and use ParseSkipped.
+type AuditFinish = storage.AuditFinish
+
+// Snapshot is a consistent encrypted evidence view used by integration and
+// query layers. Ciphertext blobs are returned unchanged.
+type Snapshot = storage.Snapshot
+
+func validateAuditRecord(record AuditRecord) error {
+	if record.AuditID == "" || record.RouteID == "" || record.Protocol == "" || record.ParserName == "" || record.Method == "" || record.Path == "" {
+		return errors.New("postgres: audit record has empty required field")
+	}
+	if len(record.RequestURIEnc) == 0 {
+		return errors.New("postgres: encrypted request URI is required")
+	}
+	if record.StartedAtNS == 0 {
+		return errors.New("postgres: audit started_at_ns is required")
+	}
+	if record.Mode != "available" && record.Mode != "strict" {
+		return fmt.Errorf("postgres: invalid audit mode %q", record.Mode)
+	}
+	if record.ForwardStatus != ForwardInProgress || record.BlockedBy != nil || record.BlockCode != nil || record.EndedAtNS != nil || record.StatusCode != nil || record.ErrorCode != nil ||
+		record.NewAPIRequestID != nil || record.CallerStatus != CallerNone || record.CallerAttempts != 0 || record.CallerNextAtNS != nil || record.CallerUpdatedAtNS != nil {
+		return errors.New("postgres: BeginAudit requires an in-progress unblocked record")
+	}
+	if record.CaptureStatus != CapturePending || record.ParseStatus != ParsePending {
+		return errors.New("postgres: invalid initial audit status")
+	}
+	if len(record.APIKeyFPR) != 0 && len(record.APIKeyFPR) != APIKeyFingerprintSize {
+		return fmt.Errorf("postgres: api key fingerprint must be %d bytes", APIKeyFingerprintSize)
+	}
+	return nil
+}
+
+func validateStage(stage HTTPStage) error {
+	if stage.AuditID == "" || !validStage(stage.Stage) || stage.StartedAtNS == 0 {
+		return errors.New("postgres: invalid stage identity or start time")
+	}
+	if stage.State != StageStateStreaming || stage.EndedAtNS != nil {
+		return errors.New("postgres: StartStage requires streaming state without end time")
+	}
+	if err := validateStatusCode(stage.StatusCode); err != nil {
+		return err
+	}
+	return validateContentLength(stage.ContentLength)
+}
+
+func validateHeader(header HTTPHeader) error {
+	if header.AuditID == "" || !validStage(header.Stage) || (header.Kind != HeaderKindHeader && header.Kind != HeaderKindTrailer) || header.Name == "" {
+		return errors.New("postgres: invalid header identity")
+	}
+	if header.ValueIndex < 0 || header.ValueLength < 0 || len(header.ValueEnc) == 0 {
+		return errors.New("postgres: invalid encrypted header value")
+	}
+	return nil
+}
+
+func validateBodyStream(body BodyStream) error {
+	if body.AuditID == "" || !validStage(body.Stage) || !validStage(body.SourceStage) || body.State != StageStateStreaming || !validRetentionState(body.RetentionState) {
+		return errors.New("postgres: invalid body stream identity or state")
+	}
+	if body.ChunkCount < 0 || body.StreamEventCount < 0 || !validObservedRange(body.FirstObservedAtNS, body.LastObservedAtNS) {
+		return errors.New("postgres: invalid body stream counters")
+	}
+	return validateBodyAggregate(body.ObservedLength, body.StoredLength, body.SHA256, body.HashComplete, body.EOFSeen)
+}
+
+func validateChunk(chunk BodyChunk) error {
+	if chunk.AuditID == "" || !validStage(chunk.Stage) || chunk.Seq < 0 || chunk.Offset < 0 || chunk.PlaintextLength < 0 || chunk.EncodedLength < 0 || chunk.ObservedAtNS == 0 || len(chunk.DataEnc) == 0 ||
+		(chunk.Compression != ChunkCompressionNone && chunk.Compression != ChunkCompressionGZIP) {
+		return errors.New("postgres: invalid body chunk")
+	}
+	return nil
+}
+
+func validateAuditGap(gap AuditGap) error {
+	if gap.StartedAtNS <= 0 || gap.EndedAtNS < gap.StartedAtNS || gap.CreatedAtNS <= 0 || gap.RequestCount <= 0 {
+		return errors.New("postgres: invalid audit gap time range or count")
+	}
+	wantDetail, ok := gapDetailForReason(gap.Reason)
+	if !ok || gap.Detail != wantDetail {
+		return errors.New("postgres: invalid audit gap reason or detail")
+	}
+	return nil
+}
+
+func validateTokenLink(link TokenLink) error {
+	if link.AuditID == "" || !validRequestID(link.NewAPIRequestID) || link.NewAPIUserID <= 0 ||
+		link.NewAPITokenID < 0 || link.LinkedAtNS <= 0 || link.Attempts <= 0 {
+		return errors.New("postgres: invalid token link identity or timestamp")
+	}
+	for _, value := range []string{link.Username, link.TokenName} {
+		if len(value) > 512 || strings.ContainsRune(value, '\x00') {
+			return errors.New("postgres: invalid token link snapshot")
+		}
+	}
+	if link.BillingState != BillingBilled && link.BillingState != BillingUnbilled {
+		return errors.New("postgres: new token link must be billed or unbilled")
+	}
+	return validateBillingValues(link.BillingState, link.Quota, link.QuotaPerUnit, link.BilledPromptTokens, link.BilledCompletionTokens)
+}
+
+// validateBillingValues mirrors the token_links CHECK: billing values are all
+// present and in range exactly when the state is billed.
+func validateBillingValues(state string, quota *int64, quotaPerUnit *float64, prompt, completion *int64) error {
+	if state != BillingBilled {
+		if quota != nil || quotaPerUnit != nil || prompt != nil || completion != nil {
+			return errors.New("postgres: billing values require billed state")
+		}
+		return nil
+	}
+	if quota == nil || quotaPerUnit == nil || prompt == nil || completion == nil {
+		return errors.New("postgres: billed state requires billing values")
+	}
+	if *quota < 0 || *prompt < 0 || *completion < 0 || !(*quotaPerUnit > 0) || math.IsInf(*quotaPerUnit, 0) {
+		return errors.New("postgres: invalid billing values")
+	}
+	return nil
+}
+
+func validateBillingUpdate(update BillingUpdate) error {
+	if update.AuditID == "" || update.Attempts < 0 || update.Attempts > MaxBillingAttempts {
+		return errors.New("postgres: invalid billing update")
+	}
+	switch update.State {
+	case BillingBilled, BillingUnbilled:
+	case BillingUnchecked:
+		if update.Attempts == 0 || update.Attempts >= MaxBillingAttempts {
+			return errors.New("postgres: unchecked billing update must record a non-final attempt")
+		}
+	default:
+		return errors.New("postgres: invalid billing state")
+	}
+	return validateBillingValues(update.State, update.Quota, update.QuotaPerUnit, update.BilledPromptTokens, update.BilledCompletionTokens)
+}
+
+func gapDetailForReason(reason string) (string, bool) {
+	switch reason {
+	case GapReasonDBUnavailable:
+		return GapDetailDBUnavailable, true
+	case GapReasonQueueFull:
+		return GapDetailQueueFull, true
+	case GapReasonEncryption:
+		return GapDetailEncryption, true
+	case GapReasonWrite:
+		return GapDetailWrite, true
+	case GapReasonProcessExit:
+		return GapDetailProcessExit, true
+	default:
+		return "", false
+	}
+}
+
+func validateStageFinish(finish StageFinish) error {
+	if finish.AuditID == "" || !validStage(finish.Stage) || finish.EndedAtNS == 0 || !terminalStageState(finish.State) {
+		return errors.New("postgres: invalid stage finish")
+	}
+	if err := validateStatusCode(finish.StatusCode); err != nil {
+		return err
+	}
+	if err := validateContentLength(finish.ContentLength); err != nil {
+		return err
+	}
+	if finish.Body == nil {
+		return nil
+	}
+	if !terminalStageState(finish.Body.State) {
+		return errors.New("postgres: invalid body finish state")
+	}
+	if !validRetentionState(finish.Body.RetentionState) || finish.Body.ChunkCount < 0 || finish.Body.StreamEventCount < 0 ||
+		!validObservedRange(finish.Body.FirstObservedAtNS, finish.Body.LastObservedAtNS) {
+		return errors.New("postgres: invalid body finish metadata")
+	}
+	if finish.Body.Timeline != nil {
+		timeline := finish.Body.Timeline
+		if timeline.EventCount != finish.Body.StreamEventCount || timeline.EventCount <= 0 ||
+			!validObservedRange(timeline.FirstEventAtNS, timeline.LastEventAtNS) ||
+			timeline.Complete != finish.Body.StreamTimelineComplete || timeline.PlaintextLength <= 0 || len(timeline.DataEnc) == 0 ||
+			(timeline.Compression != ChunkCompressionNone && timeline.Compression != ChunkCompressionGZIP) {
+			return errors.New("postgres: invalid stream timeline")
+		}
+	}
+	return validateBodyAggregate(
+		finish.Body.ObservedLength,
+		finish.Body.StoredLength,
+		finish.Body.SHA256,
+		finish.Body.HashComplete,
+		finish.Body.EOFSeen,
+	)
+}
+
+func validateAuditFinish(finish AuditFinish) error {
+	if finish.AuditID == "" || finish.EndedAtNS == 0 || finish.ForwardStatus == "" || finish.ForwardStatus == ForwardInProgress {
+		return errors.New("postgres: invalid audit finish identity or status")
+	}
+	if !validForwardStatus(finish.ForwardStatus) || !validCaptureStatus(finish.CaptureStatus) || !validParseStatus(finish.ParseStatus) {
+		return errors.New("postgres: invalid terminal audit status")
+	}
+	if err := validateStatusCode(finish.StatusCode); err != nil {
+		return err
+	}
+	if finish.TTFTNS != nil && *finish.TTFTNS < 0 {
+		return errors.New("postgres: invalid TTFT")
+	}
+	if finish.NewAPIRequestID != nil && !validRequestID(*finish.NewAPIRequestID) {
+		return errors.New("postgres: invalid NewAPI request id")
+	}
+	if finish.ForwardStatus == ForwardRejected {
+		if finish.BlockedBy == nil || strings.TrimSpace(*finish.BlockedBy) == "" || finish.BlockCode == nil || !stableBlockCode.MatchString(*finish.BlockCode) {
+			return errors.New("postgres: rejected audit requires stable blocked_by and block_code")
+		}
+		if finish.ParseStatus != ParseSkipped || finish.StatusCode == nil || !((*finish.StatusCode >= 400 && *finish.StatusCode <= 499) || *finish.StatusCode == 503) {
+			return errors.New("postgres: rejected audit requires skipped parse and 4xx/503 status")
+		}
+		return nil
+	}
+	if finish.BlockedBy != nil || finish.BlockCode != nil {
+		return errors.New("postgres: non-rejected audit cannot contain block fields")
+	}
+	return nil
+}
+
+func validateCallerRetry(retry CallerRetry) error {
+	if retry.AuditID == "" || !validRequestID(retry.RequestID) || retry.Attempts <= 0 || retry.UpdatedAtNS <= 0 {
+		return errors.New("postgres: invalid caller retry")
+	}
+	if retry.NextAttemptAtNS != nil && *retry.NextAttemptAtNS <= retry.UpdatedAtNS {
+		return errors.New("postgres: caller retry must be scheduled in the future")
+	}
+	return nil
+}
+
+func validRequestID(value string) bool {
+	return value != "" && len(value) <= 128 && strings.TrimSpace(value) == value &&
+		!strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validateBodyAggregate(observed, stored int64, digest []byte, hashComplete, eofSeen bool) error {
+	if observed < 0 || stored < 0 || stored > observed || (len(digest) != 0 && len(digest) != 32) || (hashComplete && !eofSeen) {
+		return errors.New("postgres: invalid body aggregate")
+	}
+	return nil
+}
+
+func validRetentionState(value string) bool {
+	return value == RetentionPending || value == RetentionMetadata || value == RetentionFull
+}
+
+func validObservedRange(first, last *int64) bool {
+	return first == nil && last == nil || first != nil && last != nil && *first > 0 && *last >= *first
+}
+
+func validateStatusCode(status *int) error {
+	if status != nil && (*status < 100 || *status > 599) {
+		return fmt.Errorf("postgres: invalid HTTP status %d", *status)
+	}
+	return nil
+}
+
+func validateContentLength(length *int64) error {
+	if length != nil && *length < -1 {
+		return fmt.Errorf("postgres: invalid content length %d", *length)
+	}
+	return nil
+}
+
+func validStage(stage string) bool {
+	switch stage {
+	case StageRequestReceived, StageRequestSent, StageResponseReceived, StageResponseSent:
+		return true
+	default:
+		return false
+	}
+}
+
+func terminalStageState(state string) bool {
+	return state == StageStateComplete || state == StageStatePartial
+}
+
+func validForwardStatus(status string) bool {
+	switch status {
+	case ForwardInProgress, ForwardCompleted, ForwardRejected, ForwardClientCancelled, ForwardNewAPIError, ForwardProxyError, ForwardInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+func validCaptureStatus(status string) bool {
+	switch status {
+	case CapturePending, CaptureComplete, CapturePartial, CaptureFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func validParseStatus(status string) bool {
+	switch status {
+	case ParsePending, ParseProcessing, ParseOK, ParsePartial, ParseError, ParseSkipped:
+		return true
+	default:
+		return false
+	}
+}
