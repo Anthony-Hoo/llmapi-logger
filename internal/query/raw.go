@@ -11,7 +11,7 @@ import (
 
 	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 // StreamRaw authenticates and decrypts each owning chunk before writing it.
@@ -33,13 +33,13 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 	if err != nil {
 		return fmt.Errorf("query: read raw metadata: %w", err)
 	}
-	if metadata.State == sqlite.StageStateStreaming {
+	if metadata.State == storage.StageStateStreaming {
 		return ErrNotReady
 	}
-	if metadata.RetentionState == sqlite.RetentionPending {
+	if metadata.RetentionState == storage.RetentionPending {
 		return ErrNotReady
 	}
-	if metadata.RetentionState == sqlite.RetentionMetadata {
+	if metadata.RetentionState == storage.RetentionMetadata {
 		return ErrNotRetained
 	}
 
@@ -47,9 +47,9 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 	var written int64
 	var expectedSequence int64
 	var expectedOffset int64
-	complete := metadata.State == sqlite.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
+	complete := metadata.State == storage.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
 	missingChunks := rawHasMissingChunks(metadata)
-	err = service.store.StreamBodyChunks(ctx, auditID, stage, func(chunk sqlite.BodyChunk) error {
+	err = service.store.StreamBodyChunks(ctx, auditID, stage, func(chunk storage.BodyChunk) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -117,19 +117,19 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 	return nil
 }
 
-func rawHasMissingChunks(metadata sqlite.RawBodyMetadata) bool {
-	return metadata.State == sqlite.StageStatePartial && metadata.RetentionState == sqlite.RetentionFull &&
-		metadata.ErrorCode != nil && *metadata.ErrorCode == sqlite.CaptureChunkMissing
+func rawHasMissingChunks(metadata storage.RawBodyMetadata) bool {
+	return metadata.State == storage.StageStatePartial && metadata.RetentionState == storage.RetentionFull &&
+		metadata.ErrorCode != nil && *metadata.ErrorCode == storage.CaptureChunkMissing
 }
 
 // selectRawBody prefers the provider-side stage used for ordinary request and
 // response evidence. Locally rejected requests and locally generated proxy
 // responses never reach that stage, so raw evidence falls back to the matching
 // client-facing observation point when the preferred stage does not exist.
-func (service *Service) selectRawBody(ctx context.Context, auditID string, side Side) (string, sqlite.RawBodyMetadata, error) {
+func (service *Service) selectRawBody(ctx context.Context, auditID string, side Side) (string, storage.RawBodyMetadata, error) {
 	stages, err := rawStagesForSide(side)
 	if err != nil {
-		return "", sqlite.RawBodyMetadata{}, err
+		return "", storage.RawBodyMetadata{}, err
 	}
 	for _, stage := range stages {
 		metadata, err := service.store.RawBodyMeta(ctx, auditID, stage)
@@ -137,19 +137,19 @@ func (service *Service) selectRawBody(ctx context.Context, auditID string, side 
 			continue
 		}
 		if err != nil {
-			return "", sqlite.RawBodyMetadata{}, err
+			return "", storage.RawBodyMetadata{}, err
 		}
 		return stage, metadata, nil
 	}
-	return "", sqlite.RawBodyMetadata{}, sql.ErrNoRows
+	return "", storage.RawBodyMetadata{}, sql.ErrNoRows
 }
 
 func rawStagesForSide(side Side) ([]string, error) {
 	switch side {
 	case SideRequest:
-		return []string{sqlite.StageRequestSent, sqlite.StageRequestReceived}, nil
+		return []string{storage.StageRequestSent, storage.StageRequestReceived}, nil
 	case SideResponse:
-		return []string{sqlite.StageResponseReceived, sqlite.StageResponseSent}, nil
+		return []string{storage.StageResponseReceived, storage.StageResponseSent}, nil
 	default:
 		return nil, ErrInvalidQuery
 	}

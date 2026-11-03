@@ -15,7 +15,7 @@ import (
 
 	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -23,9 +23,9 @@ const (
 	maxEncodedBodySize = MaxDecodedBodyBytes * 2
 )
 
-func (worker *Worker) loadInput(ctx context.Context, audit sqlite.ParserAudit) (Input, error) {
-	request, _, requestErr := worker.loadBody(ctx, audit.AuditID, sqlite.StageRequestReceived)
-	response, statusCode, responseErr := worker.loadBody(ctx, audit.AuditID, sqlite.StageResponseReceived)
+func (worker *Worker) loadInput(ctx context.Context, audit storage.ParserAudit) (Input, error) {
+	request, _, requestErr := worker.loadBody(ctx, audit.AuditID, storage.StageRequestReceived)
+	response, statusCode, responseErr := worker.loadBody(ctx, audit.AuditID, storage.StageResponseReceived)
 	// Headers only feed derived analysis. A failure here is logged and must
 	// not downgrade the body evidence status.
 	headers, err := worker.loadRequestHeaders(ctx, audit.AuditID, worker.headerNames())
@@ -110,10 +110,10 @@ func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (
 	return source, statusCode, errors.Join(err, decodeErr)
 }
 
-func (worker *Worker) decryptContentHeaders(auditID, stageName string, headers []sqlite.HTTPHeader, source *BodySource) error {
+func (worker *Worker) decryptContentHeaders(auditID, stageName string, headers []storage.HTTPHeader, source *BodySource) error {
 	for _, header := range headers {
 		lowerName := strings.ToLower(header.Name)
-		if header.Kind != sqlite.HeaderKindHeader || (lowerName != "content-type" && lowerName != "content-encoding") {
+		if header.Kind != storage.HeaderKindHeader || (lowerName != "content-type" && lowerName != "content-encoding") {
 			continue
 		}
 		aad, err := security.AAD(auditID, "header", stageName, header.Kind, header.Name, strconv.Itoa(header.ValueIndex))
@@ -141,13 +141,13 @@ func (worker *Worker) decryptContentHeaders(auditID, stageName string, headers [
 	return nil
 }
 
-func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string, body sqlite.BodyStream) ([]byte, bool, string, error) {
+func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string, body storage.BodyStream) ([]byte, bool, string, error) {
 	initialCapacity := int(min(int64(maxEncodedBodySize), body.StoredLength))
 	buffer := bytes.NewBuffer(make([]byte, 0, initialCapacity))
 	expectedSeq := int64(0)
 	expectedOffset := int64(0)
 	afterSeq := int64(-1)
-	complete := body.State == sqlite.StageStateComplete && body.HashComplete && body.EOFSeen && body.StoredLength == body.ObservedLength
+	complete := body.State == storage.StageStateComplete && body.HashComplete && body.EOFSeen && body.StoredLength == body.ObservedLength
 
 	for {
 		chunks, err := worker.store.ReadParserChunks(ctx, auditID, stageName, afterSeq, parserChunkPage)

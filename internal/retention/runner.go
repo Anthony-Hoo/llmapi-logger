@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"llmapi-logger/internal/storage/sqlite"
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -21,7 +21,7 @@ const (
 
 // Store is the bounded maintenance operation required by Runner.
 type Store interface {
-	DeleteExpired(context.Context, int64, int, int) (sqlite.RetentionResult, error)
+	DeleteExpired(context.Context, int64, int, int) (storage.RetentionResult, error)
 }
 
 // Result reports the rows deleted during one cleanup run.
@@ -139,11 +139,11 @@ func (runner *Runner) RunOnce(ctx context.Context) (Result, error) {
 	for (!auditsDone && total.DeletedAudits < maxRowsPerKindPerRun) || (!gapsDone && total.DeletedGaps < maxRowsPerKindPerRun) {
 		auditLimit := 0
 		if !auditsDone && total.DeletedAudits < maxRowsPerKindPerRun {
-			auditLimit = min(sqlite.RetentionBatchLimit, maxRowsPerKindPerRun-total.DeletedAudits)
+			auditLimit = min(storage.RetentionBatchLimit, maxRowsPerKindPerRun-total.DeletedAudits)
 		}
 		gapLimit := 0
 		if !gapsDone && total.DeletedGaps < maxRowsPerKindPerRun {
-			gapLimit = min(sqlite.RetentionBatchLimit, maxRowsPerKindPerRun-total.DeletedGaps)
+			gapLimit = min(storage.RetentionBatchLimit, maxRowsPerKindPerRun-total.DeletedGaps)
 		}
 		batch, err := runner.store.DeleteExpired(ctx, cutoff, auditLimit, gapLimit)
 		if err != nil {
@@ -181,7 +181,7 @@ func (runner *Runner) cleanupAndLog(ctx context.Context) time.Duration {
 	result, err := runner.RunOnce(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			runner.logger.Warn("retention cleanup failed", "error_category", "retention_failed", "storage_error", sqlite.ErrorClass(err))
+			runner.logger.Warn("retention cleanup failed", "error_category", "retention_failed", "storage_error", storage.ErrorClass(err))
 		}
 		return runner.retryInterval
 	}
