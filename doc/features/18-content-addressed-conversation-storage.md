@@ -68,7 +68,13 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 四阶段在传输期间先各自采集。终结事务只在 request-received/request-sent 或 response-received/response-sent 都完整、chunk 聚合自洽且长度/hash 一致时，删除后一阶段重复 chunks 并改为引用前一 payload source。每个阶段仍保留自己的开始/结束时间、长度、hash、状态和错误；短写、取消或字节不一致保留两份 raw 并标记 `body_stage_mismatch`/partial。
 
-采集块固定合并到约 1 MiB 后再压缩、加密并提交。Body 结束时立即 flush 尾块；进程崩溃最多损失尚未 flush 的尾部并由 recovery 标记 partial。
+采集缓冲按实际字节量惰性增长，上限约 1 MiB；即使单次 Read 返回更大的数据也按块处理。Body 结束时立即 flush 尾块并释放暂存容量，避免长 SSE 会话继续持有已结束请求阶段的缓冲。四个观察点仍独立采集，只有终结事务验证长度与 hash 一致后才合并。
+
+flush 表示压缩、加密并向异步 writer 入队，不等于数据库事务已经提交，更不等于新增的 fsync 保证。进程崩溃可能丢失尚未 flush 的尾部，以及已经入队但仍未提交的块或批次；启动 recovery 将未完成记录标记 partial。FinishAudit 的同步完成屏障才确认终结事务处理完成，底层持久性仍服从数据库配置。
+
+canonical Prepare 在同一轮内先以规范化明文 hash 去重，再压缩、加密；每个唯一对象仍检查 kind、明文长度和 semantic hash，完整请求/响应仍做重建校验。一个 Prepare 最多惰性创建一个 gzip writer，在对象之间 Reset，返回时解除输出引用并丢弃，不使用跨请求全局池。Reset 保证独立压缩流但不是安全擦除；压缩器私有缓冲可能保留明文直到覆盖或 GC。编码字节、压缩大小和随机 nonce 不参与对象身份，不能因 Go/codec 版本变化而把同一明文误判为冲突。
+
+跨轮次复用采用一次批量 lookup（数据库内部按参数上限分批），不逐对象往返查询。当前请求仍完整规范化、计算 hash 并校验重建，再读取已存在对象的密文与身份元数据。命中必须通过 AEAD/AAD、kind、semantic hash、明文/编码长度及完整逐字节比对；gzip 必须读到 EOF 并通过校验和，不能只信存在标志。验证后复用原压缩格式与密文，未命中才压缩加密。数据库查询失败或任何损坏都中止 normalized turn，不能静默退化为可信命中。验证 decoder 同样限于单次 Prepare，使用 32 KiB 暂存比较缓冲，没有全局明文缓存。
 
 `retention_state`：
 

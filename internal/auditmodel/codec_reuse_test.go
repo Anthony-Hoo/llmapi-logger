@@ -23,11 +23,14 @@ func TestPrepareItemsDeduplicatesBeforeSeal(t *testing.T) {
 	cipher := &countingCipher{Cipher: testCipher(t)}
 	encoder := &contentEncoder{}
 	defer encoder.release()
-	objects := make(map[string]ContentObject)
+	objects := make(map[string]plainContentCandidate)
 	value := map[string]any{"role": "user", "content": string(bytes.Repeat([]byte("private"), 100)), "file_id": "file-example"}
 	items := []Item{{Slot: SlotMessages, Kind: "message", Value: value}, {Slot: SlotMessages, Kind: "message", Value: value}}
-	_, refs, err := prepareItems(cipher, encoder, newBinaryAccumulator(), items, objects)
+	_, refs, err := prepareItems(newBinaryAccumulator(), items, objects)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sealCandidates(cipher, encoder, objects, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(objects) != 1 || len(refs) != 2 || cipher.encryptions != 2 {
@@ -35,10 +38,10 @@ func TestPrepareItemsDeduplicatesBeforeSeal(t *testing.T) {
 	}
 	// Existing request-local identity metadata must still be checked.
 	for key, object := range objects {
-		object.Kind = "corrupt"
+		object.Object.Kind = "corrupt"
 		objects[key] = object
 	}
-	if _, _, err := prepareItems(cipher, encoder, newBinaryAccumulator(), items, objects); err != ErrIntegrity {
+	if _, _, err := prepareItems(newBinaryAccumulator(), items, objects); err != ErrIntegrity {
 		t.Fatalf("corrupt identity: %v", err)
 	}
 }

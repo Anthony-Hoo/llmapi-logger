@@ -396,7 +396,15 @@ func (worker *Worker) prepareTurn(ctx context.Context, audit storage.ParserAudit
 	turn.ParserName = audit.ParserName
 	turn.ResponseID = result.ResponseID
 	turn.CreatedAtNS = worker.now().UnixNano()
-	prepared, err := auditmodel.Prepare(turn, worker.cipher)
+	var lookup auditmodel.ObjectLookup
+	if existing, ok := worker.store.(interface {
+		LookupAuditObjects(context.Context, [][]byte, [][]byte) ([]auditmodel.StoredContent, []auditmodel.StoredBinary, error)
+	}); ok {
+		lookup = func(contentHashes, binaryHashes [][]byte) ([]auditmodel.StoredContent, []auditmodel.StoredBinary, error) {
+			return existing.LookupAuditObjects(ctx, contentHashes, binaryHashes)
+		}
+	}
+	prepared, err := auditmodel.PrepareWithLookup(turn, worker.cipher, lookup)
 	if err != nil {
 		result.Status = StatusPartial
 		result.ErrorCode = "reconstruction_failed"

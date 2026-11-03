@@ -164,6 +164,10 @@ func alreadyCompressedMagic(data []byte) bool {
 }
 
 func openContent(cipher security.Cipher, stored StoredContent) ([]byte, error) {
+	return openContentWithDecoder(cipher, stored, &contentDecoder{})
+}
+
+func openContentWithDecoder(cipher security.Cipher, stored StoredContent, decoder *contentDecoder) ([]byte, error) {
 	aad, err := security.AAD("content_object", hashHex(stored.Hash), stored.Kind, stored.Compression)
 	if err != nil {
 		return nil, ErrIntegrity
@@ -176,7 +180,7 @@ func openContent(cipher security.Cipher, stored StoredContent) ([]byte, error) {
 		clear(encoded)
 		return nil, ErrIntegrity
 	}
-	plaintext, err := decompress(stored.Compression, encoded, stored.PlaintextLength)
+	plaintext, err := decoder.decompress(stored.Compression, encoded, stored.PlaintextLength)
 	clear(encoded)
 	if err != nil || int64(len(plaintext)) != stored.PlaintextLength || !EqualHash(ContentHash(plaintext), stored.Hash) {
 		clear(plaintext)
@@ -202,6 +206,10 @@ func OpenObject(cipher security.Cipher, stored StoredContent) (DecodedObject, er
 }
 
 func OpenBinary(cipher security.Cipher, stored StoredBinary) ([]byte, error) {
+	return openBinaryWithDecoder(cipher, stored, &contentDecoder{})
+}
+
+func openBinaryWithDecoder(cipher security.Cipher, stored StoredBinary, decoder *contentDecoder) ([]byte, error) {
 	aad, err := security.AAD("binary_object", hashHex(stored.Hash), stored.Compression)
 	if err != nil {
 		return nil, ErrIntegrity
@@ -214,7 +222,7 @@ func OpenBinary(cipher security.Cipher, stored StoredBinary) ([]byte, error) {
 		clear(encoded)
 		return nil, ErrIntegrity
 	}
-	plaintext, err := decompress(stored.Compression, encoded, stored.PlaintextLength)
+	plaintext, err := decoder.decompress(stored.Compression, encoded, stored.PlaintextLength)
 	clear(encoded)
 	if err != nil || int64(len(plaintext)) != stored.PlaintextLength || !EqualHash(BinaryHash(plaintext), stored.Hash) {
 		clear(plaintext)
@@ -224,14 +232,31 @@ func OpenBinary(cipher security.Cipher, stored StoredBinary) ([]byte, error) {
 }
 
 func decompress(compression string, encoded []byte, expectedLength int64) ([]byte, error) {
+	return (&contentDecoder{}).decompress(compression, encoded, expectedLength)
+}
+
+// Like contentEncoder, the decoder belongs to one operation, never a global
+// pool. Reusing it avoids allocating a new flate window for every verified hit.
+type contentDecoder struct {
+	reader       *gzip.Reader
+	verifyBuffer []byte
+}
+
+func (decoder *contentDecoder) decompress(compression string, encoded []byte, expectedLength int64) ([]byte, error) {
 	switch compression {
 	case CompressionNone:
 		return append([]byte(nil), encoded...), nil
 	case CompressionGZIP:
-		reader, err := gzip.NewReader(bytes.NewReader(encoded))
+		var err error
+		if decoder.reader == nil {
+			decoder.reader, err = gzip.NewReader(bytes.NewReader(encoded))
+		} else {
+			err = decoder.reader.Reset(bytes.NewReader(encoded))
+		}
 		if err != nil {
 			return nil, err
 		}
+		reader := decoder.reader
 		limit := expectedLength + 1
 		if limit <= 0 {
 			limit = 1
@@ -257,4 +282,60 @@ func errorsJoin(values ...error) error {
 		}
 	}
 	return nil
+}
+
+// verify compares a stored stream against the already hashed canonical bytes.
+// This is a complete byte comparison, not a metadata-only cache hit. Reading
+// through EOF also validates gzip's checksum and rejects trailing plaintext.
+func (decoder *contentDecoder) verify(compression string, encoded, expected []byte) error {
+	if compression == CompressionNone {
+		if !bytes.Equal(encoded, expected) {
+			return ErrIntegrity
+		}
+		return nil
+	}
+	if compression != CompressionGZIP {
+		return ErrIntegrity
+	}
+	var err error
+	if decoder.reader == nil {
+		decoder.reader, err = gzip.NewReader(bytes.NewReader(encoded))
+	} else {
+		err = decoder.reader.Reset(bytes.NewReader(encoded))
+	}
+	if err != nil {
+		return ErrIntegrity
+	}
+	if decoder.verifyBuffer == nil {
+		decoder.verifyBuffer = make([]byte, 32*1024)
+	}
+	defer clear(decoder.verifyBuffer)
+	offset := 0
+	for {
+		n, readErr := decoder.reader.Read(decoder.verifyBuffer)
+		if n > len(expected)-offset || !bytes.Equal(decoder.verifyBuffer[:n], expected[offset:offset+n]) {
+			_ = decoder.reader.Close()
+			return ErrIntegrity
+		}
+		offset += n
+		if readErr != nil {
+			closeErr := decoder.reader.Close()
+			if readErr != io.EOF || closeErr != nil || offset != len(expected) {
+				return ErrIntegrity
+			}
+			return nil
+		}
+	}
+}
+
+func verifyStoredEncoding(cipher security.Cipher, decoder *contentDecoder, aad []byte, data []byte, compression string, encodedLength int64, expected []byte) error {
+	encoded, err := cipher.Decrypt(aad, data)
+	if err != nil {
+		return ErrIntegrity
+	}
+	defer clear(encoded)
+	if encodedLength < 0 || (encodedLength > 0 && int64(len(encoded)) != encodedLength) {
+		return ErrIntegrity
+	}
+	return decoder.verify(compression, encoded, expected)
 }
