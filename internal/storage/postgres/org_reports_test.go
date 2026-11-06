@@ -54,7 +54,7 @@ func TestMigrationTwoAppliesOnceAndRuntimeOnly(t *testing.T) {
 		versions = append(versions, version)
 	}
 	rows.Close()
-	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
+	if len(versions) != 3 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 {
 		t.Fatalf("versions = %v", versions)
 	}
 	if err := store.Close(); err != nil {
@@ -62,7 +62,7 @@ func TestMigrationTwoAppliesOnceAndRuntimeOnly(t *testing.T) {
 	}
 	reopened, err := Open(context.Background(), dsn)
 	if err != nil {
-		t.Fatalf("reopen at version 2: %v", err)
+		t.Fatalf("reopen at version 3: %v", err)
 	}
 	reopened.Close()
 

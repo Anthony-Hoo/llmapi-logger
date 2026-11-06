@@ -240,7 +240,7 @@ func TestDerivedMigrationsApplyOnceAndToleratePriorVersions(t *testing.T) {
 		versions = append(versions, version)
 	}
 	rows.Close()
-	if len(versions) != 2 || versions[0] != 1 || versions[1] != 3 {
+	if len(versions) != 3 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 {
 		t.Fatalf("versions = %v", versions)
 	}
 	if err := store.Close(); err != nil {
