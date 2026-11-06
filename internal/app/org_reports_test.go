@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -31,5 +32,23 @@ func TestOrgReportsAreUnassembledWhenDisabled(t *testing.T) {
 	application.adminServer.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("disabled org route status = %d, want 404", response.Code)
+	}
+}
+
+func TestEnabledOrgReportsRefuseAStoreWithoutOrgSupport(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	configuration := insightsTestConfig(t, upstream.URL, true, "")
+	configuration.NewAPI.AccessToken = "placeholder-token"
+	configuration.NewAPI.UserID = 1
+	configuration.OrgReports.Enabled = true
+	application, err := newSQLiteTest(configuration, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if application != nil {
+		_ = application.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "org reports") {
+		t.Fatalf("New with the legacy test store = %v, want an org reports error", err)
 	}
 }

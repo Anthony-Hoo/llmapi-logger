@@ -6,6 +6,12 @@
 clients:
   codex:
     priority: 10
+    # Project identity for org reports (doc 23): the body copy is canonical,
+    # the header a compatibility projection.
+    project_body_paths:
+      - {path: client_metadata.x-codex-turn-metadata, kind: codex_turn_metadata}
+    project_headers:
+      - {header: x-codex-turn-metadata, kind: codex_turn_metadata}
     detect:
       user_agent_prefixes: ["codex_cli_rs/"]
       headers_present: [originator, x-codex-parent-thread-id, x-openai-subagent]
@@ -45,6 +51,8 @@ clients:
 
   opencode:
     priority: 30
+    project_headers:
+      - {header: x-opencode-project, kind: opencode_project}
     detect:
       user_agent_prefixes: ["opencode/"]
       headers_present: [x-opencode-client, x-opencode-session-id]
@@ -53,6 +61,8 @@ clients:
 
   dsh:
     priority: 40
+    project_body_paths:
+      - {path: dsh_session_log.session.cwd, kind: cwd}
     detect:
       user_agent_prefixes: ["deepseek-harness/"]
       headers_present: [x-deepseek-harness-session-id]
@@ -175,3 +185,34 @@ file_ops:
     bash: {op: shell}
     shell: {op: shell}
     exec_command: {op: shell}
+
+# Project identity signals read from every request, whatever its client
+# (doc/features/23-org-project-reports.md section 5.1). Only the optional
+# organisation reports read them. Text patterns run over system, developer and
+# user text of the first and last messages; the first non-empty capture group
+# is the value and a later match replaces an earlier one (environment update).
+project:
+  headers:
+    - {header: x-agent-project, kind: declared}
+  text_patterns:
+    # Codex <environment_context> and pi >= 0.86 system prompt.
+    - kind: cwd
+      pattern: '(?s)<cwd>\s*([^<\r\n]+?)\s*</cwd>'
+    # Claude Code and ZCode environment block, including "# Environment
+    # update" lines of the form "<new> (was <old>)".
+    - kind: cwd
+      pattern: '(?m)^[ \t]*-[ \t]*Primary working directory:[ \t]*(\S[^\r\n]*?)(?:[ \t]+\(was [^\r\n]*\))?[ \t]*\r?$'
+    # Claude Code project instructions file in the repository root.
+    - kind: root_file
+      pattern: 'Contents of ([^\r\n]+?[\\/]CLAUDE\.md) \(project instructions'
+    # OpenCode <env> block (v2 adds the git top level).
+    - kind: root
+      pattern: '(?m)^[ \t]*Workspace root folder:[ \t]*(\S[^\r\n]*?)[ \t]*\r?$'
+    - kind: cwd
+      pattern: '(?m)^[ \t]*Working directory:[ \t]*(\S[^\r\n]*?)[ \t]*\r?$'
+    # pi project instructions file.
+    - kind: root_file
+      pattern: '<project_instructions path="([^"\r\n]+)"'
+    # pi before 0.86 and dsh: quoted (dsh) or bare (pi) path.
+    - kind: cwd
+      pattern: '(?m)Current working directory:[ \t]*(?:"([^"\r\n]+)"|([^"\s][^\r\n]*?))[ \t]*\.?[ \t]*\r?$'

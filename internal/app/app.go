@@ -327,7 +327,10 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	// extractor, no job, no routes (doc/features/23-org-project-reports.md).
 	var orgService web.OrgReports
 	if configuration.OrgReports.Enabled && insightsService != nil {
-		service, err := assembleOrgReports(configuration, logger)
+		service, err := assembleOrgReports(orgAssembly{
+			configuration: configuration, logger: logger, store: runtime.store, cipher: runtime.cipher,
+			vocabulary: vocabulary, fingerprints: runtime.analysisFingerprints, worker: application.parserWorker,
+		})
 		if err != nil {
 			_ = runtime.store.Close()
 			return nil, fmt.Errorf("assemble org reports: %w", err)

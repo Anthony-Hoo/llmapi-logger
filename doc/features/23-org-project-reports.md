@@ -1,6 +1,6 @@
 # 模块 23：组织项目周报与使用合规（开发计划）
 
-> 状态：实现中（M0 已实现）
+> 状态：实现中（M0、M1、M3 已实现）
 > 日期：2026-11-06
 > 依赖：[11 NewAPI 请求身份](11-newapi-request-identity.md)、[20 上下文洞察](20-context-insights.md)、[21 实际计费](21-newapi-billing.md)、[22 关键词规则](22-content-policy.md)
 > 本文记录设计动机与开发拆分；落地后配置、表和 API 按惯例并入 01/04/10，以那里为唯一来源。
@@ -236,3 +236,17 @@ org_reports:
 - service 主体不进排名；异常行有标记和原因。
 - DB/WAL 中没有明文 remote URL、仓库路径或 cwd；派生表变化不改变任何完整性摘要。
 - developer 会话看不到他人数据；所有 org 端点都返回 `no-store`。
+
+## 13. 实现记录与偏差
+
+本节记录落地时与上文计划不同或补充的地方；配置、表和 API 的最终定义分别见 [01](01-configuration-and-route-boundary.md)、[04](04-sqlite-storage-and-migrations.md) §3.5、[10](10-query-api-and-minimal-web-ui.md)。
+
+### 13.1 M1 项目标识
+
+- **词表**：每个客户端新增 `project_headers`、`project_body_paths`、`project_text_patterns`（元素分别为 `{header, kind}`、`{path, kind}`、`{kind, pattern}`），另有顶层 `project: {headers, body_paths, text_patterns}` 对**所有**请求生效（包括 `unknown` 客户端）。这样 pi、ZCode 在默认词表还没有它们的客户端条目时也能按 cwd 识别；Claude Code/ZCode、OpenCode、pi、dsh、Codex `<cwd>` 的文本模式都放在共享列表里。`kind` 取值：`declared`、`codex_turn_metadata`、`opencode_project`、`remote`、`root`、`root_file`（捕获的是文件路径，取其目录）、`cwd`。覆盖文件里的列表整体替换默认列表。
+- **Header 白名单**：`Vocabulary.HeaderAllowlist()` 不变；新增 `ProjectHeaderAllowlist()`，只有开启 `org_reports` 时才并入 parser 的解密白名单。`audit_analysis` 的结果因此与关闭时逐字节一致，`AnalysisVersion` 未提升；提取器有自己的 `ProjectIdentityVersion`（当前 1）。
+- **优先级**：客户端自身的条目先于共享条目；请求体路径先于 Header（Codex 的 Header 只在请求体没有 `workspaces` 时作为回退）；文本模式最后执行，只补空缺字段，同一请求内后出现的匹配覆盖先出现的（环境更新）。只扫描前 8 条与后 8 条消息里的 system/developer/user 文本（含注入块），**从不扫描工具结果、工具调用和 assistant 文本**，避免工具输出里的路径被误认成 cwd。
+- **`source` 取值**比计划多了 `declared` 与 `root`：`declared` > `codex_turn_metadata`（remote）> `agent_header`（OpenCode 哈希）> `root` > `cwd` > `none`。另加 `body_scanned` 列，标记该行是否读过请求体（回填时 Header 已有强信号就不读请求体）。
+- **OpenCode 哈希**：解密后的身份里保存 Header 原值（40 位十六进制，`global` 等值丢弃）；规则编译时对字面量 `repo_url` 预先计算 `sha1("git-remote:" + host/org/repo)` 比对。OpenCode 自己对 origin 的规范化方式是否与本项目一致仍待真实请求核对（§11）。
+- **回填**：parser worker 每个扫描周期（30 秒）在 insights 回填之后执行，按 `started_at_ns` **倒序**、每次最多 50 条，让本周和上周先补齐。先只解密白名单 Header；Header 没有 remote、项目哈希或声明名时才读请求体：raw 仍在则直接读，OpenAI 的 metadata 记录走已验证的重建，Anthropic/Gemini 的 raw 已释放则只保存 Header 结果。
+- **迁移**：`002_org_reports.sql` 只在运行时 `migrate()` 中执行，离线导入器的基线仍是 001（见 04 §3.5）。副作用：已被新版代理打开过的空库会多出 org 表，不能再作为离线导入目标；导入应在首次启动前完成。

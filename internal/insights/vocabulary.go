@@ -49,6 +49,54 @@ type Vocabulary struct {
 	SideRequests []SideRequestRule `yaml:"side_requests"`
 	// FileOps drives file-activity extraction from response tool calls.
 	FileOps FileOpRules `yaml:"file_ops"`
+	// Project holds the project-identity signals read from every request,
+	// whatever its client (doc/features/23-org-project-reports.md 5.1). Only
+	// the optional organisation reports read it.
+	Project ProjectSignals `yaml:"project"`
+}
+
+// ProjectSignals lists where a request reveals its project. The same three
+// lists exist per client as project_headers, project_body_paths and
+// project_text_patterns; a client's own entries are tried before these.
+type ProjectSignals struct {
+	Headers      []ProjectHeader      `yaml:"headers"`
+	BodyPaths    []ProjectBodyPath    `yaml:"body_paths"`
+	TextPatterns []ProjectTextPattern `yaml:"text_patterns"`
+}
+
+// ProjectHeader reads one request header as a project signal of Kind.
+type ProjectHeader struct {
+	Header string `yaml:"header"`
+	Kind   string `yaml:"kind"`
+}
+
+// ProjectBodyPath reads a dot-separated request-body JSON path.
+type ProjectBodyPath struct {
+	Path string `yaml:"path"`
+	Kind string `yaml:"kind"`
+}
+
+// ProjectTextPattern is an RE2 expression run over system, developer and user
+// text; the first non-empty capture group is the value.
+type ProjectTextPattern struct {
+	Kind    string `yaml:"kind"`
+	Pattern string `yaml:"pattern"`
+}
+
+// Project signal kinds.
+const (
+	ProjectKindDeclared          = "declared"            // explicit project name
+	ProjectKindCodexTurnMetadata = "codex_turn_metadata" // JSON (or JSON string) with workspaces
+	ProjectKindOpenCodeProject   = "opencode_project"    // sha1 project hash
+	ProjectKindRemote            = "remote"              // git remote URL
+	ProjectKindRoot              = "root"                // repository root directory
+	ProjectKindRootFile          = "root_file"           // a file whose directory is the root
+	ProjectKindCwd               = "cwd"                 // working directory
+)
+
+var knownProjectKinds = map[string]bool{
+	ProjectKindDeclared: true, ProjectKindCodexTurnMetadata: true, ProjectKindOpenCodeProject: true,
+	ProjectKindRemote: true, ProjectKindRoot: true, ProjectKindRootFile: true, ProjectKindCwd: true,
 }
 
 // ClientRule describes how to detect one client and read its agent identity
@@ -82,6 +130,10 @@ type ClientRule struct {
 	ParentFallback string `yaml:"parent_fallback"`
 	// RoleHeaders map request-class header values to roles, in order.
 	RoleHeaders []RoleHeader `yaml:"role_headers"`
+	// Project signals specific to this client (see Vocabulary.Project).
+	ProjectHeaders      []ProjectHeader      `yaml:"project_headers"`
+	ProjectBodyPaths    []ProjectBodyPath    `yaml:"project_body_paths"`
+	ProjectTextPatterns []ProjectTextPattern `yaml:"project_text_patterns"`
 }
 
 // ClientDetect lists the signals that identify a client. Any one matching
@@ -259,6 +311,15 @@ func (vocab *Vocabulary) merge(override *Vocabulary) {
 	for name, tool := range other.Tools {
 		rules.Tools[name] = tool
 	}
+	if override.Project.Headers != nil {
+		vocab.Project.Headers = override.Project.Headers
+	}
+	if override.Project.BodyPaths != nil {
+		vocab.Project.BodyPaths = override.Project.BodyPaths
+	}
+	if override.Project.TextPatterns != nil {
+		vocab.Project.TextPatterns = override.Project.TextPatterns
+	}
 }
 
 func mergeClient(base, override ClientRule) ClientRule {
@@ -293,6 +354,15 @@ func mergeClient(base, override ClientRule) ClientRule {
 	}
 	if override.RoleHeaders != nil {
 		base.RoleHeaders = override.RoleHeaders
+	}
+	if override.ProjectHeaders != nil {
+		base.ProjectHeaders = override.ProjectHeaders
+	}
+	if override.ProjectBodyPaths != nil {
+		base.ProjectBodyPaths = override.ProjectBodyPaths
+	}
+	if override.ProjectTextPatterns != nil {
+		base.ProjectTextPatterns = override.ProjectTextPatterns
 	}
 	return base
 }
@@ -351,6 +421,8 @@ func (vocab *Vocabulary) normalize() error {
 			}
 			rule.RoleHeaders = roleHeaders
 		}
+		rule.ProjectHeaders, rule.ProjectBodyPaths, rule.ProjectTextPatterns = normalizeProjectLists(
+			rule.ProjectHeaders, rule.ProjectBodyPaths, rule.ProjectTextPatterns)
 		clients[trimmed] = rule
 	}
 	vocab.Clients = clients
@@ -375,6 +447,8 @@ func (vocab *Vocabulary) normalize() error {
 	for index := range vocab.SideRequests {
 		vocab.SideRequests[index].Role = strings.TrimSpace(vocab.SideRequests[index].Role)
 	}
+	vocab.Project.Headers, vocab.Project.BodyPaths, vocab.Project.TextPatterns = normalizeProjectLists(
+		vocab.Project.Headers, vocab.Project.BodyPaths, vocab.Project.TextPatterns)
 	return nil
 }
 
@@ -445,6 +519,9 @@ func (vocab *Vocabulary) validate() error {
 		); err != nil {
 			return err
 		}
+		if err := validateProjectLists(owner, rule.ProjectHeaders, rule.ProjectBodyPaths, rule.ProjectTextPatterns); err != nil {
+			return err
+		}
 		for header := range rule.Detect.HeadersEqual {
 			if !validHeaderName(header) {
 				return fmt.Errorf("%s: detect.headers_equal has invalid header name %q", owner, header)
@@ -478,6 +555,9 @@ func (vocab *Vocabulary) validate() error {
 				}
 			}
 		}
+	}
+	if err := validateProjectLists("project", vocab.Project.Headers, vocab.Project.BodyPaths, vocab.Project.TextPatterns); err != nil {
+		return err
 	}
 	for _, marker := range vocab.InjectionMarkers {
 		if strings.TrimSpace(marker) == "" {

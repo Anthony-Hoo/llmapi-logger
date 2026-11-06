@@ -25,12 +25,52 @@ func migrate(ctx context.Context, conn *sql.Conn) error {
 	if err := InitializeImportSchema(ctx, tx); err != nil {
 		return err
 	}
+	if err := applyRuntimeMigrations(ctx, tx); err != nil {
+		return err
+	}
 	if fresh {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO user_agent_rules(id,name,enabled,model_pattern,user_agent_pattern,created_at_ns,updated_at_ns) VALUES(1,'GPT models require Codex clients',1,'^gpt','^(codex-tui|Codex Desktop)',$1,$1)`, time.Now().UnixNano()); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// latestSchemaVersion is the newest embedded migration. The offline importer
+// builds the version-1 baseline only (its target must hold exactly the
+// imported tables); the runtime migrations below run when the proxy opens the
+// database.
+const latestSchemaVersion = 2
+
+// runtimeMigrations are applied in order after the baseline, each once.
+var runtimeMigrations = []struct {
+	version int
+	file    string
+}{
+	{version: 2, file: "migrations/002_org_reports.sql"},
+}
+
+func applyRuntimeMigrations(ctx context.Context, tx *sql.Tx) error {
+	var version int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		return err
+	}
+	for _, migration := range runtimeMigrations {
+		if migration.version <= version {
+			continue
+		}
+		body, err := migrationFiles.ReadFile(migration.file)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
+			return fmt.Errorf("postgres: apply migration %d: %w", migration.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at_ns) VALUES ($1, $2)`, migration.version, time.Now().UnixNano()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // InitializeImportSchema applies the schema inside the caller's transaction.
@@ -46,7 +86,7 @@ func InitializeImportSchema(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > latestSchemaVersion {
 		return errors.New("postgres: schema is newer than supported")
 	}
 	if version == 0 {
