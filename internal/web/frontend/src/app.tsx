@@ -35,6 +35,9 @@ import { ContentPolicyPanel } from "./components/content-policy-panel";
 import { ConversationView } from "./components/conversation-view";
 // Recharts is only needed by the insights charts, so keep it out of the main chunk.
 const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
+const SessionAnalysisView = lazy(() =>
+  import("./components/session-analysis/analysis-view").then((module) => ({ default: module.SessionAnalysisView })),
+);
 import { CompositionSection } from "./components/insights/composition-section";
 import { buildConversationExport } from "./lib/conversation-export";
 import { errorMessage, isAbortError } from "./lib/errors";
@@ -312,7 +315,8 @@ function Dashboard({
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
   const hasInsights = insightsEnabled(session);
-  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights">("audits");
+  const hasSessionAnalysis = session?.session_analysis_enabled === true;
+  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights" | "analysis">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -484,6 +488,11 @@ function Dashboard({
                   用量洞察
                 </button>
               ) : null}
+              {hasSessionAnalysis ? (
+                <button type="button" className={segmentedItemClassName(view === "analysis")} aria-current={view === "analysis" ? "page" : undefined} onClick={() => setView("analysis")}>
+                  会话分析
+                </button>
+              ) : null}
               {isDeveloper ? null : (
                 <button type="button" className={segmentedItemClassName(view === "rules")} aria-current={view === "rules" ? "page" : undefined} onClick={() => setView("rules")}>
                   UA 拦截规则
@@ -511,6 +520,10 @@ function Dashboard({
           <UserAgentRulesPanel client={client} />
         ) : view === "content-policy" && !isDeveloper ? (
           <ContentPolicyPanel client={client} />
+        ) : view === "analysis" && hasSessionAnalysis ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <SessionAnalysisView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey} />
+          </Suspense>
         ) : view === "insights" && hasInsights ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <InsightsView

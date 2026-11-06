@@ -1,0 +1,254 @@
+package postgres
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"errors"
+	"testing"
+	"time"
+
+	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
+)
+
+func testSignals(key []byte, apiKey []byte, lastAuditID string, lastNS int64) storage.SessionSignals {
+	cost := 1.25
+	userID, tokenID := int64(8), int64(1)
+	return storage.SessionSignals{
+		SessionKey: key, Kind: "agent", APIKeyFPR: apiKey, NewAPIUserID: &userID, NewAPITokenID: &tokenID,
+		Client: "codex", MainSessionID: "agt_example", MainModel: "model-example",
+		FirstNS: lastNS - int64(time.Minute), LastNS: lastNS, LastAuditID: lastAuditID,
+		Requests: 3, MainRequests: 2, SubRequests: 1, Subagents: 1, MaxDepth: 1, UserTurns: 2,
+		ActiveNS: int64(time.Minute), InputTokens: 1000, OutputTokens: 100, CacheReadTokens: 900, CostUSD: &cost,
+		ToolCalls: 5, ToolFailures: 2, MaxFailureStreak: 2, Loops: 1, MaxLoopLength: 3,
+		Verified: "no", Corrections: 1, DangerCounts: `{"force_push":1}`, SecretCounts: "{}",
+		Eligible: true, SignalVersion: 1, ComputedAtNS: lastNS + 1,
+	}
+}
+
+func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	// A locally rejected request in root A must never reach the batch.
+	seedInsights(t, store, insightsSeed{id: "a-rejected", at: day.Add(5 * time.Second), key: keyA, root: rootA, node: node1})
+	if _, err := store.writerConn.ExecContext(ctx, `UPDATE audit_records SET forward_status = 'rejected', blocked_by = 'content_policy', block_code = 'content_policy_blocked', parse_status = 'skipped', status_code = 400 WHERE audit_id = 'a-rejected'`); err != nil {
+		t.Fatal(err)
+	}
+
+	since, quiet := day.Add(-time.Hour).UnixNano(), day.Add(time.Hour).UnixNano()
+	candidates, err := store.ListSessionCandidates(ctx, since, quiet, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := map[string]storage.SessionCandidate{}
+	for _, candidate := range candidates {
+		roots[string(candidate.SessionKey)] = candidate
+	}
+	if _, ok := roots[string(rootA)]; !ok {
+		t.Fatalf("root A not a candidate: %d candidates", len(candidates))
+	}
+	// Still-active roots are not due yet.
+	if early, err := store.ListSessionCandidates(ctx, since, day.UnixNano(), 1, 10); err != nil || len(early) != 0 {
+		t.Fatalf("active roots listed: %d, %v", len(early), err)
+	}
+
+	rows, truncated, err := store.LoadSessionAudits(ctx, rootA)
+	if err != nil || truncated {
+		t.Fatalf("load: %v truncated=%v", err, truncated)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.AuditID)
+	}
+	if len(rows) != 5 || ids[0] != "a1" || ids[1] != "a2" || ids[2] != "b1" || ids[4] != "c2" {
+		t.Fatalf("rows = %v", ids)
+	}
+	if rows[0].NewAPITokenID == nil || *rows[0].NewAPITokenID != 1 || !rows[0].TurnStart || rows[2].AgentRole != "subagent" || rows[4].AgentRole != "compaction" {
+		t.Fatalf("row projection: %+v", rows[0])
+	}
+
+	lastNS := rows[len(rows)-1].StartedAtNS
+	signals := testSignals(rootA, keyA, "c2", lastNS)
+	fprs := []storage.SessionTextFPR{
+		{Source: storage.TextSourceUser, FPR: fill(0x51), APIKeyFPR: keyA, SeenAtNS: lastNS},
+		{Source: storage.TextSourceInjectedRules, FPR: fill(0x52), APIKeyFPR: keyA, SeenAtNS: 1},
+	}
+	if err := store.SaveSessionSignals(ctx, signals, fprs); err != nil {
+		t.Fatal(err)
+	}
+	// Saving twice replaces, never duplicates.
+	if err := store.SaveSessionSignals(ctx, signals, fprs); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := store.ListSessionCandidates(ctx, since, quiet, 1, 10); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, candidate := range again {
+			if bytes.Equal(candidate.SessionKey, rootA) {
+				t.Fatal("analysed root listed again")
+			}
+		}
+	}
+	if stale, err := store.ListSessionCandidates(ctx, since, quiet, 2, 10); err != nil || len(stale) == 0 {
+		t.Fatalf("older signal version not recomputed: %d %v", len(stale), err)
+	}
+
+	window := storage.SessionSignalFilter{FromNS: day.Add(-time.Hour).UnixNano(), ToNS: day.Add(time.Hour).UnixNano()}
+	page, err := store.ListSessionSignals(ctx, window, storage.SessionSignalCursor{}, 10)
+	if err != nil || len(page.Rows) != 1 {
+		t.Fatalf("admin list = %d, %v", len(page.Rows), err)
+	}
+	got := page.Rows[0]
+	if got.Loops != 1 || got.Verified != "no" || got.CostUSD == nil || *got.CostUSD != 1.25 || got.DangerCounts != `{"force_push":1}` {
+		t.Fatalf("round trip: %+v", got)
+	}
+	owner := window
+	owner.Scope = &storage.AuditScope{Fingerprint: keyA}
+	if page, err := store.ListSessionSignals(ctx, owner, storage.SessionSignalCursor{}, 10); err != nil || len(page.Rows) != 1 {
+		t.Fatalf("owner list = %d, %v", len(page.Rows), err)
+	}
+	stranger := window
+	stranger.Scope = &storage.AuditScope{Fingerprint: keyB}
+	if page, err := store.ListSessionSignals(ctx, stranger, storage.SessionSignalCursor{}, 10); err != nil || len(page.Rows) != 0 {
+		t.Fatalf("stranger list = %d, %v", len(page.Rows), err)
+	}
+	tokenID := int64(1)
+	byToken := window
+	byToken.Scope = &storage.AuditScope{Fingerprint: keyB, TokenID: &tokenID}
+	if page, err := store.ListSessionSignals(ctx, byToken, storage.SessionSignalCursor{}, 10); err != nil || len(page.Rows) != 1 {
+		t.Fatalf("token-scoped list = %d, %v", len(page.Rows), err)
+	}
+	flagged := window
+	flagged.Flags = []string{"loop", "unverified", "danger"}
+	if page, err := store.ListSessionSignals(ctx, flagged, storage.SessionSignalCursor{}, 10); err != nil || len(page.Rows) != 1 {
+		t.Fatalf("flag filter = %d, %v", len(page.Rows), err)
+	}
+	flagged.Flags = []string{"secret"}
+	if page, err := store.ListSessionSignals(ctx, flagged, storage.SessionSignalCursor{}, 10); err != nil || len(page.Rows) != 0 {
+		t.Fatalf("secret filter = %d, %v", len(page.Rows), err)
+	}
+	flagged.Flags = []string{"nonsense"}
+	if _, err := store.ListSessionSignals(ctx, flagged, storage.SessionSignalCursor{}, 10); err == nil {
+		t.Fatal("unknown flag accepted")
+	}
+
+	totals, err := store.SessionSignalTotals(ctx, window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals.Sessions != 1 || totals.LoopSessions != 1 || totals.Unverified != 1 || totals.WithWrites != 1 ||
+		totals.DangerSessions != 1 || totals.SecretSessions != 0 || totals.CostUSD != 1.25 || totals.BilledSessions != 1 {
+		t.Fatalf("totals = %+v", totals)
+	}
+
+	if err := store.RecordSessionAnalysisRun(ctx, storage.SessionAnalysisRun{StartedAtNS: 10, FinishedAtNS: 20, Trigger: "manual", Candidates: 2, Analyzed: 1}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.LatestSessionAnalysisRun(ctx)
+	if err != nil || run.Trigger != "manual" || run.Analyzed != 1 || run.SkipReasons != "{}" {
+		t.Fatalf("run = %+v, %v", run, err)
+	}
+
+	// Retention removed the session's newest audit: the next prune drops the
+	// row; fingerprints older than the cutoff go too.
+	removed, err := store.PruneSessionAnalysis(ctx, 2)
+	if err != nil || removed != 0 {
+		t.Fatalf("prune with live audit = %d, %v", removed, err)
+	}
+	var fprCount int
+	if err := store.readerDB.QueryRow(`SELECT count(*) FROM session_text_fprs`).Scan(&fprCount); err != nil || fprCount != 1 {
+		t.Fatalf("fingerprints after cutoff = %d, %v", fprCount, err)
+	}
+	if _, err := store.writerConn.ExecContext(ctx, `UPDATE session_signals SET last_audit_id = 'expired-audit'`); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := store.PruneSessionAnalysis(ctx, 2); err != nil || removed != 1 {
+		t.Fatalf("prune = %d, %v", removed, err)
+	}
+}
+
+func TestSessionAnalysisRunsWithoutRunsReturnNoRows(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	if _, err := store.LatestSessionAnalysisRun(context.Background()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSessionSignalsStayOutsideTheEvidenceChain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	key := bytes.Repeat([]byte{0x74}, security.KeySize)
+	path := newTestDSN(t)
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnableIntegrity(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	const auditID = "audit-session-chain"
+	user := graphItem("user_message", map[string]any{"role": "user", "content": "question"})
+	assistant := graphItem("assistant_message", map[string]any{"role": "assistant", "content": "answer"})
+	saveIntegrityChainTurn(t, store, graphTestCipher(t), auditID, "", "response-session", 100,
+		[]graphTestItem{user}, []graphTestItem{assistant})
+	before := readEvidenceDigests(t, store, auditID)
+	signals := testSignals(fill(0x61), scopeFingerprint(0x07), auditID, 100)
+	if err := store.SaveSessionSignals(ctx, signals, []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: fill(0x62), SeenAtNS: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordSessionAnalysisRun(ctx, storage.SessionAnalysisRun{StartedAtNS: 1, FinishedAtNS: 2, Trigger: "schedule"}); err != nil {
+		t.Fatal(err)
+	}
+	after := readEvidenceDigests(t, store, auditID)
+	if !bytes.Equal(before.capture, after.capture) || !bytes.Equal(before.parsed, after.parsed) || !bytes.Equal(before.semantic, after.semantic) {
+		t.Fatal("session signals changed an evidence digest")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.EnableIntegrity(ctx, key); err != nil {
+		t.Fatalf("integrity chain rejected after session analysis writes: %v", err)
+	}
+	if err := reopened.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatalf("payload verification failed: %v", err)
+	}
+}
+
+func TestDerivedMigrationsApplyOnceAndToleratePriorVersions(t *testing.T) {
+	t.Parallel()
+	store, path := openTestStore(t)
+	var versions []int64
+	rows, err := store.readerDB.Query(`SELECT version FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var version int64
+		if err := rows.Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, version)
+	}
+	rows.Close()
+	if len(versions) != 2 || versions[0] != 1 || versions[1] != 3 {
+		t.Fatalf("versions = %v", versions)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Reopening is idempotent.
+	reopened, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.Close()
+}

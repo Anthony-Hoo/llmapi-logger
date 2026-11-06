@@ -153,6 +153,20 @@ side_requests:
   - role: compaction
     system_prefixes: ["You are a context summarization assistant."]
 
+# User-role text parts that a client injected rather than a person typed
+# (doc/features/24-session-analysis.md section 6.3). Leading whitespace is
+# trimmed and the first 64 characters are compared case-insensitively. The
+# conversation view's user-input outline uses the same list; keep them equal.
+user_input_exclude_prefixes:
+  - "<environment_context"
+  - "<user_instructions"
+  - "<system-reminder"
+  - "<permissions"
+  - "<skill"
+  - "<user-prompt-submit-hook"
+  - "<turn_aborted"
+  - "# agents.md"
+
 file_ops:
   path_keys: [file_path, filePath, path, notebook_path]
   old_keys: [old_string, old_str]

@@ -29,6 +29,7 @@ type Config struct {
 	ShutdownTimeoutSeconds int                          `yaml:"shutdown_timeout_seconds"`
 	RetentionDays          int                          `yaml:"retention_days"`
 	Insights               InsightsConfig               `yaml:"insights"`
+	SessionAnalysis        SessionAnalysisConfig        `yaml:"session_analysis"`
 	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
 	Routes                 []RouteConfig                `yaml:"routes"`
 }
@@ -102,6 +103,7 @@ func Default() Config {
 		ShutdownTimeoutSeconds: DefaultShutdownTimeoutSecs,
 		RetentionDays:          DefaultRetentionDays,
 		Insights:               InsightsConfig{Enabled: true},
+		SessionAnalysis:        defaultSessionAnalysis(),
 		Interceptors:           make(map[string]InterceptorConfig),
 		Routes:                 make([]RouteConfig, 0),
 	}

@@ -95,6 +95,9 @@ type Options struct {
 	Assets    fs.FS
 	Readiness func(context.Context) ReadyStatus
 	Logger    *slog.Logger
+
+	// SessionAnalysis is nil unless session_analysis.enabled.
+	SessionAnalysis SessionAnalysisQuery
 }
 
 // NewHandler constructs the complete management handler. It rejects an empty
@@ -118,6 +121,8 @@ func NewHandler(options Options) (http.Handler, error) {
 		static:    newStaticHandler(options.Assets),
 		logins:    newLoginLimiter(),
 		logger:    options.Logger,
+
+		sessionAnalysis: options.SessionAnalysis,
 	}
 	handler.authenticator = newManagementAuth(options.AdminToken, options.Developer.usable())
 	handler.auth = handler.authenticator.middleware(handler.serveProtected)
@@ -137,6 +142,8 @@ type managementHandler struct {
 	authenticator *managementAuth
 	logins        *loginLimiter
 	logger        *slog.Logger
+
+	sessionAnalysis SessionAnalysisQuery
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -179,6 +186,8 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveAuditResource(writer, request)
 	case strings.HasPrefix(request.URL.Path, insightsPathPrefix):
 		handler.serveInsights(writer, request)
+	case strings.HasPrefix(request.URL.Path, sessionAnalysisPathPrefix):
+		handler.serveSessionAnalysis(writer, request)
 	case !handler.requireAdmin(writer, request):
 		return
 	case request.URL.Path == "/healthz":

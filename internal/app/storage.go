@@ -9,6 +9,7 @@ import (
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/retention"
+	"llmapi-logger/internal/sessionanalysis"
 	"llmapi-logger/internal/storage/postgres"
 	"llmapi-logger/internal/uaguard"
 	"log/slog"
@@ -24,6 +25,8 @@ type runtimeStore interface {
 	query.InsightsStore
 	insights.RunnerStore
 	retention.Store
+	sessionanalysis.Store
+	sessionanalysis.QueryStore
 	contentpolicy.Repository
 	uaguard.Repository
 	Close() error

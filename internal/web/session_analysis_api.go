@@ -1,0 +1,128 @@
+package web
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+
+	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/sessionanalysis"
+)
+
+// SessionAnalysisQuery is the session analysis surface
+// (doc/features/24-session-analysis.md). Nil makes every route 404.
+type SessionAnalysisQuery interface {
+	Overview(context.Context, int64, int64, *query.Scope) (sessionanalysis.OverviewResponse, error)
+	Sessions(context.Context, sessionanalysis.SessionsQuery) (sessionanalysis.SessionsResponse, error)
+	TriggerRun() error
+}
+
+const sessionAnalysisPathPrefix = "/api/v1/session-analysis/"
+
+// serveSessionAnalysis is reachable by administrators and developers; reads
+// are built from the caller's scope, and only the run trigger is
+// administrator-only.
+func (handler *managementHandler) serveSessionAnalysis(writer http.ResponseWriter, request *http.Request) {
+	if handler.sessionAnalysis == nil {
+		writeError(writer, http.StatusNotFound, "not_found", "session analysis is not enabled")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(request.URL.Path, sessionAnalysisPathPrefix), "/")
+	switch {
+	case len(parts) == 1 && parts[0] == "overview":
+		handler.serveSessionAnalysisOverview(writer, request)
+	case len(parts) == 1 && parts[0] == "sessions":
+		handler.serveSessionAnalysisSessions(writer, request)
+	case len(parts) == 1 && parts[0] == "run":
+		handler.serveSessionAnalysisRun(writer, request)
+	default:
+		http.NotFound(writer, request)
+	}
+}
+
+func (handler *managementHandler) serveSessionAnalysisOverview(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	values := request.URL.Query()
+	if err := parseInsightsValues(values, "from_ns", "to_ns"); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	fromNS, fromErr := optionalInt64(values, "from_ns")
+	toNS, toErr := optionalInt64(values, "to_ns")
+	if fromErr != nil || toErr != nil || fromNS == nil || toNS == nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	response, err := handler.sessionAnalysis.Overview(ctx, *fromNS, *toNS, handler.sessionScope(request))
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (handler *managementHandler) serveSessionAnalysisSessions(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	values := request.URL.Query()
+	if err := parseInsightsValues(values, "from_ns", "to_ns", "kind", "flags", "cursor", "limit"); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	fromNS, fromErr := optionalInt64(values, "from_ns")
+	toNS, toErr := optionalInt64(values, "to_ns")
+	limit, limitErr := optionalInt(values, "limit")
+	if fromErr != nil || toErr != nil || limitErr != nil || fromNS == nil || toNS == nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	sessionsQuery := sessionanalysis.SessionsQuery{
+		FromNS: *fromNS, ToNS: *toNS, Kind: values.Get("kind"), Cursor: values.Get("cursor"),
+		Scope: handler.sessionScope(request),
+	}
+	if flags := values.Get("flags"); flags != "" {
+		sessionsQuery.Flags = strings.Split(flags, ",")
+	}
+	if limit != nil {
+		if *limit == 0 {
+			writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+			return
+		}
+		sessionsQuery.Limit = *limit
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	response, err := handler.sessionAnalysis.Sessions(ctx, sessionsQuery)
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (handler *managementHandler) serveSessionAnalysisRun(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer, http.MethodPost)
+		return
+	}
+	if !handler.requireAdmin(writer, request) {
+		return
+	}
+	if err := handler.sessionAnalysis.TriggerRun(); err != nil {
+		if errors.Is(err, sessionanalysis.ErrRunInProgress) {
+			writeError(writer, http.StatusConflict, "run_in_progress", "a session analysis run is already in progress")
+			return
+		}
+		writeError(writer, http.StatusServiceUnavailable, "session_analysis_unavailable", "session analysis runner is unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]string{"status": "started"})
+}

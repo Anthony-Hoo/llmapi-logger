@@ -17,6 +17,8 @@ export interface SessionInfo {
   identity?: DeveloperIdentity | null;
   /** False when the server runs without context insights; its routes would 404. */
   insights_enabled?: boolean;
+  /** True when session analysis (doc/features/24-session-analysis.md) is enabled. */
+  session_analysis_enabled?: boolean;
 }
 
 export interface AuditCursor {

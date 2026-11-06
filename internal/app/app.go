@@ -27,6 +27,7 @@ import (
 	"llmapi-logger/internal/retention"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/sessionanalysis"
 	"llmapi-logger/internal/uaguard"
 	"llmapi-logger/internal/web"
 )
@@ -46,6 +47,7 @@ type App struct {
 	userAgentRules  uaguard.RuleSet
 	contentPolicies contentpolicy.RuleSet
 	retention       *retention.Runner
+	sessionRunner   *sessionanalysis.Runner
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
 	auditStore      runtimeStore
@@ -89,7 +91,57 @@ func ValidateConfig(path string) error {
 	if _, _, _, _, err = assembleDataPlane(configuration); err != nil {
 		return err
 	}
-	return validateInsights(configuration.Insights)
+	if err := validateInsights(configuration.Insights); err != nil {
+		return err
+	}
+	if _, err := loadSessionAnalysisVocabulary(configuration.SessionAnalysis); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loadSessionAnalysisVocabulary returns nil when session analysis is disabled,
+// so a disabled deployment never reads the override file.
+func loadSessionAnalysisVocabulary(configuration config.SessionAnalysisConfig) (*sessionanalysis.Vocabulary, error) {
+	if !configuration.Enabled {
+		return nil, nil
+	}
+	vocabulary, err := sessionanalysis.LoadVocabulary(configuration.VocabularyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load session analysis vocabulary: %w", err)
+	}
+	return vocabulary, nil
+}
+
+// assembleSessionAnalysis wires the daily batch and its management API. It
+// returns nils when the feature is off or its prerequisites are unavailable.
+func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
+	analysis := configuration.SessionAnalysis
+	if !analysis.Enabled || store == nil || loader == nil || insightsVocabulary == nil || fingerprints == nil {
+		return nil, nil, nil
+	}
+	vocabulary, err := loadSessionAnalysisVocabulary(analysis)
+	if err != nil {
+		return nil, nil, err
+	}
+	runner, err := sessionanalysis.NewRunner(sessionanalysis.Options{
+		Config:        analysis,
+		RetentionDays: configuration.RetentionDays,
+		Store:         store,
+		Loader:        loader,
+		Vocabulary:    vocabulary,
+		Insights:      insightsVocabulary,
+		Fingerprints:  fingerprints,
+		Logger:        logger,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("assemble session analysis runner: %w", err)
+	}
+	service, err := sessionanalysis.NewQueryService(store, runner, analysis.LLM.Enabled)
+	if err != nil {
+		return nil, nil, fmt.Errorf("assemble session analysis service: %w", err)
+	}
+	return runner, service, nil
 }
 
 // validateInsights loads every insights override so that --validate-config
@@ -321,6 +373,18 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		insightsService = service
 	}
 	// --- end context insights (WP2) ---
+	var sessionAnalysisService web.SessionAnalysisQuery
+	if queryService != nil {
+		runner, service, err := assembleSessionAnalysis(configuration, runtime.store, queryService, vocabulary, runtime.analysisFingerprints, logger)
+		if err != nil {
+			_ = application.closeComponents()
+			return nil, err
+		}
+		application.sessionRunner = runner
+		if service != nil {
+			sessionAnalysisService = service
+		}
+	}
 	if runtime.store != nil && configuration.RetentionDays > 0 {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
 		if err != nil {
@@ -340,6 +404,8 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		Assets:     web.EmbeddedAssets(),
 		Readiness:  application.readiness,
 		Logger:     logger,
+
+		SessionAnalysis: sessionAnalysisService,
 	})
 	if err != nil {
 		_ = application.closeComponents()
@@ -365,6 +431,9 @@ func (application *App) Run(ctx context.Context) error {
 	}
 	if application.retention != nil {
 		application.retention.Start(ctx)
+	}
+	if application.sessionRunner != nil {
+		application.sessionRunner.Start(ctx)
 	}
 
 	if application.parserWorker != nil {
@@ -551,6 +620,9 @@ func (application *App) closeComponents() error {
 	application.closeOnce.Do(func() {
 		if application.retention != nil {
 			application.retention.Close()
+		}
+		if application.sessionRunner != nil {
+			application.sessionRunner.Close()
 		}
 		if application.parserWorker != nil {
 			application.parserWorker.Close()

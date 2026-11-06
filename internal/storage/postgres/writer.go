@@ -44,6 +44,7 @@ const (
 	writeCreateContentPolicyRule
 	writeUpdateContentPolicyRule
 	writeDeleteContentPolicyRule
+	writeDerived
 )
 
 type writeRequest struct {
@@ -493,6 +494,8 @@ WHERE audit_id=$1 AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID)
 		return deleteContentPolicyRule(transaction, request.data.(int64))
 	case writeSaveAnalysis:
 		return saveAnalysis(transaction, request.data.(AnalysisRow))
+	case writeDerived:
+		return request.data.(derivedWrite)(transaction)
 	default:
 		return fmt.Errorf("postgres writer: unknown operation %d", request.kind)
 	}

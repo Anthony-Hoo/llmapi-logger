@@ -25,6 +25,7 @@ import type {
 } from "./types";
 
 import { hasRowFilters } from "./filters";
+import type { AnalysisOverview, AnalysisSessionsPage, AnalysisSessionsQuery } from "./lib/session-analysis/types";
 
 const API_BASE = "/api/v1";
 
@@ -69,6 +70,11 @@ export interface ApiClient {
   getAgentTree: (treeID: string, signal?: AbortSignal) => Promise<TreeResponse>;
   /** Rejects with ApiError(404) while the audit has not been analyzed yet. */
   getComposition: (auditID: string, signal?: AbortSignal) => Promise<CompositionResponse>;
+  // Session analysis (doc/features/24-session-analysis.md).
+  getAnalysisOverview: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisOverview>;
+  listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
+  /** Administrator only; rejects with ApiError(409) while a run is in progress. */
+  triggerAnalysisRun: (signal?: AbortSignal) => Promise<void>;
 }
 
 export function createApiClient(
@@ -350,6 +356,40 @@ export function createApiClient(
         file_ops: result.file_ops ?? [],
         events: result.events ?? [],
       };
+    },
+
+    async getAnalysisOverview(range, signal) {
+      const params = new URLSearchParams({ from_ns: range.from_ns, to_ns: range.to_ns });
+      const result = await requestJSON<AnalysisOverview>(`${API_BASE}/session-analysis/overview?${params}`, signal);
+      if (result.last_run) {
+        result.last_run.skip_reasons = result.last_run.skip_reasons ?? {};
+      }
+      return result;
+    },
+
+    async listAnalysisSessions(query, signal) {
+      const params = new URLSearchParams({ from_ns: query.from_ns, to_ns: query.to_ns, limit: String(query.limit ?? 50) });
+      if (query.kind) {
+        params.set("kind", query.kind);
+      }
+      if (query.flags && query.flags.length > 0) {
+        params.set("flags", query.flags.join(","));
+      }
+      if (query.cursor) {
+        params.set("cursor", query.cursor);
+      }
+      const result = await requestJSON<AnalysisSessionsPage>(`${API_BASE}/session-analysis/sessions?${params}`, signal);
+      return {
+        ...result,
+        items: (result.items ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
+      };
+    },
+
+    async triggerAnalysisRun(signal) {
+      const response = await sessionFetch(`${API_BASE}/session-analysis/run`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
     },
 
     getStreamTimeline(auditID, side, signal) {
