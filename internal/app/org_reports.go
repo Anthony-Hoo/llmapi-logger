@@ -11,6 +11,7 @@ import (
 	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage/postgres"
 )
 
 // orgStore is the persistence the organisation reports need; the PostgreSQL
@@ -21,6 +22,10 @@ type orgStore interface {
 	orgreport.DataStore
 	orgreport.SnapshotStore
 }
+
+// The runtime type assertion in assembleOrgReports is only exercised by an
+// enabled PostgreSQL deployment; pin the contract at compile time.
+var _ orgStore = (*postgres.Store)(nil)
 
 // orgAssembly is what the organisation reports need from the rest of the
 // application. config.Validate already guarantees NewAPI identity and
