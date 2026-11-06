@@ -78,6 +78,14 @@ func (service *QueryService) Facet(ctx context.Context, sessionID string, scope 
 	_ = json.Unmarshal([]byte(facet.Friction), &response.Friction)
 	_ = json.Unmarshal([]byte(facet.Items), &response.Items)
 	_ = json.Unmarshal([]byte(facet.InvalidFields), &response.InvalidFields)
+	if scope == nil {
+		// Work relevance is a compliance conclusion (doc 24 sections 9 and 10):
+		// only the owner sees it until the review role and shadow run exist.
+		response.WorkRelevance = ""
+		for index := range response.Items {
+			response.Items[index].WorkRelevance = ""
+		}
+	}
 	if len(facet.TextEnc) != 0 {
 		aad, err := FacetAAD(facet.SessionKey)
 		if err != nil {

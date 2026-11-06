@@ -206,10 +206,17 @@ func TestFacetReadAndCalibration(t *testing.T) {
 	if response.Goal != "把导出改成流式" || response.TaskType != "refactor" || len(response.Evidence["outcome"]) != 1 || response.Evidence["outcome"][0].AuditID == "" {
 		t.Fatalf("facet = %+v", response)
 	}
+	// The owner sees work relevance; an administrator does not (no review role yet).
+	if response.WorkRelevance != "work" {
+		t.Fatalf("owner work relevance = %q", response.WorkRelevance)
+	}
+	if adminView, err := service.Facet(ctx, id, nil, Viewer{Role: "admin"}); err != nil || adminView.WorkRelevance != "" || adminView.TaskType != "refactor" {
+		t.Fatalf("admin facet = %+v, %v", adminView, err)
+	}
 	if _, err := service.Facet(ctx, id, scopeOf(bytes.Repeat([]byte{9}, 32)), Viewer{Role: "developer"}); err == nil {
 		t.Fatal("foreign developer read the facet")
 	}
-	if len(store.views) != 1 || store.views[0].Resource != "facet" {
+	if len(store.views) != 2 || store.views[0].Resource != "facet" || store.views[1].ViewerRole != "admin" {
 		t.Fatalf("views = %+v", store.views)
 	}
 	labels := make([]CalibrationLabel, 0, 25)

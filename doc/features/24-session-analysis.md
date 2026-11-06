@@ -695,7 +695,7 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 - 固定前缀（规则、字段说明、一个示例）按包类型分两份（会话包、聊天汇总包），同一 `prompt_version`（当前 `facet-v1`）内逐字节不变；输入包放在最后一条 user 消息里。
 - 输出不是 JSON 对象时重试一次，仍失败记为 `invalid` 并缓存，不再重试；调用失败（超时、连接失败、非 200）记为 `failed`，下一轮批处理重试，`attempts` 计数。
 - 聊天汇总包的 `outcome` 固定为 `unclear`，`collaboration` 留空（该枚举没有 unclear）。
-- 会话列表返回 facet 的 `task_type`、`outcome` 明文枚举，便于筛看；`work_relevance` 不进列表，只在打开 facet 时返回（并记查看日志）。
+- 会话列表返回 facet 的 `task_type`、`outcome` 明文枚举，便于筛看；`work_relevance` 不进列表，只在会话本人打开 facet 时返回。管理员读取 facet 时该字段（含汇总包逐题的值）被清空：它属于合规结论，按 §9、§10 要等复核角色和影子运行就绪后才对复核人开放。
 - **校准**：`POST /api/v1/session-analysis/calibration`（仅管理员）接收人工标注 JSON，与当前 `prompt_version` 和模型的 facet 逐字段比对，结果存入 `facet_calibrations`。某字段至少 20 条参与比较且一致率低于 80% 时，在 facet 页面和后续报告中隐藏。页面上提供粘贴 JSON 的表单，没有逐条标注界面。
 - 未完成：§15.5 要求的真实调用次数、Token、耗时和前缀缓存命中率，需要部署后回填。
 
