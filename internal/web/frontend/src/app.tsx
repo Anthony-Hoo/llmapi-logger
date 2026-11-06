@@ -87,6 +87,11 @@ export function insightsEnabled(session: SessionInfo | null): boolean {
   return session?.insights_enabled === true;
 }
 
+/** The organisation report views exist only when the server enables them. */
+export function orgReportsEnabled(session: SessionInfo | null): boolean {
+  return session?.org_reports_enabled === true;
+}
+
 export function App() {
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "anonymous">("checking");
   const [authMessage, setAuthMessage] = useState<string | null>(null);

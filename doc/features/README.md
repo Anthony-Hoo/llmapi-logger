@@ -145,6 +145,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 20 | [上下文分析与用量洞察](20-context-insights.md) |
 | 21 | [NewAPI 实际计费](21-newapi-billing.md) |
 | 22 | [关键词/模型请求拦截与上游策略拒绝识别](22-content-policy.md) |
+| 23 | [组织项目周报与使用合规（计划中）](23-org-project-reports.md) |
 
 ## 10. 当前实现范围
 

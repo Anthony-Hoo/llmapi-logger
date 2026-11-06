@@ -37,6 +37,7 @@ type Worker struct {
 	headerAllowlist []string
 	analyzer        AuditAnalyzer
 	reconstructor   Reconstructor
+	idleTasks       []IdleTask
 
 	// Only the parser goroutine accesses the insights backfill state.
 	backfillCursor   *storage.AnalysisBackfillCursor
@@ -234,6 +235,7 @@ func (worker *Worker) run(ctx context.Context) {
 			worker.retryProcessingReleases(ctx)
 			worker.scan(ctx)
 			worker.backfill(ctx)
+			worker.runIdleTasks(ctx)
 		}
 	}
 }
