@@ -6,6 +6,7 @@ import type { AnalysisOverview, AnalysisSessionItem, AnalysisSignalTotals } from
 import { OverviewCards, SessionAnalysisView, SessionDetails } from "./analysis-view";
 import { FacetView } from "./facet-panel";
 import { PackView } from "./pack-panel";
+import { ReportBody, weekDelta } from "./report-view";
 
 function totals(overrides: Partial<AnalysisSignalTotals> = {}): AnalysisSignalTotals {
   return {
@@ -147,5 +148,36 @@ describe("session analysis view", () => {
     expect(html).toContain("C2 → a2");
     expect(html).not.toContain("达成");
     expect(html).toContain("隐藏：结果");
+  });
+  it("renders the weekly report with deltas and dismiss controls", () => {
+    const stats = { week_start_ns: "1", totals: totals(), facets_ok: 7, task_types: { bug_fix: 4, feature: 2 }, outcomes: { achieved: 5 }, collaboration: {}, friction: { tool_failed: 3 } };
+    const report = {
+      week_start_ns: "1793548800000000000",
+      scope: "all" as const,
+      stats,
+      previous: { ...stats, facets_ok: 5, totals: totals({ loop_sessions: 4 }) },
+      narrative: "本周做了什么：共 20 个会话。\n卡在哪里：暂无。\n可以沉淀或改进的点：暂无。",
+      narrative_source: "model" as const,
+      computed_ns: "1",
+      suggestions: [
+        { id: 1, kind: "instruction" as const, text: "提交前先跑 go test", sessions: 3, strong: true, status: "open" as const, first_seen_ns: "1", last_seen_ns: "2", evidence: ["a1", "a2"] },
+        { id: 2, kind: "skill" as const, text: "生成接口变更说明", sessions: 2, strong: false, status: "adopted_detected" as const, first_seen_ns: "1", last_seen_ns: "2", evidence: [] },
+      ],
+      optimizations: [],
+    };
+    const admin = renderToStaticMarkup(<ReportBody report={report} canDismiss onDismiss={() => undefined} />);
+    expect(admin).toContain("本地模型撰写");
+    expect(admin).toContain("本周做了什么：共 20 个会话。");
+    expect(admin).toContain("修缺陷");
+    expect(admin).toContain("(-2)");
+    expect(admin).toContain("强候选");
+    expect(admin).toContain("已沉淀");
+    expect(admin).toContain("证据：a1，a2");
+    expect(admin.match(/忽略/g)?.length).toBe(1);
+    const developer = renderToStaticMarkup(<ReportBody report={report} canDismiss={false} onDismiss={() => undefined} />);
+    expect(developer).not.toContain(">忽略<");
+    expect(weekDelta(3, undefined)).toBeNull();
+    expect(weekDelta(3, 3)).toBe("持平");
+    expect(weekDelta(5, 3)).toBe("+2");
   });
 });

@@ -62,13 +62,25 @@ func TestParseFacetValidatesAgainstTheSchema(t *testing.T) {
 
 // scriptedModel answers from a queue and records every call.
 type scriptedModel struct {
-	mu      sync.Mutex
-	answers []string
-	err     error
-	calls   int
+	mu        sync.Mutex
+	answers   []string
+	err       error
+	calls     int
+	textCalls int
+	narrative string
 }
 
 func (model *scriptedModel) Model() string { return "local-small" }
+
+func (model *scriptedModel) CompleteText(_ context.Context, messages []ChatMessage) (Completion, error) {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	model.textCalls++
+	if model.err != nil {
+		return Completion{}, model.err
+	}
+	return Completion{Content: model.narrative}, nil
+}
 
 func (model *scriptedModel) Complete(_ context.Context, messages []ChatMessage, _ map[string]any) (Completion, error) {
 	model.mu.Lock()

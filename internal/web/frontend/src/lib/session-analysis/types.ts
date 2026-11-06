@@ -177,3 +177,36 @@ export interface AnalysisFacet {
   evidence: Record<string, Array<{ label: string; audit_id?: string }>>;
   hidden_fields: string[];
 }
+export interface AnalysisWeeklyStats {
+  week_start_ns: string;
+  totals: AnalysisSignalTotals;
+  facets_ok: number;
+  task_types: Record<string, number>;
+  outcomes: Record<string, number>;
+  collaboration: Record<string, number>;
+  friction: Record<string, number>;
+}
+
+export interface AnalysisSuggestion {
+  id: number;
+  kind: "instruction" | "skill";
+  text: string;
+  sessions: number;
+  strong: boolean;
+  status: "open" | "adopted_detected" | "dismissed";
+  first_seen_ns: string;
+  last_seen_ns: string;
+  evidence: string[];
+}
+
+export interface AnalysisReport {
+  week_start_ns: string;
+  scope: "person" | "all";
+  stats: AnalysisWeeklyStats | null;
+  previous: AnalysisWeeklyStats | null;
+  narrative: string;
+  narrative_source?: "model" | "template";
+  computed_ns: string;
+  suggestions: AnalysisSuggestion[];
+  optimizations: AnalysisSessionItem[];
+}

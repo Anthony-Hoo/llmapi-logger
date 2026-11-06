@@ -162,8 +162,9 @@ type QueryService struct {
 	trigger Trigger
 	cipher  security.Cipher
 	// model is the local model name, empty when the LLM stage is disabled.
-	model string
-	now   func() time.Time
+	model    string
+	now      func() time.Time
+	location *time.Location
 }
 
 // Default and maximum page sizes and range of the management API.
@@ -184,7 +185,7 @@ func NewQueryService(store QueryStore, trigger Trigger, cipher security.Cipher, 
 	if store == nil || cipher == nil {
 		return nil, errors.New("sessionanalysis: nil query store or cipher")
 	}
-	return &QueryService{store: store, facets: store, trigger: trigger, cipher: cipher, model: model, now: time.Now}, nil
+	return &QueryService{store: store, facets: store, trigger: trigger, cipher: cipher, model: model, now: time.Now, location: time.Local}, nil
 }
 
 func invalid(message string) error {

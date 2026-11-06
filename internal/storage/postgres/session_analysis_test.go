@@ -418,3 +418,100 @@ func TestSessionFacetsStorage(t *testing.T) {
 		t.Fatalf("facet survived its pack: %v", err)
 	}
 }
+
+func TestSessionReportsStorage(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	at := day.UnixNano()
+	for index, key := range [][]byte{fill(0x91), fill(0x92), fill(0x93)} {
+		signals := testSignals(key, keyA, "a2", at+int64(index))
+		if index == 2 {
+			signals.APIKeyFPR = keyB
+		}
+		repeated := fill(0xa1)
+		fprs := []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: repeated, APIKeyFPR: signals.APIKeyFPR, SeenAtNS: at + int64(index)}}
+		if index == 1 {
+			fprs = append(fprs, storage.SessionTextFPR{Source: storage.TextSourceInjectedRules, FPR: repeated, APIKeyFPR: keyA, SeenAtNS: at + 10})
+		}
+		if err := store.SaveSessionSignals(ctx, signals, fprs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys, err := store.ActiveAnalysisKeys(ctx, at-1, at+100)
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("active keys = %d, %v", len(keys), err)
+	}
+	all, err := store.RepeatedFingerprints(ctx, at-1, nil, 10)
+	if err != nil || len(all) != 1 || all[0].Sessions != 3 || all[0].Kind != "instruction" || len(all[0].SessionKeys) != 3 || !all[0].Adopted {
+		t.Fatalf("repeated (all) = %+v, %v", all, err)
+	}
+	mine, err := store.RepeatedFingerprints(ctx, at-1, keyA, 10)
+	if err != nil || len(mine) != 1 || mine[0].Sessions != 2 {
+		t.Fatalf("repeated (key A) = %+v, %v", mine, err)
+	}
+	if theirs, err := store.RepeatedFingerprints(ctx, at-1, keyB, 10); err != nil || len(theirs) != 0 {
+		t.Fatalf("repeated (key B) = %+v, %v", theirs, err)
+	}
+	suggestion := storage.Suggestion{Scope: storage.ScopeAll, ScopeKey: storage.AllScopeKey, Kind: "instruction", FPR: fill(0xa1),
+		Support: 3, FirstSeenNS: at, LastSeenNS: at + 2, Status: "open", TextEnc: []byte{7}, Evidence: `["a2"]`, UpdatedAtNS: 1}
+	if err := store.UpsertSuggestion(ctx, suggestion); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.ListSuggestions(ctx, storage.ScopeAll, storage.AllScopeKey, nil, 10)
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("suggestions = %+v, %v", listed, err)
+	}
+	if err := store.DismissSuggestion(ctx, listed[0].ID, storage.ScopePerson, 2); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("dismiss in the wrong scope: %v", err)
+	}
+	if err := store.DismissSuggestion(ctx, listed[0].ID, storage.ScopeAll, 2); err != nil {
+		t.Fatal(err)
+	}
+	suggestion.Support = 4
+	if err := store.UpsertSuggestion(ctx, suggestion); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ = store.ListSuggestions(ctx, storage.ScopeAll, storage.AllScopeKey, nil, 10)
+	if listed[0].Status != "dismissed" || listed[0].Support != 4 {
+		t.Fatalf("refreshed suggestion = %+v", listed[0])
+	}
+	personal := suggestion
+	personal.Scope, personal.ScopeKey, personal.Status = storage.ScopePerson, keyA, "adopted_detected"
+	tokenID := int64(1)
+	personal.NewAPITokenID = &tokenID
+	if err := store.UpsertSuggestion(ctx, personal); err != nil {
+		t.Fatal(err)
+	}
+	personal.Status = "open"
+	if err := store.UpsertSuggestion(ctx, personal); err != nil {
+		t.Fatal(err)
+	}
+	if mineListed, err := store.ListSuggestions(ctx, storage.ScopePerson, keyB, &tokenID, 10); err != nil || len(mineListed) != 1 || mineListed[0].Status != "adopted_detected" {
+		t.Fatalf("personal by token = %+v, %v", mineListed, err)
+	}
+
+	stats := storage.PeriodStats{WeekStartNS: 100, Scope: storage.ScopePerson, ScopeKey: keyA, NewAPITokenID: &tokenID, Stats: `{"totals":{}}`,
+		NarrativeEnc: []byte{1, 2}, NarrativeSource: "template", InputHash: "h", ComputedAtNS: 5}
+	if err := store.SavePeriodStats(ctx, stats); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadPeriodStats(ctx, 100, storage.ScopePerson, keyA, nil)
+	if err != nil || loaded.InputHash != "h" || loaded.NarrativeSource != "template" || !bytes.Equal(loaded.NarrativeEnc, []byte{1, 2}) {
+		t.Fatalf("stats = %+v, %v", loaded, err)
+	}
+	if _, err := store.LoadPeriodStats(ctx, 100, storage.ScopePerson, keyB, &tokenID); err != nil {
+		t.Fatalf("token fallback: %v", err)
+	}
+	if _, err := store.LoadPeriodStats(ctx, 100, storage.ScopeAll, storage.AllScopeKey, nil); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing scope: %v", err)
+	}
+	costly, err := store.TopCostSessions(ctx, storage.SessionSignalFilter{FromNS: at - 1, ToNS: at + 100, Flags: []string{"loop"}}, 2)
+	if err != nil || len(costly) != 2 {
+		t.Fatalf("costly = %d, %v", len(costly), err)
+	}
+	if enums, err := store.FacetEnums(ctx, at-1, at+100, keyA); err != nil || len(enums) != 0 {
+		t.Fatalf("enums = %+v, %v", enums, err)
+	}
+}

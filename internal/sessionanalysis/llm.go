@@ -35,6 +35,8 @@ type Completion struct {
 // Completer calls a model; the LLM client implements it and tests fake it.
 type Completer interface {
 	Complete(ctx context.Context, messages []ChatMessage, schema map[string]any) (Completion, error)
+	// CompleteText asks for free prose: no response_format is sent.
+	CompleteText(ctx context.Context, messages []ChatMessage) (Completion, error)
 	Model() string
 }
 
@@ -122,18 +124,27 @@ func (client *LLMClient) Model() string { return client.config.Model }
 
 // Complete sends one chat completion at temperature 0.
 func (client *LLMClient) Complete(ctx context.Context, messages []ChatMessage, schema map[string]any) (Completion, error) {
+	return client.complete(ctx, messages, schema, false)
+}
+
+// CompleteText sends one chat completion for free prose.
+func (client *LLMClient) CompleteText(ctx context.Context, messages []ChatMessage) (Completion, error) {
+	return client.complete(ctx, messages, nil, true)
+}
+
+func (client *LLMClient) complete(ctx context.Context, messages []ChatMessage, schema map[string]any, text bool) (Completion, error) {
 	thinking := client.config.DisableThinking && !client.noThinkingParams.Load()
-	completion, status, err := client.post(ctx, messages, schema, thinking)
+	completion, status, err := client.post(ctx, messages, schema, thinking, text)
 	if err != nil && thinking && status == http.StatusBadRequest {
 		// Some servers reject unknown request fields: retry once without the
 		// thinking switches and stop sending them.
 		client.noThinkingParams.Store(true)
-		completion, _, err = client.post(ctx, messages, schema, false)
+		completion, _, err = client.post(ctx, messages, schema, false, text)
 	}
 	return completion, err
 }
 
-func (client *LLMClient) requestBody(messages []ChatMessage, schema map[string]any, thinking bool) ([]byte, error) {
+func (client *LLMClient) requestBody(messages []ChatMessage, schema map[string]any, thinking, text bool) ([]byte, error) {
 	body := map[string]any{
 		"model":       client.config.Model,
 		"messages":    messages,
@@ -141,12 +152,13 @@ func (client *LLMClient) requestBody(messages []ChatMessage, schema map[string]a
 		"max_tokens":  client.config.MaxOutputTokens,
 		"stream":      false,
 	}
-	switch client.config.StructuredOutput {
-	case "json_schema":
+	switch {
+	case text:
+	case client.config.StructuredOutput == "json_schema":
 		if schema != nil {
 			body["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "session_facet", "schema": schema, "strict": true}}
 		}
-	case "json_object":
+	case client.config.StructuredOutput == "json_object":
 		body["response_format"] = map[string]any{"type": "json_object"}
 	}
 	if thinking {
@@ -157,8 +169,8 @@ func (client *LLMClient) requestBody(messages []ChatMessage, schema map[string]a
 	return json.Marshal(body)
 }
 
-func (client *LLMClient) post(ctx context.Context, messages []ChatMessage, schema map[string]any, thinking bool) (Completion, int, error) {
-	payload, err := client.requestBody(messages, schema, thinking)
+func (client *LLMClient) post(ctx context.Context, messages []ChatMessage, schema map[string]any, thinking, text bool) (Completion, int, error) {
+	payload, err := client.requestBody(messages, schema, thinking, text)
 	if err != nil {
 		return Completion{}, 0, err
 	}

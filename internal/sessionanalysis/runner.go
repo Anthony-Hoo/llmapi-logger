@@ -246,6 +246,10 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 		finish("facets_failed")
 		return run, err
 	}
+	if err := runner.runReports(ctx); err != nil {
+		finish("reports_failed")
+		return run, err
+	}
 	options.Logger.Info("session analysis run completed",
 		"candidates", run.Candidates, "analyzed", run.Analyzed, "skipped", run.Skipped,
 		"duration_ms", options.Now().Sub(started).Milliseconds())

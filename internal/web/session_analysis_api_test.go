@@ -13,6 +13,8 @@ import (
 )
 
 type fakeSessionAnalysis struct {
+	weeks     []string
+	dismissed []int64
 	labels    []sessionanalysis.CalibrationLabel
 	viewers   []sessionanalysis.Viewer
 	scopes    []*query.Scope
@@ -50,6 +52,20 @@ func (fake *fakeSessionAnalysis) Facet(_ context.Context, id string, scope *quer
 func (fake *fakeSessionAnalysis) Calibrate(_ context.Context, labels []sessionanalysis.CalibrationLabel) (sessionanalysis.CalibrationResult, error) {
 	fake.labels = append(fake.labels, labels...)
 	return sessionanalysis.CalibrationResult{Labels: len(labels)}, nil
+}
+
+func (fake *fakeSessionAnalysis) Report(_ context.Context, week string, scope *query.Scope) (sessionanalysis.ReportResponse, error) {
+	fake.scopes = append(fake.scopes, scope)
+	fake.weeks = append(fake.weeks, week)
+	return sessionanalysis.ReportResponse{Scope: "all"}, nil
+}
+
+func (fake *fakeSessionAnalysis) DismissSuggestion(_ context.Context, id int64) error {
+	fake.dismissed = append(fake.dismissed, id)
+	if id == 404 {
+		return query.ErrNotFound
+	}
+	return nil
 }
 
 func (fake *fakeSessionAnalysis) TriggerRun() error {
@@ -192,5 +208,35 @@ func TestSessionAnalysisFacetAndCalibrationRoutes(t *testing.T) {
 	}
 	if response := post(nil, `{"labels":[],"extra":1}`); response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field accepted: %d", response.Code)
+	}
+}
+
+func TestSessionAnalysisReportAndDismissRoutes(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSessionAnalysis{}
+	handler, cookie := newSessionAnalysisHandler(t, fake)
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?week=previous", cookie); response.Code != http.StatusOK {
+		t.Fatalf("developer report = %d", response.Code)
+	}
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report", nil); response.Code != http.StatusOK {
+		t.Fatalf("admin report = %d", response.Code)
+	}
+	if len(fake.weeks) != 2 || fake.weeks[0] != "previous" || fake.scopes[0] == nil || fake.scopes[1] != nil {
+		t.Fatalf("weeks=%v scopes=%v", fake.weeks, fake.scopes)
+	}
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?user=1", nil); response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown key = %d", response.Code)
+	}
+	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/suggestions/7/dismiss", cookie); response.Code != http.StatusForbidden {
+		t.Fatalf("developer dismiss = %d", response.Code)
+	}
+	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/suggestions/7/dismiss", nil); response.Code != http.StatusOK || len(fake.dismissed) != 1 {
+		t.Fatalf("admin dismiss = %d %v", response.Code, fake.dismissed)
+	}
+	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/suggestions/404/dismiss", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("missing dismiss = %d", response.Code)
+	}
+	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/suggestions/x/dismiss", nil); response.Code != http.StatusBadRequest {
+		t.Fatalf("bad id = %d", response.Code)
 	}
 }

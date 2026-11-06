@@ -31,6 +31,7 @@ import type {
   AnalysisFacet,
   AnalysisOverview,
   AnalysisPack,
+  AnalysisReport,
   AnalysisSessionsPage,
   AnalysisSessionsQuery,
 } from "./lib/session-analysis/types";
@@ -89,6 +90,9 @@ export interface ApiClient {
   getAnalysisFacet: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisFacet>;
   /** Administrator only. */
   calibrateAnalysis: (labels: AnalysisCalibrationLabel[], signal?: AbortSignal) => Promise<AnalysisCalibration>;
+  getAnalysisReport: (week: "current" | "previous", signal?: AbortSignal) => Promise<AnalysisReport>;
+  /** Administrator only; all-keys suggestions. */
+  dismissAnalysisSuggestion: (id: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export function createApiClient(
@@ -426,6 +430,22 @@ export function createApiClient(
     async calibrateAnalysis(labels, signal) {
       const result = await mutateJSON<AnalysisCalibration>(`${API_BASE}/session-analysis/calibration`, "POST", { labels }, signal);
       return { ...result, hidden_fields: result.hidden_fields ?? [], agreement: result.agreement ?? {}, compared: result.compared ?? {} };
+    },
+
+    async getAnalysisReport(week, signal) {
+      const result = await requestJSON<AnalysisReport>(`${API_BASE}/session-analysis/report?week=${week}`, signal);
+      return {
+        ...result,
+        suggestions: (result.suggestions ?? []).map((item) => ({ ...item, evidence: item.evidence ?? [] })),
+        optimizations: (result.optimizations ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
+      };
+    },
+
+    async dismissAnalysisSuggestion(id, signal) {
+      const response = await sessionFetch(`${API_BASE}/session-analysis/suggestions/${id}/dismiss`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
     },
 
     async triggerAnalysisRun(signal) {

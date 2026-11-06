@@ -261,3 +261,69 @@ type FacetCalibration struct {
 	Samples       int64
 	Agreement     string
 }
+
+// Analysis scopes of suggestions and weekly statistics.
+const (
+	ScopePerson = "person"
+	ScopeAll    = "all"
+)
+
+// AllScopeKey is the scope_key of the 'all' scope.
+var AllScopeKey = make([]byte, 32)
+
+// ScopeKey identifies one API key that was active in a period.
+type ScopeKey struct {
+	APIKeyFPR     []byte
+	NewAPITokenID *int64
+}
+
+// FacetEnumRow is the plaintext part of one ok facet, for aggregation.
+type FacetEnumRow struct {
+	Kind          string
+	TaskType      string
+	Outcome       string
+	Collaboration string
+	Friction      string
+	Items         string
+}
+
+// RepeatedFPR is one sentence fingerprint seen in several sessions.
+type RepeatedFPR struct {
+	FPR         []byte
+	Kind        string // instruction | skill
+	Sessions    int64
+	FirstNS     int64
+	LastNS      int64
+	SessionKeys [][]byte
+	Adopted     bool
+}
+
+// Suggestion is one row of analysis_suggestions.
+type Suggestion struct {
+	ID            int64
+	Scope         string
+	ScopeKey      []byte
+	NewAPITokenID *int64
+	Kind          string
+	FPR           []byte
+	Support       int64
+	FirstSeenNS   int64
+	LastSeenNS    int64
+	Status        string
+	TextEnc       []byte
+	Evidence      string
+	UpdatedAtNS   int64
+}
+
+// PeriodStats is one row of analysis_period_stats.
+type PeriodStats struct {
+	WeekStartNS     int64
+	Scope           string
+	ScopeKey        []byte
+	NewAPITokenID   *int64
+	Stats           string
+	NarrativeEnc    []byte
+	NarrativeSource string
+	InputHash       string
+	ComputedAtNS    int64
+}

@@ -129,4 +129,19 @@ describe("session analysis API client", () => {
     expect(parseCalibrationLabels('{"labels":[{"task_type":"x"}]}')).toEqual({ error: "每条标注都需要 session_id。" });
     expect(parseCalibrationLabels('[{"session_id":"s"}]')).toEqual({ labels: [{ session_id: "s" }] });
   });
+  it("reads the weekly report and dismisses suggestions", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) =>
+      String(input).includes("/report")
+        ? jsonResponse({ week_start_ns: "1", scope: "person", stats: null, previous: null, narrative: "", computed_ns: "0", suggestions: [{ id: 1, evidence: null }], optimizations: null })
+        : jsonResponse({ status: "dismissed" }),
+    );
+    const client = createApiClient(vi.fn(), fetcher);
+    const report = await client.getAnalysisReport("previous");
+    expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/session-analysis/report?week=previous");
+    expect(report.suggestions[0].evidence).toEqual([]);
+    expect(report.optimizations).toEqual([]);
+    await client.dismissAnalysisSuggestion(7);
+    expect(String(fetcher.mock.calls[1][0])).toBe("/api/v1/session-analysis/suggestions/7/dismiss");
+    expect(fetcher.mock.calls[1][1]?.method).toBe("POST");
+  });
 });

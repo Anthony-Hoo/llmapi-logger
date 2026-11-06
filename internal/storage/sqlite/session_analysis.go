@@ -78,3 +78,39 @@ func (store *Store) SaveFacetCalibration(context.Context, storage.FacetCalibrati
 func (store *Store) LatestFacetCalibration(context.Context, string, string) (storage.FacetCalibration, error) {
 	return storage.FacetCalibration{}, sql.ErrNoRows
 }
+
+func (store *Store) ActiveAnalysisKeys(context.Context, int64, int64) ([]storage.ScopeKey, error) {
+	return nil, nil
+}
+
+func (store *Store) FacetEnums(context.Context, int64, int64, []byte) ([]storage.FacetEnumRow, error) {
+	return nil, nil
+}
+
+func (store *Store) RepeatedFingerprints(context.Context, int64, []byte, int) ([]storage.RepeatedFPR, error) {
+	return nil, nil
+}
+
+func (store *Store) UpsertSuggestion(context.Context, storage.Suggestion) error {
+	return nil
+}
+
+func (store *Store) ListSuggestions(context.Context, string, []byte, *int64, int) ([]storage.Suggestion, error) {
+	return nil, nil
+}
+
+func (store *Store) DismissSuggestion(context.Context, int64, string, int64) error {
+	return sql.ErrNoRows
+}
+
+func (store *Store) SavePeriodStats(context.Context, storage.PeriodStats) error {
+	return nil
+}
+
+func (store *Store) LoadPeriodStats(context.Context, int64, string, []byte, *int64) (storage.PeriodStats, error) {
+	return storage.PeriodStats{}, sql.ErrNoRows
+}
+
+func (store *Store) TopCostSessions(context.Context, storage.SessionSignalFilter, int) ([]storage.SessionSignals, error) {
+	return nil, nil
+}

@@ -32,6 +32,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { clientLabel } from "../insights/ui-bits";
 import { CalibrationPanel, CalibrationSummary, FacetPanel } from "./facet-panel";
 import { PackPanel } from "./pack-panel";
+import { ReportView } from "./report-view";
 
 type RangeKey = "week" | "last-week" | "30d";
 
@@ -56,7 +57,7 @@ export function analysisRange(key: RangeKey, nowMS: number): { from_ns: string; 
 }
 
 const DESCRIPTION =
-  "每天按计划从已审计的会话中计算确定性信号（不调用任何模型）。管理端只显示匿名会话；开发者只看到自己 Key 的会话。结论只是线索，不用于个人评价。";
+  "每天按计划从已审计的会话中计算确定性信号；启用本地模型后再生成会话摘要和周度复盘。管理端只显示匿名会话；开发者只看到自己 Key 的会话。结论只是线索，不用于个人评价。";
 
 function formatNS(value: string): string {
   const ms = Number(BigInt(value) / 1_000_000n);
@@ -75,6 +76,7 @@ export function SessionAnalysisView({
   /** Extra detail below an expanded session row (input pack, facet). */
   renderSessionDetail?: (item: AnalysisSessionItem) => ReactNode;
 }) {
+  const [page, setPage] = useState<"signals" | "report">("signals");
   const [rangeKey, setRangeKey] = useState<RangeKey>("week");
   const [kind, setKind] = useState<"all" | "agent" | "chat">("all");
   const [flags, setFlags] = useState<AnalysisFlag[]>([]);
@@ -171,7 +173,16 @@ export function SessionAnalysisView({
         description={DESCRIPTION}
         actions={
           <>
-            <Segmented label="时间范围" value={rangeKey} options={RANGES} onChange={setRangeKey} />
+            <Segmented
+              label="视图"
+              value={page}
+              options={[
+                { value: "signals", label: "会话信号" },
+                { value: "report", label: "周度复盘" },
+              ]}
+              onChange={setPage}
+            />
+            {page === "signals" ? <Segmented label="时间范围" value={rangeKey} options={RANGES} onChange={setRangeKey} /> : null}
             {isDeveloper ? null : (
               <Button variant="outline" size="sm" onClick={() => void runNow()} disabled={overview?.running}>
                 {overview?.running ? "运行中…" : "立即运行"}
@@ -180,6 +191,8 @@ export function SessionAnalysisView({
           </>
         }
       />
+      {page === "report" ? <ReportView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey + runNonce} /> : null}
+      <div className={page === "report" ? "hidden" : "space-y-section"}>
       {runMessage ? (
         <Alert variant="info">
           <AlertDescription>{runMessage}</AlertDescription>
@@ -307,6 +320,7 @@ export function SessionAnalysisView({
           ) : null}
         </CardContent>
       </Card>
+      </div>
     </div>
   );
 }
@@ -345,7 +359,8 @@ export function OverviewCards({ overview }: { overview: AnalysisOverview }) {
                 ? `；未打包：${Object.entries(run.skip_reasons)
                     .map(([reason, count]) => `${SKIP_REASON_LABELS[reason] ?? reason} ${count}`)
                     .join("、")}`
-                : "")
+                : "") +
+              "。"
             : "还没有运行记录。"}
           {overview.llm_enabled
             ? ` 本地模型 ${overview.model ?? ""}（${overview.prompt_version}）` +
