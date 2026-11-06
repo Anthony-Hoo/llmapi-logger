@@ -19,7 +19,7 @@ func writeVocabulary(t *testing.T, content string) string {
 
 func TestDefaultVocabularyContent(t *testing.T) {
 	vocab := DefaultVocabulary()
-	if got := vocab.OrderedClients(); !slices.Equal(got, []string{"codex", "claude_code", "opencode", "dsh", "custom"}) {
+	if got := vocab.OrderedClients(); !slices.Equal(got, []string{"codex", "claude_code", "opencode", "dsh", "zcode", "pi", "custom"}) {
 		t.Fatalf("client order = %v", got)
 	}
 	custom := vocab.Clients["custom"]
@@ -46,8 +46,27 @@ func TestDefaultVocabularyContent(t *testing.T) {
 	if !slices.Equal(opencode.ParentHeaders, []string{"x-opencode-parent-session-id", "x-parent-session-id"}) {
 		t.Errorf("opencode parents = %v", opencode.ParentHeaders)
 	}
-	if vocab.Clients["dsh"].RoleHeaders[0].Values["1"] != RoleCompaction {
-		t.Errorf("dsh compact mapping = %+v", vocab.Clients["dsh"].RoleHeaders)
+	dsh := vocab.Clients["dsh"]
+	if dsh.RoleHeaders[0].Values["1"] != RoleCompaction {
+		t.Errorf("dsh compact mapping = %+v", dsh.RoleHeaders)
+	}
+	if !slices.Equal(dsh.ParentBodyPaths, []string{"dsh_session_log.session.parentSession", "dsh_session_log.header.parentSession"}) {
+		t.Errorf("dsh parent paths = %v", dsh.ParentBodyPaths)
+	}
+	for name, rule := range vocab.Clients {
+		if name != "custom" && rule.Priority >= defaultClientPriority {
+			t.Errorf("built-in client %s priority %d must stay below override default %d", name, rule.Priority, defaultClientPriority)
+		}
+	}
+	zcode := vocab.Clients["zcode"]
+	if len(zcode.RoleHeaders) != 2 || zcode.RoleHeaders[0].Header != "x-zcode-query-source" || zcode.RoleHeaders[1].Header != "x-zcode-session-type" ||
+		zcode.Detect.UserAgentPrefixes[0] != "zcode/" || len(zcode.ParentHeaders) != 0 || len(zcode.ParentBodyPaths) != 0 {
+		t.Errorf("zcode client = %+v", zcode)
+	}
+	pi := vocab.Clients["pi"]
+	if !slices.Equal(pi.Detect.UserAgentPrefixes, []string{"pi/"}) || len(pi.Detect.HeadersPresent) != 0 || len(pi.Detect.HeadersEqual) != 0 ||
+		!slices.Equal(pi.NodeHeaders, []string{"session-id"}) {
+		t.Errorf("pi client = %+v", pi)
 	}
 	for _, marker := range []string{"<system-reminder>", "<environment_context>", "<user_instructions>", "<skill_content", "# AGENTS.md", "<user-prompt-submit-hook>"} {
 		if !slices.Contains(vocab.InjectionMarkers, marker) {
@@ -104,6 +123,7 @@ func TestHeaderAllowlist(t *testing.T) {
 		"x-claude-code-session-id", "x-claude-code-agent-id", "x-claude-code-parent-agent-id", "x-claude-code-request-class", "x-app",
 		"x-opencode-session-id", "x-opencode-parent-session-id", "x-parent-session-id", "x-opencode-client",
 		"x-deepseek-harness-session-id", "x-deepseek-harness-compact",
+		"x-session-id", "x-zcode-session-type", "x-zcode-query-source",
 		"x-agent-session-id", "x-agent-id", "x-agent-parent-id", "x-agent-role", "x-agent-name",
 	} {
 		if !slices.Contains(list, want) {
@@ -156,7 +176,7 @@ file_ops:
 	if got := vocab.Clients["extra"]; got.Priority != 5 || got.Detect.UserAgentPrefixes[0] != "extra/" {
 		t.Errorf("extra client = %+v", got)
 	}
-	if got := vocab.OrderedClients(); got[0] != "extra" || got[1] != "codex" || got[len(got)-1] != "custom" || len(got) != 6 {
+	if got := vocab.OrderedClients(); got[0] != "extra" || got[1] != "codex" || got[len(got)-1] != "custom" || len(got) != 8 {
 		t.Errorf("order = %v", got)
 	}
 	if !slices.Equal(vocab.InjectionMarkers, []string{"<mine>"}) {
@@ -271,7 +291,7 @@ func TestLoadVocabularyEmptyFileKeepsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(vocab.Clients) != 5 || len(vocab.InjectionMarkers) != 6 {
+	if len(vocab.Clients) != 7 || len(vocab.InjectionMarkers) != 6 {
 		t.Errorf("defaults lost: %d clients, %d markers", len(vocab.Clients), len(vocab.InjectionMarkers))
 	}
 }

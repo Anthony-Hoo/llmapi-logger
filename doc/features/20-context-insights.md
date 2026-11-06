@@ -75,8 +75,8 @@ parser worker 已经持有解密后的请求/响应 Body，在同一次解析中
 
 “分析会话”是趋势与会话卡片的分组单位，记为 `analysis_session_id`，粒度是**单个 Agent**（主 Agent 与每个子 Agent 各一个会话，父子关系见 §5.8）。三协议统一按以下顺序取第一个可用的键：
 
-1. **客户端显式 Agent 标识**（§5.8 表中的节点 ID，例如 Codex `thread-id`、Claude Code `x-claude-code-agent-id`/会话 ID、OpenCode `x-opencode-session-id`、dsh `x-deepseek-harness-session-id`）。
-2. **OpenAI 既有 `turns.conversation_id`**：仅在没有显式标识时使用。Codex 与新版 OpenCode 把根会话 ID 填进 `prompt_cache_key`，父子 Agent 会落进同一个 conversation（每个 Agent 一条链，见 §5.8“与 OpenAI 轮次图的关系”），所以有显式 Agent 标识时优先使用第 1 条。
+1. **客户端显式 Agent 标识**（§5.8 表中的节点 ID，例如 Codex `thread-id`、Claude Code `x-claude-code-agent-id`/会话 ID、OpenCode `x-opencode-session-id`、dsh `x-deepseek-harness-session-id`、ZCode `x-session-id`、pi `session-id`）。
+2. **OpenAI 既有 `turns.conversation_id`**：仅在没有显式标识时使用。Codex 把根会话 ID 填进 `prompt_cache_key`，新版 OpenCode 填的是直接父会话 ID，父子 Agent 会落进同一个 conversation（每个 Agent 一条链，见 §5.8“与 OpenAI 轮次图的关系”），所以有显式 Agent 标识时优先使用第 1 条。
 3. **Anthropic / Gemini 的轻量拼接**：不移植完整对象图。依次取：
   1. 通用 `metadata.{session_id, conversation_id, thread_id}`；Claude Code 新版的 `metadata.user_id` 是 JSON，其中有 `session_id`。
   2. 推断键：`HMAC(派生子密钥, protocol ‖ api_key_fpr ‖ system 指纹 ‖ 首条用户消息 item 指纹)`。同一 Agent 会话的请求共享系统提示词和首条用户消息，主 Agent 与子 Agent 的系统提示词通常不同，因此天然分开。
@@ -244,7 +244,7 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 
 ### 5.8 子 Agent 树
 
-调研结论（2026-10 各客户端当前源码）：主流 Agent 客户端已经在请求上显式标注 Agent 身份和父子关系，目的就是让网关/代理能做会话亲和与归组。因此 Agent 树以读取标识为主，内容匹配只作兜底。
+调研结论（2026-10 各客户端当前源码，2026-11 复核 OpenCode、dsh 并补充 ZCode、pi）：主流 Agent 客户端已经在请求上显式标注 Agent 身份和父子关系，目的就是让网关/代理能做会话亲和与归组。因此 Agent 树以读取标识为主，内容匹配只作兜底。
 
 **第一层：显式 Header / Body 标识（精确）**
 
@@ -252,10 +252,12 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | `originator`、UA `codex_cli_rs/…` | `session-id`（父子相同） | `thread-id` | `x-codex-parent-thread-id`；Body `client_metadata` 同名键；turn metadata 另有 `parent_turn_id` 精确到父轮次 | `x-openai-subagent`：`collab_spawn`/`review`/`compact`/`memory_consolidation`；根 Agent 无此头 |
 | Claude Code | UA `claude-cli/…`、`x-app: cli` | `X-Claude-Code-Session-Id`（进程级，父子相同） | `x-claude-code-agent-id`；缺失即主 Agent | `x-claude-code-parent-agent-id`；缺失但有 agent-id 时父节点为主 Agent | 可选 `x-claude-code-request-class`：`main`/`subagent`/`compaction`/`auxiliary`…（客户端需设置 `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`）；Body `system[0]` 计费块中 `cc_is_subagent=true` |
-| OpenCode ≥ v1.19.2 / ≥ v2.0.25 | UA `opencode/…`、`x-opencode-client` | 沿父链上溯得到 | `x-opencode-session-id` | `x-opencode-parent-session-id`（或 `x-parent-session-id`），只是直接父节点 | 无 Header；标题请求以固定系统提示词识别，压缩请求以固定尾部用户消息识别 |
-| dsh（官方 DeepSeek 适配器） | UA `deepseek-harness/…` | 沿父链上溯得到 | `x-deepseek-harness-session-id`（子 Agent 有自己的 ID） | Body `dsh_session_log.header.parentSession`，附带 `origin: "subagent"`、`delegationDepth` | `x-deepseek-harness-compact: 1` |
+| OpenCode ≥ v1.18.34 / ≥ v2.0.21 | UA `opencode/…`、`x-opencode-client` | 沿父链上溯得到 | `x-opencode-session-id` | `x-opencode-parent-session-id`（或 `x-parent-session-id`），只是直接父节点 | 无 Header；标题请求以固定系统提示词识别，压缩请求以固定尾部用户消息识别 |
+| dsh（官方 DeepSeek 适配器，Anthropic Messages） | UA `deepseek-harness/…` | 沿父链上溯得到 | `x-deepseek-harness-session-id`（子 Agent 有自己的 ID） | Body `dsh_session_log.session.parentSession`，附带 `session.origin: "subagent"`、`session.delegationDepth`、`session.cwd`；词表另以 `dsh_session_log.header.parentSession` 兜底旧构建 | `x-deepseek-harness-compact: 1` |
+| ZCode（Z.ai） | UA `ZCode/…`、`x-zcode-session-type`；另有 `X-Title: Z Code@electron`/`Z Code@cli` | 沿父链上溯得到 | `x-session-id`（去掉 `sess_`/`subagent_agent_` 前缀的会话 ID，子 Agent 有自己的 ID） | 未核实，词表不设父规则，子 Agent 走第三层内容匹配 | `x-zcode-query-source`：`compact`→压缩、`session_title`→标题（优先）；`x-zcode-session-type`：`main`/`subagent`/`side_chat`、`other`→附属；`project_memory_*` 暂未映射 |
+| pi（pi-coding-agent / pi-ai） | UA `pi/<版本> (<平台>; <运行时>/<版本>; <架构>)`；只按 UA 识别 | `session-id`（与节点相同） | `session-id`，仅 OpenAI Responses 协议默认发送（另有同值的 `x-client-request-id`）；Chat Completions / Anthropic 无会话 ID，走推断会话 | 无内置子 Agent | 无 Header；压缩请求以固定系统提示词识别（`side_requests`） |
 
-各客户端行为随版本变化：Codex 的父线程头约在 2026-04 引入，旧版本只有 `x-openai-subagent`；OpenCode v2.0.0–v2.0.20 期间 `x-opencode-session` 的语义从“自身”改成了“父会话”，只能用 `x-parent-session-id` 判父；Claude Code 的 `x-claude-code-session-id` 自 v2.1.86 起提供。识别规则以**可配置词表**落地（与 §5.7 同一份词表文件），默认内置以上四家，新增客户端或字段改名时只改配置。
+各客户端行为随版本变化：Codex 的父线程头约在 2026-04 引入，旧版本只有 `x-openai-subagent`；OpenCode 自 v1.18.34 / v2.0.21 起发送上述会话 Header；另一个头 `x-opencode-session` 在 v2.0.0–v2.0.18 是会话自身 ID，自 v2.0.19 起改为“亲和” ID（子会话取直接父会话、fork 取来源会话，其余取自身），不能当节点或父节点用，只能用 `x-parent-session-id` 判父；OpenCode v2 还向所有 provider 发送 `x-opencode-project`（规范化 origin URL 的 sha1），v1 只发给 OpenCode Zen，本词表不读取它；Claude Code 的 `x-claude-code-session-id` 自 v2.1.86 起提供；dsh 当前源码把父会话放在 `dsh_session_log.session` 下，早期词表写成了 `header`，导致 dsh 子 Agent 不连父节点（`AnalysisVersion` 9 修正）；pi 的 ChatGPT 后端 provider 也发送 `originator: pi`，因 UA 优先于 Codex 的 `originator` 检测而不会被误判为 Codex。识别规则以**可配置词表**落地（与 §5.7 同一份词表文件），默认内置以上六家，新增客户端或字段改名时只改配置。
 
 **第二层：Body 中的回链（精确，用于补边和交叉验证）**
 
@@ -279,7 +281,7 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 
 | 列 | 内容 |
 | --- | --- |
-| `agent_client` | `codex`/`claude_code`/`opencode`/`dsh`/`unknown` |
+| `agent_client` | `codex`/`claude_code`/`opencode`/`dsh`/`zcode`/`pi`/`custom`/`unknown`，或覆盖文件新增的客户端键 |
 | `agent_role` | `main`/`subagent`/`compaction`/`title`/`review`/`auxiliary` |
 | `agent_node_fpr`、`agent_parent_fpr`、`agent_root_fpr` | 客户端原始 ID 的 keyed HMAC 指纹 |
 | `agent_link_source` | `header`/`body`/`content` |
@@ -297,7 +299,7 @@ prev 只在同一非 NULL `api_key_fpr` 内选取（见 §3.3）：`api_key_fpr`
 - 响应带 `client_labels`（客户端键 → 词表 `label`），UI 用它显示覆盖文件新增客户端的名字。
 - 会话卡片按根聚合，显示“含 N 个子 Agent”。
 
-**与 OpenAI 轮次图的关系**：Codex 的父子 Agent 共享 `prompt_cache_key`（都是根会话 ID），OpenCode v2.0.10 以后在 Responses 协议上也是这样，因此它们落在同一个 keyed conversation 中。轮次图（[18](18-content-addressed-conversation-storage.md)）命中这类只用于分组的 key 后，不再强制挂到最新一轮，而是在该 conversation 最近 32 轮中按内容关系选父轮次；都不匹配时作为同一 conversation 的新根，所以一个 keyed conversation 可以有每个 Agent 一条链。上游托管会话（顶层 `conversation_id`/`conversation`）仍按 key 挂最新一轮。
+**与 OpenAI 轮次图的关系**：Codex 的父子 Agent 共享 `prompt_cache_key`（都是根会话 ID）；OpenCode v2.0.10 以后在 Responses 协议上把**直接父会话** ID 填进子会话的 `prompt_cache_key`（不是根），所以父 Agent 与其直接子 Agent 共享一个 key，孙 Agent 落在子 Agent 的 key 下。这些父子请求因此落在同一个 keyed conversation 中。轮次图（[18](18-content-addressed-conversation-storage.md)）命中这类只用于分组的 key 后，不再强制挂到最新一轮，而是在该 conversation 最近 32 轮中按内容关系选父轮次；都不匹配时作为同一 conversation 的新根，所以一个 keyed conversation 可以有每个 Agent 一条链。上游托管会话（顶层 `conversation_id`/`conversation`）仍按 key 挂最新一轮。
 
 剩余影响：
 
@@ -348,7 +350,7 @@ insights:
 - **流式响应的限制**：metadata 保留的 OpenAI 流式响应无法还原成 SSE。回填改用 response envelope 中保存的 usage 摘要与重建的 conversation，因此缓存读/写和推理 Token 拆分不可恢复（只有 uncached input 与 output），停止原因也可能缺失；非流式响应的重建 JSON 保留完整 usage。
 - **防空转**：进程内有界（4096）的跳过集合记录跳过或失败的 audit，同一进程不再重试；满后清空重建。日志码 `analysis_backfill_skipped`（附 `reason` 枚举）与 `analysis_backfill_failed`，见[模块 13](13-observability-health-and-lifecycle.md)。暂时性失败（如存储繁忙）也要到进程重启才会再试。
 - 已被 retention 删除的记录不在候选里；没有现成的健康计数器，因此未新增 `analysis_backfill_pending` 之类的指标（项目目前无 metrics 面）。
-- `AnalysisVersion` 为 7，版本变化会让旧行被回填重算。版本历史：2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0；4 起 user 角色的图片/文档计入会话键推断的首条用户项与 `turn_start`；5 起 Gemini 的 `toolUsePromptTokenCount` 计入未缓存输入；6 起 `api_key_fpr` 为 NULL 的审计互相隔离（无 prev、不继承 root/父链接，见 §3.3），且 system/tools 从无到有或从有到无也记 `system_changed`/`tools_changed`；7 起默认词表把系统提示词以 `You are a context summarization assistant.` 开头的请求（pi-ai / pi-coding-agent 自动压缩）识别为 `compaction` 附属请求——这是编译进二进制的词表变化，同样证据的 `agent_role`、`turn_start` 统计和事件会随之改变，所以提版本让旧行重算。
+- `AnalysisVersion` 为 9，版本变化会让旧行被回填重算。版本历史：2 起附属请求（压缩/标题/review/auxiliary）的 `event_flags` 固定为 0；4 起 user 角色的图片/文档计入会话键推断的首条用户项与 `turn_start`；5 起 Gemini 的 `toolUsePromptTokenCount` 计入未缓存输入；6 起 `api_key_fpr` 为 NULL 的审计互相隔离（无 prev、不继承 root/父链接，见 §3.3），且 system/tools 从无到有或从有到无也记 `system_changed`/`tools_changed`；7 起默认词表把系统提示词以 `You are a context summarization assistant.` 开头的请求（pi-ai / pi-coding-agent 自动压缩）识别为 `compaction` 附属请求——这是编译进二进制的词表变化，同样证据的 `agent_role`、`turn_start` 统计和事件会随之改变，所以提版本让旧行重算；8 起 `detail_enc` 可写成共享前缀的压缩信封（`detail_schema` 2，`detail_compact.go`），与前驱共享的请求历史只存一次，读取时按需展开；9 起默认词表修正 dsh 父会话路径为 `dsh_session_log.session.parentSession`（旧的 `header.parentSession` 保留为兜底），dsh 子 Agent 改为按 Body 精确连父，并新增 `zcode`（UA `ZCode/`、`x-zcode-session-type`，节点 `x-session-id`，按 `x-zcode-query-source`/`x-zcode-session-type` 定角色）与 `pi`（UA `pi/`，`session-id` 为根与节点）两个客户端——同样证据的 `agent_client`、`agent_role`、父/根指纹与会话分组会随之改变，所以提版本让旧行重算。
 - **词表覆盖只影响新分析**：修改 `insights.vocabulary_file` 只对之后新分析的记录生效；已有行保持原有分类，直到 `AnalysisVersion` 变化触发回填重算。反过来，版本变化触发的回填会用**当时生效**的覆盖文件（含其中新增的客户端）从旧到新重算历史记录。
 
 ## 10. 阶段与风险
@@ -363,7 +365,7 @@ insights:
 
 ## 11. 自定义 Agent 接入
 
-自研 Agent 框架只要在发往代理的**每一个** LLM 请求上带以下 Header，就能被精确归入 Agent 树，不需要任何内容推断。这组 Header 属于默认词表的 `custom` 客户端，优先级排在四家内置客户端的原生 Header 之后。
+自研 Agent 框架只要在发往代理的**每一个** LLM 请求上带以下 Header，就能被精确归入 Agent 树，不需要任何内容推断。这组 Header 属于默认词表的 `custom` 客户端，优先级排在六家内置客户端的原生 Header 之后。
 
 | Header | 必填 | 取值 | 含义 |
 | --- | --- | --- | --- |

@@ -12,6 +12,22 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
+// derivedMigrations add tables on top of the version-1 baseline. Each one is
+// applied independently when its version is missing, so versions need not be
+// contiguous: parallel feature branches can claim different numbers and merge
+// in any order. They run only when the proxy opens the live store, never in
+// the offline import, whose target must hold the baseline tables alone.
+var derivedMigrations = []struct {
+	version int
+	file    string
+}{
+	{2, "migrations/002_org_reports.sql"},
+	{3, "migrations/003_session_analysis.sql"},
+}
+
+// latestSchemaVersion is the newest version this binary understands.
+const latestSchemaVersion = 3
+
 func migrate(ctx context.Context, conn *sql.Conn) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -30,7 +46,33 @@ func migrate(ctx context.Context, conn *sql.Conn) error {
 			return err
 		}
 	}
+	if err := applyDerivedMigrations(ctx, tx); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func applyDerivedMigrations(ctx context.Context, tx *sql.Tx) error {
+	for _, migration := range derivedMigrations {
+		var applied bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, migration.version).Scan(&applied); err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+		body, err := migrationFiles.ReadFile(migration.file)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
+			return fmt.Errorf("postgres: apply migration %d: %w", migration.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at_ns) VALUES ($1, $2)`, migration.version, time.Now().UnixNano()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // InitializeImportSchema applies the schema inside the caller's transaction.
@@ -46,7 +88,7 @@ func InitializeImportSchema(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > latestSchemaVersion {
 		return errors.New("postgres: schema is newer than supported")
 	}
 	if version == 0 {

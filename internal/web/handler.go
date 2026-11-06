@@ -91,10 +91,16 @@ type Options struct {
 	Rules      UserAgentRules
 	// Policies is the keyword policy CRUD surface wired by app. Nil keeps the
 	// management endpoints at a stable 503.
-	Policies  ContentPolicyRules
+	Policies ContentPolicyRules
+	// Org is the optional organisation report surface; nil keeps every
+	// /api/v1/org route at 404 (doc/features/23-org-project-reports.md).
+	Org       OrgReports
 	Assets    fs.FS
 	Readiness func(context.Context) ReadyStatus
 	Logger    *slog.Logger
+
+	// SessionAnalysis is nil unless session_analysis.enabled.
+	SessionAnalysis SessionAnalysisQuery
 }
 
 // NewHandler constructs the complete management handler. It rejects an empty
@@ -113,11 +119,14 @@ func NewHandler(options Options) (http.Handler, error) {
 		users:     options.Users,
 		rules:     options.Rules,
 		policies:  options.Policies,
+		org:       options.Org,
 		developer: options.Developer,
 		readiness: options.Readiness,
 		static:    newStaticHandler(options.Assets),
 		logins:    newLoginLimiter(),
 		logger:    options.Logger,
+
+		sessionAnalysis: options.SessionAnalysis,
 	}
 	handler.authenticator = newManagementAuth(options.AdminToken, options.Developer.usable())
 	handler.auth = handler.authenticator.middleware(handler.serveProtected)
@@ -130,6 +139,7 @@ type managementHandler struct {
 	users         UserCatalog
 	rules         UserAgentRules
 	policies      ContentPolicyRules
+	org           OrgReports
 	developer     DeveloperLogin
 	readiness     func(context.Context) ReadyStatus
 	static        http.Handler
@@ -137,6 +147,8 @@ type managementHandler struct {
 	authenticator *managementAuth
 	logins        *loginLimiter
 	logger        *slog.Logger
+
+	sessionAnalysis SessionAnalysisQuery
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -179,6 +191,10 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveAuditResource(writer, request)
 	case strings.HasPrefix(request.URL.Path, insightsPathPrefix):
 		handler.serveInsights(writer, request)
+	case isOrgPath(request.URL.Path):
+		handler.serveOrg(writer, request)
+	case strings.HasPrefix(request.URL.Path, sessionAnalysisPathPrefix):
+		handler.serveSessionAnalysis(writer, request)
 	case !handler.requireAdmin(writer, request):
 		return
 	case request.URL.Path == "/healthz":

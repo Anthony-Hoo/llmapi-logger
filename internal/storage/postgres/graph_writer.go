@@ -464,9 +464,10 @@ LIMIT $4`, turn.Protocol, turn.ConversationKeyHash, turn.CreatedAtNS, parentCand
 			}
 			return evaluateCandidate(transaction, turn, candidates[0], "conversation_key", 95, linkForced, make(map[string][]auditmodel.ObjectRef))
 		}
-		// A conversation key groups a client session, not one agent: Codex and
-		// OpenCode send the root session id as prompt_cache_key for the parent
-		// and every sub-agent, so the latest keyed turn may belong to a
+		// A conversation key groups a client session, not one agent: Codex
+		// sends the root session id as prompt_cache_key for the parent and
+		// every sub-agent, and OpenCode sends a sub-agent's direct parent
+		// session id, so the latest keyed turn may belong to a
 		// concurrent sibling. Rank the session's recent turns by content
 		// instead. When none qualifies, including the key's first turn, the
 		// turn starts a new root in its own keyed conversation: the

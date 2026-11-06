@@ -35,6 +35,12 @@ import { ContentPolicyPanel } from "./components/content-policy-panel";
 import { ConversationView } from "./components/conversation-view";
 // Recharts is only needed by the insights charts, so keep it out of the main chunk.
 const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
+// Organisation reports are optional and admin-only; keep them out of the main chunk.
+const OrgAdminPanel = lazy(() => import("./components/org/org-admin-panel").then((module) => ({ default: module.OrgAdminPanel })));
+const OrgReportView = lazy(() => import("./components/org/org-report-view").then((module) => ({ default: module.OrgReportView })));
+const SessionAnalysisView = lazy(() =>
+  import("./components/session-analysis/analysis-view").then((module) => ({ default: module.SessionAnalysisView })),
+);
 import { CompositionSection } from "./components/insights/composition-section";
 import { buildConversationExport } from "./lib/conversation-export";
 import { errorMessage, isAbortError } from "./lib/errors";
@@ -85,6 +91,11 @@ interface LoadedRawBody {
 /** The insights views exist only when the server reports the capability. */
 export function insightsEnabled(session: SessionInfo | null): boolean {
   return session?.insights_enabled === true;
+}
+
+/** The organisation report views exist only when the server enables them. */
+export function orgReportsEnabled(session: SessionInfo | null): boolean {
+  return session?.org_reports_enabled === true;
 }
 
 export function App() {
@@ -312,7 +323,9 @@ function Dashboard({
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
   const hasInsights = insightsEnabled(session);
-  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights">("audits");
+  const hasOrgReports = orgReportsEnabled(session);
+  const hasSessionAnalysis = session?.session_analysis_enabled === true;
+  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights" | "org-report" | "org-admin" | "analysis">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -484,6 +497,16 @@ function Dashboard({
                   用量洞察
                 </button>
               ) : null}
+              {hasOrgReports ? (
+                <button type="button" className={segmentedItemClassName(view === "org-report")} aria-current={view === "org-report" ? "page" : undefined} onClick={() => setView("org-report")}>
+                  {isDeveloper ? "我的本周" : "项目周报"}
+                </button>
+              ) : null}
+              {hasSessionAnalysis ? (
+                <button type="button" className={segmentedItemClassName(view === "analysis")} aria-current={view === "analysis" ? "page" : undefined} onClick={() => setView("analysis")}>
+                  会话分析
+                </button>
+              ) : null}
               {isDeveloper ? null : (
                 <button type="button" className={segmentedItemClassName(view === "rules")} aria-current={view === "rules" ? "page" : undefined} onClick={() => setView("rules")}>
                   UA 拦截规则
@@ -494,6 +517,11 @@ function Dashboard({
                   关键词拦截
                 </button>
               )}
+              {hasOrgReports && !isDeveloper ? (
+                <button type="button" className={segmentedItemClassName(view === "org-admin")} aria-current={view === "org-admin" ? "page" : undefined} onClick={() => setView("org-admin")}>
+                  项目组与项目
+                </button>
+              ) : null}
             </nav>
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
@@ -511,6 +539,18 @@ function Dashboard({
           <UserAgentRulesPanel client={client} />
         ) : view === "content-policy" && !isDeveloper ? (
           <ContentPolicyPanel client={client} />
+        ) : view === "org-report" && hasOrgReports ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <OrgReportView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey} />
+          </Suspense>
+        ) : view === "org-admin" && hasOrgReports && !isDeveloper ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <OrgAdminPanel client={client} />
+          </Suspense>
+        ) : view === "analysis" && hasSessionAnalysis ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <SessionAnalysisView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey} />
+          </Suspense>
         ) : view === "insights" && hasInsights ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <InsightsView

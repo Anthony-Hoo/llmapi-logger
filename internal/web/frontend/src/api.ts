@@ -23,8 +23,38 @@ import type {
   UserAgentRuleInput,
   UserAgentRuleList,
 } from "./types";
+import type {
+  OrgCatalog,
+  OrgGroup,
+  OrgGroupInput,
+  OrgMember,
+  OrgPreviewInput,
+  OrgPreviewResult,
+  OrgPrincipal,
+  OrgProject,
+  OrgProjectInput,
+  OrgProjectReport,
+  OrgSelfReport,
+  OrgSettings,
+  OrgTrendReport,
+  OrgUnattributedEntry,
+  OrgWeeklyQuery,
+  OrgWeeklyReport,
+  PrincipalClass,
+  PrincipalKind,
+} from "./lib/org/types";
 
 import { hasRowFilters } from "./filters";
+import type {
+  AnalysisCalibration,
+  AnalysisCalibrationLabel,
+  AnalysisFacet,
+  AnalysisOverview,
+  AnalysisPack,
+  AnalysisReport,
+  AnalysisSessionsPage,
+  AnalysisSessionsQuery,
+} from "./lib/session-analysis/types";
 
 const API_BASE = "/api/v1";
 
@@ -69,6 +99,44 @@ export interface ApiClient {
   getAgentTree: (treeID: string, signal?: AbortSignal) => Promise<TreeResponse>;
   /** Rejects with ApiError(404) while the audit has not been analyzed yet. */
   getComposition: (auditID: string, signal?: AbortSignal) => Promise<CompositionResponse>;
+  // Session analysis (doc/features/24-session-analysis.md).
+  getAnalysisOverview: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisOverview>;
+  listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
+  /** Administrator only; rejects with ApiError(409) while a run is in progress. */
+  triggerAnalysisRun: (signal?: AbortSignal) => Promise<void>;
+  /** Every successful read is recorded in the analysis view log. */
+  getAnalysisPack: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisPack>;
+  /** Every successful read is recorded in the analysis view log. */
+  getAnalysisFacet: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisFacet>;
+  /** Administrator only. */
+  calibrateAnalysis: (labels: AnalysisCalibrationLabel[], signal?: AbortSignal) => Promise<AnalysisCalibration>;
+  getAnalysisReport: (week: "current" | "previous", signal?: AbortSignal) => Promise<AnalysisReport>;
+  /** Administrator only; all-keys suggestions. */
+  dismissAnalysisSuggestion: (id: number, signal?: AbortSignal) => Promise<void>;
+  /** Organisation reports (doc/features/23); every route 404s when disabled. */
+  org: OrgApi;
+}
+
+export interface OrgApi {
+  settings: (signal?: AbortSignal) => Promise<OrgSettings>;
+  catalog: (signal?: AbortSignal) => Promise<OrgCatalog>;
+  createGroup: (input: OrgGroupInput, signal?: AbortSignal) => Promise<OrgGroup>;
+  updateGroup: (id: number, input: OrgGroupInput, signal?: AbortSignal) => Promise<OrgGroup>;
+  deleteGroup: (id: number, signal?: AbortSignal) => Promise<void>;
+  createProject: (input: OrgProjectInput, signal?: AbortSignal) => Promise<OrgProject>;
+  updateProject: (id: number, input: OrgProjectInput, signal?: AbortSignal) => Promise<OrgProject>;
+  deleteProject: (id: number, signal?: AbortSignal) => Promise<void>;
+  setMember: (userID: number, groupID: number, signal?: AbortSignal) => Promise<OrgMember>;
+  deleteMember: (userID: number, signal?: AbortSignal) => Promise<void>;
+  setPrincipal: (kind: PrincipalKind, id: number, principalClass: PrincipalClass, signal?: AbortSignal) => Promise<OrgPrincipal>;
+  deletePrincipal: (kind: PrincipalKind, id: number, signal?: AbortSignal) => Promise<void>;
+  preview: (input: OrgPreviewInput, signal?: AbortSignal) => Promise<OrgPreviewResult>;
+  unattributed: (week: string | undefined, limit: number, signal?: AbortSignal) => Promise<{ items: OrgUnattributedEntry[] }>;
+  weekly: (query: OrgWeeklyQuery, signal?: AbortSignal) => Promise<OrgWeeklyReport>;
+  trend: (weeks: number, groupID: number | undefined, signal?: AbortSignal) => Promise<OrgTrendReport>;
+  projectWeekly: (projectID: number, week: string | undefined, signal?: AbortSignal) => Promise<OrgProjectReport>;
+  regenerate: (week: string, signal?: AbortSignal) => Promise<void>;
+  self: (signal?: AbortSignal) => Promise<OrgSelfReport>;
 }
 
 export function createApiClient(
@@ -110,6 +178,69 @@ export function createApiClient(
     return (await response.json()) as T;
   }
 
+  async function deleteResource(path: string, signal?: AbortSignal): Promise<void> {
+    const response = await sessionFetch(path, { method: "DELETE", signal });
+    if (!response.ok) {
+      throw await responseError(response);
+    }
+  }
+
+  const orgBase = `${API_BASE}/org`;
+  const id = (value: number) => encodeURIComponent(String(value));
+  const org: OrgApi = {
+    settings: (signal) => requestJSON<OrgSettings>(`${orgBase}/settings`, signal),
+    catalog: (signal) => requestJSON<OrgCatalog>(`${orgBase}/catalog`, signal),
+    createGroup: (input, signal) => mutateJSON<OrgGroup>(`${orgBase}/groups`, "POST", input, signal),
+    updateGroup: (groupID, input, signal) => mutateJSON<OrgGroup>(`${orgBase}/groups/${id(groupID)}`, "PUT", input, signal),
+    deleteGroup: (groupID, signal) => deleteResource(`${orgBase}/groups/${id(groupID)}`, signal),
+    createProject: (input, signal) => mutateJSON<OrgProject>(`${orgBase}/projects`, "POST", input, signal),
+    updateProject: (projectID, input, signal) => mutateJSON<OrgProject>(`${orgBase}/projects/${id(projectID)}`, "PUT", input, signal),
+    deleteProject: (projectID, signal) => deleteResource(`${orgBase}/projects/${id(projectID)}`, signal),
+    setMember: (userID, groupID, signal) => mutateJSON<OrgMember>(`${orgBase}/members/${id(userID)}`, "PUT", { group_id: groupID }, signal),
+    deleteMember: (userID, signal) => deleteResource(`${orgBase}/members/${id(userID)}`, signal),
+    setPrincipal: (kind, principalID, principalClass, signal) =>
+      mutateJSON<OrgPrincipal>(`${orgBase}/principals/${kind}/${id(principalID)}`, "PUT", { class: principalClass }, signal),
+    deletePrincipal: (kind, principalID, signal) => deleteResource(`${orgBase}/principals/${kind}/${id(principalID)}`, signal),
+    preview: (input, signal) => mutateJSON<OrgPreviewResult>(`${orgBase}/projects/preview`, "POST", input, signal),
+    unattributed: (week, limit, signal) => {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (week) {
+        params.set("week", week);
+      }
+      return requestJSON<{ items: OrgUnattributedEntry[] }>(`${orgBase}/unattributed?${params}`, signal);
+    },
+    weekly: (query, signal) => {
+      const params = new URLSearchParams();
+      if (query.week) {
+        params.set("week", query.week);
+      }
+      if (query.group_id !== undefined) {
+        params.set("group_id", String(query.group_id));
+      }
+      if (query.metric) {
+        params.set("metric", query.metric);
+      }
+      const suffix = params.size > 0 ? `?${params}` : "";
+      return requestJSON<OrgWeeklyReport>(`${orgBase}/weekly${suffix}`, signal);
+    },
+    trend: (weeks, groupID, signal) => {
+      const params = new URLSearchParams({ weeks: String(weeks) });
+      if (groupID !== undefined) {
+        params.set("group_id", String(groupID));
+      }
+      return requestJSON<OrgTrendReport>(`${orgBase}/weekly/trend?${params}`, signal);
+    },
+    projectWeekly: (projectID, week, signal) =>
+      requestJSON<OrgProjectReport>(`${orgBase}/projects/${id(projectID)}/weekly${week ? `?week=${encodeURIComponent(week)}` : ""}`, signal),
+    regenerate: async (week, signal) => {
+      const response = await sessionFetch(`${orgBase}/weekly/regenerate?week=${encodeURIComponent(week)}`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+    },
+    self: (signal) => requestJSON<OrgSelfReport>(`${orgBase}/me/weekly`, signal),
+  };
+
   async function login(credentials: Record<string, string>, signal?: AbortSignal): Promise<SessionInfo> {
     const response = await sessionFetch(
       `${API_BASE}/session`,
@@ -128,6 +259,7 @@ export function createApiClient(
   }
 
   return {
+    org,
     // Returns null rather than throwing when nobody is signed in: an anonymous
     // visitor is an expected state during start-up, not an error.
     async getSession(signal) {
@@ -350,6 +482,85 @@ export function createApiClient(
         file_ops: result.file_ops ?? [],
         events: result.events ?? [],
       };
+    },
+
+    async getAnalysisOverview(range, signal) {
+      const params = new URLSearchParams({ from_ns: range.from_ns, to_ns: range.to_ns });
+      const result = await requestJSON<AnalysisOverview>(`${API_BASE}/session-analysis/overview?${params}`, signal);
+      if (result.last_run) {
+        result.last_run.skip_reasons = result.last_run.skip_reasons ?? {};
+      }
+      return result;
+    },
+
+    async listAnalysisSessions(query, signal) {
+      const params = new URLSearchParams({ from_ns: query.from_ns, to_ns: query.to_ns, limit: String(query.limit ?? 50) });
+      if (query.kind) {
+        params.set("kind", query.kind);
+      }
+      if (query.flags && query.flags.length > 0) {
+        params.set("flags", query.flags.join(","));
+      }
+      if (query.cursor) {
+        params.set("cursor", query.cursor);
+      }
+      const result = await requestJSON<AnalysisSessionsPage>(`${API_BASE}/session-analysis/sessions?${params}`, signal);
+      return {
+        ...result,
+        items: (result.items ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
+      };
+    },
+
+    async getAnalysisPack(sessionID, signal) {
+      const result = await requestJSON<AnalysisPack>(
+        `${API_BASE}/session-analysis/sessions/${encodeURIComponent(sessionID)}/pack`,
+        signal,
+      );
+      return { ...result, refs: result.refs ?? {} };
+    },
+
+    async getAnalysisFacet(sessionID, signal) {
+      const result = await requestJSON<AnalysisFacet>(
+        `${API_BASE}/session-analysis/sessions/${encodeURIComponent(sessionID)}/facet`,
+        signal,
+      );
+      return {
+        ...result,
+        friction: result.friction ?? [],
+        items: result.items ?? [],
+        invalid_fields: result.invalid_fields ?? [],
+        instructions: result.instructions ?? [],
+        evidence: result.evidence ?? {},
+        hidden_fields: result.hidden_fields ?? [],
+      };
+    },
+
+    async calibrateAnalysis(labels, signal) {
+      const result = await mutateJSON<AnalysisCalibration>(`${API_BASE}/session-analysis/calibration`, "POST", { labels }, signal);
+      return { ...result, hidden_fields: result.hidden_fields ?? [], agreement: result.agreement ?? {}, compared: result.compared ?? {} };
+    },
+
+    async getAnalysisReport(week, signal) {
+      const result = await requestJSON<AnalysisReport>(`${API_BASE}/session-analysis/report?week=${week}`, signal);
+      return {
+        ...result,
+        suggestions: (result.suggestions ?? []).map((item) => ({ ...item, evidence: item.evidence ?? [] })),
+        optimizations: (result.optimizations ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
+      };
+    },
+
+    async dismissAnalysisSuggestion(id, signal) {
+      const response = await sessionFetch(`${API_BASE}/session-analysis/suggestions/${id}/dismiss`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+    },
+
+    async triggerAnalysisRun(signal) {
+      const response = await sessionFetch(`${API_BASE}/session-analysis/run`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
     },
 
     getStreamTimeline(auditID, side, signal) {
