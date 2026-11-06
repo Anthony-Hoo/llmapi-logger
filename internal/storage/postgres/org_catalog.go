@@ -118,7 +118,9 @@ func orgAdminError(err error) error {
 	var coded *pgconn.PgError
 	if errors.As(err, &coded) {
 		switch coded.Code {
-		case "23505", "23503":
+		// 23001 is restrict_violation: ON DELETE RESTRICT (a group that still
+		// owns projects or members) raises it instead of 23503.
+		case "23505", "23503", "23001":
 			return fmt.Errorf("%w: %s", orgreport.ErrConflict, coded.ConstraintName)
 		case "23514", "23502":
 			return fmt.Errorf("%w: %s", orgreport.ErrInvalid, coded.ConstraintName)
