@@ -122,3 +122,86 @@ export function startOfLocalWeekMS(nowMS: number): number {
   date.setDate(date.getDate() - weekday);
   return date.getTime();
 }
+
+export const TASK_TYPE_LABELS: Record<string, string> = {
+  bug_fix: "修缺陷",
+  feature: "新功能",
+  refactor: "重构",
+  test: "测试",
+  docs: "文档",
+  config_ops: "配置运维",
+  data: "数据处理",
+  explain_learn: "解释学习",
+  review: "审查",
+  research: "调研",
+  other: "其他",
+};
+
+export const OUTCOME_LABELS: Record<string, string> = {
+  achieved: "达成",
+  partial: "部分达成",
+  not_achieved: "未达成",
+  abandoned: "中途放弃",
+  unclear: "看不出",
+};
+
+export const FRICTION_LABELS: Record<string, string> = {
+  misunderstood_request: "误解需求",
+  wrong_approach: "方向错误",
+  buggy_code: "代码有缺陷",
+  user_rejected_action: "否决了操作",
+  excessive_changes: "改动过多",
+  tool_failed: "工具失败",
+  user_stopped_early: "提前中止",
+  wrong_file_or_location: "改错位置",
+  slow_or_verbose: "过慢或啰嗦",
+  user_unclear: "表述不清",
+  external_issue: "外部问题",
+  looping: "重复打转",
+};
+
+export const COLLABORATION_LABELS: Record<string, string> = {
+  directive: "直接下达",
+  feedback_loop: "报错回贴循环",
+  task_iteration: "来回迭代",
+  learning: "学习理解",
+  validation: "检查验证",
+};
+
+export const FIELD_LABELS: Record<string, string> = {
+  task_type: "任务类型",
+  outcome: "结果",
+  collaboration: "协作模式",
+  work_relevance: "工作相关性",
+  friction: "摩擦",
+};
+
+export function labelOf(map: Record<string, string>, value: string | undefined): string {
+  if (!value) {
+    return "—";
+  }
+  return map[value] ?? value;
+}
+
+/**
+ * Parses a calibration upload: a JSON array of labels or {"labels": [...]}.
+ * Returns an error message instead of throwing.
+ */
+export function parseCalibrationLabels(text: string): { labels: import("./types").AnalysisCalibrationLabel[] } | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: "不是合法的 JSON。" };
+  }
+  const list = Array.isArray(parsed) ? parsed : (parsed as { labels?: unknown })?.labels;
+  if (!Array.isArray(list) || list.length === 0) {
+    return { error: "需要一个非空的标注数组。" };
+  }
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null || typeof (entry as { session_id?: unknown }).session_id !== "string") {
+      return { error: "每条标注都需要 session_id。" };
+    }
+  }
+  return { labels: list as import("./types").AnalysisCalibrationLabel[] };
+}

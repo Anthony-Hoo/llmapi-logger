@@ -54,6 +54,12 @@ type RunSummary struct {
 	Analyzed    int64            `json:"analyzed"`
 	Skipped     int64            `json:"skipped"`
 	SkipReasons map[string]int64 `json:"skip_reasons"`
+	FacetsDue   int64            `json:"facets_due"`
+	FacetsOK    int64            `json:"facets_ok"`
+	FacetsBad   int64            `json:"facets_invalid"`
+	FacetsError int64            `json:"facets_failed"`
+	ModelInput  int64            `json:"model_input_tokens"`
+	ModelOutput int64            `json:"model_output_tokens"`
 	Error       string           `json:"error,omitempty"`
 }
 
@@ -67,7 +73,10 @@ type OverviewResponse struct {
 	Running  bool         `json:"running"`
 	// LLMEnabled reports whether facets are produced (S2); packs and signals
 	// work without it.
-	LLMEnabled bool `json:"llm_enabled"`
+	LLMEnabled    bool               `json:"llm_enabled"`
+	Model         string             `json:"model,omitempty"`
+	PromptVersion string             `json:"prompt_version"`
+	Calibration   *CalibrationResult `json:"calibration,omitempty"`
 }
 
 // SessionItem is one row of GET /api/v1/session-analysis/sessions.
@@ -108,6 +117,9 @@ type SessionItem struct {
 	Secrets          map[string]int64 `json:"secrets"`
 	Eligible         bool             `json:"eligible"`
 	SkipReason       string           `json:"skip_reason,omitempty"`
+	FacetStatus      string           `json:"facet_status,omitempty"`
+	TaskType         string           `json:"task_type,omitempty"`
+	Outcome          string           `json:"outcome,omitempty"`
 }
 
 // SessionsResponse is one keyset page.
@@ -134,6 +146,7 @@ type QueryStore interface {
 	LatestSessionAnalysisRun(ctx context.Context) (storage.SessionAnalysisRun, error)
 	LoadSessionPack(ctx context.Context, sessionKey []byte) (storage.SessionPack, error)
 	RecordAnalysisView(ctx context.Context, view storage.AnalysisView) error
+	FacetStore
 }
 
 // Trigger starts a manual batch run.
@@ -144,11 +157,13 @@ type Trigger interface {
 
 // QueryService serves the management API.
 type QueryService struct {
-	store      QueryStore
-	trigger    Trigger
-	cipher     security.Cipher
-	llmEnabled bool
-	now        func() time.Time
+	store   QueryStore
+	facets  FacetStore
+	trigger Trigger
+	cipher  security.Cipher
+	// model is the local model name, empty when the LLM stage is disabled.
+	model string
+	now   func() time.Time
 }
 
 // Default and maximum page sizes and range of the management API.
@@ -164,11 +179,12 @@ var validFlags = map[string]bool{
 }
 
 // NewQueryService assembles the management read service. trigger may be nil.
-func NewQueryService(store QueryStore, trigger Trigger, cipher security.Cipher, llmEnabled bool) (*QueryService, error) {
+// model is the local model name, empty when the LLM stage is disabled.
+func NewQueryService(store QueryStore, trigger Trigger, cipher security.Cipher, model string) (*QueryService, error) {
 	if store == nil || cipher == nil {
 		return nil, errors.New("sessionanalysis: nil query store or cipher")
 	}
-	return &QueryService{store: store, trigger: trigger, cipher: cipher, llmEnabled: llmEnabled, now: time.Now}, nil
+	return &QueryService{store: store, facets: store, trigger: trigger, cipher: cipher, model: model, now: time.Now}, nil
 }
 
 func invalid(message string) error {
@@ -208,7 +224,8 @@ func (service *QueryService) Overview(ctx context.Context, fromNS, toNS int64, s
 	response := OverviewResponse{
 		FromNS: fromNS, ToNS: toNS,
 		Current: mapTotals(current), Previous: mapTotals(previous),
-		LLMEnabled: service.llmEnabled,
+		LLMEnabled: service.model != "", Model: service.model, PromptVersion: PromptVersion,
+		Calibration: service.latestCalibration(ctx),
 	}
 	if service.trigger != nil {
 		response.Running = service.trigger.Running()
@@ -218,6 +235,8 @@ func (service *QueryService) Overview(ctx context.Context, fromNS, toNS int64, s
 		summary := RunSummary{
 			StartedNS: run.StartedAtNS, FinishedNS: run.FinishedAtNS, Trigger: run.Trigger,
 			Candidates: run.Candidates, Analyzed: run.Analyzed, Skipped: run.Skipped, Error: run.ErrorCategory,
+			FacetsDue: run.L1Candidates, FacetsOK: run.L1OK, FacetsBad: run.L1Invalid, FacetsError: run.L1Failed,
+			ModelInput: run.L1InputTokens, ModelOutput: run.L1OutputToks,
 			SkipReasons: map[string]int64{},
 		}
 		_ = json.Unmarshal([]byte(run.SkipReasons), &summary.SkipReasons)
@@ -311,6 +330,7 @@ func mapSession(row storage.SessionSignals) SessionItem {
 		UpstreamErrors: row.UpstreamErrors, HeavyModel: row.HeavyModel,
 		Danger: decodeCounts(row.DangerCounts), Secrets: decodeCounts(row.SecretCounts),
 		Eligible: row.Eligible, SkipReason: row.SkipReason,
+		FacetStatus: row.FacetStatus, TaskType: row.FacetTaskType, Outcome: row.FacetOutcome,
 	}
 	if row.Kind == KindAgent && len(row.SessionKey) >= 12 {
 		item.TreeID = hex.EncodeToString(row.SessionKey[:12])

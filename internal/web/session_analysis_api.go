@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -17,6 +18,8 @@ type SessionAnalysisQuery interface {
 	Sessions(context.Context, sessionanalysis.SessionsQuery) (sessionanalysis.SessionsResponse, error)
 	TriggerRun() error
 	Pack(context.Context, string, *query.Scope, sessionanalysis.Viewer) (sessionanalysis.PackResponse, error)
+	Facet(context.Context, string, *query.Scope, sessionanalysis.Viewer) (sessionanalysis.FacetResponse, error)
+	Calibrate(context.Context, []sessionanalysis.CalibrationLabel) (sessionanalysis.CalibrationResult, error)
 }
 
 const sessionAnalysisPathPrefix = "/api/v1/session-analysis/"
@@ -39,6 +42,10 @@ func (handler *managementHandler) serveSessionAnalysis(writer http.ResponseWrite
 		handler.serveSessionAnalysisRun(writer, request)
 	case len(parts) == 3 && parts[0] == "sessions" && parts[2] == "pack":
 		handler.serveSessionAnalysisPack(writer, request, parts[1])
+	case len(parts) == 3 && parts[0] == "sessions" && parts[2] == "facet":
+		handler.serveSessionAnalysisFacet(writer, request, parts[1])
+	case len(parts) == 1 && parts[0] == "calibration":
+		handler.serveSessionAnalysisCalibration(writer, request)
 	default:
 		http.NotFound(writer, request)
 	}
@@ -163,4 +170,56 @@ func (handler *managementHandler) serveSessionAnalysisPack(writer http.ResponseW
 		return
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (handler *managementHandler) serveSessionAnalysisFacet(writer http.ResponseWriter, request *http.Request, sessionID string) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if err := parseInsightsValues(request.URL.Query()); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	response, err := handler.sessionAnalysis.Facet(ctx, sessionID, handler.sessionScope(request), handler.sessionViewer(request))
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+// maxCalibrationBodyBytes bounds one calibration upload (1000 labels).
+const maxCalibrationBodyBytes = 512 << 10
+
+// serveSessionAnalysisCalibration compares administrator-supplied labels with
+// the stored facets (doc 24 section 7.3) and records the agreement.
+func (handler *managementHandler) serveSessionAnalysisCalibration(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer, http.MethodPost)
+		return
+	}
+	if !handler.requireAdmin(writer, request) {
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxCalibrationBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var body struct {
+		Labels []sessionanalysis.CalibrationLabel `json:"labels"`
+	}
+	if err := decoder.Decode(&body); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_calibration", "invalid calibration labels")
+		return
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	result, err := handler.sessionAnalysis.Calibrate(ctx, body.Labels)
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }

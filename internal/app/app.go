@@ -124,6 +124,15 @@ func assembleSessionAnalysis(configuration config.Config, store runtimeStore, lo
 	if err != nil {
 		return nil, nil, err
 	}
+	var model sessionanalysis.Completer
+	modelName := ""
+	if analysis.LLM.Enabled {
+		client, err := sessionanalysis.NewLLMClient(analysis.LLM, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("assemble session analysis model client: %w", err)
+		}
+		model, modelName = client, client.Model()
+	}
 	runner, err := sessionanalysis.NewRunner(sessionanalysis.Options{
 		Config:        analysis,
 		RetentionDays: configuration.RetentionDays,
@@ -133,13 +142,14 @@ func assembleSessionAnalysis(configuration config.Config, store runtimeStore, lo
 		Insights:      insightsVocabulary,
 		Fingerprints:  fingerprints,
 		Cipher:        cipher,
+		LLM:           model,
 		ClientLabels:  insightsVocabulary.ClientLabels(),
 		Logger:        logger,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble session analysis runner: %w", err)
 	}
-	service, err := sessionanalysis.NewQueryService(store, runner, cipher, analysis.LLM.Enabled)
+	service, err := sessionanalysis.NewQueryService(store, runner, cipher, modelName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble session analysis service: %w", err)
 	}

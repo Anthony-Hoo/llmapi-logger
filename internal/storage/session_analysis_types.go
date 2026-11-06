@@ -96,6 +96,10 @@ type SessionSignals struct {
 	SkipReason       string
 	SignalVersion    int64
 	ComputedAtNS     int64
+	// Read-only: the plaintext enums of the session's own facet, if any.
+	FacetStatus   string
+	FacetTaskType string
+	FacetOutcome  string
 }
 
 // Pack kinds.
@@ -160,6 +164,12 @@ type SessionAnalysisRun struct {
 	Skipped       int64
 	SkipReasons   string
 	Pruned        int64
+	L1Candidates  int64
+	L1OK          int64
+	L1Invalid     int64
+	L1Failed      int64
+	L1InputTokens int64
+	L1OutputToks  int64
 	ErrorCategory string
 }
 
@@ -213,4 +223,41 @@ type SessionSignalTotals struct {
 	CompactionSess  int64
 	InputTokens     int64
 	CacheReadTokens int64
+}
+
+// SessionFacet is one row of session_facets. TextEnc is AES-GCM ciphertext
+// of the facet's free text and evidence; the enum columns are plaintext.
+type SessionFacet struct {
+	SessionKey    []byte
+	Kind          string
+	APIKeyFPR     []byte
+	NewAPITokenID *int64
+	LastNS        int64
+	PackHash      string
+	PromptVersion string
+	Model         string
+	Status        string
+	TaskType      string
+	Outcome       string
+	Collaboration string
+	WorkRelevance string
+	Friction      string
+	Items         string
+	InvalidFields string
+	TextEnc       []byte
+	InputTokens   int64
+	OutputTokens  int64
+	LatencyMS     int64
+	Attempts      int64
+	CreatedAtNS   int64
+}
+
+// FacetCalibration is one row of facet_calibrations.
+type FacetCalibration struct {
+	ID            int64
+	CreatedAtNS   int64
+	PromptVersion string
+	Model         string
+	Samples       int64
+	Agreement     string
 }

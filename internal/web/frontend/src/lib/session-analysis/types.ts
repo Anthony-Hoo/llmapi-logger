@@ -32,6 +32,12 @@ export interface AnalysisRunSummary {
   analyzed: number;
   skipped: number;
   skip_reasons: Record<string, number>;
+  facets_due: number;
+  facets_ok: number;
+  facets_invalid: number;
+  facets_failed: number;
+  model_input_tokens: number;
+  model_output_tokens: number;
   error?: string;
 }
 
@@ -43,6 +49,9 @@ export interface AnalysisOverview {
   last_run?: AnalysisRunSummary;
   running: boolean;
   llm_enabled: boolean;
+  model?: string;
+  prompt_version: string;
+  calibration?: AnalysisCalibration;
 }
 
 export type AnalysisFlag =
@@ -95,6 +104,9 @@ export interface AnalysisSessionItem {
   secrets: Record<string, number>;
   eligible: boolean;
   skip_reason?: string;
+  facet_status?: "ok" | "invalid" | "failed";
+  task_type?: string;
+  outcome?: string;
 }
 
 export interface AnalysisSessionsPage {
@@ -122,4 +134,46 @@ export interface AnalysisPack {
   truncated: boolean;
   members: number;
   built_ns: string;
+}
+
+export interface AnalysisCalibration {
+  prompt_version: string;
+  model: string;
+  labels?: number;
+  samples: number;
+  compared: Record<string, number>;
+  agreement: Record<string, number>;
+  hidden_fields: string[];
+  created_ns: string;
+}
+
+export interface AnalysisCalibrationLabel {
+  session_id: string;
+  task_type?: string;
+  outcome?: string;
+  collaboration?: string;
+  work_relevance?: string;
+  friction?: string[];
+}
+
+export interface AnalysisFacet {
+  session_id: string;
+  pack_id: string;
+  kind: "session" | "chat_digest";
+  status: "ok" | "invalid" | "failed";
+  model: string;
+  prompt_version: string;
+  created_ns: string;
+  task_type?: string;
+  outcome?: string;
+  collaboration?: string;
+  work_relevance?: string;
+  friction: string[];
+  items: Array<{ ref: string; task_type?: string; work_relevance?: string }>;
+  invalid_fields: string[];
+  goal?: string;
+  instructions: string[];
+  skill_candidate?: string;
+  evidence: Record<string, Array<{ label: string; audit_id?: string }>>;
+  hidden_fields: string[];
 }

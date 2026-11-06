@@ -268,9 +268,11 @@ func (store *Store) RecordSessionAnalysisRun(ctx context.Context, run storage.Se
 	}
 	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
 		_, err := tx.Exec(`
-INSERT INTO session_analysis_runs (started_at_ns, finished_at_ns, trigger, candidates, analyzed, skipped, skip_reasons, pruned, error_category)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			run.StartedAtNS, run.FinishedAtNS, run.Trigger, run.Candidates, run.Analyzed, run.Skipped, run.SkipReasons, run.Pruned, nullText(run.ErrorCategory))
+INSERT INTO session_analysis_runs (started_at_ns, finished_at_ns, trigger, candidates, analyzed, skipped, skip_reasons, pruned,
+    l1_candidates, l1_ok, l1_invalid, l1_failed, l1_input_tokens, l1_output_tokens, error_category)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+			run.StartedAtNS, run.FinishedAtNS, run.Trigger, run.Candidates, run.Analyzed, run.Skipped, run.SkipReasons, run.Pruned,
+			run.L1Candidates, run.L1OK, run.L1Invalid, run.L1Failed, run.L1InputTokens, run.L1OutputToks, nullText(run.ErrorCategory))
 		if err != nil {
 			return fmt.Errorf("postgres writer: record session analysis run: %w", err)
 		}
@@ -289,9 +291,11 @@ func (store *Store) LatestSessionAnalysisRun(ctx context.Context) (storage.Sessi
 	var run storage.SessionAnalysisRun
 	var category sql.NullString
 	err := store.readerDB.QueryRowContext(ctx, `
-SELECT id, started_at_ns, finished_at_ns, trigger, candidates, analyzed, skipped, skip_reasons, pruned, error_category
+SELECT id, started_at_ns, finished_at_ns, trigger, candidates, analyzed, skipped, skip_reasons, pruned,
+       l1_candidates, l1_ok, l1_invalid, l1_failed, l1_input_tokens, l1_output_tokens, error_category
 FROM session_analysis_runs ORDER BY id DESC LIMIT 1`).Scan(&run.ID, &run.StartedAtNS, &run.FinishedAtNS, &run.Trigger,
-		&run.Candidates, &run.Analyzed, &run.Skipped, &run.SkipReasons, &run.Pruned, &category)
+		&run.Candidates, &run.Analyzed, &run.Skipped, &run.SkipReasons, &run.Pruned,
+		&run.L1Candidates, &run.L1OK, &run.L1Invalid, &run.L1Failed, &run.L1InputTokens, &run.L1OutputToks, &category)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.SessionAnalysisRun{}, sql.ErrNoRows
@@ -310,7 +314,10 @@ const sessionSignalColumns = `s.session_key, s.kind, s.api_key_fpr, s.newapi_use
     s.tool_calls, s.tool_failures, s.tool_unknown, s.max_failure_streak, s.loops, s.max_loop_length,
     s.thrash_files, s.max_file_writes, s.verified, s.error_pastes, s.interrupts, s.corrections,
     s.heavy_model, s.danger_counts, s.secret_counts, s.eligible, COALESCE(s.skip_reason, ''),
-    s.signal_version, s.computed_at_ns`
+    s.signal_version, s.computed_at_ns,
+    COALESCE((SELECT f.facet_status FROM session_facets AS f WHERE f.session_key = s.session_key), ''),
+    COALESCE((SELECT f.task_type FROM session_facets AS f WHERE f.session_key = s.session_key), ''),
+    COALESCE((SELECT f.outcome FROM session_facets AS f WHERE f.session_key = s.session_key), '')`
 
 func scanSessionSignals(scanner interface{ Scan(...any) error }) (storage.SessionSignals, error) {
 	var s storage.SessionSignals
@@ -322,7 +329,8 @@ func scanSessionSignals(scanner interface{ Scan(...any) error }) (storage.Sessio
 		&s.ToolCalls, &s.ToolFailures, &s.ToolUnknown, &s.MaxFailureStreak, &s.Loops, &s.MaxLoopLength,
 		&s.ThrashFiles, &s.MaxFileWrites, &s.Verified, &s.ErrorPastes, &s.Interrupts, &s.Corrections,
 		&s.HeavyModel, &s.DangerCounts, &s.SecretCounts, &s.Eligible, &s.SkipReason,
-		&s.SignalVersion, &s.ComputedAtNS)
+		&s.SignalVersion, &s.ComputedAtNS,
+		&s.FacetStatus, &s.FacetTaskType, &s.FacetOutcome)
 	return s, err
 }
 

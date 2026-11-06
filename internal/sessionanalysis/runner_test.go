@@ -27,11 +27,14 @@ type memoryStore struct {
 	members  map[string][][]byte
 	runs     []storage.SessionAnalysisRun
 	views    []storage.AnalysisView
+	facets   map[string]storage.SessionFacet
+	facetFPR map[string][]storage.SessionTextFPR
+	calib    []storage.FacetCalibration
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{sessions: map[string][]storage.SessionAuditRow{}, signals: map[string]storage.SessionSignals{},
-		packs: map[string]storage.SessionPack{}, members: map[string][][]byte{}}
+		packs: map[string]storage.SessionPack{}, members: map[string][][]byte{}, facets: map[string]storage.SessionFacet{}, facetFPR: map[string][]storage.SessionTextFPR{}}
 }
 
 func (store *memoryStore) ListSessionCandidates(_ context.Context, _, _, _ int64, _ int) ([]storage.SessionCandidate, error) {
@@ -130,6 +133,60 @@ func (store *memoryStore) RecordAnalysisView(_ context.Context, view storage.Ana
 	return nil
 }
 
+func (store *memoryStore) ListFacetCandidates(_ context.Context, settledBeforeNS int64, promptVersion, model string, limit int) ([]storage.SessionPack, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	out := make([]storage.SessionPack, 0)
+	for key, pack := range store.packs {
+		facet, ok := store.facets[key]
+		if pack.LastNS >= settledBeforeNS {
+			continue
+		}
+		if ok && facet.PackHash == pack.PackHash && facet.PromptVersion == promptVersion && facet.Model == model && facet.Status != "failed" {
+			continue
+		}
+		out = append(out, pack)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastNS > out[j].LastNS })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (store *memoryStore) SaveSessionFacet(_ context.Context, facet storage.SessionFacet, fprs []storage.SessionTextFPR) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.facets[hex.EncodeToString(facet.SessionKey)] = facet
+	store.facetFPR[hex.EncodeToString(facet.SessionKey)] = fprs
+	return nil
+}
+
+func (store *memoryStore) LoadSessionFacet(_ context.Context, key []byte) (storage.SessionFacet, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if facet, ok := store.facets[hex.EncodeToString(key)]; ok {
+		return facet, nil
+	}
+	return storage.SessionFacet{}, sql.ErrNoRows
+}
+
+func (store *memoryStore) SaveFacetCalibration(_ context.Context, calibration storage.FacetCalibration) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.calib = append(store.calib, calibration)
+	return nil
+}
+
+func (store *memoryStore) LatestFacetCalibration(context.Context, string, string) (storage.FacetCalibration, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.calib) == 0 {
+		return storage.FacetCalibration{}, sql.ErrNoRows
+	}
+	return store.calib[len(store.calib)-1], nil
+}
+
 func testCipher(t *testing.T) security.Cipher {
 	t.Helper()
 	cipher, err := security.NewAESGCM(bytes.Repeat([]byte{0x42}, security.KeySize))
@@ -194,7 +251,7 @@ func TestRunnerBuildsEncryptedPacksAndDigests(t *testing.T) {
 	if agentPack.Kind != storage.PackKindSession || bytes.Contains(agentPack.PackEnc, []byte("流式")) {
 		t.Fatalf("agent pack not encrypted: %+v", agentPack.Kind)
 	}
-	service, err := NewQueryService(store, runner, cipher, false)
+	service, err := NewQueryService(store, runner, cipher, "")
 	if err != nil {
 		t.Fatal(err)
 	}

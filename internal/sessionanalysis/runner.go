@@ -26,6 +26,8 @@ type Store interface {
 	RecordSessionAnalysisRun(ctx context.Context, run storage.SessionAnalysisRun) error
 	SaveSessionPack(ctx context.Context, pack storage.SessionPack, members [][]byte) error
 	ListChatDigestMembers(ctx context.Context, apiKeyFPR []byte, client string, fromNS, toNS int64, limit int) ([]storage.SessionSignals, error)
+	ListFacetCandidates(ctx context.Context, settledBeforeNS int64, promptVersion, model string, limit int) ([]storage.SessionPack, error)
+	SaveSessionFacet(ctx context.Context, facet storage.SessionFacet, fprs []storage.SessionTextFPR) error
 }
 
 // Run triggers.
@@ -54,10 +56,12 @@ type Options struct {
 	Insights      *insights.Vocabulary
 	Fingerprints  Fingerprinter
 	Cipher        security.Cipher
-	ClientLabels  map[string]string
-	Location      *time.Location
-	Logger        *slog.Logger
-	Now           func() time.Time
+	// LLM is nil unless session_analysis.llm.enabled.
+	LLM          Completer
+	ClientLabels map[string]string
+	Location     *time.Location
+	Logger       *slog.Logger
+	Now          func() time.Time
 }
 
 // Runner is the daily batch (doc 24 sections 5 and 7).
@@ -237,6 +241,10 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 		if err := runner.rebuildDigest(ctx, bucket); err != nil {
 			reasons["digest_error"]++
 		}
+	}
+	if err := runner.runFacets(ctx, &run); err != nil {
+		finish("facets_failed")
+		return run, err
 	}
 	options.Logger.Info("session analysis run completed",
 		"candidates", run.Candidates, "analyzed", run.Analyzed, "skipped", run.Skipped,

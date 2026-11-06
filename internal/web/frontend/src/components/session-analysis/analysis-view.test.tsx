@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../../api";
 import type { AnalysisOverview, AnalysisSessionItem, AnalysisSignalTotals } from "../../lib/session-analysis/types";
 import { OverviewCards, SessionAnalysisView, SessionDetails } from "./analysis-view";
+import { FacetView } from "./facet-panel";
 import { PackView } from "./pack-panel";
 
 function totals(overrides: Partial<AnalysisSignalTotals> = {}): AnalysisSignalTotals {
@@ -40,8 +41,11 @@ describe("session analysis view", () => {
       current: totals(),
       previous: totals({ loop_sessions: 0, cache_hit_rate: 0.85 }),
       running: false,
-      llm_enabled: false,
-      last_run: { started_ns: "1700000000000000000", finished_ns: "1700000060000000000", trigger: "manual", candidates: 5, analyzed: 5, skipped: 0, skip_reasons: { single_turn_chat: 2 } },
+      llm_enabled: true,
+      model: "local-small",
+      prompt_version: "facet-v1",
+      calibration: { prompt_version: "facet-v1", model: "local-small", samples: 30, compared: { outcome: 30 }, agreement: { outcome: 0.5 }, hidden_fields: ["outcome"], created_ns: "1" },
+      last_run: { started_ns: "1700000000000000000", finished_ns: "1700000060000000000", trigger: "manual", candidates: 5, analyzed: 5, skipped: 0, skip_reasons: { single_turn_chat: 2 }, facets_due: 3, facets_ok: 2, facets_invalid: 1, facets_failed: 0, model_input_tokens: 4500, model_output_tokens: 600 },
     };
     const html = renderToStaticMarkup(<OverviewCards overview={overview} />);
     expect(html).toContain("死循环");
@@ -49,6 +53,8 @@ describe("session analysis view", () => {
     expect(html).toContain("较上期 +12.5pt");
     expect(html).toContain("单轮聊天 2");
     expect(html).toContain("1 个会话出现危险命令");
+    expect(html).toContain("本地模型 local-small（facet-v1）：本轮待分析 3、成功 2、输出无效 1");
+    expect(html).toContain("结果 50%（30）；已隐藏 结果");
   });
 
   it("renders session details without identity fields", () => {
@@ -109,5 +115,37 @@ describe("session analysis view", () => {
     expect(html).toContain("聊天汇总包（4 个单轮会话）");
     expect(html).toContain("已按预算截断");
     expect(html.indexOf("U2 → a2")).toBeLessThan(html.indexOf("U10 → a10"));
+  });
+
+  it("renders a facet and hides fields below the calibration bar", () => {
+    const html = renderToStaticMarkup(
+      <FacetView
+        facet={{
+          session_id: "s",
+          pack_id: "p",
+          kind: "session",
+          status: "ok",
+          model: "local-small",
+          prompt_version: "facet-v1",
+          created_ns: "1",
+          task_type: "bug_fix",
+          outcome: "achieved",
+          collaboration: "task_iteration",
+          friction: ["tool_failed"],
+          items: [],
+          invalid_fields: [],
+          goal: "修复登录接口",
+          instructions: ["参数校验错误一律返回 400"],
+          evidence: { friction: [{ label: "C2", audit_id: "a2" }] },
+          hidden_fields: ["outcome"],
+        }}
+      />,
+    );
+    expect(html).toContain("修缺陷");
+    expect(html).toContain("工具失败");
+    expect(html).toContain("参数校验错误一律返回 400");
+    expect(html).toContain("C2 → a2");
+    expect(html).not.toContain("达成");
+    expect(html).toContain("隐藏：结果");
   });
 });

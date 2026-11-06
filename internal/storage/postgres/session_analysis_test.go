@@ -330,3 +330,91 @@ func TestSessionPacksStorageAndViewLog(t *testing.T) {
 		t.Fatalf("foreign members = %d, %v", len(others), err)
 	}
 }
+
+func TestSessionFacetsStorage(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	if err := store.SaveSessionSignals(ctx, testSignals(rootA, keyA, "a2", day.UnixNano()), nil); err != nil {
+		t.Fatal(err)
+	}
+	pack := storage.SessionPack{
+		SessionKey: rootA, Kind: storage.PackKindSession, APIKeyFPR: keyA, PackHash: strings.Repeat("ab", 32),
+		PackEnc: []byte{1}, RefMap: "{}", FirstNS: day.UnixNano(), LastNS: day.UnixNano(), LastAuditID: "a2", BuiltAtNS: 1, Members: 1,
+	}
+	if err := store.SaveSessionPack(ctx, pack, nil); err != nil {
+		t.Fatal(err)
+	}
+	settled := day.Add(time.Hour).UnixNano()
+	candidates := func(model string) int {
+		t.Helper()
+		due, err := store.ListFacetCandidates(ctx, settled, "facet-v1", model, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(due)
+	}
+	if candidates("m") != 1 {
+		t.Fatal("pack without facet not due")
+	}
+	if due, err := store.ListFacetCandidates(ctx, day.UnixNano(), "facet-v1", "m", 10); err != nil || len(due) != 0 {
+		t.Fatalf("unsettled pack due: %d %v", len(due), err)
+	}
+	facet := storage.SessionFacet{
+		SessionKey: rootA, Kind: storage.PackKindSession, APIKeyFPR: keyA, LastNS: day.UnixNano(), PackHash: pack.PackHash,
+		PromptVersion: "facet-v1", Model: "m", Status: "failed", CreatedAtNS: 5,
+	}
+	if err := store.SaveSessionFacet(ctx, facet, nil); err != nil {
+		t.Fatal(err)
+	}
+	if candidates("m") != 1 {
+		t.Fatal("failed facet not retried")
+	}
+	if err := store.SaveSessionFacet(ctx, facet, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadSessionFacet(ctx, rootA)
+	if err != nil || loaded.Attempts != 2 {
+		t.Fatalf("attempts = %d, %v", loaded.Attempts, err)
+	}
+	facet.Status, facet.TaskType, facet.Outcome, facet.Friction, facet.TextEnc = "ok", "refactor", "achieved", `["tool_failed"]`, []byte{9, 9}
+	if err := store.SaveSessionFacet(ctx, facet, []storage.SessionTextFPR{{Source: storage.TextSourceFacetInstruction, FPR: fill(0x81), SeenAtNS: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if candidates("m") != 0 || candidates("other-model") != 1 {
+		t.Fatal("facet cache key ignored")
+	}
+	loaded, err = store.LoadSessionFacet(ctx, rootA)
+	if err != nil || loaded.Status != "ok" || loaded.Attempts != 3 || loaded.Friction != `["tool_failed"]` || loaded.Items != "[]" || !bytes.Equal(loaded.TextEnc, []byte{9, 9}) {
+		t.Fatalf("facet = %+v, %v", loaded, err)
+	}
+	page, err := store.ListSessionSignals(ctx, storage.SessionSignalFilter{FromNS: day.Add(-time.Hour).UnixNano(), ToNS: settled}, storage.SessionSignalCursor{}, 10)
+	if err != nil || len(page.Rows) != 1 || page.Rows[0].FacetStatus != "ok" || page.Rows[0].FacetTaskType != "refactor" || page.Rows[0].FacetOutcome != "achieved" {
+		t.Fatalf("list facet enums = %+v, %v", page.Rows, err)
+	}
+	// A rebuilt pack with new text is due again.
+	pack.PackHash = strings.Repeat("cd", 32)
+	if err := store.SaveSessionPack(ctx, pack, nil); err != nil {
+		t.Fatal(err)
+	}
+	if candidates("m") != 1 {
+		t.Fatal("changed pack not due")
+	}
+	if err := store.SaveFacetCalibration(ctx, storage.FacetCalibration{CreatedAtNS: 1, PromptVersion: "facet-v1", Model: "m", Samples: 30, Agreement: `{"agreement":{"outcome":0.5}}`}); err != nil {
+		t.Fatal(err)
+	}
+	if calibration, err := store.LatestFacetCalibration(ctx, "facet-v1", "m"); err != nil || calibration.Samples != 30 {
+		t.Fatalf("calibration = %+v, %v", calibration, err)
+	}
+	if _, err := store.LatestFacetCalibration(ctx, "facet-v1", "other"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("calibration of another model: %v", err)
+	}
+	// Deleting the pack removes its facet.
+	if _, err := store.writerConn.ExecContext(ctx, `DELETE FROM session_packs`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSessionFacet(ctx, rootA); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("facet survived its pack: %v", err)
+	}
+}

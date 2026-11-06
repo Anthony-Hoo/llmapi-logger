@@ -1,6 +1,6 @@
 # 模块 24：会话记录分析（开发计划）
 
-> 状态：S0、S1 已实现，S2、S3 进行中，S4 未开始（实现记录与偏差见 §16）
+> 状态：S0–S2 已实现，S3 进行中，S4 未开始（实现记录与偏差见 §16）
 > 日期：2026-11-06
 > 依赖：[18 内容寻址会话存储](18-content-addressed-conversation-storage.md)、[19 开发者 API Key 会话](19-developer-key-session.md)、[20 上下文洞察](20-context-insights.md)、[12 保留清理](12-retention-and-maintenance.md)；可选集成 [23 组织项目周报](23-org-project-reports.md)（该文档在另一分支，合并后链接生效）
 > 本文是模块 23 里程碑 M5 的展开设计，并修订其 §9（见 §2）。落地后配置、表和 API 按惯例并入 01/04/10。
@@ -687,3 +687,14 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 - `[T]` 中的路径：相对路径原样保留，绝对路径只保留文件名（没有仓库根信息时）。
 - 查看日志 `analysis_view_log` 已建表并在每次读取输入包时写入（管理员和开发者都记）；读取查看日志的接口尚未提供。
 - §15.5 要求用真实样本复核 Token 分布，需在部署环境运行后补充；本地只验证了虚构示例（约 270–410 Token）。
+
+### S2（本地模型 facet）
+
+- 客户端只调 OpenAI 兼容的 `/chat/completions`，不读环境代理、不跟随重定向；`allow_non_local=false` 时拨号前校验每个解析出的对端地址，不符合直接拒绝，不会发起连接。
+- 关闭思考模式时同时发送 `chat_template_kwargs.enable_thinking=false` 和 `think=false`；服务端对此返回 400 时，去掉这两个字段重试一次，此后不再发送。
+- 固定前缀（规则、字段说明、一个示例）按包类型分两份（会话包、聊天汇总包），同一 `prompt_version`（当前 `facet-v1`）内逐字节不变；输入包放在最后一条 user 消息里。
+- 输出不是 JSON 对象时重试一次，仍失败记为 `invalid` 并缓存，不再重试；调用失败（超时、连接失败、非 200）记为 `failed`，下一轮批处理重试，`attempts` 计数。
+- 聊天汇总包的 `outcome` 固定为 `unclear`，`collaboration` 留空（该枚举没有 unclear）。
+- 会话列表返回 facet 的 `task_type`、`outcome` 明文枚举，便于筛看；`work_relevance` 不进列表，只在打开 facet 时返回（并记查看日志）。
+- **校准**：`POST /api/v1/session-analysis/calibration`（仅管理员）接收人工标注 JSON，与当前 `prompt_version` 和模型的 facet 逐字段比对，结果存入 `facet_calibrations`。某字段至少 20 条参与比较且一致率低于 80% 时，在 facet 页面和后续报告中隐藏。页面上提供粘贴 JSON 的表单，没有逐条标注界面。
+- 未完成：§15.5 要求的真实调用次数、Token、耗时和前缀缓存命中率，需要部署后回填。

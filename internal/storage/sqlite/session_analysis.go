@@ -58,3 +58,23 @@ func (store *Store) ListChatDigestMembers(context.Context, []byte, string, int64
 func (store *Store) RecordAnalysisView(context.Context, storage.AnalysisView) error {
 	return nil
 }
+
+func (store *Store) ListFacetCandidates(context.Context, int64, string, string, int) ([]storage.SessionPack, error) {
+	return nil, nil
+}
+
+func (store *Store) SaveSessionFacet(context.Context, storage.SessionFacet, []storage.SessionTextFPR) error {
+	return nil
+}
+
+func (store *Store) LoadSessionFacet(context.Context, []byte) (storage.SessionFacet, error) {
+	return storage.SessionFacet{}, sql.ErrNoRows
+}
+
+func (store *Store) SaveFacetCalibration(context.Context, storage.FacetCalibration) error {
+	return nil
+}
+
+func (store *Store) LatestFacetCalibration(context.Context, string, string) (storage.FacetCalibration, error) {
+	return storage.FacetCalibration{}, sql.ErrNoRows
+}

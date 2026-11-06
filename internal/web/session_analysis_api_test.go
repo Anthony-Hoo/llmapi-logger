@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"llmapi-logger/internal/newapi"
@@ -12,6 +13,7 @@ import (
 )
 
 type fakeSessionAnalysis struct {
+	labels    []sessionanalysis.CalibrationLabel
 	viewers   []sessionanalysis.Viewer
 	scopes    []*query.Scope
 	sessions  []sessionanalysis.SessionsQuery
@@ -37,6 +39,17 @@ func (fake *fakeSessionAnalysis) Pack(_ context.Context, id string, scope *query
 		return sessionanalysis.PackResponse{}, query.ErrNotFound
 	}
 	return sessionanalysis.PackResponse{SessionID: id, Text: "[会话] 类型=agent"}, nil
+}
+
+func (fake *fakeSessionAnalysis) Facet(_ context.Context, id string, scope *query.Scope, viewer sessionanalysis.Viewer) (sessionanalysis.FacetResponse, error) {
+	fake.scopes = append(fake.scopes, scope)
+	fake.viewers = append(fake.viewers, viewer)
+	return sessionanalysis.FacetResponse{SessionID: id, Status: "ok"}, nil
+}
+
+func (fake *fakeSessionAnalysis) Calibrate(_ context.Context, labels []sessionanalysis.CalibrationLabel) (sessionanalysis.CalibrationResult, error) {
+	fake.labels = append(fake.labels, labels...)
+	return sessionanalysis.CalibrationResult{Labels: len(labels)}, nil
 }
 
 func (fake *fakeSessionAnalysis) TriggerRun() error {
@@ -146,5 +159,38 @@ func TestSessionAnalysisPackRecordsTheViewer(t *testing.T) {
 	}
 	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/sessions/abc/pack", nil); response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST pack = %d", response.Code)
+	}
+}
+
+func TestSessionAnalysisFacetAndCalibrationRoutes(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSessionAnalysis{}
+	handler, cookie := newSessionAnalysisHandler(t, fake)
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/sessions/abc/facet", cookie); response.Code != http.StatusOK {
+		t.Fatalf("developer facet = %d", response.Code)
+	}
+	if len(fake.viewers) != 1 || fake.viewers[0].Role != "developer" || fake.scopes[0] == nil {
+		t.Fatalf("facet viewer = %+v", fake.viewers)
+	}
+	body := `{"labels":[{"session_id":"` + strings.Repeat("a", 64) + `","task_type":"bug_fix"}]}`
+	post := func(caller *http.Cookie, payload string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/session-analysis/calibration", strings.NewReader(payload))
+		if caller != nil {
+			request.AddCookie(caller)
+		} else {
+			request.Header.Set("Authorization", "Bearer "+testAdminToken)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := post(cookie, body); response.Code != http.StatusForbidden {
+		t.Fatalf("developer calibration = %d", response.Code)
+	}
+	if response := post(nil, body); response.Code != http.StatusOK || len(fake.labels) != 1 || fake.labels[0].TaskType != "bug_fix" {
+		t.Fatalf("admin calibration = %d labels=%+v", response.Code, fake.labels)
+	}
+	if response := post(nil, `{"labels":[],"extra":1}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field accepted: %d", response.Code)
 	}
 }

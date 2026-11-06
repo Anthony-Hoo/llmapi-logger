@@ -25,7 +25,15 @@ import type {
 } from "./types";
 
 import { hasRowFilters } from "./filters";
-import type { AnalysisOverview, AnalysisPack, AnalysisSessionsPage, AnalysisSessionsQuery } from "./lib/session-analysis/types";
+import type {
+  AnalysisCalibration,
+  AnalysisCalibrationLabel,
+  AnalysisFacet,
+  AnalysisOverview,
+  AnalysisPack,
+  AnalysisSessionsPage,
+  AnalysisSessionsQuery,
+} from "./lib/session-analysis/types";
 
 const API_BASE = "/api/v1";
 
@@ -77,6 +85,10 @@ export interface ApiClient {
   triggerAnalysisRun: (signal?: AbortSignal) => Promise<void>;
   /** Every successful read is recorded in the analysis view log. */
   getAnalysisPack: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisPack>;
+  /** Every successful read is recorded in the analysis view log. */
+  getAnalysisFacet: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisFacet>;
+  /** Administrator only. */
+  calibrateAnalysis: (labels: AnalysisCalibrationLabel[], signal?: AbortSignal) => Promise<AnalysisCalibration>;
 }
 
 export function createApiClient(
@@ -393,6 +405,27 @@ export function createApiClient(
         signal,
       );
       return { ...result, refs: result.refs ?? {} };
+    },
+
+    async getAnalysisFacet(sessionID, signal) {
+      const result = await requestJSON<AnalysisFacet>(
+        `${API_BASE}/session-analysis/sessions/${encodeURIComponent(sessionID)}/facet`,
+        signal,
+      );
+      return {
+        ...result,
+        friction: result.friction ?? [],
+        items: result.items ?? [],
+        invalid_fields: result.invalid_fields ?? [],
+        instructions: result.instructions ?? [],
+        evidence: result.evidence ?? {},
+        hidden_fields: result.hidden_fields ?? [],
+      };
+    },
+
+    async calibrateAnalysis(labels, signal) {
+      const result = await mutateJSON<AnalysisCalibration>(`${API_BASE}/session-analysis/calibration`, "POST", { labels }, signal);
+      return { ...result, hidden_fields: result.hidden_fields ?? [], agreement: result.agreement ?? {}, compared: result.compared ?? {} };
     },
 
     async triggerAnalysisRun(signal) {

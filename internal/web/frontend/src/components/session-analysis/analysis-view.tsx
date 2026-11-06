@@ -9,10 +9,12 @@ import {
   FLAG_OPTIONS,
   formatDuration,
   formatPointDelta,
+  labelOf,
   sessionBadges,
   signalRates,
   SKIP_REASON_LABELS,
   startOfLocalWeekMS,
+  TASK_TYPE_LABELS,
 } from "../../lib/session-analysis/format";
 import type {
   AnalysisFlag,
@@ -28,6 +30,7 @@ import { Segmented } from "../ui/segmented";
 import { Skeleton } from "../ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { clientLabel } from "../insights/ui-bits";
+import { CalibrationPanel, CalibrationSummary, FacetPanel } from "./facet-panel";
 import { PackPanel } from "./pack-panel";
 
 type RangeKey = "week" | "last-week" | "30d";
@@ -188,6 +191,13 @@ export function SessionAnalysisView({
         </Alert>
       ) : null}
       {overview ? <OverviewCards overview={overview} /> : overviewError ? null : <Skeleton className="h-32 w-full" />}
+      {overview?.llm_enabled && !isDeveloper ? (
+        <Card>
+          <CardContent className="pt-card">
+            <CalibrationPanel client={client} onDone={() => setRunNonce((value) => value + 1)} />
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardContent className="space-y-3 pt-card">
@@ -259,6 +269,7 @@ export function SessionAnalysisView({
                       <TableCell className="text-right">{formatUSD(item.cost_usd)}</TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-1">
+                          {item.facet_status === "ok" && item.task_type ? <Badge variant="outline">{labelOf(TASK_TYPE_LABELS, item.task_type)}</Badge> : null}
                           {sessionBadges(item).map((badge) => (
                             <Badge key={badge.label} variant={badge.tone}>
                               {badge.label}
@@ -274,6 +285,9 @@ export function SessionAnalysisView({
                           <SessionDetails item={item} />
                           {item.eligible || item.skip_reason === "single_turn_chat" ? (
                             <PackPanel client={client} sessionID={item.session_id} isDeveloper={isDeveloper} />
+                          ) : null}
+                          {overview?.llm_enabled && (item.eligible || item.skip_reason === "single_turn_chat") ? (
+                            <FacetPanel client={client} sessionID={item.session_id} />
                           ) : null}
                           {renderSessionDetail ? renderSessionDetail(item) : null}
                         </TableCell>
@@ -333,10 +347,15 @@ export function OverviewCards({ overview }: { overview: AnalysisOverview }) {
                     .join("、")}`
                 : "")
             : "还没有运行记录。"}
+          {overview.llm_enabled
+            ? ` 本地模型 ${overview.model ?? ""}（${overview.prompt_version}）` +
+              (run ? `：本轮待分析 ${run.facets_due}、成功 ${run.facets_ok}、输出无效 ${run.facets_invalid}、失败 ${run.facets_failed}，输入 ${formatTokens(run.model_input_tokens)} / 输出 ${formatTokens(run.model_output_tokens)} Token。` : "。")
+            : " 未启用本地模型，只计算确定性信号和输入包。"}
           {overview.current.danger_sessions + overview.current.secret_sessions > 0
             ? ` 本期有 ${overview.current.danger_sessions} 个会话出现危险命令、${overview.current.secret_sessions} 个出现疑似密钥。`
             : ""}
         </p>
+        {overview.calibration ? <CalibrationSummary calibration={overview.calibration} /> : null}
       </CardContent>
     </Card>
   );
