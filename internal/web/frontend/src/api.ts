@@ -45,6 +45,16 @@ import type {
 } from "./lib/org/types";
 
 import { hasRowFilters } from "./filters";
+import type {
+  AnalysisCalibration,
+  AnalysisCalibrationLabel,
+  AnalysisFacet,
+  AnalysisOverview,
+  AnalysisPack,
+  AnalysisReport,
+  AnalysisSessionsPage,
+  AnalysisSessionsQuery,
+} from "./lib/session-analysis/types";
 
 const API_BASE = "/api/v1";
 
@@ -89,6 +99,20 @@ export interface ApiClient {
   getAgentTree: (treeID: string, signal?: AbortSignal) => Promise<TreeResponse>;
   /** Rejects with ApiError(404) while the audit has not been analyzed yet. */
   getComposition: (auditID: string, signal?: AbortSignal) => Promise<CompositionResponse>;
+  // Session analysis (doc/features/24-session-analysis.md).
+  getAnalysisOverview: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisOverview>;
+  listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
+  /** Administrator only; rejects with ApiError(409) while a run is in progress. */
+  triggerAnalysisRun: (signal?: AbortSignal) => Promise<void>;
+  /** Every successful read is recorded in the analysis view log. */
+  getAnalysisPack: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisPack>;
+  /** Every successful read is recorded in the analysis view log. */
+  getAnalysisFacet: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisFacet>;
+  /** Administrator only. */
+  calibrateAnalysis: (labels: AnalysisCalibrationLabel[], signal?: AbortSignal) => Promise<AnalysisCalibration>;
+  getAnalysisReport: (week: "current" | "previous", signal?: AbortSignal) => Promise<AnalysisReport>;
+  /** Administrator only; all-keys suggestions. */
+  dismissAnalysisSuggestion: (id: number, signal?: AbortSignal) => Promise<void>;
   /** Organisation reports (doc/features/23); every route 404s when disabled. */
   org: OrgApi;
 }
@@ -458,6 +482,85 @@ export function createApiClient(
         file_ops: result.file_ops ?? [],
         events: result.events ?? [],
       };
+    },
+
+    async getAnalysisOverview(range, signal) {
+      const params = new URLSearchParams({ from_ns: range.from_ns, to_ns: range.to_ns });
+      const result = await requestJSON<AnalysisOverview>(`${API_BASE}/session-analysis/overview?${params}`, signal);
+      if (result.last_run) {
+        result.last_run.skip_reasons = result.last_run.skip_reasons ?? {};
+      }
+      return result;
+    },
+
+    async listAnalysisSessions(query, signal) {
+      const params = new URLSearchParams({ from_ns: query.from_ns, to_ns: query.to_ns, limit: String(query.limit ?? 50) });
+      if (query.kind) {
+        params.set("kind", query.kind);
+      }
+      if (query.flags && query.flags.length > 0) {
+        params.set("flags", query.flags.join(","));
+      }
+      if (query.cursor) {
+        params.set("cursor", query.cursor);
+      }
+      const result = await requestJSON<AnalysisSessionsPage>(`${API_BASE}/session-analysis/sessions?${params}`, signal);
+      return {
+        ...result,
+        items: (result.items ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
+      };
+    },
+
+    async getAnalysisPack(sessionID, signal) {
+      const result = await requestJSON<AnalysisPack>(
+        `${API_BASE}/session-analysis/sessions/${encodeURIComponent(sessionID)}/pack`,
+        signal,
+      );
+      return { ...result, refs: result.refs ?? {} };
+    },
+
+    async getAnalysisFacet(sessionID, signal) {
+      const result = await requestJSON<AnalysisFacet>(
+        `${API_BASE}/session-analysis/sessions/${encodeURIComponent(sessionID)}/facet`,
+        signal,
+      );
+      return {
+        ...result,
+        friction: result.friction ?? [],
+        items: result.items ?? [],
+        invalid_fields: result.invalid_fields ?? [],
+        instructions: result.instructions ?? [],
+        evidence: result.evidence ?? {},
+        hidden_fields: result.hidden_fields ?? [],
+      };
+    },
+
+    async calibrateAnalysis(labels, signal) {
+      const result = await mutateJSON<AnalysisCalibration>(`${API_BASE}/session-analysis/calibration`, "POST", { labels }, signal);
+      return { ...result, hidden_fields: result.hidden_fields ?? [], agreement: result.agreement ?? {}, compared: result.compared ?? {} };
+    },
+
+    async getAnalysisReport(week, signal) {
+      const result = await requestJSON<AnalysisReport>(`${API_BASE}/session-analysis/report?week=${week}`, signal);
+      return {
+        ...result,
+        suggestions: (result.suggestions ?? []).map((item) => ({ ...item, evidence: item.evidence ?? [] })),
+        optimizations: (result.optimizations ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
+      };
+    },
+
+    async dismissAnalysisSuggestion(id, signal) {
+      const response = await sessionFetch(`${API_BASE}/session-analysis/suggestions/${id}/dismiss`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+    },
+
+    async triggerAnalysisRun(signal) {
+      const response = await sessionFetch(`${API_BASE}/session-analysis/run`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
     },
 
     getStreamTimeline(auditID, side, signal) {

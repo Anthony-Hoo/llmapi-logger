@@ -1,0 +1,145 @@
+# Default session analysis vocabulary (doc/features/24-session-analysis.md
+# sections 5.2 and 6.5). Compiled into the binary; session_analysis.vocabulary_file
+# is merged on top: lists replace the default list when present, maps merge by key.
+# Every pattern is a Go RE2 expression matched case-insensitively.
+
+# Leading words dropped before a shell command is classified.
+shell_wrappers: [sudo, env, command, time, nohup, exec, xargs]
+
+# Interpreters whose -c / -lc / -Command / /c argument is the real command.
+shell_interpreters: [bash, sh, zsh, dash, fish, pwsh, powershell, powershell.exe, pwsh.exe, cmd, cmd.exe]
+
+# Ordered: the first class with a matching command prefix wins. A prefix
+# matches the normalized command when it is followed by a space or the end.
+shell_classes:
+  - class: test
+    commands: ["go test", pytest, "python -m pytest", "python3 -m pytest", "npm test", "npm run test", "pnpm test",
+      "pnpm run test", "pnpm vitest", "yarn test", "yarn run test", "npx vitest", "npx jest", vitest, jest,
+      "cargo test", "cargo nextest", "mvn test", "mvn verify", "gradle test", "./gradlew test", "make test",
+      "make check", "dotnet test", phpunit, rspec, ctest, "bun test", "deno test", tox, nox]
+  - class: lint
+    commands: ["go vet", golangci-lint, staticcheck, eslint, "npm run lint", "pnpm lint", "pnpm run lint",
+      "yarn lint", ruff, flake8, pylint, mypy, "cargo clippy", "prettier --check", "gofmt -l", "tsc --noemit",
+      "pnpm exec tsc --noemit", "npx tsc --noemit", shellcheck]
+  - class: build
+    commands: ["go build", "go install", "npm run build", "pnpm build", "pnpm run build", "yarn build",
+      "cargo build", "cargo check", "mvn package", "mvn compile", "gradle build", "./gradlew build", make,
+      "dotnet build", tsc, "vite build", "docker build", "podman build", cmake]
+  - class: pkg
+    commands: ["npm install", "npm i", "npm ci", "pnpm install", "pnpm add", "pnpm i", "yarn add", "yarn install",
+      "pip install", "pip3 install", "uv pip", "uv add", "uv sync", "go get", "go mod", "cargo add",
+      apt, apt-get, brew, scoop, winget]
+  - class: read
+    commands: [cat, head, tail, less, more, "sed -n", type, get-content, gc, bat, nl, wc, od, xxd]
+  - class: search
+    commands: [rg, grep, find, ls, dir, fd, ag, tree, get-childitem, select-string, gci, findstr, "git grep"]
+  - class: git
+    commands: [git, gh]
+  - class: run
+    commands: ["go run", python, python3, node, deno, bun, "npm run", "pnpm run", "pnpm exec", npx, "cargo run",
+      "dotnet run", java, ruby, php, curl, wget]
+
+# Shell command patterns by danger category (doc 24 section 5.2), matched
+# against each unwrapped command.
+danger_patterns:
+  destructive_delete:
+    - '\brm\s+(-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*|--recursive|-r)\b'
+    - '\bremove-item\b.*-recurse'
+    - '\b(rd|rmdir)\s+/s\b'
+    - '\bdel\s+/s\b'
+    - '\bgit\s+clean\s+-[a-z]*f'
+    - '\bdrop\s+(table|database|schema)\b'
+    - '\btruncate\s+table\b'
+  force_push:
+    - '\bgit\s+push\b.*(\s--force\b|\s-f\b|\s--force-with-lease\b)'
+    - '\bgit\s+reset\s+--hard\b'
+  remote_script:
+    - '\b(curl|wget|iwr|invoke-webrequest|irm|invoke-restmethod)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|python3?|iex|invoke-expression)\b'
+  credential_read:
+    - '(^|[\s/\\"''])\.env(\.[a-z]+)?\b'
+    - '\bid_(rsa|ed25519|ecdsa|dsa)\b'
+    - '\.ssh[/\\]'
+    - '\.aws[/\\]credentials'
+    - '\.(npmrc|netrc|pgpass|git-credentials|pypirc)\b'
+    - '\.kube[/\\]config\b'
+  exfiltrate:
+    - '\b(curl|wget)\b.*(\s-t\s|--upload-file|--data-binary\s+@|\s-d\s+@|\s-f\s+\S+=@|--form\s+\S+=@)'
+    - '\bscp\b'
+    - '\brsync\b.*\S+@\S+:'
+    - '\b(nc|ncat|netcat)\s+\S+\s+\d+'
+
+# Secret categories (doc 24 sections 5.2 and 6.10), matched against user text
+# and tool results; the input pack replaces every match with [REDACTED:<category>].
+secret_patterns:
+  private_key: ['-----BEGIN (RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----']
+  cloud_key: ['\b(AKIA|ASIA)[0-9A-Z]{16}\b', '\bAIza[0-9A-Za-z_-]{35}\b']
+  vcs_token: ['\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b', '\bgithub_pat_[A-Za-z0-9_]{50,}\b', '\bglpat-[A-Za-z0-9_-]{20,}\b']
+  api_key: ['\bsk-[A-Za-z0-9_-]{20,}\b', '\bxox[abprs]-[A-Za-z0-9-]{10,}\b']
+  jwt: ['\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}']
+  connection_string: ['\b(postgres(ql)?|mysql|mongodb(\+srv)?|redis|amqp)://[^\s:/@]+:[^\s@/]+@']
+  password_assignment: ['\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*["'']?[^\s"'',;]{6,}']
+
+# Contact details redacted from input packs (not counted as secrets).
+contact_patterns:
+  - '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
+  - '\b1[3-9]\d{9}\b'
+
+# A user turn is a correction when, after leading whitespace and punctuation,
+# it starts with one of correction_prefixes, or one of correction_phrases
+# appears within its first 30 characters. The first user turn never is.
+correction_prefixes: ["不对", "不是", "错了", "不要", "别", "不用", "停", "等等", "撤回", "回滚", "改回", "还原", "重来",
+  "no,", "no.", "no ", "nope", "wrong", "don't", "dont", "do not", "stop", "revert", "undo", "wait,", "actually,", "instead"]
+correction_phrases: ["不对", "错了", "搞错", "我说的是", "不是这个", "不是让你", "you broke", "not what i", "that's wrong", "i said", "i meant"]
+
+# Error or stack-trace evidence in a user turn or pasted log.
+error_patterns:
+  - 'traceback \(most recent call last\)'
+  - '^panic: '
+  - '^goroutine \d+ \['
+  - '\bexception\b'
+  - '^\s*error[:\[]'
+  - '\berror\[e\d+\]'
+  - '^\s+at \S+ \(.*:\d+:\d+\)'
+  - 'npm err!'
+  - '^fatal: '
+  - '^\s*caused by: '
+  - '\bfailed\b.*\btest'
+  - '\[(error|crit|alert|emerg|fatal)\]'
+  - '^--- fail: '
+
+# A user text part containing one of these is an interruption marker.
+interrupt_markers: ["<turn_aborted", "[request interrupted by user"]
+
+# User-role text that a client wrote after compacting history; never a user turn.
+compaction_summary_prefixes:
+  - "this session is being continued from a previous conversation"
+  - "another language model started to solve this problem"
+
+# Tool results whose exit code these patterns capture (first group).
+exit_code_patterns:
+  - '(?m)^process exited with code (-?\d+)'
+  - '(?m)^exit code:? (-?\d+)'
+  - '"exit_code"\s*:\s*(-?\d+)'
+
+# Clients whose shell tool reports only failures in-band ("Exit code N" plus
+# is_error): a shell result without an exit code from them succeeded.
+shell_ok_without_exit_code: [claude_code, zcode]
+
+# Tool results containing one of these (case-insensitive) failed, whatever the tool.
+failure_phrases: ["<tool_use_error>", "apply_patch verification failed", "failed to apply patch", "invalid patch",
+  "error: patch failed", "tool call failed", "error executing tool"]
+
+# Tool names, lower-cased, by role in the [T] sequence beyond the insights tool kinds.
+tool_classes:
+  web: [webfetch, websearch, web_fetch, web_search, fetch]
+  plan: [todowrite, update_plan, todo_write, todoread, plan]
+
+# A session whose main model contains one of these substrings, and that stays
+# under both limits below, is a heavy-model candidate.
+heavy_models: ["claude-opus", "gpt-5-pro", "o3-pro", "o1-pro", "gpt-4.5"]
+heavy_max_output_tokens: 2000
+heavy_max_tool_calls: 3
+
+# Tunables of the loop and thrash signals.
+loop_min_repeats: 3
+thrash_min_writes: 4

@@ -30,6 +30,7 @@ type Config struct {
 	RetentionDays          int                          `yaml:"retention_days"`
 	Insights               InsightsConfig               `yaml:"insights"`
 	OrgReports             OrgReportsConfig             `yaml:"org_reports"`
+	SessionAnalysis        SessionAnalysisConfig        `yaml:"session_analysis"`
 	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
 	Routes                 []RouteConfig                `yaml:"routes"`
 }
@@ -166,6 +167,7 @@ func Default() Config {
 		RetentionDays:          DefaultRetentionDays,
 		Insights:               InsightsConfig{Enabled: true},
 		OrgReports:             DefaultOrgReports(),
+		SessionAnalysis:        defaultSessionAnalysis(),
 		Interceptors:           make(map[string]InterceptorConfig),
 		Routes:                 make([]RouteConfig, 0),
 	}

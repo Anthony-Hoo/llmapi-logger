@@ -42,6 +42,8 @@ type sessionResponse struct {
 	// OrgReportsEnabled tells the UI whether the organisation report routes
 	// exist (doc/features/23-org-project-reports.md).
 	OrgReportsEnabled bool `json:"org_reports_enabled"`
+	// SessionAnalysisEnabled likewise reports the session analysis routes.
+	SessionAnalysisEnabled bool `json:"session_analysis_enabled"`
 }
 
 // serveSession is dispatched before the authenticating middleware, because
@@ -74,7 +76,8 @@ func (handler *managementHandler) serveSessionInfo(writer http.ResponseWriter, r
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
 		return
 	}
-	response := sessionResponse{Status: "authenticated", Role: caller.Role, InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil}
+	response := sessionResponse{Status: "authenticated", Role: caller.Role, InsightsEnabled: handler.insights != nil,
+		OrgReportsEnabled: handler.org != nil, SessionAnalysisEnabled: handler.sessionAnalysis != nil}
 	if !caller.ExpiresAt.IsZero() {
 		response.ExpiresAt = caller.ExpiresAt.Format(time.RFC3339)
 	}
@@ -124,6 +127,7 @@ func (handler *managementHandler) serveLogin(writer http.ResponseWriter, request
 	writeJSON(writer, http.StatusOK, sessionResponse{
 		Status: "authenticated", Role: roleAdmin, ExpiresAt: expires.Format(time.RFC3339),
 		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
+		SessionAnalysisEnabled: handler.sessionAnalysis != nil,
 	})
 }
 
@@ -172,6 +176,7 @@ func (handler *managementHandler) loginDeveloper(writer http.ResponseWriter, req
 	response := sessionResponse{
 		Status: "authenticated", Role: roleDeveloper, ExpiresAt: expires.Format(time.RFC3339),
 		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
+		SessionAnalysisEnabled: handler.sessionAnalysis != nil,
 		Identity: &developerIdentity{
 			UserID: payload.UserID, Username: payload.Username,
 			TokenID: payload.TokenID, TokenName: payload.TokenName,

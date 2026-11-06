@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -53,6 +54,12 @@ type Vocabulary struct {
 	// whatever its client (doc/features/23-org-project-reports.md 5.1). Only
 	// the optional organisation reports read it.
 	Project ProjectSignals `yaml:"project"`
+	// UserInputExcludePrefixes mark user-role text parts that a client
+	// injected rather than a person typed (doc/features/24-session-analysis.md
+	// section 6.3). Matching trims leading whitespace and compares the first 64
+	// characters case-insensitively. The conversation view's user-input outline
+	// must use the same list.
+	UserInputExcludePrefixes []string `yaml:"user_input_exclude_prefixes"`
 }
 
 // ProjectSignals lists where a request reveals its project. The same three
@@ -97,6 +104,35 @@ const (
 var knownProjectKinds = map[string]bool{
 	ProjectKindDeclared: true, ProjectKindCodexTurnMetadata: true, ProjectKindOpenCodeProject: true,
 	ProjectKindRemote: true, ProjectKindRoot: true, ProjectKindRootFile: true, ProjectKindCwd: true,
+}
+
+// userInputPrefixWindow is how many leading characters IsInjectedUserText
+// inspects, matching the conversation view.
+const userInputPrefixWindow = 64
+
+// IsInjectedUserText reports whether a user-role text part is client-injected
+// context: it starts with a user_input_exclude_prefixes entry or an
+// injection marker.
+func (vocab *Vocabulary) IsInjectedUserText(text string) bool {
+	if vocab == nil {
+		return false
+	}
+	head := strings.TrimLeftFunc(text, unicode.IsSpace)
+	if runes := []rune(head); len(runes) > userInputPrefixWindow {
+		head = string(runes[:userInputPrefixWindow])
+	}
+	head = strings.ToLower(head)
+	for _, prefix := range vocab.UserInputExcludePrefixes {
+		if strings.HasPrefix(head, prefix) {
+			return true
+		}
+	}
+	for _, marker := range vocab.InjectionMarkers {
+		if strings.HasPrefix(head, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 // ClientRule describes how to detect one client and read its agent identity
@@ -298,6 +334,9 @@ func (vocab *Vocabulary) merge(override *Vocabulary) {
 	if override.SideRequests != nil {
 		vocab.SideRequests = override.SideRequests
 	}
+	if override.UserInputExcludePrefixes != nil {
+		vocab.UserInputExcludePrefixes = override.UserInputExcludePrefixes
+	}
 	rules, other := &vocab.FileOps, override.FileOps
 	replaceList(&rules.PathKeys, other.PathKeys)
 	replaceList(&rules.OldKeys, other.OldKeys)
@@ -449,6 +488,13 @@ func (vocab *Vocabulary) normalize() error {
 	}
 	vocab.Project.Headers, vocab.Project.BodyPaths, vocab.Project.TextPatterns = normalizeProjectLists(
 		vocab.Project.Headers, vocab.Project.BodyPaths, vocab.Project.TextPatterns)
+	if vocab.UserInputExcludePrefixes != nil {
+		prefixes := make([]string, 0, len(vocab.UserInputExcludePrefixes))
+		for _, prefix := range vocab.UserInputExcludePrefixes {
+			prefixes = append(prefixes, strings.ToLower(strings.TrimLeftFunc(prefix, unicode.IsSpace)))
+		}
+		vocab.UserInputExcludePrefixes = prefixes
+	}
 	return nil
 }
 
@@ -567,6 +613,11 @@ func (vocab *Vocabulary) validate() error {
 	for _, prefix := range vocab.VolatileTextPrefixes {
 		if strings.TrimSpace(prefix) == "" {
 			return errors.New("volatile_text_prefixes contains an empty prefix")
+		}
+	}
+	for _, prefix := range vocab.UserInputExcludePrefixes {
+		if prefix == "" || len([]rune(prefix)) > userInputPrefixWindow {
+			return fmt.Errorf("user_input_exclude_prefixes entries must be 1-%d characters", userInputPrefixWindow)
 		}
 	}
 	for name, kind := range vocab.ToolKinds {

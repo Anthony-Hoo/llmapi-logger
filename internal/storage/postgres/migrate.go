@@ -12,6 +12,22 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
+// derivedMigrations add tables on top of the version-1 baseline. Each one is
+// applied independently when its version is missing, so versions need not be
+// contiguous: parallel feature branches can claim different numbers and merge
+// in any order. They run only when the proxy opens the live store, never in
+// the offline import, whose target must hold the baseline tables alone.
+var derivedMigrations = []struct {
+	version int
+	file    string
+}{
+	{2, "migrations/002_org_reports.sql"},
+	{3, "migrations/003_session_analysis.sql"},
+}
+
+// latestSchemaVersion is the newest version this binary understands.
+const latestSchemaVersion = 3
+
 func migrate(ctx context.Context, conn *sql.Conn) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -25,38 +41,24 @@ func migrate(ctx context.Context, conn *sql.Conn) error {
 	if err := InitializeImportSchema(ctx, tx); err != nil {
 		return err
 	}
-	if err := applyRuntimeMigrations(ctx, tx); err != nil {
-		return err
-	}
 	if fresh {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO user_agent_rules(id,name,enabled,model_pattern,user_agent_pattern,created_at_ns,updated_at_ns) VALUES(1,'GPT models require Codex clients',1,'^gpt','^(codex-tui|Codex Desktop)',$1,$1)`, time.Now().UnixNano()); err != nil {
 			return err
 		}
 	}
+	if err := applyDerivedMigrations(ctx, tx); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-// latestSchemaVersion is the newest embedded migration. The offline importer
-// builds the version-1 baseline only (its target must hold exactly the
-// imported tables); the runtime migrations below run when the proxy opens the
-// database.
-const latestSchemaVersion = 2
-
-// runtimeMigrations are applied in order after the baseline, each once.
-var runtimeMigrations = []struct {
-	version int
-	file    string
-}{
-	{version: 2, file: "migrations/002_org_reports.sql"},
-}
-
-func applyRuntimeMigrations(ctx context.Context, tx *sql.Tx) error {
-	var version int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
-		return err
-	}
-	for _, migration := range runtimeMigrations {
-		if migration.version <= version {
+func applyDerivedMigrations(ctx context.Context, tx *sql.Tx) error {
+	for _, migration := range derivedMigrations {
+		var applied bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, migration.version).Scan(&applied); err != nil {
+			return err
+		}
+		if applied {
 			continue
 		}
 		body, err := migrationFiles.ReadFile(migration.file)

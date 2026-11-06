@@ -48,6 +48,7 @@ const (
 	// writeOrg carries one organisation-report write (org_writes.go). Its data
 	// is an orgWrite closure so that the feature adds a single writer case.
 	writeOrg
+	writeDerived
 )
 
 type writeRequest struct {
@@ -500,6 +501,8 @@ WHERE audit_id=$1 AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID)
 		return saveAnalysis(transaction, request.data.(AnalysisRow))
 	case writeOrg:
 		return request.data.(orgWrite)(transaction)
+	case writeDerived:
+		return request.data.(derivedWrite)(transaction)
 	default:
 		return fmt.Errorf("postgres writer: unknown operation %d", request.kind)
 	}
