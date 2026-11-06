@@ -75,14 +75,74 @@ func TestIdentifyAgentReadsNativeAndCustomHeaders(t *testing.T) {
 		{
 			name:    "dsh parent from session log",
 			headers: headerSet("User-Agent", "deepseek-harness/0.3", "x-deepseek-harness-session-id", "dsh-child"),
-			request: []byte(`{"messages":[],"dsh_session_log":{"header":{"parentSession":"dsh-root","origin":"subagent"}}}`),
+			request: []byte(`{"messages":[],"dsh_session_log":{"session":{"parentSession":"dsh-root","origin":"subagent","delegationDepth":1,"cwd":"/work"}}}`),
 			want:    AgentIdentity{Client: "dsh", Role: RoleSubagent, NodeID: "dsh-child", ParentID: "dsh-root", LinkSource: LinkBody, Confidence: 100},
 		},
 		{
 			name:    "dsh parent path must hold a string",
 			headers: headerSet("User-Agent", "deepseek-harness/0.3", "x-deepseek-harness-session-id", "dsh-child"),
-			request: []byte(`{"dsh_session_log":{"header":{"parentSession":7}}}`),
+			request: []byte(`{"dsh_session_log":{"session":{"parentSession":7}}}`),
 			want:    AgentIdentity{Client: "dsh", Role: RoleMain, NodeID: "dsh-child", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name:    "dsh legacy header.parentSession is a fallback",
+			headers: headerSet("User-Agent", "deepseek-harness/0.2", "x-deepseek-harness-session-id", "dsh-child"),
+			request: []byte(`{"dsh_session_log":{"session":{"origin":"subagent"},"header":{"parentSession":"dsh-old-root"}}}`),
+			want:    AgentIdentity{Client: "dsh", Role: RoleSubagent, NodeID: "dsh-child", ParentID: "dsh-old-root", LinkSource: LinkBody, Confidence: 100},
+		},
+		{
+			name:    "dsh session.parentSession wins over the legacy path",
+			headers: headerSet("User-Agent", "deepseek-harness/0.3", "x-deepseek-harness-session-id", "dsh-child"),
+			request: []byte(`{"dsh_session_log":{"session":{"parentSession":"dsh-root"},"header":{"parentSession":"dsh-old-root"}}}`),
+			want:    AgentIdentity{Client: "dsh", Role: RoleSubagent, NodeID: "dsh-child", ParentID: "dsh-root", LinkSource: LinkBody, Confidence: 100},
+		},
+		{
+			name: "zcode main session",
+			headers: headerSet("User-Agent", "ZCode/1.4.0", "X-Title", "Z Code@cli", "x-session-id", "zc-main",
+				"x-zcode-session-type", "main", "x-zcode-query-source", "main_turn", "x-zcode-trace-id", "trace-1", "x-request-id", "req-1"),
+			want: AgentIdentity{Client: "zcode", Role: RoleMain, NodeID: "zc-main", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name:    "zcode subagent has its own node and no parent rule",
+			headers: headerSet("User-Agent", "ZCode/1.4.0", "x-session-id", "zc-child", "x-zcode-session-type", "subagent", "x-zcode-query-source", "subagent"),
+			want:    AgentIdentity{Client: "zcode", Role: RoleSubagent, NodeID: "zc-child", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name:    "zcode compaction query source beats the main session type",
+			headers: headerSet("User-Agent", "ZCode/1.4.0", "x-session-id", "zc-main", "x-zcode-session-type", "main", "x-zcode-query-source", "compact"),
+			want:    AgentIdentity{Client: "zcode", Role: RoleCompaction, NodeID: "zc-main", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name:    "zcode title query source",
+			headers: headerSet("User-Agent", "ZCode/1.4.0", "x-session-id", "zc-main", "x-zcode-session-type", "main", "x-zcode-query-source", "session_title"),
+			want:    AgentIdentity{Client: "zcode", Role: RoleTitle, NodeID: "zc-main", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name:    "zcode side chat is auxiliary",
+			headers: headerSet("User-Agent", "ZCode/1.4.0", "x-session-id", "zc-main", "x-zcode-session-type", "side_chat"),
+			want:    AgentIdentity{Client: "zcode", Role: RoleAuxiliary, NodeID: "zc-main", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name:    "zcode detected by session type header without its UA",
+			headers: headerSet("User-Agent", "node", "x-session-id", "zc-main", "x-zcode-session-type", "other"),
+			want:    AgentIdentity{Client: "zcode", Role: RoleAuxiliary, NodeID: "zc-main", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name: "pi on the chatgpt backend sends originator but stays pi",
+			headers: headerSet("User-Agent", "pi/0.9.1 (linux; node/22.11.0; x64)", "originator", "pi",
+				"session-id", "pi-session", "x-client-request-id", "pi-session"),
+			want: AgentIdentity{Client: "pi", Role: RoleMain, RootID: "pi-session", NodeID: "pi-session", LinkSource: LinkHeader, Confidence: 100},
+		},
+		{
+			name:    "pi without a session id",
+			headers: headerSet("User-Agent", "pi/0.9.1 (darwin; bun/1.2.0; arm64)"),
+			want:    AgentIdentity{Client: "pi", Role: RoleMain},
+		},
+		{
+			name:    "pi compaction from the system prompt",
+			headers: headerSet("User-Agent", "pi/0.9.1 (linux; node/22.11.0; x64)", "session-id", "pi-session"),
+			request: []byte(`{"messages":[{"role":"system","content":"You are a context summarization assistant."},{"role":"user","content":"x"}]}`),
+			want:    AgentIdentity{Client: "pi", Role: RoleCompaction, RootID: "pi-session", NodeID: "pi-session", LinkSource: LinkHeader, Confidence: 100},
 		},
 		{
 			name:    "custom grandchild with name",

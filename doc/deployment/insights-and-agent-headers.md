@@ -53,8 +53,10 @@ insights:
 | --- | --- | --- |
 | Claude Code | 设置环境变量 `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`（可选） | 会话、Agent 与父 Agent 标识 Header 默认就有；该开关额外发送 `x-claude-code-request-class`（`main`/`subagent`/`compaction`/`auxiliary`…），用于把压缩等附属请求准确挂到发起它的 Agent 下，不开则靠 Body 里的标记推断 |
 | Codex CLI | 不需要 | `session-id`、`thread-id`、`x-codex-parent-thread-id`、`x-openai-subagent` 默认携带 |
-| OpenCode | 不需要 | `x-opencode-session-id` 与父会话头默认携带（较旧版本的头语义不同，识别规则可在词表中调整） |
-| dsh（官方 DeepSeek Harness 适配器） | 不需要 | 默认携带 `x-deepseek-harness-session-id`，压缩请求带 `x-deepseek-harness-compact` |
+| OpenCode | 不需要（v1.18.34 / v2.0.21 及以上） | `x-opencode-session-id` 与父会话头默认携带；更早的版本没有这些头，只能靠内容推断。`x-opencode-session` 自 v2.0.19 起是“亲和” ID（子会话取直接父会话），不当作节点使用 |
+| dsh（官方 DeepSeek Harness 适配器） | 不需要 | 默认携带 `x-deepseek-harness-session-id`，压缩请求带 `x-deepseek-harness-compact`；子 Agent 的父会话取自 Body `dsh_session_log.session.parentSession` |
+| ZCode（Z.ai） | 不需要 | UA `ZCode/…`；`x-session-id` 为节点，`x-zcode-session-type`（`main`/`subagent`/`side_chat`/`other`）与 `x-zcode-query-source`（`compact`、`session_title`…）定角色。子 Agent 如何声明父节点尚未核实，目前靠内容推断连边 |
+| pi（pi-coding-agent） | 用 OpenAI Responses 协议的 provider 时不需要 | UA `pi/…`；只有 Responses 协议默认发送 `session-id`，作为会话与节点。Chat Completions / Anthropic 协议没有会话 ID，客户端仍识别为 `pi`，会话靠内容推断。没有内置子 Agent |
 | dsh 经第三方 pi-ai 适配器 | 无法改善 | 该路径没有任何会话 Header，只能靠内容推断：用同一 Key、系统提示词与首条用户消息拼会话，子 Agent 仅在子 Agent 提示词里带 `Your parent agent id` 时才能连边。会话和树会标为“推断”，并行且开场白相同的会话可能被合并 |
 | 基于 pi-ai SDK 的框架 | 自动压缩无需设置 | pi-ai / pi-coding-agent 自动压缩请求的系统提示词以 `You are a context summarization assistant.` 开头，默认词表据此把它识别为 `compaction` 附属请求（对任何客户端生效，包括未识别的客户端）；Agent 身份仍按 §6 加 Header |
 | 其他/自研 | 见 §6 | 在每个请求上加 `X-Agent-*` Header；可选按 §6.4 单列为一个客户端 |
@@ -63,7 +65,7 @@ insights:
 
 ## 6. 自研 Agent 的 Header 约定
 
-在发往代理的**每一个** LLM 请求上带下列 Header，即可被精确归入 Agent 树，不依赖任何内容推断（`custom` 客户端，优先级低于四家内置客户端的原生 Header）：
+在发往代理的**每一个** LLM 请求上带下列 Header，即可被精确归入 Agent 树，不依赖任何内容推断（`custom` 客户端，优先级低于六家内置客户端的原生 Header）：
 
 | Header | 必填 | 取值 | 含义 |
 | --- | --- | --- | --- |
@@ -250,7 +252,7 @@ clients:
 框架侧只需把 User-Agent 设为 `MyAgent/<版本>`（如 `MyAgent/1.2.0`），其余 Header 不变。效果：
 
 - 这些请求的 `agent_client` 写成 `my-agent`，总览 `group_by=client` 中单独一列，列名、会话卡片、Agent 树和详情页显示 `label`（没有 `label` 时显示 `my-agent`）。
-- 新客户端未填 `priority` 时默认 50：排在四家内置客户端之后、`custom`（100）之前，所以同一请求不会再落入 `custom`。
+- 新客户端未填 `priority` 时默认 50：排在六家内置客户端（优先级 10–45）之后、`custom`（100）之前，所以同一请求不会再落入 `custom`。
 - User-Agent 前缀匹配是**大小写不敏感的开头匹配**：`myagent/2`、`MyAgent/1.0 (linux)` 都命中，`node MyAgent/1.0` 不命中。User-Agent 识别优先于 Header 识别。
 - 漏发 `X-Agent-Id` 的请求（例如预热或视觉等附属调用）仍按 User-Agent 归入该客户端，但没有节点标识，会话退回按内容推断（同一 Key、系统提示词与首条用户消息），也不会挂进 Agent 树。
 - `detect.headers_present: [x-agent-id]` 会让**任何**带 `X-Agent-Id` 的请求都归入 `my-agent`，不只是该 User-Agent 的请求。如果同一个代理后面还有别的框架也用 `X-Agent-*` Header 并且应留在 `custom`，就去掉这一行，只靠 User-Agent 前缀识别。

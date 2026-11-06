@@ -26,7 +26,7 @@ var defaultVocabularyYAML []byte
 // lower-case the candidate too.
 type Vocabulary struct {
 	// Clients maps a lower-cased client name (codex, claude_code, opencode, dsh,
-	// custom or any name added by an override) to its rules. Resolve them in
+	// zcode, pi, custom or any name added by an override) to its rules. Resolve them in
 	// OrderedClients order; the first client whose Detect rule matches wins.
 	Clients map[string]ClientRule `yaml:"clients"`
 	// InjectionMarkers are text prefixes that mark client-injected context.

@@ -313,13 +313,31 @@ func TestInsightsAgentTreesFromClientHeaders(t *testing.T) {
 	dshMain := chat(headers("User-Agent", "deepseek-harness/0.3", "x-deepseek-harness-session-id", "raw-dsh-root"), "dsh task")
 	assertAgent(t, "dsh main", harness.analysis(dshMain), wantAgent{client: "dsh", role: "main", node: dshRoot, root: dshRoot, source: "header"})
 	dshBody := `{"model":"model-example","messages":[{"role":"user","content":"dsh child task"}],` +
-		`"dsh_session_log":{"header":{"parentSession":"raw-dsh-root","origin":"subagent","delegationDepth":1}}}`
+		`"dsh_session_log":{"session":{"parentSession":"raw-dsh-root","origin":"subagent","delegationDepth":1}}}`
 	dshChildID := harness.send("/v1/chat/completions", headers("User-Agent", "deepseek-harness/0.3", "Authorization", auth,
 		"x-deepseek-harness-session-id", "raw-dsh-child"), dshBody, chatResponse("model-example", "ok"))
 	assertAgent(t, "dsh child", harness.analysis(dshChildID),
 		wantAgent{client: "dsh", role: "subagent", node: dshChild, parent: dshRoot, root: dshRoot, source: "body"})
 	dshCompact := chat(headers("User-Agent", "deepseek-harness/0.3", "x-deepseek-harness-session-id", "raw-dsh-root", "x-deepseek-harness-compact", "1"), "dsh compact")
 	assertAgent(t, "dsh compaction", harness.analysis(dshCompact), wantAgent{client: "dsh", role: "compaction", node: dshRoot, root: dshRoot, source: "header"})
+
+	// ZCode: x-session-id is the node; the query source marks compaction.
+	zcRoot := harness.agent("zcode", "raw-zc-root")
+	zcode := func(extra ...string) sqlite.AnalysisRow {
+		return harness.analysis(chat(headers(append([]string{"User-Agent", "ZCode/1.4.0", "X-Title", "Z Code@cli", "x-session-id", "raw-zc-root"}, extra...)...), "zcode task"))
+	}
+	assertAgent(t, "zcode main", zcode("x-zcode-session-type", "main", "x-zcode-query-source", "main_turn"),
+		wantAgent{client: "zcode", role: "main", node: zcRoot, root: zcRoot, source: "header"})
+	assertAgent(t, "zcode compaction", zcode("x-zcode-session-type", "main", "x-zcode-query-source", "compact"),
+		wantAgent{client: "zcode", role: "compaction", node: zcRoot, root: zcRoot, source: "header"})
+
+	// pi on the Responses API sends session-id; its ChatGPT-backend
+	// originator must not turn it into Codex.
+	piRoot := harness.agent("pi", "raw-pi-session")
+	piBody := `{"model":"model-example","input":[{"role":"user","content":[{"type":"input_text","text":"pi task"}]}]}`
+	piID := harness.send("/v1/responses", headers("User-Agent", "pi/0.9.1 (linux; node/22.11.0; x64)", "originator", "pi",
+		"Authorization", auth, "session-id", "raw-pi-session", "x-client-request-id", "raw-pi-session"), piBody, responsesResponse("model-example"))
+	assertAgent(t, "pi main", harness.analysis(piID), wantAgent{client: "pi", role: "main", node: piRoot, root: piRoot, source: "header"})
 
 	// Custom X-Agent-* headers: main, child, grandchild and a compaction of
 	// the child that stays attached to the child.
@@ -345,7 +363,7 @@ func TestInsightsAgentTreesFromClientHeaders(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		for _, raw := range []string{"raw-codex-main", "raw-claude-agent", "raw-oc-child", "raw-dsh-root", "raw-custom-grand", "planner"} {
+		for _, raw := range []string{"raw-codex-main", "raw-claude-agent", "raw-oc-child", "raw-dsh-root", "raw-zc-root", "raw-pi-session", "raw-custom-grand", "planner"} {
 			if bytes.Contains(data, []byte(raw)) {
 				t.Fatalf("raw agent identifier %q stored in plaintext", raw)
 			}
