@@ -20,6 +20,7 @@ import (
 	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/newapi"
+	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/proxy"
@@ -45,6 +46,7 @@ type App struct {
 	callerWorker    *newapi.Worker
 	userAgentRules  uaguard.RuleSet
 	contentPolicies contentpolicy.RuleSet
+	orgReports      *orgreport.Service
 	retention       *retention.Runner
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
@@ -321,6 +323,21 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		insightsService = service
 	}
 	// --- end context insights (WP2) ---
+	// Organisation reports stay entirely unassembled when disabled: no
+	// extractor, no job, no routes (doc/features/23-org-project-reports.md).
+	var orgService web.OrgReports
+	if configuration.OrgReports.Enabled && insightsService != nil {
+		service, err := assembleOrgReports(orgAssembly{
+			ctx: ctx, configuration: configuration, logger: logger, store: runtime.store, cipher: runtime.cipher,
+			vocabulary: vocabulary, fingerprints: runtime.analysisFingerprints, worker: application.parserWorker,
+		})
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("assemble org reports: %w", err)
+		}
+		application.orgReports = service
+		orgService = service
+	}
 	if runtime.store != nil && configuration.RetentionDays > 0 {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
 		if err != nil {
@@ -337,6 +354,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		Users:      newAPIClient,
 		Rules:      userAgentRules,
 		Policies:   contentPolicies,
+		Org:        orgService,
 		Assets:     web.EmbeddedAssets(),
 		Readiness:  application.readiness,
 		Logger:     logger,
@@ -555,6 +573,9 @@ func (application *App) closeComponents() error {
 		if application.parserWorker != nil {
 			application.parserWorker.Close()
 			application.parserHealthy.Store(false)
+		}
+		if application.orgReports != nil {
+			application.orgReports.WaitSnapshots()
 		}
 		if application.callerWorker != nil {
 			application.callerWorker.Close()

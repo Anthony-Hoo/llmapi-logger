@@ -23,6 +23,26 @@ import type {
   UserAgentRuleInput,
   UserAgentRuleList,
 } from "./types";
+import type {
+  OrgCatalog,
+  OrgGroup,
+  OrgGroupInput,
+  OrgMember,
+  OrgPreviewInput,
+  OrgPreviewResult,
+  OrgPrincipal,
+  OrgProject,
+  OrgProjectInput,
+  OrgProjectReport,
+  OrgSelfReport,
+  OrgSettings,
+  OrgTrendReport,
+  OrgUnattributedEntry,
+  OrgWeeklyQuery,
+  OrgWeeklyReport,
+  PrincipalClass,
+  PrincipalKind,
+} from "./lib/org/types";
 
 import { hasRowFilters } from "./filters";
 
@@ -69,6 +89,30 @@ export interface ApiClient {
   getAgentTree: (treeID: string, signal?: AbortSignal) => Promise<TreeResponse>;
   /** Rejects with ApiError(404) while the audit has not been analyzed yet. */
   getComposition: (auditID: string, signal?: AbortSignal) => Promise<CompositionResponse>;
+  /** Organisation reports (doc/features/23); every route 404s when disabled. */
+  org: OrgApi;
+}
+
+export interface OrgApi {
+  settings: (signal?: AbortSignal) => Promise<OrgSettings>;
+  catalog: (signal?: AbortSignal) => Promise<OrgCatalog>;
+  createGroup: (input: OrgGroupInput, signal?: AbortSignal) => Promise<OrgGroup>;
+  updateGroup: (id: number, input: OrgGroupInput, signal?: AbortSignal) => Promise<OrgGroup>;
+  deleteGroup: (id: number, signal?: AbortSignal) => Promise<void>;
+  createProject: (input: OrgProjectInput, signal?: AbortSignal) => Promise<OrgProject>;
+  updateProject: (id: number, input: OrgProjectInput, signal?: AbortSignal) => Promise<OrgProject>;
+  deleteProject: (id: number, signal?: AbortSignal) => Promise<void>;
+  setMember: (userID: number, groupID: number, signal?: AbortSignal) => Promise<OrgMember>;
+  deleteMember: (userID: number, signal?: AbortSignal) => Promise<void>;
+  setPrincipal: (kind: PrincipalKind, id: number, principalClass: PrincipalClass, signal?: AbortSignal) => Promise<OrgPrincipal>;
+  deletePrincipal: (kind: PrincipalKind, id: number, signal?: AbortSignal) => Promise<void>;
+  preview: (input: OrgPreviewInput, signal?: AbortSignal) => Promise<OrgPreviewResult>;
+  unattributed: (week: string | undefined, limit: number, signal?: AbortSignal) => Promise<{ items: OrgUnattributedEntry[] }>;
+  weekly: (query: OrgWeeklyQuery, signal?: AbortSignal) => Promise<OrgWeeklyReport>;
+  trend: (weeks: number, groupID: number | undefined, signal?: AbortSignal) => Promise<OrgTrendReport>;
+  projectWeekly: (projectID: number, week: string | undefined, signal?: AbortSignal) => Promise<OrgProjectReport>;
+  regenerate: (week: string, signal?: AbortSignal) => Promise<void>;
+  self: (signal?: AbortSignal) => Promise<OrgSelfReport>;
 }
 
 export function createApiClient(
@@ -110,6 +154,69 @@ export function createApiClient(
     return (await response.json()) as T;
   }
 
+  async function deleteResource(path: string, signal?: AbortSignal): Promise<void> {
+    const response = await sessionFetch(path, { method: "DELETE", signal });
+    if (!response.ok) {
+      throw await responseError(response);
+    }
+  }
+
+  const orgBase = `${API_BASE}/org`;
+  const id = (value: number) => encodeURIComponent(String(value));
+  const org: OrgApi = {
+    settings: (signal) => requestJSON<OrgSettings>(`${orgBase}/settings`, signal),
+    catalog: (signal) => requestJSON<OrgCatalog>(`${orgBase}/catalog`, signal),
+    createGroup: (input, signal) => mutateJSON<OrgGroup>(`${orgBase}/groups`, "POST", input, signal),
+    updateGroup: (groupID, input, signal) => mutateJSON<OrgGroup>(`${orgBase}/groups/${id(groupID)}`, "PUT", input, signal),
+    deleteGroup: (groupID, signal) => deleteResource(`${orgBase}/groups/${id(groupID)}`, signal),
+    createProject: (input, signal) => mutateJSON<OrgProject>(`${orgBase}/projects`, "POST", input, signal),
+    updateProject: (projectID, input, signal) => mutateJSON<OrgProject>(`${orgBase}/projects/${id(projectID)}`, "PUT", input, signal),
+    deleteProject: (projectID, signal) => deleteResource(`${orgBase}/projects/${id(projectID)}`, signal),
+    setMember: (userID, groupID, signal) => mutateJSON<OrgMember>(`${orgBase}/members/${id(userID)}`, "PUT", { group_id: groupID }, signal),
+    deleteMember: (userID, signal) => deleteResource(`${orgBase}/members/${id(userID)}`, signal),
+    setPrincipal: (kind, principalID, principalClass, signal) =>
+      mutateJSON<OrgPrincipal>(`${orgBase}/principals/${kind}/${id(principalID)}`, "PUT", { class: principalClass }, signal),
+    deletePrincipal: (kind, principalID, signal) => deleteResource(`${orgBase}/principals/${kind}/${id(principalID)}`, signal),
+    preview: (input, signal) => mutateJSON<OrgPreviewResult>(`${orgBase}/projects/preview`, "POST", input, signal),
+    unattributed: (week, limit, signal) => {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (week) {
+        params.set("week", week);
+      }
+      return requestJSON<{ items: OrgUnattributedEntry[] }>(`${orgBase}/unattributed?${params}`, signal);
+    },
+    weekly: (query, signal) => {
+      const params = new URLSearchParams();
+      if (query.week) {
+        params.set("week", query.week);
+      }
+      if (query.group_id !== undefined) {
+        params.set("group_id", String(query.group_id));
+      }
+      if (query.metric) {
+        params.set("metric", query.metric);
+      }
+      const suffix = params.size > 0 ? `?${params}` : "";
+      return requestJSON<OrgWeeklyReport>(`${orgBase}/weekly${suffix}`, signal);
+    },
+    trend: (weeks, groupID, signal) => {
+      const params = new URLSearchParams({ weeks: String(weeks) });
+      if (groupID !== undefined) {
+        params.set("group_id", String(groupID));
+      }
+      return requestJSON<OrgTrendReport>(`${orgBase}/weekly/trend?${params}`, signal);
+    },
+    projectWeekly: (projectID, week, signal) =>
+      requestJSON<OrgProjectReport>(`${orgBase}/projects/${id(projectID)}/weekly${week ? `?week=${encodeURIComponent(week)}` : ""}`, signal),
+    regenerate: async (week, signal) => {
+      const response = await sessionFetch(`${orgBase}/weekly/regenerate?week=${encodeURIComponent(week)}`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+    },
+    self: (signal) => requestJSON<OrgSelfReport>(`${orgBase}/me/weekly`, signal),
+  };
+
   async function login(credentials: Record<string, string>, signal?: AbortSignal): Promise<SessionInfo> {
     const response = await sessionFetch(
       `${API_BASE}/session`,
@@ -128,6 +235,7 @@ export function createApiClient(
   }
 
   return {
+    org,
     // Returns null rather than throwing when nobody is signed in: an anonymous
     // visitor is an expected state during start-up, not an error.
     async getSession(signal) {

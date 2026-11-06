@@ -39,6 +39,14 @@ insights:
   # Optional per-model context-window overrides in tokens, e.g.
   # my-gateway-alias: 200000
   context_windows: {}
+# Optional organisation project reports (doc/features/23). Off by default;
+# enabling it requires newapi.access_token/user_id and insights.enabled.
+# Groups, projects and rules are managed in the admin UI, not here.
+org_reports:
+  enabled: false
+  timezone: Asia/Shanghai
+  week_start: monday
+  idle_gap_seconds: 180
 
 interceptors:
   require-client-credential:

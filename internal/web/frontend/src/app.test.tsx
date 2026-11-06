@@ -10,6 +10,7 @@ import {
   DeveloperBadge,
   HTTPAuditEvidence,
   insightsEnabled,
+  orgReportsEnabled,
   StreamTimingPanel,
   TurnStoragePanel,
   UserAgentRulesPanel,
@@ -704,6 +705,13 @@ describe("insights capability", () => {
     expect(insightsEnabled(base)).toBe(false);
     expect(insightsEnabled({ ...base, insights_enabled: false })).toBe(false);
     expect(insightsEnabled({ ...base, insights_enabled: true })).toBe(true);
+  });
+
+  it("shows organisation reports only when the server reports org_reports_enabled", () => {
+    expect(orgReportsEnabled(null)).toBe(false);
+    expect(orgReportsEnabled(base)).toBe(false);
+    expect(orgReportsEnabled({ ...base, org_reports_enabled: false })).toBe(false);
+    expect(orgReportsEnabled({ ...base, org_reports_enabled: true })).toBe(true);
   });
 
   it("omits the 上下文构成 section without a client, which the dashboard withholds when disabled", () => {

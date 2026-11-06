@@ -10,6 +10,7 @@ import (
 
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/contentpolicy"
+	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/uaguard"
 
@@ -44,6 +45,9 @@ const (
 	writeCreateContentPolicyRule
 	writeUpdateContentPolicyRule
 	writeDeleteContentPolicyRule
+	// writeOrg carries one organisation-report write (org_writes.go). Its data
+	// is an orgWrite closure so that the feature adds a single writer case.
+	writeOrg
 )
 
 type writeRequest struct {
@@ -362,7 +366,8 @@ func canIsolateWriteError(err error) bool {
 	var local localWriteError
 	var integrityFailure storedObjectIntegrityError
 	return errors.As(err, &local) || errors.As(err, &integrityFailure) || errors.Is(err, ErrRecoveryOverflow) || errors.Is(err, auditmodel.ErrReconstruction) ||
-		errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound) || errors.Is(err, contentpolicy.ErrNotFound)
+		errors.Is(err, sql.ErrNoRows) || errors.Is(err, uaguard.ErrNotFound) || errors.Is(err, contentpolicy.ErrNotFound) ||
+		errors.Is(err, orgreport.ErrNotFound)
 }
 
 // Async capture has no acknowledgement. Persist the failure on its audit so
@@ -493,6 +498,8 @@ WHERE audit_id=$1 AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID)
 		return deleteContentPolicyRule(transaction, request.data.(int64))
 	case writeSaveAnalysis:
 		return saveAnalysis(transaction, request.data.(AnalysisRow))
+	case writeOrg:
+		return request.data.(orgWrite)(transaction)
 	default:
 		return fmt.Errorf("postgres writer: unknown operation %d", request.kind)
 	}

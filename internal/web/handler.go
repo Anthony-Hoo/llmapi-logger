@@ -91,7 +91,10 @@ type Options struct {
 	Rules      UserAgentRules
 	// Policies is the keyword policy CRUD surface wired by app. Nil keeps the
 	// management endpoints at a stable 503.
-	Policies  ContentPolicyRules
+	Policies ContentPolicyRules
+	// Org is the optional organisation report surface; nil keeps every
+	// /api/v1/org route at 404 (doc/features/23-org-project-reports.md).
+	Org       OrgReports
 	Assets    fs.FS
 	Readiness func(context.Context) ReadyStatus
 	Logger    *slog.Logger
@@ -113,6 +116,7 @@ func NewHandler(options Options) (http.Handler, error) {
 		users:     options.Users,
 		rules:     options.Rules,
 		policies:  options.Policies,
+		org:       options.Org,
 		developer: options.Developer,
 		readiness: options.Readiness,
 		static:    newStaticHandler(options.Assets),
@@ -130,6 +134,7 @@ type managementHandler struct {
 	users         UserCatalog
 	rules         UserAgentRules
 	policies      ContentPolicyRules
+	org           OrgReports
 	developer     DeveloperLogin
 	readiness     func(context.Context) ReadyStatus
 	static        http.Handler
@@ -179,6 +184,8 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveAuditResource(writer, request)
 	case strings.HasPrefix(request.URL.Path, insightsPathPrefix):
 		handler.serveInsights(writer, request)
+	case isOrgPath(request.URL.Path):
+		handler.serveOrg(writer, request)
 	case !handler.requireAdmin(writer, request):
 		return
 	case request.URL.Path == "/healthz":
