@@ -177,6 +177,25 @@ type AuditQuery interface {
 
 洞察页是 Dashboard 的 `insights` 视图（不引入路由）：KPI 栏、日用量柱图、8 周热力图（点击某天筛选会话）、会话卡片（构成条、用量、子 Agent 数，可排序）；点击卡片进入会话趋势（Step/Turn、Total/Delta 切换和事件标记）与 Agent 树；审计详情新增“上下文构成”一节。开发者登录同样可见，但只含自己的数据。
 
+## 11a. 组织项目周报 API 与页面
+
+可选的组织项目周报（[模块 23](23-org-project-reports.md)）挂在 `/api/v1/org/*`。`org_reports.enabled=false` 时所有路径对任何调用者都返回 `404 not_found`，导航入口隐藏；会话响应的 `org_reports_enabled` 告诉前端是否显示。开启后除 `GET /api/v1/org/me/weekly` 外全部是管理员端点，developer 会话一律 `403 forbidden`。所有响应带 `Cache-Control: no-store`；写入只接受一个 JSON 对象（未知字段 `400 invalid_input`，上限 64 KiB），错误映射为 `400 invalid_input`、`404 not_found`、`409 conflict`、`503 org_unavailable`，响应从不回显提交内容。
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /api/v1/org/settings` | 时区、周起始、合并阈值、进入排名的客户端、异常阈值 |
+| `GET /api/v1/org/catalog` | 组、项目（含规则）、成员、主体分类；`service_candidates` 列出尚未分类的 NewAPI 管理员账号 |
+| `POST /api/v1/org/groups`、`PUT/DELETE /api/v1/org/groups/{id}` | `{name, enabled}`；名称大小写不敏感唯一；仍有项目或成员的组不能删除（409） |
+| `POST /api/v1/org/projects`、`PUT/DELETE /api/v1/org/projects/{id}` | `{name, group_id(null=统一项目), enabled, rules:[{kind, pattern}]}`；`kind` 为 `repo_url`（规范化 remote 的通配，`*` 不跨 `/`，`**` 跨段；字面量同时比对 OpenCode 项目哈希）、`repo_name`（仓库名或路径任一段）、`path_glob`（规范化路径通配）、`agent_project`（等于 `X-Agent-Project`）；每项目最多 32 条 |
+| `POST /api/v1/org/projects/preview` | `{week?, group_id, rules, project_id?}`：用草稿规则试匹配一周的去重标识，返回命中请求数、来源数、用户数，以及其中原本未归属、原本属于其他项目的请求数；不修改目录 |
+| `PUT/DELETE /api/v1/org/members/{user_id}` | `{group_id}`；每个 NewAPI 用户只属于一个组 |
+| `PUT/DELETE /api/v1/org/principals/{user\|token}/{id}` | `{class: human\|service}`；Token 分类优先于其用户 |
+| `GET /api/v1/org/unattributed?week=&limit=` | 本周（或指定周）未归属的仓库/目录 Top N（默认 20，最大 200），按需解密后返回明文值和一条规则草稿；仅管理员 |
+
+`week` 是周起始日的本地日期 `YYYY-MM-DD`（按 `org_reports.timezone`），不是周起始日返回 400；省略表示本周。目录变更沿用 `content_policy_rules` 的模式：先在内存里对候选目录整体编译校验（失败则数据库与快照都不动），再持久化，最后原子替换快照；未冻结的周因此立即按新规则重新归属。
+
+管理页在规则页旁新增“项目组与项目”标签（仅管理员、仅开启时可见，按需加载）：组与成员、主体分类（管理员账号一键标为服务）、项目与规则编辑（含“预览命中”）、项目列表、本周未归属 Top 20（“生成规则草稿”预填项目表单）。
+
 ## 12. 最少测试
 
 - 列表 keyset、窄筛选、User-Agent 定向解密、TTFT 映射、`conversation` 筛选、`collapse=conversation` 折叠语义及二者同时出现时的互斥优先级；`status_class` 与独立 `status_code` 筛选，以及所有行级筛选优先于折叠、较早匹配轮次可见的规则。

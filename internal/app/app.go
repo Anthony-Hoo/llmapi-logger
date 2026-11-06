@@ -328,7 +328,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	var orgService web.OrgReports
 	if configuration.OrgReports.Enabled && insightsService != nil {
 		service, err := assembleOrgReports(orgAssembly{
-			configuration: configuration, logger: logger, store: runtime.store, cipher: runtime.cipher,
+			ctx: ctx, configuration: configuration, logger: logger, store: runtime.store, cipher: runtime.cipher,
 			vocabulary: vocabulary, fingerprints: runtime.analysisFingerprints, worker: application.parserWorker,
 		})
 		if err != nil {

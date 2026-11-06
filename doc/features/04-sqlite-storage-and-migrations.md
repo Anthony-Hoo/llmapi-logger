@@ -112,7 +112,13 @@ PostgreSQL 的 `002_org_reports.sql` 只由运行时 `migrate()` 在 001 基线�
 | --- | --- | --- |
 | audit_project_identity | 每个已分析 audit 至多一行：`identity_version`、`source`（`declared`/`codex_turn_metadata`/`agent_header`/`root`/`cwd`/`none`）、`body_scanned`、keyed 指纹 `identity_fpr`/`remote_fpr`/`repo_root_fpr`/`cwd_fpr`，以及加密的 `identity_enc`（规范化 remote、仓库根、cwd、声明名与 OpenCode 项目哈希；AAD 标签 `project_identity`，绑定 audit id 与版本） | 随 audit 级联删除 |
 
+| project_groups | 项目组：名称（大小写不敏感唯一）、启用状态 | 管理数据 |
+| projects | 项目：名称、`group_id`（NULL = 全员统一项目，`RESTRICT` 外键）、启用状态、`rules`（JSON 数组 `{kind, pattern}`，由服务校验）；同一范围内名称唯一 | 管理数据 |
+| group_members | `newapi_user_id` → `group_id`，主键保证每人只属于一个组 | 管理数据 |
+| principal_class | `(kind=user\|token, principal_id)` → `human`/`service` | 管理数据 |
+
 - 明文列只有枚举、版本和 keyed HMAC 指纹；`source=none` 时指纹与密文都为空（CHECK 约束）。
+- 管理表的写入走同一 `writeOrg` 操作，但沿用策略写入的生命周期（`submitPolicySync`）：一旦被 writer 接收就等待确定的提交或回滚；唯一键/外键冲突映射为 `orgreport.ErrConflict`。
 - 写入走单 writer 的 `writeOrg` 操作（闭包形式，所有 org 写入共用一个 writer 分支）；实时路径在 parser worker 内与 insights 并列执行，回填按 `started_at_ns` 倒序、每 30 秒最多 50 条。
 ## 4. HTTP Body 保存方式
 

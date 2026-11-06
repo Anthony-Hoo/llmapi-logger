@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -13,6 +14,20 @@ import (
 // caller, so a personal deployment exposes nothing new.
 type OrgReports interface {
 	Settings() orgreport.PublicSettings
+	// Catalog administration (persist, compile, swap).
+	Catalog() orgreport.CatalogView
+	CreateGroup(context.Context, orgreport.GroupInput) (orgreport.Group, error)
+	UpdateGroup(context.Context, int64, orgreport.GroupInput) (orgreport.Group, error)
+	DeleteGroup(context.Context, int64) error
+	CreateProject(context.Context, orgreport.ProjectInput) (orgreport.Project, error)
+	UpdateProject(context.Context, int64, orgreport.ProjectInput) (orgreport.Project, error)
+	DeleteProject(context.Context, int64) error
+	SetMember(context.Context, int64, int64) (orgreport.Member, error)
+	DeleteMember(context.Context, int64) error
+	SetPrincipal(context.Context, string, int64, string) (orgreport.Principal, error)
+	DeletePrincipal(context.Context, string, int64) error
+	Preview(context.Context, orgreport.PreviewInput) (orgreport.PreviewResult, error)
+	Unattributed(context.Context, string, int) ([]orgreport.UnattributedEntry, error)
 }
 
 const (
@@ -57,10 +72,5 @@ func (handler *managementHandler) serveOrg(writer http.ResponseWriter, request *
 
 // serveOrgSelf answers the caller's own weekly row.
 func (handler *managementHandler) serveOrgSelf(writer http.ResponseWriter, request *http.Request) {
-	http.NotFound(writer, request)
-}
-
-// serveOrgAdmin serves the administrator-only org routes.
-func (handler *managementHandler) serveOrgAdmin(writer http.ResponseWriter, request *http.Request, _ []string) {
 	http.NotFound(writer, request)
 }

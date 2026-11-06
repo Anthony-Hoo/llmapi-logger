@@ -1,8 +1,10 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/insights"
@@ -11,10 +13,20 @@ import (
 	"llmapi-logger/internal/security"
 )
 
+// orgStore is the persistence the organisation reports need; the PostgreSQL
+// store implements it.
+type orgStore interface {
+	insights.ProjectStore
+	orgreport.Repository
+	orgreport.DataStore
+	orgreport.SnapshotStore
+}
+
 // orgAssembly is what the organisation reports need from the rest of the
 // application. config.Validate already guarantees NewAPI identity and
-// insights; the store must additionally implement the org persistence.
+// insights; the store must additionally implement orgStore.
 type orgAssembly struct {
+	ctx           context.Context
 	configuration config.Config
 	logger        *slog.Logger
 	store         runtimeStore
@@ -32,15 +44,20 @@ func assembleOrgReports(assembly orgAssembly) (*orgreport.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	projectStore, ok := assembly.store.(insights.ProjectStore)
+	store, ok := assembly.store.(orgStore)
 	if !ok || assembly.cipher == nil || assembly.fingerprints == nil || assembly.vocabulary == nil {
 		return nil, errors.New("org reports need the PostgreSQL store, the audit key and insights")
 	}
-	runner, err := insights.NewProjectRunner(projectStore, assembly.cipher, assembly.vocabulary, assembly.fingerprints)
+	runner, err := insights.NewProjectRunner(store, assembly.cipher, assembly.vocabulary, assembly.fingerprints)
 	if err != nil {
 		return nil, err
 	}
-	service, err := orgreport.NewService(orgreport.Options{Settings: settings, Logger: assembly.logger})
+	ctx, cancel := context.WithTimeout(assembly.ctx, 10*time.Second)
+	defer cancel()
+	service, err := orgreport.NewService(ctx, orgreport.Options{
+		Settings: settings, Repository: store, Data: store, Snapshots: store,
+		Cipher: assembly.cipher, Logger: assembly.logger,
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,6 @@
 # 模块 23：组织项目周报与使用合规（开发计划）
 
-> 状态：实现中（M0、M1、M3 已实现）
+> 状态：实现中（M0–M3 已实现）
 > 日期：2026-11-06
 > 依赖：[11 NewAPI 请求身份](11-newapi-request-identity.md)、[20 上下文洞察](20-context-insights.md)、[21 实际计费](21-newapi-billing.md)、[22 关键词规则](22-content-policy.md)
 > 本文记录设计动机与开发拆分；落地后配置、表和 API 按惯例并入 01/04/10，以那里为唯一来源。
@@ -250,3 +250,10 @@ org_reports:
 - **OpenCode 哈希**：解密后的身份里保存 Header 原值（40 位十六进制，`global` 等值丢弃）；规则编译时对字面量 `repo_url` 预先计算 `sha1("git-remote:" + host/org/repo)` 比对。OpenCode 自己对 origin 的规范化方式是否与本项目一致仍待真实请求核对（§11）。
 - **回填**：parser worker 每个扫描周期（30 秒）在 insights 回填之后执行，按 `started_at_ns` **倒序**、每次最多 50 条，让本周和上周先补齐。先只解密白名单 Header；Header 没有 remote、项目哈希或声明名时才读请求体：raw 仍在则直接读，OpenAI 的 metadata 记录走已验证的重建，Anthropic/Gemini 的 raw 已释放则只保存 Header 结果。
 - **迁移**：`002_org_reports.sql` 只在运行时 `migrate()` 中执行，离线导入器的基线仍是 001（见 04 §3.5）。副作用：已被新版代理打开过的空库会多出 org 表，不能再作为离线导入目标；导入应在首次启动前完成。
+### 13.2 M2 项目组、项目与主体
+
+- 目录（组、项目、成员、主体分类）的变更先在内存里对**整个候选目录**编译校验，通过后才写库，写库成功后原子替换快照；任一环节失败，数据库与快照都保持原样（测试 `TestServiceCRUDPersistsThenSwapsTheSnapshot`）。这比 `content_policy_rules` 更严格：后者只预编译单条规则。
+- 匹配顺序：先用户所在组的项目，再统一项目；每个范围内按信号强弱分层（声明 > remote/项目哈希 > 仓库根 > cwd），同层按项目 id 取第一个命中。停用的项目、停用组的项目都不参与匹配。cwd 先映射到同一用户本周已见过的最长仓库根，再匹配 `repo_name`（路径任一段）和 `path_glob`。
+- 通配语义：`*` 不跨 `/`，`**` 跨段，`?` 匹配一个字符，其余字面量；`repo_url` 写成 `https://…`/`git@…` 形式时先按 remote 规则规范化。
+- 删除仍有项目或成员的组返回 409（外键 `RESTRICT`），不会级联删除项目。删除项目后，已冻结周的快照仍保留其 id 和名称。
+- “规则命中预览”与“未归属 Top N”在 M2 就实现了：它们需要按周加载请求并解密去重后的标识，这部分加载与归属管线（`orgreport.Attribute`）也是 M4 周报的输入。

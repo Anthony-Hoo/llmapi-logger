@@ -7,6 +7,7 @@ import (
 	"errors"
 	"testing"
 
+	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -183,5 +184,52 @@ func TestProjectIdentityBackfillCandidatesNewestFirst(t *testing.T) {
 	candidates, err = store.ListProjectIdentityBackfillCandidates(ctx, 2, &storage.ProjectBackfillCursor{StartedAtNS: 300, AuditID: "c-new"}, 10)
 	if err != nil || len(candidates) != 2 || candidates[0].AuditID != "c-mid" {
 		t.Fatalf("version upgrade candidates = %+v err = %v", candidates, err)
+	}
+}
+
+func TestOrgCatalogCRUDAndConstraints(t *testing.T) {
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	group, err := store.CreateProjectGroup(ctx, orgreport.Group{Name: "Platform", Enabled: true, CreatedAtNS: 1, UpdatedAtNS: 1})
+	if err != nil || group.ID <= 0 {
+		t.Fatalf("group = %+v err = %v", group, err)
+	}
+	if _, err := store.CreateProjectGroup(ctx, orgreport.Group{Name: "platform", CreatedAtNS: 1, UpdatedAtNS: 1}); !errors.Is(err, orgreport.ErrConflict) {
+		t.Fatalf("duplicate group = %v", err)
+	}
+	project, err := store.CreateProject(ctx, orgreport.Project{Name: "Core", GroupID: &group.ID, Enabled: true,
+		Rules: []orgreport.Rule{{Kind: orgreport.RuleRepoName, Pattern: "core"}}, CreatedAtNS: 1, UpdatedAtNS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetGroupMember(ctx, orgreport.Member{UserID: 7, GroupID: group.ID, UpdatedAtNS: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPrincipalClass(ctx, orgreport.Principal{Kind: "token", ID: 70, Class: "service", UpdatedAtNS: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProjectGroup(ctx, group.ID); !errors.Is(err, orgreport.ErrConflict) {
+		t.Fatalf("restricted delete = %v", err)
+	}
+	catalog, err := store.LoadOrgCatalog(ctx)
+	if err != nil || len(catalog.Groups) != 1 || len(catalog.Projects) != 1 || catalog.Projects[0].Rules[0].Pattern != "core" ||
+		*catalog.Projects[0].GroupID != group.ID || len(catalog.Members) != 1 || len(catalog.Principals) != 1 {
+		t.Fatalf("catalog = %+v err = %v", catalog, err)
+	}
+	project.Enabled = false
+	if err := store.UpdateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(ctx, project.ID); !errors.Is(err, orgreport.ErrNotFound) {
+		t.Fatalf("delete twice = %v", err)
+	}
+	if err := store.DeleteGroupMember(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProjectGroup(ctx, group.ID); err != nil {
+		t.Fatal(err)
 	}
 }

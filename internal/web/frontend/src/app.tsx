@@ -35,6 +35,8 @@ import { ContentPolicyPanel } from "./components/content-policy-panel";
 import { ConversationView } from "./components/conversation-view";
 // Recharts is only needed by the insights charts, so keep it out of the main chunk.
 const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
+// Organisation reports are optional and admin-only; keep them out of the main chunk.
+const OrgAdminPanel = lazy(() => import("./components/org/org-admin-panel").then((module) => ({ default: module.OrgAdminPanel })));
 import { CompositionSection } from "./components/insights/composition-section";
 import { buildConversationExport } from "./lib/conversation-export";
 import { errorMessage, isAbortError } from "./lib/errors";
@@ -317,7 +319,8 @@ function Dashboard({
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
   const hasInsights = insightsEnabled(session);
-  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights">("audits");
+  const hasOrgReports = orgReportsEnabled(session);
+  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights" | "org-admin">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -499,6 +502,11 @@ function Dashboard({
                   关键词拦截
                 </button>
               )}
+              {hasOrgReports && !isDeveloper ? (
+                <button type="button" className={segmentedItemClassName(view === "org-admin")} aria-current={view === "org-admin" ? "page" : undefined} onClick={() => setView("org-admin")}>
+                  项目组与项目
+                </button>
+              ) : null}
             </nav>
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
@@ -516,6 +524,10 @@ function Dashboard({
           <UserAgentRulesPanel client={client} />
         ) : view === "content-policy" && !isDeveloper ? (
           <ContentPolicyPanel client={client} />
+        ) : view === "org-admin" && hasOrgReports && !isDeveloper ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <OrgAdminPanel client={client} />
+          </Suspense>
         ) : view === "insights" && hasInsights ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <InsightsView

@@ -6,7 +6,6 @@ import (
 	"path"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -469,5 +468,5 @@ func (runner *ProjectRunner) Row(input Input, bodyScanned bool) (storage.Project
 
 // ProjectIdentityAAD binds identity_enc to its audit and row version.
 func ProjectIdentityAAD(auditID string, version int) ([]byte, error) {
-	return security.AAD(auditID, "project_identity", strconv.Itoa(version))
+	return orgreport.IdentityAAD(auditID, version)
 }
