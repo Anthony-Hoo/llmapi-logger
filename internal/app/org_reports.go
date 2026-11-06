@@ -56,7 +56,7 @@ func assembleOrgReports(assembly orgAssembly) (*orgreport.Service, error) {
 	defer cancel()
 	service, err := orgreport.NewService(ctx, orgreport.Options{
 		Settings: settings, Repository: store, Data: store, Snapshots: store,
-		Cipher: assembly.cipher, Logger: assembly.logger,
+		Cipher: assembly.cipher, Logger: assembly.logger, IdentityVersion: insights.ProjectIdentityVersion,
 	})
 	if err != nil {
 		return nil, err
@@ -65,6 +65,9 @@ func assembleOrgReports(assembly orgAssembly) (*orgreport.Service, error) {
 		allowlist := append(assembly.vocabulary.HeaderAllowlist(), assembly.vocabulary.ProjectHeaderAllowlist()...)
 		assembly.worker.SetHeaderAllowlist(allowlist)
 		assembly.worker.SetProjectAnalyzer(runner)
+		// Weekly snapshots ride the parser idle cadence; the tick only
+		// starts a guarded goroutine and never blocks parsing.
+		assembly.worker.AddIdleTask(service.SnapshotTick)
 	}
 	return service, nil
 }

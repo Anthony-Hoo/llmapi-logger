@@ -233,3 +233,51 @@ func TestOrgCatalogCRUDAndConstraints(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWeeklySnapshotRoundTripSurvivesRetention(t *testing.T) {
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	finishedTestAudit(t, store, "audit-snap", 100)
+	snapshot := orgreport.WeeklySnapshot{
+		Week: "2026-11-02", FrozenAtNS: 5, GeneratedAtNS: 5, ProjectNames: map[int64]string{10: "Demo"},
+		Result: orgreport.WeekResult{
+			Users: []orgreport.UserRow{{
+				UserID: 7, GroupID: 1, ActiveNS: 600, OtherActiveNS: 5, Roots: 2, SingleRequestRoots: 1, Requests: 4,
+				IdentifiedRequests: 3, BilledRequests: 4, Tokens: orgreport.Tokens{Uncached: 1, CacheRead: 2, CacheWrite: 3, Output: 4},
+				CostUSD: 1.5, PeakConcurrency: 2, AvgConcurrency: 1.5, Daily: []int64{600, 0, 0, 0, 0, 0, 0},
+				Flags:    []orgreport.Flag{{Code: orgreport.FlagConcurrency, Value: 2, Threshold: 1}},
+				Projects: []orgreport.ProjectCell{{Project: 10, ActiveNS: 400, Roots: 1, Requests: 2}, {Project: orgreport.ProjectUnattributed, ActiveNS: 200, Roots: 1, Requests: 2}},
+			}},
+			Service: []orgreport.ServiceRow{{UserID: 9, TokenID: 90, ActiveNS: 50, Requests: 1}},
+		},
+	}
+	if err := store.SaveWeeklySnapshot(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	// Retention deletes the audit; the snapshot has no foreign key to it.
+	if _, err := store.writerConn.ExecContext(ctx, `DELETE FROM audit_records`); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok, err := store.LoadWeeklySnapshot(ctx, "2026-11-02")
+	if err != nil || !ok {
+		t.Fatalf("load = %v %v", ok, err)
+	}
+	user := loaded.Result.Users[0]
+	if user.ActiveNS != 600 || user.Tokens.CacheWrite != 3 || user.Flags[0].Code != orgreport.FlagConcurrency || len(user.Projects) != 2 ||
+		user.Projects[0].Project != 10 || loaded.ProjectNames[10] != "Demo" || len(loaded.Result.Service) != 1 || loaded.Result.Service[0].TokenID != 90 {
+		t.Fatalf("loaded = %+v", loaded)
+	}
+	// Regeneration replaces the whole week.
+	snapshot.Result.Users = nil
+	snapshot.GeneratedAtNS = 9
+	if err := store.SaveWeeklySnapshot(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _ = store.LoadWeeklySnapshot(ctx, "2026-11-02")
+	if len(loaded.Result.Users) != 0 || loaded.GeneratedAtNS != 9 {
+		t.Fatalf("regenerated = %+v", loaded)
+	}
+	if _, ok, err := store.LoadWeeklySnapshot(ctx, "2026-10-26"); ok || err != nil {
+		t.Fatalf("missing week = %v %v", ok, err)
+	}
+}

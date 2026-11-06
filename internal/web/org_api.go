@@ -28,6 +28,12 @@ type OrgReports interface {
 	DeletePrincipal(context.Context, string, int64) error
 	Preview(context.Context, orgreport.PreviewInput) (orgreport.PreviewResult, error)
 	Unattributed(context.Context, string, int) ([]orgreport.UnattributedEntry, error)
+	// Reports.
+	Weekly(context.Context, orgreport.WeeklyQuery) (orgreport.WeeklyReport, error)
+	Trend(context.Context, int, *int64) (orgreport.TrendReport, error)
+	ProjectWeekly(context.Context, int64, string) (orgreport.ProjectReport, error)
+	Regenerate(context.Context, string) error
+	Self(context.Context, int64) (orgreport.SelfReport, error)
 }
 
 const (
@@ -70,7 +76,25 @@ func (handler *managementHandler) serveOrg(writer http.ResponseWriter, request *
 	}
 }
 
-// serveOrgSelf answers the caller's own weekly row.
+// serveOrgSelf answers the caller's own current-week row. It is the only org
+// route a developer may read; the user id comes from the signed session,
+// never from the query string, and nobody else's data is returned.
 func (handler *managementHandler) serveOrgSelf(writer http.ResponseWriter, request *http.Request) {
-	http.NotFound(writer, request)
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if parseInsightsValues(request.URL.Query()) != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid org query")
+		return
+	}
+	caller, _ := principalFrom(request.Context())
+	userID := int64(0)
+	if caller.Role == roleDeveloper {
+		userID = caller.Identity.UserID
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
+	defer cancel()
+	report, err := handler.org.Self(ctx, userID)
+	handler.writeOrgResult(writer, http.StatusOK, report, err)
 }

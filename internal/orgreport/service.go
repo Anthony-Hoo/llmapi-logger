@@ -52,6 +52,10 @@ type Options struct {
 	Cipher     security.Cipher
 	Logger     *slog.Logger
 	Now        func() time.Time
+	// IdentityVersion is the current project identity version
+	// (insights.ProjectIdentityVersion); a week freezes only once every
+	// audit has it. Zero means 1.
+	IdentityVersion int
 }
 
 // Service is the organisation report surface used by the web layer and the
@@ -64,6 +68,8 @@ type Service struct {
 	cipher     security.Cipher
 	logger     *slog.Logger
 	now        func() time.Time
+
+	identityVersion int
 
 	mu      sync.Mutex
 	current atomic.Pointer[Compiled]
@@ -83,9 +89,13 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	if options.IdentityVersion <= 0 {
+		options.IdentityVersion = 1
+	}
 	service := &Service{
 		settings: options.Settings, repository: options.Repository, data: options.Data,
 		snapshots: options.Snapshots, cipher: options.Cipher, logger: options.Logger, now: options.Now,
+		identityVersion: options.IdentityVersion,
 	}
 	catalog := Catalog{}
 	if options.Repository != nil {

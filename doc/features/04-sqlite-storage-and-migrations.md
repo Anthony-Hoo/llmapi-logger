@@ -116,6 +116,8 @@ PostgreSQL 的 `002_org_reports.sql` 只由运行时 `migrate()` 在 001 基线�
 | projects | 项目：名称、`group_id`（NULL = 全员统一项目，`RESTRICT` 外键）、启用状态、`rules`（JSON 数组 `{kind, pattern}`，由服务校验）；同一范围内名称唯一 | 管理数据 |
 | group_members | `newapi_user_id` → `group_id`，主键保证每人只属于一个组 | 管理数据 |
 | principal_class | `(kind=user\|token, principal_id)` → `human`/`service` | 管理数据 |
+| org_weekly_snapshots | 每个已冻结的报告周一行：`week_start`（按 `org_reports.timezone` 的周起始本地日期）、`frozen_at_ns`、`generated_at_ns` | **不级联**，超过 retention 仍保留 |
+| org_weekly_stats | `(week_start, section=ranked\|service, newapi_user_id, newapi_token_id, project_id)` → 活跃时长、其他客户端时长、推断会话时长、根会话数、单请求根会话数、请求数、有标识请求数、已计费请求数、Token 四桶、实际计费；`project_id=0` 是用户合计行并携带峰值/平均并行、逐日时长 JSON 与异常标记 JSON；`-1` 未归属、`-2` 无项目上下文；`project_name` 保存冻结时的项目名 | 随所属快照整体替换；与 audit 无外键 |
 
 - 明文列只有枚举、版本和 keyed HMAC 指纹；`source=none` 时指纹与密文都为空（CHECK 约束）。
 - 管理表的写入走同一 `writeOrg` 操作，但沿用策略写入的生命周期（`submitPolicySync`）：一旦被 writer 接收就等待确定的提交或回滚；唯一键/外键冲突映射为 `orgreport.ErrConflict`。

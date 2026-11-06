@@ -33,8 +33,13 @@ import type {
   OrgPrincipal,
   OrgProject,
   OrgProjectInput,
+  OrgProjectReport,
+  OrgSelfReport,
   OrgSettings,
+  OrgTrendReport,
   OrgUnattributedEntry,
+  OrgWeeklyQuery,
+  OrgWeeklyReport,
   PrincipalClass,
   PrincipalKind,
 } from "./lib/org/types";
@@ -103,6 +108,11 @@ export interface OrgApi {
   deletePrincipal: (kind: PrincipalKind, id: number, signal?: AbortSignal) => Promise<void>;
   preview: (input: OrgPreviewInput, signal?: AbortSignal) => Promise<OrgPreviewResult>;
   unattributed: (week: string | undefined, limit: number, signal?: AbortSignal) => Promise<{ items: OrgUnattributedEntry[] }>;
+  weekly: (query: OrgWeeklyQuery, signal?: AbortSignal) => Promise<OrgWeeklyReport>;
+  trend: (weeks: number, groupID: number | undefined, signal?: AbortSignal) => Promise<OrgTrendReport>;
+  projectWeekly: (projectID: number, week: string | undefined, signal?: AbortSignal) => Promise<OrgProjectReport>;
+  regenerate: (week: string, signal?: AbortSignal) => Promise<void>;
+  self: (signal?: AbortSignal) => Promise<OrgSelfReport>;
 }
 
 export function createApiClient(
@@ -175,6 +185,36 @@ export function createApiClient(
       }
       return requestJSON<{ items: OrgUnattributedEntry[] }>(`${orgBase}/unattributed?${params}`, signal);
     },
+    weekly: (query, signal) => {
+      const params = new URLSearchParams();
+      if (query.week) {
+        params.set("week", query.week);
+      }
+      if (query.group_id !== undefined) {
+        params.set("group_id", String(query.group_id));
+      }
+      if (query.metric) {
+        params.set("metric", query.metric);
+      }
+      const suffix = params.size > 0 ? `?${params}` : "";
+      return requestJSON<OrgWeeklyReport>(`${orgBase}/weekly${suffix}`, signal);
+    },
+    trend: (weeks, groupID, signal) => {
+      const params = new URLSearchParams({ weeks: String(weeks) });
+      if (groupID !== undefined) {
+        params.set("group_id", String(groupID));
+      }
+      return requestJSON<OrgTrendReport>(`${orgBase}/weekly/trend?${params}`, signal);
+    },
+    projectWeekly: (projectID, week, signal) =>
+      requestJSON<OrgProjectReport>(`${orgBase}/projects/${id(projectID)}/weekly${week ? `?week=${encodeURIComponent(week)}` : ""}`, signal),
+    regenerate: async (week, signal) => {
+      const response = await sessionFetch(`${orgBase}/weekly/regenerate?week=${encodeURIComponent(week)}`, { method: "POST", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+    },
+    self: (signal) => requestJSON<OrgSelfReport>(`${orgBase}/me/weekly`, signal),
   };
 
   async function login(credentials: Record<string, string>, signal?: AbortSignal): Promise<SessionInfo> {

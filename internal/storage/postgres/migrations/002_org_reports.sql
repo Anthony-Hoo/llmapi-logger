@@ -72,3 +72,44 @@ CREATE TABLE principal_class (
     updated_at_ns BIGINT NOT NULL CHECK (updated_at_ns > 0),
     PRIMARY KEY (kind, principal_id)
 );
+
+-- Frozen weekly snapshots. No foreign key to audits: a snapshot must outlive
+-- retention. week_start is the local date of the report week's first day.
+CREATE TABLE org_weekly_snapshots (
+    week_start TEXT COLLATE "C" PRIMARY KEY CHECK (length(week_start) = 10),
+    frozen_at_ns BIGINT NOT NULL CHECK (frozen_at_ns > 0),
+    generated_at_ns BIGINT NOT NULL CHECK (generated_at_ns > 0)
+);
+
+-- One row per (week, section, user, token, project). project_id 0 is the
+-- user's total row, which also carries the per-user figures (concurrency,
+-- daily curve, flags); -1 is unattributed and -2 no project context.
+-- section 'ranked' rows have token 0; 'service' rows name a service token or
+-- 0 for a whole service user.
+CREATE TABLE org_weekly_stats (
+    week_start TEXT COLLATE "C" NOT NULL REFERENCES org_weekly_snapshots(week_start) ON DELETE CASCADE,
+    section TEXT COLLATE "C" NOT NULL CHECK (section IN ('ranked', 'service')),
+    newapi_user_id BIGINT NOT NULL CHECK (newapi_user_id >= 0),
+    newapi_token_id BIGINT NOT NULL CHECK (newapi_token_id >= 0),
+    project_id BIGINT NOT NULL CHECK (project_id >= -2),
+    group_id BIGINT NOT NULL CHECK (group_id >= 0),
+    project_name TEXT COLLATE "C" NOT NULL DEFAULT '' CHECK (length(project_name) <= 128),
+    active_ns BIGINT NOT NULL CHECK (active_ns >= 0),
+    other_active_ns BIGINT NOT NULL DEFAULT 0 CHECK (other_active_ns >= 0),
+    inferred_ns BIGINT NOT NULL DEFAULT 0 CHECK (inferred_ns >= 0),
+    roots BIGINT NOT NULL CHECK (roots >= 0),
+    single_request_roots BIGINT NOT NULL DEFAULT 0 CHECK (single_request_roots >= 0),
+    requests BIGINT NOT NULL CHECK (requests >= 0),
+    identified_requests BIGINT NOT NULL DEFAULT 0 CHECK (identified_requests >= 0),
+    billed_requests BIGINT NOT NULL DEFAULT 0 CHECK (billed_requests >= 0),
+    u_uncached_input BIGINT NOT NULL CHECK (u_uncached_input >= 0),
+    u_cache_read BIGINT NOT NULL CHECK (u_cache_read >= 0),
+    u_cache_write BIGINT NOT NULL CHECK (u_cache_write >= 0),
+    u_output BIGINT NOT NULL CHECK (u_output >= 0),
+    cost_usd DOUBLE PRECISION NOT NULL CHECK (cost_usd >= 0),
+    peak_concurrency BIGINT NOT NULL DEFAULT 0 CHECK (peak_concurrency >= 0),
+    avg_concurrency DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (avg_concurrency >= 0),
+    daily_active_ns TEXT COLLATE "C" NOT NULL DEFAULT '[]' CHECK (length(daily_active_ns) <= 512),
+    flags TEXT COLLATE "C" NOT NULL DEFAULT '[]' CHECK (length(flags) <= 4096),
+    PRIMARY KEY (week_start, section, newapi_user_id, newapi_token_id, project_id)
+);

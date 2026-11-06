@@ -263,3 +263,55 @@ func jsonInt(value int64) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
 }
+
+func TestOrgReportEndpoints(t *testing.T) {
+	t.Parallel()
+	service, _ := newOrgTestService(t)
+	handler := newDeveloperHandler(t, Options{Developer: developerOptions(t, newapi.TokenIdentity{UserID: 7, TokenID: 70, HasIdentity: true}, nil), Org: service})
+
+	response := orgRequest(t, handler, http.MethodGet, "/api/v1/org/weekly?week=2026-11-02&metric=cost", "", nil)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("weekly = %d %s", response.Code, response.Body.String())
+	}
+	weekly := decodeOrg[orgreport.WeeklyReport](t, response)
+	if len(weekly.Users) != 2 || weekly.Users[0].UserID != 7 || weekly.Metric != "cost" || weekly.Totals.Requests != 10 {
+		t.Fatalf("weekly = %+v", weekly)
+	}
+	for _, bad := range []string{"/api/v1/org/weekly?metric=lines", "/api/v1/org/weekly?week=2026-11-04", "/api/v1/org/weekly?group_id=x", "/api/v1/org/weekly?extra=1", "/api/v1/org/weekly/trend?weeks=99"} {
+		if response := orgRequest(t, handler, http.MethodGet, bad, "", nil); response.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d", bad, response.Code)
+		}
+	}
+	trend := decodeOrg[orgreport.TrendReport](t, orgRequest(t, handler, http.MethodGet, "/api/v1/org/weekly/trend?weeks=2", "", nil))
+	if len(trend.Weeks) != 2 || trend.Weeks[1].Week != "2026-11-02" {
+		t.Fatalf("trend = %+v", trend)
+	}
+	if response := orgRequest(t, handler, http.MethodGet, "/api/v1/org/projects/-1/weekly?week=2026-11-02", "", nil); response.Code != http.StatusOK {
+		t.Fatalf("unattributed project view = %d %s", response.Code, response.Body.String())
+	}
+	if response := orgRequest(t, handler, http.MethodGet, "/api/v1/org/projects/55/weekly", "", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown project view = %d", response.Code)
+	}
+	if response := orgRequest(t, handler, http.MethodPost, "/api/v1/org/weekly/regenerate", "", nil); response.Code != http.StatusBadRequest {
+		t.Fatalf("regenerate without week = %d", response.Code)
+	}
+
+	// The developer sees exactly their own row, never another user's.
+	cookie := developerSignIn(t, handler)
+	response = orgRequest(t, handler, http.MethodGet, "/api/v1/org/me/weekly", "", cookie)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("me = %d %s", response.Code, response.Body.String())
+	}
+	self := decodeOrg[orgreport.SelfReport](t, response)
+	if self.Row == nil || self.Row.UserID != 7 || strings.Contains(response.Body.String(), `"user_id":8`) {
+		t.Fatalf("self = %s", response.Body.String())
+	}
+	if response := orgRequest(t, handler, http.MethodGet, "/api/v1/org/me/weekly?user_id=8", "", cookie); response.Code != http.StatusBadRequest {
+		t.Fatalf("query widening = %d", response.Code)
+	}
+	// An administrator has no NewAPI identity: an empty self report.
+	admin := decodeOrg[orgreport.SelfReport](t, orgRequest(t, handler, http.MethodGet, "/api/v1/org/me/weekly", "", nil))
+	if admin.Row != nil {
+		t.Fatalf("admin self = %+v", admin)
+	}
+}

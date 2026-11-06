@@ -574,6 +574,9 @@ func (application *App) closeComponents() error {
 			application.parserWorker.Close()
 			application.parserHealthy.Store(false)
 		}
+		if application.orgReports != nil {
+			application.orgReports.WaitSnapshots()
+		}
 		if application.callerWorker != nil {
 			application.callerWorker.Close()
 			application.callerHealthy.Store(false)

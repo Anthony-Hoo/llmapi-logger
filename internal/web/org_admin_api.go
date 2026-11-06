@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"llmapi-logger/internal/orgreport"
 )
@@ -214,7 +215,91 @@ func (handler *managementHandler) writeOrgResult(writer http.ResponseWriter, sta
 	}
 }
 
-// serveOrgReport serves the report routes (M4).
-func (handler *managementHandler) serveOrgReport(writer http.ResponseWriter, request *http.Request, _ []string) {
-	http.NotFound(writer, request)
+// serveOrgReport serves the administrator report routes.
+func (handler *managementHandler) serveOrgReport(writer http.ResponseWriter, request *http.Request, parts []string) {
+	values := request.URL.Query()
+	invalid := func() {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid org query")
+	}
+	groupID, err := optionalInt64(values, "group_id")
+	if err != nil || (groupID != nil && *groupID < 0) {
+		invalid()
+		return
+	}
+	switch {
+	case len(parts) == 1 && parts[0] == "weekly":
+		if request.Method != http.MethodGet {
+			methodNotAllowed(writer, http.MethodGet)
+			return
+		}
+		if parseInsightsValues(values, "week", "group_id", "metric") != nil {
+			invalid()
+			return
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
+		defer cancel()
+		report, err := handler.org.Weekly(ctx, orgreport.WeeklyQuery{Week: values.Get("week"), GroupID: groupID, Metric: values.Get("metric")})
+		handler.writeOrgResult(writer, http.StatusOK, report, err)
+	case len(parts) == 2 && parts[0] == "weekly" && parts[1] == "trend":
+		if request.Method != http.MethodGet {
+			methodNotAllowed(writer, http.MethodGet)
+			return
+		}
+		if parseInsightsValues(values, "weeks", "group_id") != nil {
+			invalid()
+			return
+		}
+		weeks := 8
+		if values.Has("weeks") {
+			parsed, err := parseInt(values.Get("weeks"))
+			if err != nil {
+				invalid()
+				return
+			}
+			weeks = parsed
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
+		defer cancel()
+		report, err := handler.org.Trend(ctx, weeks, groupID)
+		handler.writeOrgResult(writer, http.StatusOK, report, err)
+	case len(parts) == 2 && parts[0] == "weekly" && parts[1] == "regenerate":
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer, http.MethodPost)
+			return
+		}
+		if parseInsightsValues(values, "week") != nil || values.Get("week") == "" {
+			invalid()
+			return
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), orgRegenerateTimeout)
+		defer cancel()
+		handler.writeOrgResult(writer, http.StatusNoContent, nil, handler.org.Regenerate(ctx, values.Get("week")))
+	case len(parts) == 3 && parts[0] == "projects" && parts[2] == "weekly":
+		if request.Method != http.MethodGet {
+			methodNotAllowed(writer, http.MethodGet)
+			return
+		}
+		id, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			http.NotFound(writer, request)
+			return
+		}
+		if parseInsightsValues(values, "week") != nil {
+			invalid()
+			return
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
+		defer cancel()
+		report, err := handler.org.ProjectWeekly(ctx, id, values.Get("week"))
+		handler.writeOrgResult(writer, http.StatusOK, report, err)
+	default:
+		http.NotFound(writer, request)
+	}
 }
+
+// A report week loads every analysed request of the week plus margins; it
+// gets more time than an ordinary query. Regeneration also writes.
+const (
+	orgReportTimeout     = 30 * time.Second
+	orgRegenerateTimeout = 2 * time.Minute
+)

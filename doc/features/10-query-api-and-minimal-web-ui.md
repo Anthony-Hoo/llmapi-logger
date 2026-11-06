@@ -192,7 +192,19 @@ type AuditQuery interface {
 | `PUT/DELETE /api/v1/org/principals/{user\|token}/{id}` | `{class: human\|service}`；Token 分类优先于其用户 |
 | `GET /api/v1/org/unattributed?week=&limit=` | 本周（或指定周）未归属的仓库/目录 Top N（默认 20，最大 200），按需解密后返回明文值和一条规则草稿；仅管理员 |
 
+报告端点（加载一整周及前后各 24 小时，超时 30 秒；重新生成 2 分钟）：
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /api/v1/org/weekly?week=&group_id=&metric=hours\|tokens\|cost` | 已冻结周读快照（`frozen=true`），本周与尚未冻结的周实时计算（同一目录快照下 1 分钟内复用）。`users` 是排名行（按所选指标降序，`rank` 从 1 开始），每行含项目分段、覆盖率 `coverage`、根会话数、峰值/平均并行、逐日时长、异常标记；`unresolved` 汇总无法识别调用者的请求；`service` 是服务/系统分区；`projects` 是本周出现的项目及名称；`group_id=0` 表示未分组用户 |
+| `GET /api/v1/org/weekly/trend?weeks=N&group_id=` | 最近 N 周（默认 8，最大 12，含本周）每周的排名合计与按项目的时长/Token/计费 |
+| `GET /api/v1/org/projects/{id}/weekly?week=` | 某项目（`-1` 未归属、`-2` 无项目上下文）的贡献者、时长与成本 |
+| `POST /api/v1/org/weekly/regenerate?week=` | 按当前规则与仍在 retention 内的证据重新计算并覆盖该周快照；本周不能冻结（400） |
+| `GET /api/v1/org/me/weekly` | **developer 可用**：只返回会话身份对应 NewAPI 用户本周的一行（用户 id 取自签名 Cookie，不接受任何查询参数）；管理员或身份未知时 `row=null` |
+
 `week` 是周起始日的本地日期 `YYYY-MM-DD`（按 `org_reports.timezone`），不是周起始日返回 400；省略表示本周。目录变更沿用 `content_policy_rules` 的模式：先在内存里对候选目录整体编译校验（失败则数据库与快照都不动），再持久化，最后原子替换快照；未冻结的周因此立即按新规则重新归属。
+
+“项目周报”页（导航在“用量洞察”之后，按需加载 recharts）：周选择器（上一周/下一周/本周）、项目组筛选、指标切换（时长/Token/计费）、已冻结或实时标记与“重新生成”；KPI（排名口径时长、Token、计费、身份覆盖率）；按项目分段堆叠的排名横向柱图与明细表（覆盖率、并行、异常标记徽标，其他客户端时长单列）；人 × 项目热力矩阵（点击列头打开项目视角：贡献者、时长与成本）；近 8 周趋势；服务/系统分区与未识别调用者汇总。developer 登录看到的是“我的本周”卡片：自己的时长、项目分布和逐日时长。
 
 管理页在规则页旁新增“项目组与项目”标签（仅管理员、仅开启时可见，按需加载）：组与成员、主体分类（管理员账号一键标为服务）、项目与规则编辑（含“预览命中”）、项目列表、本周未归属 Top 20（“生成规则草稿”预填项目表单）。
 
