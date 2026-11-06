@@ -22,6 +22,8 @@ const BUILTIN_CLIENT_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
   opencode: "OpenCode",
   dsh: "DSH",
+  zcode: "ZCode",
+  pi: "pi",
   custom: "自定义",
   unknown: "未知客户端",
 };

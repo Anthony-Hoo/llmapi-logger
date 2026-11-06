@@ -57,11 +57,61 @@ clients:
       user_agent_prefixes: ["deepseek-harness/"]
       headers_present: [x-deepseek-harness-session-id]
     node_headers: [x-deepseek-harness-session-id]
-    parent_body_paths: [dsh_session_log.header.parentSession]
+    # deepseek-harness docs/deepseek-llm-api-wire-extensions.md: the session
+    # block carries parentSession (with origin "subagent", delegationDepth,
+    # cwd). header.parentSession is kept as a fallback for older builds that
+    # may have put it there. The pi-ai adapter path sends no session headers
+    # and falls back to content inference.
+    parent_body_paths:
+      - dsh_session_log.session.parentSession
+      - dsh_session_log.header.parentSession
     role_headers:
       - header: x-deepseek-harness-compact
         values:
           "1": compaction
+
+  # Z.ai ZCode (zai-org/ZCode, apps/zcode-cli/packages/adapters/src/model/
+  # runner-attribution.ts). UA ZCode/<ver>, X-Title "Z Code@electron" or
+  # "Z Code@cli". x-session-id is the session id with the sess_ /
+  # subagent_agent_ prefix stripped, so a sub-agent has its own node id.
+  # How a sub-agent names its parent is not verified, so there is no parent
+  # rule: sub-agents link through content matching.
+  zcode:
+    priority: 42
+    detect:
+      user_agent_prefixes: ["ZCode/"]
+      headers_present: [x-zcode-session-type]
+    node_headers: [x-session-id]
+    # The first matching role header wins: query source first, so a compact
+    # request of a main session is a compaction. project_memory_* query
+    # sources have no exact value to map and stay with the session type.
+    role_headers:
+      - header: x-zcode-query-source
+        values:
+          compact: compaction
+          session_title: title
+      - header: x-zcode-session-type
+        values:
+          main: main
+          subagent: subagent
+          side_chat: auxiliary
+          other: auxiliary
+
+  # pi (earendil-works/pi, formerly badlogic/pi-mono; packages/ai/src/utils/
+  # identity.ts, packages/ai/src/api/openai-responses.ts). UA
+  # "pi/<ver> (<platform>; <runtime>/<ver>; <arch>)". Only the OpenAI
+  # Responses provider sends session-id (and x-client-request-id, the same
+  # uuid) by default; Chat Completions and Anthropic send no session id. No
+  # built-in sub-agents; compaction is the side_requests system prefix below.
+  # Detected by User-Agent only: session-id is shared with Codex, and pi's
+  # ChatGPT-backend provider also sends originator: pi, which the codex
+  # header rule would otherwise claim.
+  pi:
+    priority: 45
+    detect:
+      user_agent_prefixes: ["pi/"]
+    root_headers: [session-id]
+    node_headers: [session-id]
 
   # Generic custom agent frameworks (doc section 11). Lowest priority: native
   # client headers win.
