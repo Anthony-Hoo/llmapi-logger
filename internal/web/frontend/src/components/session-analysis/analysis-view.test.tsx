@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../../api";
 import type { AnalysisOverview, AnalysisSessionItem, AnalysisSignalTotals } from "../../lib/session-analysis/types";
 import { OverviewCards, SessionAnalysisView, SessionDetails } from "./analysis-view";
+import { PackView } from "./pack-panel";
 
 function totals(overrides: Partial<AnalysisSignalTotals> = {}): AnalysisSignalTotals {
   return {
@@ -97,5 +98,16 @@ describe("session analysis view", () => {
     const client = {} as ApiClient;
     expect(renderToStaticMarkup(<SessionAnalysisView client={client} isDeveloper refreshKey={0} />)).not.toContain("立即运行");
     expect(renderToStaticMarkup(<SessionAnalysisView client={client} isDeveloper={false} refreshKey={0} />)).toContain("立即运行");
+  });
+
+  it("renders a pack with its evidence references", () => {
+    const html = renderToStaticMarkup(
+      <PackView
+        pack={{ session_id: "s", pack_id: "p", kind: "chat_digest", text: "[会话] 类型=聊天汇总\n[U1 09:12] 问题", refs: { U10: "a10", U2: "a2" }, tokens: 42, truncated: true, members: 4, built_ns: "1" }}
+      />,
+    );
+    expect(html).toContain("聊天汇总包（4 个单轮会话）");
+    expect(html).toContain("已按预算截断");
+    expect(html.indexOf("U2 → a2")).toBeLessThan(html.indexOf("U10 → a10"));
   });
 });

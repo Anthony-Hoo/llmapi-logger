@@ -261,7 +261,7 @@ func hasAnyPrefix(text string, prefixes []string) bool {
 }
 
 // classifyCall fills Kind, Class, Label, Paths and Status of one call.
-func classifyCall(call *ToolCall, vocab *Vocabulary, insightsVocab *insights.Vocabulary) {
+func classifyCall(call *ToolCall, vocab *Vocabulary, insightsVocab *insights.Vocabulary, client string) {
 	hasResult := call.hasResult
 	name := strings.ToLower(strings.TrimSpace(call.Name))
 	arguments := call.arguments
@@ -308,6 +308,8 @@ func classifyCall(call *ToolCall, vocab *Vocabulary, insightsVocab *insights.Voc
 			} else {
 				call.Status = StatusFailed
 			}
+		} else if vocab.okWithoutExit[client] {
+			call.Status = StatusOK
 		} else {
 			call.Status = StatusUnknown
 		}

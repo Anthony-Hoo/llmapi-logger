@@ -202,6 +202,12 @@ ON CONFLICT (session_key) DO UPDATE SET
 	if err != nil {
 		return fmt.Errorf("postgres writer: upsert session signals: %w", err)
 	}
+	if !s.Eligible {
+		// A session that no longer qualifies keeps no stale pack.
+		if _, err := tx.Exec(`DELETE FROM session_packs WHERE session_key = $1 AND kind = $2`, s.SessionKey, storage.PackKindSession); err != nil {
+			return fmt.Errorf("postgres writer: drop stale session pack: %w", err)
+		}
+	}
 	if _, err := tx.Exec(`DELETE FROM session_text_fprs WHERE session_key = $1 AND source IN ($2, $3)`,
 		s.SessionKey, storage.TextSourceUser, storage.TextSourceInjectedRules); err != nil {
 		return fmt.Errorf("postgres writer: clear session text fingerprints: %w", err)
@@ -236,6 +242,11 @@ WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = s.last_aud
 			return fmt.Errorf("postgres writer: prune session signals: %w", err)
 		}
 		removed, _ = result.RowsAffected()
+		if _, err := tx.Exec(`
+DELETE FROM session_packs AS p
+WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = p.last_audit_id)`); err != nil {
+			return fmt.Errorf("postgres writer: prune session packs: %w", err)
+		}
 		if _, err := tx.Exec(`DELETE FROM session_text_fprs WHERE seen_at_ns < $1`, fingerprintCutoffNS); err != nil {
 			return fmt.Errorf("postgres writer: prune session text fingerprints: %w", err)
 		}

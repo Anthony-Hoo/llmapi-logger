@@ -1,6 +1,6 @@
 # 模块 24：会话记录分析（开发计划）
 
-> 状态：计划中，未实现
+> 状态：S0、S1 已实现，S2、S3 进行中，S4 未开始（实现记录与偏差见 §16）
 > 日期：2026-11-06
 > 依赖：[18 内容寻址会话存储](18-content-addressed-conversation-storage.md)、[19 开发者 API Key 会话](19-developer-key-session.md)、[20 上下文洞察](20-context-insights.md)、[12 保留清理](12-retention-and-maintenance.md)；可选集成 [23 组织项目周报](23-org-project-reports.md)（该文档在另一分支，合并后链接生效）
 > 本文是模块 23 里程碑 M5 的展开设计，并修订其 §9（见 §2）。落地后配置、表和 API 按惯例并入 01/04/10。
@@ -188,7 +188,7 @@ session_analysis:
    - Claude Code 斜杠命令（`<command-name>/x</command-name>`、`<command-args>…</command-args>`）改写为 `[命令 /x] <参数>`，供 skill 候选检测使用。
    - 连续三个以上空行压成一个。
 5. **整条都是注入的消息不算用户轮次**，例如 Codex 只含 `<environment_context>` 的那条。`<turn_aborted` 不进文本，但计入 L0 的"用户中断"次数。
-6. **图片和附件**：`unknown` part 或 `content_binary_refs` 指向的二进制对象，写成 `[图片 image/png 312KB]` 或 `[附件 application/pdf 1.2MB]`。不做 OCR，不读文件内容。
+6. **图片和附件**：`unknown` part 或 `content_binary_refs` 指向的二进制对象，写成 `[图片 image/png]` 或 `[附件 application/pdf]`（S1 不读二进制大小）。不做 OCR，不读文件内容。
 7. **粘贴的日志、堆栈、大段代码**：
    - 识别条件：连续 ≥15 行，且命中词表中的日志或堆栈特征，或者是长度 ≥40 行的围栏代码块。
    - 处理：保留前 5 行和后 5 行，中间换成 `[…省略 N 行日志…]`。命中错误特征的，计入 L0 的"报错回贴"。
@@ -196,7 +196,7 @@ session_analysis:
 
 ### 6.4 子 Agent
 
-- **任务文本**：父 Agent 派给子 Agent 的任务**不算用户输入**，标为 `[S<k> 名称=<显示名或角色> 深度=<d>]`。
+- **任务文本**：父 Agent 派给子 Agent 的任务**不算用户输入**，标为 `[S<k> 深度=<d>]`（S1 尚未读取 `X-Agent-Name` 显示名，有名称时再加 `名称=`）。
   - 正文取子 Agent 首条 user 消息，并去掉词表 `subagent_prefixes` 中的固定前缀。取不到时，退回父 Agent 派生工具调用的参数（`spawn_tools` 词表中的 `prompt` / `message` 字段）。
   - 上限 300 字。
   - 不参与 L0 的用户指令指纹，因为这段文字是模型写的，不是人写的。
@@ -322,7 +322,7 @@ session_analysis:
 
 原始记录摘要：
 
-- 根会话：1 个 `session-id`，2 个 `thread-id`（主 Agent、1 个 `collab_spawn` 子 Agent）。共 64 条请求：主 Agent 52 条，子 Agent 10 条，附属 2 条（`compact`）。时间 11-04 14:02–15:10，活跃 51 分钟。模型全部为 `codex-large`。
+- 根会话：1 个 `session-id`，2 个 `thread-id`（主 Agent、1 个 `collab_spawn` 子 Agent）。共 64 条请求：主 Agent 52 条，子 Agent 10 条，附属 2 条（`compact`）。时间 11-04 14:02–15:08。模型全部为 `codex-large`。
 - 23 归属结果：remote 命中虚构项目 `orders-service`。
 - 主 Agent 的用户条目，按出现顺序：
   - ① `<environment_context>…` → 注入，丢弃。
@@ -332,16 +332,16 @@ session_analysis:
   - ⑤ `<turn_aborted>…` → 不进文本，"用户中断"计 1 次。
   - ⑥ "测试过了的话顺便更新一下 README 的接口说明"。
 - 子 Agent：首条消息为"检查仓库里其他导出接口是怎么做参数校验的，列出文件和做法"。
-- 工具：`exec_command` 31 次（`rg`、`sed -n`、`go test` 5 次其中 2 次失败、`git diff`），`apply_patch` 7 次（1 次失败）。reasoning 条目 40 个，全部不进包。
+- 工具（主 Agent）：`exec_command`（`rg`、`sed -n`、`go test` 4 次其中 2 次失败、`git diff`），`apply_patch` 5 次（1 次失败），`spawn_agent` 1 次；子 Agent 有 `rg`、`cat` 各 1 次。reasoning 条目全部不进包。
 
 生成的输入包：
 
 ~~~text
-[会话] 类型=agent 客户端=Codex 项目=orders-service(remote) 模型=codex-large 时间=11-04 14:02–15:10 活跃51m 请求=64(52/10/2) 子Agent=1(深度1) 用户轮=3 输入≈2.9M 输出≈41k 缓存命中94%
-[信号] 工具失败=3(最长连续2) 纠正=1 用户中断=1 反复编辑=1个文件×4 结束前验证=是
+[会话] 类型=agent 客户端=Codex 模型=codex-large 时间=11-04 14:02–15:08 活跃1h7m 请求=64(52/10/2) 子Agent=1(深度1) 用户轮=3 输入≈2.9M 输出≈41k 缓存命中93%
+[信号] 工具失败=3(最长连续1) 反复编辑=1个文件×4 结束前验证=否 用户中断=1 纠正=1 压缩=2
 [U1] 给订单导出接口加上按日期过滤，参数 from/to，格式 YYYY-MM-DD，补单测
-[T1] search×6 → read×9 → spawn(S1){search×3 → read×5} → write(internal/export/handler.go) → shell:test(go test)(失败) → write(internal/export/handler.go) → shell:test(go test)
-[S1 名称=collab_spawn 深度=1] 检查仓库里其他导出接口是怎么做参数校验的，列出文件和做法
+[T1] search → read → spawn(S1){search → read} → write(internal/export/handler.go) → shell:test(go test)(失败) → write(internal/export/handler.go) → shell:test(go test)
+[S1 深度=1] 检查仓库里其他导出接口是怎么做参数校验的，列出文件和做法
 [A→C2] 已实现 from/to 过滤，使用 time.Parse 按 UTC 解析，并补充了 3 个单测，go test 通过。
 [C2] 不对，日期要按 UTC+8 解析，不要用 UTC
 [T2] write(internal/export/handler.go)×2(失败1) → shell:test(go test)×2(失败1)
@@ -350,7 +350,7 @@ session_analysis:
 [A] 已改为按 UTC+8 解析 from/to，新增跨日边界用例；README 的导出接口一节补充了参数说明和示例。
 ~~~
 
-估算约 420 Token（中文约 260 字，其余约 640 字符）。
+估算约 340 Token。本例与示例 B 逐字等于 `internal/sessionanalysis/pack_test.go` 的 golden 输出（时间按 UTC+8 显示）；示例 C 的格式由同一文件的测试锁定，文中省略了日志行。
 
 #### 示例 B：Claude Code（Anthropic Messages）
 
@@ -360,27 +360,27 @@ session_analysis:
 - 第 1 个用户轮次的 content：
   - ① text `<system-reminder>…CLAUDE.md 内容…</system-reminder>` → 丢弃。
   - ② text `<command-message>…</command-message><command-name>/review-pr</command-name><command-args>42</command-args>` → 改写为命令。
-- 第 2 个用户轮次：image part（`image/png`，312KB）加文字"这个按钮在窄屏下错位了，见截图，修一下"。
+- 第 2 个用户轮次：image part（`image/png`）加文字"这个按钮在窄屏下错位了，见截图，修一下"。
 - 第 3 个用户轮次："别改全局样式，只改这个组件"，属于纠正。
-- 工具：`Bash`（`gh pr diff`、`npm test` 两次，第一次 `is_error=true`）、`Read`×6、`Edit`×3、`Task`×1。thinking 块不进包。
+- 工具：`Bash`（`gh pr diff`、`npm test` 两次，第一次结果为 `Exit code 1`）、`Read`、`Edit`×3、`Task`×1；子 Agent 有 `Grep`、`Read` 各 1 次。thinking 块不进包。
 
 生成的输入包：
 
 ~~~text
-[会话] 类型=agent 客户端=Claude Code 项目=web-console(cwd) 模型=claude-main(+haiku 18%) 时间=11-05 10:15–10:49 活跃29m 请求=23(17/5/1) 子Agent=1(深度1) 用户轮=3 输入≈610k 输出≈12k 缓存命中88%
-[信号] 工具失败=1 纠正=1 结束前验证=是
+[会话] 类型=agent 客户端=Claude Code 模型=claude-main(+claude-haiku 14%) 时间=11-05 10:15–10:46 活跃33m 请求=23(17/5/1) 子Agent=1(深度1) 用户轮=3 输入≈610k 输出≈12k 缓存命中88%
+[信号] 工具失败=1(最长连续1) 结束前验证=是 纠正=1
 [U1] [命令 /review-pr] 42
-[T1] shell:other(gh) → spawn(S1){search×2 → read×3} → read×2
-[S1 名称=Explore 深度=1] Find where the PR changes the toolbar layout and list affected components.
-[U2] [图片 image/png 312KB] 这个按钮在窄屏下错位了，见截图，修一下
-[T2] read×1 → write(src/styles/global.css) → shell:test(npm test)(失败)
+[T1] shell:git(gh) → spawn(S1){search → read} → read
+[S1 深度=1] Find where the PR changes the toolbar layout and list affected components.
+[U2] [图片 image/png] 这个按钮在窄屏下错位了，见截图，修一下
+[T2] write(src/styles/global.css) → shell:test(npm test)(失败)
 [A→C3] 我在 global.css 中把 .btn 的 flex-shrink 改为 0，并调整了媒体查询断点。
 [C3] 别改全局样式，只改这个组件
 [T3] write(src/styles/global.css) → write(src/components/Toolbar.tsx) → shell:test(npm test)
 [A] 已撤回 global.css 的改动，改为在 Toolbar 组件内用局部样式处理窄屏换行，npm test 通过。
 ~~~
 
-估算约 330 Token。
+估算约 270 Token。
 
 #### 示例 C：普通聊天（chat/completions）与单轮聊天汇总
 
@@ -395,7 +395,7 @@ session_analysis:
 生成的输入包（没有 `[T]`、`[S]`，也没有 `[A→C]`）：
 
 ~~~text
-[会话] 类型=聊天 客户端=unknown 项目=无项目上下文 模型=gpt-chat-small 时间=11-05 20:31–20:44 请求=3 用户轮=3 输入≈9k 输出≈2k
+[会话] 类型=聊天 客户端=unknown 模型=gpt-chat-small 时间=11-05 20:31–20:39 活跃11m 请求=3 用户轮=3 输入≈9k 输出≈2k
 [信号] 报错回贴=1
 [U1] 帮我把下面这段报错翻译一下并说明原因
 2026/11/05 20:30:01 [error] 1234#0: *5678 upstream timed out (110: Connection timed out) while reading response header from upstream, client: 192.0.2.10, ...
@@ -407,12 +407,12 @@ session_analysis:
 [A] 以下是几部适合周末观看的电影：……
 ~~~
 
-估算约 260 Token。日志中的地址是 RFC 5737 文档保留地址；真实日志中的 IP 不会被脱敏替换，但只出现在加密的输入包里。
+估算约 410 Token（首轮按 900+300 字截断，可能截断其中一行日志）。日志中的地址是 RFC 5737 文档保留地址；真实日志中的 IP 不会被脱敏替换，但只出现在加密的输入包里。
 
-单轮聊天汇总包（同一 Key、同一客户端、同一天的 4 个单轮会话）：
+单轮聊天汇总包（同一 Key、同一客户端、同一天的 4 个单轮会话；联系方式会替换为 `[REDACTED:contact]`）：
 
 ~~~text
-[会话] 类型=聊天汇总 客户端=unknown 项目=无项目上下文 模型=gpt-chat-small 时间=11-06 09:12–17:40 会话=4 请求=4
+[会话] 类型=聊天汇总 客户端=unknown 模型=gpt-chat-small 时间=11-06 09:12–17:40 会话=4
 [U1 09:12] 用 SQL 写一个按月统计订单数的查询
 [U2 11:03] Kubernetes 里 readinessProbe 和 livenessProbe 的区别
 [U3 15:27] 写一封请假邮件，下周三下午
@@ -663,3 +663,27 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 
 - S1 完成后，对同一类样本周期生成真实输入包，统计 Token 分布并与 §15.3 对比，偏差超过 30% 时更新本节和 `pack.max_tokens` 默认值。
 - S2 完成后，记录实际的调用次数、输入输出 Token、单次耗时、前缀缓存命中率（vLLM 的 `prefix_cache_hit_rate` 指标或服务端日志），以及 L1 的重算比例，回填本节。
+
+## 16. 实现记录与偏差
+
+按里程碑记录与上文设计不同或尚未覆盖的地方。
+
+### S0（确定性信号）
+
+- **会话快照**：每个 Agent 只解密最后一个请求，加上每次检测到压缩之前的那个请求（最多 6 个快照），在内存里合并：用户轮次按规范化文本去重，工具调用按 call id 去重。没有按 §5.3 逐请求读取增量条目；OpenAI 记录用已验证的轮次图重建，其他协议读解析器加密保存的 conversation。
+- **用户轮次到 audit 的映射**：第 k 个用户轮次对应该 Agent 第 k 个 `turn_start=1` 的请求；两边数量不一致时，多出的轮次都映射到最后一个。
+- **工具失败**：Conversation DTO 不保留 Anthropic `tool_result.is_error`，S0 不读 raw；改为在词表里配置 `shell_ok_without_exit_code`（默认 `claude_code`、`zcode`）：这些客户端的 shell 结果没有退出码就视为成功，`Exit code N` 视为失败。其他客户端解析不到退出码记为未知。
+- **路径与工具名**：直接从解密后的工具调用参数里取（`insights` 词表的 `file_ops`、`apply_patch` 头），没有读取 `audit_analysis.detail_enc`。
+- **被本地策略拦截的请求**整体不进入 L0，也不计数，避免开发者从信号里看到策略命中。
+- **项目归属**：本分支没有模块 23，`project_id`、`bucket` 列未建，`[会话]` 行不写项目。合并 23 后补上。
+- **migration**：派生表放在 `003`，并把派生 migration 改为"缺哪个版本补哪个"，允许与 23 的 `002` 以任意顺序合并。
+- **手动运行**：新增管理员专用的 `POST /api/v1/session-analysis/run`，便于首次部署后立即生成结果。
+- **retention**：派生行在下一次批处理开始时按"会话最后一条 audit 是否还在"清理，最多滞后一天。
+
+### S1（输入包）
+
+- 输入包加密保存在 `session_packs`，单轮聊天按 Key、客户端、本地日期合并为汇总包，汇总包成员记在 `session_pack_members`；每轮批处理只重建本轮有新成员的那一天。
+- §6.11 示例 A、B 逐字等于 `pack_test.go` 的 golden 输出，示例 C 的格式由同一文件的测试锁定；与最初手写示例的差别：没有项目字段、`[S]` 行没有名称、图片占位不带大小、`[信号]` 行顺序按 §5.2。
+- `[T]` 中的路径：相对路径原样保留，绝对路径只保留文件名（没有仓库根信息时）。
+- 查看日志 `analysis_view_log` 已建表并在每次读取输入包时写入（管理员和开发者都记）；读取查看日志的接口尚未提供。
+- §15.5 要求用真实样本复核 Token 分布，需在部署环境运行后补充；本地只验证了虚构示例（约 270–410 Token）。

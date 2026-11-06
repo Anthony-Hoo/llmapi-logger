@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,4 +252,81 @@ func TestDerivedMigrationsApplyOnceAndToleratePriorVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 	reopened.Close()
+}
+
+func TestSessionPacksStorageAndViewLog(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	tokenID := int64(1)
+	pack := storage.SessionPack{
+		SessionKey: rootA, Kind: storage.PackKindSession, APIKeyFPR: keyA, NewAPITokenID: &tokenID, Client: "codex",
+		PackHash: strings.Repeat("ab", 32), PackEnc: []byte{1, 2, 3}, RefMap: `{"U1":"a1"}`, TokenEstimate: 120,
+		FirstNS: day.UnixNano(), LastNS: day.UnixNano(), LastAuditID: "a2", BuiltAtNS: 5, Members: 1,
+	}
+	if err := store.SaveSessionPack(ctx, pack, nil); err != nil {
+		t.Fatal(err)
+	}
+	digestKey := fill(0x71)
+	digest := pack
+	digest.SessionKey, digest.Kind, digest.LastAuditID, digest.Members = digestKey, storage.PackKindChatDigest, "expired-audit", 2
+	member1, member2 := fill(0x72), fill(0x73)
+	if err := store.SaveSessionPack(ctx, digest, [][]byte{member1, member2}); err != nil {
+		t.Fatal(err)
+	}
+	// A rebuilt digest replaces its members.
+	if err := store.SaveSessionPack(ctx, digest, [][]byte{member2}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadSessionPack(ctx, rootA)
+	if err != nil || loaded.Kind != storage.PackKindSession || loaded.RefMap != `{"U1":"a1"}` || *loaded.NewAPITokenID != 1 || !bytes.Equal(loaded.PackEnc, []byte{1, 2, 3}) {
+		t.Fatalf("own pack = %+v, %v", loaded, err)
+	}
+	if viaMember, err := store.LoadSessionPack(ctx, member2); err != nil || !bytes.Equal(viaMember.SessionKey, digestKey) {
+		t.Fatalf("member lookup = %v", err)
+	}
+	if _, err := store.LoadSessionPack(ctx, member1); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("dropped member still resolves: %v", err)
+	}
+	if err := store.RecordAnalysisView(ctx, storage.AnalysisView{AtNS: 9, ViewerRole: "admin", Resource: "pack", SessionKey: rootA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAnalysisView(ctx, storage.AnalysisView{AtNS: 9, ViewerRole: "root", Resource: "pack", SessionKey: rootA}); err == nil {
+		t.Fatal("invalid viewer role accepted")
+	}
+	// An ineligible recomputation drops the session pack; the digest of a
+	// vanished audit goes with the next prune.
+	signals := testSignals(rootA, keyA, "a2", day.UnixNano())
+	signals.Eligible, signals.SkipReason = false, "below_threshold"
+	if err := store.SaveSessionSignals(ctx, signals, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSessionPack(ctx, rootA); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale pack kept: %v", err)
+	}
+	if _, err := store.PruneSessionAnalysis(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSessionPack(ctx, member2); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("digest of a missing audit survived the prune: %v", err)
+	}
+	var views int
+	if err := store.readerDB.QueryRow(`SELECT count(*) FROM analysis_view_log`).Scan(&views); err != nil || views != 1 {
+		t.Fatalf("views = %d, %v", views, err)
+	}
+
+	// Digest members: single-turn chats of one key and client in a day.
+	chat := testSignals(fill(0x74), keyA, "a1", day.UnixNano())
+	chat.Kind, chat.Client, chat.SkipReason, chat.Eligible = "chat", "", "single_turn_chat", false
+	if err := store.SaveSessionSignals(ctx, chat, nil); err != nil {
+		t.Fatal(err)
+	}
+	members, err := store.ListChatDigestMembers(ctx, keyA, "unknown", day.Add(-time.Hour).UnixNano(), day.Add(time.Hour).UnixNano(), 10)
+	if err != nil || len(members) != 1 || !bytes.Equal(members[0].SessionKey, fill(0x74)) {
+		t.Fatalf("members = %d, %v", len(members), err)
+	}
+	if others, err := store.ListChatDigestMembers(ctx, keyB, "unknown", day.Add(-time.Hour).UnixNano(), day.Add(time.Hour).UnixNano(), 10); err != nil || len(others) != 0 {
+		t.Fatalf("foreign members = %d, %v", len(others), err)
+	}
 }

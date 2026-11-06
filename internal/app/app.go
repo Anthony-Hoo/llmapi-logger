@@ -115,9 +115,9 @@ func loadSessionAnalysisVocabulary(configuration config.SessionAnalysisConfig) (
 
 // assembleSessionAnalysis wires the daily batch and its management API. It
 // returns nils when the feature is off or its prerequisites are unavailable.
-func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
+func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
 	analysis := configuration.SessionAnalysis
-	if !analysis.Enabled || store == nil || loader == nil || insightsVocabulary == nil || fingerprints == nil {
+	if !analysis.Enabled || store == nil || loader == nil || cipher == nil || insightsVocabulary == nil || fingerprints == nil {
 		return nil, nil, nil
 	}
 	vocabulary, err := loadSessionAnalysisVocabulary(analysis)
@@ -132,12 +132,14 @@ func assembleSessionAnalysis(configuration config.Config, store runtimeStore, lo
 		Vocabulary:    vocabulary,
 		Insights:      insightsVocabulary,
 		Fingerprints:  fingerprints,
+		Cipher:        cipher,
+		ClientLabels:  insightsVocabulary.ClientLabels(),
 		Logger:        logger,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble session analysis runner: %w", err)
 	}
-	service, err := sessionanalysis.NewQueryService(store, runner, analysis.LLM.Enabled)
+	service, err := sessionanalysis.NewQueryService(store, runner, cipher, analysis.LLM.Enabled)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble session analysis service: %w", err)
 	}
@@ -375,7 +377,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	// --- end context insights (WP2) ---
 	var sessionAnalysisService web.SessionAnalysisQuery
 	if queryService != nil {
-		runner, service, err := assembleSessionAnalysis(configuration, runtime.store, queryService, vocabulary, runtime.analysisFingerprints, logger)
+		runner, service, err := assembleSessionAnalysis(configuration, runtime.store, queryService, runtime.cipher, vocabulary, runtime.analysisFingerprints, logger)
 		if err != nil {
 			_ = application.closeComponents()
 			return nil, err

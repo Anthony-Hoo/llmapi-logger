@@ -98,6 +98,41 @@ type SessionSignals struct {
 	ComputedAtNS     int64
 }
 
+// Pack kinds.
+const (
+	PackKindSession    = "session"
+	PackKindChatDigest = "chat_digest"
+)
+
+// SessionPack is one row of session_packs. PackEnc is AES-GCM ciphertext.
+type SessionPack struct {
+	SessionKey    []byte
+	Kind          string
+	APIKeyFPR     []byte
+	NewAPITokenID *int64
+	Client        string
+	PackHash      string
+	PackEnc       []byte
+	RefMap        string
+	TokenEstimate int64
+	Truncated     bool
+	Members       int64
+	FirstNS       int64
+	LastNS        int64
+	LastAuditID   string
+	BuiltAtNS     int64
+}
+
+// AnalysisView is one row of the append-only analysis_view_log.
+type AnalysisView struct {
+	AtNS          int64
+	ViewerRole    string
+	ViewerUserID  *int64
+	ViewerTokenID *int64
+	Resource      string
+	SessionKey    []byte
+}
+
 // SessionTextFPR is one keyed sentence fingerprint of a session.
 type SessionTextFPR struct {
 	Source    string

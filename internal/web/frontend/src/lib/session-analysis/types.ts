@@ -110,3 +110,16 @@ export interface AnalysisSessionsQuery {
   cursor?: string;
   limit?: number;
 }
+
+export interface AnalysisPack {
+  session_id: string;
+  pack_id: string;
+  kind: "session" | "chat_digest";
+  /** Redacted text the local model sees; sensitive, never cached. */
+  text: string;
+  refs: Record<string, string>;
+  tokens: number;
+  truncated: boolean;
+  members: number;
+  built_ns: string;
+}

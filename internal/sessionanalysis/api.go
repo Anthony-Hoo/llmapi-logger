@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
 
@@ -131,6 +132,8 @@ type QueryStore interface {
 	ListSessionSignals(ctx context.Context, filter storage.SessionSignalFilter, cursor storage.SessionSignalCursor, limit int) (storage.SessionSignalPage, error)
 	SessionSignalTotals(ctx context.Context, filter storage.SessionSignalFilter) (storage.SessionSignalTotals, error)
 	LatestSessionAnalysisRun(ctx context.Context) (storage.SessionAnalysisRun, error)
+	LoadSessionPack(ctx context.Context, sessionKey []byte) (storage.SessionPack, error)
+	RecordAnalysisView(ctx context.Context, view storage.AnalysisView) error
 }
 
 // Trigger starts a manual batch run.
@@ -143,7 +146,9 @@ type Trigger interface {
 type QueryService struct {
 	store      QueryStore
 	trigger    Trigger
+	cipher     security.Cipher
 	llmEnabled bool
+	now        func() time.Time
 }
 
 // Default and maximum page sizes and range of the management API.
@@ -159,11 +164,11 @@ var validFlags = map[string]bool{
 }
 
 // NewQueryService assembles the management read service. trigger may be nil.
-func NewQueryService(store QueryStore, trigger Trigger, llmEnabled bool) (*QueryService, error) {
-	if store == nil {
-		return nil, errors.New("sessionanalysis: nil query store")
+func NewQueryService(store QueryStore, trigger Trigger, cipher security.Cipher, llmEnabled bool) (*QueryService, error) {
+	if store == nil || cipher == nil {
+		return nil, errors.New("sessionanalysis: nil query store or cipher")
 	}
-	return &QueryService{store: store, trigger: trigger, llmEnabled: llmEnabled}, nil
+	return &QueryService{store: store, trigger: trigger, cipher: cipher, llmEnabled: llmEnabled, now: time.Now}, nil
 }
 
 func invalid(message string) error {
@@ -350,4 +355,78 @@ func ParseSessionID(id string) ([]byte, error) {
 		return nil, invalid("invalid session id")
 	}
 	return key, nil
+}
+
+// Viewer identifies who opens a pack or facet, for the view log.
+type Viewer struct {
+	Role    string // admin | developer
+	UserID  *int64
+	TokenID *int64
+}
+
+// PackResponse is GET /api/v1/session-analysis/sessions/{id}/pack.
+type PackResponse struct {
+	SessionID string            `json:"session_id"`
+	PackID    string            `json:"pack_id"`
+	Kind      string            `json:"kind"`
+	Text      string            `json:"text"`
+	Refs      map[string]string `json:"refs"`
+	Tokens    int64             `json:"tokens"`
+	Truncated bool              `json:"truncated"`
+	Members   int64             `json:"members"`
+	BuiltNS   int64             `json:"built_ns,string"`
+}
+
+// ownedBy applies the developer scope to a pack's owner columns.
+func ownedBy(scope *query.Scope, apiKey []byte, tokenID *int64) bool {
+	if scope == nil {
+		return true
+	}
+	if len(apiKey) != 0 && len(scope.Fingerprint) != 0 && string(apiKey) == string(scope.Fingerprint) {
+		return true
+	}
+	return scope.TokenID != nil && tokenID != nil && *scope.TokenID == *tokenID
+}
+
+// Pack decrypts the input pack of one session (its own, or the chat digest
+// it belongs to) and records the view.
+func (service *QueryService) Pack(ctx context.Context, sessionID string, scope *query.Scope, viewer Viewer) (PackResponse, error) {
+	key, err := ParseSessionID(sessionID)
+	if err != nil {
+		return PackResponse{}, err
+	}
+	pack, err := service.store.LoadSessionPack(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PackResponse{}, query.ErrNotFound
+	}
+	if err != nil {
+		return PackResponse{}, err
+	}
+	if !ownedBy(scope, pack.APIKeyFPR, pack.NewAPITokenID) {
+		return PackResponse{}, query.ErrNotFound
+	}
+	aad, err := PackAAD(pack.SessionKey)
+	if err != nil {
+		return PackResponse{}, query.ErrIntegrity
+	}
+	plaintext, err := service.cipher.Decrypt(aad, pack.PackEnc)
+	if err != nil {
+		return PackResponse{}, query.ErrIntegrity
+	}
+	// The view is recorded before the content leaves the service; a log
+	// failure withholds the pack.
+	if err := service.store.RecordAnalysisView(ctx, storage.AnalysisView{
+		AtNS: service.now().UnixNano(), ViewerRole: viewer.Role, ViewerUserID: viewer.UserID, ViewerTokenID: viewer.TokenID,
+		Resource: "pack", SessionKey: key,
+	}); err != nil {
+		clear(plaintext)
+		return PackResponse{}, err
+	}
+	response := PackResponse{
+		SessionID: sessionID, PackID: hex.EncodeToString(pack.SessionKey), Kind: pack.Kind, Text: string(plaintext),
+		Refs: map[string]string{}, Tokens: pack.TokenEstimate, Truncated: pack.Truncated, Members: pack.Members, BuiltNS: pack.BuiltAtNS,
+	}
+	clear(plaintext)
+	_ = json.Unmarshal([]byte(pack.RefMap), &response.Refs)
+	return response, nil
 }

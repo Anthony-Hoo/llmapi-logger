@@ -12,6 +12,7 @@ import (
 )
 
 type fakeSessionAnalysis struct {
+	viewers   []sessionanalysis.Viewer
 	scopes    []*query.Scope
 	sessions  []sessionanalysis.SessionsQuery
 	triggered int
@@ -27,6 +28,15 @@ func (fake *fakeSessionAnalysis) Sessions(_ context.Context, request sessionanal
 	fake.sessions = append(fake.sessions, request)
 	fake.scopes = append(fake.scopes, request.Scope)
 	return sessionanalysis.SessionsResponse{Items: []sessionanalysis.SessionItem{}}, nil
+}
+
+func (fake *fakeSessionAnalysis) Pack(_ context.Context, id string, scope *query.Scope, viewer sessionanalysis.Viewer) (sessionanalysis.PackResponse, error) {
+	fake.scopes = append(fake.scopes, scope)
+	fake.viewers = append(fake.viewers, viewer)
+	if id == "missing" {
+		return sessionanalysis.PackResponse{}, query.ErrNotFound
+	}
+	return sessionanalysis.PackResponse{SessionID: id, Text: "[会话] 类型=agent"}, nil
 }
 
 func (fake *fakeSessionAnalysis) TriggerRun() error {
@@ -113,5 +123,28 @@ func TestSessionAnalysisRunIsAdministratorOnly(t *testing.T) {
 	fake.triggerOK = sessionanalysis.ErrRunInProgress
 	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/run", nil); response.Code != http.StatusConflict {
 		t.Fatalf("overlapping run = %d", response.Code)
+	}
+}
+
+func TestSessionAnalysisPackRecordsTheViewer(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSessionAnalysis{}
+	handler, cookie := newSessionAnalysisHandler(t, fake)
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/sessions/abc/pack", nil); response.Code != http.StatusOK {
+		t.Fatalf("admin pack = %d", response.Code)
+	} else {
+		assertNoStore(t, response, "pack")
+	}
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/sessions/abc/pack", cookie); response.Code != http.StatusOK {
+		t.Fatalf("developer pack = %d", response.Code)
+	}
+	if len(fake.viewers) != 2 || fake.viewers[0].Role != "admin" || fake.viewers[1].Role != "developer" || fake.scopes[1] == nil || fake.scopes[0] != nil {
+		t.Fatalf("viewers = %+v scopes = %+v", fake.viewers, fake.scopes)
+	}
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/sessions/missing/pack", cookie); response.Code != http.StatusNotFound {
+		t.Fatalf("missing pack = %d", response.Code)
+	}
+	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/sessions/abc/pack", nil); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST pack = %d", response.Code)
 	}
 }

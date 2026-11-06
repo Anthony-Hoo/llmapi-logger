@@ -16,6 +16,7 @@ type SessionAnalysisQuery interface {
 	Overview(context.Context, int64, int64, *query.Scope) (sessionanalysis.OverviewResponse, error)
 	Sessions(context.Context, sessionanalysis.SessionsQuery) (sessionanalysis.SessionsResponse, error)
 	TriggerRun() error
+	Pack(context.Context, string, *query.Scope, sessionanalysis.Viewer) (sessionanalysis.PackResponse, error)
 }
 
 const sessionAnalysisPathPrefix = "/api/v1/session-analysis/"
@@ -36,6 +37,8 @@ func (handler *managementHandler) serveSessionAnalysis(writer http.ResponseWrite
 		handler.serveSessionAnalysisSessions(writer, request)
 	case len(parts) == 1 && parts[0] == "run":
 		handler.serveSessionAnalysisRun(writer, request)
+	case len(parts) == 3 && parts[0] == "sessions" && parts[2] == "pack":
+		handler.serveSessionAnalysisPack(writer, request, parts[1])
 	default:
 		http.NotFound(writer, request)
 	}
@@ -125,4 +128,39 @@ func (handler *managementHandler) serveSessionAnalysisRun(writer http.ResponseWr
 		return
 	}
 	writeJSON(writer, http.StatusAccepted, map[string]string{"status": "started"})
+}
+
+// sessionViewer describes the caller for the analysis view log.
+func (handler *managementHandler) sessionViewer(request *http.Request) sessionanalysis.Viewer {
+	caller, ok := principalFrom(request.Context())
+	if !ok || caller.Role != roleDeveloper {
+		return sessionanalysis.Viewer{Role: "admin"}
+	}
+	viewer := sessionanalysis.Viewer{Role: "developer", TokenID: caller.Identity.TokenID}
+	if caller.Identity.UserID != 0 {
+		userID := caller.Identity.UserID
+		viewer.UserID = &userID
+	}
+	return viewer
+}
+
+// serveSessionAnalysisPack returns the decrypted input pack of one session;
+// every successful read is written to the analysis view log first.
+func (handler *managementHandler) serveSessionAnalysisPack(writer http.ResponseWriter, request *http.Request, sessionID string) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if err := parseInsightsValues(request.URL.Query()); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	response, err := handler.sessionAnalysis.Pack(ctx, sessionID, handler.sessionScope(request), handler.sessionViewer(request))
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
 }

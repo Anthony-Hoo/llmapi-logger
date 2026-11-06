@@ -42,3 +42,19 @@ func (store *Store) SessionSignalTotals(context.Context, storage.SessionSignalFi
 func (store *Store) LatestSessionAnalysisRun(context.Context) (storage.SessionAnalysisRun, error) {
 	return storage.SessionAnalysisRun{}, sql.ErrNoRows
 }
+
+func (store *Store) SaveSessionPack(context.Context, storage.SessionPack, [][]byte) error {
+	return nil
+}
+
+func (store *Store) LoadSessionPack(context.Context, []byte) (storage.SessionPack, error) {
+	return storage.SessionPack{}, sql.ErrNoRows
+}
+
+func (store *Store) ListChatDigestMembers(context.Context, []byte, string, int64, int64, int) ([]storage.SessionSignals, error) {
+	return nil, nil
+}
+
+func (store *Store) RecordAnalysisView(context.Context, storage.AnalysisView) error {
+	return nil
+}

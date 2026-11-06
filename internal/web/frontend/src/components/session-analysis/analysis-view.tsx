@@ -28,6 +28,7 @@ import { Segmented } from "../ui/segmented";
 import { Skeleton } from "../ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { clientLabel } from "../insights/ui-bits";
+import { PackPanel } from "./pack-panel";
 
 type RangeKey = "week" | "last-week" | "30d";
 
@@ -271,6 +272,9 @@ export function SessionAnalysisView({
                       <TableRow>
                         <TableCell colSpan={7} className="bg-surface-sunken">
                           <SessionDetails item={item} />
+                          {item.eligible || item.skip_reason === "single_turn_chat" ? (
+                            <PackPanel client={client} sessionID={item.session_id} isDeveloper={isDeveloper} />
+                          ) : null}
                           {renderSessionDetail ? renderSessionDetail(item) : null}
                         </TableCell>
                       </TableRow>

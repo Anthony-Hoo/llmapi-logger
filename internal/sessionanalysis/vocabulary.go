@@ -38,6 +38,7 @@ type VocabularyFile struct {
 	InterruptMarkers          []string            `yaml:"interrupt_markers"`
 	CompactionSummaryPrefixes []string            `yaml:"compaction_summary_prefixes"`
 	ExitCodePatterns          []string            `yaml:"exit_code_patterns"`
+	ShellOKWithoutExitCode    []string            `yaml:"shell_ok_without_exit_code"`
 	FailurePhrases            []string            `yaml:"failure_phrases"`
 	ToolClasses               map[string][]string `yaml:"tool_classes"`
 	HeavyModels               []string            `yaml:"heavy_models"`
@@ -67,6 +68,7 @@ type Vocabulary struct {
 	interrupts        []string
 	summaryPrefixes   []string
 	exitCodes         []*regexp.Regexp
+	okWithoutExit     map[string]bool
 	failurePhrases    []string
 	toolClasses       map[string]string
 	heavyModels       []string
@@ -161,6 +163,7 @@ func (file *VocabularyFile) merge(override VocabularyFile) {
 	replace(&file.InterruptMarkers, override.InterruptMarkers)
 	replace(&file.CompactionSummaryPrefixes, override.CompactionSummaryPrefixes)
 	replace(&file.ExitCodePatterns, override.ExitCodePatterns)
+	replace(&file.ShellOKWithoutExitCode, override.ShellOKWithoutExitCode)
 	replace(&file.FailurePhrases, override.FailurePhrases)
 	file.ToolClasses = mergeLists(file.ToolClasses, override.ToolClasses)
 	replace(&file.HeavyModels, override.HeavyModels)
@@ -247,6 +250,7 @@ func (file VocabularyFile) compile() (*Vocabulary, error) {
 		summaryPrefixes:   lowerAll(file.CompactionSummaryPrefixes),
 		failurePhrases:    lowerAll(file.FailurePhrases),
 		toolClasses:       map[string]string{},
+		okWithoutExit:     map[string]bool{},
 		heavyModels:       lowerAll(file.HeavyModels),
 		heavyMaxOutput:    file.HeavyMaxOutputTokens,
 		heavyMaxTools:     file.HeavyMaxToolCalls,
@@ -255,6 +259,9 @@ func (file VocabularyFile) compile() (*Vocabulary, error) {
 	}
 	for _, word := range file.ShellWrappers {
 		vocab.wrappers[strings.ToLower(strings.TrimSpace(word))] = true
+	}
+	for _, client := range file.ShellOKWithoutExitCode {
+		vocab.okWithoutExit[strings.ToLower(strings.TrimSpace(client))] = true
 	}
 	for _, word := range file.ShellInterpreters {
 		vocab.interpreters[strings.ToLower(strings.TrimSpace(word))] = true

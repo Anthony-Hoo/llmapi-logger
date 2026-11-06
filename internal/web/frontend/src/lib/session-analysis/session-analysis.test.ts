@@ -109,4 +109,12 @@ describe("session analysis API client", () => {
     expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/session-analysis/overview?from_ns=1&to_ns=2");
     expect(overview.last_run?.skip_reasons).toEqual({});
   });
+
+  it("reads the pack of a session and normalizes refs", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({ session_id: "ab", text: "[会话]", refs: null, kind: "session" }));
+    const client = createApiClient(vi.fn(), fetcher);
+    const pack = await client.getAnalysisPack("ab/../x");
+    expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/session-analysis/sessions/ab%2F..%2Fx/pack");
+    expect(pack.refs).toEqual({});
+  });
 });

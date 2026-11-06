@@ -25,7 +25,7 @@ import type {
 } from "./types";
 
 import { hasRowFilters } from "./filters";
-import type { AnalysisOverview, AnalysisSessionsPage, AnalysisSessionsQuery } from "./lib/session-analysis/types";
+import type { AnalysisOverview, AnalysisPack, AnalysisSessionsPage, AnalysisSessionsQuery } from "./lib/session-analysis/types";
 
 const API_BASE = "/api/v1";
 
@@ -75,6 +75,8 @@ export interface ApiClient {
   listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
   /** Administrator only; rejects with ApiError(409) while a run is in progress. */
   triggerAnalysisRun: (signal?: AbortSignal) => Promise<void>;
+  /** Every successful read is recorded in the analysis view log. */
+  getAnalysisPack: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisPack>;
 }
 
 export function createApiClient(
@@ -383,6 +385,14 @@ export function createApiClient(
         ...result,
         items: (result.items ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
       };
+    },
+
+    async getAnalysisPack(sessionID, signal) {
+      const result = await requestJSON<AnalysisPack>(
+        `${API_BASE}/session-analysis/sessions/${encodeURIComponent(sessionID)}/pack`,
+        signal,
+      );
+      return { ...result, refs: result.refs ?? {} };
     },
 
     async triggerAnalysisRun(signal) {

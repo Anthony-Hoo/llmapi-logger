@@ -64,6 +64,8 @@ func BuildSession(ctx context.Context, key []byte, rows []storage.SessionAuditRo
 	if len(rows) == 0 {
 		return nil, errors.New("sessionanalysis: empty session")
 	}
+	rows = append([]storage.SessionAuditRow(nil), rows...)
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].StartedAtNS < rows[j].StartedAtNS })
 	session := &Session{Key: key, Rows: rows, Truncated: truncated, Main: -1}
 	byKey := map[string]int{}
 	nodeRows := map[int][]storage.SessionAuditRow{}
@@ -234,7 +236,7 @@ func (session *Session) loadNode(ctx context.Context, index int, rows []storage.
 	node.Loaded = true
 	mergeSegments(node, segments)
 	for callIndex := range node.Calls {
-		classifyCall(&node.Calls[callIndex], vocab, insightsVocab)
+		classifyCall(&node.Calls[callIndex], vocab, insightsVocab, session.Client)
 	}
 	turnAudits := make([]storage.SessionAuditRow, 0)
 	for _, row := range rows {

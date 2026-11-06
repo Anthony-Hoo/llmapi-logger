@@ -104,6 +104,7 @@ error_patterns:
   - '^fatal: '
   - '^\s*caused by: '
   - '\bfailed\b.*\btest'
+  - '\[(error|crit|alert|emerg|fatal)\]'
   - '^--- fail: '
 
 # A user text part containing one of these is an interruption marker.
@@ -119,6 +120,10 @@ exit_code_patterns:
   - '(?m)^process exited with code (-?\d+)'
   - '(?m)^exit code:? (-?\d+)'
   - '"exit_code"\s*:\s*(-?\d+)'
+
+# Clients whose shell tool reports only failures in-band ("Exit code N" plus
+# is_error): a shell result without an exit code from them succeeded.
+shell_ok_without_exit_code: [claude_code, zcode]
 
 # Tool results containing one of these (case-insensitive) failed, whatever the tool.
 failure_phrases: ["<tool_use_error>", "apply_patch verification failed", "failed to apply patch", "invalid patch",
