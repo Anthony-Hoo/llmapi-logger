@@ -26,8 +26,13 @@ type Store interface {
 	SaveSessionSignals(ctx context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR, pack *storage.SessionPack) error
 	PruneSessionAnalysis(ctx context.Context, fingerprintCutoffNS int64) (int64, error)
 	RecordSessionAnalysisRun(ctx context.Context, run storage.SessionAnalysisRun) error
-	SaveSessionPack(ctx context.Context, pack storage.SessionPack, members [][]byte) error
 	ListChatDigestMembers(ctx context.Context, apiKeyFPR []byte, client string, fromNS, toNS int64, limit int) ([]storage.SessionSignals, error)
+	// ListPendingDigestMembers lists single-turn chats whose digest bucket
+	// has not been rebuilt with them yet.
+	ListPendingDigestMembers(ctx context.Context, limit int) ([]storage.SessionSignals, error)
+	// SaveChatDigests replaces one bucket's digests and clears its pending
+	// members atomically.
+	SaveChatDigests(ctx context.Context, bucket storage.ChatDigestBucket, chunks []storage.ChatDigestChunk, staleKeys [][]byte) error
 	ListFacetCandidates(ctx context.Context, settledBeforeNS int64, promptVersion, model string, limit int) ([]storage.SessionPack, error)
 	SaveSessionFacet(ctx context.Context, facet storage.SessionFacet, fprs []storage.SessionTextFPR) error
 }
@@ -214,7 +219,6 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 	}
 	run.Candidates = int64(len(candidates))
 	thresholds := Thresholds{MinUserTurns: options.Config.MinUserTurns, MinActiveSeconds: options.Config.MinActiveSeconds}
-	digests := map[string]digestBucket{}
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			finish("canceled")
@@ -230,12 +234,26 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 		if signals.SkipReason != "" {
 			reasons[signals.SkipReason]++
 		}
-		if signals.SkipReason == SkipSingleTurnChat {
-			bucket := runner.bucketOf(signals)
+	}
+	// Every bucket with a pending member is rebuilt: new single-turn chats,
+	// and the remaining members of digests dropped because a member left the
+	// single-turn category or expired. A failed rebuild stays pending.
+	pending, err := options.Store.ListPendingDigestMembers(ctx, maxCandidatesPerRun)
+	if err != nil {
+		finish("digests_failed")
+		return run, err
+	}
+	digests := map[string]digestBucket{}
+	order := make([]string, 0)
+	for _, member := range pending {
+		bucket := runner.bucketOf(member)
+		if _, seen := digests[bucket.id()]; !seen {
 			digests[bucket.id()] = bucket
+			order = append(order, bucket.id())
 		}
 	}
-	for _, bucket := range digests {
+	for _, id := range order {
+		bucket := digests[id]
 		if err := ctx.Err(); err != nil {
 			finish("canceled")
 			return run, err
@@ -294,6 +312,11 @@ func (runner *Runner) analyzeOne(ctx context.Context, root, apiKey []byte, thres
 	if len(apiKey) == 0 {
 		signals.APIKeyFPR = nil
 	}
+	if signals.SkipReason == SkipSingleTurnChat {
+		// Saving queues the bucket for a digest rebuild; leaving a bucket
+		// drops the digests that still hold this chat.
+		signals.DigestBucket = runner.bucketOf(signals).key(options.Fingerprints)
+	}
 	// The pack is built and sealed before anything is written: signals mark
 	// the session analysed, so they are stored only together with its pack.
 	var stored *storage.SessionPack
@@ -346,6 +369,19 @@ func (bucket digestBucket) id() string {
 	return hex.EncodeToString(bucket.apiKey) + "\x00" + bucket.client + "\x00" + bucket.day.Format("2006-01-02")
 }
 
+// key is the bucket's keyed fingerprint, stored with its member chats.
+func (bucket digestBucket) key(fp Fingerprinter) []byte {
+	return fp.Fingerprint(domainDigest, []byte(bucket.id()))
+}
+
+// chunkKey is the session key of the bucket's chunk-th digest pack.
+func (bucket digestBucket) chunkKey(fp Fingerprinter, chunk int) []byte {
+	return fp.Fingerprint(domainDigest, []byte(bucket.id()+"\x00"+strconv.Itoa(chunk)))
+}
+
+// maxDigestChunks is the most digest packs one bucket can fill.
+const maxDigestChunks = (maxDigestMembersPerDay + maxDigestItems - 1) / maxDigestItems
+
 func (runner *Runner) bucketOf(signals storage.SessionSignals) digestBucket {
 	local := time.Unix(0, signals.LastNS).In(runner.options.Location)
 	client := signals.Client
@@ -376,8 +412,11 @@ func (runner *Runner) rebuildDigest(ctx context.Context, bucket digestBucket) er
 	items := make([]DigestItem, 0, len(members))
 	for _, member := range members {
 		rows, truncated, err := options.Store.LoadSessionAudits(digestContext, member.AgentRootFPR, member.APIKeyFPR)
-		if err != nil || len(rows) == 0 {
-			continue
+		if err != nil {
+			return err // the bucket stays pending and is retried
+		}
+		if len(rows) == 0 {
+			continue // expired; the next prune removes its signals
 		}
 		session, err := BuildSession(digestContext, member.SessionKey, rows, truncated, options.Loader, options.Vocabulary, options.Insights)
 		if err != nil {
@@ -390,14 +429,14 @@ func (runner *Runner) rebuildDigest(ctx context.Context, bucket digestBucket) er
 		turn := main.Turns[0]
 		items = append(items, DigestItem{SessionKey: member.SessionKey, AuditID: turn.AuditID, StartedNS: turn.StartedNS, Text: turn.Text, Model: member.MainModel})
 	}
-	for chunk := 0; chunk*maxDigestItems < len(items); chunk++ {
+	chunks := make([]storage.ChatDigestChunk, 0, maxDigestChunks)
+	for chunk := 0; chunk*maxDigestItems < len(items) && chunk < maxDigestChunks; chunk++ {
 		end := (chunk + 1) * maxDigestItems
 		if end > len(items) {
 			end = len(items)
 		}
 		part := items[chunk*maxDigestItems : end]
 		pack := BuildDigestPack(bucket.client, part, options.Vocabulary, runner.packOptions())
-		key := options.Fingerprints.Fingerprint(domainDigest, []byte(bucket.id()+"\x00"+strconv.Itoa(chunk)))
 		keys := make([][]byte, 0, len(part))
 		lastAudit, firstNS, lastNS := part[0].AuditID, part[0].StartedNS, part[0].StartedNS
 		for _, item := range part {
@@ -409,13 +448,18 @@ func (runner *Runner) rebuildDigest(ctx context.Context, bucket digestBucket) er
 				firstNS = item.StartedNS
 			}
 		}
-		stored, err := runner.sealPack(key, storage.PackKindChatDigest, pack, bucket.apiKey, bucket.tokenID, bucket.client, firstNS, lastNS, lastAudit, int64(len(part)))
+		stored, err := runner.sealPack(bucket.chunkKey(options.Fingerprints, chunk), storage.PackKindChatDigest, pack, bucket.apiKey, bucket.tokenID, bucket.client, firstNS, lastNS, lastAudit, int64(len(part)))
 		if err != nil {
 			return err
 		}
-		if err := options.Store.SaveSessionPack(digestContext, stored, keys); err != nil {
-			return err
-		}
+		chunks = append(chunks, storage.ChatDigestChunk{Pack: stored, Members: keys})
 	}
-	return nil
+	// Chunks the bucket no longer fills, all of them when no member is left.
+	stale := make([][]byte, 0, maxDigestChunks)
+	for chunk := len(chunks); chunk < maxDigestChunks; chunk++ {
+		stale = append(stale, bucket.chunkKey(options.Fingerprints, chunk))
+	}
+	return options.Store.SaveChatDigests(digestContext, storage.ChatDigestBucket{
+		APIKeyFPR: bucket.apiKey, Client: bucket.client, FromNS: bucket.day.UnixNano(), ToNS: bucket.day.AddDate(0, 0, 1).UnixNano(),
+	}, chunks, stale)
 }

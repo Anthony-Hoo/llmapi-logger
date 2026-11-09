@@ -230,6 +230,113 @@ func TestSessionSignalsAndPackAreOneWrite(t *testing.T) {
 	}
 }
 
+// Chat digests follow their members: a chat that leaves its bucket drops the
+// digests holding it (and their facets) and queues the other members; a
+// rebuild replaces the bucket's chunks, removes surplus ones and clears the
+// queue; retention does the same for expiring members.
+func TestChatDigestsFollowTheirMembers(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	bucketKey := fill(0xd1)
+	bucket := storage.ChatDigestBucket{APIKeyFPR: keyA, Client: "unknown", FromNS: day.Add(-time.Hour).UnixNano(), ToNS: day.Add(time.Hour).UnixNano()}
+	chat := func(key []byte, lastNS int64) storage.SessionSignals {
+		signals := testSignals(key, keyA, "a2", lastNS)
+		signals.Kind, signals.Client, signals.SkipReason, signals.Eligible, signals.DigestBucket = "chat", "", "single_turn_chat", false, bucketKey
+		return signals
+	}
+	c1, c2, c3 := fill(0xc1), fill(0xc2), fill(0xc3)
+	for index, key := range [][]byte{c1, c2, c3} {
+		if err := store.SaveSessionSignals(ctx, chat(key, day.UnixNano()+int64(index)), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending := func() map[string]bool {
+		t.Helper()
+		rows, err := store.ListPendingDigestMembers(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, row := range rows {
+			out[string(row.SessionKey)] = true
+		}
+		return out
+	}
+	if got := pending(); len(got) != 3 {
+		t.Fatalf("new single-turn chats pending = %d", len(got))
+	}
+	digest := func(key []byte, members ...[]byte) storage.ChatDigestChunk {
+		return storage.ChatDigestChunk{Members: members, Pack: storage.SessionPack{
+			SessionKey: key, Kind: storage.PackKindChatDigest, APIKeyFPR: keyA, Client: "unknown", PackHash: strings.Repeat("ef", 32),
+			PackEnc: []byte{1}, RefMap: "{}", FirstNS: day.UnixNano(), LastNS: day.UnixNano(), LastAuditID: "a2", BuiltAtNS: 1, Members: int64(len(members)),
+		}}
+	}
+	chunk0, chunk1 := fill(0xe0), fill(0xe1)
+	// A surplus chunk from a larger day is removed by the rebuild.
+	surplus := digest(chunk1, c3)
+	if err := store.SaveSessionPack(ctx, surplus.Pack, surplus.Members); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveChatDigests(ctx, bucket, []storage.ChatDigestChunk{digest(chunk0, c1, c2, c3)}, [][]byte{chunk1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pending(); len(got) != 0 {
+		t.Fatalf("pending after the rebuild = %d", len(got))
+	}
+	if _, err := store.LoadSessionPack(ctx, chunk1); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("surplus chunk kept: %v", err)
+	}
+	if err := store.SaveSessionFacet(ctx, storage.SessionFacet{SessionKey: chunk0, Kind: storage.PackKindChatDigest, APIKeyFPR: keyA,
+		LastNS: day.UnixNano(), PackHash: strings.Repeat("ef", 32), PromptVersion: "facet-v1", Model: "m", Status: "ok", TaskType: "stale", CreatedAtNS: 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// c1 gains a turn and leaves the single-turn category.
+	left := testSignals(c1, keyA, "a2", day.UnixNano())
+	left.Kind = "chat"
+	if err := store.SaveSessionSignals(ctx, left, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSessionPack(ctx, c2); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("digest holding the departed chat kept: %v", err)
+	}
+	if _, err := store.LoadSessionFacet(ctx, chunk0); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale digest facet kept: %v", err)
+	}
+	if got := pending(); len(got) != 2 || !got[string(c2)] || !got[string(c3)] {
+		t.Fatalf("remaining members not queued: %d", len(got))
+	}
+	// A re-save of a chat that stays in its bucket drops nothing.
+	if err := store.SaveChatDigests(ctx, bucket, []storage.ChatDigestChunk{digest(chunk0, c2, c3)}, [][]byte{chunk1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSessionSignals(ctx, chat(c2, day.UnixNano()+1), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := store.LoadSessionPack(ctx, c3); err != nil || !bytes.Equal(loaded.SessionKey, chunk0) {
+		t.Fatalf("digest dropped by a member that stayed: %v", err)
+	}
+	if err := store.SaveChatDigests(ctx, bucket, []storage.ChatDigestChunk{digest(chunk0, c2, c3)}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retention removes c2: its digest goes and c3 is queued.
+	if _, err := store.writerConn.ExecContext(ctx, `UPDATE session_signals SET last_audit_id = 'expired-audit' WHERE session_key = $1`, c2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PruneSessionAnalysis(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSessionPack(ctx, c3); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("digest holding an expired chat kept: %v", err)
+	}
+	if got := pending(); len(got) != 1 || !got[string(c3)] {
+		t.Fatalf("pending after prune = %d", len(got))
+	}
+}
+
 func TestSessionAnalysisRunsWithoutRunsReturnNoRows(t *testing.T) {
 	t.Parallel()
 	store, _ := openTestStore(t)

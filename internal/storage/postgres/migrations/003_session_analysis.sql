@@ -53,9 +53,15 @@ CREATE TABLE session_signals (
     eligible BOOLEAN NOT NULL DEFAULT FALSE,
     skip_reason TEXT COLLATE "C",
     signal_version BIGINT NOT NULL CHECK (signal_version > 0),
-    computed_at_ns BIGINT NOT NULL
+    computed_at_ns BIGINT NOT NULL,
+    -- Single-turn chats only: the keyed fingerprint of their digest bucket
+    -- (key, client, local day), and whether that bucket's digest packs still
+    -- have to be rebuilt to include them. Cleared by the bucket's rebuild.
+    digest_bucket BYTEA CHECK (digest_bucket IS NULL OR length(digest_bucket) = 32),
+    digest_pending BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX session_signals_last_idx ON session_signals(last_ns);
+CREATE INDEX session_signals_digest_pending_idx ON session_signals(last_ns) WHERE digest_pending;
 CREATE INDEX session_signals_root_idx ON session_signals(agent_root_fpr);
 CREATE INDEX session_signals_key_idx ON session_signals(api_key_fpr, last_ns);
 CREATE INDEX session_signals_token_idx ON session_signals(newapi_token_id, last_ns);

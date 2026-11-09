@@ -57,8 +57,13 @@ type SessionAuditRow struct {
 // SessionSignals is one row of session_signals.
 type SessionSignals struct {
 	// SessionKey is the keyed fingerprint of (AgentRootFPR, APIKeyFPR).
-	SessionKey       []byte
-	AgentRootFPR     []byte
+	SessionKey   []byte
+	AgentRootFPR []byte
+	// DigestBucket is set for single-turn chats only: the keyed fingerprint
+	// of their chat digest bucket. DigestPending (read only) reports that the
+	// bucket's digest packs have not been rebuilt with this session yet.
+	DigestBucket     []byte
+	DigestPending    bool
 	Kind             string
 	APIKeyFPR        []byte
 	NewAPIUserID     *int64
@@ -115,6 +120,21 @@ const (
 	PackKindSession    = "session"
 	PackKindChatDigest = "chat_digest"
 )
+
+// ChatDigestBucket selects the single-turn chats of one API key (nil: none),
+// client and local day [FromNS, ToNS), by their last request.
+type ChatDigestBucket struct {
+	APIKeyFPR []byte
+	Client    string
+	FromNS    int64
+	ToNS      int64
+}
+
+// ChatDigestChunk is one chat digest pack and the sessions it holds.
+type ChatDigestChunk struct {
+	Pack    SessionPack
+	Members [][]byte
+}
 
 // SessionPack is one row of session_packs. PackEnc is AES-GCM ciphertext.
 type SessionPack struct {

@@ -149,6 +149,105 @@ LIMIT $4`, arguments...)
 	return out, nil
 }
 
+// ListPendingDigestMembers returns single-turn chats whose digest bucket still
+// has to be rebuilt: new members, and members of digests that were dropped
+// because another member left or expired. Oldest first.
+func (store *Store) ListPendingDigestMembers(ctx context.Context, limit int) ([]storage.SessionSignals, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	if limit <= 0 {
+		return nil, errors.New("postgres: pending digest limit must be positive")
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `SELECT `+sessionSignalColumns+`
+FROM session_signals AS s
+WHERE s.digest_pending
+ORDER BY s.last_ns, s.session_key
+LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list pending digest members: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.SessionSignals, 0)
+	for rows.Next() {
+		row, err := scanSessionSignals(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan pending digest member: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate pending digest members: %w", err)
+	}
+	return out, nil
+}
+
+// SaveChatDigests replaces the digest packs of one bucket in one transaction:
+// it upserts chunks with their members, deletes the digests named by
+// staleKeys (chunks the bucket no longer fills), and clears the pending flag
+// of every chat in the bucket. A failure leaves the members pending.
+func (store *Store) SaveChatDigests(ctx context.Context, bucket storage.ChatDigestBucket, chunks []storage.ChatDigestChunk, staleKeys [][]byte) error {
+	if ctx == nil {
+		return errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return ErrClosed
+	}
+	if bucket.ToNS <= bucket.FromNS || bucket.Client == "" {
+		return errors.New("postgres: invalid chat digest bucket")
+	}
+	type ownedChunk struct {
+		pack    storage.SessionPack
+		members [][]byte
+	}
+	owned := make([]ownedChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if chunk.Pack.Kind != storage.PackKindChatDigest || len(chunk.Members) == 0 {
+			return errors.New("postgres: a digest chunk must be a chat digest with members")
+		}
+		pack, members, err := ownSessionPack(chunk.Pack, chunk.Members)
+		if err != nil {
+			return err
+		}
+		owned = append(owned, ownedChunk{pack: pack, members: members})
+	}
+	stale := make([][]byte, 0, len(staleKeys))
+	for _, key := range staleKeys {
+		if len(key) != 32 {
+			return errors.New("postgres: digest key must be 32 bytes")
+		}
+		stale = append(stale, append([]byte(nil), key...))
+	}
+	apiKey := append([]byte(nil), bucket.APIKeyFPR...)
+	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+		for _, chunk := range owned {
+			if err := upsertSessionPack(tx, chunk.pack, chunk.members); err != nil {
+				return err
+			}
+		}
+		for _, key := range stale {
+			if _, err := tx.Exec(`DELETE FROM session_packs WHERE session_key = $1 AND kind = $2`, key, storage.PackKindChatDigest); err != nil {
+				return fmt.Errorf("postgres writer: drop surplus chat digest: %w", err)
+			}
+		}
+		keyCondition := "api_key_fpr IS NULL"
+		arguments := []any{bucket.FromNS, bucket.ToNS, bucket.Client}
+		if len(apiKey) != 0 {
+			keyCondition = "api_key_fpr = $4"
+			arguments = append(arguments, apiKey)
+		}
+		if _, err := tx.Exec(`
+UPDATE session_signals SET digest_pending = FALSE
+WHERE digest_pending AND last_ns >= $1 AND last_ns < $2 AND COALESCE(client, 'unknown') = $3 AND `+keyCondition, arguments...); err != nil {
+			return fmt.Errorf("postgres writer: clear pending digest members: %w", err)
+		}
+		return nil
+	})})
+}
+
 // RecordAnalysisView appends one view-log row.
 func (store *Store) RecordAnalysisView(ctx context.Context, view storage.AnalysisView) error {
 	if ctx == nil {

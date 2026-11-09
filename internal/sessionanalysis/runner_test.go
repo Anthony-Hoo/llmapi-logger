@@ -110,6 +110,10 @@ func (store *memoryStore) SaveSessionSignals(_ context.Context, signals storage.
 		return errors.New("write failed")
 	}
 	key := hex.EncodeToString(signals.SessionKey)
+	if previous, ok := store.signals[key]; ok && len(previous.DigestBucket) != 0 && !bytes.Equal(previous.DigestBucket, signals.DigestBucket) {
+		store.dropDigestsOfLocked(signals.SessionKey)
+	}
+	signals.DigestPending = len(signals.DigestBucket) != 0
 	store.signals[key] = signals
 	store.textFPRs[key] = fprs
 	if pack != nil {
@@ -154,6 +158,77 @@ func (store *memoryStore) ListChatDigestMembers(_ context.Context, apiKey []byte
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// dropDigestsOfLocked drops the digests holding member, with their facets,
+// and marks their other members pending, like dropChatDigestsOf.
+func (store *memoryStore) dropDigestsOfLocked(member []byte) {
+	for packKey, members := range store.members {
+		holds := false
+		for _, candidate := range members {
+			holds = holds || bytes.Equal(candidate, member)
+		}
+		if !holds || store.packs[packKey].Kind != storage.PackKindChatDigest {
+			continue
+		}
+		for _, other := range members {
+			if signals, ok := store.signals[hex.EncodeToString(other)]; ok && len(signals.DigestBucket) != 0 {
+				signals.DigestPending = true
+				store.signals[hex.EncodeToString(other)] = signals
+			}
+		}
+		delete(store.packs, packKey)
+		delete(store.members, packKey)
+		delete(store.facets, packKey)
+		delete(store.facetFPR, packKey)
+	}
+}
+
+func (store *memoryStore) ListPendingDigestMembers(_ context.Context, limit int) ([]storage.SessionSignals, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	out := make([]storage.SessionSignals, 0)
+	for _, signals := range store.signals {
+		if signals.DigestPending {
+			out = append(out, signals)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastNS < out[j].LastNS })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (store *memoryStore) SaveChatDigests(_ context.Context, bucket storage.ChatDigestBucket, chunks []storage.ChatDigestChunk, staleKeys [][]byte) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, chunk := range chunks {
+		key := hex.EncodeToString(chunk.Pack.SessionKey)
+		store.packs[key] = chunk.Pack
+		store.members[key] = chunk.Members
+	}
+	for _, stale := range staleKeys {
+		key := hex.EncodeToString(stale)
+		if store.packs[key].Kind == storage.PackKindChatDigest {
+			delete(store.packs, key)
+			delete(store.members, key)
+			delete(store.facets, key)
+			delete(store.facetFPR, key)
+		}
+	}
+	for key, signals := range store.signals {
+		client := signals.Client
+		if client == "" {
+			client = "unknown"
+		}
+		if signals.DigestPending && bytes.Equal(signals.APIKeyFPR, bucket.APIKeyFPR) && client == bucket.Client &&
+			signals.LastNS >= bucket.FromNS && signals.LastNS < bucket.ToNS {
+			signals.DigestPending = false
+			store.signals[key] = signals
+		}
+	}
+	return nil
 }
 
 func (store *memoryStore) ListSessionSignals(context.Context, storage.SessionSignalFilter, storage.SessionSignalCursor, int) (storage.SessionSignalPage, error) {
@@ -441,6 +516,98 @@ func TestRunnerKeepsSessionDueUntilSignalsAndPackAreStored(t *testing.T) {
 	id := analysisID(sessionK, bytes.Repeat([]byte{1}, 32))
 	if err != nil || run.Candidates != 1 || run.Analyzed != 1 || store.packs[id].Kind != storage.PackKindSession || !store.signals[id].Eligible {
 		t.Fatalf("retry: run=%+v err=%v", run, err)
+	}
+}
+
+// A single-turn chat that gains a turn leaves its day's digest: the digest is
+// rebuilt from the remaining members (its stale facet goes with it), and a
+// digest left without members is removed.
+func TestRunnerRebuildsDigestsWhenChatsLeave(t *testing.T) {
+	store := newMemoryStore()
+	keyA := bytes.Repeat([]byte{0x0a}, 32)
+	rootX, rootY := bytes.Repeat([]byte{0x41}, 32), bytes.Repeat([]byte{0x42}, 32)
+	nodeX, nodeY := bytes.Repeat([]byte{0x51}, 32), bytes.Repeat([]byte{0x52}, 32)
+	store.sessions[hex.EncodeToString(rootX)] = chatRows("cx1", keyA, nodeX, baseTime)
+	store.sessions[hex.EncodeToString(rootY)] = chatRows("cy1", keyA, nodeY, baseTime.Add(time.Hour))
+	views := map[string]*conversation.Conversation{
+		"cx1": convo(user("第一个问题关于正则表达式"), answer("……")),
+		"cy1": convo(user("第二个问题关于数据库索引"), answer("……")),
+	}
+	now := baseTime.Add(24 * time.Hour)
+	vocab, insightsVocab := testVocabularies(t)
+	runner, err := NewRunner(Options{
+		Config: config.SessionAnalysisConfig{RunAt: "02:00", SessionIdleMinutes: 120, MinUserTurns: 2, MinActiveSeconds: 1, Pack: config.SessionAnalysisPack{MaxTokens: 6000}},
+		Store:  store, Loader: &fakeLoader{views: views}, Vocabulary: vocab, Insights: insightsVocab,
+		Fingerprints: testFingerprinter{}, Cipher: testCipher(t), Location: time.UTC,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewQueryService(store, runner, runner.options.Cipher, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := func() []storage.SessionPack {
+		out := make([]storage.SessionPack, 0)
+		for _, pack := range store.packs {
+			if pack.Kind == storage.PackKindChatDigest {
+				out = append(out, pack)
+			}
+		}
+		return out
+	}
+	gainTurn := func(root, node []byte, id, first, second string, at time.Time) {
+		row := auditRow(id, at, node, "main", true)
+		row.AgentClient, row.APIKeyFPR = "unknown", keyA
+		store.sessions[hex.EncodeToString(root)] = append(store.sessions[hex.EncodeToString(root)], row)
+		views[id] = convo(user(first), answer("……"), user(second), answer("完成"))
+	}
+	if _, err := runner.RunOnce(context.Background(), TriggerManual); err != nil {
+		t.Fatal(err)
+	}
+	before := digests()
+	if len(before) != 1 || before[0].Members != 2 {
+		t.Fatalf("digests after run 1 = %+v", before)
+	}
+	digestKey := hex.EncodeToString(before[0].SessionKey)
+	store.facets[digestKey] = storage.SessionFacet{SessionKey: before[0].SessionKey, Kind: storage.PackKindChatDigest, Status: "ok", TaskType: "stale", LastNS: before[0].LastNS}
+
+	// Chat X gains a second turn: it is no longer a single-turn chat.
+	gainTurn(rootX, nodeX, "cx2", "第一个问题关于正则表达式", "再追问一下贪婪匹配", baseTime.Add(10*time.Minute))
+	now = now.Add(24 * time.Hour)
+	if _, err := runner.RunOnce(context.Background(), TriggerManual); err != nil {
+		t.Fatal(err)
+	}
+	after := digests()
+	if len(after) != 1 || after[0].Members != 1 || len(store.members[digestKey]) != 1 {
+		t.Fatalf("digests after chat X left = %+v", after)
+	}
+	if facet, ok := store.facets[digestKey]; ok && facet.TaskType == "stale" {
+		t.Fatal("the digest kept the facet that classified chat X")
+	}
+	text, err := service.Pack(context.Background(), analysisID(rootY, keyA), nil, Viewer{Role: "admin"})
+	if err != nil || strings.Contains(text.Text, "正则表达式") || !strings.Contains(text.Text, "数据库索引") {
+		t.Fatalf("rebuilt digest: %v\n%s", err, text.Text)
+	}
+	own, err := service.Pack(context.Background(), analysisID(rootX, keyA), nil, Viewer{Role: "admin"})
+	if err != nil || own.Kind != storage.PackKindSession || !strings.Contains(own.Text, "贪婪匹配") {
+		t.Fatalf("chat X pack: %v %+v", err, own)
+	}
+	for _, signals := range store.signals {
+		if signals.DigestPending {
+			t.Fatalf("member still pending after the rebuild: %+v", signals.LastAuditID)
+		}
+	}
+
+	// Chat Y leaves too: the day has no single-turn chat left.
+	gainTurn(rootY, nodeY, "cy2", "第二个问题关于数据库索引", "联合索引的顺序呢", baseTime.Add(70*time.Minute))
+	now = now.Add(24 * time.Hour)
+	if _, err := runner.RunOnce(context.Background(), TriggerManual); err != nil {
+		t.Fatal(err)
+	}
+	if left := digests(); len(left) != 0 {
+		t.Fatalf("empty digest kept: %+v", left)
 	}
 }
 

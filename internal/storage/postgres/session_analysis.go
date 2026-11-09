@@ -143,12 +143,13 @@ func (store *Store) SaveSessionSignals(ctx context.Context, signals storage.Sess
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
-	if len(signals.SessionKey) != 32 || len(signals.AgentRootFPR) != 32 || signals.LastAuditID == "" || signals.SignalVersion <= 0 {
+	if len(signals.SessionKey) != 32 || len(signals.AgentRootFPR) != 32 || (len(signals.DigestBucket) != 0 && len(signals.DigestBucket) != 32) || signals.LastAuditID == "" || signals.SignalVersion <= 0 {
 		return errors.New("postgres: invalid session signals")
 	}
 	owned := signals
 	owned.SessionKey = append([]byte(nil), signals.SessionKey...)
 	owned.AgentRootFPR = append([]byte(nil), signals.AgentRootFPR...)
+	owned.DigestBucket = append([]byte(nil), signals.DigestBucket...)
 	owned.APIKeyFPR = append([]byte(nil), signals.APIKeyFPR...)
 	ownedFPRs := make([]storage.SessionTextFPR, len(fprs))
 	for index, fpr := range fprs {
@@ -181,6 +182,20 @@ func saveSessionSignals(tx dbTransaction, s storage.SessionSignals, fprs []stora
 	if secret == "" {
 		secret = "{}"
 	}
+	// A session that leaves its chat digest bucket (it gained turns, or its
+	// bucket changed) must not stay in that bucket's digests: they are dropped
+	// with their facets and their other members are queued for the rebuild.
+	var previousBucket []byte
+	switch err := tx.QueryRow(`SELECT digest_bucket FROM session_signals WHERE session_key = $1`, s.SessionKey).Scan(&previousBucket); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return fmt.Errorf("postgres writer: read previous digest bucket: %w", err)
+	}
+	if len(previousBucket) != 0 && !bytes.Equal(previousBucket, s.DigestBucket) {
+		if err := dropChatDigestsOf(tx, `SELECT $1::bytea`, s.SessionKey); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(`
 INSERT INTO session_signals (
     session_key, agent_root_fpr, kind, api_key_fpr, newapi_user_id, newapi_token_id, client, main_session_id, main_model,
@@ -189,9 +204,9 @@ INSERT INTO session_signals (
     compactions, model_switches, length_stops, upstream_errors,
     tool_calls, tool_failures, tool_unknown, max_failure_streak, loops, max_loop_length, thrash_files, max_file_writes,
     verified, error_pastes, interrupts, corrections, heavy_model, danger_counts, secret_counts,
-    eligible, skip_reason, signal_version, computed_at_ns
+    eligible, skip_reason, signal_version, computed_at_ns, digest_bucket, digest_pending
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
-          $28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47)
+          $28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48::bytea,$48::bytea IS NOT NULL)
 ON CONFLICT (session_key) DO UPDATE SET
     agent_root_fpr = excluded.agent_root_fpr, kind = excluded.kind, api_key_fpr = excluded.api_key_fpr, newapi_user_id = excluded.newapi_user_id,
     newapi_token_id = excluded.newapi_token_id, client = excluded.client, main_session_id = excluded.main_session_id,
@@ -209,14 +224,15 @@ ON CONFLICT (session_key) DO UPDATE SET
     error_pastes = excluded.error_pastes, interrupts = excluded.interrupts, corrections = excluded.corrections,
     heavy_model = excluded.heavy_model, danger_counts = excluded.danger_counts, secret_counts = excluded.secret_counts,
     eligible = excluded.eligible, skip_reason = excluded.skip_reason, signal_version = excluded.signal_version,
-    computed_at_ns = excluded.computed_at_ns`,
+    computed_at_ns = excluded.computed_at_ns, digest_bucket = excluded.digest_bucket,
+    digest_pending = excluded.digest_pending`,
 		s.SessionKey, s.AgentRootFPR, s.Kind, nullableBytes(s.APIKeyFPR), s.NewAPIUserID, s.NewAPITokenID, nullText(s.Client), nullText(s.MainSessionID), nullText(s.MainModel),
 		s.FirstNS, s.LastNS, s.LastAuditID, s.Requests, s.MainRequests, s.SubRequests, s.AuxRequests, s.Subagents, s.MaxDepth,
 		s.UserTurns, s.ActiveNS, s.InputTokens, s.OutputTokens, s.CacheReadTokens, s.CostUSD,
 		s.Compactions, s.ModelSwitches, s.LengthStops, s.UpstreamErrors,
 		s.ToolCalls, s.ToolFailures, s.ToolUnknown, s.MaxFailureStreak, s.Loops, s.MaxLoopLength, s.ThrashFiles, s.MaxFileWrites,
 		s.Verified, s.ErrorPastes, s.Interrupts, s.Corrections, s.HeavyModel, danger, secret,
-		s.Eligible, nullText(s.SkipReason), s.SignalVersion, s.ComputedAtNS)
+		s.Eligible, nullText(s.SkipReason), s.SignalVersion, s.ComputedAtNS, nullableBytes(s.DigestBucket))
 	if err != nil {
 		return fmt.Errorf("postgres writer: upsert session signals: %w", err)
 	}
@@ -243,6 +259,23 @@ VALUES ($1, $2, $3, $4, $5) ON CONFLICT (session_key, source, fpr) DO UPDATE SET
 	return nil
 }
 
+// dropChatDigestsOf drops every chat digest that holds a session selected by
+// members (a query returning session keys) and queues the digests' other
+// members for a rebuild. Facets and member rows go with the packs.
+func dropChatDigestsOf(tx dbTransaction, members string, args ...any) error {
+	holders := `SELECT m.pack_key FROM session_pack_members AS m WHERE m.session_key IN (` + members + `)`
+	if _, err := tx.Exec(`
+UPDATE session_signals SET digest_pending = TRUE
+WHERE digest_bucket IS NOT NULL
+  AND session_key IN (SELECT other.session_key FROM session_pack_members AS other WHERE other.pack_key IN (`+holders+`))`, args...); err != nil {
+		return fmt.Errorf("postgres writer: queue chat digest members: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM session_packs WHERE kind = 'chat_digest' AND session_key IN (`+holders+`)`, args...); err != nil {
+		return fmt.Errorf("postgres writer: drop chat digests: %w", err)
+	}
+	return nil
+}
+
 // PruneSessionAnalysis removes session rows whose newest audit was deleted by
 // retention (dependent rows cascade) and sentence fingerprints older than
 // fingerprintCutoffNS. It returns the number of removed session rows.
@@ -255,6 +288,20 @@ func (store *Store) PruneSessionAnalysis(ctx context.Context, fingerprintCutoffN
 	}
 	var removed int64
 	err := store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+		// Digests holding an expiring session, or whose own newest audit
+		// expired, are rebuilt from the members that remain.
+		if err := dropChatDigestsOf(tx, `
+SELECT s.session_key FROM session_signals AS s
+WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = s.last_audit_id)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+UPDATE session_signals SET digest_pending = TRUE
+WHERE digest_bucket IS NOT NULL AND session_key IN (
+    SELECT m.session_key FROM session_pack_members AS m JOIN session_packs AS p ON p.session_key = m.pack_key
+    WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = p.last_audit_id))`); err != nil {
+			return fmt.Errorf("postgres writer: queue members of expired digests: %w", err)
+		}
 		result, err := tx.Exec(`
 DELETE FROM session_signals AS s
 WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = s.last_audit_id)`)
@@ -326,7 +373,7 @@ FROM session_analysis_runs ORDER BY id DESC LIMIT 1`).Scan(&run.ID, &run.Started
 	return run, nil
 }
 
-const sessionSignalColumns = `s.session_key, s.agent_root_fpr, s.kind, s.api_key_fpr, s.newapi_user_id, s.newapi_token_id,
+const sessionSignalColumns = `s.session_key, s.agent_root_fpr, s.digest_bucket, s.digest_pending, s.kind, s.api_key_fpr, s.newapi_user_id, s.newapi_token_id,
     COALESCE(s.client, ''), COALESCE(s.main_session_id, ''), COALESCE(s.main_model, ''),
     s.first_ns, s.last_ns, s.last_audit_id, s.requests, s.main_requests, s.sub_requests, s.aux_requests,
     s.subagents, s.max_depth, s.user_turns, s.active_ns, s.input_tokens, s.output_tokens, s.cache_read_tokens,
@@ -341,7 +388,7 @@ const sessionSignalColumns = `s.session_key, s.agent_root_fpr, s.kind, s.api_key
 
 func scanSessionSignals(scanner interface{ Scan(...any) error }) (storage.SessionSignals, error) {
 	var s storage.SessionSignals
-	err := scanner.Scan(&s.SessionKey, &s.AgentRootFPR, &s.Kind, &s.APIKeyFPR, &s.NewAPIUserID, &s.NewAPITokenID,
+	err := scanner.Scan(&s.SessionKey, &s.AgentRootFPR, &s.DigestBucket, &s.DigestPending, &s.Kind, &s.APIKeyFPR, &s.NewAPIUserID, &s.NewAPITokenID,
 		&s.Client, &s.MainSessionID, &s.MainModel,
 		&s.FirstNS, &s.LastNS, &s.LastAuditID, &s.Requests, &s.MainRequests, &s.SubRequests, &s.AuxRequests,
 		&s.Subagents, &s.MaxDepth, &s.UserTurns, &s.ActiveNS, &s.InputTokens, &s.OutputTokens, &s.CacheReadTokens,

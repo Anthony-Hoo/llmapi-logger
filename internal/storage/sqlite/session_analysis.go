@@ -55,6 +55,14 @@ func (store *Store) ListChatDigestMembers(context.Context, []byte, string, int64
 	return nil, nil
 }
 
+func (store *Store) ListPendingDigestMembers(context.Context, int) ([]storage.SessionSignals, error) {
+	return nil, nil
+}
+
+func (store *Store) SaveChatDigests(context.Context, storage.ChatDigestBucket, []storage.ChatDigestChunk, [][]byte) error {
+	return nil
+}
+
 func (store *Store) RecordAnalysisView(context.Context, storage.AnalysisView) error {
 	return nil
 }
