@@ -122,6 +122,9 @@ LIMIT $2`, arguments...)
 	out := make([]storage.RepeatedFPR, 0)
 	for rows.Next() {
 		var row storage.RepeatedFPR
+		// session_keys is bytea[]. go.mod requires Go 1.27, where pgx's stdlib
+		// rows implement driver.RowsColumnScanner and decode it into [][]byte
+		// through the pgx type map; TestSessionReportsStorage covers it on PG.
 		var keys [][]byte
 		if err := rows.Scan(&row.FPR, &row.Kind, &row.Sessions, &row.FirstNS, &row.LastNS, &keys, &row.Adopted); err != nil {
 			return nil, fmt.Errorf("postgres: scan repeated fingerprint: %w", err)

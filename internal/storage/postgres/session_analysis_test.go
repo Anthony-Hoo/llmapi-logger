@@ -443,12 +443,30 @@ func TestSessionReportsStorage(t *testing.T) {
 	if err != nil || len(keys) != 2 {
 		t.Fatalf("active keys = %d, %v", len(keys), err)
 	}
+	// session_keys is a bytea[] column: every key must decode byte for byte.
+	sameKeys := func(got [][]byte, want ...[]byte) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		remaining := map[string]int{}
+		for _, key := range want {
+			remaining[string(key)]++
+		}
+		for _, key := range got {
+			if remaining[string(key)] == 0 {
+				return false
+			}
+			remaining[string(key)]--
+		}
+		return true
+	}
 	all, err := store.RepeatedFingerprints(ctx, at-1, nil, 10)
-	if err != nil || len(all) != 1 || all[0].Sessions != 3 || all[0].Kind != "instruction" || len(all[0].SessionKeys) != 3 || !all[0].Adopted {
+	if err != nil || len(all) != 1 || all[0].Sessions != 3 || all[0].Kind != "instruction" || !all[0].Adopted ||
+		!bytes.Equal(all[0].FPR, fill(0xa1)) || !sameKeys(all[0].SessionKeys, fill(0x91), fill(0x92), fill(0x93)) {
 		t.Fatalf("repeated (all) = %+v, %v", all, err)
 	}
 	mine, err := store.RepeatedFingerprints(ctx, at-1, keyA, 10)
-	if err != nil || len(mine) != 1 || mine[0].Sessions != 2 {
+	if err != nil || len(mine) != 1 || mine[0].Sessions != 2 || !sameKeys(mine[0].SessionKeys, fill(0x91), fill(0x92)) {
 		t.Fatalf("repeated (key A) = %+v, %v", mine, err)
 	}
 	if theirs, err := store.RepeatedFingerprints(ctx, at-1, keyB, 10); err != nil || len(theirs) != 0 {
