@@ -86,11 +86,11 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 		{Source: storage.TextSourceUser, FPR: fill(0x51), APIKeyFPR: keyA, SeenAtNS: lastNS},
 		{Source: storage.TextSourceInjectedRules, FPR: fill(0x52), APIKeyFPR: keyA, SeenAtNS: 1},
 	}
-	if err := store.SaveSessionSignals(ctx, signals, fprs); err != nil {
+	if err := store.SaveSessionSignals(ctx, signals, fprs, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Saving twice replaces, never duplicates.
-	if err := store.SaveSessionSignals(ctx, signals, fprs); err != nil {
+	if err := store.SaveSessionSignals(ctx, signals, fprs, nil); err != nil {
 		t.Fatal(err)
 	}
 	if again, err := store.ListSessionCandidates(ctx, since, quiet, 1, 10); err != nil {
@@ -183,6 +183,53 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 	}
 }
 
+// Signals mark a session analysed, so they are stored only together with its
+// pack: a pack the database rejects leaves no signals behind.
+func TestSessionSignalsAndPackAreOneWrite(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	key := fill(0xc2)
+	signals := testSignals(key, keyA, "a2", day.UnixNano())
+	signals.AgentRootFPR = rootA
+	pack := storage.SessionPack{
+		SessionKey: key, Kind: storage.PackKindSession, APIKeyFPR: keyA, PackHash: strings.Repeat("ab", 32),
+		PackEnc: []byte{1}, RefMap: "{}", FirstNS: day.UnixNano(), LastNS: day.UnixNano(), LastAuditID: "a2", BuiltAtNS: 1, Members: 1,
+		TokenEstimate: -1, // violates the token_estimate check inside the transaction
+	}
+	if err := store.SaveSessionSignals(ctx, signals, nil, &pack); err == nil {
+		t.Fatal("rejected pack accepted")
+	}
+	var count int
+	if err := store.readerDB.QueryRow(`SELECT count(*) FROM session_signals WHERE session_key = $1`, key).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("signals stored without their pack: %d, %v", count, err)
+	}
+	since, quiet := day.Add(-time.Hour).UnixNano(), day.Add(time.Hour).UnixNano()
+	if due, err := store.ListSessionCandidates(ctx, since, quiet, 1, 10); err != nil || len(due) != 3 {
+		t.Fatalf("session not due after a failed write: %d, %v", len(due), err)
+	}
+	pack.TokenEstimate = 10
+	if err := store.SaveSessionSignals(ctx, signals, nil, &pack); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := store.LoadSessionPack(ctx, key); err != nil || loaded.Kind != storage.PackKindSession {
+		t.Fatalf("pack = %+v, %v", loaded, err)
+	}
+	// A recomputation without a pack drops the stale one in the same write.
+	if err := store.SaveSessionSignals(ctx, signals, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSessionPack(ctx, key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale pack kept: %v", err)
+	}
+	digest := pack
+	digest.Kind = storage.PackKindChatDigest
+	if err := store.SaveSessionSignals(ctx, signals, nil, &digest); err == nil {
+		t.Fatal("digest accepted as a session's own pack")
+	}
+}
+
 func TestSessionAnalysisRunsWithoutRunsReturnNoRows(t *testing.T) {
 	t.Parallel()
 	store, _ := openTestStore(t)
@@ -210,7 +257,7 @@ func TestSessionSignalsStayOutsideTheEvidenceChain(t *testing.T) {
 		[]graphTestItem{user}, []graphTestItem{assistant})
 	before := readEvidenceDigests(t, store, auditID)
 	signals := testSignals(fill(0x61), scopeFingerprint(0x07), auditID, 100)
-	if err := store.SaveSessionSignals(ctx, signals, []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: fill(0x62), SeenAtNS: 100}}); err != nil {
+	if err := store.SaveSessionSignals(ctx, signals, []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: fill(0x62), SeenAtNS: 100}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RecordSessionAnalysisRun(ctx, storage.SessionAnalysisRun{StartedAtNS: 1, FinishedAtNS: 2, Trigger: "schedule"}); err != nil {
@@ -311,7 +358,7 @@ func TestSessionPacksStorageAndViewLog(t *testing.T) {
 	// vanished audit goes with the next prune.
 	signals := testSignals(rootA, keyA, "a2", day.UnixNano())
 	signals.Eligible, signals.SkipReason = false, "below_threshold"
-	if err := store.SaveSessionSignals(ctx, signals, nil); err != nil {
+	if err := store.SaveSessionSignals(ctx, signals, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.LoadSessionPack(ctx, rootA); !errors.Is(err, sql.ErrNoRows) {
@@ -331,7 +378,7 @@ func TestSessionPacksStorageAndViewLog(t *testing.T) {
 	// Digest members: single-turn chats of one key and client in a day.
 	chat := testSignals(fill(0x74), keyA, "a1", day.UnixNano())
 	chat.Kind, chat.Client, chat.SkipReason, chat.Eligible = "chat", "", "single_turn_chat", false
-	if err := store.SaveSessionSignals(ctx, chat, nil); err != nil {
+	if err := store.SaveSessionSignals(ctx, chat, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	members, err := store.ListChatDigestMembers(ctx, keyA, "unknown", day.Add(-time.Hour).UnixNano(), day.Add(time.Hour).UnixNano(), 10)
@@ -348,7 +395,7 @@ func TestSessionFacetsStorage(t *testing.T) {
 	store, _ := openTestStore(t)
 	ctx := context.Background()
 	day := seedSharedWorld(t, store)
-	if err := store.SaveSessionSignals(ctx, testSignals(rootA, keyA, "a2", day.UnixNano()), nil); err != nil {
+	if err := store.SaveSessionSignals(ctx, testSignals(rootA, keyA, "a2", day.UnixNano()), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	pack := storage.SessionPack{
@@ -447,7 +494,7 @@ func TestSessionReportsStorage(t *testing.T) {
 		if index == 1 {
 			fprs = append(fprs, storage.SessionTextFPR{Source: storage.TextSourceInjectedRules, FPR: repeated, APIKeyFPR: keyA, SeenAtNS: at + 10})
 		}
-		if err := store.SaveSessionSignals(ctx, signals, fprs); err != nil {
+		if err := store.SaveSessionSignals(ctx, signals, fprs, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -21,7 +21,9 @@ import (
 type Store interface {
 	ListSessionCandidates(ctx context.Context, sinceNS, quietBeforeNS, signalVersion int64, limit int) ([]storage.SessionCandidate, error)
 	LoadSessionAudits(ctx context.Context, agentRootFPR, apiKeyFPR []byte) ([]storage.SessionAuditRow, bool, error)
-	SaveSessionSignals(ctx context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR) error
+	// SaveSessionSignals writes signals, fingerprints and the session pack
+	// (nil: none) atomically, so a failed write leaves the session due.
+	SaveSessionSignals(ctx context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR, pack *storage.SessionPack) error
 	PruneSessionAnalysis(ctx context.Context, fingerprintCutoffNS int64) (int64, error)
 	RecordSessionAnalysisRun(ctx context.Context, run storage.SessionAnalysisRun) error
 	SaveSessionPack(ctx context.Context, pack storage.SessionPack, members [][]byte) error
@@ -292,21 +294,19 @@ func (runner *Runner) analyzeOne(ctx context.Context, root, apiKey []byte, thres
 	if len(apiKey) == 0 {
 		signals.APIKeyFPR = nil
 	}
-	if err := options.Store.SaveSessionSignals(sessionContext, signals, fprs); err != nil {
-		return storage.SessionSignals{}, err
+	// The pack is built and sealed before anything is written: signals mark
+	// the session analysed, so they are stored only together with its pack.
+	var stored *storage.SessionPack
+	if signals.Eligible {
+		if pack := BuildSessionPack(session, signals, options.Vocabulary, runner.packOptions()); pack.Text != "" {
+			sealed, err := runner.sealPack(key, storage.PackKindSession, pack, signals.APIKeyFPR, signals.NewAPITokenID, signals.Client, signals.FirstNS, signals.LastNS, signals.LastAuditID, 1)
+			if err != nil {
+				return storage.SessionSignals{}, err
+			}
+			stored = &sealed
+		}
 	}
-	if !signals.Eligible {
-		return signals, nil
-	}
-	pack := BuildSessionPack(session, signals, options.Vocabulary, runner.packOptions())
-	if pack.Text == "" {
-		return signals, nil
-	}
-	stored, err := runner.sealPack(key, storage.PackKindSession, pack, signals.APIKeyFPR, signals.NewAPITokenID, signals.Client, signals.FirstNS, signals.LastNS, signals.LastAuditID, 1)
-	if err != nil {
-		return storage.SessionSignals{}, err
-	}
-	if err := options.Store.SaveSessionPack(sessionContext, stored, nil); err != nil {
+	if err := options.Store.SaveSessionSignals(sessionContext, signals, fprs, stored); err != nil {
 		return storage.SessionSignals{}, err
 	}
 	return signals, nil

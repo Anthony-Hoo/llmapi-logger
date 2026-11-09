@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -130,9 +131,12 @@ LIMIT $3`, agentRootFPR, ForwardRejected, maxSessionAuditRows+1, nullableBytes(a
 	return out, truncated, nil
 }
 
-// SaveSessionSignals upserts one session's signals and replaces its user-text
-// and injected-rule fingerprints. Facet fingerprints are left alone.
-func (store *Store) SaveSessionSignals(ctx context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR) error {
+// SaveSessionSignals upserts one session's signals, replaces its user-text
+// and injected-rule fingerprints, and writes its session pack, all in one
+// transaction: a failure leaves the previous state, so the session stays due
+// until signals and pack are both stored. pack nil (ineligible session, or no
+// pack text) removes a stale session pack. Facet fingerprints are left alone.
+func (store *Store) SaveSessionSignals(ctx context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR, pack *storage.SessionPack) error {
 	if ctx == nil {
 		return errors.New("postgres: nil context")
 	}
@@ -153,12 +157,23 @@ func (store *Store) SaveSessionSignals(ctx context.Context, signals storage.Sess
 		}
 		ownedFPRs[index] = storage.SessionTextFPR{Source: fpr.Source, FPR: append([]byte(nil), fpr.FPR...), APIKeyFPR: append([]byte(nil), fpr.APIKeyFPR...), SeenAtNS: fpr.SeenAtNS}
 	}
+	var ownedPack *storage.SessionPack
+	if pack != nil {
+		if pack.Kind != storage.PackKindSession || !bytes.Equal(pack.SessionKey, signals.SessionKey) {
+			return errors.New("postgres: a session's own pack must be a session pack with its key")
+		}
+		copied, _, err := ownSessionPack(*pack, nil)
+		if err != nil {
+			return err
+		}
+		ownedPack = &copied
+	}
 	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
-		return saveSessionSignals(tx, owned, ownedFPRs)
+		return saveSessionSignals(tx, owned, ownedFPRs, ownedPack)
 	})})
 }
 
-func saveSessionSignals(tx dbTransaction, s storage.SessionSignals, fprs []storage.SessionTextFPR) error {
+func saveSessionSignals(tx dbTransaction, s storage.SessionSignals, fprs []storage.SessionTextFPR, pack *storage.SessionPack) error {
 	danger, secret := s.DangerCounts, s.SecretCounts
 	if danger == "" {
 		danger = "{}"
@@ -205,11 +220,13 @@ ON CONFLICT (session_key) DO UPDATE SET
 	if err != nil {
 		return fmt.Errorf("postgres writer: upsert session signals: %w", err)
 	}
-	if !s.Eligible {
-		// A session that no longer qualifies keeps no stale pack.
-		if _, err := tx.Exec(`DELETE FROM session_packs WHERE session_key = $1 AND kind = $2`, s.SessionKey, storage.PackKindSession); err != nil {
-			return fmt.Errorf("postgres writer: drop stale session pack: %w", err)
+	// A session without a current pack keeps no stale one.
+	if pack != nil {
+		if err := upsertSessionPack(tx, *pack, nil); err != nil {
+			return err
 		}
+	} else if _, err := tx.Exec(`DELETE FROM session_packs WHERE session_key = $1 AND kind = $2`, s.SessionKey, storage.PackKindSession); err != nil {
+		return fmt.Errorf("postgres writer: drop stale session pack: %w", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM session_text_fprs WHERE session_key = $1 AND source IN ($2, $3)`,
 		s.SessionKey, storage.TextSourceUser, storage.TextSourceInjectedRules); err != nil {

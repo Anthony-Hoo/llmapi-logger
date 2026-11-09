@@ -18,9 +18,20 @@ func (store *Store) SaveSessionPack(ctx context.Context, pack storage.SessionPac
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
+	owned, ownedMembers, err := ownSessionPack(pack, members)
+	if err != nil {
+		return err
+	}
+	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+		return upsertSessionPack(tx, owned, ownedMembers)
+	})})
+}
+
+// ownSessionPack validates a pack and copies it for the writer goroutine.
+func ownSessionPack(pack storage.SessionPack, members [][]byte) (storage.SessionPack, [][]byte, error) {
 	if len(pack.SessionKey) != 32 || len(pack.PackEnc) == 0 || len(pack.PackHash) != 64 || pack.LastAuditID == "" ||
 		(pack.Kind != storage.PackKindSession && pack.Kind != storage.PackKindChatDigest) {
-		return errors.New("postgres: invalid session pack")
+		return storage.SessionPack{}, nil, errors.New("postgres: invalid session pack")
 	}
 	owned := pack
 	owned.SessionKey = append([]byte(nil), pack.SessionKey...)
@@ -32,12 +43,16 @@ func (store *Store) SaveSessionPack(ctx context.Context, pack storage.SessionPac
 	ownedMembers := make([][]byte, 0, len(members))
 	for _, member := range members {
 		if len(member) != 32 {
-			return errors.New("postgres: pack member key must be 32 bytes")
+			return storage.SessionPack{}, nil, errors.New("postgres: pack member key must be 32 bytes")
 		}
 		ownedMembers = append(ownedMembers, append([]byte(nil), member...))
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
-		_, err := tx.Exec(`
+	return owned, ownedMembers, nil
+}
+
+// upsertSessionPack writes one pack and replaces its member list.
+func upsertSessionPack(tx dbTransaction, owned storage.SessionPack, ownedMembers [][]byte) error {
+	_, err := tx.Exec(`
 INSERT INTO session_packs (session_key, kind, api_key_fpr, newapi_token_id, client, pack_hash, pack_enc, ref_map,
     token_estimate, truncated, members, first_ns, last_ns, last_audit_id, built_at_ns)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
@@ -47,22 +62,21 @@ ON CONFLICT (session_key) DO UPDATE SET
     token_estimate = excluded.token_estimate, truncated = excluded.truncated, members = excluded.members,
     first_ns = excluded.first_ns, last_ns = excluded.last_ns, last_audit_id = excluded.last_audit_id,
     built_at_ns = excluded.built_at_ns`,
-			owned.SessionKey, owned.Kind, nullableBytes(owned.APIKeyFPR), owned.NewAPITokenID, nullText(owned.Client),
-			owned.PackHash, owned.PackEnc, owned.RefMap, owned.TokenEstimate, owned.Truncated, owned.Members,
-			owned.FirstNS, owned.LastNS, owned.LastAuditID, owned.BuiltAtNS)
-		if err != nil {
-			return fmt.Errorf("postgres writer: upsert session pack: %w", err)
+		owned.SessionKey, owned.Kind, nullableBytes(owned.APIKeyFPR), owned.NewAPITokenID, nullText(owned.Client),
+		owned.PackHash, owned.PackEnc, owned.RefMap, owned.TokenEstimate, owned.Truncated, owned.Members,
+		owned.FirstNS, owned.LastNS, owned.LastAuditID, owned.BuiltAtNS)
+	if err != nil {
+		return fmt.Errorf("postgres writer: upsert session pack: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM session_pack_members WHERE pack_key = $1`, owned.SessionKey); err != nil {
+		return fmt.Errorf("postgres writer: clear pack members: %w", err)
+	}
+	for _, member := range ownedMembers {
+		if _, err := tx.Exec(`INSERT INTO session_pack_members (pack_key, session_key) VALUES ($1, $2) ON CONFLICT DO NOTHING`, owned.SessionKey, member); err != nil {
+			return fmt.Errorf("postgres writer: add pack member: %w", err)
 		}
-		if _, err := tx.Exec(`DELETE FROM session_pack_members WHERE pack_key = $1`, owned.SessionKey); err != nil {
-			return fmt.Errorf("postgres writer: clear pack members: %w", err)
-		}
-		for _, member := range ownedMembers {
-			if _, err := tx.Exec(`INSERT INTO session_pack_members (pack_key, session_key) VALUES ($1, $2) ON CONFLICT DO NOTHING`, owned.SessionKey, member); err != nil {
-				return fmt.Errorf("postgres writer: add pack member: %w", err)
-			}
-		}
-		return nil
-	})})
+	}
+	return nil
 }
 
 // LoadSessionPack returns the pack of a session: its own pack, or the chat

@@ -19,7 +19,7 @@ func (store *Store) LoadSessionAudits(context.Context, []byte, []byte) ([]storag
 	return nil, false, nil
 }
 
-func (store *Store) SaveSessionSignals(context.Context, storage.SessionSignals, []storage.SessionTextFPR) error {
+func (store *Store) SaveSessionSignals(context.Context, storage.SessionSignals, []storage.SessionTextFPR, *storage.SessionPack) error {
 	return nil
 }
 

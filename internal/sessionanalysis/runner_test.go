@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +35,8 @@ type memoryStore struct {
 	textFPRs map[string][]storage.SessionTextFPR
 	suggest  map[string]storage.Suggestion
 	stats    map[string]storage.PeriodStats
+	// failSignals makes the next SaveSessionSignals calls fail.
+	failSignals int
 }
 
 func newMemoryStore() *memoryStore {
@@ -99,11 +102,23 @@ func analysisID(root, apiKey []byte) string {
 	return hex.EncodeToString(SessionKey(testFingerprinter{}, root, apiKey))
 }
 
-func (store *memoryStore) SaveSessionSignals(_ context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR) error {
+func (store *memoryStore) SaveSessionSignals(_ context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR, pack *storage.SessionPack) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.signals[hex.EncodeToString(signals.SessionKey)] = signals
-	store.textFPRs[hex.EncodeToString(signals.SessionKey)] = fprs
+	if store.failSignals > 0 {
+		store.failSignals--
+		return errors.New("write failed")
+	}
+	key := hex.EncodeToString(signals.SessionKey)
+	store.signals[key] = signals
+	store.textFPRs[key] = fprs
+	if pack != nil {
+		store.packs[key] = *pack
+		store.members[key] = nil
+	} else if existing, ok := store.packs[key]; ok && existing.Kind == storage.PackKindSession {
+		delete(store.packs, key)
+		delete(store.members, key)
+	}
 	return nil
 }
 
@@ -396,6 +411,36 @@ func TestRunnerSplitsOneRootByAPIKey(t *testing.T) {
 		if item := mapSession(signals); item.TreeID != hex.EncodeToString(sessionK[:12]) {
 			t.Fatalf("tree id = %q", item.TreeID)
 		}
+	}
+}
+
+// A failed write stores neither signals nor pack, so the session stays due
+// and the next run stores both.
+func TestRunnerKeepsSessionDueUntilSignalsAndPackAreStored(t *testing.T) {
+	store := newMemoryStore()
+	store.sessions[hex.EncodeToString(sessionK)] = []storage.SessionAuditRow{
+		auditRow("ag1", baseTime, nodeMain, "main", true),
+		auditRow("ag2", baseTime.Add(5*time.Minute), nodeMain, "main", true),
+	}
+	vocab, insightsVocab := testVocabularies(t)
+	runner, err := NewRunner(Options{
+		Config: config.SessionAnalysisConfig{RunAt: "02:00", SessionIdleMinutes: 120, MinUserTurns: 2, MinActiveSeconds: 1, Pack: config.SessionAnalysisPack{MaxTokens: 6000}},
+		Store:  store, Loader: &fakeLoader{views: map[string]*conversation.Conversation{"ag2": convo(user("把导出改成流式"), answer("好"), user("再补一下文档"), answer("完成"))}},
+		Vocabulary: vocab, Insights: insightsVocab, Fingerprints: testFingerprinter{}, Cipher: testCipher(t), Location: time.UTC,
+		Now: func() time.Time { return baseTime.Add(24 * time.Hour) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.failSignals = 1
+	run, err := runner.RunOnce(context.Background(), TriggerManual)
+	if err != nil || run.Skipped != 1 || len(store.signals) != 0 || len(store.packs) != 0 {
+		t.Fatalf("failed write left state: run=%+v signals=%d packs=%d err=%v", run, len(store.signals), len(store.packs), err)
+	}
+	run, err = runner.RunOnce(context.Background(), TriggerManual)
+	id := analysisID(sessionK, bytes.Repeat([]byte{1}, 32))
+	if err != nil || run.Candidates != 1 || run.Analyzed != 1 || store.packs[id].Kind != storage.PackKindSession || !store.signals[id].Eligible {
+		t.Fatalf("retry: run=%+v err=%v", run, err)
 	}
 }
 
