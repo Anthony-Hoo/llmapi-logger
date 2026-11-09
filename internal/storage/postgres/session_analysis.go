@@ -19,10 +19,11 @@ type derivedWrite func(dbTransaction) error
 // from their first maxSessionAuditRows requests and flagged by the caller.
 const maxSessionAuditRows = 20000
 
-// ListSessionCandidates returns agent-tree roots that were active since
-// sinceNS, have had no request end at or after quietBeforeNS, and either have
-// no session_signals row, have gained requests since it was computed, or were
-// computed by an older signal version. Most recent first.
+// ListSessionCandidates returns (agent-tree root, API key) pairs that were
+// active since sinceNS, have had no request end at or after quietBeforeNS,
+// and either have no session_signals row, have gained requests since it was
+// computed, or were computed by an older signal version. Requests without a
+// key fingerprint form their own pair. Most recent first.
 func (store *Store) ListSessionCandidates(ctx context.Context, sinceNS, quietBeforeNS, signalVersion int64, limit int) ([]storage.SessionCandidate, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
@@ -35,18 +36,18 @@ func (store *Store) ListSessionCandidates(ctx context.Context, sinceNS, quietBef
 	}
 	rows, err := store.readerDB.QueryContext(ctx, `
 WITH recent AS (
-    SELECT an.agent_root_fpr AS root, MAX(an.started_at_ns) AS last_started, COUNT(*) AS requests
+    SELECT an.agent_root_fpr AS root, a.api_key_fpr AS api_key, MAX(an.started_at_ns) AS last_started, COUNT(*) AS requests
     FROM audit_analysis AS an
     JOIN audit_records AS a ON a.audit_id = an.audit_id
     WHERE an.started_at_ns >= $1 AND an.agent_root_fpr IS NOT NULL AND a.forward_status <> $2
-    GROUP BY an.agent_root_fpr
+    GROUP BY an.agent_root_fpr, a.api_key_fpr
     HAVING MAX(COALESCE(a.ended_at_ns, a.started_at_ns)) < $3
 )
-SELECT r.root, r.last_started, r.requests, COALESCE(s.last_ns, 0), COALESCE(s.requests, 0)
+SELECT r.root, r.api_key, r.last_started, r.requests, COALESCE(s.last_ns, 0), COALESCE(s.requests, 0)
 FROM recent AS r
-LEFT JOIN session_signals AS s ON s.session_key = r.root
+LEFT JOIN session_signals AS s ON s.agent_root_fpr = r.root AND s.api_key_fpr IS NOT DISTINCT FROM r.api_key
 WHERE s.session_key IS NULL OR s.last_ns < r.last_started OR s.signal_version < $4
-ORDER BY r.last_started DESC, r.root
+ORDER BY r.last_started DESC, r.root, r.api_key NULLS FIRST
 LIMIT $5`, sinceNS, ForwardRejected, quietBeforeNS, signalVersion, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list session candidates: %w", err)
@@ -55,7 +56,7 @@ LIMIT $5`, sinceNS, ForwardRejected, quietBeforeNS, signalVersion, limit)
 	candidates := make([]storage.SessionCandidate, 0)
 	for rows.Next() {
 		var candidate storage.SessionCandidate
-		if err := rows.Scan(&candidate.SessionKey, &candidate.LastStartedNS, &candidate.Requests, &candidate.AnalyzedLastNS, &candidate.AnalyzedRequests); err != nil {
+		if err := rows.Scan(&candidate.AgentRootFPR, &candidate.APIKeyFPR, &candidate.LastStartedNS, &candidate.Requests, &candidate.AnalyzedLastNS, &candidate.AnalyzedRequests); err != nil {
 			return nil, fmt.Errorf("postgres: scan session candidate: %w", err)
 		}
 		candidates = append(candidates, candidate)
@@ -67,17 +68,18 @@ LIMIT $5`, sinceNS, ForwardRejected, quietBeforeNS, signalVersion, limit)
 }
 
 // LoadSessionAudits reads the plaintext projection of every non-rejected
-// request of one agent-tree root in start order. The boolean reports whether
-// the read was truncated at maxSessionAuditRows.
-func (store *Store) LoadSessionAudits(ctx context.Context, sessionKey []byte) ([]storage.SessionAuditRow, bool, error) {
+// request of one agent-tree root sent with one API key (nil: requests without
+// a key fingerprint) in start order. The boolean reports whether the read was
+// truncated at maxSessionAuditRows.
+func (store *Store) LoadSessionAudits(ctx context.Context, agentRootFPR, apiKeyFPR []byte) ([]storage.SessionAuditRow, bool, error) {
 	if ctx == nil {
 		return nil, false, errors.New("postgres: nil context")
 	}
 	if store == nil || store.isClosed() {
 		return nil, false, ErrClosed
 	}
-	if len(sessionKey) != 32 {
-		return nil, false, errors.New("postgres: session key must be 32 bytes")
+	if len(agentRootFPR) != 32 {
+		return nil, false, errors.New("postgres: agent root fingerprint must be 32 bytes")
 	}
 	rows, err := store.readerDB.QueryContext(ctx, `
 SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.status_code, a.api_key_fpr,
@@ -92,9 +94,9 @@ FROM audit_analysis AS an
 JOIN audit_records AS a ON a.audit_id = an.audit_id
 LEFT JOIN token_links AS t ON t.audit_id = a.audit_id
 LEFT JOIN parsed_results AS pr ON pr.audit_id = a.audit_id
-WHERE an.agent_root_fpr = $1 AND a.forward_status <> $2
+WHERE an.agent_root_fpr = $1 AND a.api_key_fpr IS NOT DISTINCT FROM $4 AND a.forward_status <> $2
 ORDER BY an.started_at_ns, a.audit_id
-LIMIT $3`, sessionKey, ForwardRejected, maxSessionAuditRows+1)
+LIMIT $3`, agentRootFPR, ForwardRejected, maxSessionAuditRows+1, nullableBytes(apiKeyFPR))
 	if err != nil {
 		return nil, false, fmt.Errorf("postgres: load session audits: %w", err)
 	}
@@ -137,11 +139,12 @@ func (store *Store) SaveSessionSignals(ctx context.Context, signals storage.Sess
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
-	if len(signals.SessionKey) != 32 || signals.LastAuditID == "" || signals.SignalVersion <= 0 {
+	if len(signals.SessionKey) != 32 || len(signals.AgentRootFPR) != 32 || signals.LastAuditID == "" || signals.SignalVersion <= 0 {
 		return errors.New("postgres: invalid session signals")
 	}
 	owned := signals
 	owned.SessionKey = append([]byte(nil), signals.SessionKey...)
+	owned.AgentRootFPR = append([]byte(nil), signals.AgentRootFPR...)
 	owned.APIKeyFPR = append([]byte(nil), signals.APIKeyFPR...)
 	ownedFPRs := make([]storage.SessionTextFPR, len(fprs))
 	for index, fpr := range fprs {
@@ -165,7 +168,7 @@ func saveSessionSignals(tx dbTransaction, s storage.SessionSignals, fprs []stora
 	}
 	_, err := tx.Exec(`
 INSERT INTO session_signals (
-    session_key, kind, api_key_fpr, newapi_user_id, newapi_token_id, client, main_session_id, main_model,
+    session_key, agent_root_fpr, kind, api_key_fpr, newapi_user_id, newapi_token_id, client, main_session_id, main_model,
     first_ns, last_ns, last_audit_id, requests, main_requests, sub_requests, aux_requests, subagents, max_depth,
     user_turns, active_ns, input_tokens, output_tokens, cache_read_tokens, cost_usd,
     compactions, model_switches, length_stops, upstream_errors,
@@ -173,9 +176,9 @@ INSERT INTO session_signals (
     verified, error_pastes, interrupts, corrections, heavy_model, danger_counts, secret_counts,
     eligible, skip_reason, signal_version, computed_at_ns
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
-          $28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
+          $28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47)
 ON CONFLICT (session_key) DO UPDATE SET
-    kind = excluded.kind, api_key_fpr = excluded.api_key_fpr, newapi_user_id = excluded.newapi_user_id,
+    agent_root_fpr = excluded.agent_root_fpr, kind = excluded.kind, api_key_fpr = excluded.api_key_fpr, newapi_user_id = excluded.newapi_user_id,
     newapi_token_id = excluded.newapi_token_id, client = excluded.client, main_session_id = excluded.main_session_id,
     main_model = excluded.main_model, first_ns = excluded.first_ns, last_ns = excluded.last_ns,
     last_audit_id = excluded.last_audit_id, requests = excluded.requests, main_requests = excluded.main_requests,
@@ -192,7 +195,7 @@ ON CONFLICT (session_key) DO UPDATE SET
     heavy_model = excluded.heavy_model, danger_counts = excluded.danger_counts, secret_counts = excluded.secret_counts,
     eligible = excluded.eligible, skip_reason = excluded.skip_reason, signal_version = excluded.signal_version,
     computed_at_ns = excluded.computed_at_ns`,
-		s.SessionKey, s.Kind, nullableBytes(s.APIKeyFPR), s.NewAPIUserID, s.NewAPITokenID, nullText(s.Client), nullText(s.MainSessionID), nullText(s.MainModel),
+		s.SessionKey, s.AgentRootFPR, s.Kind, nullableBytes(s.APIKeyFPR), s.NewAPIUserID, s.NewAPITokenID, nullText(s.Client), nullText(s.MainSessionID), nullText(s.MainModel),
 		s.FirstNS, s.LastNS, s.LastAuditID, s.Requests, s.MainRequests, s.SubRequests, s.AuxRequests, s.Subagents, s.MaxDepth,
 		s.UserTurns, s.ActiveNS, s.InputTokens, s.OutputTokens, s.CacheReadTokens, s.CostUSD,
 		s.Compactions, s.ModelSwitches, s.LengthStops, s.UpstreamErrors,
@@ -306,7 +309,7 @@ FROM session_analysis_runs ORDER BY id DESC LIMIT 1`).Scan(&run.ID, &run.Started
 	return run, nil
 }
 
-const sessionSignalColumns = `s.session_key, s.kind, s.api_key_fpr, s.newapi_user_id, s.newapi_token_id,
+const sessionSignalColumns = `s.session_key, s.agent_root_fpr, s.kind, s.api_key_fpr, s.newapi_user_id, s.newapi_token_id,
     COALESCE(s.client, ''), COALESCE(s.main_session_id, ''), COALESCE(s.main_model, ''),
     s.first_ns, s.last_ns, s.last_audit_id, s.requests, s.main_requests, s.sub_requests, s.aux_requests,
     s.subagents, s.max_depth, s.user_turns, s.active_ns, s.input_tokens, s.output_tokens, s.cache_read_tokens,
@@ -321,7 +324,7 @@ const sessionSignalColumns = `s.session_key, s.kind, s.api_key_fpr, s.newapi_use
 
 func scanSessionSignals(scanner interface{ Scan(...any) error }) (storage.SessionSignals, error) {
 	var s storage.SessionSignals
-	err := scanner.Scan(&s.SessionKey, &s.Kind, &s.APIKeyFPR, &s.NewAPIUserID, &s.NewAPITokenID,
+	err := scanner.Scan(&s.SessionKey, &s.AgentRootFPR, &s.Kind, &s.APIKeyFPR, &s.NewAPIUserID, &s.NewAPITokenID,
 		&s.Client, &s.MainSessionID, &s.MainModel,
 		&s.FirstNS, &s.LastNS, &s.LastAuditID, &s.Requests, &s.MainRequests, &s.SubRequests, &s.AuxRequests,
 		&s.Subagents, &s.MaxDepth, &s.UserTurns, &s.ActiveNS, &s.InputTokens, &s.OutputTokens, &s.CacheReadTokens,

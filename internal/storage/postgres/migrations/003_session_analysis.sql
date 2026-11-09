@@ -3,8 +3,12 @@
 -- part of the offline SQLite import. Plaintext columns hold only counts, enums,
 -- model names and keyed fingerprints; anything else is AES-GCM ciphertext.
 
+-- One analysis session is the part of one agent-tree root sent with one API
+-- key: session_key is a keyed fingerprint of (agent_root_fpr, api_key_fpr), so
+-- two keys reusing a client session id never share derived rows.
 CREATE TABLE session_signals (
     session_key BYTEA PRIMARY KEY CHECK (length(session_key) = 32),
+    agent_root_fpr BYTEA NOT NULL CHECK (length(agent_root_fpr) = 32),
     kind TEXT COLLATE "C" NOT NULL CHECK (kind IN ('agent', 'chat')),
     api_key_fpr BYTEA,
     newapi_user_id BIGINT,
@@ -52,6 +56,7 @@ CREATE TABLE session_signals (
     computed_at_ns BIGINT NOT NULL
 );
 CREATE INDEX session_signals_last_idx ON session_signals(last_ns);
+CREATE INDEX session_signals_root_idx ON session_signals(agent_root_fpr);
 CREATE INDEX session_signals_key_idx ON session_signals(api_key_fpr, last_ns);
 CREATE INDEX session_signals_token_idx ON session_signals(newapi_token_id, last_ns);
 

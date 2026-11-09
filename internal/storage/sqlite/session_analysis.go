@@ -15,7 +15,7 @@ func (store *Store) ListSessionCandidates(context.Context, int64, int64, int64, 
 	return nil, nil
 }
 
-func (store *Store) LoadSessionAudits(context.Context, []byte) ([]storage.SessionAuditRow, bool, error) {
+func (store *Store) LoadSessionAudits(context.Context, []byte, []byte) ([]storage.SessionAuditRow, bool, error) {
 	return nil, false, nil
 }
 

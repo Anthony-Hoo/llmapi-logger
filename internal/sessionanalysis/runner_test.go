@@ -42,24 +42,61 @@ func newMemoryStore() *memoryStore {
 		textFPRs: map[string][]storage.SessionTextFPR{}, suggest: map[string]storage.Suggestion{}, stats: map[string]storage.PeriodStats{}}
 }
 
+// ListSessionCandidates splits every root of store.sessions (keyed by root)
+// by API key, like the PostgreSQL query; a pair is due until signals with the
+// same pair exist and cover its newest request.
 func (store *memoryStore) ListSessionCandidates(_ context.Context, _, _, _ int64, _ int) ([]storage.SessionCandidate, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	out := make([]storage.SessionCandidate, 0)
-	for key := range store.sessions {
-		raw, _ := hex.DecodeString(key)
-		if _, done := store.signals[key]; !done {
-			out = append(out, storage.SessionCandidate{SessionKey: raw})
+	for rootHex, rows := range store.sessions {
+		root, _ := hex.DecodeString(rootHex)
+		latest := map[string]int64{}
+		for _, row := range rows {
+			if row.StartedAtNS > latest[string(row.APIKeyFPR)] || latest[string(row.APIKeyFPR)] == 0 {
+				latest[string(row.APIKeyFPR)] = row.StartedAtNS
+			}
+		}
+		for apiKey, last := range latest {
+			done := false
+			for _, signals := range store.signals {
+				if bytes.Equal(signals.AgentRootFPR, root) && string(signals.APIKeyFPR) == apiKey && signals.LastNS >= last {
+					done = true
+				}
+			}
+			if !done {
+				candidate := storage.SessionCandidate{AgentRootFPR: root, LastStartedNS: last}
+				if apiKey != "" {
+					candidate.APIKeyFPR = []byte(apiKey)
+				}
+				out = append(out, candidate)
+			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].SessionKey, out[j].SessionKey) < 0 })
+	sort.Slice(out, func(i, j int) bool {
+		if order := bytes.Compare(out[i].AgentRootFPR, out[j].AgentRootFPR); order != 0 {
+			return order < 0
+		}
+		return bytes.Compare(out[i].APIKeyFPR, out[j].APIKeyFPR) < 0
+	})
 	return out, nil
 }
 
-func (store *memoryStore) LoadSessionAudits(_ context.Context, key []byte) ([]storage.SessionAuditRow, bool, error) {
+func (store *memoryStore) LoadSessionAudits(_ context.Context, root, apiKey []byte) ([]storage.SessionAuditRow, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return store.sessions[hex.EncodeToString(key)], false, nil
+	out := make([]storage.SessionAuditRow, 0)
+	for _, row := range store.sessions[hex.EncodeToString(root)] {
+		if bytes.Equal(row.APIKeyFPR, apiKey) {
+			out = append(out, row)
+		}
+	}
+	return out, false, nil
+}
+
+// analysisID is the API session id of one root and key.
+func analysisID(root, apiKey []byte) string {
+	return hex.EncodeToString(SessionKey(testFingerprinter{}, root, apiKey))
 }
 
 func (store *memoryStore) SaveSessionSignals(_ context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR) error {
@@ -255,7 +292,7 @@ func TestRunnerBuildsEncryptedPacksAndDigests(t *testing.T) {
 	if len(store.packs) != 3 {
 		t.Fatalf("packs = %d (want agent + two digests)", len(store.packs))
 	}
-	agentPack := store.packs[hex.EncodeToString(sessionK)]
+	agentPack := store.packs[analysisID(sessionK, bytes.Repeat([]byte{1}, 32))]
 	if agentPack.Kind != storage.PackKindSession || bytes.Contains(agentPack.PackEnc, []byte("流式")) {
 		t.Fatalf("agent pack not encrypted: %+v", agentPack.Kind)
 	}
@@ -265,7 +302,7 @@ func TestRunnerBuildsEncryptedPacksAndDigests(t *testing.T) {
 	}
 	// A member chat resolves to its digest; the digest holds the three
 	// questions of key A in time order, redacted, and not key B's.
-	memberID := hex.EncodeToString(bytes.Repeat([]byte{0x21}, 32))
+	memberID := analysisID(bytes.Repeat([]byte{0x21}, 32), keyA)
 	response, err := service.Pack(context.Background(), memberID, nil, Viewer{Role: "admin"})
 	if err != nil {
 		t.Fatal(err)
@@ -287,9 +324,78 @@ func TestRunnerBuildsEncryptedPacksAndDigests(t *testing.T) {
 	if _, err := service.Pack(context.Background(), memberID, scopeOf(keyA), Viewer{Role: "developer"}); err != nil {
 		t.Fatalf("owner read: %v", err)
 	}
-	agentResponse, err := service.Pack(context.Background(), hex.EncodeToString(sessionK), scopeOf(bytes.Repeat([]byte{1}, 32)), Viewer{Role: "developer"})
+	agentResponse, err := service.Pack(context.Background(), analysisID(sessionK, bytes.Repeat([]byte{1}, 32)), scopeOf(bytes.Repeat([]byte{1}, 32)), Viewer{Role: "developer"})
 	if err != nil || !strings.Contains(agentResponse.Text, "[U1] 把导出改成流式") || agentResponse.Refs["U2"] != "ag2" {
 		t.Fatalf("agent pack: %v %+v", err, agentResponse)
+	}
+}
+
+// Two API keys reusing one client session id are two analysis sessions: each
+// pack holds only its own key's requests, and neither key can read the other.
+func TestRunnerSplitsOneRootByAPIKey(t *testing.T) {
+	store := newMemoryStore()
+	keyA, keyB := bytes.Repeat([]byte{0x0a}, 32), bytes.Repeat([]byte{0x0b}, 32)
+	rows := make([]storage.SessionAuditRow, 0, 4)
+	for index, spec := range []struct {
+		id  string
+		key []byte
+	}{{"sa1", keyA}, {"sb1", keyB}, {"sa2", keyA}, {"sb2", keyB}} {
+		row := auditRow(spec.id, baseTime.Add(time.Duration(index)*time.Minute), nodeMain, "main", true)
+		row.APIKeyFPR = spec.key
+		rows = append(rows, row)
+	}
+	store.sessions[hex.EncodeToString(sessionK)] = rows
+	views := map[string]*conversation.Conversation{
+		"sa2": convo(user("A 的第一个问题需要分析"), answer("好"), user("A 的第二个问题继续追问"), answer("完成")),
+		"sb2": convo(user("B 的第一个问题需要分析"), answer("好"), user("B 的第二个问题继续追问"), answer("完成")),
+	}
+	vocab, insightsVocab := testVocabularies(t)
+	cipher := testCipher(t)
+	runner, err := NewRunner(Options{
+		Config: config.SessionAnalysisConfig{RunAt: "02:00", SessionIdleMinutes: 120, MinUserTurns: 2, MinActiveSeconds: 1, Pack: config.SessionAnalysisPack{MaxTokens: 6000}},
+		Store:  store, Loader: &fakeLoader{views: views}, Vocabulary: vocab, Insights: insightsVocab,
+		Fingerprints: testFingerprinter{}, Cipher: cipher, Location: time.UTC,
+		Now: func() time.Time { return baseTime.Add(24 * time.Hour) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := runner.RunOnce(context.Background(), TriggerManual)
+	if err != nil || run.Candidates != 2 || run.Analyzed != 2 {
+		t.Fatalf("run = %+v, %v", run, err)
+	}
+	idA, idB := analysisID(sessionK, keyA), analysisID(sessionK, keyB)
+	if idA == idB || len(store.signals) != 2 {
+		t.Fatalf("one root and two keys gave %d sessions", len(store.signals))
+	}
+	for id, want := range map[string]struct {
+		key        []byte
+		own, other string
+		lastAudit  string
+	}{idA: {keyA, "A 的第二个问题", "B 的", "sa2"}, idB: {keyB, "B 的第二个问题", "A 的", "sb2"}} {
+		signals := store.signals[id]
+		if !bytes.Equal(signals.APIKeyFPR, want.key) || !bytes.Equal(signals.AgentRootFPR, sessionK) || signals.Requests != 2 || signals.LastAuditID != want.lastAudit {
+			t.Fatalf("signals of %s = %+v", want.lastAudit, signals)
+		}
+		service, err := NewQueryService(store, runner, cipher, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pack, err := service.Pack(context.Background(), id, scopeOf(want.key), Viewer{Role: "developer"})
+		if err != nil || !strings.Contains(pack.Text, want.own) || strings.Contains(pack.Text, want.other) {
+			t.Fatalf("pack of %s: %v\n%s", want.lastAudit, err, pack.Text)
+		}
+		foreign := keyA
+		if bytes.Equal(want.key, keyA) {
+			foreign = keyB
+		}
+		if _, err := service.Pack(context.Background(), id, scopeOf(foreign), Viewer{Role: "developer"}); err == nil {
+			t.Fatalf("the other key read the pack of %s", want.lastAudit)
+		}
+		// The insights tree link still points at the shared root.
+		if item := mapSession(signals); item.TreeID != hex.EncodeToString(sessionK[:12]) {
+			t.Fatalf("tree id = %q", item.TreeID)
+		}
 	}
 }
 

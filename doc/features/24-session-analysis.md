@@ -85,7 +85,7 @@ session_analysis:
 
 ### 5.1 会话单元与收口
 
-- 单元是 Agent 树的根（`agent_root_fpr`，20 §5.8）：根 Agent、子 Agent 合在一起；压缩、标题等附属请求只计 Token 和成本。
+- 单元是 Agent 树的根（`agent_root_fpr`，20 §5.8）中**同一个 API Key** 发出的请求：根 Agent、子 Agent 合在一起；压缩、标题等附属请求只计 Token 和成本。两个 Key 复用同一个客户端会话 ID 时拆成两个分析会话，`session_key` 是 (`agent_root_fpr`, `api_key_fpr`) 的 keyed 指纹，没有 Key 指纹的请求单独成一个会话。这样输入包和 facet 只含该 Key 自己的请求，开发者鉴权（"只看到该 Key 产生的记录"）在派生数据上同样成立；跳转到 insights 的 Agent 树仍用 `agent_root_fpr`。
 - 批处理选择 `session_idle_minutes` 内没有新请求的根会话。根会话之后又有新请求时整行重算，输入包哈希随之变化，L1 也会重算。
 - `principal_class=service`（23 §4）的会话只算 L0，不打包、不进改进模式的报告。
 - 低于 `min_user_turns` 或 `min_active_seconds` 的会话只记 L0。例外是单轮普通聊天：它们按天合并成聊天汇总包（§6.2）。
@@ -164,7 +164,7 @@ session_analysis:
 
 | 会话形态 | 判定 | 会话单元 |
 | --- | --- | --- |
-| Agent 会话 | 有客户端 Agent 标识，或推断出的会话里出现过工具调用 | Agent 树的根（`agent_root_fpr`），子 Agent 并入 |
+| Agent 会话 | 有客户端 Agent 标识，或推断出的会话里出现过工具调用 | Agent 树的根（`agent_root_fpr`）按 API Key 拆分（§5.1），子 Agent 并入 |
 | 普通聊天会话 | 整个会话没有任何工具调用、也没有子 Agent | 20 §3.3 的推断会话（系统提示词指纹加首条用户消息），即同一个聊天窗口 |
 | 单轮聊天汇总 | 只有一个用户轮次的普通聊天会话 | 同一 API Key、同一客户端、同一天的单轮聊天合并成一个"聊天汇总包"，每个问题一行 `[U*]`，一包最多 20 个问题，超出顺延到下一包 |
 
@@ -679,6 +679,7 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 - **migration**：派生表放在 `003`，并把派生 migration 改为"缺哪个版本补哪个"，允许与 23 的 `002` 以任意顺序合并。
 - **手动运行**：新增管理员专用的 `POST /api/v1/session-analysis/run`，便于首次部署后立即生成结果。
 - **retention**：派生行在下一次批处理开始时按"会话最后一条 audit 是否还在"清理，最多滞后一天。
+- **会话按 Key 拆分**（PR 评审后修订）：最初实现只按 `agent_root_fpr` 分组，归属取第一条请求的 Key，另一个 Key 复用同一会话 ID 时会读到对方内容派生的包和 facet。现在候选查询和读取都按 (`agent_root_fpr`, `api_key_fpr`) 分组，`session_signals` 另存 `agent_root_fpr`（§5.1）。003 尚未发布，直接修改，没有另加 migration。
 
 ### S1（输入包）
 

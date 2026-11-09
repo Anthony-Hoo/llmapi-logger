@@ -333,8 +333,10 @@ func mapSession(row storage.SessionSignals) SessionItem {
 		Eligible: row.Eligible, SkipReason: row.SkipReason,
 		FacetStatus: row.FacetStatus, TaskType: row.FacetTaskType, Outcome: row.FacetOutcome,
 	}
-	if row.Kind == KindAgent && len(row.SessionKey) >= 12 {
-		item.TreeID = hex.EncodeToString(row.SessionKey[:12])
+	if row.Kind == KindAgent && len(row.AgentRootFPR) >= 12 {
+		// The insights agent-tree id is the root fingerprint prefix, not the
+		// key-scoped session key.
+		item.TreeID = hex.EncodeToString(row.AgentRootFPR[:12])
 	}
 	return item
 }

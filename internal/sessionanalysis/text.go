@@ -18,6 +18,7 @@ const (
 	domainToolCall = "session-analysis/tool-call"
 	domainPath     = "session-analysis/path"
 	domainDigest   = "session-analysis/chat-digest"
+	domainSession  = "session-analysis/session"
 )
 
 const (

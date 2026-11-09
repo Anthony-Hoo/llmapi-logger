@@ -17,7 +17,7 @@ func testSignals(key []byte, apiKey []byte, lastAuditID string, lastNS int64) st
 	cost := 1.25
 	userID, tokenID := int64(8), int64(1)
 	return storage.SessionSignals{
-		SessionKey: key, Kind: "agent", APIKeyFPR: apiKey, NewAPIUserID: &userID, NewAPITokenID: &tokenID,
+		SessionKey: key, AgentRootFPR: key, Kind: "agent", APIKeyFPR: apiKey, NewAPIUserID: &userID, NewAPITokenID: &tokenID,
 		Client: "codex", MainSessionID: "agt_example", MainModel: "model-example",
 		FirstNS: lastNS - int64(time.Minute), LastNS: lastNS, LastAuditID: lastAuditID,
 		Requests: 3, MainRequests: 2, SubRequests: 1, Subagents: 1, MaxDepth: 1, UserTurns: 2,
@@ -44,19 +44,20 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := map[string]storage.SessionCandidate{}
+	// Key B sent one step into key A's tree: one root, two analysis sessions.
+	pairs := map[string]storage.SessionCandidate{}
 	for _, candidate := range candidates {
-		roots[string(candidate.SessionKey)] = candidate
+		pairs[string(candidate.AgentRootFPR)+string(candidate.APIKeyFPR)] = candidate
 	}
-	if _, ok := roots[string(rootA)]; !ok {
-		t.Fatalf("root A not a candidate: %d candidates", len(candidates))
+	if len(candidates) != 3 || pairs[string(rootA)+string(keyA)].Requests != 4 || pairs[string(rootA)+string(keyB)].Requests != 1 || pairs[string(rootB)+string(keyB)].Requests != 1 {
+		t.Fatalf("candidates = %+v", candidates)
 	}
 	// Still-active roots are not due yet.
 	if early, err := store.ListSessionCandidates(ctx, since, day.UnixNano(), 1, 10); err != nil || len(early) != 0 {
 		t.Fatalf("active roots listed: %d, %v", len(early), err)
 	}
 
-	rows, truncated, err := store.LoadSessionAudits(ctx, rootA)
+	rows, truncated, err := store.LoadSessionAudits(ctx, rootA, keyA)
 	if err != nil || truncated {
 		t.Fatalf("load: %v truncated=%v", err, truncated)
 	}
@@ -64,15 +65,23 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 	for _, row := range rows {
 		ids = append(ids, row.AuditID)
 	}
-	if len(rows) != 5 || ids[0] != "a1" || ids[1] != "a2" || ids[2] != "b1" || ids[4] != "c2" {
-		t.Fatalf("rows = %v", ids)
+	if strings.Join(ids, ",") != "a1,a2,c1,c2" {
+		t.Fatalf("rows of key A = %v", ids)
 	}
-	if rows[0].NewAPITokenID == nil || *rows[0].NewAPITokenID != 1 || !rows[0].TurnStart || rows[2].AgentRole != "subagent" || rows[4].AgentRole != "compaction" {
+	if rows[0].NewAPITokenID == nil || *rows[0].NewAPITokenID != 1 || !rows[0].TurnStart || rows[2].AgentRole != "subagent" || rows[3].AgentRole != "compaction" {
 		t.Fatalf("row projection: %+v", rows[0])
+	}
+	foreign, _, err := store.LoadSessionAudits(ctx, rootA, keyB)
+	if err != nil || len(foreign) != 1 || foreign[0].AuditID != "b1" || !bytes.Equal(foreign[0].APIKeyFPR, keyB) {
+		t.Fatalf("rows of key B = %+v, %v", foreign, err)
+	}
+	if keyless, _, err := store.LoadSessionAudits(ctx, rootA, nil); err != nil || len(keyless) != 0 {
+		t.Fatalf("rows without a key = %d, %v", len(keyless), err)
 	}
 
 	lastNS := rows[len(rows)-1].StartedAtNS
-	signals := testSignals(rootA, keyA, "c2", lastNS)
+	signals := testSignals(fill(0xc1), keyA, "c2", lastNS)
+	signals.AgentRootFPR = rootA
 	fprs := []storage.SessionTextFPR{
 		{Source: storage.TextSourceUser, FPR: fill(0x51), APIKeyFPR: keyA, SeenAtNS: lastNS},
 		{Source: storage.TextSourceInjectedRules, FPR: fill(0x52), APIKeyFPR: keyA, SeenAtNS: 1},
@@ -88,9 +97,12 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		for _, candidate := range again {
-			if bytes.Equal(candidate.SessionKey, rootA) {
-				t.Fatal("analysed root listed again")
+			if bytes.Equal(candidate.AgentRootFPR, rootA) && bytes.Equal(candidate.APIKeyFPR, keyA) {
+				t.Fatal("analysed session listed again")
 			}
+		}
+		if len(again) != 2 {
+			t.Fatalf("key B's part of root A must stay due: %+v", again)
 		}
 	}
 	if stale, err := store.ListSessionCandidates(ctx, since, quiet, 2, 10); err != nil || len(stale) == 0 {
@@ -103,7 +115,7 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 		t.Fatalf("admin list = %d, %v", len(page.Rows), err)
 	}
 	got := page.Rows[0]
-	if got.Loops != 1 || got.Verified != "no" || got.CostUSD == nil || *got.CostUSD != 1.25 || got.DangerCounts != `{"force_push":1}` {
+	if !bytes.Equal(got.AgentRootFPR, rootA) || got.Loops != 1 || got.Verified != "no" || got.CostUSD == nil || *got.CostUSD != 1.25 || got.DangerCounts != `{"force_push":1}` {
 		t.Fatalf("round trip: %+v", got)
 	}
 	owner := window

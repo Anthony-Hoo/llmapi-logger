@@ -3,11 +3,17 @@ package storage
 // Session analysis (doc/features/24-session-analysis.md) storage contracts.
 // Every row described here is derived data outside the integrity chain.
 
-// SessionCandidate is one agent-tree root with recent activity, together with
-// what the last analysis of it saw. A root is due when it has gone quiet and
-// either has never been analysed or has gained requests since.
+// SessionCandidate is the part of one agent-tree root that one API key sent,
+// with recent activity, together with what the last analysis of it saw. Two
+// keys reusing one client session id are two analysis sessions, so a key
+// never sees content derived from another key's requests. It is due when it
+// has gone quiet and either has never been analysed or has gained requests
+// since.
 type SessionCandidate struct {
-	SessionKey    []byte
+	AgentRootFPR []byte
+	// APIKeyFPR is nil for requests without a key fingerprint; they form
+	// their own session.
+	APIKeyFPR     []byte
 	LastStartedNS int64
 	Requests      int64
 	// AnalyzedLastNS is the last_ns of the stored signals row, 0 when none.
@@ -50,7 +56,9 @@ type SessionAuditRow struct {
 
 // SessionSignals is one row of session_signals.
 type SessionSignals struct {
+	// SessionKey is the keyed fingerprint of (AgentRootFPR, APIKeyFPR).
 	SessionKey       []byte
+	AgentRootFPR     []byte
 	Kind             string
 	APIKeyFPR        []byte
 	NewAPIUserID     *int64

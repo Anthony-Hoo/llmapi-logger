@@ -20,7 +20,7 @@ import (
 // Store is the storage surface of the batch runner.
 type Store interface {
 	ListSessionCandidates(ctx context.Context, sinceNS, quietBeforeNS, signalVersion int64, limit int) ([]storage.SessionCandidate, error)
-	LoadSessionAudits(ctx context.Context, sessionKey []byte) ([]storage.SessionAuditRow, bool, error)
+	LoadSessionAudits(ctx context.Context, agentRootFPR, apiKeyFPR []byte) ([]storage.SessionAuditRow, bool, error)
 	SaveSessionSignals(ctx context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR) error
 	PruneSessionAnalysis(ctx context.Context, fingerprintCutoffNS int64) (int64, error)
 	RecordSessionAnalysisRun(ctx context.Context, run storage.SessionAnalysisRun) error
@@ -218,7 +218,7 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 			finish("canceled")
 			return run, err
 		}
-		signals, err := runner.analyzeOne(ctx, candidate.SessionKey, thresholds)
+		signals, err := runner.analyzeOne(ctx, candidate.AgentRootFPR, candidate.APIKeyFPR, thresholds)
 		if err != nil {
 			run.Skipped++
 			reasons["error"]++
@@ -260,22 +260,38 @@ func (runner *Runner) packOptions() PackOptions {
 	return PackOptions{MaxTokens: runner.options.Config.Pack.MaxTokens, Location: runner.options.Location, ClientLabels: runner.options.ClientLabels}
 }
 
-func (runner *Runner) analyzeOne(ctx context.Context, key []byte, thresholds Thresholds) (storage.SessionSignals, error) {
+// SessionKey is the analysis session key of the requests of one agent-tree
+// root sent with one API key (nil: no key fingerprint). Keys never share a
+// session, so pack and facet ownership checks see one key's content only.
+func SessionKey(fp Fingerprinter, agentRootFPR, apiKeyFPR []byte) []byte {
+	value := make([]byte, 0, len(agentRootFPR)+len(apiKeyFPR))
+	value = append(append(value, agentRootFPR...), apiKeyFPR...)
+	return fp.Fingerprint(domainSession, value)
+}
+
+func (runner *Runner) analyzeOne(ctx context.Context, root, apiKey []byte, thresholds Thresholds) (storage.SessionSignals, error) {
 	options := runner.options
 	sessionContext, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
-	rows, truncated, err := options.Store.LoadSessionAudits(sessionContext, key)
+	rows, truncated, err := options.Store.LoadSessionAudits(sessionContext, root, apiKey)
 	if err != nil {
 		return storage.SessionSignals{}, err
 	}
 	if len(rows) == 0 {
 		return storage.SessionSignals{}, errors.New("sessionanalysis: session vanished")
 	}
+	key := SessionKey(options.Fingerprints, root, apiKey)
 	session, err := BuildSession(sessionContext, key, rows, truncated, options.Loader, options.Vocabulary, options.Insights)
 	if err != nil {
 		return storage.SessionSignals{}, err
 	}
 	signals, fprs := ComputeSignals(session, options.Vocabulary, options.Fingerprints, thresholds, options.Now())
+	// The stored pair must equal the candidate's, or it would be due again.
+	signals.AgentRootFPR = append([]byte(nil), root...)
+	signals.APIKeyFPR = append([]byte(nil), apiKey...)
+	if len(apiKey) == 0 {
+		signals.APIKeyFPR = nil
+	}
 	if err := options.Store.SaveSessionSignals(sessionContext, signals, fprs); err != nil {
 		return storage.SessionSignals{}, err
 	}
@@ -359,7 +375,7 @@ func (runner *Runner) rebuildDigest(ctx context.Context, bucket digestBucket) er
 	}
 	items := make([]DigestItem, 0, len(members))
 	for _, member := range members {
-		rows, truncated, err := options.Store.LoadSessionAudits(digestContext, member.SessionKey)
+		rows, truncated, err := options.Store.LoadSessionAudits(digestContext, member.AgentRootFPR, member.APIKeyFPR)
 		if err != nil || len(rows) == 0 {
 			continue
 		}

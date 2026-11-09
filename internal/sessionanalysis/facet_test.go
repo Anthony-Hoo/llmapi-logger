@@ -141,15 +141,15 @@ func TestFacetStageSettlesCachesAndRetries(t *testing.T) {
 	if err != nil || run.L1Candidates != 1 || run.L1OK != 1 || model.calls != 2 || run.L1InputTokens != 2000 {
 		t.Fatalf("settled run = %+v calls=%d err=%v", run, model.calls, err)
 	}
-	facet := store.facets[hex.EncodeToString(sessionK)]
+	facet := store.facets[analysisID(sessionK, bytes.Repeat([]byte{1}, 32))]
 	if facet.Status != FacetOK || facet.TaskType != "refactor" || facet.PromptVersion != PromptVersion || facet.Model != "local-small" {
 		t.Fatalf("facet = %+v", facet)
 	}
 	if bytes.Contains(facet.TextEnc, []byte("流式")) || len(facet.TextEnc) == 0 {
 		t.Fatal("facet text not encrypted")
 	}
-	if len(store.facetFPR[hex.EncodeToString(sessionK)]) != 1 {
-		t.Fatalf("instruction fingerprints = %d", len(store.facetFPR[hex.EncodeToString(sessionK)]))
+	if len(store.facetFPR[analysisID(sessionK, bytes.Repeat([]byte{1}, 32))]) != 1 {
+		t.Fatalf("instruction fingerprints = %d", len(store.facetFPR[analysisID(sessionK, bytes.Repeat([]byte{1}, 32))]))
 	}
 	// Cache hit: nothing changed, no call.
 	if run, err := facetRunner(t, store, model, settled).RunOnce(ctx, TriggerManual); err != nil || run.L1Candidates != 0 || model.calls != 2 {
@@ -198,7 +198,7 @@ func TestFacetReadAndCalibration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := hex.EncodeToString(sessionK)
+	id := analysisID(sessionK, bytes.Repeat([]byte{1}, 32))
 	response, err := service.Facet(ctx, id, scopeOf(bytes.Repeat([]byte{1}, 32)), Viewer{Role: "developer"})
 	if err != nil {
 		t.Fatal(err)
