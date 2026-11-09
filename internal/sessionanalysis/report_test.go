@@ -156,6 +156,43 @@ func TestReportsSuggestionsAndNarrative(t *testing.T) {
 	}
 }
 
+// Only the first line of a multi-line user message carries its label; a
+// repeated instruction on a later line must still be recovered from the
+// pack, while tool and answer lines never count as user text.
+func TestSentenceInPackReadsContinuationLines(t *testing.T) {
+	_, runner := reportFixture(t, nil)
+	text := strings.Join([]string{
+		"[会话] 类型=agent 客户端=Codex",
+		"[U1] 修一下导出接口的分页",
+		"提交前先跑一遍全部单元测试",
+		"[REDACTED:contact] 改完之后发给我看一下",
+		"[T1] 读×2。提交前先跑 go vet ./...",
+		"[U2 10:02] 好的",
+		"第二轮的补充说明也要保留",
+		"[A] 完成。提交前先跑 golangci-lint run",
+	}, "\n")
+	pack, err := runner.sealPack(bytes.Repeat([]byte{0x44}, 32), storage.PackKindSession, Pack{Text: text}, nil, nil, "", 1, 2, "a1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := func(want string) string {
+		tag := instructionFingerprint(runner.options.Fingerprints, want)
+		return runner.sentenceInPack(pack, func(candidate string) bool {
+			return string(instructionFingerprint(runner.options.Fingerprints, candidate)) == string(tag)
+		})
+	}
+	for _, want := range []string{"提交前先跑一遍全部单元测试", "[REDACTED:contact] 改完之后发给我看一下", "第二轮的补充说明也要保留", "修一下导出接口的分页"} {
+		if got := find(want); got != want {
+			t.Errorf("recovered %q, want %q", got, want)
+		}
+	}
+	for _, foreign := range []string{"提交前先跑 go vet ./...", "提交前先跑 golangci-lint run"} {
+		if got := find(foreign); got != "" {
+			t.Errorf("non-user line recovered: %q", got)
+		}
+	}
+}
+
 func TestNarrativeFallsBackToTheTemplate(t *testing.T) {
 	model := &scriptedModel{narrative: "本周做了什么：效率提升了 87%。"}
 	store, runner := reportFixture(t, model)

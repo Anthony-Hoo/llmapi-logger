@@ -346,7 +346,37 @@ func (runner *Runner) buildSuggestions(ctx context.Context, store ReportStore, s
 	return nil
 }
 
-var packTextLine = regexp.MustCompile(`^\[(?:U|C)\d+(?: \d{2}:\d{2})?\] (.*)$`)
+var (
+	// packUserLine opens one user message of a pack ([U3], [C4] or a digest's
+	// [U2 14:02]); only its first line carries the label.
+	packUserLine = regexp.MustCompile(`^\[(?:U|C)\d+(?: \d{2}:\d{2})?\] (.*)$`)
+	// packLabelLine matches every other line a pack writes itself. Any line
+	// that matches neither continues the user message above it, including
+	// lines that start with a redaction or paste placeholder.
+	packLabelLine = regexp.MustCompile(`^\[(?:[TS]\d+(?: [^\]]*)?|A|A→C\d+|会话|信号)\] |^\[…省略 U\d+–U\d+|^\[…超出预算`)
+)
+
+// packUserTexts returns the user messages of a pack text, each with its
+// continuation lines, in pack order.
+func packUserTexts(text string) []string {
+	out := make([]string, 0, 8)
+	open := false
+	for _, line := range strings.Split(text, "\n") {
+		if match := packUserLine.FindStringSubmatch(line); match != nil {
+			out = append(out, match[1])
+			open = true
+			continue
+		}
+		if packLabelLine.MatchString(line) {
+			open = false
+			continue
+		}
+		if open {
+			out[len(out)-1] += "\n" + line
+		}
+	}
+	return out
+}
 
 // recoverSentence finds the text behind a repeated fingerprint in the
 // facets or packs of its sessions, and collects evidence audit ids.
@@ -389,12 +419,8 @@ func (runner *Runner) sentenceInPack(pack storage.SessionPack, matches func(stri
 		return ""
 	}
 	defer clear(plaintext)
-	for _, line := range strings.Split(string(plaintext), "\n") {
-		match := packTextLine.FindStringSubmatch(line)
-		if match == nil {
-			continue
-		}
-		for _, sentence := range splitSentences(match[1]) {
+	for _, message := range packUserTexts(string(plaintext)) {
+		for _, sentence := range splitSentences(message) {
 			if matches(sentence) {
 				return strings.TrimSpace(sentence)
 			}
