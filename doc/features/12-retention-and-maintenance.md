@@ -39,15 +39,21 @@
 
 同一 writer 事务按以下顺序执行：
 
-1. 创建必要的 retention checkpoints；
-2. 在删除集合内按叶到根删除 turns；
-3. 删除目标 audit_records，由外键级联清理 HTTP、parsed result、token link、turn 子表以及派生的 `audit_analysis` 与 `agent_spawn_hints` 行（上下文洞察，不在完整性链内，也不需要任何额外清理步骤）；
-4. 删除不再包含 turn 的 conversations；
-5. 删除不再被 turn envelope、context op 或 response item 引用的 content objects；
-6. 删除不再被 content object 引用的 binary objects；
-7. 删除本批过期 audit_gaps。
+1. 读出候选对象：目标 turns 的 conversation、request/response envelope、response item，以及目标 turns 和其直接子轮次的 context op 引用的 content object；
+2. 创建必要的 retention checkpoints；
+3. 在删除集合内按叶到根删除 turns；
+4. 读出本批 audit 的 `audit_analysis.detail_root`，再删除目标 audit_records，由外键级联清理 HTTP、parsed result、token link、turn 子表以及派生的 `audit_analysis` 与 `agent_spawn_hints` 行（上下文洞察，不在完整性链内）；
+5. 从上一步读出的 detail root 出发裁剪 `analysis_detail_objects`（见下文）；
+6. 在候选中删除不再包含 turn 的 conversations；
+7. 先读出候选 content object 引用的 binary，再在候选中删除不再被 turn envelope、context op 或 response item 引用的 content objects；
+8. 在上一步读出的 binary 中删除不再被 content object 引用的 binary objects；
+9. 删除本批过期 audit_gaps。
 
-对象 GC 使用 `NOT EXISTS` 和专用引用索引，不使用手工 ref_count。`content_binary_refs` 随 content object 级联删除，binary object 只有在没有任何引用后才删除。
+对象 GC 使用 `NOT EXISTS` 和专用引用索引，不使用手工 ref_count，也不做全表扫描：每条语句只检查本批候选（每条最多 500 个参数），引用检查分别走 `turns_conversation_created_idx`、`turns_request_envelope_idx`、`turns_response_envelope_idx`、`turn_context_ops_object_idx`、`turn_response_items_object_idx` 和 `content_binary_refs_binary_idx`，开销随本批删除量而不是表大小增长。全表 `NOT EXISTS` 放在唯一 writer 事务里，库一大就会超过语句超时并拖垮同批审计写入。`content_binary_refs` 随 content object 级联删除，binary object 只有在没有任何引用后才删除。只有 retention 会删除 turn 或改写 context op，所以候选覆盖了所有可能被释放的对象；早期版本遗留、与本批无关的孤儿对象不会被顺带清理。
+
+`analysis_detail_objects` 是共享前缀树，不做全表可达性扫描，而是定向裁剪：从被释放的 detail root 开始，删除既没有子节点（`analysis_detail_parent_idx`）、也不再是任何 `audit_analysis.detail_root`（`audit_analysis_detail_root_idx`）的节点，再对被删节点的父节点重复，直到遇到仍被共享的节点为止。开销只与被释放的链长度有关，与表大小无关。全表递归扫描放在唯一 writer 事务里，表一大就会超过语句超时并拖垮同批审计写入，因此禁止使用。
+
+重新分析替换 detail root 时，`SaveAnalysis` 在同一事务里按旧 root 裁剪，所以没有过期 audit 的 retention 轮次不处理 analysis detail。定向裁剪只覆盖被释放的链；早期版本遗留的、不在任何被释放链上的孤儿节点不会被自动清理（属于可重算的派生数据，不影响证据）。
 
 ## 5. 执行方式
 
@@ -67,10 +73,12 @@ retention 失败不改变 data-plane admission；数据库 writer 本身不健�
 - 删除简单 audit 后不存在 HTTP/parsed/token/turn 孤儿行。
 - 删除父轮次但保留子轮次时，子轮次成为 `retention_checkpoint`，provider request/response 仍可精确重建。
 - 多层删除集合按叶到根完成，不触发 parent RESTRICT，也不会形成循环。
-- 仅由过期 turns 引用的 content/binary objects 被清理，共享对象继续保留。
+- 仅由过期 turns 引用的 content/binary objects 被清理，共享对象继续保留；候选超过单条语句上限时分批完成，本批释放的 content object 和 conversation 全部被回收。
 - 事务中任何一步失败完整回滚。
 - 日志不包含 Header、Body、Query、Token、主密钥或底层数据库错误原文。
 - 删除 audit 后不残留 `audit_analysis` 与 `agent_spawn_hints` 行。
+- 重新分析替换 detail root 后，旧链上不再被共享的节点在保存时即被删除，仍被其他 audit 共享的前缀保留。
+- retention 只裁剪本批被删 audit 的 detail 链，长链逐层裁剪完成，仍保留 audit 的节点不受影响；一次释放的根超过单条语句上限时分批完成。
 
 ## 7. 运维
 

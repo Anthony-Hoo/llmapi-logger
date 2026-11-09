@@ -353,3 +353,157 @@ func assertTableCount(t *testing.T, database *sql.DB, table string, want int) {
 		t.Fatalf("%s count = %d, want %d", table, count, want)
 	}
 }
+
+func TestDeleteExpiredCollectsCandidatesAcrossBatchesAndKeepsSharedObjects(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	cipher, err := security.NewAESGCM(bytes.Repeat([]byte{0x37}, security.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredEnded := int64(200)
+	keptEnded := int64(2200)
+	insertRetentionAudit(t, store, "wide-expired", 100, &expiredEnded, ParseProcessing, false)
+	insertRetentionAudit(t, store, "wide-kept", 2000, &keptEnded, ParseProcessing, false)
+
+	shared := map[string]any{"role": "user", "content": "shared question"}
+	save := func(auditID string, createdAt int64, values []map[string]any) {
+		t.Helper()
+		items := make([]auditmodel.Item, 0, len(values))
+		messages := make([]any, 0, len(values))
+		for _, value := range values {
+			items = append(items, auditmodel.Item{Slot: auditmodel.SlotMessages, Kind: "user_message", Value: value})
+			messages = append(messages, value)
+		}
+		answer := map[string]any{"role": "assistant", "content": "answer " + auditID}
+		response := map[string]any{"id": "response-" + auditID, "choices": []any{map[string]any{"message": answer}}}
+		turn, err := auditmodel.Prepare(auditmodel.Turn{
+			AuditID: auditID, Protocol: "openai", ParserName: "parser",
+			RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope,
+			RequestEnvelope:  map[string]any{"model": "model-example"},
+			ResponseEnvelope: map[string]any{"id": "response-" + auditID, "choices": []any{map[string]any{"message": auditmodel.ItemMarker(0)}}},
+			RequestItems:     items,
+			ResponseItems:    []auditmodel.Item{{Slot: auditmodel.SlotChoice, Kind: "assistant_message", Value: answer}},
+			RequestOriginal:  map[string]any{"model": "model-example", "messages": messages},
+			ResponseOriginal: response, ResponseID: "response-" + auditID, CreatedAtNS: createdAt,
+		}, cipher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SaveParsedAudit(ctx, ParsedAudit{
+			Result: ParsedResult{AuditID: auditID, ParserName: "parser", ParserVersion: "2", Status: ParseOK, ParsedAtNS: createdAt + 100},
+			Turn:   &turn,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// More distinct request items than one candidate statement binds.
+	wide := []map[string]any{shared}
+	for index := 0; index < gcBatchSize+150; index++ {
+		wide = append(wide, map[string]any{"role": "user", "content": fmt.Sprintf("expired message %d", index)})
+	}
+	save("wide-expired", 100, wide)
+	save("wide-kept", 2000, []map[string]any{shared})
+
+	var sharedHash []byte
+	if err := store.readerDB.QueryRow(`
+SELECT o.object_hash FROM turn_context_ops AS o
+WHERE o.turn_id = 'wide-kept' AND o.object_hash IS NOT NULL`).Scan(&sharedHash); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.DeleteExpired(ctx, 1000, RetentionBatchLimit, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedAudits != 1 {
+		t.Fatalf("delete result = %+v", result)
+	}
+	assertTableCount(t, store.readerDB, "turns", 1)
+	var sharedCount int
+	if err := store.readerDB.QueryRow(`SELECT COUNT(*) FROM content_objects WHERE object_hash = $1`, sharedHash).Scan(&sharedCount); err != nil {
+		t.Fatal(err)
+	}
+	if sharedCount != 1 {
+		t.Fatalf("shared content object removed")
+	}
+	var orphanContent int
+	if err := store.readerDB.QueryRow(`
+SELECT COUNT(*)
+FROM content_objects AS c
+WHERE NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.request_envelope_hash = c.object_hash)
+  AND NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.response_envelope_hash = c.object_hash)
+  AND NOT EXISTS (SELECT 1 FROM turn_context_ops AS o WHERE o.object_hash = c.object_hash)
+  AND NOT EXISTS (SELECT 1 FROM turn_response_items AS r WHERE r.object_hash = c.object_hash)`).Scan(&orphanContent); err != nil {
+		t.Fatal(err)
+	}
+	if orphanContent != 0 {
+		t.Fatalf("unreachable content objects = %d", orphanContent)
+	}
+	var orphanConversations int
+	if err := store.readerDB.QueryRow(`
+SELECT COUNT(*) FROM conversations AS c
+WHERE NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.conversation_id = c.conversation_id)`).Scan(&orphanConversations); err != nil {
+		t.Fatal(err)
+	}
+	if orphanConversations != 0 {
+		t.Fatalf("unreachable conversations = %d", orphanConversations)
+	}
+}
+
+func TestDeleteExpiredKeepsBinaryStillReferencedByRetainedTurn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	cipher, err := security.NewAESGCM(bytes.Repeat([]byte{0x38}, security.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredEnded := int64(200)
+	keptEnded := int64(2200)
+	insertRetentionAudit(t, store, "binary-expired", 100, &expiredEnded, ParseProcessing, false)
+	insertRetentionAudit(t, store, "binary-kept", 2000, &keptEnded, ParseProcessing, false)
+	image := "data:image/png;base64," + base64.StdEncoding.EncodeToString(append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x74}, 256)...))
+	save := func(auditID string, createdAt int64, caption string) {
+		t.Helper()
+		// Different wrapper objects carry the same image bytes, so the
+		// content objects differ while the binary object is shared.
+		output := map[string]any{"type": "output_image", "caption": caption, "data": image}
+		response := map[string]any{"id": "response-" + auditID, "output": []any{output}}
+		user := map[string]any{"role": "user", "content": "draw " + auditID}
+		turn, err := auditmodel.Prepare(auditmodel.Turn{
+			AuditID: auditID, Protocol: "openai", ParserName: "parser",
+			RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope,
+			RequestEnvelope:  map[string]any{"model": "model-example"},
+			ResponseEnvelope: map[string]any{"id": "response-" + auditID, "output": []any{auditmodel.ItemMarker(0)}},
+			RequestItems:     []auditmodel.Item{{Slot: auditmodel.SlotMessages, Kind: "user_message", Value: user}},
+			ResponseItems:    []auditmodel.Item{{Slot: auditmodel.SlotOutput, Kind: "output_image", Value: output}},
+			RequestOriginal:  map[string]any{"model": "model-example", "messages": []any{user}},
+			ResponseOriginal: response, ResponseID: "response-" + auditID, CreatedAtNS: createdAt,
+		}, cipher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(turn.Binaries) != 1 {
+			t.Fatalf("binaries = %d, want 1", len(turn.Binaries))
+		}
+		if err := store.SaveParsedAudit(ctx, ParsedAudit{
+			Result: ParsedResult{AuditID: auditID, ParserName: "parser", ParserVersion: "2", Status: ParseOK, ParsedAtNS: createdAt + 100},
+			Turn:   &turn,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("binary-expired", 100, "first")
+	save("binary-kept", 2000, "second")
+	assertTableCount(t, store.readerDB, "binary_objects", 1)
+	assertTableCount(t, store.readerDB, "content_binary_refs", 2)
+
+	if _, err := store.DeleteExpired(ctx, 1000, RetentionBatchLimit, 0); err != nil {
+		t.Fatal(err)
+	}
+	assertTableCount(t, store.readerDB, "turns", 1)
+	assertTableCount(t, store.readerDB, "content_binary_refs", 1)
+	assertTableCount(t, store.readerDB, "binary_objects", 1)
+}
