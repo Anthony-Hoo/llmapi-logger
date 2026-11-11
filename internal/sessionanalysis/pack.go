@@ -75,6 +75,9 @@ type PackOptions struct {
 	MaxTokens    int
 	Location     *time.Location
 	ClientLabels map[string]string
+	// Project is the value of the session line's project field; empty (org
+	// reports off, or no booking yet) omits the field.
+	Project string
 }
 
 func (options PackOptions) clientLabel(client string) string {
@@ -259,9 +262,13 @@ func sessionHeader(session *Session, signals storage.SessionSignals, options Pac
 	parts := []string{
 		"类型=" + kind,
 		"客户端=" + options.clientLabel(session.Client),
-		"模型=" + modelSummary(session.Rows),
-		"时间=" + formatSpan(signals.FirstNS, signals.LastNS, options.Location) + " 活跃" + formatActive(signals.ActiveNS),
 	}
+	if options.Project != "" {
+		parts = append(parts, "项目="+options.Project)
+	}
+	parts = append(parts,
+		"模型="+modelSummary(session.Rows),
+		"时间="+formatSpan(signals.FirstNS, signals.LastNS, options.Location)+" 活跃"+formatActive(signals.ActiveNS))
 	if session.Kind == KindAgent {
 		parts = append(parts,
 			fmt.Sprintf("请求=%d(%d/%d/%d)", signals.Requests, signals.MainRequests, signals.SubRequests, signals.AuxRequests),

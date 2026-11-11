@@ -50,6 +50,28 @@ type ProjectResolver interface {
 	ProjectName(id int64) string
 }
 
+// projectField renders a booking as the pack's project field (doc 24 section
+// 6.7): the project name with the signal level it matched at, or one of the
+// two unmatched buckets. An unknown booking has no field.
+func projectField(project orgreport.SessionProject) string {
+	switch {
+	case !project.Known:
+		return ""
+	case project.Project > 0:
+		name := project.Name
+		if name == "" {
+			name = "#" + strconv.FormatInt(int64(project.Project), 10)
+		}
+		if project.Level != "" {
+			name += "(" + project.Level + ")"
+		}
+		return name
+	case project.Project == orgreport.ProjectUnattributed:
+		return "未归属"
+	}
+	return "无项目上下文"
+}
+
 // projectColumns maps a booking to the stored project id and bucket. An
 // unknown booking stores neither and is filled in by a later refresh.
 func projectColumns(project orgreport.SessionProject) (*int64, string) {
@@ -353,12 +375,14 @@ func (runner *Runner) analyzeOne(ctx context.Context, root, apiKey []byte, thres
 	if len(apiKey) == 0 {
 		signals.APIKeyFPR = nil
 	}
+	packOptions := runner.packOptions()
 	if options.Projects != nil {
 		project, err := options.Projects.ResolveSession(sessionContext, root, apiKey)
 		if err != nil {
 			return storage.SessionSignals{}, err // stays due and is retried
 		}
 		signals.ProjectID, signals.Bucket = projectColumns(project)
+		packOptions.Project = projectField(project)
 		if project.Service {
 			// A service principal's sessions keep signals only: no pack, no
 			// chat digest and no sentence fingerprints.
@@ -374,7 +398,7 @@ func (runner *Runner) analyzeOne(ctx context.Context, root, apiKey []byte, thres
 	// the session analysed, so they are stored only together with its pack.
 	var stored *storage.SessionPack
 	if signals.Eligible {
-		if pack := BuildSessionPack(session, signals, options.Vocabulary, runner.packOptions()); pack.Text != "" {
+		if pack := BuildSessionPack(session, signals, options.Vocabulary, packOptions); pack.Text != "" {
 			sealed, err := runner.sealPack(key, storage.PackKindSession, pack, signals.APIKeyFPR, signals.NewAPITokenID, signals.Client, signals.FirstNS, signals.LastNS, signals.LastAuditID, 1)
 			if err != nil {
 				return storage.SessionSignals{}, err

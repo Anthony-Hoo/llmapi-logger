@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,14 +97,29 @@ func TestRunnerBooksSessionsToProjects(t *testing.T) {
 	}}
 	now := baseTime.Add(24 * time.Hour)
 	vocab, insightsVocab := testVocabularies(t)
+	cipher := testCipher(t)
 	runner, err := NewRunner(Options{
 		Config: config.SessionAnalysisConfig{RunAt: "02:00", SessionIdleMinutes: 120, MinUserTurns: 2, MinActiveSeconds: 1, Pack: config.SessionAnalysisPack{MaxTokens: 6000}},
 		Store:  store, Loader: &fakeLoader{views: views}, Vocabulary: vocab, Insights: insightsVocab,
-		Fingerprints: testFingerprinter{}, Cipher: testCipher(t), Location: time.UTC, Projects: projects,
+		Fingerprints: testFingerprinter{}, Cipher: cipher, Location: time.UTC, Projects: projects,
 		Now: func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	service, err := NewQueryService(store, runner, cipher, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.UseProjects(projects)
+	sessionLine := func(id string) string {
+		t.Helper()
+		pack, err := service.Pack(context.Background(), id, nil, Viewer{Role: "admin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		line, _, _ := strings.Cut(pack.Text, "\n")
+		return line
 	}
 	agentID, chatID := analysisID(sessionK, ownKey), analysisID(chatRoot, ownKey)
 	run := func() storage.SessionAnalysisRun {
@@ -128,6 +144,17 @@ func TestRunnerBooksSessionsToProjects(t *testing.T) {
 	if !ok || len(store.textFPRs[agentID]) == 0 || len(store.packs) != 2 {
 		t.Fatalf("packs = %d, own pack %v, fingerprints %d", len(store.packs), ok, len(store.textFPRs[agentID]))
 	}
+	// The pack names the project and the level it matched at; a chat digest
+	// spans sessions and names none.
+	if line := sessionLine(agentID); !strings.HasPrefix(line, "[会话] 类型=agent 客户端=Codex 项目=orders(remote) 模型=") {
+		t.Fatalf("session line = %s", line)
+	}
+	if line := sessionLine(chatID); strings.Contains(line, "项目=") {
+		t.Fatalf("digest line = %s", line)
+	}
+	if item := service.sessionItem(agent); item.ProjectID != 10 || item.Project != "orders" || item.Bucket != storage.BucketAttributed {
+		t.Fatalf("item = %d %q %q", item.ProjectID, item.Project, item.Bucket)
+	}
 
 	// A rule change re-books the session without analysing it again.
 	projects.byRoot[hex.EncodeToString(sessionK)] = orgreport.SessionProject{Known: true, Project: 11, Name: "billing", Level: orgreport.LevelRoot}
@@ -136,6 +163,10 @@ func TestRunnerBooksSessionsToProjects(t *testing.T) {
 	}
 	if agent = store.signals[agentID]; projectID(agent) != 11 || agent.Bucket != storage.BucketAttributed || store.packs[agentID].BuiltAtNS != firstPack.BuiltAtNS {
 		t.Fatalf("after rule change: %d %q", projectID(agent), agent.Bucket)
+	}
+	// The pack keeps the name it was built with; the stored booking is current.
+	if line := sessionLine(agentID); !strings.Contains(line, "项目=orders(remote)") {
+		t.Fatalf("rebooking rebuilt the pack: %s", line)
 	}
 
 	// No verdict (identity extraction still running) keeps the stored booking.
