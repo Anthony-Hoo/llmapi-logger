@@ -14,7 +14,8 @@ import (
 const maxRepeatedSessionKeys = 10
 
 // ActiveAnalysisKeys lists the API keys with analysed sessions whose last
-// request falls in [fromNS, toNS).
+// request falls in [fromNS, toNS). Sessions of service principals do not
+// count: they are not reported.
 func (store *Store) ActiveAnalysisKeys(ctx context.Context, fromNS, toNS int64) ([]storage.ScopeKey, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
@@ -25,7 +26,7 @@ func (store *Store) ActiveAnalysisKeys(ctx context.Context, fromNS, toNS int64) 
 	rows, err := store.readerDB.QueryContext(ctx, `
 SELECT s.api_key_fpr, MAX(s.newapi_token_id)
 FROM session_signals AS s
-WHERE s.last_ns >= $1 AND s.last_ns < $2 AND s.api_key_fpr IS NOT NULL
+WHERE s.last_ns >= $1 AND s.last_ns < $2 AND s.api_key_fpr IS NOT NULL AND s.bucket IS DISTINCT FROM 'service'
 GROUP BY s.api_key_fpr
 ORDER BY s.api_key_fpr`, fromNS, toNS)
 	if err != nil {

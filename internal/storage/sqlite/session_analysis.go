@@ -23,6 +23,14 @@ func (store *Store) SaveSessionSignals(context.Context, storage.SessionSignals, 
 	return nil
 }
 
+func (store *Store) ListSessionProjects(context.Context, int64, int64, int) ([]storage.SessionProjectRef, error) {
+	return nil, nil
+}
+
+func (store *Store) UpdateSessionProjects(context.Context, []storage.SessionProjectRef) error {
+	return nil
+}
+
 func (store *Store) PruneSessionAnalysis(context.Context, int64) (int64, error) {
 	return 0, nil
 }

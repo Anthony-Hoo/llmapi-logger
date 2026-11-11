@@ -109,7 +109,7 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 		_ = json.Unmarshal([]byte(row.Evidence), &item.Evidence)
 		response.Suggestions = append(response.Suggestions, item)
 	}
-	filter := storage.SessionSignalFilter{FromNS: start.UnixNano(), ToNS: start.AddDate(0, 0, 7).UnixNano(), Scope: storageScope(scope)}
+	filter := storage.SessionSignalFilter{FromNS: start.UnixNano(), ToNS: start.AddDate(0, 0, 7).UnixNano(), Scope: storageScope(scope), ExcludeService: true}
 	seen := map[string]bool{}
 	for _, flag := range []string{"loop", "thrash", "unverified"} {
 		filter.Flags = []string{flag}
@@ -121,7 +121,7 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 			id := hex.EncodeToString(row.SessionKey)
 			if !seen[id] {
 				seen[id] = true
-				response.Optimizations = append(response.Optimizations, mapSession(row))
+				response.Optimizations = append(response.Optimizations, service.sessionItem(row))
 			}
 		}
 	}

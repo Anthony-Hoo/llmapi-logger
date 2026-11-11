@@ -13,6 +13,7 @@ import (
 
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/insights"
+	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -35,6 +36,39 @@ type Store interface {
 	SaveChatDigests(ctx context.Context, bucket storage.ChatDigestBucket, chunks []storage.ChatDigestChunk, staleKeys [][]byte) error
 	ListFacetCandidates(ctx context.Context, settledBeforeNS int64, promptVersion, model string, limit int) ([]storage.SessionPack, error)
 	SaveSessionFacet(ctx context.Context, facet storage.SessionFacet, fprs []storage.SessionTextFPR) error
+	// ListSessionProjects and UpdateSessionProjects keep the stored booking of
+	// recent sessions in step with the project rules (ProjectResolver only).
+	ListSessionProjects(ctx context.Context, sinceNS, computedBeforeNS int64, limit int) ([]storage.SessionProjectRef, error)
+	UpdateSessionProjects(ctx context.Context, refs []storage.SessionProjectRef) error
+}
+
+// ProjectResolver books an analysis session to a project of the organisation
+// reports (doc 23). It is nil when org reports are disabled: sessions then
+// carry no project and no bucket, and nothing is treated as a service.
+type ProjectResolver interface {
+	ResolveSession(ctx context.Context, agentRootFPR, apiKeyFPR []byte) (orgreport.SessionProject, error)
+	ProjectName(id int64) string
+}
+
+// projectColumns maps a booking to the stored project id and bucket. An
+// unknown booking stores neither and is filled in by a later refresh.
+func projectColumns(project orgreport.SessionProject) (*int64, string) {
+	var id *int64
+	if project.Known && project.Project > 0 {
+		value := int64(project.Project)
+		id = &value
+	}
+	switch {
+	case project.Service:
+		return id, storage.BucketService
+	case !project.Known:
+		return nil, ""
+	case project.Project > 0:
+		return id, storage.BucketAttributed
+	case project.Project == orgreport.ProjectUnattributed:
+		return nil, storage.BucketUnattributed
+	}
+	return nil, storage.BucketNoContext
 }
 
 // Run triggers.
@@ -63,6 +97,8 @@ type Options struct {
 	Insights      *insights.Vocabulary
 	Fingerprints  Fingerprinter
 	Cipher        security.Cipher
+	// Projects is nil unless organisation reports are enabled.
+	Projects ProjectResolver
 	// LLM is nil unless session_analysis.llm.enabled.
 	LLM          Completer
 	ClientLabels map[string]string
@@ -235,6 +271,11 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 			reasons[signals.SkipReason]++
 		}
 	}
+	if rebooked, err := runner.refreshProjects(ctx, started, thresholds); err != nil {
+		reasons["project_refresh_error"]++
+	} else if rebooked > 0 {
+		reasons["rebooked"] += rebooked
+	}
 	// Every bucket with a pending member is rebuilt: new single-turn chats,
 	// and the remaining members of digests dropped because a member left the
 	// single-turn category or expired. A failed rebuild stays pending.
@@ -312,6 +353,18 @@ func (runner *Runner) analyzeOne(ctx context.Context, root, apiKey []byte, thres
 	if len(apiKey) == 0 {
 		signals.APIKeyFPR = nil
 	}
+	if options.Projects != nil {
+		project, err := options.Projects.ResolveSession(sessionContext, root, apiKey)
+		if err != nil {
+			return storage.SessionSignals{}, err // stays due and is retried
+		}
+		signals.ProjectID, signals.Bucket = projectColumns(project)
+		if project.Service {
+			// A service principal's sessions keep signals only: no pack, no
+			// chat digest and no sentence fingerprints.
+			signals.Eligible, signals.SkipReason, fprs = false, SkipService, nil
+		}
+	}
 	if signals.SkipReason == SkipSingleTurnChat {
 		// Saving queues the bucket for a digest rebuild; leaving a bucket
 		// drops the digests that still hold this chat.
@@ -333,6 +386,80 @@ func (runner *Runner) analyzeOne(ctx context.Context, root, apiKey []byte, thres
 		return storage.SessionSignals{}, err
 	}
 	return signals, nil
+}
+
+const projectRefreshBatch = 200
+
+// refreshProjects re-books the sessions of the two reported weeks that this
+// run did not analyse: project rules and principal classes change after a
+// session was analysed, and the project identity backfill may finish later.
+// A changed project or bucket is a column update; a session that became or
+// stopped being a service is analysed again, which adds or removes its pack,
+// digest membership and fingerprints. It returns the number of changed rows.
+func (runner *Runner) refreshProjects(ctx context.Context, started time.Time, thresholds Thresholds) (int64, error) {
+	options := runner.options
+	if options.Projects == nil {
+		return 0, nil
+	}
+	since := runner.weekStart(started).AddDate(0, 0, -7)
+	refs, err := options.Store.ListSessionProjects(ctx, since.UnixNano(), started.UnixNano(), maxCandidatesPerRun)
+	if err != nil {
+		return 0, err
+	}
+	changed := int64(0)
+	updates := make([]storage.SessionProjectRef, 0, projectRefreshBatch)
+	flush := func() error {
+		if len(updates) == 0 {
+			return nil
+		}
+		err := options.Store.UpdateSessionProjects(ctx, updates)
+		if err == nil {
+			changed += int64(len(updates))
+		}
+		updates = updates[:0]
+		return err
+	}
+	for _, ref := range refs {
+		if err := ctx.Err(); err != nil {
+			return changed, err
+		}
+		project, err := options.Projects.ResolveSession(ctx, ref.AgentRootFPR, ref.APIKeyFPR)
+		if err != nil {
+			return changed, err
+		}
+		id, bucket := projectColumns(project)
+		if bucket == "" || (bucket == ref.Bucket && sameID(id, ref.ProjectID)) {
+			continue // no verdict yet, or unchanged
+		}
+		if (bucket == storage.BucketService) != (ref.Bucket == storage.BucketService) {
+			if _, err := runner.analyzeOne(ctx, ref.AgentRootFPR, ref.APIKeyFPR, thresholds); err == nil {
+				changed++
+			}
+			continue
+		}
+		if bucket == storage.BucketService {
+			continue // still a service; its project is not reported
+		}
+		updates = append(updates, storage.SessionProjectRef{SessionKey: ref.SessionKey, ProjectID: id, Bucket: bucket})
+		if len(updates) == projectRefreshBatch {
+			if err := flush(); err != nil {
+				return changed, err
+			}
+		}
+	}
+	return changed, flush()
+}
+
+func sameID(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+// weekStart is the start of the report week containing t.
+func (runner *Runner) weekStart(t time.Time) time.Time {
+	return WeekStart(t, runner.options.Location)
 }
 
 // PackAAD is the additional data binding a pack ciphertext to its key.

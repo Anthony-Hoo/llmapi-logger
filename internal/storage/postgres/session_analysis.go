@@ -204,9 +204,10 @@ INSERT INTO session_signals (
     compactions, model_switches, length_stops, upstream_errors,
     tool_calls, tool_failures, tool_unknown, max_failure_streak, loops, max_loop_length, thrash_files, max_file_writes,
     verified, error_pastes, interrupts, corrections, heavy_model, danger_counts, secret_counts,
-    eligible, skip_reason, signal_version, computed_at_ns, digest_bucket, digest_pending
+    eligible, skip_reason, signal_version, computed_at_ns, digest_bucket, digest_pending, project_id, bucket
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
-          $28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48::bytea,$48::bytea IS NOT NULL)
+          $28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48::bytea,$48::bytea IS NOT NULL,
+          $49,$50)
 ON CONFLICT (session_key) DO UPDATE SET
     agent_root_fpr = excluded.agent_root_fpr, kind = excluded.kind, api_key_fpr = excluded.api_key_fpr, newapi_user_id = excluded.newapi_user_id,
     newapi_token_id = excluded.newapi_token_id, client = excluded.client, main_session_id = excluded.main_session_id,
@@ -225,14 +226,15 @@ ON CONFLICT (session_key) DO UPDATE SET
     heavy_model = excluded.heavy_model, danger_counts = excluded.danger_counts, secret_counts = excluded.secret_counts,
     eligible = excluded.eligible, skip_reason = excluded.skip_reason, signal_version = excluded.signal_version,
     computed_at_ns = excluded.computed_at_ns, digest_bucket = excluded.digest_bucket,
-    digest_pending = excluded.digest_pending`,
+    digest_pending = excluded.digest_pending, project_id = excluded.project_id, bucket = excluded.bucket`,
 		s.SessionKey, s.AgentRootFPR, s.Kind, nullableBytes(s.APIKeyFPR), s.NewAPIUserID, s.NewAPITokenID, nullText(s.Client), nullText(s.MainSessionID), nullText(s.MainModel),
 		s.FirstNS, s.LastNS, s.LastAuditID, s.Requests, s.MainRequests, s.SubRequests, s.AuxRequests, s.Subagents, s.MaxDepth,
 		s.UserTurns, s.ActiveNS, s.InputTokens, s.OutputTokens, s.CacheReadTokens, s.CostUSD,
 		s.Compactions, s.ModelSwitches, s.LengthStops, s.UpstreamErrors,
 		s.ToolCalls, s.ToolFailures, s.ToolUnknown, s.MaxFailureStreak, s.Loops, s.MaxLoopLength, s.ThrashFiles, s.MaxFileWrites,
 		s.Verified, s.ErrorPastes, s.Interrupts, s.Corrections, s.HeavyModel, danger, secret,
-		s.Eligible, nullText(s.SkipReason), s.SignalVersion, s.ComputedAtNS, nullableBytes(s.DigestBucket))
+		s.Eligible, nullText(s.SkipReason), s.SignalVersion, s.ComputedAtNS, nullableBytes(s.DigestBucket),
+		s.ProjectID, nullText(s.Bucket))
 	if err != nil {
 		return fmt.Errorf("postgres writer: upsert session signals: %w", err)
 	}
@@ -250,13 +252,95 @@ ON CONFLICT (session_key) DO UPDATE SET
 	}
 	for _, fpr := range fprs {
 		if _, err := tx.Exec(`
-INSERT INTO session_text_fprs (session_key, source, fpr, api_key_fpr, seen_at_ns)
-VALUES ($1, $2, $3, $4, $5) ON CONFLICT (session_key, source, fpr) DO UPDATE SET seen_at_ns = excluded.seen_at_ns`,
-			s.SessionKey, fpr.Source, fpr.FPR, nullableBytes(fpr.APIKeyFPR), fpr.SeenAtNS); err != nil {
+INSERT INTO session_text_fprs (session_key, source, fpr, api_key_fpr, seen_at_ns, project_id)
+VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (session_key, source, fpr) DO UPDATE SET
+    seen_at_ns = excluded.seen_at_ns, project_id = excluded.project_id`,
+			s.SessionKey, fpr.Source, fpr.FPR, nullableBytes(fpr.APIKeyFPR), fpr.SeenAtNS, s.ProjectID); err != nil {
 			return fmt.Errorf("postgres writer: add session text fingerprint: %w", err)
 		}
 	}
+	// Facet fingerprints are written by the facet stage and follow the booking.
+	if _, err := tx.Exec(`UPDATE session_text_fprs SET project_id = $2 WHERE session_key = $1 AND project_id IS DISTINCT FROM $2`,
+		s.SessionKey, s.ProjectID); err != nil {
+		return fmt.Errorf("postgres writer: rebook session text fingerprints: %w", err)
+	}
 	return nil
+}
+
+// ListSessionProjects returns the stored booking of the sessions whose last
+// request is at or after sinceNS and whose signals were computed before
+// computedBeforeNS, most recent first.
+func (store *Store) ListSessionProjects(ctx context.Context, sinceNS, computedBeforeNS int64, limit int) ([]storage.SessionProjectRef, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	if limit <= 0 {
+		return nil, errors.New("postgres: session project limit must be positive")
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT s.session_key, s.agent_root_fpr, s.api_key_fpr, s.project_id, COALESCE(s.bucket, '')
+FROM session_signals AS s
+WHERE s.last_ns >= $1 AND s.computed_at_ns < $2
+ORDER BY s.last_ns DESC, s.session_key
+LIMIT $3`, sinceNS, computedBeforeNS, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list session projects: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.SessionProjectRef, 0)
+	for rows.Next() {
+		var ref storage.SessionProjectRef
+		if err := rows.Scan(&ref.SessionKey, &ref.AgentRootFPR, &ref.APIKeyFPR, &ref.ProjectID, &ref.Bucket); err != nil {
+			return nil, fmt.Errorf("postgres: scan session project: %w", err)
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate session projects: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateSessionProjects rebooks sessions (and their sentence fingerprints) in
+// one transaction. It never turns a session into or out of the service
+// bucket: that changes what is stored for it and needs a full re-analysis.
+func (store *Store) UpdateSessionProjects(ctx context.Context, refs []storage.SessionProjectRef) error {
+	if ctx == nil {
+		return errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return ErrClosed
+	}
+	owned := make([]storage.SessionProjectRef, 0, len(refs))
+	for _, ref := range refs {
+		if len(ref.SessionKey) != 32 || ref.Bucket == storage.BucketService {
+			return errors.New("postgres: invalid session project update")
+		}
+		owned = append(owned, storage.SessionProjectRef{SessionKey: append([]byte(nil), ref.SessionKey...), ProjectID: ref.ProjectID, Bucket: ref.Bucket})
+	}
+	if len(owned) == 0 {
+		return nil
+	}
+	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+		for _, ref := range owned {
+			if _, err := tx.Exec(`
+UPDATE session_signals SET project_id = $2, bucket = $3
+WHERE session_key = $1 AND bucket IS DISTINCT FROM 'service'`, ref.SessionKey, ref.ProjectID, nullText(ref.Bucket)); err != nil {
+				return fmt.Errorf("postgres writer: rebook session: %w", err)
+			}
+			if _, err := tx.Exec(`
+UPDATE session_text_fprs SET project_id = $2
+WHERE session_key = $1 AND project_id IS DISTINCT FROM $2
+  AND EXISTS (SELECT 1 FROM session_signals AS s WHERE s.session_key = $1 AND s.bucket IS DISTINCT FROM 'service')`,
+				ref.SessionKey, ref.ProjectID); err != nil {
+				return fmt.Errorf("postgres writer: rebook session text fingerprints: %w", err)
+			}
+		}
+		return nil
+	})})
 }
 
 // dropChatDigestsOf drops every chat digest that holds a session selected by
@@ -381,7 +465,7 @@ const sessionSignalColumns = `s.session_key, s.agent_root_fpr, s.digest_bucket, 
     s.tool_calls, s.tool_failures, s.tool_unknown, s.max_failure_streak, s.loops, s.max_loop_length,
     s.thrash_files, s.max_file_writes, s.verified, s.error_pastes, s.interrupts, s.corrections,
     s.heavy_model, s.danger_counts, s.secret_counts, s.eligible, COALESCE(s.skip_reason, ''),
-    s.signal_version, s.computed_at_ns,
+    s.signal_version, s.computed_at_ns, s.project_id, COALESCE(s.bucket, ''),
     COALESCE((SELECT f.facet_status FROM session_facets AS f WHERE f.session_key = s.session_key), ''),
     COALESCE((SELECT f.task_type FROM session_facets AS f WHERE f.session_key = s.session_key), ''),
     COALESCE((SELECT f.outcome FROM session_facets AS f WHERE f.session_key = s.session_key), '')`
@@ -396,7 +480,7 @@ func scanSessionSignals(scanner interface{ Scan(...any) error }) (storage.Sessio
 		&s.ToolCalls, &s.ToolFailures, &s.ToolUnknown, &s.MaxFailureStreak, &s.Loops, &s.MaxLoopLength,
 		&s.ThrashFiles, &s.MaxFileWrites, &s.Verified, &s.ErrorPastes, &s.Interrupts, &s.Corrections,
 		&s.HeavyModel, &s.DangerCounts, &s.SecretCounts, &s.Eligible, &s.SkipReason,
-		&s.SignalVersion, &s.ComputedAtNS,
+		&s.SignalVersion, &s.ComputedAtNS, &s.ProjectID, &s.Bucket,
 		&s.FacetStatus, &s.FacetTaskType, &s.FacetOutcome)
 	return s, err
 }
@@ -452,6 +536,15 @@ func sessionSignalWhere(filter storage.SessionSignalFilter) (string, []any, erro
 			ownership = "(" + ownership + " OR s.newapi_token_id = " + push(*filter.Scope.TokenID) + ")"
 		}
 		conditions = append(conditions, ownership)
+	}
+	if filter.ExcludeService {
+		conditions = append(conditions, "s.bucket IS DISTINCT FROM 'service'")
+	}
+	if filter.ProjectID != nil {
+		conditions = append(conditions, "s.project_id = "+push(*filter.ProjectID))
+	}
+	if filter.UserIDs != nil {
+		conditions = append(conditions, "s.newapi_user_id = ANY("+push(filter.UserIDs)+"::bigint[])")
 	}
 	for _, flag := range filter.Flags {
 		condition, ok := sessionSignalFlagConditions[flag]
@@ -546,14 +639,15 @@ SELECT COUNT(*),
        COUNT(*) FILTER (WHERE s.secret_counts <> '{}'),
        COUNT(*) FILTER (WHERE s.compactions > 0),
        COALESCE(SUM(s.input_tokens), 0),
-       COALESCE(SUM(s.cache_read_tokens), 0)
+       COALESCE(SUM(s.cache_read_tokens), 0),
+       COUNT(DISTINCT COALESCE('u' || s.newapi_user_id::text, 'k' || encode(s.api_key_fpr, 'hex')))
 FROM session_signals AS s WHERE `+where, arguments...).Scan(
 		&totals.Sessions, &totals.AgentSessions, &totals.ChatSessions, &totals.Eligible,
 		&totals.CostUSD, &totals.BilledSessions, &totals.LoopSessions, &totals.LoopCostUSD,
 		&totals.ThrashSessions, &totals.Unverified, &totals.WithWrites, &totals.FailureSessions,
 		&totals.Corrections, &totals.CorrectionSess, &totals.ErrorPasteSess, &totals.InterruptSess,
 		&totals.HeavyModelSess, &totals.DangerSessions, &totals.SecretSessions, &totals.CompactionSess,
-		&totals.InputTokens, &totals.CacheReadTokens)
+		&totals.InputTokens, &totals.CacheReadTokens, &totals.Contributors)
 	if err != nil {
 		return storage.SessionSignalTotals{}, fmt.Errorf("postgres: aggregate session signals: %w", err)
 	}

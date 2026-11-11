@@ -117,7 +117,12 @@ func loadSessionAnalysisVocabulary(configuration config.SessionAnalysisConfig) (
 
 // assembleSessionAnalysis wires the daily batch and its management API. It
 // returns nils when the feature is off or its prerequisites are unavailable.
-func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
+//
+// projects is the organisation report service, nil when org reports are off.
+// With it, sessions are booked to projects, service principals keep signals
+// only, and days and weeks follow org_reports.timezone instead of the process
+// time zone (doc 24 section 4).
+func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, projects *orgreport.Service, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
 	analysis := configuration.SessionAnalysis
 	if !analysis.Enabled || store == nil || loader == nil || cipher == nil || insightsVocabulary == nil || fingerprints == nil {
 		return nil, nil, nil
@@ -135,7 +140,19 @@ func assembleSessionAnalysis(configuration config.Config, store runtimeStore, lo
 		}
 		model, modelName = client, client.Model()
 	}
+	var resolver sessionanalysis.ProjectResolver
+	var location *time.Location
+	if projects != nil {
+		resolver = projects
+		zone, err := config.OrgLocation(configuration.OrgReports.Timezone)
+		if err != nil {
+			return nil, nil, fmt.Errorf("assemble session analysis time zone: %w", err)
+		}
+		location = zone
+	}
 	runner, err := sessionanalysis.NewRunner(sessionanalysis.Options{
+		Projects:      resolver,
+		Location:      location,
 		Config:        analysis,
 		RetentionDays: configuration.RetentionDays,
 		Store:         store,
@@ -154,6 +171,10 @@ func assembleSessionAnalysis(configuration config.Config, store runtimeStore, lo
 	service, err := sessionanalysis.NewQueryService(store, runner, cipher, modelName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble session analysis service: %w", err)
+	}
+	if resolver != nil {
+		service.UseProjects(resolver)
+		service.UseLocation(location)
 	}
 	return runner, service, nil
 }
@@ -404,7 +425,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	}
 	var sessionAnalysisService web.SessionAnalysisQuery
 	if queryService != nil {
-		runner, service, err := assembleSessionAnalysis(configuration, runtime.store, queryService, runtime.cipher, vocabulary, runtime.analysisFingerprints, logger)
+		runner, service, err := assembleSessionAnalysis(configuration, runtime.store, queryService, runtime.cipher, vocabulary, runtime.analysisFingerprints, application.orgReports, logger)
 		if err != nil {
 			_ = application.closeComponents()
 			return nil, err

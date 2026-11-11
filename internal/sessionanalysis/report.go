@@ -169,7 +169,9 @@ func hiddenFieldsOf(calibration storage.FacetCalibration) []string {
 func (runner *Runner) reportScope(ctx context.Context, store ReportStore, weekStart time.Time, scope string, key storage.ScopeKey, hidden map[string]bool) error {
 	options := runner.options
 	from, to := weekStart.UnixNano(), weekStart.AddDate(0, 0, 7).UnixNano()
-	filter := storage.SessionSignalFilter{FromNS: from, ToNS: to}
+	// Sessions of service principals keep signals only and stay out of every
+	// report (doc 24 section 5.1).
+	filter := storage.SessionSignalFilter{FromNS: from, ToNS: to, ExcludeService: true}
 	var apiKey []byte
 	if scope == storage.ScopePerson {
 		apiKey = key.APIKeyFPR
@@ -197,7 +199,9 @@ func (runner *Runner) reportScope(ctx context.Context, store ReportStore, weekSt
 	}
 	goals := runner.topGoals(ctx, store, filter)
 	suggestions := runner.topSuggestionTexts(ctx, store, scope, scopeKeyFor(scope, apiKey), key.NewAPITokenID)
-	optimizations, _ := store.TopCostSessions(ctx, storage.SessionSignalFilter{FromNS: from, ToNS: to, Scope: filter.Scope, Flags: []string{"loop"}}, 3)
+	loops := filter
+	loops.Flags = []string{"loop"}
+	optimizations, _ := store.TopCostSessions(ctx, loops, 3)
 	input := NarrativeInput(stats, previous, goals, suggestions, optimizations, scope, options.Location)
 	inputHash := fmt.Sprintf("%x", sha256.Sum256([]byte(input)))
 	row := storage.PeriodStats{

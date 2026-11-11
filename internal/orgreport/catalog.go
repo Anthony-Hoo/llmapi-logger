@@ -380,8 +380,35 @@ func (rule compiledRule) matchPaths(paths []string) bool {
 // strongest signal tier wins, then the lowest project id. knownRoots are the
 // repository roots already seen for the same user.
 func (compiled *Compiled) Resolve(identity Identity, groupID int64, knownRoots []string) ProjectKey {
+	project, _ := compiled.ResolveLevel(identity, groupID, knownRoots)
+	return project
+}
+
+// Signal levels a rule can match at, strongest first.
+const (
+	LevelDeclared = "declared"
+	LevelRemote   = "remote"
+	LevelRoot     = "root"
+	LevelCwd      = "cwd"
+)
+
+var levelNames = [...]string{tierDeclared: LevelDeclared, tierRemote: LevelRemote, tierRoot: LevelRoot, tierCwd: LevelCwd}
+
+// LevelRank orders signal levels, strongest first; an unknown level is last.
+func LevelRank(level string) int {
+	for rank, name := range levelNames {
+		if name == level {
+			return rank
+		}
+	}
+	return len(levelNames)
+}
+
+// ResolveLevel is Resolve that also names the signal level the matching rule
+// hit at ("" unless a project matched).
+func (compiled *Compiled) ResolveLevel(identity Identity, groupID int64, knownRoots []string) (ProjectKey, string) {
 	if identity.Empty() {
-		return ProjectNoContext
+		return ProjectNoContext, ""
 	}
 	resolvedRoot := ""
 	if identity.Cwd != "" {
@@ -399,13 +426,34 @@ func (compiled *Compiled) Resolve(identity Identity, groupID int64, knownRoots [
 			for _, project := range scope {
 				for _, rule := range project.rules {
 					if rule.matches(identity, level, resolvedRoot) {
-						return ProjectKey(project.project.ID)
+						return ProjectKey(project.project.ID), levelNames[level]
 					}
 				}
 			}
 		}
 	}
-	return ProjectUnattributed
+	return ProjectUnattributed, ""
+}
+
+// IsService reports whether a caller is classified as a service principal; a
+// token's class overrides its user's.
+func (compiled *Compiled) IsService(userID, tokenID int64) bool {
+	if class, ok := compiled.tokens[tokenID]; ok && tokenID > 0 {
+		return class == ClassService
+	}
+	return compiled.users[userID] == ClassService
+}
+
+// GroupMembers returns the users of a group, ascending.
+func (compiled *Compiled) GroupMembers(groupID int64) []int64 {
+	members := make([]int64, 0)
+	for user, group := range compiled.members {
+		if group == groupID {
+			members = append(members, user)
+		}
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i] < members[j] })
+	return members
 }
 
 // MatchRules reports whether draft rules match an identity at any tier (rule

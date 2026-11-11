@@ -120,6 +120,11 @@ type SessionItem struct {
 	FacetStatus      string           `json:"facet_status,omitempty"`
 	TaskType         string           `json:"task_type,omitempty"`
 	Outcome          string           `json:"outcome,omitempty"`
+	// Organisation reports only: where the session is booked. Project is the
+	// project's current name, empty when it was deleted.
+	Bucket    string `json:"bucket,omitempty"`
+	ProjectID int64  `json:"project_id,omitempty"`
+	Project   string `json:"project,omitempty"`
 }
 
 // SessionsResponse is one keyset page.
@@ -165,6 +170,31 @@ type QueryService struct {
 	model    string
 	now      func() time.Time
 	location *time.Location
+	// projects is nil unless organisation reports are enabled.
+	projects ProjectResolver
+}
+
+// UseProjects names the projects sessions are booked to (organisation
+// reports) and opens the project and group report scopes.
+func (service *QueryService) UseProjects(projects ProjectResolver) {
+	service.projects = projects
+}
+
+// UseLocation sets the time zone report weeks are cut in; it must be the
+// runner's.
+func (service *QueryService) UseLocation(location *time.Location) {
+	if location != nil {
+		service.location = location
+	}
+}
+
+// sessionItem maps a row and names its project.
+func (service *QueryService) sessionItem(row storage.SessionSignals) SessionItem {
+	item := mapSession(row)
+	if service.projects != nil && item.ProjectID > 0 {
+		item.Project = service.projects.ProjectName(item.ProjectID)
+	}
+	return item
 }
 
 // Default and maximum page sizes and range of the management API.
@@ -299,7 +329,7 @@ func (service *QueryService) Sessions(ctx context.Context, request SessionsQuery
 	}
 	response := SessionsResponse{Items: make([]SessionItem, 0, len(page.Rows))}
 	for _, row := range page.Rows {
-		response.Items = append(response.Items, mapSession(row))
+		response.Items = append(response.Items, service.sessionItem(row))
 	}
 	if page.HasMore && len(page.Rows) != 0 {
 		last := page.Rows[len(page.Rows)-1]
@@ -332,6 +362,10 @@ func mapSession(row storage.SessionSignals) SessionItem {
 		Danger: decodeCounts(row.DangerCounts), Secrets: decodeCounts(row.SecretCounts),
 		Eligible: row.Eligible, SkipReason: row.SkipReason,
 		FacetStatus: row.FacetStatus, TaskType: row.FacetTaskType, Outcome: row.FacetOutcome,
+		Bucket: row.Bucket,
+	}
+	if row.ProjectID != nil {
+		item.ProjectID = *row.ProjectID
 	}
 	if row.Kind == KindAgent && len(row.AgentRootFPR) >= 12 {
 		// The insights agent-tree id is the root fingerprint prefix, not the

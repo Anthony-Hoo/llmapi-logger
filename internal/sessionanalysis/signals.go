@@ -29,6 +29,9 @@ const (
 	SkipSingleTurnChat = "single_turn_chat"
 	SkipNoContent      = "content_unavailable"
 	SkipNoAgent        = "no_agent_identity"
+	// SkipService: the caller is a service principal of the organisation
+	// reports; its sessions keep signals only (doc 24 section 5.1).
+	SkipService = "service"
 )
 
 // ComputeSignals derives the L0 signals and sentence fingerprints of one

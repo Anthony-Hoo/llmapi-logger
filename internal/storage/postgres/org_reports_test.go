@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/security"
@@ -279,5 +282,62 @@ func TestWeeklySnapshotRoundTripSurvivesRetention(t *testing.T) {
 	}
 	if _, ok, err := store.LoadWeeklySnapshot(ctx, "2026-10-26"); ok || err != nil {
 		t.Fatalf("missing week = %v %v", ok, err)
+	}
+}
+
+// One analysis session's attribution input is its own requests only: another
+// key's requests under the same root, and rejected requests, stay out.
+func TestLoadOrgSessionReadsOneKeysRequests(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	seedInsights(t, store, insightsSeed{id: "a-rejected", at: day.Add(5 * time.Second), key: keyA, root: rootA, node: node1})
+	if _, err := store.writerConn.ExecContext(ctx, `UPDATE audit_records SET forward_status = 'rejected', blocked_by = 'content_policy', block_code = 'content_policy_blocked', parse_status = 'skipped', status_code = 400 WHERE audit_id = 'a-rejected'`); err != nil {
+		t.Fatal(err)
+	}
+	identity := identityTestRow("a1")
+	identity.IdentityFPR = fill(0x71)
+	empty := identityTestRow("a2")
+	empty.Source, empty.IdentityFPR, empty.RemoteFPR, empty.RootFPR, empty.CwdFPR, empty.IdentityEnc = "none", nil, nil, nil, nil, nil
+	foreign := identityTestRow("b1")
+	foreign.IdentityFPR = fill(0x72)
+	rejected := identityTestRow("a-rejected")
+	rejected.IdentityFPR = fill(0x73)
+	for _, row := range []storage.ProjectIdentityRow{identity, empty, foreign, rejected} {
+		if err := store.SaveProjectIdentity(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	own, err := store.LoadOrgSession(ctx, rootA, keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(own.Requests))
+	for _, request := range own.Requests {
+		ids = append(ids, request.AuditID)
+	}
+	if strings.Join(ids, ",") != "a1,a2,c1,c2" || own.Extracted != 2 {
+		t.Fatalf("requests = %v, extracted = %d", ids, own.Extracted)
+	}
+	first := own.Requests[0]
+	if first.IdentityKey != hex.EncodeToString(fill(0x71)) || first.TokenID != 1 || first.RootKey != hex.EncodeToString(rootA) ||
+		first.NodeKey != hex.EncodeToString(node1) || own.Requests[1].IdentityKey != "" {
+		t.Fatalf("request projection = %+v / %+v", first, own.Requests[1])
+	}
+	if len(own.Identities) != 1 || own.Identities[0].Key != first.IdentityKey || own.Identities[0].AuditID != "a1" || !bytes.Equal(own.Identities[0].Enc, identity.IdentityEnc) {
+		t.Fatalf("identities = %+v", own.Identities)
+	}
+
+	other, err := store.LoadOrgSession(ctx, rootA, keyB)
+	if err != nil || len(other.Requests) != 1 || other.Requests[0].AuditID != "b1" || len(other.Identities) != 1 || other.Identities[0].Key != hex.EncodeToString(fill(0x72)) {
+		t.Fatalf("key B = %+v, %v", other, err)
+	}
+	if keyless, err := store.LoadOrgSession(ctx, rootA, nil); err != nil || len(keyless.Requests) != 0 || len(keyless.Identities) != 0 {
+		t.Fatalf("no key = %+v, %v", keyless, err)
+	}
+	if _, err := store.LoadOrgSession(ctx, []byte{1}, keyA); err == nil {
+		t.Fatal("short root accepted")
 	}
 }

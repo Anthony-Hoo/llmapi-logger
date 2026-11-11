@@ -699,3 +699,136 @@ func TestSessionReportsStorage(t *testing.T) {
 		t.Fatalf("enums = %+v, %v", enums, err)
 	}
 }
+
+// Sessions carry the project and bucket of the organisation reports; report
+// filters select by them, and a refresh re-books without re-analysing.
+func TestSessionProjectBooking(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	at := day.UnixNano()
+	project := func(id int64) *int64 { return &id }
+	user := func(id int64) *int64 { return &id }
+	save := func(key []byte, apiKey []byte, userID int64, projectID *int64, bucket string, offset int64) {
+		t.Helper()
+		signals := testSignals(key, apiKey, "a2", at+offset)
+		signals.NewAPIUserID, signals.ProjectID, signals.Bucket = user(userID), projectID, bucket
+		fprs := []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: fill(0xb0), APIKeyFPR: apiKey, SeenAtNS: at + offset}}
+		if err := store.SaveSessionSignals(ctx, signals, fprs, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	booked, loose, service, plain := fill(0xd1), fill(0xd2), fill(0xd3), fill(0xd4)
+	save(booked, keyA, 8, project(10), storage.BucketAttributed, 1)
+	save(loose, keyA, 8, nil, storage.BucketUnattributed, 2)
+	save(service, keyB, 9, project(10), storage.BucketService, 3)
+	save(plain, keyA, 8, nil, "", 4)
+	bad := testSignals(fill(0xd5), keyA, "a2", at)
+	bad.Bucket = "elsewhere"
+	if err := store.SaveSessionSignals(ctx, bad, nil, nil); err == nil {
+		t.Fatal("unknown bucket stored")
+	}
+
+	window := storage.SessionSignalFilter{FromNS: at, ToNS: at + 100}
+	page, err := store.ListSessionSignals(ctx, window, storage.SessionSignalCursor{}, 10)
+	if err != nil || len(page.Rows) != 4 {
+		t.Fatalf("rows = %d, %v", len(page.Rows), err)
+	}
+	stored := map[string]storage.SessionSignals{}
+	for _, row := range page.Rows {
+		stored[string(row.SessionKey)] = row
+	}
+	if row := stored[string(booked)]; row.ProjectID == nil || *row.ProjectID != 10 || row.Bucket != storage.BucketAttributed {
+		t.Fatalf("booked = %v %q", row.ProjectID, row.Bucket)
+	}
+	if row := stored[string(plain)]; row.ProjectID != nil || row.Bucket != "" {
+		t.Fatalf("plain = %v %q", row.ProjectID, row.Bucket)
+	}
+
+	count := func(filter storage.SessionSignalFilter) storage.SessionSignalTotals {
+		t.Helper()
+		filter.FromNS, filter.ToNS = window.FromNS, window.ToNS
+		totals, err := store.SessionSignalTotals(ctx, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return totals
+	}
+	if all := count(storage.SessionSignalFilter{}); all.Sessions != 4 || all.Contributors != 2 {
+		t.Fatalf("all = %d sessions, %d contributors", all.Sessions, all.Contributors)
+	}
+	if reported := count(storage.SessionSignalFilter{ExcludeService: true}); reported.Sessions != 3 || reported.Contributors != 1 {
+		t.Fatalf("without services = %d sessions, %d contributors", reported.Sessions, reported.Contributors)
+	}
+	if got := count(storage.SessionSignalFilter{ProjectID: project(10)}).Sessions; got != 2 {
+		t.Fatalf("project 10 = %d", got)
+	}
+	if got := count(storage.SessionSignalFilter{ProjectID: project(10), ExcludeService: true}).Sessions; got != 1 {
+		t.Fatalf("project 10 without services = %d", got)
+	}
+	if got := count(storage.SessionSignalFilter{UserIDs: []int64{9, 77}}).Sessions; got != 1 {
+		t.Fatalf("users 9 and 77 = %d", got)
+	}
+	if got := count(storage.SessionSignalFilter{UserIDs: []int64{}}).Sessions; got != 0 {
+		t.Fatalf("empty user set = %d", got)
+	}
+	// Key B only has a service session: it gets no personal report.
+	if keys, err := store.ActiveAnalysisKeys(ctx, at, at+100); err != nil || len(keys) != 1 || !bytes.Equal(keys[0].APIKeyFPR, keyA) {
+		t.Fatalf("active keys = %+v, %v", keys, err)
+	}
+
+	fprProject := func(key []byte) sql.NullInt64 {
+		t.Helper()
+		var id sql.NullInt64
+		if err := store.readerDB.QueryRow(`SELECT project_id FROM session_text_fprs WHERE session_key = $1`, key).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	if id := fprProject(booked); !id.Valid || id.Int64 != 10 {
+		t.Fatalf("fingerprint project = %+v", id)
+	}
+	if id := fprProject(loose); id.Valid {
+		t.Fatalf("unattributed fingerprint has project %d", id.Int64)
+	}
+
+	refs, err := store.ListSessionProjects(ctx, at+2, at+1000, 10)
+	if err != nil || len(refs) != 3 || !bytes.Equal(refs[0].SessionKey, plain) || !bytes.Equal(refs[2].SessionKey, loose) ||
+		!bytes.Equal(refs[1].AgentRootFPR, service) || !bytes.Equal(refs[1].APIKeyFPR, keyB) || refs[1].Bucket != storage.BucketService {
+		t.Fatalf("refs = %+v, %v", refs, err)
+	}
+	if early, err := store.ListSessionProjects(ctx, at, at+3, 10); err != nil || len(early) != 1 || !bytes.Equal(early[0].SessionKey, booked) {
+		t.Fatalf("computed before = %+v, %v", early, err)
+	}
+
+	if err := store.UpdateSessionProjects(ctx, []storage.SessionProjectRef{
+		{SessionKey: loose, ProjectID: project(11), Bucket: storage.BucketAttributed},
+		{SessionKey: booked, Bucket: storage.BucketUnattributed},
+		{SessionKey: service, ProjectID: project(12), Bucket: storage.BucketAttributed},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(storage.SessionSignalFilter{ProjectID: project(11)}).Sessions; got != 1 {
+		t.Fatalf("re-booked to 11 = %d", got)
+	}
+	if id := fprProject(loose); !id.Valid || id.Int64 != 11 {
+		t.Fatalf("re-booked fingerprint = %+v", id)
+	}
+	if id := fprProject(booked); id.Valid {
+		t.Fatalf("fingerprint kept project %d", id.Int64)
+	}
+	// A service session is never re-booked by the refresh.
+	if got := count(storage.SessionSignalFilter{ProjectID: project(10)}).Sessions; got != 1 {
+		t.Fatalf("service session moved: project 10 = %d", got)
+	}
+	if id := fprProject(service); !id.Valid || id.Int64 != 10 {
+		t.Fatalf("service fingerprint = %+v", id)
+	}
+	if err := store.UpdateSessionProjects(ctx, []storage.SessionProjectRef{{SessionKey: loose, Bucket: storage.BucketService}}); err == nil {
+		t.Fatal("refresh turned a session into a service")
+	}
+	if err := store.UpdateSessionProjects(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+}

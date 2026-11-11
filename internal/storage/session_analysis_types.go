@@ -1,5 +1,7 @@
 package storage
 
+import "encoding/binary"
+
 // Session analysis (doc/features/24-session-analysis.md) storage contracts.
 // Every row described here is derived data outside the integrity chain.
 
@@ -109,10 +111,32 @@ type SessionSignals struct {
 	SkipReason       string
 	SignalVersion    int64
 	ComputedAtNS     int64
+	// ProjectID and Bucket book the session to a project of the organisation
+	// reports (doc 23). Both are empty when org reports are off or the project
+	// identity of its requests has not been extracted yet.
+	ProjectID *int64
+	Bucket    string
 	// Read-only: the plaintext enums of the session's own facet, if any.
 	FacetStatus   string
 	FacetTaskType string
 	FacetOutcome  string
+}
+
+// Session buckets (doc 24 section 11).
+const (
+	BucketAttributed   = "attributed"
+	BucketUnattributed = "unattributed"
+	BucketNoContext    = "no_context"
+	BucketService      = "service"
+)
+
+// SessionProjectRef is the stored booking of one analysis session.
+type SessionProjectRef struct {
+	SessionKey   []byte
+	AgentRootFPR []byte
+	APIKeyFPR    []byte
+	ProjectID    *int64
+	Bucket       string
 }
 
 // Pack kinds.
@@ -213,6 +237,12 @@ type SessionSignalFilter struct {
 	// Flags keeps only sessions with every listed signal: loop, thrash,
 	// unverified, failures, corrections, heavy_model, danger, secret.
 	Flags []string
+	// ExcludeService drops sessions of service principals (reports).
+	ExcludeService bool
+	// ProjectID keeps the sessions booked to one project; UserIDs (non-nil)
+	// keeps the sessions of those NewAPI users, none when empty.
+	ProjectID *int64
+	UserIDs   []int64
 }
 
 // SessionSignalCursor is the keyset position after the last returned row.
@@ -251,6 +281,8 @@ type SessionSignalTotals struct {
 	CompactionSess  int64
 	InputTokens     int64
 	CacheReadTokens int64
+	// Contributors counts the distinct callers (NewAPI user, else API key).
+	Contributors int64
 }
 
 // SessionFacet is one row of session_facets. TextEnc is AES-GCM ciphertext
@@ -290,14 +322,35 @@ type FacetCalibration struct {
 	Agreement     string
 }
 
-// Analysis scopes of suggestions and weekly statistics.
+// Analysis scopes of suggestions and weekly statistics. Project and group
+// scopes exist only with organisation reports.
 const (
-	ScopePerson = "person"
-	ScopeAll    = "all"
+	ScopePerson  = "person"
+	ScopeAll     = "all"
+	ScopeProject = "project"
+	ScopeGroup   = "group"
 )
 
 // AllScopeKey is the scope_key of the 'all' scope.
 var AllScopeKey = make([]byte, 32)
+
+// IDScopeKey is the scope_key of a project or group scope: the id as 8
+// big-endian bytes after 24 zero bytes.
+func IDScopeKey(id int64) []byte {
+	key := make([]byte, 32)
+	binary.BigEndian.PutUint64(key[24:], uint64(id))
+	return key
+}
+
+// FacetScope selects the facets one report scope aggregates: every facet
+// (zero value), one API key's, one project's, or those of a set of users.
+// Project and user scopes read session facets only; a chat digest spans
+// sessions and has neither.
+type FacetScope struct {
+	APIKeyFPR []byte
+	ProjectID *int64
+	UserIDs   []int64
+}
 
 // ScopeKey identifies one API key that was active in a period.
 type ScopeKey struct {

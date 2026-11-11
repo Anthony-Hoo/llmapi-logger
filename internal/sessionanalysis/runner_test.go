@@ -620,7 +620,7 @@ func (store *memoryStore) ActiveAnalysisKeys(_ context.Context, fromNS, toNS int
 	defer store.mu.Unlock()
 	seen := map[string]storage.ScopeKey{}
 	for _, signals := range store.signals {
-		if signals.LastNS >= fromNS && signals.LastNS < toNS && len(signals.APIKeyFPR) != 0 {
+		if signals.LastNS >= fromNS && signals.LastNS < toNS && len(signals.APIKeyFPR) != 0 && signals.Bucket != storage.BucketService {
 			seen[string(signals.APIKeyFPR)] = storage.ScopeKey{APIKeyFPR: signals.APIKeyFPR, NewAPITokenID: signals.NewAPITokenID}
 		}
 	}
@@ -637,6 +637,21 @@ func (store *memoryStore) inScope(signals storage.SessionSignals, filter storage
 	}
 	if filter.Scope != nil && !bytes.Equal(signals.APIKeyFPR, filter.Scope.Fingerprint) {
 		return false
+	}
+	if filter.ExcludeService && signals.Bucket == storage.BucketService {
+		return false
+	}
+	if filter.ProjectID != nil && (signals.ProjectID == nil || *signals.ProjectID != *filter.ProjectID) {
+		return false
+	}
+	if filter.UserIDs != nil {
+		member := false
+		for _, user := range filter.UserIDs {
+			member = member || (signals.NewAPIUserID != nil && *signals.NewAPIUserID == user)
+		}
+		if !member {
+			return false
+		}
 	}
 	for _, flag := range filter.Flags {
 		if flag == "loop" && signals.Loops == 0 || flag == "thrash" && signals.ThrashFiles == 0 || flag == "unverified" && signals.Verified != "no" {
