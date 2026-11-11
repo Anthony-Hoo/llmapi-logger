@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -26,6 +27,10 @@ func saveAnalysis(transaction dbTransaction, row AnalysisRow) error {
 			return fmt.Errorf("postgres writer: save analysis for unknown audit: %w", sql.ErrNoRows)
 		}
 		return fmt.Errorf("postgres writer: read analysis audit: %w", err)
+	}
+	var previousRoot []byte
+	if err := transaction.QueryRow(`SELECT detail_root FROM audit_analysis WHERE audit_id = $1`, row.AuditID).Scan(&previousRoot); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("postgres writer: read previous analysis detail root: %w", err)
 	}
 	if err := saveAnalysisDetailObjects(transaction, row); err != nil {
 		return err
@@ -108,6 +113,13 @@ ON CONFLICT(audit_id) DO UPDATE SET
 	)
 	if err != nil {
 		return fmt.Errorf("postgres writer: upsert analysis: %w", err)
+	}
+	// Re-analysis may replace the detail root. Release the old chain now,
+	// while its root is known, instead of sweeping the whole table later.
+	if len(previousRoot) != 0 && !bytes.Equal(previousRoot, row.DetailRoot) {
+		if err := pruneAnalysisDetailChains(transaction, [][]byte{previousRoot}); err != nil {
+			return err
+		}
 	}
 	if _, err := transaction.Exec(`DELETE FROM agent_spawn_hints WHERE audit_id = $1`, row.AuditID); err != nil {
 		return fmt.Errorf("postgres writer: clear spawn hints: %w", err)

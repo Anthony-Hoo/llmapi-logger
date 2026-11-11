@@ -101,11 +101,35 @@ func saveAnalysisDetailObjects(tx dbTransaction, row AnalysisRow) error {
 	return nil
 }
 
-func garbageCollectAnalysisDetails(tx dbTransaction) error {
-	_, err := tx.Exec(`WITH RECURSIVE live(hash) AS (
- SELECT detail_root FROM audit_analysis WHERE detail_root IS NOT NULL
- UNION
- SELECT n.parent_hash FROM analysis_detail_objects n JOIN live l ON n.hash=l.hash WHERE n.parent_hash IS NOT NULL
- ) DELETE FROM analysis_detail_objects n WHERE NOT EXISTS(SELECT 1 FROM live WHERE live.hash=n.hash)`)
-	return err
+// selectAnalysisDetailRoots returns the distinct detail roots that the given
+// audits' analysis rows reference. Callers read them before the rows are
+// deleted so the chains can be pruned afterwards.
+func selectAnalysisDetailRoots(tx dbTransaction, auditIDs []string) ([][]byte, error) {
+	return queryColumn[[]byte](tx, stringsToAny(auditIDs), `SELECT DISTINCT detail_root FROM audit_analysis
+WHERE detail_root IS NOT NULL AND audit_id IN (%s)`, "select analysis detail roots")
+}
+
+// pruneAnalysisDetailChains deletes the prefix nodes on the chains that start
+// at roots once no analysis row and no child node references them. It walks
+// toward the chain heads one level per round and stops at the first node that
+// is still shared, so the cost follows the released chains instead of the
+// size of analysis_detail_objects. Both reference checks use indexes
+// (analysis_detail_parent_idx, audit_analysis_detail_root_idx); a full
+// reachability sweep inside the single writer transaction would block every
+// audit write once the table grows.
+func pruneAnalysisDetailChains(tx dbTransaction, roots [][]byte) error {
+	candidates := distinctHashes(roots)
+	for len(candidates) > 0 {
+		parents, err := queryColumn[[]byte](tx, hashesToAny(candidates), `DELETE FROM analysis_detail_objects n
+WHERE n.hash IN (%s)
+  AND NOT EXISTS (SELECT 1 FROM analysis_detail_objects c WHERE c.parent_hash = n.hash)
+  AND NOT EXISTS (SELECT 1 FROM audit_analysis a WHERE a.detail_root = n.hash)
+RETURNING n.parent_hash`, "prune analysis detail objects")
+		if err != nil {
+			return err
+		}
+		// distinctHashes also drops the NULL parents of chain heads.
+		candidates = distinctHashes(parents)
+	}
+	return nil
 }
