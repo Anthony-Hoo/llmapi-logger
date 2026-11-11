@@ -102,7 +102,7 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 - **不在完整性链内**：这两张表是可重算的派生数据，**不得**进入 `capturePayloadDigest`、`appendParsedResultDigest` 或任何完整性事件；一旦加入，旧库中每条历史记录的重算摘要都会改变，启动校验会失败。测试锁定：写入、更新、删除 `audit_analysis` 行不改变任何已签名摘要。
 - **明文列只有数值、枚举、计数 JSON 和 keyed HMAC 指纹**。消息正文、工具名、文件路径和原始 Agent ID 只存在 `detail_enc`（AES-256-GCM，AAD 标签 `analysis_detail`，绑定 audit id 与 `analysis_version`），日志同样不得出现。
 - `analysis_version` 随算法升级递增；后台回填（模块 20 §9）按版本重算，不触碰 `parse_status`。索引 `audit_analysis_version_idx` 支撑“缺失或过旧”扫描。
-- 写入走既有单 writer 的 `SaveAnalysis`（按 `audit_id` upsert，并整体替换该 audit 的 spawn hints）；失败只记录日志，不影响解析结果。
+- 写入走既有单 writer 的 `SaveAnalysis`（按 `audit_id` upsert，并整体替换该 audit 的 spawn hints）；PostgreSQL 运行时在 `detail_root` 被替换时于同一事务内定向裁剪旧链上不再被引用的 `analysis_detail_objects`（模块 12 §4）；失败只记录日志，不影响解析结果。
 
 ### 3.5 组织项目周报（模块 23，PostgreSQL migration 002）
 
@@ -221,9 +221,10 @@ retention 删除旧 audit 前，若仍保留的子轮次依赖将删除的父轮
 
 - 没有 turn 的 conversations；
 - 不再被 envelope、context op 或 response item 引用的 content objects；
-- 不再被 content object 引用的 binary objects。
+- 不再被 content object 引用的 binary objects；
+- 本批被删 audit 的 analysis detail 链上不再被引用的前缀节点（PostgreSQL 运行时，定向逐层裁剪，不做全表扫描）。
 
-GC 使用 `NOT EXISTS` 可达性检查和对象引用索引，不维护可漂移的手工 ref_count。全局 integrity event chain 不因 audit retention 删除中间事件；对于已经删除的 audit，启动验证仍校验链本身，但不再重算已不存在的 payload。
+GC 使用 `NOT EXISTS` 可达性检查和对象引用索引，不维护可漂移的手工 ref_count。SQLite 实现仍按全表检查；PostgreSQL 运行时只检查本批被删 turns 引用过的候选对象，不做全表扫描（见模块 12 §4）。全局 integrity event chain 不因 audit retention 删除中间事件；对于已经删除的 audit，启动验证仍校验链本身，但不再重算已不存在的 payload。
 
 ## 9. 备份与文件收缩
 

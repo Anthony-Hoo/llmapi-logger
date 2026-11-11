@@ -45,15 +45,10 @@ func deleteExpired(transaction dbTransaction, request *retentionRequest) error {
 	if err != nil {
 		return err
 	}
+	// Detail roots replaced by re-analysis are released by SaveAnalysis, so a
+	// pass without expired audits has no analysis detail work to do.
 	if err := deleteAuditBatch(transaction, auditIDs); err != nil {
 		return err
-	}
-	// Re-analysis may replace a detail root before any audit reaches its TTL.
-	// Sweep those obsolete prefixes on the normal retention pass as well.
-	if len(auditIDs) == 0 {
-		if err := garbageCollectAnalysisDetails(transaction); err != nil {
-			return err
-		}
 	}
 
 	gaps, err := transaction.Exec(`
@@ -118,10 +113,22 @@ func deleteAuditBatch(transaction dbTransaction, auditIDs []string) error {
 	if err != nil {
 		return err
 	}
+	// Collect what the expired turns reference before checkpoints rewrite
+	// child deltas and the turns go away, so only those objects are checked.
+	candidates, err := selectRetentionObjectCandidates(transaction, turnIDs)
+	if err != nil {
+		return err
+	}
 	if err := checkpointRetainedChildren(transaction, turnIDs); err != nil {
 		return err
 	}
 	if err := deleteTurnsLeafFirst(transaction, turnIDs); err != nil {
+		return err
+	}
+	// audit_analysis rows cascade with their audits; read the detail roots
+	// first so only those chains are pruned afterwards.
+	detailRoots, err := selectAnalysisDetailRoots(transaction, auditIDs)
+	if err != nil {
 		return err
 	}
 
@@ -137,10 +144,149 @@ func deleteAuditBatch(transaction dbTransaction, auditIDs []string) error {
 	if deleted != int64(len(auditIDs)) {
 		return errors.New("postgres writer: expired audit batch changed during deletion")
 	}
-	if err := garbageCollectConversationObjects(transaction); err != nil {
+	if err := pruneAnalysisDetailChains(transaction, detailRoots); err != nil {
+		return err
+	}
+	if err := garbageCollectConversationObjects(transaction, candidates); err != nil {
 		return err
 	}
 	return nil
+}
+
+// retentionObjectCandidates lists the graph rows a retention batch may
+// release: the conversations, content objects and (filled in during GC)
+// binary objects that the expired turns, or the deltas that checkpoints
+// replace, referenced.
+type retentionObjectCandidates struct {
+	ConversationIDs []string
+	ContentHashes   [][]byte
+}
+
+// gcBatchSize bounds the bind parameters of one candidate or prune statement.
+const gcBatchSize = 500
+
+func selectRetentionObjectCandidates(transaction dbTransaction, expiredTurnIDs []string) (retentionObjectCandidates, error) {
+	var candidates retentionObjectCandidates
+	if len(expiredTurnIDs) == 0 {
+		return candidates, nil
+	}
+	// Checkpoints replace the context ops of retained children. Their new
+	// root ops reference the same objects, but include the old ops anyway so
+	// correctness does not depend on that.
+	childTurnIDs, err := queryColumn[string](transaction, stringsToAny(expiredTurnIDs), `SELECT turn_id FROM turns WHERE parent_turn_id IN (%s)`, "select retention child turns")
+	if err != nil {
+		return candidates, err
+	}
+	err = forEachBatch(stringsToAny(expiredTurnIDs), func(arguments []any) error {
+		rows, err := transaction.Query(`SELECT conversation_id, request_envelope_hash, response_envelope_hash FROM turns WHERE turn_id IN (`+placeholders(len(arguments))+`)`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: select retention turn references: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var conversationID string
+			var requestEnvelope, responseEnvelope []byte
+			if err := rows.Scan(&conversationID, &requestEnvelope, &responseEnvelope); err != nil {
+				return fmt.Errorf("postgres writer: scan retention turn references: %w", err)
+			}
+			candidates.ConversationIDs = append(candidates.ConversationIDs, conversationID)
+			candidates.ContentHashes = append(candidates.ContentHashes, requestEnvelope, responseEnvelope)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("postgres writer: iterate retention turn references: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return candidates, err
+	}
+	opTurnIDs := append(append([]string(nil), expiredTurnIDs...), childTurnIDs...)
+	opHashes, err := queryColumn[[]byte](transaction, stringsToAny(opTurnIDs), `SELECT object_hash FROM turn_context_ops WHERE object_hash IS NOT NULL AND turn_id IN (%s)`, "select retention context op objects")
+	if err != nil {
+		return candidates, err
+	}
+	itemHashes, err := queryColumn[[]byte](transaction, stringsToAny(expiredTurnIDs), `SELECT object_hash FROM turn_response_items WHERE turn_id IN (%s)`, "select retention response item objects")
+	if err != nil {
+		return candidates, err
+	}
+	candidates.ConversationIDs = distinctStrings(candidates.ConversationIDs)
+	candidates.ContentHashes = distinctHashes(append(append(candidates.ContentHashes, opHashes...), itemHashes...))
+	return candidates, nil
+}
+
+// forEachBatch calls run with consecutive slices of at most gcBatchSize
+// arguments.
+func forEachBatch(arguments []any, run func([]any) error) error {
+	for start := 0; start < len(arguments); start += gcBatchSize {
+		if err := run(arguments[start:min(start+gcBatchSize, len(arguments))]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// queryColumn runs query, whose single %s is replaced by the placeholders of
+// one batch, over arguments in batches and collects its single column.
+func queryColumn[T any](transaction dbTransaction, arguments []any, query, action string) ([]T, error) {
+	var result []T
+	err := forEachBatch(arguments, func(batch []any) error {
+		rows, err := transaction.Query(fmt.Sprintf(query, placeholders(len(batch))), batch...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: %s: %w", action, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var value T
+			if err := rows.Scan(&value); err != nil {
+				return fmt.Errorf("postgres writer: scan %s: %w", action, err)
+			}
+			result = append(result, value)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("postgres writer: iterate %s: %w", action, err)
+		}
+		return nil
+	})
+	return result, err
+}
+
+func hashesToAny(values [][]byte) []any {
+	result := make([]any, len(values))
+	for index, value := range values {
+		result[index] = value
+	}
+	return result
+}
+
+// distinctHashes drops duplicates and anything that is not a 32-byte hash,
+// such as the NULL parent of a chain head.
+func distinctHashes(hashes [][]byte) [][]byte {
+	seen := make(map[string]struct{}, len(hashes))
+	result := make([][]byte, 0, len(hashes))
+	for _, hash := range hashes {
+		if len(hash) != 32 {
+			continue
+		}
+		if _, ok := seen[string(hash)]; ok {
+			continue
+		}
+		seen[string(hash)] = struct{}{}
+		result = append(result, hash)
+	}
+	return result
+}
+
+func distinctStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func selectTurnIDsForAudits(transaction dbTransaction, auditIDs []string) ([]string, error) {
@@ -273,22 +419,41 @@ WHERE turn_id IN (`+placeholders(len(arguments))+`)
 	return nil
 }
 
-func garbageCollectConversationObjects(transaction dbTransaction) error {
-	if err := garbageCollectAnalysisDetails(transaction); err != nil {
+// garbageCollectConversationObjects deletes the candidate conversations,
+// content objects and binary objects that nothing references any more. Every
+// statement is limited to the candidates of the current batch and each
+// reference check uses its dedicated index, so the cost follows the batch
+// instead of the table sizes. A table-wide NOT EXISTS sweep inside the single
+// writer transaction would block every audit write on a large database.
+func garbageCollectConversationObjects(transaction dbTransaction, candidates retentionObjectCandidates) error {
+	err := forEachBatch(stringsToAny(candidates.ConversationIDs), func(arguments []any) error {
+		_, err := transaction.Exec(`
+DELETE FROM conversations
+WHERE conversation_id IN (`+placeholders(len(arguments))+`)
+  AND NOT EXISTS (
+      SELECT 1 FROM turns WHERE turns.conversation_id = conversations.conversation_id
+  )`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: garbage collect conversations: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	statements := []struct {
-		name string
-		sql  string
-	}{
-		{name: "conversations", sql: `
-DELETE FROM conversations
-WHERE NOT EXISTS (
-    SELECT 1 FROM turns WHERE turns.conversation_id = conversations.conversation_id
-)`},
-		{name: "content objects", sql: `
+
+	// content_binary_refs cascade with their content objects, so read the
+	// binary candidates before deleting content.
+	binaryHashes, err := queryColumn[[]byte](transaction, hashesToAny(candidates.ContentHashes), `SELECT binary_hash FROM content_binary_refs WHERE object_hash IN (%s)`, "select binary candidates")
+	if err != nil {
+		return err
+	}
+
+	err = forEachBatch(hashesToAny(candidates.ContentHashes), func(arguments []any) error {
+		_, err := transaction.Exec(`
 DELETE FROM content_objects
-WHERE NOT EXISTS (
+WHERE object_hash IN (`+placeholders(len(arguments))+`)
+  AND NOT EXISTS (
           SELECT 1 FROM turns WHERE turns.request_envelope_hash = content_objects.object_hash
       )
   AND NOT EXISTS (
@@ -299,19 +464,28 @@ WHERE NOT EXISTS (
       )
   AND NOT EXISTS (
           SELECT 1 FROM turn_response_items WHERE turn_response_items.object_hash = content_objects.object_hash
-      )`},
-		{name: "binary objects", sql: `
-DELETE FROM binary_objects
-WHERE NOT EXISTS (
-    SELECT 1 FROM content_binary_refs WHERE content_binary_refs.binary_hash = binary_objects.binary_hash
-)`},
-	}
-	for _, statement := range statements {
-		if _, err := transaction.Exec(statement.sql); err != nil {
-			return fmt.Errorf("postgres writer: garbage collect %s: %w", statement.name, err)
+      )`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: garbage collect content objects: %w", err)
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	return nil
+
+	return forEachBatch(hashesToAny(distinctHashes(binaryHashes)), func(arguments []any) error {
+		_, err := transaction.Exec(`
+DELETE FROM binary_objects
+WHERE binary_hash IN (`+placeholders(len(arguments))+`)
+  AND NOT EXISTS (
+      SELECT 1 FROM content_binary_refs WHERE content_binary_refs.binary_hash = binary_objects.binary_hash
+  )`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: garbage collect binary objects: %w", err)
+		}
+		return nil
+	})
 }
 
 func stringsToAny(values []string) []any {
