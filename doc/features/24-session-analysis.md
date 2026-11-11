@@ -1,6 +1,6 @@
 # 模块 24：会话记录分析（开发计划）
 
-> 状态：S0–S3 已实现，S4（合规模式）未开始（实现记录与偏差见 §16）
+> 状态：S0–S3 已实现，与模块 23 的对接（项目归属、项目与项目组周报）已实现；S4（合规模式）未开始（实现记录与偏差见 §16）
 > 日期：2026-11-06
 > 依赖：[18 内容寻址会话存储](18-content-addressed-conversation-storage.md)、[19 开发者 API Key 会话](19-developer-key-session.md)、[20 上下文洞察](20-context-insights.md)、[12 保留清理](12-retention-and-maintenance.md)；可选集成 [23 组织项目周报](23-org-project-reports.md)
 > 本文是模块 23 里程碑 M5 的展开设计，并修订其 §9（见 §2）。落地后配置、表和 API 按惯例并入 01/04/10。
@@ -158,7 +158,7 @@ session_analysis:
 | `body_chunks`（raw，仅 `retention_state=full`） | provider 原始 JSON | 解密 | 兜底：Conversation DTO 不保留的字段，目前只有 Anthropic `tool_result.is_error` | 不落库；raw 不在时该失败状态记为"未知" |
 | `http_headers` | — | 不直接读 | 客户端、Agent 身份已在 `audit_analysis`；项目标识由 23 的提取器负责 | — |
 | `http_stages`、`body_streams`（除 `retention_state`）、`stream_timelines`、`integrity_events` | — | 不读 | — | — |
-| 模块 23（启用时） | 归属结果（`project_id`、来源级别、分桶）、`projects.name`、`principal_class`、`group_members` | 明文管理数据；**不解密 `identity_enc`** | 包：`[会话]` 的项目名与来源级别；L0：service 排除；聚合：项目组 | `session_signals.project_id`、`bucket` |
+| 模块 23（启用时） | 归属结果（`project_id`、信号级别、分桶）、`projects.name`、`principal_class`、`group_members` | 明文管理数据。归属由 23 的服务计算，`identity_enc` 在它内部解密；本模块只拿到项目 id、项目名、级别和是否 service，**拿不到仓库地址和路径** | 包：`[会话]` 的项目名与信号级别；L0：service 排除；聚合：项目、项目组 | `session_signals.project_id`、`bucket`；`session_text_fprs.project_id` |
 
 ### 6.2 会话划分
 
@@ -267,7 +267,7 @@ session_analysis:
 | --- | --- |
 | 类型 | `agent` / `聊天` / `聊天汇总` |
 | 客户端 | `agent_client` 的词表显示名；`unknown` 原样写出 |
-| 项目 | 项目名（来源级别：declared / remote / root / cwd / 继承），或 `未归属`、`无项目上下文`；未启用 23 时省略 |
+| 项目 | `项目名(信号级别)`，级别为 declared / remote / root / cwd；或 `未归属`、`无项目上下文`。未启用 23 或尚无归属结论时省略。生成输入包时的快照，之后归属变化不重建输入包（§16） |
 | 模型 | 按请求数排序，主模型直接写出，其余最多再列 2 个并附占比，例如 `codex-large(+mini 12%)` |
 | 时间 | 本地时区的日期和起止时刻，加活跃时长（23 §6.1 算法） |
 | 请求数 | `总数(主/子/附属)` |
@@ -487,8 +487,8 @@ session_analysis:
 ### 8.2 沉淀与优化建议
 
 - **指令沉淀**：把 L0 的用户句子指纹和 L1 `instructions` 规范化后的指纹合并分组。≥2 个会话出现为候选，≥3 个为强候选。
-  - 同一项目内的会话汇成**项目级 AGENTS.md 建议**，不标注来自谁的会话。
-  - 其余会话汇成本人的个人规则建议。
+  - 同一项目内的会话汇成**项目级 AGENTS.md 建议**，不标注来自谁的会话（需要启用 23）。
+  - 本人的个人规则建议按该 Key 的全部会话计算（实现时没有把已归属项目的会话剔除，见 §16）。
 - **skill 候选**：`skill_candidate` 按同样规则分组。
 - **优化清单**：L0 信号命中的会话按成本排序，例如"本周 6 个会话出现死循环，占成本 18%"。
 - **复述合并的限制**：首版只按规范化后的指纹做完全匹配，说法不同的同一条指令会被拆成多组。是否接入本地 embedding 端点做近义合并，见 §13。
@@ -535,7 +535,7 @@ session_analysis:
 | --- | --- | --- |
 | 本人会话的 L0 信号、输入包、facet | 可见 | 不在默认列表中；按会话打开，写查看日志 |
 | 本人周度复盘、个人规则建议 | 可见 | 不可见 |
-| 项目级建议 | 可见自己所属项目的（启用 23 时） | 可见，不标注贡献者 |
+| 项目级建议 | 暂不可见（§13 第 10 项；原设计为"可见自己所属项目的"） | 可见，不标注贡献者；调用者少于 2 人的周不显示（§16） |
 | 项目、团队、全体的统计与趋势 | 只有"我的"一行 | 可见 |
 | 合规模式 | 不可见 | 仅复核角色（§10） |
 
@@ -568,12 +568,12 @@ session_analysis:
 
 | 表 | 主要列 | 生命周期 |
 | --- | --- | --- |
-| `session_signals` | `root_fpr`、`newapi_user_id`、`api_key_fpr`、`project_id`、`bucket`（attributed/unattributed/no_context/service）、`client`、首末时间、§5.2 各计数与枚举、`signal_version`、`skip_reason` | 随根会话最后一条 audit 被 retention 删除 |
-| `session_text_fprs` | `root_fpr`、`fpr`、`source`（user_text/injected_rules/facet_instruction） | 默认保留 180 天，供跨月重复检测；只有 keyed 指纹 |
+| `session_signals` | `session_key`（(`agent_root_fpr`, `api_key_fpr`) 的 keyed 指纹）、`agent_root_fpr`、`newapi_user_id`、`api_key_fpr`、`project_id`、`bucket`（attributed/unattributed/no_context/service，未启用 23 时为空）、`client`、首末时间、§5.2 各计数与枚举、`signal_version`、`skip_reason`、`digest_bucket`、`digest_pending` | 随会话最后一条 audit 被 retention 删除 |
+| `session_text_fprs` | `session_key`、`fpr`、`source`（user_text/injected_rules/facet_instruction/facet_skill）、`project_id`（会话当前归属的项目，供项目级建议使用） | 默认保留 180 天，供跨月重复检测；只有 keyed 指纹 |
 | `session_packs` | `root_fpr`、`pack_hash`、`pack_enc`、`ref_map`（标签 → audit_id）、估算 Token、截断标记 | 同 `session_signals` |
 | `session_facets` | `root_fpr`、`pack_hash`、`prompt_version`、`model`、`facet_status`、各枚举（明文）、`friction` 位图、`text_enc`（goal、instructions、skill_candidate）、`evidence`、`invalid_fields` | 同 `session_signals` |
-| `analysis_suggestions` | `scope`（person/project）、`scope_id`、`kind`（instruction/skill）、`fpr`、支持会话数、首末出现时间、`status`、`text_enc`、证据 audit_id | 不级联；证据过期后显示"证据已过期" |
-| `analysis_period_stats` | （周期，范围，范围 ID）→ §8.1 各计数 | 不级联，与 `org_weekly_stats` 相同 |
+| `analysis_suggestions` | `scope`（person/all/project）、`scope_key`、`kind`（instruction/skill）、`fpr`、支持会话数、首末出现时间、`status`、`text_enc`、证据 audit_id | 不级联；证据过期后显示"证据已过期" |
+| `analysis_period_stats` | （周期，`scope`，`scope_key`）→ §8.1 各计数。`scope` 为 person/all/project/group；`scope_key` 对 person 是 Key 指纹，对 all 是 32 个零字节，对 project/group 是 id 的 8 字节大端值前补 24 个零字节 | 不级联，与 `org_weekly_stats` 相同 |
 | `analysis_view_log` | 时间、身份类型与标识、资源类型、资源 ID | 只追加，不随 retention 删除 |
 
 retention 清理按根会话删除孤儿行，复用模块 12 的批次与 writer。
@@ -604,6 +604,8 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 8. **组织侧前提**（不是设计选项，但必须在对应里程碑之前完成）：
    - S1 之前：更新员工告知，写明新增"工作流改进"这一用途，并承诺不用于个人绩效评价。
    - S4 之前：具名管理员和复核人凭据。
+9. **项目与项目组周报的人数下限**（默认 2）：某一周调用者少于 2 人时只显示计数，不显示目标和建议原文，避免等同于把个人复盘展示给管理员。阈值目前写死，是否改为配置项、取多少，待定。
+10. **开发者能否看到项目级建议**（默认不能）：需要先定"所属项目"的口径——按项目组成员，还是按本周有会话归属到该项目。
 
 ## 14. 验收
 
@@ -675,7 +677,7 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 - **工具失败**：Conversation DTO 不保留 Anthropic `tool_result.is_error`，S0 不读 raw；改为在词表里配置 `shell_ok_without_exit_code`（默认 `claude_code`、`zcode`）：这些客户端的 shell 结果没有退出码就视为成功，`Exit code N` 视为失败。其他客户端解析不到退出码记为未知。
 - **路径与工具名**：直接从解密后的工具调用参数里取（`insights` 词表的 `file_ops`、`apply_patch` 头），没有读取 `audit_analysis.detail_enc`。
 - **被本地策略拦截的请求**整体不进入 L0，也不计数，避免开发者从信号里看到策略命中。
-- **项目归属**：S0–S3 开发时还没有模块 23，`project_id`、`bucket` 列未建，`[会话]` 行不写项目。23 已合并，接入待后续补上。
+- **项目归属**：S0–S3 开发时还没有模块 23，当时没有 `project_id`、`bucket` 列。23 合并后已接入，见下文"与模块 23 的对接"。
 - **migration**：派生表放在 `003`，并把派生 migration 改为"缺哪个版本补哪个"，允许与 23 的 `002` 以任意顺序合并。
 - **手动运行**：新增管理员专用的 `POST /api/v1/session-analysis/run`，便于首次部署后立即生成结果。
 - **retention**：派生行在下一次批处理开始时按"会话最后一条 audit 是否还在"清理，最多滞后一天。
@@ -703,9 +705,42 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 
 ### S3（周度聚合、建议与复盘）
 
-- **周期与范围**：每轮批处理刷新本周和上周的统计，范围是"本人"（按 API Key）和"全体"。S0–S3 开发时还没有模块 23，项目和项目组范围暂缺，后续在同一套表上增加。管理员只看"全体"汇总，看不到某个人的周报；开发者只看自己 Key 的周报。
+- **周期与范围**：每轮批处理刷新本周和上周的统计，范围是"本人"（按 API Key）和"全体"；启用 23 时另有"项目"和"项目组"（见下文"与模块 23 的对接"）。管理员看"全体"及项目、项目组的汇总，看不到某个人的周报；开发者只看自己 Key 的周报。
 - **统计**写入 `analysis_period_stats`（明文计数和枚举，不随 retention 删除）。被校准隐藏的字段不计入分布，也不进叙述输入。
 - **建议**：`session_text_fprs` 中同一指纹（用户原句和模型提取的指令共用同一套规范化）在 90 天内出现在 ≥2 个会话即为候选，≥3 个为强候选。建议文本从仍在保留期内的输入包或 facet 中找回并加密保存（输入包按整条用户消息找回：标签只在首行，后续行属于同一条消息，直到下一个包自己的标签行）；找不到原文的指纹不生成建议。之后会话注入的 AGENTS.md / CLAUDE.md 出现同一指纹时自动标为"已沉淀"。管理员可以忽略"全体"范围的建议，忽略状态在后续刷新中保留；开发者不能标记（§13 第 6 项的默认值）。
 - **叙述**：模型只读程序生成的统计表（§8.4 格式，不含会话原文、人名、Key、单个会话费用）。输出中出现表外数字、超过 400 字或调用失败时改用模板；输入哈希不变时不重新生成。没有配置模型时始终使用模板。
 - **优化清单**：报告接口按费用列出本周死循环、反复编辑和未验证的会话（各最多 3 个）。
 - **页面**："会话分析"页新增"周度复盘"视图。浏览器验证使用了本地 mock 接口和 Vite 开发服务器；真实后端加 PostgreSQL 的端到端界面没有跑过（本机容器端口无法从 Windows 访问）。
+
+### 与模块 23 的对接
+
+`org_reports.enabled=true` 时生效。关闭时下面各项都不发生：`project_id`、`bucket` 为空，输入包和各接口的输出与对接之前逐字节一致。
+
+- **会话归属**：批处理分析每个会话时调用 23 的归属（`orgreport.Service.ResolveSession`）。它只读这个分析会话自己的请求（同一个根、同一把 Key），另一把 Key 在同一客户端会话 ID 下的请求不影响结果。身份密文在 23 的服务内部解密，本模块只拿到项目 id、项目名、信号级别和是否 service。
+- **一个会话只记一个项目**：23 按请求归属、按时间比例分摊；这里需要单一结论，规则如下。
+  - 命中项目的请求优先于未命中的；命中多个项目时取请求数最多的，并列时取最先出现的。
+  - 没有任何请求命中项目时，只要有请求带仓库或路径就记"未归属"，否则记"无项目上下文"。
+  - cwd 到仓库根的映射只用本会话内出现过的仓库根；23 的周报用该员工当周见过的全部仓库根。个别只带 cwd 的会话，结论可能与 23 的周报不同。
+- **尚无结论**：会话里没有请求带项目信号，且还有请求没经过项目标识提取（回填未完成）时，不写 `bucket`，等后面的刷新补上，而不是记成"无项目上下文"。
+- **service**：调用者被 23 标为 service（Token 的分类优先于用户的）时，`bucket=service`、`skip_reason=service`。这类会话只存信号：不生成输入包，不进聊天汇总，不存句子指纹，也不进任何范围的周报和建议（§5.1）。信号列表页仍能看到它们。
+- **刷新**：每轮批处理对本周和上周的会话重新求一次归属（本轮刚分析过的除外），因为规则和主体分类会在分析之后变化，项目标识的回填也可能晚到。
+  - 项目或分桶变了：只更新 `session_signals` 和句子指纹上的 `project_id`，不重新分析。
+  - 是否 service 变了：把该会话重新分析一遍，输入包、汇总成员关系和指纹随之增删。
+  - 更早的会话不再刷新，与 23 "已冻结的周不随规则变化"一致。单轮最多 5000 个会话。
+- **输入包**：`[会话]` 行在"客户端"之后写 `项目=<项目名>(<级别>)`，未命中写 `项目=未归属` 或 `项目=无项目上下文`，尚无结论时不写。
+  - 级别是命中规则的信号级别，没有 §6.7 最初设想的"继承"：归属是会话级的。
+  - 项目名是生成输入包时的快照。之后刷新改了归属，输入包不重建（重建会让 facet 重算），以 `session_signals` 为准。
+  - 聊天汇总包跨多个会话，不写项目。
+- **周报范围**：在"本人""全体"之外增加"项目"和"项目组"，项目组的范围是当前组成员的会话。
+  - 项目范围按 `session_signals.project_id` 取会话和 facet。聊天汇总包不属于任何项目或组，不计入这两类范围的 facet 分布。
+  - 管理员在"周度复盘"页选择范围，接口是 `GET /api/v1/session-analysis/report?project_id=` 或 `group_id=`；开发者会话带这两个参数返回 403。
+- **项目级建议**：同一句话在同一项目的 ≥2 个会话出现即生成项目范围的建议，"已沉淀"也只看该项目会话注入的规则；管理员可以忽略。
+  - 项目组没有自己的建议。
+  - 本人的建议仍按该 Key 的全部会话计算，没有按 §8.2 把已归属项目的会话剔除。
+  - 开发者暂时看不到项目级建议（§13 第 10 项）。
+- **人数下限**：项目或项目组某一周的调用者（按 NewAPI 用户，没有时按 Key）少于 2 人时，该周只保存和显示计数：不取会话目标，不带建议原文，叙述用模板。否则它等同于把某一个人的周度复盘展示给管理员，与 §9 相悖。"全体"范围没有这个限制，单人部署需要它。阈值见 §13 第 9 项。
+- **日历**：启用 23 时，批处理的时区用 `org_reports.timezone`，周的起始日用 `org_reports.week_start`；未启用时仍是进程本地时区和周一。改时区会改变单轮聊天的"本地日期"分桶，相关汇总包在下一次重新分析时重建。
+- **未做**：
+  - 信号列表没有按项目筛选的参数，只在每行显示归属。
+  - `[T]` 中的写入路径仍未用 23 的仓库根换成相对路径（见 S1）。
+  - 项目和项目组范围没有接入真实部署的数据核对；新增的 SQL 只在一次性的 PostgreSQL 18.6 容器上跑过测试。
