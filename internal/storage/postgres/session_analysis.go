@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"llmapi-logger/internal/storage"
@@ -368,50 +369,181 @@ WHERE digest_bucket IS NOT NULL
 	return nil
 }
 
-// PruneSessionAnalysis removes session rows whose newest audit was deleted by
-// retention (dependent rows cascade) and sentence fingerprints older than
-// fingerprintCutoffNS. It returns the number of removed session rows.
-func (store *Store) PruneSessionAnalysis(ctx context.Context, fingerprintCutoffNS int64) (int64, error) {
+// Bounds of one prune pass. Every statement is limited to one page of
+// candidates and every page is its own writer operation, so the single writer
+// never runs a statement whose cost grows with the tables: a statement that
+// outlives statement_timeout fails the whole writer batch, audit writes
+// included (see garbageCollectConversationObjects).
+const (
+	sessionPrunePageSize   = gcBatchSize
+	sessionPruneMaxPages   = 40
+	fingerprintPruneChunk  = 5000
+	fingerprintPruneChunks = 40
+)
+
+const lastAuditGone = `NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = t.last_audit_id)`
+
+// PruneSessionAnalysis removes the session rows and packs whose newest audit
+// retention deleted, and sentence fingerprints older than fingerprintCutoffNS.
+// It returns the number of removed session rows.
+//
+// Only rows whose last request started before expiredBeforeNS are checked:
+// retention is the only deleter of audits and deletes by start time, so with
+// expiredBeforeNS at "now minus the retention period" every row that can have
+// lost its audit is covered. Zero (retention disabled) checks none. A pass
+// checks at most sessionPruneMaxPages pages per table and deletes at most
+// fingerprintPruneChunks chunks of fingerprints; the rest waits for the next.
+func (store *Store) PruneSessionAnalysis(ctx context.Context, expiredBeforeNS, fingerprintCutoffNS int64) (int64, error) {
+	return store.pruneSessionAnalysis(ctx, expiredBeforeNS, fingerprintCutoffNS, sessionPrunePageSize, fingerprintPruneChunk)
+}
+
+func (store *Store) pruneSessionAnalysis(ctx context.Context, expiredBeforeNS, fingerprintCutoffNS int64, pageSize, fingerprintChunk int) (int64, error) {
 	if ctx == nil {
 		return 0, errors.New("postgres: nil context")
 	}
 	if store == nil || store.isClosed() {
 		return 0, ErrClosed
 	}
+	if pageSize <= 0 || pageSize > gcBatchSize || fingerprintChunk <= 0 {
+		return 0, errors.New("postgres: invalid session prune page size")
+	}
 	var removed int64
-	err := store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
-		// Digests holding an expiring session, or whose own newest audit
-		// expired, are rebuilt from the members that remain.
-		if err := dropChatDigestsOf(tx, `
-SELECT s.session_key FROM session_signals AS s
-WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = s.last_audit_id)`); err != nil {
-			return err
+	if expiredBeforeNS > 0 {
+		var err error
+		if removed, err = store.pruneExpiredPages(ctx, "session_signals", expiredBeforeNS, pageSize, releaseExpiredSessions); err != nil {
+			return removed, err
 		}
-		if _, err := tx.Exec(`
-UPDATE session_signals SET digest_pending = TRUE
-WHERE digest_bucket IS NOT NULL AND session_key IN (
-    SELECT m.session_key FROM session_pack_members AS m JOIN session_packs AS p ON p.session_key = m.pack_key
-    WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = p.last_audit_id))`); err != nil {
-			return fmt.Errorf("postgres writer: queue members of expired digests: %w", err)
+		// What is left after the sessions went: digests whose own newest audit
+		// expired while members remain, and packs without a session row.
+		if _, err := store.pruneExpiredPages(ctx, "session_packs", expiredBeforeNS, pageSize, releaseExpiredPacks); err != nil {
+			return removed, err
 		}
-		result, err := tx.Exec(`
-DELETE FROM session_signals AS s
-WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = s.last_audit_id)`)
+	}
+	for chunk := 0; chunk < fingerprintPruneChunks; chunk++ {
+		var deleted int64
+		err := store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+			result, err := tx.Exec(`
+DELETE FROM session_text_fprs WHERE (session_key, source, fpr) IN (
+    SELECT f.session_key, f.source, f.fpr FROM session_text_fprs AS f
+    WHERE f.seen_at_ns < $1 ORDER BY f.seen_at_ns LIMIT $2)`, fingerprintCutoffNS, fingerprintChunk)
+			if err != nil {
+				return fmt.Errorf("postgres writer: prune session text fingerprints: %w", err)
+			}
+			deleted, _ = result.RowsAffected()
+			return nil
+		})})
 		if err != nil {
-			return fmt.Errorf("postgres writer: prune session signals: %w", err)
+			return removed, err
 		}
-		removed, _ = result.RowsAffected()
-		if _, err := tx.Exec(`
-DELETE FROM session_packs AS p
-WHERE NOT EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = p.last_audit_id)`); err != nil {
-			return fmt.Errorf("postgres writer: prune session packs: %w", err)
+		if deleted < int64(fingerprintChunk) {
+			break
 		}
-		if _, err := tx.Exec(`DELETE FROM session_text_fprs WHERE seen_at_ns < $1`, fingerprintCutoffNS); err != nil {
-			return fmt.Errorf("postgres writer: prune session text fingerprints: %w", err)
+	}
+	return removed, nil
+}
+
+// pruneExpiredPages pages through the rows of table (session_signals or
+// session_packs) older than expiredBeforeNS, oldest first, and hands each
+// page to release as one writer operation. The page is a plain keyset range
+// over the last_ns index, read on the reader pool; whether a row's audit is
+// gone is decided by release, for at most one page of keys, with a primary
+// key probe per row. No statement depends on how the planner joins against
+// audit_records, and none grows with the tables.
+//
+// Retention deletes the oldest audits first, so the rows that can be released
+// come first too. Rows whose audit still exists (a retention backlog) are
+// read again by the next pass.
+func (store *Store) pruneExpiredPages(ctx context.Context, table string, expiredBeforeNS int64, pageSize int, release func(dbTransaction, [][]byte) (int64, error)) (int64, error) {
+	var total int64
+	cursorNS, cursorKey := int64(math.MinInt64), []byte{}
+	for page := 0; page < sessionPruneMaxPages; page++ {
+		rows, err := store.readerDB.QueryContext(ctx, `
+SELECT t.session_key, t.last_ns FROM `+table+` AS t
+WHERE t.last_ns < $1 AND (t.last_ns, t.session_key) > ($2, $3)
+ORDER BY t.last_ns, t.session_key
+LIMIT $4`, expiredBeforeNS, cursorNS, cursorKey, pageSize)
+		if err != nil {
+			return total, fmt.Errorf("postgres: list expired %s: %w", table, err)
 		}
-		return nil
-	})})
-	return removed, err
+		keys := make([][]byte, 0, pageSize)
+		for rows.Next() {
+			var key []byte
+			if err := rows.Scan(&key, &cursorNS); err != nil {
+				rows.Close()
+				return total, fmt.Errorf("postgres: scan expired %s: %w", table, err)
+			}
+			keys = append(keys, key)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return total, fmt.Errorf("postgres: iterate expired %s: %w", table, err)
+		}
+		if len(keys) == 0 {
+			break
+		}
+		cursorKey = keys[len(keys)-1]
+		var released int64
+		err = store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+			var err error
+			released, err = release(tx, keys)
+			return err
+		})})
+		if err != nil {
+			return total, err
+		}
+		total += released
+		if len(keys) < pageSize {
+			break
+		}
+	}
+	return total, nil
+}
+
+// releaseExpiredSessions deletes those of the given sessions whose newest
+// audit is gone, with their own packs and the chat digests that hold them.
+// The check runs inside the writer, so a session analysed again since the
+// page was read keeps its rows.
+func releaseExpiredSessions(tx dbTransaction, keys [][]byte) (int64, error) {
+	arguments := hashesToAny(keys)
+	expired := `SELECT t.session_key FROM session_signals AS t WHERE t.session_key IN (` + placeholders(len(arguments)) + `) AND ` + lastAuditGone
+	// Digests holding an expiring session are rebuilt from the members that
+	// remain.
+	if err := dropChatDigestsOf(tx, expired, arguments...); err != nil {
+		return 0, err
+	}
+	deleted, err := queryColumn[[]byte](tx, arguments, `DELETE FROM session_signals AS t
+WHERE t.session_key IN (%s) AND `+lastAuditGone+`
+RETURNING t.session_key`, "prune session signals")
+	if err != nil {
+		return 0, err
+	}
+	if len(deleted) != 0 {
+		gone := hashesToAny(deleted)
+		if _, err := tx.Exec(`DELETE FROM session_packs WHERE kind = 'session' AND session_key IN (`+placeholders(len(gone))+`)`, gone...); err != nil {
+			return 0, fmt.Errorf("postgres writer: prune session packs: %w", err)
+		}
+	}
+	return int64(len(deleted)), nil
+}
+
+// releaseExpiredPacks deletes those of the given packs whose newest audit is
+// gone, after queueing the members of expired digests for a rebuild.
+func releaseExpiredPacks(tx dbTransaction, keys [][]byte) (int64, error) {
+	arguments := hashesToAny(keys)
+	expired := `SELECT t.session_key FROM session_packs AS t WHERE t.session_key IN (` + placeholders(len(arguments)) + `) AND ` + lastAuditGone
+	if _, err := tx.Exec(`
+UPDATE session_signals SET digest_pending = TRUE
+WHERE digest_bucket IS NOT NULL
+  AND session_key IN (SELECT m.session_key FROM session_pack_members AS m WHERE m.pack_key IN (`+expired+`))`, arguments...); err != nil {
+		return 0, fmt.Errorf("postgres writer: queue members of expired digests: %w", err)
+	}
+	result, err := tx.Exec(`DELETE FROM session_packs AS t WHERE t.session_key IN (`+placeholders(len(arguments))+`) AND `+lastAuditGone, arguments...)
+	if err != nil {
+		return 0, fmt.Errorf("postgres writer: prune expired packs: %w", err)
+	}
+	released, _ := result.RowsAffected()
+	return released, nil
 }
 
 // RecordSessionAnalysisRun appends one batch run summary.

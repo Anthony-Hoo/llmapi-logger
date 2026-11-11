@@ -37,6 +37,8 @@ type memoryStore struct {
 	stats    map[string]storage.PeriodStats
 	// failSignals makes the next SaveSessionSignals calls fail.
 	failSignals int
+	// prunes records the (expiredBeforeNS, fingerprintCutoffNS) of each prune.
+	prunes [][2]int64
 }
 
 func newMemoryStore() *memoryStore {
@@ -126,7 +128,12 @@ func (store *memoryStore) SaveSessionSignals(_ context.Context, signals storage.
 	return nil
 }
 
-func (store *memoryStore) PruneSessionAnalysis(context.Context, int64) (int64, error) { return 0, nil }
+func (store *memoryStore) PruneSessionAnalysis(_ context.Context, expiredBeforeNS, fingerprintCutoffNS int64) (int64, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.prunes = append(store.prunes, [2]int64{expiredBeforeNS, fingerprintCutoffNS})
+	return 0, nil
+}
 
 func (store *memoryStore) RecordSessionAnalysisRun(_ context.Context, run storage.SessionAnalysisRun) error {
 	store.mu.Lock()
@@ -612,6 +619,35 @@ func TestRunnerRebuildsDigestsWhenChatsLeave(t *testing.T) {
 }
 
 func scopeOf(key []byte) *query.Scope { return &query.Scope{Fingerprint: key} }
+
+// The prune only looks behind the retention cutoff: audits are deleted by
+// start time, so younger sessions cannot have lost theirs. Without retention
+// it looks at none.
+func TestRunnerPrunesBehindTheRetentionCutoff(t *testing.T) {
+	now := baseTime.Add(48 * time.Hour)
+	for _, test := range []struct {
+		days int
+		want int64
+	}{{30, now.Add(-30 * 24 * time.Hour).UnixNano()}, {0, 0}} {
+		store := newMemoryStore()
+		vocab, insightsVocab := testVocabularies(t)
+		runner, err := NewRunner(Options{
+			Config: config.SessionAnalysisConfig{RunAt: "02:00", SessionIdleMinutes: 120, MinUserTurns: 2, MinActiveSeconds: 1, Pack: config.SessionAnalysisPack{MaxTokens: 6000}},
+			Store:  store, Loader: &fakeLoader{}, Vocabulary: vocab, Insights: insightsVocab, RetentionDays: test.days,
+			Fingerprints: testFingerprinter{}, Cipher: testCipher(t), Location: time.UTC,
+			Now: func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runner.RunOnce(context.Background(), TriggerManual); err != nil {
+			t.Fatal(err)
+		}
+		if len(store.prunes) != 1 || store.prunes[0][0] != test.want || store.prunes[0][1] != now.Add(-fingerprintKeep).UnixNano() {
+			t.Fatalf("retention %d days: prunes = %v, want cutoff %d", test.days, store.prunes, test.want)
+		}
+	}
+}
 
 // --- report surface of the in-memory store ---
 

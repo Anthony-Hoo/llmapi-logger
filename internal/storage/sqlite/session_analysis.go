@@ -31,7 +31,7 @@ func (store *Store) UpdateSessionProjects(context.Context, []storage.SessionProj
 	return nil
 }
 
-func (store *Store) PruneSessionAnalysis(context.Context, int64) (int64, error) {
+func (store *Store) PruneSessionAnalysis(context.Context, int64, int64) (int64, error) {
 	return 0, nil
 }
 

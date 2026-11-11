@@ -167,7 +167,7 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 
 	// Retention removed the session's newest audit: the next prune drops the
 	// row; fingerprints older than the cutoff go too.
-	removed, err := store.PruneSessionAnalysis(ctx, 2)
+	removed, err := store.PruneSessionAnalysis(ctx, quiet, 2)
 	if err != nil || removed != 0 {
 		t.Fatalf("prune with live audit = %d, %v", removed, err)
 	}
@@ -178,7 +178,7 @@ func TestSessionAnalysisStorageRoundTrip(t *testing.T) {
 	if _, err := store.writerConn.ExecContext(ctx, `UPDATE session_signals SET last_audit_id = 'expired-audit'`); err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := store.PruneSessionAnalysis(ctx, 2); err != nil || removed != 1 {
+	if removed, err := store.PruneSessionAnalysis(ctx, quiet, 2); err != nil || removed != 1 {
 		t.Fatalf("prune = %d, %v", removed, err)
 	}
 }
@@ -326,7 +326,7 @@ func TestChatDigestsFollowTheirMembers(t *testing.T) {
 	if _, err := store.writerConn.ExecContext(ctx, `UPDATE session_signals SET last_audit_id = 'expired-audit' WHERE session_key = $1`, c2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PruneSessionAnalysis(ctx, 0); err != nil {
+	if _, err := store.PruneSessionAnalysis(ctx, day.Add(time.Hour).UnixNano(), 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.LoadSessionPack(ctx, c3); !errors.Is(err, sql.ErrNoRows) {
@@ -471,7 +471,7 @@ func TestSessionPacksStorageAndViewLog(t *testing.T) {
 	if _, err := store.LoadSessionPack(ctx, rootA); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("stale pack kept: %v", err)
 	}
-	if _, err := store.PruneSessionAnalysis(ctx, 0); err != nil {
+	if _, err := store.PruneSessionAnalysis(ctx, day.Add(time.Hour).UnixNano(), 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.LoadSessionPack(ctx, member2); !errors.Is(err, sql.ErrNoRows) {
@@ -1010,5 +1010,111 @@ func TestSessionReportScopes(t *testing.T) {
 	suggestion.Scope = storage.ScopeGroup
 	if err := store.UpsertSuggestion(ctx, suggestion); err == nil {
 		t.Fatal("group suggestion stored")
+	}
+}
+
+// The prune checks only rows older than the retention cutoff, one bounded
+// page per writer operation, and leaves everything else alone.
+func TestSessionPruneChecksOnlyExpiredCandidatesInPages(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	at := day.UnixNano()
+	cutoff := at + 1000
+	pack := func(key []byte, kind, lastAuditID string, lastNS int64) storage.SessionPack {
+		return storage.SessionPack{
+			SessionKey: key, Kind: kind, APIKeyFPR: keyA, PackHash: strings.Repeat("ef", 32), PackEnc: []byte{1}, RefMap: "{}",
+			FirstNS: at - 1, LastNS: lastNS, LastAuditID: lastAuditID, BuiltAtNS: 1, Members: 1,
+		}
+	}
+	save := func(key []byte, lastAuditID string, lastNS, seenNS int64) {
+		t.Helper()
+		signals := testSignals(key, keyA, lastAuditID, lastNS)
+		own := pack(key, storage.PackKindSession, lastAuditID, lastNS)
+		fprs := []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: key, APIKeyFPR: keyA, SeenAtNS: seenNS}}
+		if err := store.SaveSessionSignals(ctx, signals, fprs, &own); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Five sessions older than the cutoff lost their newest audit. Two share a
+	// last_ns, so a page boundary falls between rows of the same instant.
+	expired := [][]byte{fill(0xf1), fill(0xf2), fill(0xf3), fill(0xf4), fill(0xf5)}
+	for index, lastNS := range []int64{at, at + 1, at + 1, at + 3, at + 4} {
+		save(expired[index], "gone-"+string(rune('a'+index)), lastNS, int64(index+1))
+	}
+	// Older than the cutoff, but its audit is still there.
+	live := fill(0xf6)
+	chat := testSignals(live, keyA, "a2", at+2)
+	chat.Kind, chat.Eligible, chat.SkipReason, chat.DigestBucket = "chat", false, "single_turn_chat", fill(0xb7)
+	if err := store.SaveSessionSignals(ctx, chat, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Its audit is gone too, but it is not older than the cutoff: outside the
+	// range the prune may look at.
+	recent := fill(0xf7)
+	save(recent, "gone-recent", cutoff, 100)
+	// A digest whose own newest audit expired while its member remains.
+	digest := fill(0xf8)
+	if err := store.SaveSessionPack(ctx, pack(digest, storage.PackKindChatDigest, "gone-digest", at+5), [][]byte{live}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writerConn.ExecContext(ctx, `UPDATE session_signals SET digest_pending = FALSE`); err != nil {
+		t.Fatal(err)
+	}
+
+	count := func(query string, arguments ...any) int {
+		t.Helper()
+		var rows int
+		if err := store.readerDB.QueryRow(query, arguments...).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	// Retention disabled: nothing is checked, whatever is missing.
+	if removed, err := store.pruneSessionAnalysis(ctx, 0, 0, 2, 2); err != nil || removed != 0 || count(`SELECT COUNT(*) FROM session_signals`) != 7 {
+		t.Fatalf("prune without a cutoff removed %d, %v", removed, err)
+	}
+
+	// Pages of two sessions and chunks of two fingerprints.
+	removed, err := store.pruneSessionAnalysis(ctx, cutoff, 4, 2, 2)
+	if err != nil || removed != 5 {
+		t.Fatalf("removed = %d, %v", removed, err)
+	}
+	for _, key := range expired {
+		if count(`SELECT COUNT(*) FROM session_signals WHERE session_key = $1`, key) != 0 || count(`SELECT COUNT(*) FROM session_packs WHERE session_key = $1`, key) != 0 {
+			t.Fatalf("expired session %x kept rows", key[:1])
+		}
+	}
+	if count(`SELECT COUNT(*) FROM session_signals`) != 2 {
+		t.Fatalf("sessions left = %d", count(`SELECT COUNT(*) FROM session_signals`))
+	}
+	if count(`SELECT COUNT(*) FROM session_signals WHERE session_key = $1`, recent) != 1 || count(`SELECT COUNT(*) FROM session_packs WHERE session_key = $1`, recent) != 1 {
+		t.Fatal("a session inside the retention period was pruned")
+	}
+	// The expired digest is gone and its remaining member waits for a rebuild.
+	if count(`SELECT COUNT(*) FROM session_packs WHERE session_key = $1`, digest) != 0 || count(`SELECT COUNT(*) FROM session_pack_members WHERE pack_key = $1`, digest) != 0 {
+		t.Fatal("expired digest kept")
+	}
+	if count(`SELECT COUNT(*) FROM session_signals WHERE session_key = $1 AND digest_pending`, live) != 1 {
+		t.Fatal("member of the expired digest not queued")
+	}
+	// Fingerprints older than the cutoff went, in chunks; the others stay
+	// although their sessions are gone.
+	if count(`SELECT COUNT(*) FROM session_text_fprs WHERE seen_at_ns < 4`) != 0 || count(`SELECT COUNT(*) FROM session_text_fprs`) != 3 {
+		t.Fatalf("fingerprints left = %d", count(`SELECT COUNT(*) FROM session_text_fprs`))
+	}
+	// A second pass finds nothing.
+	if removed, err := store.pruneSessionAnalysis(ctx, cutoff, 4, 2, 2); err != nil || removed != 0 {
+		t.Fatalf("second pass removed %d, %v", removed, err)
+	}
+	// Once it is older than the cutoff, the remaining orphan goes as well.
+	if removed, err := store.PruneSessionAnalysis(ctx, cutoff+1, 0); err != nil || removed != 1 {
+		t.Fatalf("later pass removed %d, %v", removed, err)
+	}
+	for _, size := range [][2]int{{0, 2}, {gcBatchSize + 1, 2}, {2, 0}} {
+		if _, err := store.pruneSessionAnalysis(ctx, cutoff, 0, size[0], size[1]); err == nil {
+			t.Fatalf("page sizes %v accepted", size)
+		}
 	}
 }

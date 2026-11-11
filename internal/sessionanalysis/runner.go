@@ -25,7 +25,10 @@ type Store interface {
 	// SaveSessionSignals writes signals, fingerprints and the session pack
 	// (nil: none) atomically, so a failed write leaves the session due.
 	SaveSessionSignals(ctx context.Context, signals storage.SessionSignals, fprs []storage.SessionTextFPR, pack *storage.SessionPack) error
-	PruneSessionAnalysis(ctx context.Context, fingerprintCutoffNS int64) (int64, error)
+	// PruneSessionAnalysis drops the derived rows of sessions whose audits
+	// retention deleted; only sessions older than expiredBeforeNS are checked
+	// (zero: none), in bounded batches.
+	PruneSessionAnalysis(ctx context.Context, expiredBeforeNS, fingerprintCutoffNS int64) (int64, error)
 	RecordSessionAnalysisRun(ctx context.Context, run storage.SessionAnalysisRun) error
 	ListChatDigestMembers(ctx context.Context, apiKeyFPR []byte, client string, fromNS, toNS int64, limit int) ([]storage.SessionSignals, error)
 	// ListPendingDigestMembers lists single-turn chats whose digest bucket
@@ -268,7 +271,13 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 		return run, nil
 	}
 
-	pruned, err := options.Store.PruneSessionAnalysis(ctx, started.Add(-fingerprintKeep).UnixNano())
+	// Retention deletes audits by start time, so only sessions older than the
+	// retention period can have lost theirs. Without retention none can.
+	expiredBefore := int64(0)
+	if days := options.RetentionDays; days > 0 {
+		expiredBefore = started.Add(-time.Duration(days) * 24 * time.Hour).UnixNano()
+	}
+	pruned, err := options.Store.PruneSessionAnalysis(ctx, expiredBefore, started.Add(-fingerprintKeep).UnixNano())
 	if err != nil {
 		finish("prune_failed")
 		return run, err
