@@ -90,11 +90,13 @@ org_reports:
   anomaly:
     max_concurrent_roots: 10       # 周内峰值并行根会话超过即标记
     max_single_request_roots: 200  # 周内单请求根会话超过即标记
+  llm_classification:              # 保留字段，必须为 false；功能由顶层 session_analysis 提供（模块 24）
+    enabled: false
 ~~~
 
 启动校验：`enabled=true` 时必须同时配置 `newapi.access_token`/`user_id`（身份）且 `insights.enabled=true`（会话与 Agent 树），否则拒绝启动。项目组、项目和规则存数据库并在管理页维护，不进 YAML，避免把真实仓库名写进配置样例。
 
-原设计里的子开关 `org_reports.llm_classification` 已取消，由顶层开关 `session_analysis` 取代（[模块 24](24-session-analysis.md) §4）。`session_analysis` 只依赖 `insights.enabled`，不依赖 `org_reports`；两者都开启时，会话分析额外得到项目归属、项目与项目组范围的周报（§13.6）。
+原设计里的子开关 `org_reports.llm_classification` 不再使用：对应的功能由顶层开关 `session_analysis` 提供（[模块 24](24-session-analysis.md) §4）。这个键仍保留在配置结构里，已有的配置文件照常加载，但值必须为 false，设为 true 会拒绝启动。`session_analysis` 只依赖 `insights.enabled`，不依赖 `org_reports`；两者都开启时，会话分析额外得到项目归属、项目与项目组范围的周报（§13.6）。
 
 ## 4. 数据模型（PostgreSQL migration 002）
 

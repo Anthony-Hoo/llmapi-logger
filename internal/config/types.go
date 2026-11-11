@@ -78,8 +78,10 @@ type OrgAnomalyConfig struct {
 	MaxSingleRequestRoots int `yaml:"max_single_request_roots"`
 }
 
-// OrgLLMClassificationConfig reserves the M5 switch. It is not implemented and
-// must stay disabled.
+// OrgLLMClassificationConfig is the switch the original M5 design reserved.
+// That work became the top-level session_analysis section
+// (doc/features/24-session-analysis.md); the switch is kept so existing
+// configuration files still load, and must stay disabled.
 type OrgLLMClassificationConfig struct {
 	Enabled bool `yaml:"enabled"`
 }

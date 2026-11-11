@@ -211,38 +211,40 @@ export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiCli
           {scopeSummary(report, isDeveloper)}
           {report ? ` 周期 ${weekLabel(report.week_start_ns)}。` : ""}
         </p>
-        {!isDeveloper && report && (report.projects.length > 0 || report.groups.length > 0 || selected !== "all") ? (
-          <Select aria-label="范围" value={selected} onChange={(event) => setTarget(parseTargetValue(event.target.value))}>
-            <option value="all">全体</option>
-            {report.projects.length > 0 ? (
-              <optgroup label="项目">
-                {report.projects.map((item) => (
-                  <option key={item.id} value={`project:${item.id}`}>
-                    {item.name || `#${item.id}`}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null}
-            {report.groups.length > 0 ? (
-              <optgroup label="项目组">
-                {report.groups.map((item) => (
-                  <option key={item.id} value={`group:${item.id}`}>
-                    {item.name || `#${item.id}`}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null}
-          </Select>
-        ) : null}
-        <Segmented
-          label="周期"
-          value={week}
-          options={[
-            { value: "current", label: "本周" },
-            { value: "previous", label: "上周" },
-          ]}
-          onChange={setWeek}
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          {!isDeveloper && report && (report.projects.length > 0 || report.groups.length > 0 || selected !== "all") ? (
+            <Select aria-label="范围" className="w-auto min-w-40" value={selected} onChange={(event) => setTarget(parseTargetValue(event.target.value))}>
+              <option value="all">全体</option>
+              {report.projects.length > 0 ? (
+                <optgroup label="项目">
+                  {report.projects.map((item) => (
+                    <option key={item.id} value={`project:${item.id}`}>
+                      {item.name || `#${item.id}`}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {report.groups.length > 0 ? (
+                <optgroup label="项目组">
+                  {report.groups.map((item) => (
+                    <option key={item.id} value={`group:${item.id}`}>
+                      {item.name || `#${item.id}`}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+            </Select>
+          ) : null}
+          <Segmented
+            label="周期"
+            value={week}
+            options={[
+              { value: "current", label: "本周" },
+              { value: "previous", label: "上周" },
+            ]}
+            onChange={setWeek}
+          />
+        </div>
       </div>
       {error ? (
         <Alert variant="danger">
@@ -267,7 +269,7 @@ export function ReportBody({ report, canDismiss, onDismiss }: { report: Analysis
       {report.stats?.limited ? (
         <Alert variant="info">
           <AlertDescription>
-            本周这个范围只有 {report.stats.contributors ?? 0} 位使用者。为避免变成某个人的复盘，这里只显示计数，不显示目标和建议原文。
+            本周这个范围只有 {report.stats.contributors ?? 0} 位使用者。为避免变成某个人的复盘，这里只显示计数，不显示目标、建议原文和问题会话。
           </AlertDescription>
         </Alert>
       ) : null}

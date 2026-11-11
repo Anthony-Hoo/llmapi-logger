@@ -457,17 +457,17 @@ func (runner *Runner) refreshProjects(ctx context.Context, started time.Time, th
 			return changed, err
 		}
 		id, bucket := projectColumns(project)
-		if bucket == "" || (bucket == ref.Bucket && sameID(id, ref.ProjectID)) {
-			continue // no verdict yet, or unchanged
-		}
-		if (bucket == storage.BucketService) != (ref.Bucket == storage.BucketService) {
+		wasService := ref.Bucket == storage.BucketService
+		if project.Service != wasService {
+			// Decided before the "no verdict" skip: a caller stops being a
+			// service whether or not its project is known yet.
 			if _, err := runner.analyzeOne(ctx, ref.AgentRootFPR, ref.APIKeyFPR, thresholds); err == nil {
 				changed++
 			}
 			continue
 		}
-		if bucket == storage.BucketService {
-			continue // still a service; its project is not reported
+		if wasService || bucket == "" || (bucket == ref.Bucket && sameID(id, ref.ProjectID)) {
+			continue // still a service, no verdict yet, or unchanged
 		}
 		updates = append(updates, storage.SessionProjectRef{SessionKey: ref.SessionKey, ProjectID: id, Bucket: bucket})
 		if len(updates) == projectRefreshBatch {

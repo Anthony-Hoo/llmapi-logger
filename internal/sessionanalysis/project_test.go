@@ -203,7 +203,18 @@ func TestRunnerBooksSessionsToProjects(t *testing.T) {
 		t.Fatalf("service sessions kept %d packs, %d fingerprints", len(store.packs), len(store.textFPRs[agentID]))
 	}
 
-	// Classified human again: the pack and the digest come back.
+	// Classified human again while its project is not known yet: the session
+	// stops being a service at once and gets its pack back without a booking.
+	projects.byRoot[hex.EncodeToString(sessionK)] = orgreport.SessionProject{Project: orgreport.ProjectNoContext}
+	run()
+	if agent = store.signals[agentID]; agent.Bucket != "" || agent.ProjectID != nil || !agent.Eligible || agent.SkipReason != "" {
+		t.Fatalf("reclassified without a verdict: %q %v eligible=%v %q", agent.Bucket, agent.ProjectID, agent.Eligible, agent.SkipReason)
+	}
+	if _, ok := store.packs[agentID]; !ok || len(store.textFPRs[agentID]) == 0 {
+		t.Fatal("reclassified session has no pack or fingerprints")
+	}
+	// The booking arrives later; the chat is human again too and its digest
+	// comes back.
 	projects.byRoot[hex.EncodeToString(sessionK)] = orgreport.SessionProject{Known: true, Project: 11, Name: "billing", Level: orgreport.LevelRoot}
 	delete(projects.byRoot, hex.EncodeToString(chatRoot))
 	run()
@@ -252,7 +263,13 @@ func TestProjectAndGroupReports(t *testing.T) {
 			rows[position].Quota, rows[position].QuotaPerUnit = &quota, &unit
 		}
 		store.sessions[hex.EncodeToString(root)] = rows
-		views[prefix+"2"] = convo(user("修一下导出接口的分页。提交前先跑一遍全部单元测试"), answer("好"), user("好的，再看一下文档"), answer("完成"))
+		// Every session writes a file and never verifies it, so each scope
+		// has "costliest problem sessions" to show.
+		views[prefix+"2"] = convo(
+			user("修一下导出接口的分页。提交前先跑一遍全部单元测试"),
+			call("w"+prefix, "apply_patch", "*** Begin Patch\n*** Update File: export.go\n*** End Patch"),
+			result("w"+prefix, "Success."),
+			user("好的，再看一下文档"), answer("完成"))
 	}
 	projects := &fakeProjects{
 		names: map[int64]string{10: "orders", 11: "billing"},
@@ -311,6 +328,14 @@ func TestProjectAndGroupReports(t *testing.T) {
 	if found := rule(orders); len(orders.Suggestions) != 3 || found == nil || found.Sessions != 2 || found.Status != "open" || len(found.Evidence) != 2 {
 		t.Fatalf("orders suggestions = %+v", orders.Suggestions)
 	}
+	if len(orders.Optimizations) != 2 || orders.Optimizations[0].Project != "orders" {
+		t.Fatalf("orders optimizations = %+v", orders.Optimizations)
+	}
+	// A week without statistics has no caller count: no suggestion texts and
+	// no sessions either, although the project has suggestions.
+	if earlier, err := service.Report(ctx, "previous", nil, ReportTarget{ProjectID: 10}); err != nil || earlier.Stats != nil || len(earlier.Suggestions) != 0 || len(earlier.Optimizations) != 0 {
+		t.Fatalf("project week without statistics = %+v, %v", earlier, err)
+	}
 	if !strings.Contains(orders.Narrative, "提交前先跑一遍全部单元测试") {
 		t.Fatalf("orders narrative = %q", orders.Narrative)
 	}
@@ -322,16 +347,16 @@ func TestProjectAndGroupReports(t *testing.T) {
 	// One caller only: counts stay, goals and suggestion texts do not.
 	billing, err := service.Report(ctx, "current", nil, ReportTarget{ProjectID: 11})
 	if err != nil || billing.Stats == nil || billing.Stats.Totals.Sessions != 1 || billing.Stats.Contributors != 1 || !billing.Stats.Limited ||
-		len(billing.Suggestions) != 0 || strings.Contains(billing.Narrative, "提交前") {
+		len(billing.Suggestions) != 0 || len(billing.Optimizations) != 0 || strings.Contains(billing.Narrative, "提交前") {
 		t.Fatalf("billing = %+v stats=%+v, %v", billing, billing.Stats, err)
 	}
 	payments, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 1})
 	if err != nil || payments.Scope != storage.ScopeGroup || payments.ScopeName != "payments" || payments.Stats == nil ||
-		payments.Stats.Totals.Sessions != 3 || payments.Stats.Contributors != 2 || payments.Stats.Limited || len(payments.Suggestions) != 0 {
+		payments.Stats.Totals.Sessions != 3 || payments.Stats.Contributors != 2 || payments.Stats.Limited || len(payments.Suggestions) != 0 || len(payments.Optimizations) != 3 {
 		t.Fatalf("payments = %+v stats=%+v, %v", payments, payments.Stats, err)
 	}
 	solo, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 2})
-	if err != nil || solo.Stats == nil || solo.Stats.Totals.Sessions != 1 || !solo.Stats.Limited {
+	if err != nil || solo.Stats == nil || solo.Stats.Totals.Sessions != 1 || !solo.Stats.Limited || len(solo.Optimizations) != 0 {
 		t.Fatalf("solo = %+v stats=%+v, %v", solo, solo.Stats, err)
 	}
 	if empty, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 3}); err != nil || empty.Stats == nil || empty.Stats.Totals.Sessions != 0 || !empty.Stats.Limited {

@@ -142,9 +142,13 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 	} else if !isNoRows(err) {
 		return ReportResponse{}, err
 	}
+	// A project or group week with too few callers shows counts only: its
+	// suggestion texts and its costliest sessions would be one person's. A
+	// week without statistics has no caller count and is treated the same.
+	limited := selected.shared() && (response.Stats == nil || response.Stats.Limited)
 	var suggestions []storage.Suggestion
-	if selected.scope != storage.ScopeGroup && (response.Stats == nil || !response.Stats.Limited) {
-		// Groups have no suggestions of their own; a limited week shows none.
+	if selected.scope != storage.ScopeGroup && !limited {
+		// Groups have no suggestions of their own.
 		var err error
 		if suggestions, err = store.ListSuggestions(ctx, scopeName, scopeKey, tokenID, maxReportSuggestions); err != nil {
 			return ReportResponse{}, err
@@ -169,6 +173,9 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 	}
 	filter := selected.signals(start.UnixNano(), start.AddDate(0, 0, 7).UnixNano())
 	filter.Scope = storageScope(scope)
+	if limited {
+		return response, nil
+	}
 	seen := map[string]bool{}
 	for _, flag := range []string{"loop", "thrash", "unverified"} {
 		filter.Flags = []string{flag}

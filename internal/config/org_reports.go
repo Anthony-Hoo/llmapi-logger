@@ -60,7 +60,7 @@ func validateOrgReports(cfg Config) error {
 		return fmt.Errorf("org_reports.anomaly.max_single_request_roots must be between 1 and %d", maxOrgAnomalyLimit)
 	}
 	if org.LLMClassification.Enabled {
-		return errors.New("org_reports.llm_classification is not implemented yet and must stay disabled")
+		return errors.New("org_reports.llm_classification was replaced by session_analysis and must stay disabled")
 	}
 	return nil
 }
