@@ -342,6 +342,20 @@ func IDScopeKey(id int64) []byte {
 	return key
 }
 
+// IDOfScopeKey is the inverse of IDScopeKey; ok is false for any other key.
+func IDOfScopeKey(key []byte) (id int64, ok bool) {
+	if len(key) != 32 {
+		return 0, false
+	}
+	for _, value := range key[:24] {
+		if value != 0 {
+			return 0, false
+		}
+	}
+	id = int64(binary.BigEndian.Uint64(key[24:]))
+	return id, id > 0
+}
+
 // FacetScope selects the facets one report scope aggregates: every facet
 // (zero value), one API key's, one project's, or those of a set of users.
 // Project and user scopes read session facets only; a chat digest spans

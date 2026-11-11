@@ -4,12 +4,13 @@ import { ApiError, type ApiClient } from "../../api";
 import { errorMessage, isAbortError } from "../../lib/errors";
 import { formatUSD } from "../../lib/insights/format";
 import { FRICTION_LABELS, labelOf, OUTCOME_LABELS, TASK_TYPE_LABELS } from "../../lib/session-analysis/format";
-import type { AnalysisReport, AnalysisSuggestion, AnalysisWeeklyStats } from "../../lib/session-analysis/types";
+import type { AnalysisReport, AnalysisReportTarget, AnalysisSuggestion, AnalysisWeeklyStats } from "../../lib/session-analysis/types";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import { Segmented } from "../ui/segmented";
+import { Select } from "../ui/select";
 import { Skeleton } from "../ui/skeleton";
 import { clientLabel } from "../insights/ui-bits";
 
@@ -136,17 +137,52 @@ export function SuggestionList({
   );
 }
 
+/** Select value of a report target: "all", "project:<id>" or "group:<id>". */
+export function targetValue(target: AnalysisReportTarget): string {
+  if (target.project_id) {
+    return `project:${target.project_id}`;
+  }
+  return target.group_id ? `group:${target.group_id}` : "all";
+}
+
+export function parseTargetValue(value: string): AnalysisReportTarget {
+  const [kind, idText] = value.split(":");
+  const id = Number(idText);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return {};
+  }
+  if (kind === "project") {
+    return { project_id: id };
+  }
+  return kind === "group" ? { group_id: id } : {};
+}
+
+function scopeSummary(report: AnalysisReport | null, isDeveloper: boolean): string {
+  if (isDeveloper) {
+    return "只包含你这把 Key 的会话，仅你本人可见。";
+  }
+  if (report?.scope === "project") {
+    return `项目「${report.scope_name || `#${report.scope_id}`}」的汇总，不按人拆分。`;
+  }
+  if (report?.scope === "group") {
+    return `项目组「${report.scope_name || `#${report.scope_id}`}」成员的汇总，不按人拆分。`;
+  }
+  return "全体 Key 的汇总，不按人拆分。";
+}
+
 export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiClient; isDeveloper: boolean; refreshKey: number }) {
   const [week, setWeek] = useState<"current" | "previous">("current");
+  const [target, setTarget] = useState<AnalysisReportTarget>({});
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const selected = targetValue(target);
 
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
     client
-      .getAnalysisReport(week, controller.signal)
+      .getAnalysisReport(week, controller.signal, parseTargetValue(selected))
       .then(setReport)
       .catch((cause: unknown) => {
         if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
@@ -155,7 +191,7 @@ export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiCli
         }
       });
     return () => controller.abort();
-  }, [client, week, refreshKey, nonce]);
+  }, [client, week, selected, refreshKey, nonce]);
 
   async function dismiss(id: number) {
     try {
@@ -172,9 +208,32 @@ export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiCli
     <div className="space-y-section">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-body-sm text-muted">
-          {isDeveloper ? "只包含你这把 Key 的会话，仅你本人可见。" : "全体 Key 的汇总，不按人拆分。"}
+          {scopeSummary(report, isDeveloper)}
           {report ? ` 周期 ${weekLabel(report.week_start_ns)}。` : ""}
         </p>
+        {!isDeveloper && report && (report.projects.length > 0 || report.groups.length > 0 || selected !== "all") ? (
+          <Select aria-label="范围" value={selected} onChange={(event) => setTarget(parseTargetValue(event.target.value))}>
+            <option value="all">全体</option>
+            {report.projects.length > 0 ? (
+              <optgroup label="项目">
+                {report.projects.map((item) => (
+                  <option key={item.id} value={`project:${item.id}`}>
+                    {item.name || `#${item.id}`}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
+            {report.groups.length > 0 ? (
+              <optgroup label="项目组">
+                {report.groups.map((item) => (
+                  <option key={item.id} value={`group:${item.id}`}>
+                    {item.name || `#${item.id}`}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
+          </Select>
+        ) : null}
         <Segmented
           label="周期"
           value={week}
@@ -191,7 +250,13 @@ export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiCli
         </Alert>
       ) : null}
       {!report && !error ? <Skeleton className="h-48 w-full" /> : null}
-      {report ? <ReportBody report={report} canDismiss={!isDeveloper && report.scope === "all"} onDismiss={(id) => void dismiss(id)} /> : null}
+      {report ? (
+        <ReportBody
+          report={report}
+          canDismiss={!isDeveloper && (report.scope === "all" || report.scope === "project")}
+          onDismiss={(id) => void dismiss(id)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -199,6 +264,13 @@ export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiCli
 export function ReportBody({ report, canDismiss, onDismiss }: { report: AnalysisReport; canDismiss: boolean; onDismiss: (id: number) => void }) {
   return (
     <>
+      {report.stats?.limited ? (
+        <Alert variant="info">
+          <AlertDescription>
+            本周这个范围只有 {report.stats.contributors ?? 0} 位使用者。为避免变成某个人的复盘，这里只显示计数，不显示目标和建议原文。
+          </AlertDescription>
+        </Alert>
+      ) : null}
       <Card>
         <CardContent className="space-y-2 pt-card">
           <div className="flex items-center gap-2">
@@ -219,13 +291,15 @@ export function ReportBody({ report, canDismiss, onDismiss }: { report: Analysis
           </CardContent>
         </Card>
       ) : null}
-      <Card>
-        <CardContent className="space-y-2 pt-card">
-          <h3 className="text-body font-semibold">可沉淀的指令与 skill</h3>
-          <p className="text-label text-subtle">同一句话在 2 个会话出现为候选，3 个以上为强候选；之后的会话注入的 AGENTS.md / CLAUDE.md 里出现了同一句，会自动标为已沉淀。</p>
-          <SuggestionList suggestions={report.suggestions} canDismiss={canDismiss} onDismiss={onDismiss} />
-        </CardContent>
-      </Card>
+      {report.scope === "group" || report.stats?.limited ? null : (
+        <Card>
+          <CardContent className="space-y-2 pt-card">
+            <h3 className="text-body font-semibold">可沉淀的指令与 skill</h3>
+            <p className="text-label text-subtle">同一句话在 2 个会话出现为候选，3 个以上为强候选；之后的会话注入的 AGENTS.md / CLAUDE.md 里出现了同一句，会自动标为已沉淀。</p>
+            <SuggestionList suggestions={report.suggestions} canDismiss={canDismiss} onDismiss={onDismiss} />
+          </CardContent>
+        </Card>
+      )}
       {report.optimizations.length > 0 ? (
         <Card>
           <CardContent className="space-y-2 pt-card">

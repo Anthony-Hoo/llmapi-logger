@@ -21,6 +21,7 @@ type fakeSessionAnalysis struct {
 	sessions  []sessionanalysis.SessionsQuery
 	triggered int
 	triggerOK error
+	targets   []sessionanalysis.ReportTarget
 }
 
 func (fake *fakeSessionAnalysis) Overview(_ context.Context, from, to int64, scope *query.Scope) (sessionanalysis.OverviewResponse, error) {
@@ -54,9 +55,10 @@ func (fake *fakeSessionAnalysis) Calibrate(_ context.Context, labels []sessionan
 	return sessionanalysis.CalibrationResult{Labels: len(labels)}, nil
 }
 
-func (fake *fakeSessionAnalysis) Report(_ context.Context, week string, scope *query.Scope) (sessionanalysis.ReportResponse, error) {
+func (fake *fakeSessionAnalysis) Report(_ context.Context, week string, scope *query.Scope, target sessionanalysis.ReportTarget) (sessionanalysis.ReportResponse, error) {
 	fake.scopes = append(fake.scopes, scope)
 	fake.weeks = append(fake.weeks, week)
+	fake.targets = append(fake.targets, target)
 	return sessionanalysis.ReportResponse{Scope: "all"}, nil
 }
 
@@ -226,6 +228,24 @@ func TestSessionAnalysisReportAndDismissRoutes(t *testing.T) {
 	}
 	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?user=1", nil); response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown key = %d", response.Code)
+	}
+	// Project and group reports are for administrators only.
+	for _, selector := range []string{"project_id=10", "group_id=3"} {
+		if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?"+selector, cookie); response.Code != http.StatusForbidden {
+			t.Fatalf("developer %s = %d", selector, response.Code)
+		}
+		if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?week=previous&"+selector, nil); response.Code != http.StatusOK {
+			t.Fatalf("admin %s = %d", selector, response.Code)
+		}
+	}
+	if len(fake.targets) != 4 || fake.targets[0] != (sessionanalysis.ReportTarget{}) ||
+		fake.targets[2] != (sessionanalysis.ReportTarget{ProjectID: 10}) || fake.targets[3] != (sessionanalysis.ReportTarget{GroupID: 3}) {
+		t.Fatalf("targets = %+v", fake.targets)
+	}
+	for _, bad := range []string{"project_id=0", "project_id=-1", "group_id=x", "project_id=1&group_id=2", "project_id=1&project_id=2"} {
+		if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?"+bad, nil); response.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d", bad, response.Code)
+		}
 	}
 	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/suggestions/7/dismiss", cookie); response.Code != http.StatusForbidden {
 		t.Fatalf("developer dismiss = %d", response.Code)

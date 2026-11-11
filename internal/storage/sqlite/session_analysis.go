@@ -99,11 +99,19 @@ func (store *Store) ActiveAnalysisKeys(context.Context, int64, int64) ([]storage
 	return nil, nil
 }
 
-func (store *Store) FacetEnums(context.Context, int64, int64, []byte) ([]storage.FacetEnumRow, error) {
+func (store *Store) ActiveAnalysisProjects(context.Context, int64, int64) ([]int64, error) {
 	return nil, nil
 }
 
-func (store *Store) RepeatedFingerprints(context.Context, int64, []byte, int) ([]storage.RepeatedFPR, error) {
+func (store *Store) ListPeriodScopeKeys(context.Context, int64, string) ([][]byte, error) {
+	return nil, nil
+}
+
+func (store *Store) FacetEnums(context.Context, int64, int64, storage.FacetScope) ([]storage.FacetEnumRow, error) {
+	return nil, nil
+}
+
+func (store *Store) RepeatedFingerprints(context.Context, int64, storage.FacetScope, int) ([]storage.RepeatedFPR, error) {
 	return nil, nil
 }
 

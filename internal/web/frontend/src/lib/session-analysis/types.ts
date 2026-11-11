@@ -107,6 +107,11 @@ export interface AnalysisSessionItem {
   facet_status?: "ok" | "invalid" | "failed";
   task_type?: string;
   outcome?: string;
+  /** Organisation reports only: where the session is booked. */
+  bucket?: "attributed" | "unattributed" | "no_context" | "service";
+  project_id?: number;
+  /** Current project name; absent when the project was deleted. */
+  project?: string;
 }
 
 export interface AnalysisSessionsPage {
@@ -185,6 +190,10 @@ export interface AnalysisWeeklyStats {
   outcomes: Record<string, number>;
   collaboration: Record<string, number>;
   friction: Record<string, number>;
+  /** Project and group scopes only: distinct callers of the week. */
+  contributors?: number;
+  /** Too few callers: counts only, no goals or suggestion texts. */
+  limited?: boolean;
 }
 
 export interface AnalysisSuggestion {
@@ -199,9 +208,25 @@ export interface AnalysisSuggestion {
   evidence: string[];
 }
 
+export interface AnalysisScopeOption {
+  id: number;
+  name: string;
+}
+
+/** Selects a project or group report (administrators, organisation reports). */
+export interface AnalysisReportTarget {
+  project_id?: number;
+  group_id?: number;
+}
+
 export interface AnalysisReport {
   week_start_ns: string;
-  scope: "person" | "all";
+  scope: "person" | "all" | "project" | "group";
+  scope_id?: number;
+  scope_name?: string;
+  /** Scopes an administrator can open for this week; empty without organisation reports. */
+  projects: AnalysisScopeOption[];
+  groups: AnalysisScopeOption[];
   stats: AnalysisWeeklyStats | null;
   previous: AnalysisWeeklyStats | null;
   narrative: string;

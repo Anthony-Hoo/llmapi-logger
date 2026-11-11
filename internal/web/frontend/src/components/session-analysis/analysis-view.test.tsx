@@ -164,6 +164,8 @@ describe("session analysis view", () => {
         { id: 2, kind: "skill" as const, text: "生成接口变更说明", sessions: 2, strong: false, status: "adopted_detected" as const, first_seen_ns: "1", last_seen_ns: "2", evidence: [] },
       ],
       optimizations: [],
+      projects: [],
+      groups: [],
     };
     const admin = renderToStaticMarkup(<ReportBody report={report} canDismiss onDismiss={() => undefined} />);
     expect(admin).toContain("本地模型撰写");
@@ -179,5 +181,20 @@ describe("session analysis view", () => {
     expect(weekDelta(3, undefined)).toBeNull();
     expect(weekDelta(3, 3)).toBe("持平");
     expect(weekDelta(5, 3)).toBe("+2");
+    // A project week with one caller shows counts only.
+    const limited = renderToStaticMarkup(
+      <ReportBody
+        report={{ ...report, scope: "project", scope_id: 10, scope_name: "orders", stats: { ...stats, contributors: 1, limited: true }, suggestions: [] }}
+        canDismiss
+        onDismiss={() => undefined}
+      />,
+    );
+    expect(limited).toContain("只有 1 位使用者");
+    expect(limited).not.toContain("可沉淀的指令与 skill");
+    expect(limited).toContain("修缺陷");
+    // Groups have statistics but no suggestions of their own.
+    const group = renderToStaticMarkup(<ReportBody report={{ ...report, scope: "group", scope_id: 3, suggestions: [] }} canDismiss={false} onDismiss={() => undefined} />);
+    expect(group).not.toContain("可沉淀的指令与 skill");
+    expect(group).not.toContain("位使用者");
   });
 });

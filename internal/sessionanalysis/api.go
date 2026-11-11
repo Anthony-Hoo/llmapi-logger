@@ -172,6 +172,8 @@ type QueryService struct {
 	location *time.Location
 	// projects is nil unless organisation reports are enabled.
 	projects ProjectResolver
+	// weekStartsSunday cuts report weeks on Sunday instead of Monday.
+	weekStartsSunday bool
 }
 
 // UseProjects names the projects sessions are booked to (organisation
@@ -180,12 +182,13 @@ func (service *QueryService) UseProjects(projects ProjectResolver) {
 	service.projects = projects
 }
 
-// UseLocation sets the time zone report weeks are cut in; it must be the
-// runner's.
-func (service *QueryService) UseLocation(location *time.Location) {
+// UseCalendar sets the time zone and first weekday report weeks are cut
+// with; both must be the runner's.
+func (service *QueryService) UseCalendar(location *time.Location, weekStartsSunday bool) {
 	if location != nil {
 		service.location = location
 	}
+	service.weekStartsSunday = weekStartsSunday
 }
 
 // sessionItem maps a row and names its project.

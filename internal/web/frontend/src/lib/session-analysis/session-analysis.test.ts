@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError, createApiClient } from "../../api";
 import { analysisRange } from "../../components/session-analysis/analysis-view";
-import { formatDuration, formatPointDelta, parseCalibrationLabels, sessionBadges, share, signalRates, startOfLocalWeekMS } from "./format";
+import { parseTargetValue, targetValue } from "../../components/session-analysis/report-view";
+import { formatDuration, formatPointDelta, parseCalibrationLabels, projectLabel, sessionBadges, share, signalRates, startOfLocalWeekMS } from "./format";
 import type { AnalysisSessionItem, AnalysisSignalTotals } from "./types";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -140,8 +141,45 @@ describe("session analysis API client", () => {
     expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/session-analysis/report?week=previous");
     expect(report.suggestions[0].evidence).toEqual([]);
     expect(report.optimizations).toEqual([]);
+    expect(report.projects).toEqual([]);
+    expect(report.groups).toEqual([]);
     await client.dismissAnalysisSuggestion(7);
     expect(String(fetcher.mock.calls[1][0])).toBe("/api/v1/session-analysis/suggestions/7/dismiss");
     expect(fetcher.mock.calls[1][1]?.method).toBe("POST");
+  });
+
+  it("opens one project or one group report", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ week_start_ns: "1", scope: "project", scope_id: 10, scope_name: "orders", stats: null, previous: null, narrative: "", computed_ns: "0", projects: [{ id: 10, name: "orders" }] }),
+    );
+    const client = createApiClient(vi.fn(), fetcher);
+    const report = await client.getAnalysisReport("current", undefined, { project_id: 10 });
+    expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/session-analysis/report?week=current&project_id=10");
+    expect(report.projects).toEqual([{ id: 10, name: "orders" }]);
+    expect(report.groups).toEqual([]);
+    await client.getAnalysisReport("previous", undefined, { group_id: 3 });
+    expect(String(fetcher.mock.calls[1][0])).toBe("/api/v1/session-analysis/report?week=previous&group_id=3");
+    await client.getAnalysisReport("current", undefined, {});
+    expect(String(fetcher.mock.calls[2][0])).toBe("/api/v1/session-analysis/report?week=current");
+  });
+
+  it("labels where a session is booked", () => {
+    expect(projectLabel({})).toBeNull();
+    expect(projectLabel({ bucket: "attributed", project_id: 10, project: "orders" })).toBe("orders");
+    expect(projectLabel({ bucket: "attributed", project_id: 10 })).toBe("项目 #10");
+    expect(projectLabel({ bucket: "unattributed" })).toBe("未归属");
+    expect(projectLabel({ bucket: "no_context" })).toBe("无项目上下文");
+    expect(projectLabel({ bucket: "service", project_id: 10, project: "orders" })).toBe("服务账号");
+  });
+
+  it("round-trips the report scope selector value", () => {
+    expect(targetValue({})).toBe("all");
+    expect(targetValue({ project_id: 10 })).toBe("project:10");
+    expect(targetValue({ group_id: 3 })).toBe("group:3");
+    expect(parseTargetValue("all")).toEqual({});
+    expect(parseTargetValue("project:10")).toEqual({ project_id: 10 });
+    expect(parseTargetValue("group:3")).toEqual({ group_id: 3 });
+    expect(parseTargetValue("project:x")).toEqual({});
+    expect(parseTargetValue("team:4")).toEqual({});
   });
 });

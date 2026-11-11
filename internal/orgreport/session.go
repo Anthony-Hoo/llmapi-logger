@@ -56,6 +56,26 @@ func (service *Service) ProjectName(id int64) string {
 	return service.current.Load().ProjectName(id)
 }
 
+// ReportGroup is one enabled project group with its member users.
+type ReportGroup struct {
+	ID      int64
+	Name    string
+	Members []int64
+}
+
+// ReportGroups returns the enabled groups in id order.
+func (service *Service) ReportGroups() []ReportGroup {
+	compiled := service.current.Load()
+	groups := make([]ReportGroup, 0, len(compiled.groups))
+	for _, group := range compiled.groups {
+		if group.Enabled {
+			groups = append(groups, ReportGroup{ID: group.ID, Name: group.Name, Members: compiled.GroupMembers(group.ID)})
+		}
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].ID < groups[j].ID })
+	return groups
+}
+
 // ResolveSession reduces the per-request attribution of one session's
 // requests (in start order) to a single booking:
 //

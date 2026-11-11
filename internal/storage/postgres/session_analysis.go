@@ -259,6 +259,14 @@ VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (session_key, source, fpr) DO UPDATE
 			return fmt.Errorf("postgres writer: add session text fingerprint: %w", err)
 		}
 	}
+	if s.Bucket == storage.BucketService {
+		// A service principal's session keeps signals only: the fingerprints
+		// of a facet it had before it was classified go as well.
+		if _, err := tx.Exec(`DELETE FROM session_text_fprs WHERE session_key = $1`, s.SessionKey); err != nil {
+			return fmt.Errorf("postgres writer: drop service session fingerprints: %w", err)
+		}
+		return nil
+	}
 	// Facet fingerprints are written by the facet stage and follow the booking.
 	if _, err := tx.Exec(`UPDATE session_text_fprs SET project_id = $2 WHERE session_key = $1 AND project_id IS DISTINCT FROM $2`,
 		s.SessionKey, s.ProjectID); err != nil {

@@ -48,6 +48,8 @@ type Store interface {
 type ProjectResolver interface {
 	ResolveSession(ctx context.Context, agentRootFPR, apiKeyFPR []byte) (orgreport.SessionProject, error)
 	ProjectName(id int64) string
+	// ReportGroups lists the enabled project groups with their members.
+	ReportGroups() []orgreport.ReportGroup
 }
 
 // projectField renders a booking as the pack's project field (doc 24 section
@@ -121,6 +123,9 @@ type Options struct {
 	Cipher        security.Cipher
 	// Projects is nil unless organisation reports are enabled.
 	Projects ProjectResolver
+	// WeekStartsSunday cuts report weeks on Sunday instead of Monday
+	// (org_reports.week_start).
+	WeekStartsSunday bool
 	// LLM is nil unless session_analysis.llm.enabled.
 	LLM          Completer
 	ClientLabels map[string]string
@@ -483,7 +488,7 @@ func sameID(left, right *int64) bool {
 
 // weekStart is the start of the report week containing t.
 func (runner *Runner) weekStart(t time.Time) time.Time {
-	return WeekStart(t, runner.options.Location)
+	return weekStartOn(t, runner.options.Location, runner.options.WeekStartsSunday)
 }
 
 // PackAAD is the additional data binding a pack ciphertext to its key.

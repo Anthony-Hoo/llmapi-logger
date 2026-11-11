@@ -13,6 +13,7 @@ import (
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/orgreport"
+	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/storage"
 )
 
@@ -21,9 +22,12 @@ import (
 type fakeProjects struct {
 	byRoot map[string]orgreport.SessionProject
 	names  map[int64]string
+	groups []orgreport.ReportGroup
 	fail   bool
 	calls  int
 }
+
+func (projects *fakeProjects) ReportGroups() []orgreport.ReportGroup { return projects.groups }
 
 func (projects *fakeProjects) ResolveSession(_ context.Context, root, _ []byte) (orgreport.SessionProject, error) {
 	projects.calls++
@@ -221,5 +225,174 @@ func TestRunnerWithoutProjectsStoresNoBooking(t *testing.T) {
 		if signals.ProjectID != nil || signals.Bucket != "" {
 			t.Fatalf("booking without org reports: %v %q", signals.ProjectID, signals.Bucket)
 		}
+	}
+}
+
+// With organisation reports, weekly statistics also exist per project and
+// per project group; a week with a single caller keeps counts only.
+func TestProjectAndGroupReports(t *testing.T) {
+	store := newMemoryStore()
+	views := map[string]*conversation.Conversation{}
+	day := time.Date(2026, 11, 3, 2, 0, 0, 0, time.UTC)
+	keyOne, keyTwo := bytes.Repeat([]byte{0x0a}, 32), bytes.Repeat([]byte{0x0b}, 32)
+	roots := make([][]byte, 0, 3)
+	for index, caller := range []struct {
+		key  []byte
+		user int64
+	}{{keyOne, 5}, {keyTwo, 6}, {keyOne, 5}} {
+		root := bytes.Repeat([]byte{byte(0x50 + index)}, 32)
+		roots = append(roots, root)
+		node := bytes.Repeat([]byte{byte(0x60 + index)}, 32)
+		prefix := "pr" + string(rune('a'+index))
+		at := day.Add(time.Duration(index) * time.Hour)
+		rows := []storage.SessionAuditRow{auditRow(prefix+"1", at, node, "main", true), auditRow(prefix+"2", at.Add(10*time.Minute), node, "main", true)}
+		for position := range rows {
+			user, quota, unit := caller.user, int64(500000*(index+1)), 1000000.0
+			rows[position].APIKeyFPR, rows[position].NewAPIUserID = caller.key, &user
+			rows[position].Quota, rows[position].QuotaPerUnit = &quota, &unit
+		}
+		store.sessions[hex.EncodeToString(root)] = rows
+		views[prefix+"2"] = convo(user("修一下导出接口的分页。提交前先跑一遍全部单元测试"), answer("好"), user("好的，再看一下文档"), answer("完成"))
+	}
+	projects := &fakeProjects{
+		names: map[int64]string{10: "orders", 11: "billing"},
+		byRoot: map[string]orgreport.SessionProject{
+			hex.EncodeToString(roots[0]): {Known: true, Project: 10, Name: "orders", Level: orgreport.LevelRemote},
+			hex.EncodeToString(roots[1]): {Known: true, Project: 10, Name: "orders", Level: orgreport.LevelRemote},
+			hex.EncodeToString(roots[2]): {Known: true, Project: 11, Name: "billing", Level: orgreport.LevelRoot},
+		},
+		groups: []orgreport.ReportGroup{{ID: 1, Name: "payments", Members: []int64{5, 6}}, {ID: 2, Name: "solo", Members: []int64{6}}, {ID: 3, Name: "empty"}},
+	}
+	vocab, insightsVocab := testVocabularies(t)
+	cipher := testCipher(t)
+	now := day.Add(48 * time.Hour)
+	runner, err := NewRunner(Options{
+		Config: testRunnerConfig(),
+		Store:  store, Loader: &fakeLoader{views: views}, Vocabulary: vocab, Insights: insightsVocab,
+		Fingerprints: testFingerprinter{}, Cipher: cipher, Location: time.UTC, Projects: projects,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// The second run writes narratives with the suggestions the first built.
+	for range 2 {
+		if _, err := runner.RunOnce(ctx, TriggerManual); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Hour)
+	}
+	service, err := NewQueryService(store, runner, cipher, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = runner.options.Now
+	service.UseProjects(projects)
+	service.UseCalendar(time.UTC, false)
+
+	orders, err := service.Report(ctx, "current", nil, ReportTarget{ProjectID: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orders.Scope != storage.ScopeProject || orders.ScopeID != 10 || orders.ScopeName != "orders" || orders.Stats == nil ||
+		orders.Stats.Totals.Sessions != 2 || orders.Stats.Contributors != 2 || orders.Stats.Limited {
+		t.Fatalf("orders = %+v stats=%+v", orders, orders.Stats)
+	}
+	// The two sessions of the project say the same three sentences.
+	rule := func(report ReportResponse) *SuggestionItem {
+		for index := range report.Suggestions {
+			if strings.Contains(report.Suggestions[index].Text, "提交前先跑一遍全部单元测试") {
+				return &report.Suggestions[index]
+			}
+		}
+		return nil
+	}
+	if found := rule(orders); len(orders.Suggestions) != 3 || found == nil || found.Sessions != 2 || found.Status != "open" || len(found.Evidence) != 2 {
+		t.Fatalf("orders suggestions = %+v", orders.Suggestions)
+	}
+	if !strings.Contains(orders.Narrative, "提交前先跑一遍全部单元测试") {
+		t.Fatalf("orders narrative = %q", orders.Narrative)
+	}
+	if len(orders.Projects) != 2 || orders.Projects[0] != (ScopeOption{ID: 10, Name: "orders"}) || orders.Projects[1] != (ScopeOption{ID: 11, Name: "billing"}) ||
+		len(orders.Groups) != 3 || orders.Groups[0] != (ScopeOption{ID: 1, Name: "payments"}) {
+		t.Fatalf("scopes = %+v / %+v", orders.Projects, orders.Groups)
+	}
+
+	// One caller only: counts stay, goals and suggestion texts do not.
+	billing, err := service.Report(ctx, "current", nil, ReportTarget{ProjectID: 11})
+	if err != nil || billing.Stats == nil || billing.Stats.Totals.Sessions != 1 || billing.Stats.Contributors != 1 || !billing.Stats.Limited ||
+		len(billing.Suggestions) != 0 || strings.Contains(billing.Narrative, "提交前") {
+		t.Fatalf("billing = %+v stats=%+v, %v", billing, billing.Stats, err)
+	}
+	payments, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 1})
+	if err != nil || payments.Scope != storage.ScopeGroup || payments.ScopeName != "payments" || payments.Stats == nil ||
+		payments.Stats.Totals.Sessions != 3 || payments.Stats.Contributors != 2 || payments.Stats.Limited || len(payments.Suggestions) != 0 {
+		t.Fatalf("payments = %+v stats=%+v, %v", payments, payments.Stats, err)
+	}
+	solo, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 2})
+	if err != nil || solo.Stats == nil || solo.Stats.Totals.Sessions != 1 || !solo.Stats.Limited {
+		t.Fatalf("solo = %+v stats=%+v, %v", solo, solo.Stats, err)
+	}
+	if empty, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 3}); err != nil || empty.Stats == nil || empty.Stats.Totals.Sessions != 0 || !empty.Stats.Limited {
+		t.Fatalf("empty group = %+v, %v", empty, err)
+	}
+	// The everything and personal scopes are unchanged.
+	all, err := service.Report(ctx, "current", nil, ReportTarget{})
+	if found := rule(all); err != nil || all.Stats == nil || all.Stats.Totals.Sessions != 3 || all.Stats.Limited || all.Stats.Contributors != 0 || found == nil || found.Sessions != 3 {
+		t.Fatalf("all = %+v stats=%+v, %v", all, all.Stats, err)
+	}
+	own, err := service.Report(ctx, "current", scopeOf(keyOne), ReportTarget{})
+	if err != nil || own.Stats == nil || own.Stats.Totals.Sessions != 2 || own.Projects != nil || own.Groups != nil {
+		t.Fatalf("own = %+v, %v", own, err)
+	}
+
+	if _, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 99}); !errors.Is(err, query.ErrNotFound) {
+		t.Fatalf("unknown group: %v", err)
+	}
+	if _, err := service.Report(ctx, "current", scopeOf(keyOne), ReportTarget{ProjectID: 10}); !errors.Is(err, query.ErrInvalidQuery) {
+		t.Fatalf("developer opened a project: %v", err)
+	}
+	if _, err := service.Report(ctx, "current", nil, ReportTarget{ProjectID: 10, GroupID: 1}); !errors.Is(err, query.ErrInvalidQuery) {
+		t.Fatalf("two selectors: %v", err)
+	}
+	// An administrator can dismiss a project suggestion.
+	if err := service.DismissSuggestion(ctx, rule(orders).ID); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := service.Report(ctx, "current", nil, ReportTarget{ProjectID: 10})
+	if found := rule(again); found == nil || found.Status != "dismissed" {
+		t.Fatalf("project suggestions = %+v", again.Suggestions)
+	}
+	all, _ = service.Report(ctx, "current", nil, ReportTarget{})
+	if found := rule(all); found == nil || found.Status != "open" {
+		t.Fatalf("dismissing a project suggestion touched the all-keys one: %+v", found)
+	}
+	// Without organisation reports the selectors do not exist.
+	plain, err := NewQueryService(store, runner, cipher, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Report(ctx, "current", nil, ReportTarget{ProjectID: 10}); !errors.Is(err, query.ErrNotFound) {
+		t.Fatalf("project report without org reports: %v", err)
+	}
+}
+
+func TestWeeksCanStartOnSunday(t *testing.T) {
+	wednesday := time.Date(2026, 11, 4, 15, 30, 0, 0, time.UTC)
+	start := weekStartOn(wednesday, time.UTC, true)
+	if start.Weekday() != time.Sunday || start.Day() != 1 || start.Hour() != 0 {
+		t.Fatalf("week start = %v", start)
+	}
+	if !weekStartOn(time.Date(2026, 11, 7, 23, 59, 0, 0, time.UTC), time.UTC, true).Equal(start) {
+		t.Fatal("Saturday belongs to the same week")
+	}
+	if !weekStartOn(start, time.UTC, true).Equal(start) {
+		t.Fatal("a Sunday starts its own week")
+	}
+	// The narrative names a Sunday-first week after its Monday.
+	input := NarrativeInput(WeeklyStats{WeekStartNS: start.UnixNano()}, nil, nil, nil, nil, storage.ScopeProject, time.UTC)
+	if !strings.HasPrefix(input, "[范围] 项目 周期=2026-W45\n") {
+		t.Fatalf("input = %s", input)
 	}
 }

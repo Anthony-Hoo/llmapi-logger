@@ -23,8 +23,10 @@ import (
 type ReportStore interface {
 	ActiveAnalysisKeys(ctx context.Context, fromNS, toNS int64) ([]storage.ScopeKey, error)
 	SessionSignalTotals(ctx context.Context, filter storage.SessionSignalFilter) (storage.SessionSignalTotals, error)
-	FacetEnums(ctx context.Context, fromNS, toNS int64, apiKey []byte) ([]storage.FacetEnumRow, error)
-	RepeatedFingerprints(ctx context.Context, sinceNS int64, apiKey []byte, limit int) ([]storage.RepeatedFPR, error)
+	ActiveAnalysisProjects(ctx context.Context, fromNS, toNS int64) ([]int64, error)
+	ListPeriodScopeKeys(ctx context.Context, weekStartNS int64, scope string) ([][]byte, error)
+	FacetEnums(ctx context.Context, fromNS, toNS int64, scope storage.FacetScope) ([]storage.FacetEnumRow, error)
+	RepeatedFingerprints(ctx context.Context, sinceNS int64, scope storage.FacetScope, limit int) ([]storage.RepeatedFPR, error)
 	UpsertSuggestion(ctx context.Context, suggestion storage.Suggestion) error
 	SavePeriodStats(ctx context.Context, stats storage.PeriodStats) error
 	LoadPeriodStats(ctx context.Context, weekStartNS int64, scope string, scopeKey []byte, tokenID *int64) (storage.PeriodStats, error)
@@ -43,6 +45,10 @@ const (
 	maxEvidenceAudits    = 5
 	maxNarrativeRunes    = 400
 	narrativeGoals       = 5
+	// minSharedContributors is the fewest distinct callers a project or group
+	// week needs before its report shows goals and suggestions: with one
+	// caller it would be that person's weekly review shown to administrators.
+	minSharedContributors = 2
 )
 
 // WeeklyStats is the deterministic aggregate of one scope and week; it is
@@ -55,21 +61,77 @@ type WeeklyStats struct {
 	Outcomes      map[string]int64 `json:"outcomes"`
 	Collaboration map[string]int64 `json:"collaboration"`
 	Friction      map[string]int64 `json:"friction"`
+	// Project and group scopes only: the distinct callers of the week, and
+	// whether there were too few to show goals and suggestions.
+	Contributors int64 `json:"contributors,omitempty"`
+	Limited      bool  `json:"limited,omitempty"`
 }
 
 // WeekStart returns 00:00 of the Monday of the week containing t.
 func WeekStart(t time.Time, location *time.Location) time.Time {
+	return weekStartOn(t, location, false)
+}
+
+// weekStartOn is WeekStart for weeks that start on Monday or on Sunday.
+func weekStartOn(t time.Time, location *time.Location, sunday bool) time.Time {
 	local := t.In(location)
 	weekday := (int(local.Weekday()) + 6) % 7
+	if sunday {
+		weekday = int(local.Weekday())
+	}
 	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
 	return day.AddDate(0, 0, -weekday)
 }
 
-func scopeKeyFor(scope string, key []byte) []byte {
-	if scope == storage.ScopeAll {
-		return storage.AllScopeKey
+// reportTarget is one scope of the weekly report: one API key, everything,
+// or (organisation reports only) one project or one project group.
+type reportTarget struct {
+	scope     string
+	key       []byte // scope_key of its statistics and suggestions
+	apiKey    []byte
+	tokenID   *int64
+	projectID *int64
+	userIDs   []int64
+}
+
+func allTarget() reportTarget {
+	return reportTarget{scope: storage.ScopeAll, key: storage.AllScopeKey}
+}
+
+func personTarget(key storage.ScopeKey) reportTarget {
+	return reportTarget{scope: storage.ScopePerson, key: key.APIKeyFPR, apiKey: key.APIKeyFPR, tokenID: key.NewAPITokenID}
+}
+
+func projectTarget(id int64) reportTarget {
+	return reportTarget{scope: storage.ScopeProject, key: storage.IDScopeKey(id), projectID: &id}
+}
+
+func groupTarget(id int64, members []int64) reportTarget {
+	if members == nil {
+		members = []int64{} // a group without members has no sessions
 	}
-	return key
+	return reportTarget{scope: storage.ScopeGroup, key: storage.IDScopeKey(id), userIDs: members}
+}
+
+// shared reports whether the target aggregates several people for
+// administrators.
+func (target reportTarget) shared() bool {
+	return target.scope == storage.ScopeProject || target.scope == storage.ScopeGroup
+}
+
+// signals selects the target's sessions of [fromNS, toNS). Sessions of
+// service principals keep signals only and stay out of every report (doc 24
+// section 5.1).
+func (target reportTarget) signals(fromNS, toNS int64) storage.SessionSignalFilter {
+	filter := storage.SessionSignalFilter{FromNS: fromNS, ToNS: toNS, ExcludeService: true, ProjectID: target.projectID, UserIDs: target.userIDs}
+	if target.scope == storage.ScopePerson {
+		filter.Scope = &storage.AuditScope{Fingerprint: target.apiKey}
+	}
+	return filter
+}
+
+func (target reportTarget) facets() storage.FacetScope {
+	return storage.FacetScope{APIKeyFPR: target.apiKey, ProjectID: target.projectID, UserIDs: target.userIDs}
 }
 
 func buildWeeklyStats(weekStart time.Time, totals storage.SessionSignalTotals, enums []storage.FacetEnumRow, hidden map[string]bool) WeeklyStats {
@@ -119,7 +181,7 @@ func (runner *Runner) runReports(ctx context.Context) error {
 		return nil
 	}
 	now := options.Now()
-	current := WeekStart(now, options.Location)
+	current := runner.weekStart(now)
 	hidden := map[string]bool{}
 	if options.LLM != nil {
 		if calibration, err := store.LatestFacetCalibration(ctx, PromptVersion, options.LLM.Model()); err == nil {
@@ -129,26 +191,71 @@ func (runner *Runner) runReports(ctx context.Context) error {
 		}
 	}
 	keysSeen := map[string]storage.ScopeKey{}
+	projectsSeen := map[int64]bool{}
 	for _, weekStart := range []time.Time{current.AddDate(0, 0, -7), current} {
-		keys, err := store.ActiveAnalysisKeys(ctx, weekStart.UnixNano(), weekStart.AddDate(0, 0, 7).UnixNano())
+		from, to := weekStart.UnixNano(), weekStart.AddDate(0, 0, 7).UnixNano()
+		keys, err := store.ActiveAnalysisKeys(ctx, from, to)
 		if err != nil {
 			return err
 		}
-		if err := runner.reportScope(ctx, store, weekStart, storage.ScopeAll, storage.ScopeKey{}, hidden); err != nil {
+		if err := runner.reportScope(ctx, store, weekStart, allTarget(), hidden); err != nil {
 			return err
 		}
 		for _, key := range keys {
 			keysSeen[string(key.APIKeyFPR)] = key
-			if err := runner.reportScope(ctx, store, weekStart, storage.ScopePerson, key, hidden); err != nil {
+			if err := runner.reportScope(ctx, store, weekStart, personTarget(key), hidden); err != nil {
+				return err
+			}
+		}
+		if options.Projects == nil {
+			continue
+		}
+		// Projects with sessions this week, and those that had statistics
+		// before every session was re-booked away (their row must not go stale).
+		projects, err := store.ActiveAnalysisProjects(ctx, from, to)
+		if err != nil {
+			return err
+		}
+		stored, err := store.ListPeriodScopeKeys(ctx, from, storage.ScopeProject)
+		if err != nil {
+			return err
+		}
+		for _, key := range stored {
+			if id, ok := storage.IDOfScopeKey(key); ok {
+				projects = append(projects, id)
+			}
+		}
+		reported := map[int64]bool{}
+		for _, id := range projects {
+			if reported[id] {
+				continue
+			}
+			reported[id], projectsSeen[id] = true, true
+			if err := runner.reportScope(ctx, store, weekStart, projectTarget(id), hidden); err != nil {
+				return err
+			}
+		}
+		for _, group := range options.Projects.ReportGroups() {
+			if err := runner.reportScope(ctx, store, weekStart, groupTarget(group.ID, group.Members), hidden); err != nil {
 				return err
 			}
 		}
 	}
-	if err := runner.buildSuggestions(ctx, store, storage.ScopeAll, storage.ScopeKey{}); err != nil {
+	if err := runner.buildSuggestions(ctx, store, allTarget()); err != nil {
 		return err
 	}
 	for _, key := range keysSeen {
-		if err := runner.buildSuggestions(ctx, store, storage.ScopePerson, key); err != nil {
+		if err := runner.buildSuggestions(ctx, store, personTarget(key)); err != nil {
+			return err
+		}
+	}
+	projects := make([]int64, 0, len(projectsSeen))
+	for id := range projectsSeen {
+		projects = append(projects, id)
+	}
+	sort.Slice(projects, func(i, j int) bool { return projects[i] < projects[j] })
+	for _, id := range projects {
+		if err := runner.buildSuggestions(ctx, store, projectTarget(id)); err != nil {
 			return err
 		}
 	}
@@ -166,46 +273,50 @@ func hiddenFieldsOf(calibration storage.FacetCalibration) []string {
 	return hiddenFrom(stored.Agreement, stored.Compared)
 }
 
-func (runner *Runner) reportScope(ctx context.Context, store ReportStore, weekStart time.Time, scope string, key storage.ScopeKey, hidden map[string]bool) error {
+func (runner *Runner) reportScope(ctx context.Context, store ReportStore, weekStart time.Time, target reportTarget, hidden map[string]bool) error {
 	options := runner.options
+	scope := target.scope
 	from, to := weekStart.UnixNano(), weekStart.AddDate(0, 0, 7).UnixNano()
-	// Sessions of service principals keep signals only and stay out of every
-	// report (doc 24 section 5.1).
-	filter := storage.SessionSignalFilter{FromNS: from, ToNS: to, ExcludeService: true}
-	var apiKey []byte
-	if scope == storage.ScopePerson {
-		apiKey = key.APIKeyFPR
-		filter.Scope = &storage.AuditScope{Fingerprint: key.APIKeyFPR}
-	}
+	filter := target.signals(from, to)
 	totals, err := store.SessionSignalTotals(ctx, filter)
 	if err != nil {
 		return err
 	}
-	enums, err := store.FacetEnums(ctx, from, to, apiKey)
+	enums, err := store.FacetEnums(ctx, from, to, target.facets())
 	if err != nil {
 		return err
 	}
 	stats := buildWeeklyStats(weekStart, totals, enums, hidden)
+	if target.shared() {
+		stats.Contributors = totals.Contributors
+		stats.Limited = totals.Contributors < minSharedContributors
+	}
 	encoded, err := json.Marshal(stats)
 	if err != nil {
 		return err
 	}
 	var previous *WeeklyStats
-	if stored, err := store.LoadPeriodStats(ctx, weekStart.AddDate(0, 0, -7).UnixNano(), scope, scopeKeyFor(scope, apiKey), nil); err == nil {
+	if stored, err := store.LoadPeriodStats(ctx, weekStart.AddDate(0, 0, -7).UnixNano(), scope, target.key, nil); err == nil {
 		var decoded WeeklyStats
 		if json.Unmarshal([]byte(stored.Stats), &decoded) == nil {
 			previous = &decoded
 		}
 	}
-	goals := runner.topGoals(ctx, store, filter)
-	suggestions := runner.topSuggestionTexts(ctx, store, scope, scopeKeyFor(scope, apiKey), key.NewAPITokenID)
+	var goals []string
+	var suggestions []SuggestionLine
+	if !stats.Limited {
+		// With a single caller, goals and suggestion texts would be that
+		// person's; the limited report keeps counts only.
+		goals = runner.topGoals(ctx, store, filter)
+		suggestions = runner.topSuggestionTexts(ctx, store, scope, target.key, target.tokenID)
+	}
 	loops := filter
 	loops.Flags = []string{"loop"}
 	optimizations, _ := store.TopCostSessions(ctx, loops, 3)
 	input := NarrativeInput(stats, previous, goals, suggestions, optimizations, scope, options.Location)
 	inputHash := fmt.Sprintf("%x", sha256.Sum256([]byte(input)))
 	row := storage.PeriodStats{
-		WeekStartNS: from, Scope: scope, ScopeKey: scopeKeyFor(scope, apiKey), NewAPITokenID: key.NewAPITokenID,
+		WeekStartNS: from, Scope: scope, ScopeKey: target.key, NewAPITokenID: target.tokenID,
 		Stats: string(encoded), InputHash: inputHash, ComputedAtNS: options.Now().UnixNano(),
 	}
 	if existing, err := store.LoadPeriodStats(ctx, from, scope, row.ScopeKey, nil); err == nil && existing.InputHash == inputHash && len(existing.NarrativeEnc) != 0 {
@@ -310,17 +421,14 @@ func (runner *Runner) topSuggestionTexts(ctx context.Context, store ReportStore,
 
 // buildSuggestions refreshes the suggestions of one scope from repeated
 // sentence fingerprints (doc 24 sections 8.2 and 8.3).
-func (runner *Runner) buildSuggestions(ctx context.Context, store ReportStore, scope string, key storage.ScopeKey) error {
+func (runner *Runner) buildSuggestions(ctx context.Context, store ReportStore, target reportTarget) error {
 	options := runner.options
-	var apiKey []byte
-	if scope == storage.ScopePerson {
-		apiKey = key.APIKeyFPR
-	}
-	repeated, err := store.RepeatedFingerprints(ctx, options.Now().Add(-suggestionLookback).UnixNano(), apiKey, maxSuggestionsPerRun)
+	scope := target.scope
+	repeated, err := store.RepeatedFingerprints(ctx, options.Now().Add(-suggestionLookback).UnixNano(), target.facets(), maxSuggestionsPerRun)
 	if err != nil {
 		return err
 	}
-	scopeKey := scopeKeyFor(scope, apiKey)
+	scopeKey := target.key
 	for _, group := range repeated {
 		text, evidence := runner.recoverSentence(ctx, store, group)
 		if text == "" {
@@ -340,7 +448,7 @@ func (runner *Runner) buildSuggestions(ctx context.Context, store ReportStore, s
 		}
 		evidenceJSON, _ := json.Marshal(evidence)
 		if err := store.UpsertSuggestion(ctx, storage.Suggestion{
-			Scope: scope, ScopeKey: scopeKey, NewAPITokenID: key.NewAPITokenID, Kind: group.Kind, FPR: group.FPR,
+			Scope: scope, ScopeKey: scopeKey, NewAPITokenID: target.tokenID, Kind: group.Kind, FPR: group.FPR,
 			Support: group.Sessions, FirstSeenNS: group.FirstNS, LastSeenNS: group.LastNS, Status: status,
 			TextEnc: sealed, Evidence: string(evidenceJSON), UpdatedAtNS: options.Now().UnixNano(),
 		}); err != nil {
@@ -508,10 +616,13 @@ var (
 func NarrativeInput(stats WeeklyStats, previous *WeeklyStats, goals []string, suggestions []SuggestionLine, optimizations []storage.SessionSignals, scope string, location *time.Location) string {
 	totals := stats.Totals
 	week := time.Unix(0, stats.WeekStartNS).In(location)
+	if week.Weekday() == time.Sunday {
+		week = week.AddDate(0, 0, 1) // a Sunday-first week is named after its Monday
+	}
 	year, number := week.ISOWeek()
-	scopeName := "本人"
-	if scope == storage.ScopeAll {
-		scopeName = "全体"
+	scopeName := map[string]string{storage.ScopeAll: "全体", storage.ScopeProject: "项目", storage.ScopeGroup: "项目组"}[scope]
+	if scopeName == "" {
+		scopeName = "本人"
 	}
 	hasPrevious := previous != nil
 	var prior SignalTotals

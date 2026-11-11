@@ -44,25 +44,98 @@ ORDER BY s.api_key_fpr`, fromNS, toNS)
 	return out, rows.Err()
 }
 
-// FacetEnums returns the plaintext enums of the ok facets whose session's
-// last request falls in [fromNS, toNS); apiKey nil reads every key.
-func (store *Store) FacetEnums(ctx context.Context, fromNS, toNS int64, apiKey []byte) ([]storage.FacetEnumRow, error) {
+// ActiveAnalysisProjects lists the projects that sessions whose last request
+// falls in [fromNS, toNS) are booked to, ascending. Service sessions do not
+// count.
+func (store *Store) ActiveAnalysisProjects(ctx context.Context, fromNS, toNS int64) ([]int64, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
 	}
 	if store == nil || store.isClosed() {
 		return nil, ErrClosed
 	}
-	query := `
-SELECT f.kind, COALESCE(f.task_type, ''), COALESCE(f.outcome, ''), COALESCE(f.collaboration, ''), f.friction, f.items
-FROM session_facets AS f
-WHERE f.facet_status = 'ok' AND f.last_ns >= $1 AND f.last_ns < $2`
-	arguments := []any{fromNS, toNS}
-	if len(apiKey) != 0 {
-		query += ` AND f.api_key_fpr = $3`
-		arguments = append(arguments, apiKey)
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT DISTINCT s.project_id
+FROM session_signals AS s
+WHERE s.last_ns >= $1 AND s.last_ns < $2 AND s.project_id IS NOT NULL AND s.bucket IS DISTINCT FROM 'service'
+ORDER BY s.project_id`, fromNS, toNS)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active analysis projects: %w", err)
 	}
-	rows, err := store.readerDB.QueryContext(ctx, query, arguments...)
+	defer rows.Close()
+	out := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres: scan active analysis project: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListPeriodScopeKeys returns the scope keys that have statistics for one
+// week and scope, ascending.
+func (store *Store) ListPeriodScopeKeys(ctx context.Context, weekStartNS int64, scope string) ([][]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT p.scope_key FROM analysis_period_stats AS p
+WHERE p.week_start_ns = $1 AND p.scope = $2
+ORDER BY p.scope_key`, weekStartNS, scope)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list period scopes: %w", err)
+	}
+	defer rows.Close()
+	out := make([][]byte, 0)
+	for rows.Next() {
+		var key []byte
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("postgres: scan period scope: %w", err)
+		}
+		out = append(out, key)
+	}
+	return out, rows.Err()
+}
+
+// FacetEnums returns the plaintext enums of the ok facets whose session's
+// last request falls in [fromNS, toNS). A project or user scope reads the
+// facets of session packs only, through their signals row; a chat digest
+// spans sessions and belongs to neither.
+func (store *Store) FacetEnums(ctx context.Context, fromNS, toNS int64, scope storage.FacetScope) ([]storage.FacetEnumRow, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	arguments := []any{fromNS, toNS}
+	push := func(value any) string {
+		arguments = append(arguments, value)
+		return parameter(len(arguments))
+	}
+	join, conditions := "", ""
+	if len(scope.APIKeyFPR) != 0 {
+		conditions += ` AND f.api_key_fpr = ` + push(scope.APIKeyFPR)
+	}
+	if scope.ProjectID != nil || scope.UserIDs != nil {
+		join = ` JOIN session_signals AS s ON s.session_key = f.session_key`
+		conditions += ` AND s.bucket IS DISTINCT FROM 'service'`
+		if scope.ProjectID != nil {
+			conditions += ` AND s.project_id = ` + push(*scope.ProjectID)
+		}
+		if scope.UserIDs != nil {
+			conditions += ` AND s.newapi_user_id = ANY(` + push(scope.UserIDs) + `::bigint[])`
+		}
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT f.kind, COALESCE(f.task_type, ''), COALESCE(f.outcome, ''), COALESCE(f.collaboration, ''), f.friction, f.items
+FROM session_facets AS f`+join+`
+WHERE f.facet_status = 'ok' AND f.last_ns >= $1 AND f.last_ns < $2`+conditions, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: read facet enums: %w", err)
 	}
@@ -82,8 +155,9 @@ WHERE f.facet_status = 'ok' AND f.last_ns >= $1 AND f.last_ns < $2`
 // fingerprint and kind (user sentences and model-extracted instructions
 // count as one instruction), keeping those seen in at least two sessions.
 // Adopted reports whether the same fingerprint later appeared in injected
-// rules (AGENTS.md / CLAUDE.md) of the same scope. apiKey nil reads all keys.
-func (store *Store) RepeatedFingerprints(ctx context.Context, sinceNS int64, apiKey []byte, limit int) ([]storage.RepeatedFPR, error) {
+// rules (AGENTS.md / CLAUDE.md) of the same scope. scope selects one API key
+// or one project; its zero value reads everything.
+func (store *Store) RepeatedFingerprints(ctx context.Context, sinceNS int64, scope storage.FacetScope, limit int) ([]storage.RepeatedFPR, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
 	}
@@ -92,10 +166,15 @@ func (store *Store) RepeatedFingerprints(ctx context.Context, sinceNS int64, api
 	}
 	keyCondition, ruleCondition := "", ""
 	arguments := []any{sinceNS, limit, maxRepeatedSessionKeys}
-	if len(apiKey) != 0 {
-		arguments = append(arguments, apiKey)
-		keyCondition = " AND t.api_key_fpr = $4"
-		ruleCondition = " AND r.api_key_fpr = $4"
+	if len(scope.APIKeyFPR) != 0 {
+		arguments = append(arguments, scope.APIKeyFPR)
+		keyCondition += " AND t.api_key_fpr = " + parameter(len(arguments))
+		ruleCondition += " AND r.api_key_fpr = " + parameter(len(arguments))
+	}
+	if scope.ProjectID != nil {
+		arguments = append(arguments, *scope.ProjectID)
+		keyCondition += " AND t.project_id = " + parameter(len(arguments))
+		ruleCondition += " AND r.project_id = " + parameter(len(arguments))
 	}
 	rows, err := store.readerDB.QueryContext(ctx, `
 WITH grouped AS (

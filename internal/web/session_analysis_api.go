@@ -21,7 +21,7 @@ type SessionAnalysisQuery interface {
 	Pack(context.Context, string, *query.Scope, sessionanalysis.Viewer) (sessionanalysis.PackResponse, error)
 	Facet(context.Context, string, *query.Scope, sessionanalysis.Viewer) (sessionanalysis.FacetResponse, error)
 	Calibrate(context.Context, []sessionanalysis.CalibrationLabel) (sessionanalysis.CalibrationResult, error)
-	Report(context.Context, string, *query.Scope) (sessionanalysis.ReportResponse, error)
+	Report(context.Context, string, *query.Scope, sessionanalysis.ReportTarget) (sessionanalysis.ReportResponse, error)
 	DismissSuggestion(context.Context, int64) error
 }
 
@@ -232,20 +232,40 @@ func (handler *managementHandler) serveSessionAnalysisCalibration(writer http.Re
 }
 
 // serveSessionAnalysisReport returns the weekly review of the caller's own
-// scope: a developer's key, or all keys for an administrator.
+// scope: a developer's key, or all keys for an administrator. project_id or
+// group_id (organisation reports) opens one project or group, administrators
+// only.
 func (handler *managementHandler) serveSessionAnalysisReport(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		methodNotAllowed(writer, http.MethodGet)
 		return
 	}
 	values := request.URL.Query()
-	if err := parseInsightsValues(values, "week"); err != nil {
+	if err := parseInsightsValues(values, "week", "project_id", "group_id"); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
 		return
 	}
+	projectID, projectErr := optionalInt64(values, "project_id")
+	groupID, groupErr := optionalInt64(values, "group_id")
+	if projectErr != nil || groupErr != nil || (projectID != nil && *projectID <= 0) || (groupID != nil && *groupID <= 0) || (projectID != nil && groupID != nil) {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	var target sessionanalysis.ReportTarget
+	if projectID != nil || groupID != nil {
+		// Project and group reports aggregate other people's sessions.
+		if !handler.requireAdmin(writer, request) {
+			return
+		}
+		if projectID != nil {
+			target.ProjectID = *projectID
+		} else {
+			target.GroupID = *groupID
+		}
+	}
 	ctx, cancel := handler.insightsContext(request)
 	defer cancel()
-	response, err := handler.sessionAnalysis.Report(ctx, values.Get("week"), handler.sessionScope(request))
+	response, err := handler.sessionAnalysis.Report(ctx, values.Get("week"), handler.sessionScope(request), target)
 	if err != nil {
 		handler.writeQueryError(writer, err)
 		return

@@ -117,8 +117,9 @@ ON CONFLICT (session_key) DO UPDATE SET
 		}
 		for _, fpr := range ownedFPRs {
 			if _, err := tx.Exec(`
-INSERT INTO session_text_fprs (session_key, source, fpr, api_key_fpr, seen_at_ns)
-VALUES ($1, $2, $3, $4, $5) ON CONFLICT (session_key, source, fpr) DO UPDATE SET seen_at_ns = excluded.seen_at_ns`,
+INSERT INTO session_text_fprs (session_key, source, fpr, api_key_fpr, seen_at_ns, project_id)
+VALUES ($1, $2, $3, $4, $5, (SELECT s.project_id FROM session_signals AS s WHERE s.session_key = $1))
+ON CONFLICT (session_key, source, fpr) DO UPDATE SET seen_at_ns = excluded.seen_at_ns, project_id = excluded.project_id`,
 				owned.SessionKey, fpr.Source, fpr.FPR, nullableBytes(fpr.APIKeyFPR), fpr.SeenAtNS); err != nil {
 				return fmt.Errorf("postgres writer: add facet fingerprint: %w", err)
 			}

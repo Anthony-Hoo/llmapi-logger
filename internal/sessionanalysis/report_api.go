@@ -33,19 +33,40 @@ type ReportResponse struct {
 	ComputedNS      int64            `json:"computed_ns,string"`
 	Suggestions     []SuggestionItem `json:"suggestions"`
 	Optimizations   []SessionItem    `json:"optimizations"`
+	// Organisation reports only. ScopeID and ScopeName identify the project
+	// or group of a 'project' or 'group' report. Projects and Groups list the
+	// scopes an administrator can open for this week.
+	ScopeID   int64         `json:"scope_id,omitempty"`
+	ScopeName string        `json:"scope_name,omitempty"`
+	Projects  []ScopeOption `json:"projects,omitempty"`
+	Groups    []ScopeOption `json:"groups,omitempty"`
+}
+
+// ScopeOption is one project or group with weekly statistics.
+type ScopeOption struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// ReportTarget selects a project or group report; the zero value is the
+// caller's own scope. At most one id is set.
+type ReportTarget struct {
+	ProjectID int64
+	GroupID   int64
 }
 
 const maxReportSuggestions = 30
 
 // Report returns the weekly review of the caller's scope: a developer's own
-// key, or all keys together for an administrator. week is "current" or
-// "previous" (weeks start on Monday in the server's time zone).
-func (service *QueryService) Report(ctx context.Context, week string, scope *query.Scope) (ReportResponse, error) {
+// key, or all keys together for an administrator. With organisation reports
+// an administrator can also open one project or one project group. week is
+// "current" or "previous"; weeks are cut in the runner's calendar.
+func (service *QueryService) Report(ctx context.Context, week string, scope *query.Scope, target ReportTarget) (ReportResponse, error) {
 	store, ok := service.store.(ReportStore)
 	if !ok {
 		return ReportResponse{}, query.ErrNotFound
 	}
-	start := WeekStart(service.now(), service.location)
+	start := weekStartOn(service.now(), service.location, service.weekStartsSunday)
 	switch week {
 	case "", "current":
 	case "previous":
@@ -53,12 +74,45 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 	default:
 		return ReportResponse{}, invalid("week must be current or previous")
 	}
-	scopeName, scopeKey := storage.ScopeAll, storage.AllScopeKey
-	var tokenID *int64
+	selected := allTarget()
 	if scope != nil {
-		scopeName, scopeKey, tokenID = storage.ScopePerson, scope.Fingerprint, scope.TokenID
+		selected = personTarget(storage.ScopeKey{APIKeyFPR: scope.Fingerprint, NewAPITokenID: scope.TokenID})
 	}
-	response := ReportResponse{WeekStartNS: start.UnixNano(), Scope: scopeName, Suggestions: []SuggestionItem{}, Optimizations: []SessionItem{}}
+	scopeID, scopeLabel := int64(0), ""
+	if target.ProjectID != 0 || target.GroupID != 0 {
+		switch {
+		case scope != nil:
+			return ReportResponse{}, invalid("a developer session reads its own report only")
+		case service.projects == nil:
+			return ReportResponse{}, query.ErrNotFound
+		case target.ProjectID < 0 || target.GroupID < 0 || (target.ProjectID != 0 && target.GroupID != 0):
+			return ReportResponse{}, invalid("select one project or one group")
+		case target.ProjectID != 0:
+			selected, scopeID = projectTarget(target.ProjectID), target.ProjectID
+			scopeLabel = service.projects.ProjectName(target.ProjectID)
+		default:
+			found := false
+			for _, group := range service.projects.ReportGroups() {
+				if group.ID == target.GroupID {
+					selected, scopeID, scopeLabel, found = groupTarget(group.ID, group.Members), group.ID, group.Name, true
+				}
+			}
+			if !found {
+				return ReportResponse{}, query.ErrNotFound
+			}
+		}
+	}
+	scopeName, scopeKey, tokenID := selected.scope, selected.key, selected.tokenID
+	response := ReportResponse{
+		WeekStartNS: start.UnixNano(), Scope: scopeName, ScopeID: scopeID, ScopeName: scopeLabel,
+		Suggestions: []SuggestionItem{}, Optimizations: []SessionItem{},
+	}
+	if scope == nil && service.projects != nil {
+		var err error
+		if response.Projects, response.Groups, err = service.reportScopes(ctx, store, start.UnixNano()); err != nil {
+			return ReportResponse{}, err
+		}
+	}
 	if row, err := store.LoadPeriodStats(ctx, start.UnixNano(), scopeName, scopeKey, tokenID); err == nil {
 		var stats WeeklyStats
 		if json.Unmarshal([]byte(row.Stats), &stats) == nil {
@@ -88,9 +142,13 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 	} else if !isNoRows(err) {
 		return ReportResponse{}, err
 	}
-	suggestions, err := store.ListSuggestions(ctx, scopeName, scopeKey, tokenID, maxReportSuggestions)
-	if err != nil {
-		return ReportResponse{}, err
+	var suggestions []storage.Suggestion
+	if selected.scope != storage.ScopeGroup && (response.Stats == nil || !response.Stats.Limited) {
+		// Groups have no suggestions of their own; a limited week shows none.
+		var err error
+		if suggestions, err = store.ListSuggestions(ctx, scopeName, scopeKey, tokenID, maxReportSuggestions); err != nil {
+			return ReportResponse{}, err
+		}
 	}
 	for _, row := range suggestions {
 		aad, err := SuggestionAAD(row.Scope, row.ScopeKey, row.Kind, row.FPR)
@@ -109,7 +167,8 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 		_ = json.Unmarshal([]byte(row.Evidence), &item.Evidence)
 		response.Suggestions = append(response.Suggestions, item)
 	}
-	filter := storage.SessionSignalFilter{FromNS: start.UnixNano(), ToNS: start.AddDate(0, 0, 7).UnixNano(), Scope: storageScope(scope), ExcludeService: true}
+	filter := selected.signals(start.UnixNano(), start.AddDate(0, 0, 7).UnixNano())
+	filter.Scope = storageScope(scope)
 	seen := map[string]bool{}
 	for _, flag := range []string{"loop", "thrash", "unverified"} {
 		filter.Flags = []string{flag}
@@ -133,8 +192,9 @@ type SuggestionStore interface {
 	DismissSuggestion(ctx context.Context, id int64, scope string, nowNS int64) error
 }
 
-// DismissSuggestion marks one all-keys suggestion dismissed (administrators
-// only; doc 24 section 8.3). Personal suggestions are never dismissed here.
+// DismissSuggestion marks one all-keys or project suggestion dismissed
+// (administrators only; doc 24 section 8.3). Personal suggestions are never
+// dismissed here.
 func (service *QueryService) DismissSuggestion(ctx context.Context, id int64) error {
 	store, ok := service.store.(SuggestionStore)
 	if !ok || id <= 0 {
@@ -142,7 +202,41 @@ func (service *QueryService) DismissSuggestion(ctx context.Context, id int64) er
 	}
 	err := store.DismissSuggestion(ctx, id, storage.ScopeAll, service.now().UnixNano())
 	if isNoRows(err) {
+		err = store.DismissSuggestion(ctx, id, storage.ScopeProject, service.now().UnixNano())
+	}
+	if isNoRows(err) {
 		return query.ErrNotFound
 	}
 	return err
+}
+
+// reportScopes lists the projects and groups that have statistics for a week.
+func (service *QueryService) reportScopes(ctx context.Context, store ReportStore, weekStartNS int64) ([]ScopeOption, []ScopeOption, error) {
+	projectKeys, err := store.ListPeriodScopeKeys(ctx, weekStartNS, storage.ScopeProject)
+	if err != nil {
+		return nil, nil, err
+	}
+	projects := make([]ScopeOption, 0, len(projectKeys))
+	for _, key := range projectKeys {
+		if id, ok := storage.IDOfScopeKey(key); ok {
+			projects = append(projects, ScopeOption{ID: id, Name: service.projects.ProjectName(id)})
+		}
+	}
+	groupKeys, err := store.ListPeriodScopeKeys(ctx, weekStartNS, storage.ScopeGroup)
+	if err != nil {
+		return nil, nil, err
+	}
+	stored := map[int64]bool{}
+	for _, key := range groupKeys {
+		if id, ok := storage.IDOfScopeKey(key); ok {
+			stored[id] = true
+		}
+	}
+	groups := make([]ScopeOption, 0, len(stored))
+	for _, group := range service.projects.ReportGroups() {
+		if stored[group.ID] {
+			groups = append(groups, ScopeOption{ID: group.ID, Name: group.Name})
+		}
+	}
+	return projects, groups, nil
 }

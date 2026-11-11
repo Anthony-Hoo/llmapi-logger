@@ -626,16 +626,16 @@ func TestSessionReportsStorage(t *testing.T) {
 		}
 		return true
 	}
-	all, err := store.RepeatedFingerprints(ctx, at-1, nil, 10)
+	all, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{}, 10)
 	if err != nil || len(all) != 1 || all[0].Sessions != 3 || all[0].Kind != "instruction" || !all[0].Adopted ||
 		!bytes.Equal(all[0].FPR, fill(0xa1)) || !sameKeys(all[0].SessionKeys, fill(0x91), fill(0x92), fill(0x93)) {
 		t.Fatalf("repeated (all) = %+v, %v", all, err)
 	}
-	mine, err := store.RepeatedFingerprints(ctx, at-1, keyA, 10)
+	mine, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{APIKeyFPR: keyA}, 10)
 	if err != nil || len(mine) != 1 || mine[0].Sessions != 2 || !sameKeys(mine[0].SessionKeys, fill(0x91), fill(0x92)) {
 		t.Fatalf("repeated (key A) = %+v, %v", mine, err)
 	}
-	if theirs, err := store.RepeatedFingerprints(ctx, at-1, keyB, 10); err != nil || len(theirs) != 0 {
+	if theirs, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{APIKeyFPR: keyB}, 10); err != nil || len(theirs) != 0 {
 		t.Fatalf("repeated (key B) = %+v, %v", theirs, err)
 	}
 	suggestion := storage.Suggestion{Scope: storage.ScopeAll, ScopeKey: storage.AllScopeKey, Kind: "instruction", FPR: fill(0xa1),
@@ -695,7 +695,7 @@ func TestSessionReportsStorage(t *testing.T) {
 	if err != nil || len(costly) != 2 {
 		t.Fatalf("costly = %d, %v", len(costly), err)
 	}
-	if enums, err := store.FacetEnums(ctx, at-1, at+100, keyA); err != nil || len(enums) != 0 {
+	if enums, err := store.FacetEnums(ctx, at-1, at+100, storage.FacetScope{APIKeyFPR: keyA}); err != nil || len(enums) != 0 {
 		t.Fatalf("enums = %+v, %v", enums, err)
 	}
 }
@@ -822,13 +822,193 @@ func TestSessionProjectBooking(t *testing.T) {
 	if got := count(storage.SessionSignalFilter{ProjectID: project(10)}).Sessions; got != 1 {
 		t.Fatalf("service session moved: project 10 = %d", got)
 	}
-	if id := fprProject(service); !id.Valid || id.Int64 != 10 {
-		t.Fatalf("service fingerprint = %+v", id)
+	// It stored no fingerprints in the first place.
+	var kept int
+	if err := store.readerDB.QueryRow(`SELECT COUNT(*) FROM session_text_fprs WHERE session_key = $1`, service).Scan(&kept); err != nil || kept != 0 {
+		t.Fatalf("service session kept %d fingerprints, %v", kept, err)
 	}
 	if err := store.UpdateSessionProjects(ctx, []storage.SessionProjectRef{{SessionKey: loose, Bucket: storage.BucketService}}); err == nil {
 		t.Fatal("refresh turned a session into a service")
 	}
 	if err := store.UpdateSessionProjects(ctx, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Weekly statistics and suggestions also exist per project and per project
+// group; facets and sentence fingerprints are selected through the booking.
+func TestSessionReportScopes(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	at := day.UnixNano()
+	id := func(value int64) *int64 { return &value }
+	type session struct {
+		key     []byte
+		apiKey  []byte
+		user    int64
+		project *int64
+		bucket  string
+	}
+	sessions := []session{
+		{fill(0xe1), keyA, 8, id(10), storage.BucketAttributed},
+		{fill(0xe2), keyB, 9, id(10), storage.BucketAttributed},
+		{fill(0xe3), keyA, 8, id(11), storage.BucketAttributed},
+		{fill(0xe4), keyB, 9, id(10), storage.BucketService},
+	}
+	repeated := fill(0xa7)
+	for index, entry := range sessions {
+		signals := testSignals(entry.key, entry.apiKey, "a2", at+int64(index))
+		signals.NewAPIUserID, signals.ProjectID, signals.Bucket = id(entry.user), entry.project, entry.bucket
+		fprs := []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: repeated, APIKeyFPR: entry.apiKey, SeenAtNS: at + int64(index)}}
+		if index == 2 {
+			// Project 11 already injects the sentence as a rule.
+			fprs = append(fprs, storage.SessionTextFPR{Source: storage.TextSourceInjectedRules, FPR: repeated, APIKeyFPR: entry.apiKey, SeenAtNS: at + 50})
+		}
+		pack := storage.SessionPack{
+			SessionKey: entry.key, Kind: storage.PackKindSession, APIKeyFPR: entry.apiKey, PackHash: strings.Repeat("cd", 32),
+			PackEnc: []byte{1}, RefMap: "{}", FirstNS: at, LastNS: at + int64(index), LastAuditID: "a2", BuiltAtNS: 1, Members: 1,
+		}
+		if err := store.SaveSessionSignals(ctx, signals, fprs, &pack); err != nil {
+			t.Fatal(err)
+		}
+		facet := storage.SessionFacet{
+			SessionKey: entry.key, Kind: storage.PackKindSession, APIKeyFPR: entry.apiKey, LastNS: at + int64(index), PackHash: pack.PackHash,
+			PromptVersion: "facet-v1", Model: "m", Status: "ok", TaskType: "bug_fix", Outcome: "achieved", CreatedAtNS: 5,
+		}
+		if err := store.SaveSessionFacet(ctx, facet, []storage.SessionTextFPR{{Source: storage.TextSourceFacetSkill, FPR: fill(0xa8), APIKeyFPR: entry.apiKey, SeenAtNS: at + int64(index)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if projects, err := store.ActiveAnalysisProjects(ctx, at, at+100); err != nil || len(projects) != 2 || projects[0] != 10 || projects[1] != 11 {
+		t.Fatalf("active projects = %v, %v", projects, err)
+	}
+	if none, err := store.ActiveAnalysisProjects(ctx, at+3, at+100); err != nil || len(none) != 0 {
+		t.Fatalf("a service session made its project active: %v, %v", none, err)
+	}
+
+	enums := func(scope storage.FacetScope) int {
+		t.Helper()
+		rows, err := store.FacetEnums(ctx, at, at+100, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(rows)
+	}
+	if enums(storage.FacetScope{}) != 4 || enums(storage.FacetScope{APIKeyFPR: keyA}) != 2 {
+		t.Fatalf("all = %d, key A = %d", enums(storage.FacetScope{}), enums(storage.FacetScope{APIKeyFPR: keyA}))
+	}
+	// Project and user scopes leave the service session out.
+	if got := enums(storage.FacetScope{ProjectID: id(10)}); got != 2 {
+		t.Fatalf("project 10 facets = %d", got)
+	}
+	if got := enums(storage.FacetScope{ProjectID: id(11)}); got != 1 {
+		t.Fatalf("project 11 facets = %d", got)
+	}
+	if got := enums(storage.FacetScope{UserIDs: []int64{9}}); got != 1 {
+		t.Fatalf("user 9 facets = %d", got)
+	}
+	if got := enums(storage.FacetScope{UserIDs: []int64{8, 9}}); got != 3 {
+		t.Fatalf("users 8 and 9 facets = %d", got)
+	}
+	if got := enums(storage.FacetScope{UserIDs: []int64{}}); got != 0 {
+		t.Fatalf("empty user set facets = %d", got)
+	}
+
+	// Sentences repeat inside a project; the facet stage's fingerprints carry
+	// the session's project too.
+	inOrders, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{ProjectID: id(10)}, 10)
+	if err != nil || len(inOrders) != 2 {
+		t.Fatalf("project 10 repeats = %+v, %v", inOrders, err)
+	}
+	for _, group := range inOrders {
+		// Two sessions of project 10 say it; the rule lives in project 11
+		// only. A service session keeps no fingerprints: the instruction it
+		// was saved with is dropped, and the skill its facet added afterwards
+		// goes when it is saved as a service again.
+		want := int64(2)
+		if group.Kind == "skill" {
+			want = 3
+		}
+		if group.Sessions != want || group.Adopted {
+			t.Fatalf("project 10 group = %+v", group)
+		}
+	}
+	serviceSignals := testSignals(sessions[3].key, keyB, "a2", at+3)
+	serviceSignals.NewAPIUserID, serviceSignals.ProjectID, serviceSignals.Bucket = id(9), id(10), storage.BucketService
+	if err := store.SaveSessionSignals(ctx, serviceSignals, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := store.readerDB.QueryRow(`SELECT COUNT(*) FROM session_text_fprs WHERE session_key = $1`, sessions[3].key).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("service session kept %d fingerprints, %v", left, err)
+	}
+	if inBilling, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{ProjectID: id(11)}, 10); err != nil || len(inBilling) != 0 {
+		t.Fatalf("project 11 repeats = %+v, %v", inBilling, err)
+	}
+	everywhere, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{}, 10)
+	if err != nil || len(everywhere) != 2 {
+		t.Fatalf("all repeats = %+v, %v", everywhere, err)
+	}
+	for _, group := range everywhere {
+		if group.Sessions != 3 || (group.Kind == "instruction") != group.Adopted {
+			t.Fatalf("all group = %+v", group)
+		}
+	}
+
+	// Project and group scopes are stored under the id-derived key.
+	for _, scope := range []string{storage.ScopeProject, storage.ScopeGroup} {
+		for _, scopeID := range []int64{11, 10} {
+			if err := store.SavePeriodStats(ctx, storage.PeriodStats{WeekStartNS: 700, Scope: scope, ScopeKey: storage.IDScopeKey(scopeID),
+				Stats: `{"totals":{}}`, InputHash: "h", ComputedAtNS: 5}); err != nil {
+				t.Fatalf("%s stats: %v", scope, err)
+			}
+		}
+		keys, err := store.ListPeriodScopeKeys(ctx, 700, scope)
+		if err != nil || len(keys) != 2 {
+			t.Fatalf("%s keys = %d, %v", scope, len(keys), err)
+		}
+		first, okFirst := storage.IDOfScopeKey(keys[0])
+		second, okSecond := storage.IDOfScopeKey(keys[1])
+		if !okFirst || !okSecond || first != 10 || second != 11 {
+			t.Fatalf("%s ids = %d %d", scope, first, second)
+		}
+		if loaded, err := store.LoadPeriodStats(ctx, 700, scope, storage.IDScopeKey(10), nil); err != nil || loaded.Scope != scope {
+			t.Fatalf("%s load = %+v, %v", scope, loaded, err)
+		}
+	}
+	if keys, err := store.ListPeriodScopeKeys(ctx, 701, storage.ScopeProject); err != nil || len(keys) != 0 {
+		t.Fatalf("another week = %d, %v", len(keys), err)
+	}
+	if _, ok := storage.IDOfScopeKey(keyA); ok {
+		t.Fatal("an API key fingerprint decoded as an id")
+	}
+	if err := store.SavePeriodStats(ctx, storage.PeriodStats{WeekStartNS: 700, Scope: "team", ScopeKey: storage.IDScopeKey(1), Stats: "{}", ComputedAtNS: 5}); err == nil {
+		t.Fatal("unknown scope stored")
+	}
+
+	suggestion := storage.Suggestion{Scope: storage.ScopeProject, ScopeKey: storage.IDScopeKey(10), Kind: "instruction", FPR: repeated,
+		Support: 2, FirstSeenNS: at, LastSeenNS: at + 1, Status: "open", TextEnc: []byte{7}, UpdatedAtNS: 1}
+	if err := store.UpsertSuggestion(ctx, suggestion); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.ListSuggestions(ctx, storage.ScopeProject, storage.IDScopeKey(10), nil, 10)
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("project suggestions = %+v, %v", listed, err)
+	}
+	if other, err := store.ListSuggestions(ctx, storage.ScopeProject, storage.IDScopeKey(11), nil, 10); err != nil || len(other) != 0 {
+		t.Fatalf("another project's suggestions = %+v, %v", other, err)
+	}
+	if err := store.DismissSuggestion(ctx, listed[0].ID, storage.ScopeAll, 2); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("dismissed through the all scope: %v", err)
+	}
+	if err := store.DismissSuggestion(ctx, listed[0].ID, storage.ScopeProject, 2); err != nil {
+		t.Fatal(err)
+	}
+	suggestion.Scope = storage.ScopeGroup
+	if err := store.UpsertSuggestion(ctx, suggestion); err == nil {
+		t.Fatal("group suggestion stored")
 	}
 }

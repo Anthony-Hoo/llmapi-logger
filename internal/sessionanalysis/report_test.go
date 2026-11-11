@@ -102,7 +102,7 @@ func TestReportsSuggestionsAndNarrative(t *testing.T) {
 	}
 	service.now = runner.options.Now
 	service.location = packZone
-	report, err := service.Report(ctx, "current", nil)
+	report, err := service.Report(ctx, "current", nil, ReportTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,14 +127,14 @@ func TestReportsSuggestionsAndNarrative(t *testing.T) {
 	}
 	// A developer sees only their own key's statistics.
 	own := scopeOf(bytes.Repeat([]byte{1}, 32))
-	personal, err := service.Report(ctx, "current", own)
+	personal, err := service.Report(ctx, "current", own, ReportTarget{})
 	if err != nil || personal.Scope != storage.ScopePerson || personal.Stats == nil || personal.Stats.Totals.Sessions != 3 || len(personal.Suggestions) == 0 {
 		t.Fatalf("personal = %+v, %v", personal, err)
 	}
-	if foreign, err := service.Report(ctx, "current", scopeOf(bytes.Repeat([]byte{7}, 32))); err != nil || foreign.Stats != nil || len(foreign.Suggestions) != 0 {
+	if foreign, err := service.Report(ctx, "current", scopeOf(bytes.Repeat([]byte{7}, 32)), ReportTarget{}); err != nil || foreign.Stats != nil || len(foreign.Suggestions) != 0 {
 		t.Fatalf("foreign = %+v, %v", foreign, err)
 	}
-	if _, err := service.Report(ctx, "next", nil); err == nil {
+	if _, err := service.Report(ctx, "next", nil, ReportTarget{}); err == nil {
 		t.Fatal("unknown week accepted")
 	}
 	// Dismissing an all-keys suggestion survives the next refresh.
@@ -144,7 +144,7 @@ func TestReportsSuggestionsAndNarrative(t *testing.T) {
 	if _, err := runner.RunOnce(ctx, TriggerManual); err != nil {
 		t.Fatal(err)
 	}
-	refreshed, _ := service.Report(ctx, "current", nil)
+	refreshed, _ := service.Report(ctx, "current", nil, ReportTarget{})
 	for _, item := range refreshed.Suggestions {
 		if item.ID == instruction.ID && item.Status != "dismissed" {
 			t.Fatalf("dismissed suggestion reopened: %+v", item)
@@ -201,7 +201,7 @@ func TestNarrativeFallsBackToTheTemplate(t *testing.T) {
 	}
 	service, _ := NewQueryService(store, runner, runner.options.Cipher, "local-small")
 	service.now, service.location = runner.options.Now, packZone
-	report, err := service.Report(context.Background(), "current", nil)
+	report, err := service.Report(context.Background(), "current", nil, ReportTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestNarrativeFallsBackToTheTemplate(t *testing.T) {
 	}
 	service, _ = NewQueryService(plain, runnerNoModel, runnerNoModel.options.Cipher, "")
 	service.now, service.location = runnerNoModel.options.Now, packZone
-	if report, _ := service.Report(context.Background(), "current", nil); report.NarrativeSource != "template" {
+	if report, _ := service.Report(context.Background(), "current", nil, ReportTarget{}); report.NarrativeSource != "template" {
 		t.Fatalf("no-model narrative source = %s", report.NarrativeSource)
 	}
 }

@@ -663,9 +663,15 @@ func (store *memoryStore) inScope(signals storage.SessionSignals, filter storage
 
 func (store *memoryStore) SessionSignalTotalsLocked(filter storage.SessionSignalFilter) storage.SessionSignalTotals {
 	var totals storage.SessionSignalTotals
+	callers := map[string]bool{}
 	for _, signals := range store.signals {
 		if !store.inScope(signals, filter) {
 			continue
+		}
+		if signals.NewAPIUserID != nil {
+			callers["u"+strconv.FormatInt(*signals.NewAPIUserID, 10)] = true
+		} else {
+			callers["k"+string(signals.APIKeyFPR)] = true
 		}
 		totals.Sessions++
 		if signals.Kind == "agent" {
@@ -686,28 +692,77 @@ func (store *memoryStore) SessionSignalTotalsLocked(filter storage.SessionSignal
 			totals.WithWrites++
 		}
 	}
+	totals.Contributors = int64(len(callers))
 	return totals
 }
 
-func (store *memoryStore) FacetEnums(_ context.Context, fromNS, toNS int64, apiKey []byte) ([]storage.FacetEnumRow, error) {
+func (store *memoryStore) ActiveAnalysisProjects(_ context.Context, fromNS, toNS int64) ([]int64, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	seen := map[int64]bool{}
+	for _, signals := range store.signals {
+		if signals.LastNS >= fromNS && signals.LastNS < toNS && signals.ProjectID != nil && signals.Bucket != storage.BucketService {
+			seen[*signals.ProjectID] = true
+		}
+	}
+	out := make([]int64, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func (store *memoryStore) ListPeriodScopeKeys(_ context.Context, weekStartNS int64, scope string) ([][]byte, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	out := make([][]byte, 0)
+	for _, stats := range store.stats {
+		if stats.WeekStartNS == weekStartNS && stats.Scope == scope {
+			out = append(out, stats.ScopeKey)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i], out[j]) < 0 })
+	return out, nil
+}
+
+// facetInScope applies a FacetScope like the PostgreSQL join: project and
+// user scopes read session facets through their signals row.
+func (store *memoryStore) facetInScope(key string, facet storage.SessionFacet, scope storage.FacetScope) bool {
+	if scope.APIKeyFPR != nil && !bytes.Equal(facet.APIKeyFPR, scope.APIKeyFPR) {
+		return false
+	}
+	if scope.ProjectID == nil && scope.UserIDs == nil {
+		return true
+	}
+	signals, ok := store.signals[key]
+	return ok && store.inScope(signals, storage.SessionSignalFilter{ExcludeService: true, ProjectID: scope.ProjectID, UserIDs: scope.UserIDs})
+}
+
+func (store *memoryStore) FacetEnums(_ context.Context, fromNS, toNS int64, scope storage.FacetScope) ([]storage.FacetEnumRow, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	out := make([]storage.FacetEnumRow, 0)
-	for _, facet := range store.facets {
-		if facet.Status == "ok" && facet.LastNS >= fromNS && facet.LastNS < toNS && (apiKey == nil || bytes.Equal(facet.APIKeyFPR, apiKey)) {
+	for key, facet := range store.facets {
+		if facet.Status == "ok" && facet.LastNS >= fromNS && facet.LastNS < toNS && store.facetInScope(key, facet, scope) {
 			out = append(out, storage.FacetEnumRow{Kind: facet.Kind, TaskType: facet.TaskType, Outcome: facet.Outcome, Collaboration: facet.Collaboration, Friction: facet.Friction, Items: facet.Items})
 		}
 	}
 	return out, nil
 }
 
-func (store *memoryStore) RepeatedFingerprints(_ context.Context, sinceNS int64, apiKey []byte, limit int) ([]storage.RepeatedFPR, error) {
+func (store *memoryStore) RepeatedFingerprints(_ context.Context, sinceNS int64, scope storage.FacetScope, limit int) ([]storage.RepeatedFPR, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	apiKey := scope.APIKeyFPR
 	groups := map[string]*storage.RepeatedFPR{}
 	rules := map[string]int64{}
 	add := func(session string, fpr storage.SessionTextFPR) {
 		if fpr.SeenAtNS < sinceNS || (apiKey != nil && !bytes.Equal(fpr.APIKeyFPR, apiKey)) {
+			return
+		}
+		// Fingerprints carry their session's current project.
+		if booked := store.signals[session].ProjectID; scope.ProjectID != nil && (booked == nil || *booked != *scope.ProjectID) {
 			return
 		}
 		if fpr.Source == storage.TextSourceInjectedRules {

@@ -20,8 +20,29 @@ export const SKIP_REASON_LABELS: Record<string, string> = {
   single_turn_chat: "单轮聊天",
   content_unavailable: "正文不可得",
   no_agent_identity: "无会话标识",
+  service: "服务账号",
   error: "处理失败",
+  // Run summary only.
+  rebooked: "重新归属",
+  project_refresh_error: "归属刷新失败",
+  digest_error: "汇总重建失败",
 };
+
+/** Where a session is booked, or null without organisation reports. */
+export function projectLabel(item: Pick<AnalysisSessionItem, "bucket" | "project" | "project_id">): string | null {
+  switch (item.bucket) {
+    case "attributed":
+      return item.project || (item.project_id ? `项目 #${item.project_id}` : "已归属");
+    case "unattributed":
+      return "未归属";
+    case "no_context":
+      return "无项目上下文";
+    case "service":
+      return "服务账号";
+    default:
+      return null;
+  }
+}
 
 export const DANGER_LABELS: Record<string, string> = {
   destructive_delete: "破坏性删除",

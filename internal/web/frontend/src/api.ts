@@ -52,6 +52,7 @@ import type {
   AnalysisOverview,
   AnalysisPack,
   AnalysisReport,
+  AnalysisReportTarget,
   AnalysisSessionsPage,
   AnalysisSessionsQuery,
 } from "./lib/session-analysis/types";
@@ -110,8 +111,9 @@ export interface ApiClient {
   getAnalysisFacet: (sessionID: string, signal?: AbortSignal) => Promise<AnalysisFacet>;
   /** Administrator only. */
   calibrateAnalysis: (labels: AnalysisCalibrationLabel[], signal?: AbortSignal) => Promise<AnalysisCalibration>;
-  getAnalysisReport: (week: "current" | "previous", signal?: AbortSignal) => Promise<AnalysisReport>;
-  /** Administrator only; all-keys suggestions. */
+  /** target (administrator, organisation reports) opens one project or group. */
+  getAnalysisReport: (week: "current" | "previous", signal?: AbortSignal, target?: AnalysisReportTarget) => Promise<AnalysisReport>;
+  /** Administrator only; all-keys and project suggestions. */
   dismissAnalysisSuggestion: (id: number, signal?: AbortSignal) => Promise<void>;
   /** Organisation reports (doc/features/23); every route 404s when disabled. */
   org: OrgApi;
@@ -540,10 +542,18 @@ export function createApiClient(
       return { ...result, hidden_fields: result.hidden_fields ?? [], agreement: result.agreement ?? {}, compared: result.compared ?? {} };
     },
 
-    async getAnalysisReport(week, signal) {
-      const result = await requestJSON<AnalysisReport>(`${API_BASE}/session-analysis/report?week=${week}`, signal);
+    async getAnalysisReport(week, signal, target) {
+      const params = new URLSearchParams({ week });
+      if (target?.project_id) {
+        params.set("project_id", String(target.project_id));
+      } else if (target?.group_id) {
+        params.set("group_id", String(target.group_id));
+      }
+      const result = await requestJSON<AnalysisReport>(`${API_BASE}/session-analysis/report?${params}`, signal);
       return {
         ...result,
+        projects: result.projects ?? [],
+        groups: result.groups ?? [],
         suggestions: (result.suggestions ?? []).map((item) => ({ ...item, evidence: item.evidence ?? [] })),
         optimizations: (result.optimizations ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
       };

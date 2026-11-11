@@ -13,6 +13,7 @@ import {
   sessionBadges,
   signalRates,
   SKIP_REASON_LABELS,
+  projectLabel,
   startOfLocalWeekMS,
   TASK_TYPE_LABELS,
 } from "../../lib/session-analysis/format";
@@ -275,6 +276,7 @@ export function SessionAnalysisView({
                       <TableCell>
                         <div>{clientLabel(item.client || "unknown")}</div>
                         <div className="text-label text-subtle">{item.model || "—"}</div>
+                        {projectLabel(item) ? <div className="text-label text-subtle">{projectLabel(item)}</div> : null}
                       </TableCell>
                       <TableCell className="text-right">{item.user_turns}</TableCell>
                       <TableCell className="text-right">{formatDuration(item.active_seconds)}</TableCell>

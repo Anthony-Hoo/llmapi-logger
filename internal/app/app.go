@@ -142,28 +142,34 @@ func assembleSessionAnalysis(configuration config.Config, store runtimeStore, lo
 	}
 	var resolver sessionanalysis.ProjectResolver
 	var location *time.Location
+	weekStartsSunday := false
 	if projects != nil {
 		resolver = projects
 		zone, err := config.OrgLocation(configuration.OrgReports.Timezone)
 		if err != nil {
 			return nil, nil, fmt.Errorf("assemble session analysis time zone: %w", err)
 		}
-		location = zone
+		weekStart, err := config.OrgWeekStart(configuration.OrgReports.WeekStart)
+		if err != nil {
+			return nil, nil, fmt.Errorf("assemble session analysis week start: %w", err)
+		}
+		location, weekStartsSunday = zone, weekStart == time.Sunday
 	}
 	runner, err := sessionanalysis.NewRunner(sessionanalysis.Options{
-		Projects:      resolver,
-		Location:      location,
-		Config:        analysis,
-		RetentionDays: configuration.RetentionDays,
-		Store:         store,
-		Loader:        loader,
-		Vocabulary:    vocabulary,
-		Insights:      insightsVocabulary,
-		Fingerprints:  fingerprints,
-		Cipher:        cipher,
-		LLM:           model,
-		ClientLabels:  insightsVocabulary.ClientLabels(),
-		Logger:        logger,
+		Projects:         resolver,
+		Location:         location,
+		WeekStartsSunday: weekStartsSunday,
+		Config:           analysis,
+		RetentionDays:    configuration.RetentionDays,
+		Store:            store,
+		Loader:           loader,
+		Vocabulary:       vocabulary,
+		Insights:         insightsVocabulary,
+		Fingerprints:     fingerprints,
+		Cipher:           cipher,
+		LLM:              model,
+		ClientLabels:     insightsVocabulary.ClientLabels(),
+		Logger:           logger,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble session analysis runner: %w", err)
@@ -174,7 +180,7 @@ func assembleSessionAnalysis(configuration config.Config, store runtimeStore, lo
 	}
 	if resolver != nil {
 		service.UseProjects(resolver)
-		service.UseLocation(location)
+		service.UseCalendar(location, weekStartsSunday)
 	}
 	return runner, service, nil
 }
