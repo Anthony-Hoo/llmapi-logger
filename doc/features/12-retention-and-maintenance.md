@@ -55,6 +55,8 @@
 
 重新分析替换 detail root 时，`SaveAnalysis` 在同一事务里按旧 root 裁剪，所以没有过期 audit 的 retention 轮次不处理 analysis detail。定向裁剪只覆盖被释放的链；早期版本遗留的、不在任何被释放链上的孤儿节点不会被自动清理（属于可重算的派生数据，不影响证据）。
 
+会话分析的派生表（`session_signals`、`session_packs` 等，[模块 24](24-session-analysis.md)）与 audit 没有外键，不在 retention 批次里清理：会话分析的每日批处理按同样的约束分页清理（候选只取早于 retention 截止时间的行，每页最多 500 个、各自一次 writer 操作，见 24 §16）。`audit_project_identity`（模块 23）随 audit 外键级联删除。
+
 ## 5. 执行方式
 
 - 应用启动后异步执行一轮；已追平时每小时检查一次。

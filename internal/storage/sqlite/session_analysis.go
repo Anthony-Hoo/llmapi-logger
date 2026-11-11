@@ -23,7 +23,7 @@ func (store *Store) SaveSessionSignals(context.Context, storage.SessionSignals, 
 	return nil
 }
 
-func (store *Store) PruneSessionAnalysis(context.Context, int64) (int64, error) {
+func (store *Store) PruneSessionAnalysis(context.Context, int64, int64) (int64, error) {
 	return 0, nil
 }
 
