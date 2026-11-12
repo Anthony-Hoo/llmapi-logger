@@ -72,9 +72,15 @@ func assembleOrgReports(assembly orgAssembly) (*orgreport.Service, error) {
 	}
 	ctx, cancel := context.WithTimeout(assembly.ctx, 10*time.Second)
 	defer cancel()
+	var progress orgreport.AnalysisProgress
+	if assembly.worker != nil {
+		progress = assembly.worker
+	}
 	service, err := orgreport.NewService(ctx, orgreport.Options{
 		Settings: settings, Repository: store, Data: store, Snapshots: store,
 		Cipher: assembly.cipher, Logger: assembly.logger, IdentityVersion: insights.ProjectIdentityVersion,
+		// The freeze job waits for the analysis backfill to reach a week.
+		AnalysisProgress: progress,
 		// Settings saved from the management UI override the file for the
 		// fields the page edits.
 		File: assembly.configuration.OrgReports, SavedSettings: store, Clients: vocabularyClients(assembly.vocabulary),

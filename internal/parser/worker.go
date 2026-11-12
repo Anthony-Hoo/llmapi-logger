@@ -44,6 +44,8 @@ type Worker struct {
 	backfillCursor   *storage.AnalysisBackfillCursor
 	backfillSkipped  map[string]struct{}
 	backfillNextScan time.Time
+	// backfillProgress is readable from any goroutine.
+	backfillProgress backfillProgress
 	// Project identity backfill state, parser goroutine only.
 	projectCursor   *storage.ProjectBackfillCursor
 	projectNextScan time.Time

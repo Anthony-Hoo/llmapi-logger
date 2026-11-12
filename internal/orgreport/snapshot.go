@@ -22,10 +22,28 @@ type WeeklySnapshot struct {
 type SnapshotStore interface {
 	SaveWeeklySnapshot(ctx context.Context, snapshot WeeklySnapshot) error
 	LoadWeeklySnapshot(ctx context.Context, week string) (WeeklySnapshot, bool, error)
-	// CountOrgPendingAudits counts audits of [fromNS, toNS) that are parsed
-	// but not yet analysed or not yet given a current project identity. A
-	// week is frozen only once it reaches zero.
-	CountOrgPendingAudits(ctx context.Context, fromNS, toNS int64, identityVersion int) (int, error)
+	// CountOrgPendingAudits counts the audits of [fromNS, toNS) a week still
+	// waits for. A week is frozen only once nothing is pending.
+	CountOrgPendingAudits(ctx context.Context, fromNS, toNS int64, identityVersion int) (PendingAudits, error)
+}
+
+// PendingAudits are the audits of one week that are not ready yet.
+type PendingAudits struct {
+	// Pending are still waiting for the parser, or analysed without a current
+	// project identity.
+	Pending int
+	// Unanalysed are parsed and ended but have no analysis. The analysis
+	// backfill picks them up, or skips them for good (no body left, no
+	// parser); only its progress tells which.
+	Unanalysed int
+}
+
+// AnalysisProgress reports the insights backfill's progress.
+type AnalysisProgress interface {
+	// AnalysisBackfillCovered reports whether a backfill pass that began at
+	// or after sinceNS has attempted every unanalysed audit that started
+	// before untilNS.
+	AnalysisBackfillCovered(untilNS, sinceNS int64) bool
 }
 
 const (
@@ -125,10 +143,18 @@ func (service *Service) freezePending(ctx context.Context, now time.Time) {
 		if exists {
 			continue
 		}
-		pending, err := service.snapshots.CountOrgPendingAudits(ctx, candidate.Start.UnixNano(), candidate.End.UnixNano(), service.identityVersion)
+		counts, err := service.snapshots.CountOrgPendingAudits(ctx, candidate.Start.UnixNano(), candidate.End.UnixNano(), service.identityVersion)
 		if err != nil {
 			service.logger.Warn("org snapshot check failed", "error_code", "org_snapshot_failed", "reason", "pending_count_failed")
 			return
+		}
+		pending := counts.Pending
+		// Unanalysed audits wait for one backfill pass that began after the
+		// week ended to reach past it; whatever is still unanalysed then was
+		// skipped or failed and no longer holds the week.
+		if counts.Unanalysed > 0 && (service.progress == nil ||
+			!service.progress.AnalysisBackfillCovered(candidate.End.UnixNano(), candidate.End.Add(freezeGrace).UnixNano())) {
+			pending += counts.Unanalysed
 		}
 		if pending > 0 && now.Before(candidate.End.Add(freezeDeadline)) {
 			// Older weeks first: a later week must not freeze before an

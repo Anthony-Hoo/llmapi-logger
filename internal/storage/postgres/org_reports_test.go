@@ -285,6 +285,60 @@ func TestWeeklySnapshotRoundTripSurvivesRetention(t *testing.T) {
 	}
 }
 
+// The freeze check separates audits still in the pipeline from parsed audits
+// that never got an analysis row.
+func TestCountOrgPendingAuditsSplitsUnanalysed(t *testing.T) {
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	exec := func(query string, arguments ...any) {
+		t.Helper()
+		if _, err := store.writerConn.ExecContext(ctx, query, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, id := range []string{"p-parse", "p-unanalysed", "p-no-identity", "p-done", "p-failed"} {
+		finishedTestAudit(t, store, id, int64(100+index))
+	}
+	finishedTestAudit(t, store, "p-outside", 500)
+	exec(`UPDATE audit_records SET parse_status = 'ok' WHERE audit_id IN ('p-unanalysed', 'p-no-identity', 'p-done', 'p-outside')`)
+	exec(`UPDATE audit_records SET parse_status = 'error' WHERE audit_id = 'p-failed'`)
+	for _, id := range []string{"p-no-identity", "p-done"} {
+		exec(`INSERT INTO audit_analysis (audit_id, analysis_version, analyzed_at_ns, protocol, started_at_ns) VALUES ($1, 1, 1, 'openai', 100)`, id)
+	}
+	if err := store.SaveProjectIdentity(ctx, identityTestRow("p-done")); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.CountOrgPendingAudits(ctx, 100, 200, 1)
+	if err != nil || counts.Pending != 2 || counts.Unanalysed != 1 {
+		t.Fatalf("counts = %+v err = %v", counts, err)
+	}
+	// A newer identity version makes the identified audit pending again.
+	if counts, err = store.CountOrgPendingAudits(ctx, 100, 200, 2); err != nil || counts.Pending != 3 {
+		t.Fatalf("counts at version 2 = %+v err = %v", counts, err)
+	}
+}
+
+// Report requests carry their caller scope, so identity inheritance never
+// crosses keys.
+func TestLoadOrgRequestsCarryTheCallerKey(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	day := seedSharedWorld(t, store)
+	requests, err := store.LoadOrgRequests(context.Background(), day.Add(-time.Hour).UnixNano(), day.Add(time.Hour).UnixNano())
+	if err != nil || len(requests) == 0 {
+		t.Fatalf("requests = %d err = %v", len(requests), err)
+	}
+	for _, request := range requests {
+		want := hex.EncodeToString(keyA)
+		if request.AuditID == "b1" || request.AuditID == "d1" {
+			want = hex.EncodeToString(keyB)
+		}
+		if request.CallerKey != want {
+			t.Fatalf("%s caller = %s, want %s", request.AuditID, request.CallerKey, want)
+		}
+	}
+}
+
 // One analysis session's attribution input is its own requests only: another
 // key's requests under the same root, and rejected requests, stay out.
 func TestLoadOrgSessionReadsOneKeysRequests(t *testing.T) {

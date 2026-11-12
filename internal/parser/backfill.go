@@ -92,6 +92,9 @@ func (worker *Worker) backfill(ctx context.Context) int {
 	if analyzer == nil || !listable || ctx.Err() != nil || len(worker.queue) > 0 || worker.now().Before(worker.backfillNextScan) {
 		return 0
 	}
+	if worker.backfillCursor == nil {
+		worker.backfillProgress.begin(worker.now().UnixNano())
+	}
 	candidates, err := store.ListAnalysisBackfillCandidates(ctx, insights.AnalysisVersion, worker.backfillCursor, backfillBatch)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -102,6 +105,7 @@ func (worker *Worker) backfill(ctx context.Context) int {
 	if len(candidates) == 0 {
 		worker.backfillCursor = nil
 		worker.backfillNextScan = worker.now().Add(backfillRescanInterval)
+		worker.backfillProgress.complete()
 		return 0
 	}
 	attempted := 0
@@ -114,6 +118,7 @@ func (worker *Worker) backfill(ctx context.Context) int {
 			attempted++
 		}
 		worker.backfillCursor = &storage.AnalysisBackfillCursor{StartedAtNS: candidate.StartedAtNS, AuditID: candidate.AuditID}
+		worker.backfillProgress.advance(candidate.StartedAtNS)
 	}
 	return attempted
 }

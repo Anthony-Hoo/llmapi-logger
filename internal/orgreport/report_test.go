@@ -39,11 +39,12 @@ func (data *memoryData) LoadOrgIdentities(context.Context, int64, int64) ([]Seal
 }
 
 type memorySnapshots struct {
-	mu       sync.Mutex
-	weeks    map[string]WeeklySnapshot
-	pending  int
-	saves    int
-	failLoad error
+	mu         sync.Mutex
+	weeks      map[string]WeeklySnapshot
+	pending    int
+	unanalysed int
+	saves      int
+	failLoad   error
 }
 
 func (store *memorySnapshots) SaveWeeklySnapshot(_ context.Context, snapshot WeeklySnapshot) error {
@@ -71,10 +72,24 @@ func (store *memorySnapshots) LoadWeeklySnapshot(_ context.Context, week string)
 	return snapshot, ok, nil
 }
 
-func (store *memorySnapshots) CountOrgPendingAudits(context.Context, int64, int64, int) (int, error) {
+func (store *memorySnapshots) CountOrgPendingAudits(context.Context, int64, int64, int) (PendingAudits, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return store.pending, nil
+	return PendingAudits{Pending: store.pending, Unanalysed: store.unanalysed}, nil
+}
+
+// fakeProgress reports coverage for weeks ending at or before coveredUntil,
+// by a pass that began at passStart.
+type fakeProgress struct {
+	mu           sync.Mutex
+	coveredUntil int64
+	passStart    int64
+}
+
+func (progress *fakeProgress) AnalysisBackfillCovered(untilNS, sinceNS int64) bool {
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+	return untilNS <= progress.coveredUntil && progress.passStart >= sinceNS
 }
 
 type reportFixture struct {
@@ -245,6 +260,57 @@ func TestFreezeJobAndRegenerate(t *testing.T) {
 func TestPendingAuditsFreezeAfterTheDeadline(t *testing.T) {
 	fixture := newReportFixture(t)
 	fixture.snapshots.pending = 1
+	*fixture.now = testWeekStart.AddDate(0, 0, 7).Add(freezeDeadline + time.Minute)
+	fixture.service.SnapshotTick(context.Background())
+	fixture.service.WaitSnapshots()
+	if _, ok := fixture.snapshots.weeks["2026-11-02"]; !ok {
+		t.Fatal("deadline did not force the freeze")
+	}
+}
+
+func TestUnanalysedAuditsWaitForTheBackfill(t *testing.T) {
+	fixture := newReportFixture(t)
+	progress := &fakeProgress{}
+	fixture.service.progress = progress
+	fixture.snapshots.unanalysed = 2
+	tick := func() {
+		*fixture.now = fixture.now.Add(freezeCheckInterval + time.Second)
+		fixture.service.SnapshotTick(context.Background())
+		fixture.service.WaitSnapshots()
+	}
+	weekEnd := testWeekStart.AddDate(0, 0, 7)
+
+	// Last week has unanalysed audits the backfill has not reached: it waits.
+	tick()
+	if _, ok := fixture.snapshots.weeks["2026-11-02"]; ok {
+		t.Fatal("froze before the backfill reached the week")
+	}
+	// A pass that began before the week ended does not count.
+	progress.mu.Lock()
+	progress.coveredUntil, progress.passStart = weekEnd.UnixNano(), weekEnd.UnixNano()
+	progress.mu.Unlock()
+	tick()
+	if _, ok := fixture.snapshots.weeks["2026-11-02"]; ok {
+		t.Fatal("froze on a pass that began before the grace period ended")
+	}
+	// A later pass reached past the week: what is left was skipped.
+	progress.mu.Lock()
+	progress.passStart = weekEnd.Add(freezeGrace).UnixNano()
+	progress.mu.Unlock()
+	tick()
+	if _, ok := fixture.snapshots.weeks["2026-11-02"]; !ok {
+		t.Fatal("did not freeze once the backfill covered the week")
+	}
+}
+
+func TestUnanalysedAuditsWithoutProgressWaitForTheDeadline(t *testing.T) {
+	fixture := newReportFixture(t)
+	fixture.snapshots.unanalysed = 1
+	fixture.service.SnapshotTick(context.Background())
+	fixture.service.WaitSnapshots()
+	if _, ok := fixture.snapshots.weeks["2026-11-02"]; ok {
+		t.Fatal("froze with unanalysed audits and no backfill progress")
+	}
 	*fixture.now = testWeekStart.AddDate(0, 0, 7).Add(freezeDeadline + time.Minute)
 	fixture.service.SnapshotTick(context.Background())
 	fixture.service.WaitSnapshots()

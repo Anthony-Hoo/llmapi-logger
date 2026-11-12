@@ -204,28 +204,31 @@ ORDER BY section, newapi_user_id, newapi_token_id, project_id`, week)
 	return snapshot, true, nil
 }
 
-// CountOrgPendingAudits counts audits of [fromNS, toNS) still waiting for the
-// parser, and analysed audits without a current project identity. Audits the
-// analysis backfill can never analyse are not counted: they are outside every
-// report anyway and would otherwise block the week forever.
-func (store *Store) CountOrgPendingAudits(ctx context.Context, fromNS, toNS int64, identityVersion int) (int, error) {
+// CountOrgPendingAudits counts the audits of [fromNS, toNS) still waiting for
+// the parser or analysed without a current project identity (Pending), and
+// the parsed, ended audits without any analysis that the analysis backfill
+// selects (Unanalysed). Whether an unanalysed audit will ever be analysed is
+// only known to the backfill, so the caller decides how long they hold the
+// week.
+func (store *Store) CountOrgPendingAudits(ctx context.Context, fromNS, toNS int64, identityVersion int) (orgreport.PendingAudits, error) {
 	if ctx == nil {
-		return 0, errors.New("postgres: nil context")
+		return orgreport.PendingAudits{}, errors.New("postgres: nil context")
 	}
 	if store == nil || store.isClosed() {
-		return 0, ErrClosed
+		return orgreport.PendingAudits{}, ErrClosed
 	}
-	var pending int
+	var counts orgreport.PendingAudits
 	err := store.readerDB.QueryRowContext(ctx, `
-SELECT COUNT(*)
+SELECT
+    COUNT(*) FILTER (WHERE ar.parse_status IN ('pending', 'processing')
+                        OR (aa.audit_id IS NOT NULL AND (pi.audit_id IS NULL OR pi.identity_version < $3))),
+    COUNT(*) FILTER (WHERE aa.audit_id IS NULL AND ar.ended_at_ns IS NOT NULL AND ar.parse_status IN ('ok', 'partial'))
 FROM audit_records AS ar
 LEFT JOIN audit_analysis AS aa ON aa.audit_id = ar.audit_id
 LEFT JOIN audit_project_identity AS pi ON pi.audit_id = ar.audit_id
-WHERE ar.started_at_ns >= $1 AND ar.started_at_ns < $2
-  AND (ar.parse_status IN ('pending', 'processing')
-       OR (aa.audit_id IS NOT NULL AND (pi.audit_id IS NULL OR pi.identity_version < $3)))`, fromNS, toNS, identityVersion).Scan(&pending)
+WHERE ar.started_at_ns >= $1 AND ar.started_at_ns < $2`, fromNS, toNS, identityVersion).Scan(&counts.Pending, &counts.Unanalysed)
 	if err != nil {
-		return 0, fmt.Errorf("postgres: count org pending audits: %w", err)
+		return orgreport.PendingAudits{}, fmt.Errorf("postgres: count org pending audits: %w", err)
 	}
-	return pending, nil
+	return counts, nil
 }

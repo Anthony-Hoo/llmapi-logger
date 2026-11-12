@@ -57,6 +57,10 @@ type Options struct {
 	// (insights.ProjectIdentityVersion); a week freezes only once every
 	// audit has it. Zero means 1.
 	IdentityVersion int
+	// AnalysisProgress tells when the insights backfill has attempted every
+	// unanalysed audit of a week (the parser worker). Without it, unanalysed
+	// audits hold a week until the freeze deadline.
+	AnalysisProgress AnalysisProgress
 	// File is the configuration file's section, and SavedSettings where an
 	// administrator's changes to it are kept. Both are needed to edit
 	// settings at run time; without SavedSettings the file always applies.
@@ -86,6 +90,7 @@ type Service struct {
 	now        func() time.Time
 
 	identityVersion int
+	progress        AnalysisProgress
 
 	mu      sync.Mutex
 	current atomic.Pointer[Compiled]
@@ -112,7 +117,7 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 		file: options.File, saved: options.SavedSettings, clients: append([]ClientOption(nil), options.Clients...),
 		repository: options.Repository, data: options.Data,
 		snapshots: options.Snapshots, cipher: options.Cipher, logger: options.Logger, now: options.Now,
-		identityVersion: options.IdentityVersion,
+		identityVersion: options.IdentityVersion, progress: options.AnalysisProgress,
 	}
 	settings := options.Settings
 	service.settings.Store(&settings)
