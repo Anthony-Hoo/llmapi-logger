@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api";
 import { settingsSections } from "../../app";
 import { contextBudget, draftChanged, draftFromSettings, keySourceLabel, probeSummary, updateFromDraft } from "../../lib/settings/analysis";
-import { orgDraftChanged, orgDraftFromSettings, orgUpdateFromDraft, parseClients } from "../../lib/settings/org";
+import { clientOptions, orgDraftChanged, orgDraftFromView, orgUpdateFromDraft, toggleClient, unknownRankedClients } from "../../lib/settings/org";
 import type { AnalysisSettingsView, OrgSettingsView } from "../../lib/settings/types";
 import { AnalysisFileOnly, AnalysisSettingsCard, AnalysisSettingsFields, AnalysisSettingsStatus, ProbeOutcome } from "./analysis-settings-form";
 import { OrgSettingsCard, OrgSettingsFields } from "./org-settings-form";
@@ -48,14 +48,23 @@ describe("system settings menu", () => {
 
   it("edits the weekly report parameters and shows the calendar read-only", () => {
     const settings = { idle_gap_seconds: 180, ranked_clients: ["claude_code", "codex"], max_concurrent_roots: 10, max_single_request_roots: 200 };
-    const view: OrgSettingsView = { source: "file", settings, file: settings, timezone: "Asia/Shanghai", week_start: "sunday" };
-    const draft = orgDraftFromSettings(settings);
-    expect(draft.ranked_clients).toBe("claude_code, codex");
+    const clients = [
+      { key: "claude_code", label: "" },
+      { key: "codex", label: "" },
+      { key: "my-agent", label: "My Agent" },
+      { key: "opencode", label: "" },
+    ];
+    const view: OrgSettingsView = { source: "file", settings, file: settings, timezone: "Asia/Shanghai", week_start: "sunday", clients };
+    const draft = orgDraftFromView(view);
+    expect(draft.ranked_clients).toEqual(["claude_code", "codex"]);
     expect(orgUpdateFromDraft(draft)).toEqual(settings);
     expect(orgDraftChanged(draft, view)).toBe(false);
-    // The order of clients does not count as a change; separators are forgiving.
-    expect(orgDraftChanged({ ...draft, ranked_clients: "codex，claude_code" }, view)).toBe(false);
-    expect(parseClients(" codex、 opencode,pi\nzcode ")).toEqual(["codex", "opencode", "pi", "zcode"]);
+    // The order of clients does not count as a change.
+    expect(orgDraftChanged({ ...draft, ranked_clients: ["codex", "claude_code"] }, view)).toBe(false);
+    expect(toggleClient(["codex"], "claude_code", true)).toEqual(["claude_code", "codex"]);
+    expect(toggleClient(["claude_code", "codex"], "codex", false)).toEqual(["claude_code"]);
+    expect(toggleClient(["codex"], "codex", true)).toEqual(["codex"]);
+    expect(orgDraftChanged({ ...draft, ranked_clients: toggleClient(draft.ranked_clients, "opencode", true) }, view)).toBe(true);
     expect(orgDraftChanged({ ...draft, idle_gap_seconds: "60" }, view)).toBe(true);
     expect(orgUpdateFromDraft({ ...draft, idle_gap_seconds: "3m" }).idle_gap_seconds).toBe(-1);
 
@@ -63,6 +72,30 @@ describe("system settings menu", () => {
     expect(html).toContain("来自配置文件");
     expect(html).toContain('id="org-idle_gap_seconds"');
     expect(html).toContain("已冻结的周保持原来的快照");
+    // Clients are chosen from the vocabulary, never typed: one tick box each,
+    // named by the vocabulary label or the built-in name.
+    expect(html.match(/type="checkbox"/g)?.length).toBe(4);
+    expect(html.match(/checked=""/g)?.length).toBe(2);
+    expect(html).not.toContain('id="org-ranked_clients"');
+    expect(html).toContain("Claude Code");
+    expect(html).toContain("My Agent");
+    expect(html).toContain("只能从词表能识别的客户端里选");
+    expect(html).not.toContain("不会命中任何请求");
+    expect(renderToStaticMarkup(<OrgSettingsFields view={view} draft={{ ...draft, ranked_clients: [] }} busy={false} onChange={() => undefined} />)).toContain("至少要选一个客户端");
+
+    // A key in use that the vocabulary does not know cannot be ticked: it is
+    // called out, and saving drops it, so the form counts as changed.
+    const stale: OrgSettingsView = { ...view, settings: { ...settings, ranked_clients: ["codex", "homegrown"] } };
+    expect(unknownRankedClients(stale)).toEqual(["homegrown"]);
+    expect(orgDraftFromView(stale).ranked_clients).toEqual(["codex"]);
+    expect(orgDraftChanged(orgDraftFromView(stale), stale)).toBe(true);
+    const staleHTML = renderToStaticMarkup(<OrgSettingsFields view={stale} draft={orgDraftFromView(stale)} busy={false} onChange={() => undefined} />);
+    expect(staleHTML).toContain("homegrown");
+    expect(staleHTML).toContain("不会命中任何请求；保存时会去掉");
+    expect(staleHTML.match(/type="checkbox"/g)?.length).toBe(4);
+    // A server that names no clients leaves the keys in use to choose from.
+    expect(clientOptions({ ...view, clients: [] }).map((option) => option.key)).toEqual(["claude_code", "codex"]);
+    expect(unknownRankedClients({ ...stale, clients: [] })).toEqual([]);
     // The time zone and the first weekday are shown, not edited.
     expect(html).toContain("Asia/Shanghai");
     expect(html).toContain("周日");

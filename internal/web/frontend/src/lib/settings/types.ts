@@ -69,6 +69,14 @@ export interface OrgSettingsView {
   /** Read from the configuration file only: they place the week boundaries. */
   timezone: string;
   week_start: "monday" | "sunday";
+  /** The clients ranked_clients is chosen from: the ones the vocabulary recognises. */
+  clients: OrgClientOption[];
+}
+
+/** One client of the vocabulary; label is empty when the vocabulary sets none. */
+export interface OrgClientOption {
+  key: string;
+  label: string;
 }
 
 /** Outcome of the connection test; it carries no model output. */

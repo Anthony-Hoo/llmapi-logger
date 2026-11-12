@@ -257,6 +257,16 @@ clients:
 	if len(labels) != 2 || labels["custom"] != "My Framework" || labels["my-agent"] != "My Agent" {
 		t.Fatalf("labels = %v", labels)
 	}
+	// Every client a request can be attributed to, built-in or added, sorted.
+	if keys := strings.Join(DefaultVocabulary().ClientKeys(), ","); keys != "claude_code,codex,custom,dsh,opencode,pi,zcode" {
+		t.Fatalf("built-in client keys = %s", keys)
+	}
+	if keys := vocab.ClientKeys(); !slices.Contains(keys, "my-agent") || !slices.Contains(keys, "unlabeled") || !slices.Contains(keys, "codex") || !slices.IsSorted(keys) {
+		t.Fatalf("client keys = %v", keys)
+	}
+	if keys := (*Vocabulary)(nil).ClientKeys(); keys == nil || len(keys) != 0 {
+		t.Fatalf("nil vocabulary keys = %v", keys)
+	}
 	labels["custom"] = "mutated"
 	if vocab.ClientLabels()["custom"] != "My Framework" {
 		t.Error("ClientLabels must return a copy")

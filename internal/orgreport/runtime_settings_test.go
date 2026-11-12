@@ -170,6 +170,49 @@ func TestOrgSettingsRejectWhatTheFileWouldReject(t *testing.T) {
 	}
 }
 
+// The page can only rank clients a request can be attributed to: a key the
+// vocabulary does not know never matches anything.
+func TestOrgSettingsOnlySaveVocabularyClients(t *testing.T) {
+	ctx := context.Background()
+	store := &settingsMemory{}
+	// The file lists a key the vocabulary does not have; that is allowed there.
+	file := fileOrgSection()
+	file.RankedClients = []string{"codex", "homegrown"}
+	settings, err := SettingsFromConfig(file, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := []ClientOption{{Key: "claude_code", Label: "Claude Code"}, {Key: "codex", Label: "Codex"}, {Key: "opencode"}}
+	service, err := NewService(ctx, Options{Settings: settings, File: file, SavedSettings: store, Clients: clients})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := service.EditableSettings(ctx)
+	if err != nil || len(view.Clients) != 3 || view.Clients[0] != (ClientOption{Key: "claude_code", Label: "Claude Code"}) || view.Clients[2].Label != "" ||
+		strings.Join(view.Settings.RankedClients, ",") != "codex,homegrown" {
+		t.Fatalf("view = %+v, %v", view, err)
+	}
+	// Saving the file's own list back is refused because of the unknown key.
+	_, err = service.UpdateSettings(ctx, view.Settings)
+	if !errors.Is(err, ErrInvalidSettings) || !strings.Contains(SettingsMessage(err), `"homegrown" is not a client of the vocabulary`) || len(store.rows) != 0 {
+		t.Fatalf("unknown client saved: %v", err)
+	}
+	edited := view.Settings
+	edited.RankedClients = []string{"opencode", "codex"}
+	saved, err := service.UpdateSettings(ctx, edited)
+	if err != nil || strings.Join(saved.Settings.RankedClients, ",") != "codex,opencode" || len(saved.Clients) != 3 {
+		t.Fatalf("saved = %+v, %v", saved, err)
+	}
+	// Without a known vocabulary nothing can be checked, as before.
+	open, err := NewService(ctx, Options{Settings: settings, File: file, SavedSettings: &settingsMemory{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view, err := open.UpdateSettings(ctx, editableOf(file)); err != nil || len(view.Clients) != 0 || view.Clients == nil {
+		t.Fatalf("unchecked save = %+v, %v", view, err)
+	}
+}
+
 func TestOrgSettingsAreReadBackAtStartup(t *testing.T) {
 	ctx := context.Background()
 	store := &settingsMemory{rows: map[string]storage.RuntimeSettings{

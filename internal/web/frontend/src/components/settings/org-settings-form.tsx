@@ -2,7 +2,15 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 
 import { ApiError, type ApiClient } from "../../api";
 import { errorMessage, isAbortError } from "../../lib/errors";
-import { orgDraftChanged, orgDraftFromSettings, orgUpdateFromDraft, type OrgSettingsDraft } from "../../lib/settings/org";
+import {
+  clientOptions,
+  orgDraftChanged,
+  orgDraftFromView,
+  orgUpdateFromDraft,
+  toggleClient,
+  unknownRankedClients,
+  type OrgSettingsDraft,
+} from "../../lib/settings/org";
 import type { OrgSettingsView } from "../../lib/settings/types";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -10,6 +18,7 @@ import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Skeleton } from "../ui/skeleton";
+import { clientLabel } from "../insights/ui-bits";
 
 function Field({ label, htmlFor, hint, children }: { label: string; htmlFor: string; hint?: ReactNode; children: ReactNode }) {
   return (
@@ -42,12 +51,14 @@ export function OrgSettingsFields({
   busy: boolean;
   onChange: (patch: Partial<OrgSettingsDraft>) => void;
 }) {
-  const text = (key: keyof OrgSettingsDraft) => ({
+  const text = (key: "idle_gap_seconds" | "max_concurrent_roots" | "max_single_request_roots") => ({
     id: `org-${key}`,
     value: draft[key],
     disabled: busy,
     onChange: (event: { target: { value: string } }) => onChange({ [key]: event.target.value }),
   });
+  const options = clientOptions(view);
+  const unknown = unknownRankedClients(view);
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-body-sm">
@@ -59,9 +70,6 @@ export function OrgSettingsFields({
         <Field label="活跃时长的合并间隔（秒）" htmlFor="org-idle_gap_seconds" hint="同一根会话里，两次请求间隔不超过这个值就算连续活跃。1–3600。">
           <Input {...text("idle_gap_seconds")} inputMode="numeric" className="max-w-32" />
         </Field>
-        <Field label="进入时长排名的客户端" htmlFor="org-ranked_clients" hint="词表里的客户端键，小写，用逗号分隔。其他客户端的时长单独显示，不进排名。">
-          <Input {...text("ranked_clients")} spellCheck={false} autoComplete="off" />
-        </Field>
         <Field label="并行根会话标记阈值" htmlFor="org-max_concurrent_roots" hint="一周内同时进行的根会话峰值超过它就打标记。">
           <Input {...text("max_concurrent_roots")} inputMode="numeric" className="max-w-32" />
         </Field>
@@ -69,6 +77,36 @@ export function OrgSettingsFields({
           <Input {...text("max_single_request_roots")} inputMode="numeric" className="max-w-32" />
         </Field>
       </div>
+      <fieldset className="space-y-1">
+        <legend className="text-body-sm font-medium">进入时长排名的客户端</legend>
+        <p className="text-label text-subtle">
+          只能从词表能识别的客户端里选：请求先由词表判定属于哪个客户端，这里再决定哪些进排名。没勾选的客户端时长单独显示，不进排名。要增加客户端，先在洞察词表里加上识别规则。
+        </p>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {options.map((option) => (
+            <label key={option.key} className="flex items-center gap-2 text-body-sm">
+              <input
+                type="checkbox"
+                name="org-ranked_clients"
+                value={option.key}
+                checked={draft.ranked_clients.includes(option.key)}
+                disabled={busy}
+                onChange={(event) => onChange({ ranked_clients: toggleClient(draft.ranked_clients, option.key, event.target.checked) })}
+              />
+              <span>{option.label || clientLabel(option.key)}</span>
+              <span className="font-mono text-label text-subtle">{option.key}</span>
+            </label>
+          ))}
+        </div>
+        {draft.ranked_clients.length === 0 ? <p className="text-label text-danger-fg">至少要选一个客户端。</p> : null}
+        {unknown.length > 0 ? (
+          <Alert variant="warning">
+            <AlertDescription>
+              当前生效的列表里还有 <span className="font-mono">{unknown.join("、")}</span>，词表里没有{unknown.length > 1 ? "这些" : "这个"}客户端，不会命中任何请求；保存时会去掉。
+            </AlertDescription>
+          </Alert>
+        ) : null}
+      </fieldset>
       <div>
         <h4 className="text-body-sm font-semibold">只能在配置文件里改的项</h4>
         <p className="text-label text-subtle">它们决定每一周从哪里开始、到哪里结束，改动会移动已经保存的周的边界；改动后需要重启服务。</p>
@@ -99,7 +137,7 @@ export function OrgSettingsCard({ client }: { client: ApiClient }) {
 
   function show(next: OrgSettingsView) {
     setView(next);
-    setDraft(orgDraftFromSettings(next.settings));
+    setDraft(orgDraftFromView(next));
   }
 
   useEffect(() => {
@@ -172,7 +210,7 @@ export function OrgSettingsCard({ client }: { client: ApiClient }) {
           <form className="space-y-4" onSubmit={save}>
             <OrgSettingsFields view={view} draft={draft} busy={busy} onChange={(patch) => setDraft((current) => (current ? { ...current, ...patch } : current))} />
             <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit" disabled={busy || !orgDraftChanged(draft, view)}>
+              <Button type="submit" disabled={busy || draft.ranked_clients.length === 0 || !orgDraftChanged(draft, view)}>
                 保存
               </Button>
               {view.source === "saved" ? (

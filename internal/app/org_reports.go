@@ -42,6 +42,18 @@ type orgAssembly struct {
 	worker        *parser.Worker
 }
 
+// vocabularyClients lists the clients a request can be attributed to, for the
+// ranked-clients choice of the settings page.
+func vocabularyClients(vocabulary *insights.Vocabulary) []orgreport.ClientOption {
+	labels := vocabulary.ClientLabels()
+	keys := vocabulary.ClientKeys()
+	clients := make([]orgreport.ClientOption, 0, len(keys))
+	for _, key := range keys {
+		clients = append(clients, orgreport.ClientOption{Key: key, Label: labels[key]})
+	}
+	return clients
+}
+
 // assembleOrgReports builds the organisation report service of an enabled
 // deployment and installs its parser hooks: the project identity extractor
 // on the live path and its backfill.
@@ -65,7 +77,7 @@ func assembleOrgReports(assembly orgAssembly) (*orgreport.Service, error) {
 		Cipher: assembly.cipher, Logger: assembly.logger, IdentityVersion: insights.ProjectIdentityVersion,
 		// Settings saved from the management UI override the file for the
 		// fields the page edits.
-		File: assembly.configuration.OrgReports, SavedSettings: store,
+		File: assembly.configuration.OrgReports, SavedSettings: store, Clients: vocabularyClients(assembly.vocabulary),
 	})
 	if err != nil {
 		return nil, err

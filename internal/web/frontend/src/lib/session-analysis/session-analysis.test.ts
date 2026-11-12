@@ -222,8 +222,11 @@ describe("session analysis API client", () => {
     const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(view));
     const client = createApiClient(vi.fn(), fetcher);
     const update = { idle_gap_seconds: 60, ranked_clients: ["codex"], max_concurrent_roots: 5, max_single_request_roots: 100 };
-    await expect(client.getOrgReportSettings()).resolves.toEqual(view);
+    // A response without a client list is normalised to an empty one.
+    await expect(client.getOrgReportSettings()).resolves.toEqual({ ...view, clients: [] });
     expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/settings/org-reports");
+    const listed = createApiClient(vi.fn(), vi.fn<typeof fetch>(async () => jsonResponse({ ...view, clients: [{ key: "codex", label: "" }] })));
+    await expect(listed.getOrgReportSettings()).resolves.toMatchObject({ clients: [{ key: "codex", label: "" }] });
     await client.saveOrgReportSettings(update);
     expect(fetcher.mock.calls[1][1]?.method).toBe("PUT");
     expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual(update);

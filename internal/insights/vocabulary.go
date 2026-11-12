@@ -705,6 +705,21 @@ func (vocab *Vocabulary) OrderedClients() []string {
 	return names
 }
 
+// ClientKeys returns the keys of every client the vocabulary can recognise,
+// sorted: the built-in ones and those an override added. A request is only
+// ever attributed to one of these keys or to ClientUnknown.
+func (vocab *Vocabulary) ClientKeys() []string {
+	if vocab == nil {
+		return []string{}
+	}
+	keys := make([]string, 0, len(vocab.Clients))
+	for name := range vocab.Clients {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // ClientLabels returns a fresh map of client key -> display label for every
 // client that sets one. The insights API attaches it to its responses so the
 // UI can name clients added by an override.

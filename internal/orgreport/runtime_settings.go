@@ -34,6 +34,13 @@ const (
 	SettingsSourceSaved = "saved"
 )
 
+// ClientOption is one client the insights vocabulary can recognise. Label is
+// its display name, empty when the vocabulary sets none.
+type ClientOption struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
 // SettingsView is GET /api/v1/settings/org-reports.
 type SettingsView struct {
 	// Source is "saved" when a saved section overrides the file.
@@ -45,6 +52,9 @@ type SettingsView struct {
 	// Timezone and WeekStart are read from the configuration file only.
 	Timezone  string `json:"timezone"`
 	WeekStart string `json:"week_start"`
+	// Clients are the clients ranked_clients can be chosen from: the ones the
+	// vocabulary recognises. A key outside this list never matches a request.
+	Clients []ClientOption `json:"clients"`
 }
 
 // ErrInvalidSettings wraps a validation message that names a field and its
@@ -143,13 +153,40 @@ func (service *Service) loadSavedSettings(ctx context.Context) {
 	if err != nil {
 		service.logger.Warn("saved org report settings ignored", "error_category", "runtime_settings_invalid")
 	}
+	ranked := make([]string, 0, len(service.settingsNow().RankedClients))
+	for client := range service.settingsNow().RankedClients {
+		ranked = append(ranked, client)
+	}
+	if unknown := service.unknownClients(ranked); len(unknown) != 0 {
+		// Such a key ranks nothing: no request is attributed to it.
+		service.logger.Warn("ranked clients list keys the vocabulary does not know", "error_category", "org_ranked_client_unknown", "count", len(unknown))
+	}
+}
+
+// unknownClients returns the clients of a list that the vocabulary does not
+// recognise; none when the vocabulary's clients are not known.
+func (service *Service) unknownClients(clients []string) []string {
+	if len(service.clients) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(service.clients))
+	for _, client := range service.clients {
+		known[client.Key] = true
+	}
+	var unknown []string
+	for _, client := range clients {
+		if !known[client] {
+			unknown = append(unknown, client)
+		}
+	}
+	return unknown
 }
 
 func (service *Service) settingsView(effective config.OrgReportsConfig, updatedNS int64) SettingsView {
 	public := service.settingsNow().Public()
 	view := SettingsView{
 		Source: SettingsSourceFile, UpdatedNS: updatedNS, Settings: editableOf(effective), File: editableOf(service.file),
-		Timezone: public.Timezone, WeekStart: public.WeekStart,
+		Timezone: public.Timezone, WeekStart: public.WeekStart, Clients: append([]ClientOption{}, service.clients...),
 	}
 	if updatedNS != 0 {
 		view.Source = SettingsSourceSaved
@@ -185,6 +222,11 @@ func (service *Service) UpdateSettings(ctx context.Context, edited EditableSetti
 	next, err := service.settingsFor(candidate)
 	if err != nil {
 		return SettingsView{}, err
+	}
+	// The configuration file may list any well-formed key; the page only
+	// saves clients a request can actually be attributed to.
+	if unknown := service.unknownClients(candidate.RankedClients); len(unknown) != 0 {
+		return SettingsView{}, fmt.Errorf("%w: org_reports.ranked_clients entry %q is not a client of the vocabulary", ErrInvalidSettings, unknown[0])
 	}
 	encoded, err := json.Marshal(editableOf(candidate))
 	if err != nil {

@@ -62,6 +62,10 @@ type Options struct {
 	// settings at run time; without SavedSettings the file always applies.
 	File          config.OrgReportsConfig
 	SavedSettings SettingsStore
+	// Clients are the clients the insights vocabulary can recognise. The
+	// ranked clients an administrator saves must be among them: any other key
+	// never matches a request. Empty means unknown, and nothing is checked.
+	Clients []ClientOption
 }
 
 // Service is the organisation report surface used by the web layer and the
@@ -72,6 +76,7 @@ type Service struct {
 	settings   atomic.Pointer[Settings]
 	file       config.OrgReportsConfig
 	saved      SettingsStore
+	clients    []ClientOption
 	settingsMu sync.Mutex
 	repository Repository
 	data       DataStore
@@ -104,7 +109,8 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 		options.IdentityVersion = 1
 	}
 	service := &Service{
-		file: options.File, saved: options.SavedSettings, repository: options.Repository, data: options.Data,
+		file: options.File, saved: options.SavedSettings, clients: append([]ClientOption(nil), options.Clients...),
+		repository: options.Repository, data: options.Data,
 		snapshots: options.Snapshots, cipher: options.Cipher, logger: options.Logger, now: options.Now,
 		identityVersion: options.IdentityVersion,
 	}

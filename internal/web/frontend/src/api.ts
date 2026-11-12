@@ -61,6 +61,11 @@ import type { AnalysisProbeResult, AnalysisSettingsUpdate, AnalysisSettingsView,
 
 const API_BASE = "/api/v1";
 
+/** A weekly report settings view always carries its client list. */
+function withClients(view: OrgSettingsView): OrgSettingsView {
+  return { ...view, clients: view.clients ?? [] };
+}
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -612,12 +617,12 @@ export function createApiClient(
       return mutateJSON<AnalysisProbeResult>(`${API_BASE}/settings/session-analysis/test`, "POST", update, signal);
     },
 
-    getOrgReportSettings(signal) {
-      return requestJSON<OrgSettingsView>(`${API_BASE}/settings/org-reports`, signal);
+    async getOrgReportSettings(signal) {
+      return withClients(await requestJSON<OrgSettingsView>(`${API_BASE}/settings/org-reports`, signal));
     },
 
-    saveOrgReportSettings(update, signal) {
-      return mutateJSON<OrgSettingsView>(`${API_BASE}/settings/org-reports`, "PUT", update, signal);
+    async saveOrgReportSettings(update, signal) {
+      return withClients(await mutateJSON<OrgSettingsView>(`${API_BASE}/settings/org-reports`, "PUT", update, signal));
     },
 
     async resetOrgReportSettings(signal) {
@@ -625,7 +630,7 @@ export function createApiClient(
       if (!response.ok) {
         throw await responseError(response);
       }
-      return (await response.json()) as OrgSettingsView;
+      return withClients((await response.json()) as OrgSettingsView);
     },
 
     async dismissAnalysisSuggestion(id, signal) {
