@@ -65,7 +65,7 @@ const (
 	DefaultSessionLLMBaseURL           = "http://127.0.0.1:11434/v1"
 	DefaultSessionLLMStructuredOutput  = "json_schema"
 	DefaultSessionLLMContextTokens     = 16384
-	DefaultSessionLLMMaxOutputTokens   = 600
+	DefaultSessionLLMMaxOutputTokens   = 1500
 	DefaultSessionLLMMaxConcurrency    = 1
 	DefaultSessionLLMTimeoutSeconds    = 120
 	DefaultSessionLLMMaxSessionsPerRun = 300

@@ -69,7 +69,7 @@ session_analysis:
     structured_output: json_schema
     context_tokens: 16384
     disable_thinking: true
-    max_output_tokens: 600
+    max_output_tokens: 1500
     max_concurrency: 1
     timeout_seconds: 120
     max_sessions_per_run: 300

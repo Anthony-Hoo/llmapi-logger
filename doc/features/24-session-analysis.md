@@ -66,7 +66,7 @@ session_analysis:
     structured_output: json_schema   # json_schema | json_object | prompt
     context_tokens: 16384       # 模型上下文窗口；pack.max_tokens + 提示词 + 输出必须放得下
     disable_thinking: true      # 关闭思考模式（§7.2）；开启时输出 Token 约为关闭时的 6 倍（§15.3）
-    max_output_tokens: 600      # facet 正常约 150–400 Token
+    max_output_tokens: 1500     # 会话 facet 约 150–400 Token，聊天汇总可超过 600；留出余量避免截断
     max_concurrency: 1
     timeout_seconds: 120
     max_sessions_per_run: 300   # 超出部分顺延到下一轮，报告写出覆盖率
