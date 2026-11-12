@@ -284,7 +284,8 @@ func (store *memoryStore) ListFacetCandidates(_ context.Context, settledBeforeNS
 		if pack.LastNS >= settledBeforeNS {
 			continue
 		}
-		if ok && facet.PackHash == pack.PackHash && facet.PromptVersion == promptVersion && facet.Model == model && facet.Status != "failed" {
+		if ok && facet.PackHash == pack.PackHash && facet.PromptVersion == promptVersion && facet.Model == model &&
+			(facet.Status != "failed" || facet.Attempts > storage.FacetRetryLimit) {
 			continue
 		}
 		out = append(out, pack)
@@ -299,6 +300,11 @@ func (store *memoryStore) ListFacetCandidates(_ context.Context, settledBeforeNS
 func (store *memoryStore) SaveSessionFacet(_ context.Context, facet storage.SessionFacet, fprs []storage.SessionTextFPR) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	facet.Attempts = 1
+	if old, ok := store.facets[hex.EncodeToString(facet.SessionKey)]; ok && old.Status == "failed" &&
+		old.PackHash == facet.PackHash && old.PromptVersion == facet.PromptVersion && old.Model == facet.Model {
+		facet.Attempts = old.Attempts + 1
+	}
 	store.facets[hex.EncodeToString(facet.SessionKey)] = facet
 	store.facetFPR[hex.EncodeToString(facet.SessionKey)] = fprs
 	return nil

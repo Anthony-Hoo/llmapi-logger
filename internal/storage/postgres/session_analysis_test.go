@@ -497,6 +497,64 @@ func TestSessionPacksStorageAndViewLog(t *testing.T) {
 	}
 }
 
+func TestSessionFacetRetryLimit(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	if err := store.SaveSessionSignals(ctx, testSignals(rootA, keyA, "a2", day.UnixNano()), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	pack := storage.SessionPack{
+		SessionKey: rootA, Kind: storage.PackKindSession, APIKeyFPR: keyA, PackHash: strings.Repeat("ab", 32),
+		PackEnc: []byte{1}, RefMap: "{}", FirstNS: day.UnixNano(), LastNS: day.UnixNano(), LastAuditID: "a2", BuiltAtNS: 1, Members: 1,
+	}
+	if err := store.SaveSessionPack(ctx, pack, nil); err != nil {
+		t.Fatal(err)
+	}
+	settled := day.Add(time.Hour).UnixNano()
+	due := func(model string) int {
+		t.Helper()
+		packs, err := store.ListFacetCandidates(ctx, settled, "facet-v1", model, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(packs)
+	}
+	failed := storage.SessionFacet{
+		SessionKey: rootA, Kind: storage.PackKindSession, APIKeyFPR: keyA, LastNS: day.UnixNano(), PackHash: pack.PackHash,
+		PromptVersion: "facet-v1", Model: "m", Status: "failed", CreatedAtNS: 5,
+	}
+	// The first attempt and every retry inside the limit leave the pack due.
+	for attempt := 1; attempt <= storage.FacetRetryLimit; attempt++ {
+		if err := store.SaveSessionFacet(ctx, failed, nil); err != nil {
+			t.Fatal(err)
+		}
+		if due("m") != 1 {
+			t.Fatalf("failed facet not due after attempt %d", attempt)
+		}
+	}
+	// The last retry failed too: the pack is left alone.
+	if err := store.SaveSessionFacet(ctx, failed, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadSessionFacet(ctx, rootA)
+	if err != nil || loaded.Attempts != storage.FacetRetryLimit+1 || due("m") != 0 {
+		t.Fatalf("after the limit: attempts = %d, due = %d, %v", loaded.Attempts, due("m"), err)
+	}
+	// Another model starts over, and its attempts are counted from one.
+	if due("other") != 1 {
+		t.Fatal("another model is not due")
+	}
+	failed.Model = "other"
+	if err := store.SaveSessionFacet(ctx, failed, nil); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := store.LoadSessionFacet(ctx, rootA); err != nil || loaded.Attempts != 1 || due("other") != 1 {
+		t.Fatalf("after a model change: attempts = %d, %v", loaded.Attempts, err)
+	}
+}
+
 func TestSessionFacetsStorage(t *testing.T) {
 	t.Parallel()
 	store, _ := openTestStore(t)

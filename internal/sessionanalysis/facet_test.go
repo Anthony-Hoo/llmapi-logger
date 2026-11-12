@@ -218,6 +218,28 @@ func TestFacetStageTruncatedOutputIsRetried(t *testing.T) {
 	}
 }
 
+func TestFacetStageStopsRetryingAfterTheLimit(t *testing.T) {
+	ctx := context.Background()
+	settled := baseTime.Add(30 * time.Hour)
+	store := newMemoryStore()
+	seedAgentSession(store)
+	down := &scriptedModel{err: errors.New("connection refused")}
+	// The first attempt and three retries, one per run.
+	for attempt := 1; attempt <= storage.FacetRetryLimit+1; attempt++ {
+		if run, _ := facetRunner(t, store, down, settled).RunOnce(ctx, TriggerManual); run.L1Candidates != 1 || run.L1Failed != 1 || down.calls != attempt {
+			t.Fatalf("attempt %d = %+v calls=%d", attempt, run, down.calls)
+		}
+	}
+	// After that the pack is left alone, even once the model is back.
+	down.err = nil
+	if run, _ := facetRunner(t, store, down, settled).RunOnce(ctx, TriggerManual); run.L1Candidates != 0 || down.calls != storage.FacetRetryLimit+1 {
+		t.Fatalf("run after the limit = %+v calls=%d", run, down.calls)
+	}
+	if facet := store.facets[analysisID(sessionK, bytes.Repeat([]byte{1}, 32))]; facet.Status != FacetFailed || facet.Attempts != storage.FacetRetryLimit+1 {
+		t.Fatalf("facet after the limit = %+v", facet)
+	}
+}
+
 func TestFacetReadAndCalibration(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()

@@ -22,7 +22,8 @@ func scanSessionPack(scanner interface{ Scan(...any) error }) (storage.SessionPa
 
 // ListFacetCandidates returns the packs that went quiet before settledBeforeNS
 // and have no facet for their current text, prompt version and model, or
-// whose last attempt failed for a transient reason. Most recent first.
+// whose attempts failed no more than storage.FacetRetryLimit times. Most
+// recent first.
 func (store *Store) ListFacetCandidates(ctx context.Context, settledBeforeNS int64, promptVersion, model string, limit int) ([]storage.SessionPack, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
@@ -37,9 +38,10 @@ func (store *Store) ListFacetCandidates(ctx context.Context, settledBeforeNS int
 FROM session_packs AS p
 LEFT JOIN session_facets AS f ON f.session_key = p.session_key
 WHERE p.last_ns < $1
-  AND (f.session_key IS NULL OR f.pack_hash <> p.pack_hash OR f.prompt_version <> $2 OR f.model <> $3 OR f.facet_status = 'failed')
+  AND (f.session_key IS NULL OR f.pack_hash <> p.pack_hash OR f.prompt_version <> $2 OR f.model <> $3
+       OR (f.facet_status = 'failed' AND f.attempts <= $5))
 ORDER BY p.last_ns DESC, p.session_key
-LIMIT $4`, settledBeforeNS, promptVersion, model, limit)
+LIMIT $4`, settledBeforeNS, promptVersion, model, limit, storage.FacetRetryLimit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list facet candidates: %w", err)
 	}
@@ -59,7 +61,8 @@ LIMIT $4`, settledBeforeNS, promptVersion, model, limit)
 }
 
 // SaveSessionFacet upserts one facet and replaces its instruction and skill
-// fingerprints. A failed attempt keeps counting attempts on the same row.
+// fingerprints. A failed attempt keeps counting attempts on the same row
+// while the pack text, prompt version and model stay the same.
 func (store *Store) SaveSessionFacet(ctx context.Context, facet storage.SessionFacet, fprs []storage.SessionTextFPR) error {
 	if ctx == nil {
 		return errors.New("postgres: nil context")
@@ -101,7 +104,8 @@ ON CONFLICT (session_key) DO UPDATE SET
     friction = excluded.friction, items = excluded.items, invalid_fields = excluded.invalid_fields,
     text_enc = excluded.text_enc, input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
     latency_ms = excluded.latency_ms,
-    attempts = CASE WHEN session_facets.pack_hash = excluded.pack_hash AND session_facets.facet_status = 'failed'
+    attempts = CASE WHEN session_facets.pack_hash = excluded.pack_hash AND session_facets.prompt_version = excluded.prompt_version
+                         AND session_facets.model = excluded.model AND session_facets.facet_status = 'failed'
                     THEN session_facets.attempts + 1 ELSE 1 END,
     created_at_ns = excluded.created_at_ns`,
 			owned.SessionKey, owned.Kind, nullableBytes(owned.APIKeyFPR), owned.NewAPITokenID, owned.LastNS, owned.PackHash,

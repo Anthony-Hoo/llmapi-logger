@@ -285,6 +285,12 @@ type SessionSignalTotals struct {
 	Contributors int64
 }
 
+// FacetRetryLimit is how many later runs ask the model again for a pack whose
+// facet attempt failed. With the first attempt, one pack text is sent at most
+// FacetRetryLimit+1 times per prompt version and model; after that the failed
+// row stays until the pack, the prompt version or the model changes.
+const FacetRetryLimit = 3
+
 // SessionFacet is one row of session_facets. TextEnc is AES-GCM ciphertext
 // of the facet's free text and evidence; the enum columns are plaintext.
 type SessionFacet struct {
