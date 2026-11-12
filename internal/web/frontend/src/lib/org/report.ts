@@ -13,7 +13,8 @@ const PROJECT_PALETTE = [
   "cat-media",
   "cat-injected",
   "primary-400",
-  "primary-700",
+  // The dark blue of the light theme and its light counterpart in the dark one.
+  "info-fg",
 ];
 
 export function projectColor(projectID: number, order: number): string {
@@ -125,11 +126,11 @@ export function buildMatrix(report: OrgWeeklyReport, metric: OrgMetric, series: 
 }
 
 export const MATRIX_COLORS: Record<MatrixCell["level"], string> = {
-  0: colorVar("neutral-100"),
-  1: colorVar("primary-200"),
-  2: colorVar("primary-400"),
-  3: colorVar("primary-600"),
-  4: colorVar("primary-800"),
+  0: colorVar("surface-sunken"),
+  1: colorVar("heat-1"),
+  2: colorVar("heat-2"),
+  3: colorVar("heat-3"),
+  4: colorVar("heat-4"),
 };
 
 /** Weekly trend rows (hours), one numeric field per project series. */

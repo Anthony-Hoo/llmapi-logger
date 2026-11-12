@@ -20,6 +20,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./com
 import { Input } from "./components/ui/input";
 import { PageHeader } from "./components/ui/page-header";
 import { segmentedItemClassName, segmentedTrackClassName } from "./components/ui/segmented";
+import { ThemeSwitch } from "./components/ui/theme-switch";
 import { Select } from "./components/ui/select";
 import { Separator } from "./components/ui/separator";
 import {
@@ -239,7 +240,10 @@ function TokenGate({
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-gutter py-12">
+    <main className="relative flex min-h-screen items-center justify-center px-gutter py-12">
+      <div className="absolute right-gutter top-4">
+        <ThemeSwitch />
+      </div>
       <Card className="w-full max-w-md overflow-hidden">
         <div className="h-1 bg-primary" />
         <CardHeader className="gap-4 p-6 pb-4">
@@ -517,6 +521,7 @@ function Dashboard({
                 </button>
               )}
             </nav>
+            <ThemeSwitch />
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
               <span className="hidden sm:inline">刷新</span>
@@ -1191,7 +1196,7 @@ export function AuditList({
                     type="button"
                     aria-current={selected ? "true" : undefined}
                     className={`block w-full min-w-0 border-l-2 px-card py-3 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
-                      selected ? "border-l-primary bg-primary-50" : "border-l-transparent hover:bg-surface-muted"
+                      selected ? "border-l-primary bg-selected" : "border-l-transparent hover:bg-surface-muted"
                     }`}
                     onClick={() => onSelect(audit.audit_id)}
                   >

@@ -19,7 +19,7 @@ import {
   type SeriesKey,
 } from "../../lib/org/report";
 import type { OrgGroup, OrgMetric, OrgProjectReport, OrgSelfReport, OrgServiceRow, OrgTrendReport, OrgWeeklyReport } from "../../lib/org/types";
-import { axisTick, chartColors } from "../../lib/tokens";
+import { axisTick, chartColors, chartTooltip } from "../../lib/tokens";
 import type { NewAPIUser } from "../../types";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -226,7 +226,7 @@ function AdminReport({ client, refreshKey }: { client: ApiClient; refreshKey: nu
                       <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={chartColors.grid} />
                       <XAxis type="number" tick={axisTick} stroke={chartColors.grid} tickFormatter={(value: number) => formatMetric(value, metric)} />
                       <YAxis type="category" dataKey="user" tick={axisTick} stroke={chartColors.grid} width={120} />
-                      <Tooltip formatter={(value) => formatMetric(Number(value), metric)} cursor={{ fill: chartColors.cursor }} />
+                      <Tooltip formatter={(value) => formatMetric(Number(value), metric)} cursor={{ fill: chartColors.cursor }} {...chartTooltip} />
                       <Legend wrapperStyle={{ fontSize: axisTick.fontSize }} />
                       {series.map((entry) => (
                         <Bar key={entry.key} dataKey={entry.key} name={entry.label} stackId="projects" fill={entry.color} isAnimationActive={false} />
@@ -438,7 +438,7 @@ function TrendChart({ trend, metric, names }: { trend: OrgTrendReport; metric: O
           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={chartColors.grid} />
           <XAxis dataKey="week" tick={axisTick} stroke={chartColors.grid} />
           <YAxis tick={axisTick} stroke={chartColors.grid} tickFormatter={(value: number) => formatMetric(value, metric)} width={56} />
-          <Tooltip formatter={(value) => formatMetric(Number(value), metric)} cursor={{ fill: chartColors.cursor }} />
+          <Tooltip formatter={(value) => formatMetric(Number(value), metric)} cursor={{ fill: chartColors.cursor }} {...chartTooltip} />
           {series.map((entry) => (
             <Bar key={entry.key} dataKey={entry.key} name={entry.label} stackId="trend" fill={entry.color} isAnimationActive={false} />
           ))}

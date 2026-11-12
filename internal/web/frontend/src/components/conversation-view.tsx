@@ -98,7 +98,7 @@ const markdownComponents: Components = {
       <a
         {...props}
         href={href}
-        className="break-all text-primary underline underline-offset-2 hover:text-primary-hover"
+        className="break-all text-link underline underline-offset-2 hover:text-link-hover"
         target="_blank"
         rel="noreferrer noopener"
         referrerPolicy="no-referrer"

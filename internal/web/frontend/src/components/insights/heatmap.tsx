@@ -5,11 +5,11 @@ import { buildHeatGrid, WEEKDAY_LABELS, type HeatLevel } from "../../lib/insight
 import { chartColors, chartFont, colorVar } from "../../lib/tokens";
 
 export const HEAT_COLORS: Record<HeatLevel, string> = {
-  0: colorVar("neutral-200"),
-  1: colorVar("primary-200"),
-  2: colorVar("primary-400"),
-  3: colorVar("primary-600"),
-  4: colorVar("primary-800"),
+  0: colorVar("chart-track"),
+  1: colorVar("heat-1"),
+  2: colorVar("heat-2"),
+  3: colorVar("heat-3"),
+  4: colorVar("heat-4"),
 };
 
 const CELL = 16;

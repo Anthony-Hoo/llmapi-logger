@@ -34,5 +34,22 @@ export const chartFont = {
   glyph: 8,
 } as const;
 
+/**
+ * Styles for recharts' built-in tooltip, whose own defaults are a white box
+ * with black text whatever the theme. Charts with a custom tooltip component
+ * style it with classes instead.
+ */
+export const chartTooltip = {
+  contentStyle: {
+    backgroundColor: chartColors.surface,
+    borderColor: colorVar("border"),
+    borderRadius: "var(--radius-md)",
+    boxShadow: "var(--shadow-overlay)",
+    color: chartColors.text,
+  },
+  labelStyle: { color: chartColors.text },
+  itemStyle: { color: chartColors.text },
+} as const;
+
 /** Shared recharts axis tick style. */
 export const axisTick = { fontSize: chartFont.caption, fill: chartColors.axis } as const;
