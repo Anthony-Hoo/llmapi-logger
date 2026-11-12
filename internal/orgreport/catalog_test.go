@@ -317,6 +317,23 @@ func TestAttributeInheritsThenResolvesPerUser(t *testing.T) {
 	}
 }
 
+func TestGlobRulesKeepNonASCIICharacters(t *testing.T) {
+	rules, err := CompileRules([]Rule{{Kind: RulePathGlob, Pattern: "/work/项目/**"}, {Kind: RulePathGlob, Pattern: "/work/caf?/x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !MatchRules(rules[:1], Identity{Cwd: "/work/项目/src"}, nil) {
+		t.Fatal("a non-ASCII path glob does not match its own directory")
+	}
+	if MatchRules(rules[:1], Identity{Cwd: "/work/其他/src"}, nil) {
+		t.Fatal("a non-ASCII path glob matches another directory")
+	}
+	// "?" is one character, also when that character takes several bytes.
+	if !MatchRules(rules[1:], Identity{Cwd: "/work/café/x"}, nil) {
+		t.Fatal("? does not match one multi-byte character")
+	}
+}
+
 func TestDraftRules(t *testing.T) {
 	if rule := draftRule(RuleRepoURL, "git.example.com/a/b"); rule.Kind != RuleRepoURL || rule.Pattern != "git.example.com/a/b" {
 		t.Fatalf("remote draft = %+v", rule)

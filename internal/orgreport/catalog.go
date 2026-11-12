@@ -279,14 +279,16 @@ func hasGlob(pattern string) bool { return strings.ContainsAny(pattern, "*?") }
 
 // globRegexp converts a lower-case glob: "**" matches across "/", "*" within
 // one segment, "?" one character; everything else is literal. The whole
-// value must match.
+// value must match. It walks runes, so non-ASCII names stay intact and "?"
+// matches one character, not one byte.
 func globRegexp(pattern string) *regexp.Regexp {
 	var builder strings.Builder
 	builder.WriteString("^")
-	for index := 0; index < len(pattern); index++ {
-		switch char := pattern[index]; char {
+	chars := []rune(pattern)
+	for index := 0; index < len(chars); index++ {
+		switch char := chars[index]; char {
 		case '*':
-			if index+1 < len(pattern) && pattern[index+1] == '*' {
+			if index+1 < len(chars) && chars[index+1] == '*' {
 				builder.WriteString(".*")
 				index++
 			} else {
