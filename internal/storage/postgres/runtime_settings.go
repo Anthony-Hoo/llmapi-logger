@@ -52,7 +52,10 @@ func (store *Store) SaveRuntimeSettings(ctx context.Context, row storage.Runtime
 	}
 	owned := row
 	owned.SecretEnc = append([]byte(nil), row.SecretEnc...)
-	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+	// The policy lifecycle: once queued, the caller waits for a definitive
+	// commit or rollback, so the running service applies exactly what the
+	// database holds even if the request is cancelled meanwhile.
+	return store.submitPolicySync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
 		_, err := tx.Exec(`
 INSERT INTO runtime_settings (section, settings, secret_enc, updated_at_ns) VALUES ($1, $2, $3, $4)
 ON CONFLICT (section) DO UPDATE SET
@@ -78,7 +81,8 @@ func (store *Store) DeleteRuntimeSettings(ctx context.Context, section string) e
 	if !validSettingsSection(section) {
 		return errors.New("postgres: unknown settings section")
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+	// Same lifecycle as SaveRuntimeSettings.
+	return store.submitPolicySync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
 		if _, err := tx.Exec(`DELETE FROM runtime_settings WHERE section = $1`, section); err != nil {
 			return fmt.Errorf("postgres writer: delete runtime settings: %w", err)
 		}
