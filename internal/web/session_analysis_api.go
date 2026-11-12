@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -15,8 +16,9 @@ import (
 // SessionAnalysisQuery is the session analysis surface
 // (doc/features/24-session-analysis.md). Nil makes every route 404.
 type SessionAnalysisQuery interface {
-	Overview(context.Context, int64, int64, *query.Scope) (sessionanalysis.OverviewResponse, error)
+	Overview(context.Context, int64, int64, *query.Scope, *int64) (sessionanalysis.OverviewResponse, error)
 	Sessions(context.Context, sessionanalysis.SessionsQuery) (sessionanalysis.SessionsResponse, error)
+	Users(context.Context, int64, int64) (sessionanalysis.UsersResponse, error)
 	TriggerRun() error
 	Pack(context.Context, string, *query.Scope, sessionanalysis.Viewer) (sessionanalysis.PackResponse, error)
 	Facet(context.Context, string, *query.Scope, sessionanalysis.Viewer) (sessionanalysis.FacetResponse, error)
@@ -28,7 +30,8 @@ type SessionAnalysisQuery interface {
 const sessionAnalysisPathPrefix = "/api/v1/session-analysis/"
 
 // serveSessionAnalysis is reachable by administrators and developers; reads
-// are built from the caller's scope, and only the run trigger is
+// are built from the caller's scope. The run trigger, calibration, the
+// per-user listing and every user, project or group selector are
 // administrator-only.
 func (handler *managementHandler) serveSessionAnalysis(writer http.ResponseWriter, request *http.Request) {
 	if handler.sessionAnalysis == nil {
@@ -41,6 +44,8 @@ func (handler *managementHandler) serveSessionAnalysis(writer http.ResponseWrite
 		handler.serveSessionAnalysisOverview(writer, request)
 	case len(parts) == 1 && parts[0] == "sessions":
 		handler.serveSessionAnalysisSessions(writer, request)
+	case len(parts) == 1 && parts[0] == "users":
+		handler.serveSessionAnalysisUsers(writer, request)
 	case len(parts) == 1 && parts[0] == "run":
 		handler.serveSessionAnalysisRun(writer, request)
 	case len(parts) == 3 && parts[0] == "sessions" && parts[2] == "pack":
@@ -64,6 +69,56 @@ func (handler *managementHandler) serveSessionAnalysisOverview(writer http.Respo
 		return
 	}
 	values := request.URL.Query()
+	if err := parseInsightsValues(values, "from_ns", "to_ns", "user_id"); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	fromNS, fromErr := optionalInt64(values, "from_ns")
+	toNS, toErr := optionalInt64(values, "to_ns")
+	if fromErr != nil || toErr != nil || fromNS == nil || toNS == nil {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	userID, ok := handler.sessionAnalysisUser(writer, request, values)
+	if !ok {
+		return
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	response, err := handler.sessionAnalysis.Overview(ctx, *fromNS, *toNS, handler.sessionScope(request), userID)
+	if err != nil {
+		handler.writeQueryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+// sessionAnalysisUser reads the optional user_id selector. Selecting a user
+// reads another person's sessions, so it is administrator-only; ok is false
+// after an error response was written.
+func (handler *managementHandler) sessionAnalysisUser(writer http.ResponseWriter, request *http.Request, values url.Values) (*int64, bool) {
+	userID, err := optionalInt64(values, "user_id")
+	if err != nil || (userID != nil && *userID <= 0) {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return nil, false
+	}
+	if userID != nil && !handler.requireAdmin(writer, request) {
+		return nil, false
+	}
+	return userID, true
+}
+
+// serveSessionAnalysisUsers returns the session totals of a period per NewAPI
+// user (administrators only).
+func (handler *managementHandler) serveSessionAnalysisUsers(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if !handler.requireAdmin(writer, request) {
+		return
+	}
+	values := request.URL.Query()
 	if err := parseInsightsValues(values, "from_ns", "to_ns"); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
 		return
@@ -76,7 +131,7 @@ func (handler *managementHandler) serveSessionAnalysisOverview(writer http.Respo
 	}
 	ctx, cancel := handler.insightsContext(request)
 	defer cancel()
-	response, err := handler.sessionAnalysis.Overview(ctx, *fromNS, *toNS, handler.sessionScope(request))
+	response, err := handler.sessionAnalysis.Users(ctx, *fromNS, *toNS)
 	if err != nil {
 		handler.writeQueryError(writer, err)
 		return
@@ -90,7 +145,7 @@ func (handler *managementHandler) serveSessionAnalysisSessions(writer http.Respo
 		return
 	}
 	values := request.URL.Query()
-	if err := parseInsightsValues(values, "from_ns", "to_ns", "kind", "flags", "cursor", "limit"); err != nil {
+	if err := parseInsightsValues(values, "from_ns", "to_ns", "kind", "flags", "cursor", "limit", "user_id"); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
 		return
 	}
@@ -101,9 +156,13 @@ func (handler *managementHandler) serveSessionAnalysisSessions(writer http.Respo
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
 		return
 	}
+	userID, ok := handler.sessionAnalysisUser(writer, request, values)
+	if !ok {
+		return
+	}
 	sessionsQuery := sessionanalysis.SessionsQuery{
 		FromNS: *fromNS, ToNS: *toNS, Kind: values.Get("kind"), Cursor: values.Get("cursor"),
-		Scope: handler.sessionScope(request),
+		Scope: handler.sessionScope(request), UserID: userID,
 	}
 	if flags := values.Get("flags"); flags != "" {
 		sessionsQuery.Flags = strings.Split(flags, ",")
@@ -232,36 +291,39 @@ func (handler *managementHandler) serveSessionAnalysisCalibration(writer http.Re
 }
 
 // serveSessionAnalysisReport returns the weekly review of the caller's own
-// scope: a developer's key, or all keys for an administrator. project_id or
-// group_id (organisation reports) opens one project or group, administrators
-// only.
+// scope: a developer's key, or all keys for an administrator. user_id opens
+// one NewAPI user, and project_id or group_id (organisation reports) one
+// project or group; all three are administrator-only.
 func (handler *managementHandler) serveSessionAnalysisReport(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		methodNotAllowed(writer, http.MethodGet)
 		return
 	}
 	values := request.URL.Query()
-	if err := parseInsightsValues(values, "week", "project_id", "group_id"); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
-		return
-	}
-	projectID, projectErr := optionalInt64(values, "project_id")
-	groupID, groupErr := optionalInt64(values, "group_id")
-	if projectErr != nil || groupErr != nil || (projectID != nil && *projectID <= 0) || (groupID != nil && *groupID <= 0) || (projectID != nil && groupID != nil) {
+	if err := parseInsightsValues(values, "week", "project_id", "group_id", "user_id"); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
 		return
 	}
 	var target sessionanalysis.ReportTarget
-	if projectID != nil || groupID != nil {
-		// Project and group reports aggregate other people's sessions.
-		if !handler.requireAdmin(writer, request) {
+	selectors := 0
+	for name, field := range map[string]*int64{"project_id": &target.ProjectID, "group_id": &target.GroupID, "user_id": &target.UserID} {
+		id, err := optionalInt64(values, name)
+		if err != nil || (id != nil && *id <= 0) {
+			writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
 			return
 		}
-		if projectID != nil {
-			target.ProjectID = *projectID
-		} else {
-			target.GroupID = *groupID
+		if id != nil {
+			*field = *id
+			selectors++
 		}
+	}
+	if selectors > 1 {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
+		return
+	}
+	// A project, group or user report reads other people's sessions.
+	if selectors == 1 && !handler.requireAdmin(writer, request) {
+		return
 	}
 	ctx, cancel := handler.insightsContext(request)
 	defer cancel()

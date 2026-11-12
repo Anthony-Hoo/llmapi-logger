@@ -24,6 +24,7 @@ type ReportStore interface {
 	ActiveAnalysisKeys(ctx context.Context, fromNS, toNS int64) ([]storage.ScopeKey, error)
 	SessionSignalTotals(ctx context.Context, filter storage.SessionSignalFilter) (storage.SessionSignalTotals, error)
 	ActiveAnalysisProjects(ctx context.Context, fromNS, toNS int64) ([]int64, error)
+	ActiveAnalysisUsers(ctx context.Context, fromNS, toNS int64) ([]int64, error)
 	ListPeriodScopeKeys(ctx context.Context, weekStartNS int64, scope string) ([][]byte, error)
 	FacetEnums(ctx context.Context, fromNS, toNS int64, scope storage.FacetScope) ([]storage.FacetEnumRow, error)
 	RepeatedFingerprints(ctx context.Context, sinceNS int64, scope storage.FacetScope, limit int) ([]storage.RepeatedFPR, error)
@@ -83,8 +84,9 @@ func weekStartOn(t time.Time, location *time.Location, sunday bool) time.Time {
 	return day.AddDate(0, 0, -weekday)
 }
 
-// reportTarget is one scope of the weekly report: one API key, everything,
-// or (organisation reports only) one project or one project group.
+// reportTarget is one scope of the weekly report: one API key, one NewAPI
+// user across that user's keys, everything, or (organisation reports only)
+// one project or one project group.
 type reportTarget struct {
 	scope     string
 	key       []byte // scope_key of its statistics and suggestions
@@ -92,6 +94,7 @@ type reportTarget struct {
 	tokenID   *int64
 	projectID *int64
 	userIDs   []int64
+	userID    *int64
 }
 
 func allTarget() reportTarget {
@@ -113,6 +116,13 @@ func groupTarget(id int64, members []int64) reportTarget {
 	return reportTarget{scope: storage.ScopeGroup, key: storage.IDScopeKey(id), userIDs: members}
 }
 
+// userTarget is one NewAPI user: the sessions resolved to that user, with the
+// chat digests and repeated sentences of that user's API keys. Administrators
+// read it; a developer's own report stays per key (personTarget).
+func userTarget(id int64) reportTarget {
+	return reportTarget{scope: storage.ScopeUser, key: storage.IDScopeKey(id), userIDs: []int64{id}, userID: &id}
+}
+
 // shared reports whether the target aggregates several people for
 // administrators.
 func (target reportTarget) shared() bool {
@@ -131,6 +141,9 @@ func (target reportTarget) signals(fromNS, toNS int64) storage.SessionSignalFilt
 }
 
 func (target reportTarget) facets() storage.FacetScope {
+	if target.userID != nil {
+		return storage.FacetScope{UserID: target.userID}
+	}
 	return storage.FacetScope{APIKeyFPR: target.apiKey, ProjectID: target.projectID, UserIDs: target.userIDs}
 }
 
@@ -172,8 +185,8 @@ func buildWeeklyStats(weekStart time.Time, totals storage.SessionSignalTotals, e
 }
 
 // runReports is the L2 stage: weekly statistics of the current and previous
-// week for every active key and for all keys together, suggestions per
-// scope, and a narrative per scope and week.
+// week for every active key, every active user and all keys together,
+// suggestions per scope, and a narrative per scope and week.
 func (runner *Runner) runReports(ctx context.Context) error {
 	options := runner.options
 	store, ok := options.Store.(ReportStore)
@@ -192,6 +205,7 @@ func (runner *Runner) runReports(ctx context.Context) error {
 	}
 	keysSeen := map[string]storage.ScopeKey{}
 	projectsSeen := map[int64]bool{}
+	usersSeen := map[int64]bool{}
 	for _, weekStart := range []time.Time{current.AddDate(0, 0, -7), current} {
 		from, to := weekStart.UnixNano(), weekStart.AddDate(0, 0, 7).UnixNano()
 		keys, err := store.ActiveAnalysisKeys(ctx, from, to)
@@ -204,6 +218,32 @@ func (runner *Runner) runReports(ctx context.Context) error {
 		for _, key := range keys {
 			keysSeen[string(key.APIKeyFPR)] = key
 			if err := runner.reportScope(ctx, store, weekStart, personTarget(key), hidden); err != nil {
+				return err
+			}
+		}
+		// Users with sessions this week, and those that still have a row from
+		// before their sessions stopped counting (a user turned into a service
+		// principal): that row must not go stale.
+		users, err := store.ActiveAnalysisUsers(ctx, from, to)
+		if err != nil {
+			return err
+		}
+		storedUsers, err := store.ListPeriodScopeKeys(ctx, from, storage.ScopeUser)
+		if err != nil {
+			return err
+		}
+		for _, key := range storedUsers {
+			if id, ok := storage.IDOfScopeKey(key); ok {
+				users = append(users, id)
+			}
+		}
+		reportedUsers := map[int64]bool{}
+		for _, id := range users {
+			if reportedUsers[id] {
+				continue
+			}
+			reportedUsers[id], usersSeen[id] = true, true
+			if err := runner.reportScope(ctx, store, weekStart, userTarget(id), hidden); err != nil {
 				return err
 			}
 		}
@@ -246,6 +286,16 @@ func (runner *Runner) runReports(ctx context.Context) error {
 	}
 	for _, key := range keysSeen {
 		if err := runner.buildSuggestions(ctx, store, personTarget(key)); err != nil {
+			return err
+		}
+	}
+	users := make([]int64, 0, len(usersSeen))
+	for id := range usersSeen {
+		users = append(users, id)
+	}
+	sort.Slice(users, func(i, j int) bool { return users[i] < users[j] })
+	for _, id := range users {
+		if err := runner.buildSuggestions(ctx, store, userTarget(id)); err != nil {
 			return err
 		}
 	}
@@ -620,7 +670,8 @@ func NarrativeInput(stats WeeklyStats, previous *WeeklyStats, goals []string, su
 		week = week.AddDate(0, 0, 1) // a Sunday-first week is named after its Monday
 	}
 	year, number := week.ISOWeek()
-	scopeName := map[string]string{storage.ScopeAll: "全体", storage.ScopeProject: "项目", storage.ScopeGroup: "项目组"}[scope]
+	// The input never names who a personal scope belongs to.
+	scopeName := map[string]string{storage.ScopeAll: "全体", storage.ScopeProject: "项目", storage.ScopeGroup: "项目组", storage.ScopeUser: "个人"}[scope]
 	if scopeName == "" {
 		scopeName = "本人"
 	}

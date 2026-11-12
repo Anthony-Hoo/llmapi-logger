@@ -14,13 +14,17 @@ import {
   signalRates,
   SKIP_REASON_LABELS,
   projectLabel,
+  sortByUserName,
   startOfLocalWeekMS,
   TASK_TYPE_LABELS,
+  userLabel,
+  userNameMap,
 } from "../../lib/session-analysis/format";
 import type {
   AnalysisFlag,
   AnalysisOverview,
   AnalysisSessionItem,
+  AnalysisUserTotals,
 } from "../../lib/session-analysis/types";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -57,8 +61,9 @@ export function analysisRange(key: RangeKey, nowMS: number): { from_ns: string; 
   }
 }
 
-const DESCRIPTION =
-  "每天按计划从已审计的会话中计算确定性信号；启用本地模型后再生成会话摘要和周度复盘。管理端只显示匿名会话；开发者只看到自己 Key 的会话。结论只是线索，不用于个人评价。";
+const DESCRIPTION_BASE = "每天按计划从已审计的会话中计算确定性信号；启用本地模型后再生成会话摘要和周度复盘。";
+const DESCRIPTION_ADMIN = DESCRIPTION_BASE + "管理端可以按用户查看会话和周度复盘。结论只是线索，不用于个人评价。";
+const DESCRIPTION_DEVELOPER = DESCRIPTION_BASE + "这里只有你自己这把 Key 的会话；管理员可以按用户查看会话和周度复盘。结论只是线索，不用于个人评价。";
 
 function formatNS(value: string): string {
   const ms = Number(BigInt(value) / 1_000_000n);
@@ -92,12 +97,46 @@ export function SessionAnalysisView({
   const [listError, setListError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [runMessage, setRunMessage] = useState<string | null>(null);
+  // Administrators read per user: the selected user narrows the totals and
+  // the list. A developer session never selects one.
+  const [userID, setUserID] = useState<number | null>(null);
+  const [userTotals, setUserTotals] = useState<AnalysisUserTotals[] | null>(null);
+  const [userNames, setUserNames] = useState<Map<number, string>>(new Map());
+  const selectedUser = isDeveloper ? undefined : (userID ?? undefined);
+
+  useEffect(() => {
+    if (isDeveloper) {
+      return;
+    }
+    const controller = new AbortController();
+    client
+      .listNewAPICallers(controller.signal)
+      .then((result) => setUserNames(userNameMap(result.items)))
+      .catch(() => undefined); // names are a convenience: ids are shown without them
+    return () => controller.abort();
+  }, [client, isDeveloper]);
+
+  useEffect(() => {
+    if (isDeveloper) {
+      return;
+    }
+    const controller = new AbortController();
+    client
+      .listAnalysisUsers(range, controller.signal)
+      .then((result) => setUserTotals(result.items))
+      .catch((cause: unknown) => {
+        if (!isAbortError(cause)) {
+          setUserTotals([]);
+        }
+      });
+    return () => controller.abort();
+  }, [client, isDeveloper, range]);
 
   useEffect(() => {
     const controller = new AbortController();
     setOverviewError(null);
     client
-      .getAnalysisOverview(range, controller.signal)
+      .getAnalysisOverview(range, controller.signal, selectedUser)
       .then(setOverview)
       .catch((cause: unknown) => {
         if (!isAbortError(cause) && !(cause instanceof ApiError && cause.status === 401)) {
@@ -106,14 +145,14 @@ export function SessionAnalysisView({
         }
       });
     return () => controller.abort();
-  }, [client, range]);
+  }, [client, range, selectedUser]);
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setListError(null);
     client
-      .listAnalysisSessions({ ...range, kind: kind === "all" ? undefined : kind, flags, limit: 50 }, controller.signal)
+      .listAnalysisSessions({ ...range, kind: kind === "all" ? undefined : kind, flags, limit: 50, user_id: selectedUser }, controller.signal)
       .then((page) => {
         setItems(page.items);
         setNextCursor(page.next_cursor || null);
@@ -131,14 +170,14 @@ export function SessionAnalysisView({
         }
       });
     return () => controller.abort();
-  }, [client, range, kind, flags]);
+  }, [client, range, kind, flags, selectedUser]);
 
   async function loadMore() {
     if (!nextCursor) {
       return;
     }
     try {
-      const page = await client.listAnalysisSessions({ ...range, kind: kind === "all" ? undefined : kind, flags, limit: 50, cursor: nextCursor });
+      const page = await client.listAnalysisSessions({ ...range, kind: kind === "all" ? undefined : kind, flags, limit: 50, cursor: nextCursor, user_id: selectedUser });
       setItems((current) => [...current, ...page.items]);
       setNextCursor(page.next_cursor || null);
     } catch (cause: unknown) {
@@ -171,7 +210,7 @@ export function SessionAnalysisView({
     <div className="space-y-section">
       <PageHeader
         title="会话分析"
-        description={DESCRIPTION}
+        description={isDeveloper ? DESCRIPTION_DEVELOPER : DESCRIPTION_ADMIN}
         actions={
           <>
             <Segmented
@@ -192,7 +231,7 @@ export function SessionAnalysisView({
           </>
         }
       />
-      {page === "report" ? <ReportView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey + runNonce} /> : null}
+      {page === "report" ? <ReportView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey + runNonce} userNames={userNames} /> : null}
       <div className={page === "report" ? "hidden" : "space-y-section"}>
       {runMessage ? (
         <Alert variant="info">
@@ -203,6 +242,14 @@ export function SessionAnalysisView({
         <Alert variant="danger">
           <AlertDescription>{overviewError}</AlertDescription>
         </Alert>
+      ) : null}
+      {isDeveloper ? null : (
+        <UserTotalsCard rows={userTotals} names={userNames} selected={userID} onSelect={setUserID} />
+      )}
+      {selectedUser ? (
+        <p className="text-body-sm text-muted">
+          下面的汇总和会话列表只包含用户「{userLabel(userNames, selectedUser)}」。
+        </p>
       ) : null}
       {overview ? <OverviewCards overview={overview} /> : overviewError ? null : <Skeleton className="h-32 w-full" />}
       {overview?.llm_enabled && !isDeveloper ? (
@@ -256,6 +303,7 @@ export function SessionAnalysisView({
               <TableHeader>
                 <TableRow>
                   <TableHead>最后活动</TableHead>
+                  {isDeveloper ? null : <TableHead>用户</TableHead>}
                   <TableHead>客户端 / 模型</TableHead>
                   <TableHead className="text-right">轮次</TableHead>
                   <TableHead className="text-right">活跃</TableHead>
@@ -273,6 +321,7 @@ export function SessionAnalysisView({
                       onClick={() => setExpanded((current) => (current === item.session_id ? null : item.session_id))}
                     >
                       <TableCell className="whitespace-nowrap">{formatNS(item.last_ns)}</TableCell>
+                      {isDeveloper ? null : <TableCell className="whitespace-nowrap">{userLabel(userNames, item.user_id)}</TableCell>}
                       <TableCell>
                         <div>{clientLabel(item.client || "unknown")}</div>
                         <div className="text-label text-subtle">{item.model || "—"}</div>
@@ -296,7 +345,7 @@ export function SessionAnalysisView({
                     </TableRow>
                     {expanded === item.session_id ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="bg-surface-sunken">
+                        <TableCell colSpan={isDeveloper ? 7 : 8} className="bg-surface-sunken">
                           <SessionDetails item={item} />
                           {item.eligible || item.skip_reason === "single_turn_chat" ? (
                             <PackPanel client={client} sessionID={item.session_id} isDeveloper={isDeveloper} />
@@ -324,6 +373,88 @@ export function SessionAnalysisView({
       </Card>
       </div>
     </div>
+  );
+}
+
+/**
+ * Per-user totals of the selected period (administrators). Rows are in name
+ * order, not ranked; selecting one narrows the totals and the session list.
+ */
+export function UserTotalsCard({
+  rows,
+  names,
+  selected,
+  onSelect,
+}: {
+  rows: AnalysisUserTotals[] | null;
+  names: ReadonlyMap<number, string>;
+  selected: number | null;
+  onSelect: (userID: number | null) => void;
+}) {
+  if (rows === null) {
+    return <Skeleton className="h-24 w-full" />;
+  }
+  const sorted = sortByUserName(rows, names);
+  return (
+    <Card>
+      <CardContent className="space-y-2 pt-card">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-body font-semibold">按用户</h3>
+          {selected ? (
+            <Button variant="outline" size="sm" onClick={() => onSelect(null)}>
+              查看全部用户
+            </Button>
+          ) : (
+            <span className="text-label text-subtle">点一行只看这位用户；按姓名排列，不是排名。</span>
+          )}
+        </div>
+        {sorted.length === 0 ? (
+          <p className="py-3 text-center text-body-sm text-muted">这个时间范围内没有会话。</p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>用户</TableHead>
+                <TableHead className="text-right">会话</TableHead>
+                <TableHead className="text-right">Agent / 聊天</TableHead>
+                <TableHead className="text-right">费用</TableHead>
+                <TableHead className="text-right">死循环</TableHead>
+                <TableHead className="text-right">反复编辑</TableHead>
+                <TableHead className="text-right">结束前未验证</TableHead>
+                <TableHead className="text-right">有纠正</TableHead>
+                <TableHead>最后活动</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sorted.map((row) => {
+                const id = row.user_id;
+                const active = id !== null && id === selected;
+                return (
+                  <TableRow
+                    key={id ?? "unresolved"}
+                    className={(id ? "cursor-pointer " : "") + (active ? "bg-surface-sunken" : "")}
+                    aria-selected={active}
+                    onClick={id ? () => onSelect(active ? null : id) : undefined}
+                  >
+                    <TableCell className="whitespace-nowrap font-medium">{userLabel(names, id)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.totals.sessions}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {row.totals.agent_sessions} / {row.totals.chat_sessions}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">{formatUSD(row.totals.cost_usd)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.totals.loop_sessions}</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.totals.thrash_sessions}</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.totals.unverified_sessions}</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.totals.correction_sessions}</TableCell>
+                    <TableCell className="whitespace-nowrap">{formatNS(row.last_ns)}</TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

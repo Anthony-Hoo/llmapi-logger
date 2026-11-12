@@ -161,6 +161,34 @@ describe("session analysis API client", () => {
     expect(String(fetcher.mock.calls[1][0])).toBe("/api/v1/session-analysis/report?week=previous&group_id=3");
     await client.getAnalysisReport("current", undefined, {});
     expect(String(fetcher.mock.calls[2][0])).toBe("/api/v1/session-analysis/report?week=current");
+    expect(report.users).toEqual([]);
+  });
+
+  it("reads per user: the listing, a user's report and the user filter", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/users")) {
+        return jsonResponse({ from_ns: "1", to_ns: "2", items: null });
+      }
+      if (url.includes("/report")) {
+        return jsonResponse({ week_start_ns: "1", scope: "user", scope_id: 7, stats: null, previous: null, narrative: "", computed_ns: "0", users: [{ id: 7, name: "" }] });
+      }
+      if (url.includes("/overview")) {
+        return jsonResponse({ from_ns: "1", to_ns: "2", current: {}, previous: {}, running: false, llm_enabled: false });
+      }
+      return jsonResponse({ items: [] });
+    });
+    const client = createApiClient(vi.fn(), fetcher);
+    const listing = await client.listAnalysisUsers({ from_ns: "1", to_ns: "2" });
+    expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/session-analysis/users?from_ns=1&to_ns=2");
+    expect(listing.items).toEqual([]);
+    const report = await client.getAnalysisReport("current", undefined, { user_id: 7 });
+    expect(String(fetcher.mock.calls[1][0])).toBe("/api/v1/session-analysis/report?week=current&user_id=7");
+    expect(report.users).toEqual([{ id: 7, name: "" }]);
+    await client.getAnalysisOverview({ from_ns: "1", to_ns: "2" }, undefined, 7);
+    expect(String(fetcher.mock.calls[2][0])).toBe("/api/v1/session-analysis/overview?from_ns=1&to_ns=2&user_id=7");
+    await client.listAnalysisSessions({ from_ns: "1", to_ns: "2", user_id: 7 });
+    expect(String(fetcher.mock.calls[3][0])).toBe("/api/v1/session-analysis/sessions?from_ns=1&to_ns=2&limit=50&user_id=7");
   });
 
   it("labels where a session is booked", () => {

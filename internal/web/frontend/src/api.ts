@@ -55,6 +55,7 @@ import type {
   AnalysisReportTarget,
   AnalysisSessionsPage,
   AnalysisSessionsQuery,
+  AnalysisUsers,
 } from "./lib/session-analysis/types";
 
 const API_BASE = "/api/v1";
@@ -101,7 +102,9 @@ export interface ApiClient {
   /** Rejects with ApiError(404) while the audit has not been analyzed yet. */
   getComposition: (auditID: string, signal?: AbortSignal) => Promise<CompositionResponse>;
   // Session analysis (doc/features/24-session-analysis.md).
-  getAnalysisOverview: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisOverview>;
+  getAnalysisOverview: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal, userID?: number) => Promise<AnalysisOverview>;
+  /** Administrators only: session totals of a period per NewAPI user. */
+  listAnalysisUsers: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisUsers>;
   listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
   /** Administrator only; rejects with ApiError(409) while a run is in progress. */
   triggerAnalysisRun: (signal?: AbortSignal) => Promise<void>;
@@ -486,13 +489,22 @@ export function createApiClient(
       };
     },
 
-    async getAnalysisOverview(range, signal) {
+    async getAnalysisOverview(range, signal, userID) {
       const params = new URLSearchParams({ from_ns: range.from_ns, to_ns: range.to_ns });
+      if (userID) {
+        params.set("user_id", String(userID));
+      }
       const result = await requestJSON<AnalysisOverview>(`${API_BASE}/session-analysis/overview?${params}`, signal);
       if (result.last_run) {
         result.last_run.skip_reasons = result.last_run.skip_reasons ?? {};
       }
       return result;
+    },
+
+    async listAnalysisUsers(range, signal) {
+      const params = new URLSearchParams({ from_ns: range.from_ns, to_ns: range.to_ns });
+      const result = await requestJSON<AnalysisUsers>(`${API_BASE}/session-analysis/users?${params}`, signal);
+      return { ...result, items: result.items ?? [] };
     },
 
     async listAnalysisSessions(query, signal) {
@@ -505,6 +517,9 @@ export function createApiClient(
       }
       if (query.cursor) {
         params.set("cursor", query.cursor);
+      }
+      if (query.user_id) {
+        params.set("user_id", String(query.user_id));
       }
       const result = await requestJSON<AnalysisSessionsPage>(`${API_BASE}/session-analysis/sessions?${params}`, signal);
       return {
@@ -548,12 +563,15 @@ export function createApiClient(
         params.set("project_id", String(target.project_id));
       } else if (target?.group_id) {
         params.set("group_id", String(target.group_id));
+      } else if (target?.user_id) {
+        params.set("user_id", String(target.user_id));
       }
       const result = await requestJSON<AnalysisReport>(`${API_BASE}/session-analysis/report?${params}`, signal);
       return {
         ...result,
         projects: result.projects ?? [],
         groups: result.groups ?? [],
+        users: result.users ?? [],
         suggestions: (result.suggestions ?? []).map((item) => ({ ...item, evidence: item.evidence ?? [] })),
         optimizations: (result.optimizations ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
       };

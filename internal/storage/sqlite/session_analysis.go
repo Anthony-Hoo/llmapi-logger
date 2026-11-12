@@ -103,6 +103,14 @@ func (store *Store) ActiveAnalysisProjects(context.Context, int64, int64) ([]int
 	return nil, nil
 }
 
+func (store *Store) ActiveAnalysisUsers(context.Context, int64, int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (store *Store) SessionSignalTotalsByUser(context.Context, storage.SessionSignalFilter) ([]storage.SessionUserTotals, error) {
+	return nil, nil
+}
+
 func (store *Store) ListPeriodScopeKeys(context.Context, int64, string) ([][]byte, error) {
 	return nil, nil
 }

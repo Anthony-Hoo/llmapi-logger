@@ -197,6 +197,39 @@ export const FIELD_LABELS: Record<string, string> = {
   friction: "摩擦",
 };
 
+/** Display names of NewAPI users by id, from the caller catalog. */
+export function userNameMap(users: ReadonlyArray<{ id: number; username: string; display_name?: string }>): Map<number, string> {
+  const names = new Map<number, string>();
+  for (const user of users) {
+    names.set(user.id, user.display_name?.trim() || user.username?.trim() || `#${user.id}`);
+  }
+  return names;
+}
+
+/** Name of a session's user; an unresolved caller has no id. */
+export function userLabel(names: ReadonlyMap<number, string>, id: number | null | undefined): string {
+  if (!id) {
+    return "未识别用户";
+  }
+  return names.get(id) ?? `#${id}`;
+}
+
+/**
+ * Orders per-user rows by display name with unresolved callers last. The
+ * order carries no judgement: per-user views are not a ranking.
+ */
+export function sortByUserName<T extends { user_id?: number | null; id?: number }>(rows: readonly T[], names: ReadonlyMap<number, string>): T[] {
+  const idOf = (row: T) => row.user_id ?? row.id ?? null;
+  return [...rows].sort((left, right) => {
+    const leftID = idOf(left);
+    const rightID = idOf(right);
+    if (!leftID || !rightID) {
+      return leftID ? -1 : rightID ? 1 : 0;
+    }
+    return userLabel(names, leftID).localeCompare(userLabel(names, rightID), "zh-CN") || leftID - rightID;
+  });
+}
+
 export function labelOf(map: Record<string, string>, value: string | undefined): string {
   if (!value) {
     return "—";

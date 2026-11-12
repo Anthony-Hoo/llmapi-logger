@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { ApiError, type ApiClient } from "../../api";
 import { errorMessage, isAbortError } from "../../lib/errors";
 import { formatUSD } from "../../lib/insights/format";
-import { FRICTION_LABELS, labelOf, OUTCOME_LABELS, TASK_TYPE_LABELS } from "../../lib/session-analysis/format";
+import { FRICTION_LABELS, labelOf, OUTCOME_LABELS, sortByUserName, TASK_TYPE_LABELS, userLabel } from "../../lib/session-analysis/format";
 import type { AnalysisReport, AnalysisReportTarget, AnalysisSuggestion, AnalysisWeeklyStats } from "../../lib/session-analysis/types";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -137,8 +137,11 @@ export function SuggestionList({
   );
 }
 
-/** Select value of a report target: "all", "project:<id>" or "group:<id>". */
+/** Select value of a report target: "all", "user:<id>", "project:<id>" or "group:<id>". */
 export function targetValue(target: AnalysisReportTarget): string {
+  if (target.user_id) {
+    return `user:${target.user_id}`;
+  }
   if (target.project_id) {
     return `project:${target.project_id}`;
   }
@@ -151,26 +154,45 @@ export function parseTargetValue(value: string): AnalysisReportTarget {
   if (!Number.isSafeInteger(id) || id <= 0) {
     return {};
   }
+  if (kind === "user") {
+    return { user_id: id };
+  }
   if (kind === "project") {
     return { project_id: id };
   }
   return kind === "group" ? { group_id: id } : {};
 }
 
-function scopeSummary(report: AnalysisReport | null, isDeveloper: boolean): string {
+export function scopeSummary(report: AnalysisReport | null, isDeveloper: boolean, userNames: ReadonlyMap<number, string>): string {
   if (isDeveloper) {
-    return "只包含你这把 Key 的会话，仅你本人可见。";
+    return "只包含你这把 Key 的会话。管理员可以按用户查看周度复盘。";
+  }
+  if (report?.scope === "user") {
+    return `用户「${userLabel(userNames, report.scope_id)}」名下全部 Key 的个人复盘。`;
   }
   if (report?.scope === "project") {
-    return `项目「${report.scope_name || `#${report.scope_id}`}」的汇总，不按人拆分。`;
+    return `项目「${report.scope_name || `#${report.scope_id}`}」的汇总。`;
   }
   if (report?.scope === "group") {
-    return `项目组「${report.scope_name || `#${report.scope_id}`}」成员的汇总，不按人拆分。`;
+    return `项目组「${report.scope_name || `#${report.scope_id}`}」成员的汇总。`;
   }
-  return "全体 Key 的汇总，不按人拆分。";
+  return "全体用户的汇总；在右侧选择用户可以查看个人复盘。";
 }
 
-export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiClient; isDeveloper: boolean; refreshKey: number }) {
+const NO_NAMES: ReadonlyMap<number, string> = new Map();
+
+export function ReportView({
+  client,
+  isDeveloper,
+  refreshKey,
+  userNames = NO_NAMES,
+}: {
+  client: ApiClient;
+  isDeveloper: boolean;
+  refreshKey: number;
+  /** Display names of NewAPI users (administrators); ids are shown without them. */
+  userNames?: ReadonlyMap<number, string>;
+}) {
   const [week, setWeek] = useState<"current" | "previous">("current");
   const [target, setTarget] = useState<AnalysisReportTarget>({});
   const [report, setReport] = useState<AnalysisReport | null>(null);
@@ -208,13 +230,22 @@ export function ReportView({ client, isDeveloper, refreshKey }: { client: ApiCli
     <div className="space-y-section">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-body-sm text-muted">
-          {scopeSummary(report, isDeveloper)}
+          {scopeSummary(report, isDeveloper, userNames)}
           {report ? ` 周期 ${weekLabel(report.week_start_ns)}。` : ""}
         </p>
         <div className="flex flex-wrap items-center gap-2">
-          {!isDeveloper && report && (report.projects.length > 0 || report.groups.length > 0 || selected !== "all") ? (
+          {!isDeveloper && report && (report.users.length > 0 || report.projects.length > 0 || report.groups.length > 0 || selected !== "all") ? (
             <Select aria-label="范围" className="w-auto min-w-40" value={selected} onChange={(event) => setTarget(parseTargetValue(event.target.value))}>
               <option value="all">全体</option>
+              {report.users.length > 0 ? (
+                <optgroup label="用户">
+                  {sortByUserName(report.users, userNames).map((item) => (
+                    <option key={item.id} value={`user:${item.id}`}>
+                      {userLabel(userNames, item.id)}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
               {report.projects.length > 0 ? (
                 <optgroup label="项目">
                   {report.projects.map((item) => (

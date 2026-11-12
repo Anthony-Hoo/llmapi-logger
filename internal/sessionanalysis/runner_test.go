@@ -755,6 +755,74 @@ func (store *memoryStore) ActiveAnalysisProjects(_ context.Context, fromNS, toNS
 	return out, nil
 }
 
+func (store *memoryStore) ActiveAnalysisUsers(_ context.Context, fromNS, toNS int64) ([]int64, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	seen := map[int64]bool{}
+	for _, signals := range store.signals {
+		if signals.LastNS >= fromNS && signals.LastNS < toNS && signals.NewAPIUserID != nil && signals.Bucket != storage.BucketService {
+			seen[*signals.NewAPIUserID] = true
+		}
+	}
+	out := make([]int64, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func (store *memoryStore) SessionSignalTotalsByUser(_ context.Context, filter storage.SessionSignalFilter) ([]storage.SessionUserTotals, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	users := map[int64]bool{}
+	unresolved := false
+	for _, signals := range store.signals {
+		if !store.inScope(signals, filter) {
+			continue
+		}
+		if signals.NewAPIUserID == nil {
+			unresolved = true
+		} else {
+			users[*signals.NewAPIUserID] = true
+		}
+	}
+	ids := make([]int64, 0, len(users))
+	for id := range users {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := make([]storage.SessionUserTotals, 0, len(ids)+1)
+	for _, id := range ids {
+		user := id
+		own := filter
+		own.UserIDs = []int64{id}
+		out = append(out, storage.SessionUserTotals{UserID: &user, Totals: store.SessionSignalTotalsLocked(own)})
+	}
+	if unresolved {
+		var totals storage.SessionSignalTotals
+		for _, signals := range store.signals {
+			if store.inScope(signals, filter) && signals.NewAPIUserID == nil {
+				totals.Sessions++
+			}
+		}
+		out = append(out, storage.SessionUserTotals{Totals: totals})
+	}
+	return out, nil
+}
+
+// userKeys lists the API keys a user sent sessions with, like the
+// PostgreSQL subquery.
+func (store *memoryStore) userKeys(user int64) map[string]bool {
+	keys := map[string]bool{}
+	for _, signals := range store.signals {
+		if signals.NewAPIUserID != nil && *signals.NewAPIUserID == user && len(signals.APIKeyFPR) != 0 {
+			keys[string(signals.APIKeyFPR)] = true
+		}
+	}
+	return keys
+}
+
 func (store *memoryStore) ListPeriodScopeKeys(_ context.Context, weekStartNS int64, scope string) ([][]byte, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -773,6 +841,14 @@ func (store *memoryStore) ListPeriodScopeKeys(_ context.Context, weekStartNS int
 func (store *memoryStore) facetInScope(key string, facet storage.SessionFacet, scope storage.FacetScope) bool {
 	if scope.APIKeyFPR != nil && !bytes.Equal(facet.APIKeyFPR, scope.APIKeyFPR) {
 		return false
+	}
+	if scope.UserID != nil {
+		// One user: that user's session facets, and the chat digests of the
+		// user's keys.
+		if signals, ok := store.signals[key]; ok {
+			return store.inScope(signals, storage.SessionSignalFilter{ExcludeService: true, UserIDs: []int64{*scope.UserID}})
+		}
+		return facet.Kind == storage.PackKindChatDigest && store.userKeys(*scope.UserID)[string(facet.APIKeyFPR)]
 	}
 	if scope.ProjectID == nil && scope.UserIDs == nil {
 		return true
@@ -799,8 +875,15 @@ func (store *memoryStore) RepeatedFingerprints(_ context.Context, sinceNS int64,
 	apiKey := scope.APIKeyFPR
 	groups := map[string]*storage.RepeatedFPR{}
 	rules := map[string]int64{}
+	var ownKeys map[string]bool
+	if scope.UserID != nil {
+		ownKeys = store.userKeys(*scope.UserID)
+	}
 	add := func(session string, fpr storage.SessionTextFPR) {
 		if fpr.SeenAtNS < sinceNS || (apiKey != nil && !bytes.Equal(fpr.APIKeyFPR, apiKey)) {
+			return
+		}
+		if ownKeys != nil && !ownKeys[string(fpr.APIKeyFPR)] {
 			return
 		}
 		// Fingerprints carry their session's current project.

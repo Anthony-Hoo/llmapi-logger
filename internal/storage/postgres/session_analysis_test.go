@@ -895,6 +895,153 @@ func TestSessionProjectBooking(t *testing.T) {
 
 // Weekly statistics and suggestions also exist per project and per project
 // group; facets and sentence fingerprints are selected through the booking.
+// The user scope merges one NewAPI user's API keys: session facets through
+// the signals row, chat digests and repeated sentences through the keys.
+func TestSessionUserScope(t *testing.T) {
+	t.Parallel()
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	day := seedSharedWorld(t, store)
+	at := day.UnixNano()
+	id := func(value int64) *int64 { return &value }
+	type session struct {
+		key    []byte
+		apiKey []byte
+		user   *int64
+		bucket string
+	}
+	sessions := []session{
+		{fill(0xb1), keyA, id(8), ""},
+		{fill(0xb2), keyB, id(9), ""},
+		{fill(0xb3), keyA, id(8), ""},
+		{fill(0xb4), keyB, id(9), storage.BucketService},
+		{fill(0xb5), keyA, nil, ""}, // caller not resolved
+	}
+	repeated := fill(0xa7)
+	for index, entry := range sessions {
+		signals := testSignals(entry.key, entry.apiKey, "a2", at+int64(index))
+		signals.NewAPIUserID, signals.Bucket = entry.user, entry.bucket
+		fprs := []storage.SessionTextFPR{{Source: storage.TextSourceUser, FPR: repeated, APIKeyFPR: entry.apiKey, SeenAtNS: at + int64(index)}}
+		pack := storage.SessionPack{
+			SessionKey: entry.key, Kind: storage.PackKindSession, APIKeyFPR: entry.apiKey, PackHash: strings.Repeat("cd", 32),
+			PackEnc: []byte{1}, RefMap: "{}", FirstNS: at, LastNS: at + int64(index), LastAuditID: "a2", BuiltAtNS: 1, Members: 1,
+		}
+		if entry.bucket == storage.BucketService {
+			// A service session keeps signals only.
+			if err := store.SaveSessionSignals(ctx, signals, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := store.SaveSessionSignals(ctx, signals, fprs, &pack); err != nil {
+			t.Fatal(err)
+		}
+		facet := storage.SessionFacet{
+			SessionKey: entry.key, Kind: storage.PackKindSession, APIKeyFPR: entry.apiKey, LastNS: at + int64(index), PackHash: pack.PackHash,
+			PromptVersion: "facet-v1", Model: "m", Status: "ok", TaskType: "bug_fix", Outcome: "achieved", CreatedAtNS: 5,
+		}
+		if err := store.SaveSessionFacet(ctx, facet, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One chat digest of key A: it has no signals row of its own.
+	digest := storage.SessionPack{
+		SessionKey: fill(0xd1), Kind: storage.PackKindChatDigest, APIKeyFPR: keyA, PackHash: strings.Repeat("ef", 32),
+		PackEnc: []byte{1}, RefMap: "{}", FirstNS: at, LastNS: at + 9, LastAuditID: "a2", BuiltAtNS: 1, Members: 2,
+	}
+	if err := store.SaveSessionPack(ctx, digest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSessionFacet(ctx, storage.SessionFacet{
+		SessionKey: digest.SessionKey, Kind: storage.PackKindChatDigest, APIKeyFPR: keyA, LastNS: at + 9, PackHash: digest.PackHash,
+		PromptVersion: "facet-v1", Model: "m", Status: "ok", Items: `[{"task_type":"question"}]`, CreatedAtNS: 5,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if users, err := store.ActiveAnalysisUsers(ctx, at, at+100); err != nil || len(users) != 2 || users[0] != 8 || users[1] != 9 {
+		t.Fatalf("active users = %v, %v", users, err)
+	}
+	// Only the service session and the unresolved one fall in this range.
+	if none, err := store.ActiveAnalysisUsers(ctx, at+3, at+100); err != nil || len(none) != 0 {
+		t.Fatalf("a service or unresolved session made a user active: %v, %v", none, err)
+	}
+
+	enums := func(scope storage.FacetScope) int {
+		t.Helper()
+		rows, err := store.FacetEnums(ctx, at, at+100, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(rows)
+	}
+	// User 8: two sessions and the digest of the user's key; the unresolved
+	// session of the same key is nobody's. User 9: one session.
+	if got := enums(storage.FacetScope{UserID: id(8)}); got != 3 {
+		t.Fatalf("user 8 facets = %d", got)
+	}
+	if got := enums(storage.FacetScope{UserID: id(9)}); got != 1 {
+		t.Fatalf("user 9 facets = %d", got)
+	}
+	if got := enums(storage.FacetScope{UserID: id(77)}); got != 0 {
+		t.Fatalf("unknown user facets = %d", got)
+	}
+	// The list form still reads session facets only.
+	if got := enums(storage.FacetScope{UserIDs: []int64{8}}); got != 2 {
+		t.Fatalf("user list facets = %d", got)
+	}
+
+	// Sentences repeat across the sessions of the user's keys.
+	own, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{UserID: id(8)}, 10)
+	if err != nil || len(own) != 1 || own[0].Sessions != 3 || own[0].Kind != "instruction" {
+		t.Fatalf("user 8 repeats = %+v, %v", own, err)
+	}
+	if other, err := store.RepeatedFingerprints(ctx, at-1, storage.FacetScope{UserID: id(9)}, 10); err != nil || len(other) != 0 {
+		t.Fatalf("user 9 repeats = %+v, %v", other, err)
+	}
+
+	byUser, err := store.SessionSignalTotalsByUser(ctx, storage.SessionSignalFilter{FromNS: at, ToNS: at + 100})
+	if err != nil || len(byUser) != 3 {
+		t.Fatalf("totals by user = %+v, %v", byUser, err)
+	}
+	if *byUser[0].UserID != 8 || byUser[0].Totals.Sessions != 2 || byUser[0].LastNS != at+2 ||
+		*byUser[1].UserID != 9 || byUser[1].Totals.Sessions != 2 || byUser[2].UserID != nil || byUser[2].Totals.Sessions != 1 {
+		t.Fatalf("totals by user = %+v", byUser)
+	}
+	withoutService, err := store.SessionSignalTotalsByUser(ctx, storage.SessionSignalFilter{FromNS: at, ToNS: at + 100, ExcludeService: true})
+	if err != nil || len(withoutService) != 3 || withoutService[1].Totals.Sessions != 1 {
+		t.Fatalf("totals by user without service = %+v, %v", withoutService, err)
+	}
+
+	// Statistics and suggestions of a user are stored under the id-derived key.
+	if err := store.SavePeriodStats(ctx, storage.PeriodStats{WeekStartNS: 700, Scope: storage.ScopeUser, ScopeKey: storage.IDScopeKey(8),
+		Stats: `{"totals":{}}`, InputHash: "h", ComputedAtNS: 5}); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := store.ListPeriodScopeKeys(ctx, 700, storage.ScopeUser)
+	if user, ok := storage.IDOfScopeKey(firstOf(keys)); err != nil || len(keys) != 1 || !ok || user != 8 {
+		t.Fatalf("user keys = %v, %v", keys, err)
+	}
+	if err := store.UpsertSuggestion(ctx, storage.Suggestion{Scope: storage.ScopeUser, ScopeKey: storage.IDScopeKey(8), Kind: "instruction", FPR: repeated,
+		Support: 2, FirstSeenNS: at, LastSeenNS: at + 1, Status: "open", TextEnc: []byte{7}, UpdatedAtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.ListSuggestions(ctx, storage.ScopeUser, storage.IDScopeKey(8), nil, 10)
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("user suggestions = %+v, %v", listed, err)
+	}
+	if other, err := store.ListSuggestions(ctx, storage.ScopeUser, storage.IDScopeKey(9), nil, 10); err != nil || len(other) != 0 {
+		t.Fatalf("another user's suggestions = %+v, %v", other, err)
+	}
+}
+
+func firstOf(keys [][]byte) []byte {
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys[0]
+}
+
 func TestSessionReportScopes(t *testing.T) {
 	t.Parallel()
 	store, _ := openTestStore(t)

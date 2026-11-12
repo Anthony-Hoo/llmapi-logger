@@ -22,11 +22,19 @@ type fakeSessionAnalysis struct {
 	triggered int
 	triggerOK error
 	targets   []sessionanalysis.ReportTarget
+	users     []*int64
+	listings  int
 }
 
-func (fake *fakeSessionAnalysis) Overview(_ context.Context, from, to int64, scope *query.Scope) (sessionanalysis.OverviewResponse, error) {
+func (fake *fakeSessionAnalysis) Overview(_ context.Context, from, to int64, scope *query.Scope, userID *int64) (sessionanalysis.OverviewResponse, error) {
 	fake.scopes = append(fake.scopes, scope)
+	fake.users = append(fake.users, userID)
 	return sessionanalysis.OverviewResponse{FromNS: from, ToNS: to}, nil
+}
+
+func (fake *fakeSessionAnalysis) Users(_ context.Context, from, to int64) (sessionanalysis.UsersResponse, error) {
+	fake.listings++
+	return sessionanalysis.UsersResponse{FromNS: from, ToNS: to, Items: []sessionanalysis.UserTotalsItem{}}, nil
 }
 
 func (fake *fakeSessionAnalysis) Sessions(_ context.Context, request sessionanalysis.SessionsQuery) (sessionanalysis.SessionsResponse, error) {
@@ -138,6 +146,57 @@ func TestSessionAnalysisScopeComesFromTheSession(t *testing.T) {
 	}
 }
 
+// Reading per user is for administrators: the listing, and the user selector
+// of the overview and the session list.
+func TestSessionAnalysisUserRoutesAreAdministratorOnly(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSessionAnalysis{}
+	handler, cookie := newSessionAnalysisHandler(t, fake)
+	window := "?from_ns=1000&to_ns=2000"
+	for _, path := range []string{
+		"/api/v1/session-analysis/users" + window,
+		"/api/v1/session-analysis/overview" + window + "&user_id=7",
+		"/api/v1/session-analysis/sessions" + window + "&user_id=7",
+	} {
+		if response := serveAs(handler, http.MethodGet, path, cookie); response.Code != http.StatusForbidden {
+			t.Fatalf("developer %s = %d", path, response.Code)
+		}
+	}
+	if fake.listings != 0 || len(fake.users) != 0 || len(fake.sessions) != 0 {
+		t.Fatalf("a refused request reached the service: %d %d %d", fake.listings, len(fake.users), len(fake.sessions))
+	}
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/users"+window, nil); response.Code != http.StatusOK || fake.listings != 1 {
+		t.Fatalf("admin users = %d listings=%d", response.Code, fake.listings)
+	} else {
+		assertNoStore(t, response, "users")
+	}
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/overview"+window+"&user_id=7", nil); response.Code != http.StatusOK ||
+		len(fake.users) != 1 || fake.users[0] == nil || *fake.users[0] != 7 {
+		t.Fatalf("admin overview of a user = %d %v", response.Code, fake.users)
+	}
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/sessions"+window+"&user_id=7", nil); response.Code != http.StatusOK ||
+		len(fake.sessions) != 1 || fake.sessions[0].UserID == nil || *fake.sessions[0].UserID != 7 || fake.sessions[0].Scope != nil {
+		t.Fatalf("admin sessions of a user = %d %+v", response.Code, fake.sessions)
+	}
+	// Without the selector nothing is narrowed.
+	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/sessions"+window, nil); response.Code != http.StatusOK || fake.sessions[1].UserID != nil {
+		t.Fatalf("admin sessions = %d %+v", response.Code, fake.sessions)
+	}
+	for _, path := range []string{
+		"/api/v1/session-analysis/users",                              // range required
+		"/api/v1/session-analysis/users" + window + "&user_id=7",      // unknown key
+		"/api/v1/session-analysis/overview" + window + "&user_id=0",   // not an id
+		"/api/v1/session-analysis/sessions" + window + "&user_id=abc", // not a number
+	} {
+		if response := serveAs(handler, http.MethodGet, path, nil); response.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", path, response.Code)
+		}
+	}
+	if response := serveAs(handler, http.MethodPost, "/api/v1/session-analysis/users"+window, nil); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST users = %d", response.Code)
+	}
+}
+
 func TestSessionAnalysisRunIsAdministratorOnly(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionAnalysis{}
@@ -229,8 +288,8 @@ func TestSessionAnalysisReportAndDismissRoutes(t *testing.T) {
 	if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?user=1", nil); response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown key = %d", response.Code)
 	}
-	// Project and group reports are for administrators only.
-	for _, selector := range []string{"project_id=10", "group_id=3"} {
+	// Project, group and user reports are for administrators only.
+	for _, selector := range []string{"project_id=10", "group_id=3", "user_id=7"} {
 		if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?"+selector, cookie); response.Code != http.StatusForbidden {
 			t.Fatalf("developer %s = %d", selector, response.Code)
 		}
@@ -238,11 +297,12 @@ func TestSessionAnalysisReportAndDismissRoutes(t *testing.T) {
 			t.Fatalf("admin %s = %d", selector, response.Code)
 		}
 	}
-	if len(fake.targets) != 4 || fake.targets[0] != (sessionanalysis.ReportTarget{}) ||
-		fake.targets[2] != (sessionanalysis.ReportTarget{ProjectID: 10}) || fake.targets[3] != (sessionanalysis.ReportTarget{GroupID: 3}) {
+	if len(fake.targets) != 5 || fake.targets[0] != (sessionanalysis.ReportTarget{}) ||
+		fake.targets[2] != (sessionanalysis.ReportTarget{ProjectID: 10}) || fake.targets[3] != (sessionanalysis.ReportTarget{GroupID: 3}) ||
+		fake.targets[4] != (sessionanalysis.ReportTarget{UserID: 7}) {
 		t.Fatalf("targets = %+v", fake.targets)
 	}
-	for _, bad := range []string{"project_id=0", "project_id=-1", "group_id=x", "project_id=1&group_id=2", "project_id=1&project_id=2"} {
+	for _, bad := range []string{"project_id=0", "project_id=-1", "group_id=x", "project_id=1&group_id=2", "project_id=1&project_id=2", "user_id=0", "project_id=1&user_id=2"} {
 		if response := serveAs(handler, http.MethodGet, "/api/v1/session-analysis/report?"+bad, nil); response.Code != http.StatusBadRequest {
 			t.Fatalf("%s = %d", bad, response.Code)
 		}

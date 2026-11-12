@@ -757,8 +757,54 @@ func (store *Store) SessionSignalTotals(ctx context.Context, filter storage.Sess
 		return storage.SessionSignalTotals{}, err
 	}
 	var totals storage.SessionSignalTotals
-	err = store.readerDB.QueryRowContext(ctx, `
-SELECT COUNT(*),
+	err = store.readerDB.QueryRowContext(ctx, `SELECT `+sessionTotalsColumns+`
+FROM session_signals AS s WHERE `+where, arguments...).Scan(sessionTotalsTargets(&totals)...)
+	if err != nil {
+		return storage.SessionSignalTotals{}, fmt.Errorf("postgres: aggregate session signals: %w", err)
+	}
+	return totals, nil
+}
+
+// SessionSignalTotalsByUser aggregates the sessions selected by filter per
+// NewAPI user, ascending by user id; the sessions without a resolved user
+// come last as one row with a nil UserID.
+func (store *Store) SessionSignalTotalsByUser(ctx context.Context, filter storage.SessionSignalFilter) ([]storage.SessionUserTotals, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	where, arguments, err := sessionSignalWhere(filter)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `SELECT s.newapi_user_id, MAX(s.last_ns), `+sessionTotalsColumns+`
+FROM session_signals AS s WHERE `+where+`
+GROUP BY s.newapi_user_id
+ORDER BY s.newapi_user_id NULLS LAST`, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: aggregate session signals by user: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.SessionUserTotals, 0)
+	for rows.Next() {
+		var row storage.SessionUserTotals
+		var userID sql.NullInt64
+		if err := rows.Scan(append([]any{&userID, &row.LastNS}, sessionTotalsTargets(&row.Totals)...)...); err != nil {
+			return nil, fmt.Errorf("postgres: scan session signals by user: %w", err)
+		}
+		if userID.Valid {
+			row.UserID = &userID.Int64
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// sessionTotalsColumns is the aggregate select list of session_signals AS s;
+// sessionTotalsTargets scans it.
+const sessionTotalsColumns = `COUNT(*),
        COUNT(*) FILTER (WHERE s.kind = 'agent'),
        COUNT(*) FILTER (WHERE s.kind = 'chat'),
        COUNT(*) FILTER (WHERE s.eligible),
@@ -780,18 +826,17 @@ SELECT COUNT(*),
        COUNT(*) FILTER (WHERE s.compactions > 0),
        COALESCE(SUM(s.input_tokens), 0),
        COALESCE(SUM(s.cache_read_tokens), 0),
-       COUNT(DISTINCT COALESCE('u' || s.newapi_user_id::text, 'k' || encode(s.api_key_fpr, 'hex')))
-FROM session_signals AS s WHERE `+where, arguments...).Scan(
+       COUNT(DISTINCT COALESCE('u' || s.newapi_user_id::text, 'k' || encode(s.api_key_fpr, 'hex')))`
+
+func sessionTotalsTargets(totals *storage.SessionSignalTotals) []any {
+	return []any{
 		&totals.Sessions, &totals.AgentSessions, &totals.ChatSessions, &totals.Eligible,
 		&totals.CostUSD, &totals.BilledSessions, &totals.LoopSessions, &totals.LoopCostUSD,
 		&totals.ThrashSessions, &totals.Unverified, &totals.WithWrites, &totals.FailureSessions,
 		&totals.Corrections, &totals.CorrectionSess, &totals.ErrorPasteSess, &totals.InterruptSess,
 		&totals.HeavyModelSess, &totals.DangerSessions, &totals.SecretSessions, &totals.CompactionSess,
-		&totals.InputTokens, &totals.CacheReadTokens, &totals.Contributors)
-	if err != nil {
-		return storage.SessionSignalTotals{}, fmt.Errorf("postgres: aggregate session signals: %w", err)
+		&totals.InputTokens, &totals.CacheReadTokens, &totals.Contributors,
 	}
-	return totals, nil
 }
 
 func nullText(value string) any {

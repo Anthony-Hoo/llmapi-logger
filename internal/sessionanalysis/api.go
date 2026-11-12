@@ -18,8 +18,9 @@ import (
 )
 
 // JSON contract of the session analysis management API. The web frontend
-// mirrors these shapes in src/types.ts. Responses never carry who a session
-// belongs to: an administrator sees anonymous rows, a developer only their own.
+// mirrors these shapes in src/types.ts. An administrator sees every session
+// with the NewAPI user it belongs to and can read per user (doc 24 section 9,
+// decided 2026-11-12); a developer sees only their own key's sessions.
 
 // SignalTotals summarizes the sessions of one period.
 type SignalTotals struct {
@@ -125,6 +126,9 @@ type SessionItem struct {
 	Bucket    string `json:"bucket,omitempty"`
 	ProjectID int64  `json:"project_id,omitempty"`
 	Project   string `json:"project,omitempty"`
+	// Administrators only: the NewAPI user of the session, absent when the
+	// caller was not resolved.
+	UserID int64 `json:"user_id,omitempty"`
 }
 
 // SessionsResponse is one keyset page.
@@ -142,6 +146,62 @@ type SessionsQuery struct {
 	Cursor string
 	Limit  int
 	Scope  *query.Scope
+	// UserID keeps the sessions of one NewAPI user (administrators only).
+	UserID *int64
+}
+
+// UserTotalsItem is the totals of one NewAPI user's sessions. UserID is null
+// for the sessions whose caller was not resolved.
+type UserTotalsItem struct {
+	UserID *int64       `json:"user_id"`
+	LastNS int64        `json:"last_ns,string"`
+	Totals SignalTotals `json:"totals"`
+}
+
+// UsersResponse is GET /api/v1/session-analysis/users: one row per user, in
+// user id order. It is not a ranking.
+type UsersResponse struct {
+	FromNS int64            `json:"from_ns,string"`
+	ToNS   int64            `json:"to_ns,string"`
+	Items  []UserTotalsItem `json:"items"`
+}
+
+// UserTotalsStore aggregates sessions per user.
+type UserTotalsStore interface {
+	SessionSignalTotalsByUser(ctx context.Context, filter storage.SessionSignalFilter) ([]storage.SessionUserTotals, error)
+}
+
+// Users returns the session totals of [fromNS, toNS) per NewAPI user
+// (administrators only; the web layer enforces the role).
+func (service *QueryService) Users(ctx context.Context, fromNS, toNS int64) (UsersResponse, error) {
+	if err := validRange(fromNS, toNS); err != nil {
+		return UsersResponse{}, err
+	}
+	store, ok := service.store.(UserTotalsStore)
+	if !ok {
+		return UsersResponse{}, query.ErrNotFound
+	}
+	rows, err := store.SessionSignalTotalsByUser(ctx, storage.SessionSignalFilter{FromNS: fromNS, ToNS: toNS})
+	if err != nil {
+		return UsersResponse{}, err
+	}
+	response := UsersResponse{FromNS: fromNS, ToNS: toNS, Items: make([]UserTotalsItem, 0, len(rows))}
+	for _, row := range rows {
+		response.Items = append(response.Items, UserTotalsItem{UserID: row.UserID, LastNS: row.LastNS, Totals: mapTotals(row.Totals)})
+	}
+	return response, nil
+}
+
+// userFilter turns the administrator's user selection into a signal filter.
+// A developer session never selects a user.
+func userFilter(scope *query.Scope, userID *int64) ([]int64, error) {
+	if userID == nil {
+		return nil, nil
+	}
+	if scope != nil || *userID <= 0 {
+		return nil, invalid("invalid user")
+	}
+	return []int64{*userID}, nil
 }
 
 // QueryStore is the read surface of the management API.
@@ -191,11 +251,15 @@ func (service *QueryService) UseCalendar(location *time.Location, weekStartsSund
 	service.weekStartsSunday = weekStartsSunday
 }
 
-// sessionItem maps a row and names its project.
-func (service *QueryService) sessionItem(row storage.SessionSignals) SessionItem {
+// sessionItem maps a row and names its project. admin also carries the
+// session's NewAPI user.
+func (service *QueryService) sessionItem(row storage.SessionSignals, admin bool) SessionItem {
 	item := mapSession(row)
 	if service.projects != nil && item.ProjectID > 0 {
 		item.Project = service.projects.ProjectName(item.ProjectID)
+	}
+	if admin && row.NewAPIUserID != nil {
+		item.UserID = *row.NewAPIUserID
 	}
 	return item
 }
@@ -240,12 +304,16 @@ func validRange(fromNS, toNS int64) error {
 }
 
 // Overview returns the totals of [fromNS, toNS) and of the equally long period
-// before it.
-func (service *QueryService) Overview(ctx context.Context, fromNS, toNS int64, scope *query.Scope) (OverviewResponse, error) {
+// before it. userID narrows them to one NewAPI user (administrators only).
+func (service *QueryService) Overview(ctx context.Context, fromNS, toNS int64, scope *query.Scope, userID *int64) (OverviewResponse, error) {
 	if err := validRange(fromNS, toNS); err != nil {
 		return OverviewResponse{}, err
 	}
-	filter := storage.SessionSignalFilter{FromNS: fromNS, ToNS: toNS, Scope: storageScope(scope)}
+	users, err := userFilter(scope, userID)
+	if err != nil {
+		return OverviewResponse{}, err
+	}
+	filter := storage.SessionSignalFilter{FromNS: fromNS, ToNS: toNS, Scope: storageScope(scope), UserIDs: users}
 	current, err := service.store.SessionSignalTotals(ctx, filter)
 	if err != nil {
 		return OverviewResponse{}, err
@@ -324,15 +392,19 @@ func (service *QueryService) Sessions(ctx context.Context, request SessionsQuery
 	if err != nil {
 		return SessionsResponse{}, err
 	}
+	users, err := userFilter(request.Scope, request.UserID)
+	if err != nil {
+		return SessionsResponse{}, err
+	}
 	page, err := service.store.ListSessionSignals(ctx, storage.SessionSignalFilter{
-		FromNS: request.FromNS, ToNS: request.ToNS, Kind: request.Kind, Flags: request.Flags, Scope: storageScope(request.Scope),
+		FromNS: request.FromNS, ToNS: request.ToNS, Kind: request.Kind, Flags: request.Flags, Scope: storageScope(request.Scope), UserIDs: users,
 	}, cursor, request.Limit)
 	if err != nil {
 		return SessionsResponse{}, err
 	}
 	response := SessionsResponse{Items: make([]SessionItem, 0, len(page.Rows))}
 	for _, row := range page.Rows {
-		response.Items = append(response.Items, service.sessionItem(row))
+		response.Items = append(response.Items, service.sessionItem(row, request.Scope == nil))
 	}
 	if page.HasMore && len(page.Rows) != 0 {
 		last := page.Rows[len(page.Rows)-1]

@@ -112,6 +112,8 @@ export interface AnalysisSessionItem {
   project_id?: number;
   /** Current project name; absent when the project was deleted. */
   project?: string;
+  /** Administrators only: the session's NewAPI user; absent when the caller was not resolved. */
+  user_id?: number;
 }
 
 export interface AnalysisSessionsPage {
@@ -126,6 +128,21 @@ export interface AnalysisSessionsQuery {
   flags?: AnalysisFlag[];
   cursor?: string;
   limit?: number;
+  /** Administrators only: keeps one NewAPI user's sessions. */
+  user_id?: number;
+}
+
+/** Session totals of one NewAPI user; user_id is null for unresolved callers. */
+export interface AnalysisUserTotals {
+  user_id: number | null;
+  last_ns: string;
+  totals: AnalysisSignalTotals;
+}
+
+export interface AnalysisUsers {
+  from_ns: string;
+  to_ns: string;
+  items: AnalysisUserTotals[];
 }
 
 export interface AnalysisPack {
@@ -213,20 +230,23 @@ export interface AnalysisScopeOption {
   name: string;
 }
 
-/** Selects a project or group report (administrators, organisation reports). */
+/** Selects a user, project or group report (administrators; projects and groups need organisation reports). */
 export interface AnalysisReportTarget {
   project_id?: number;
   group_id?: number;
+  user_id?: number;
 }
 
 export interface AnalysisReport {
   week_start_ns: string;
-  scope: "person" | "all" | "project" | "group";
+  scope: "person" | "all" | "project" | "group" | "user";
   scope_id?: number;
   scope_name?: string;
-  /** Scopes an administrator can open for this week; empty without organisation reports. */
+  /** Scopes an administrator can open for this week; projects and groups are empty without organisation reports. */
   projects: AnalysisScopeOption[];
   groups: AnalysisScopeOption[];
+  /** Users with statistics this week; their names come from the caller catalog. */
+  users: AnalysisScopeOption[];
   stats: AnalysisWeeklyStats | null;
   previous: AnalysisWeeklyStats | null;
   narrative: string;

@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import type { ApiClient } from "../../api";
 import type { AnalysisOverview, AnalysisSessionItem, AnalysisSignalTotals } from "../../lib/session-analysis/types";
-import { OverviewCards, SessionAnalysisView, SessionDetails } from "./analysis-view";
+import { sortByUserName, userNameMap } from "../../lib/session-analysis/format";
+import { OverviewCards, SessionAnalysisView, SessionDetails, UserTotalsCard } from "./analysis-view";
 import { FacetView } from "./facet-panel";
 import { PackView } from "./pack-panel";
-import { ReportBody, weekDelta } from "./report-view";
+import { parseTargetValue, ReportBody, scopeSummary, targetValue, weekDelta } from "./report-view";
 
 function totals(overrides: Partial<AnalysisSignalTotals> = {}): AnalysisSignalTotals {
   return {
@@ -166,6 +167,7 @@ describe("session analysis view", () => {
       optimizations: [],
       projects: [],
       groups: [],
+      users: [],
     };
     const admin = renderToStaticMarkup(<ReportBody report={report} canDismiss onDismiss={() => undefined} />);
     expect(admin).toContain("本地模型撰写");
@@ -196,5 +198,57 @@ describe("session analysis view", () => {
     const group = renderToStaticMarkup(<ReportBody report={{ ...report, scope: "group", scope_id: 3, suggestions: [] }} canDismiss={false} onDismiss={() => undefined} />);
     expect(group).not.toContain("可沉淀的指令与 skill");
     expect(group).not.toContain("位使用者");
+    // A user's report is personal: suggestions are shown and cannot be dismissed.
+    const user = renderToStaticMarkup(<ReportBody report={{ ...report, scope: "user", scope_id: 7 }} canDismiss={false} onDismiss={() => undefined} />);
+    expect(user).toContain("可沉淀的指令与 skill");
+    expect(user).not.toContain(">忽略<");
+  });
+
+  it("lists users by name, not by any metric, with unresolved callers last", () => {
+    const names = userNameMap([
+      { id: 7, username: "zhao", display_name: "Zhao" },
+      { id: 9, username: "bai", display_name: "" },
+    ]);
+    const rows = [
+      { user_id: null, last_ns: "1700000000000000000", totals: totals({ sessions: 99 }) },
+      { user_id: 7, last_ns: "1700000000000000000", totals: totals({ sessions: 50, cost_usd: 40 }) },
+      { user_id: 9, last_ns: "1700000000000000000", totals: totals({ sessions: 3, cost_usd: 1 }) },
+      { user_id: 12, last_ns: "1700000000000000000", totals: totals({ sessions: 1, cost_usd: null }) },
+    ];
+    expect(sortByUserName(rows, names).map((row) => row.user_id)).toEqual([12, 9, 7, null]);
+    const html = renderToStaticMarkup(<UserTotalsCard rows={rows} names={names} selected={7} onSelect={() => undefined} />);
+    expect(html).toContain("按用户");
+    expect(html).toContain("bai");
+    expect(html).toContain("#12");
+    expect(html).toContain("未识别用户");
+    expect(html).toContain("查看全部用户");
+    expect(html.indexOf("bai")).toBeLessThan(html.indexOf("Zhao"));
+    expect(html.match(/aria-selected="true"/g)?.length).toBe(1);
+    const idle = renderToStaticMarkup(<UserTotalsCard rows={[]} names={names} selected={null} onSelect={() => undefined} />);
+    expect(idle).toContain("这个时间范围内没有会话");
+    expect(idle).toContain("不是排名");
+  });
+
+  it("names the scope of a report and round-trips its selector", () => {
+    const names = userNameMap([{ id: 7, username: "zhao", display_name: "赵" }]);
+    const base = { week_start_ns: "1", stats: null, previous: null, narrative: "", computed_ns: "1", suggestions: [], optimizations: [], projects: [], groups: [], users: [] };
+    expect(scopeSummary({ ...base, scope: "user", scope_id: 7 }, false, names)).toContain("用户「赵」");
+    expect(scopeSummary({ ...base, scope: "user", scope_id: 8 }, false, names)).toContain("用户「#8」");
+    expect(scopeSummary({ ...base, scope: "all" }, false, names)).toContain("全体用户");
+    expect(scopeSummary({ ...base, scope: "person" }, true, names)).toContain("管理员可以按用户查看");
+    expect(targetValue({ user_id: 7 })).toBe("user:7");
+    expect(parseTargetValue("user:7")).toEqual({ user_id: 7 });
+    expect(parseTargetValue("user:0")).toEqual({});
+    expect(targetValue(parseTargetValue("project:3"))).toBe("project:3");
+  });
+
+  it("tells each role who can read what", () => {
+    const client = {} as ApiClient;
+    const admin = renderToStaticMarkup(<SessionAnalysisView client={client} isDeveloper={false} refreshKey={0} />);
+    expect(admin).toContain("管理端可以按用户查看会话和周度复盘");
+    expect(admin).not.toContain("匿名");
+    const developer = renderToStaticMarkup(<SessionAnalysisView client={client} isDeveloper refreshKey={0} />);
+    expect(developer).toContain("管理员可以按用户查看会话和周度复盘");
+    expect(developer).not.toContain("按用户</h3>");
   });
 });

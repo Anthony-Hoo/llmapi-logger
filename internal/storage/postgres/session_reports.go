@@ -44,6 +44,40 @@ ORDER BY s.api_key_fpr`, fromNS, toNS)
 	return out, rows.Err()
 }
 
+// ActiveAnalysisUsers lists the NewAPI users with analysed sessions whose
+// last request falls in [fromNS, toNS), ascending. Sessions of service
+// principals do not count.
+func (store *Store) ActiveAnalysisUsers(ctx context.Context, fromNS, toNS int64) ([]int64, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT DISTINCT s.newapi_user_id
+FROM session_signals AS s
+WHERE s.last_ns >= $1 AND s.last_ns < $2 AND s.newapi_user_id IS NOT NULL AND s.bucket IS DISTINCT FROM 'service'
+ORDER BY s.newapi_user_id`, fromNS, toNS)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active analysis users: %w", err)
+	}
+	defer rows.Close()
+	out := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres: scan active analysis user: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// userKeysSubquery selects the API keys a NewAPI user has sent sessions with;
+// %s is the user id parameter. A key belongs to one user.
+const userKeysSubquery = `(SELECT DISTINCT k.api_key_fpr FROM session_signals AS k WHERE k.newapi_user_id = %s AND k.api_key_fpr IS NOT NULL)`
+
 // ActiveAnalysisProjects lists the projects that sessions whose last request
 // falls in [fromNS, toNS) are booked to, ascending. Service sessions do not
 // count.
@@ -103,9 +137,10 @@ ORDER BY p.scope_key`, weekStartNS, scope)
 }
 
 // FacetEnums returns the plaintext enums of the ok facets whose session's
-// last request falls in [fromNS, toNS). A project or user scope reads the
+// last request falls in [fromNS, toNS). A project or user-list scope reads the
 // facets of session packs only, through their signals row; a chat digest
-// spans sessions and belongs to neither.
+// spans sessions and belongs to neither. A single-user scope (UserID) also
+// reads the chat digests of that user's API keys.
 func (store *Store) FacetEnums(ctx context.Context, fromNS, toNS int64, scope storage.FacetScope) ([]storage.FacetEnumRow, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
@@ -132,6 +167,12 @@ func (store *Store) FacetEnums(ctx context.Context, fromNS, toNS int64, scope st
 			conditions += ` AND s.newapi_user_id = ANY(` + push(scope.UserIDs) + `::bigint[])`
 		}
 	}
+	if scope.UserID != nil {
+		user := push(*scope.UserID)
+		conditions += ` AND (EXISTS (SELECT 1 FROM session_signals AS u WHERE u.session_key = f.session_key AND u.newapi_user_id = ` + user +
+			` AND u.bucket IS DISTINCT FROM 'service')
+       OR (f.kind = 'chat_digest' AND f.api_key_fpr IN ` + fmt.Sprintf(userKeysSubquery, user) + `))`
+	}
 	rows, err := store.readerDB.QueryContext(ctx, `
 SELECT f.kind, COALESCE(f.task_type, ''), COALESCE(f.outcome, ''), COALESCE(f.collaboration, ''), f.friction, f.items
 FROM session_facets AS f`+join+`
@@ -155,8 +196,8 @@ WHERE f.facet_status = 'ok' AND f.last_ns >= $1 AND f.last_ns < $2`+conditions, 
 // fingerprint and kind (user sentences and model-extracted instructions
 // count as one instruction), keeping those seen in at least two sessions.
 // Adopted reports whether the same fingerprint later appeared in injected
-// rules (AGENTS.md / CLAUDE.md) of the same scope. scope selects one API key
-// or one project; its zero value reads everything.
+// rules (AGENTS.md / CLAUDE.md) of the same scope. scope selects one API key,
+// one project or the API keys of one user; its zero value reads everything.
 func (store *Store) RepeatedFingerprints(ctx context.Context, sinceNS int64, scope storage.FacetScope, limit int) ([]storage.RepeatedFPR, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
@@ -175,6 +216,12 @@ func (store *Store) RepeatedFingerprints(ctx context.Context, sinceNS int64, sco
 		arguments = append(arguments, *scope.ProjectID)
 		keyCondition += " AND t.project_id = " + parameter(len(arguments))
 		ruleCondition += " AND r.project_id = " + parameter(len(arguments))
+	}
+	if scope.UserID != nil {
+		arguments = append(arguments, *scope.UserID)
+		keys := fmt.Sprintf(userKeysSubquery, parameter(len(arguments)))
+		keyCondition += " AND t.api_key_fpr IN " + keys
+		ruleCondition += " AND r.api_key_fpr IN " + keys
 	}
 	rows, err := store.readerDB.QueryContext(ctx, `
 WITH grouped AS (

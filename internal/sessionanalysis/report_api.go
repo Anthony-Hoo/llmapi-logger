@@ -33,34 +33,40 @@ type ReportResponse struct {
 	ComputedNS      int64            `json:"computed_ns,string"`
 	Suggestions     []SuggestionItem `json:"suggestions"`
 	Optimizations   []SessionItem    `json:"optimizations"`
-	// Organisation reports only. ScopeID and ScopeName identify the project
-	// or group of a 'project' or 'group' report. Projects and Groups list the
-	// scopes an administrator can open for this week.
+	// ScopeID identifies the project, group or NewAPI user of a 'project',
+	// 'group' or 'user' report; ScopeName is the project's or group's name (a
+	// user has none here: the caller catalog names users). Projects and Groups
+	// (organisation reports only) and Users list the scopes an administrator
+	// can open for this week.
 	ScopeID   int64         `json:"scope_id,omitempty"`
 	ScopeName string        `json:"scope_name,omitempty"`
 	Projects  []ScopeOption `json:"projects,omitempty"`
 	Groups    []ScopeOption `json:"groups,omitempty"`
+	Users     []ScopeOption `json:"users,omitempty"`
 }
 
-// ScopeOption is one project or group with weekly statistics.
+// ScopeOption is one project, group or user with weekly statistics. Name is
+// empty for a user.
 type ScopeOption struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
 }
 
-// ReportTarget selects a project or group report; the zero value is the
+// ReportTarget selects a project, group or user report; the zero value is the
 // caller's own scope. At most one id is set.
 type ReportTarget struct {
 	ProjectID int64
 	GroupID   int64
+	UserID    int64
 }
 
 const maxReportSuggestions = 30
 
 // Report returns the weekly review of the caller's scope: a developer's own
-// key, or all keys together for an administrator. With organisation reports
-// an administrator can also open one project or one project group. week is
-// "current" or "previous"; weeks are cut in the runner's calendar.
+// key, or all keys together for an administrator. An administrator can also
+// open one NewAPI user and, with organisation reports, one project or one
+// project group. week is "current" or "previous"; weeks are cut in the
+// runner's calendar.
 func (service *QueryService) Report(ctx context.Context, week string, scope *query.Scope, target ReportTarget) (ReportResponse, error) {
 	store, ok := service.store.(ReportStore)
 	if !ok {
@@ -79,14 +85,22 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 		selected = personTarget(storage.ScopeKey{APIKeyFPR: scope.Fingerprint, NewAPITokenID: scope.TokenID})
 	}
 	scopeID, scopeLabel := int64(0), ""
-	if target.ProjectID != 0 || target.GroupID != 0 {
+	if target.ProjectID != 0 || target.GroupID != 0 || target.UserID != 0 {
+		selectors := 0
+		for _, id := range []int64{target.ProjectID, target.GroupID, target.UserID} {
+			if id != 0 {
+				selectors++
+			}
+		}
 		switch {
 		case scope != nil:
 			return ReportResponse{}, invalid("a developer session reads its own report only")
+		case target.ProjectID < 0 || target.GroupID < 0 || target.UserID < 0 || selectors != 1:
+			return ReportResponse{}, invalid("select one project, one group or one user")
+		case target.UserID != 0:
+			selected, scopeID = userTarget(target.UserID), target.UserID
 		case service.projects == nil:
 			return ReportResponse{}, query.ErrNotFound
-		case target.ProjectID < 0 || target.GroupID < 0 || (target.ProjectID != 0 && target.GroupID != 0):
-			return ReportResponse{}, invalid("select one project or one group")
 		case target.ProjectID != 0:
 			selected, scopeID = projectTarget(target.ProjectID), target.ProjectID
 			scopeLabel = service.projects.ProjectName(target.ProjectID)
@@ -106,6 +120,17 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 	response := ReportResponse{
 		WeekStartNS: start.UnixNano(), Scope: scopeName, ScopeID: scopeID, ScopeName: scopeLabel,
 		Suggestions: []SuggestionItem{}, Optimizations: []SessionItem{},
+	}
+	if scope == nil {
+		userKeys, err := store.ListPeriodScopeKeys(ctx, start.UnixNano(), storage.ScopeUser)
+		if err != nil {
+			return ReportResponse{}, err
+		}
+		for _, key := range userKeys {
+			if id, ok := storage.IDOfScopeKey(key); ok {
+				response.Users = append(response.Users, ScopeOption{ID: id})
+			}
+		}
 	}
 	if scope == nil && service.projects != nil {
 		var err error
@@ -187,7 +212,7 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 			id := hex.EncodeToString(row.SessionKey)
 			if !seen[id] {
 				seen[id] = true
-				response.Optimizations = append(response.Optimizations, service.sessionItem(row))
+				response.Optimizations = append(response.Optimizations, service.sessionItem(row, scope == nil))
 			}
 		}
 	}
@@ -200,8 +225,8 @@ type SuggestionStore interface {
 }
 
 // DismissSuggestion marks one all-keys or project suggestion dismissed
-// (administrators only; doc 24 section 8.3). Personal suggestions are never
-// dismissed here.
+// (administrators only; doc 24 section 8.3). Personal suggestions, per key or
+// per user, are never dismissed here.
 func (service *QueryService) DismissSuggestion(ctx context.Context, id int64) error {
 	store, ok := service.store.(SuggestionStore)
 	if !ok || id <= 0 {

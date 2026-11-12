@@ -156,7 +156,7 @@ func TestRunnerBooksSessionsToProjects(t *testing.T) {
 	if line := sessionLine(chatID); strings.Contains(line, "项目=") {
 		t.Fatalf("digest line = %s", line)
 	}
-	if item := service.sessionItem(agent); item.ProjectID != 10 || item.Project != "orders" || item.Bucket != storage.BucketAttributed {
+	if item := service.sessionItem(agent, true); item.ProjectID != 10 || item.Project != "orders" || item.Bucket != storage.BucketAttributed {
 		t.Fatalf("item = %d %q %q", item.ProjectID, item.Project, item.Bucket)
 	}
 
@@ -368,8 +368,63 @@ func TestProjectAndGroupReports(t *testing.T) {
 		t.Fatalf("all = %+v stats=%+v, %v", all, all.Stats, err)
 	}
 	own, err := service.Report(ctx, "current", scopeOf(keyOne), ReportTarget{})
-	if err != nil || own.Stats == nil || own.Stats.Totals.Sessions != 2 || own.Projects != nil || own.Groups != nil {
+	if err != nil || own.Stats == nil || own.Stats.Totals.Sessions != 2 || own.Projects != nil || own.Groups != nil || own.Users != nil {
 		t.Fatalf("own = %+v, %v", own, err)
+	}
+	if len(own.Optimizations) == 0 || own.Optimizations[0].UserID != 0 {
+		t.Fatalf("a developer report names a user: %+v", own.Optimizations)
+	}
+
+	// An administrator can open one user: every session of that user whatever
+	// its project, with the user's own repeated sentences. A single caller
+	// does not limit it.
+	five, err := service.Report(ctx, "current", nil, ReportTarget{UserID: 5})
+	if err != nil || five.Scope != storage.ScopeUser || five.ScopeID != 5 || five.Stats == nil || five.Stats.Totals.Sessions != 2 || five.Stats.Limited {
+		t.Fatalf("user 5 = %+v stats=%+v, %v", five, five.Stats, err)
+	}
+	if found := rule(five); found == nil || found.Sessions != 2 || len(five.Optimizations) != 2 || five.Optimizations[0].UserID != 5 {
+		t.Fatalf("user 5 suggestions = %+v optimizations = %+v", five.Suggestions, five.Optimizations)
+	}
+	if !strings.Contains(five.Narrative, "提交前先跑一遍全部单元测试") {
+		t.Fatalf("user 5 narrative = %q", five.Narrative)
+	}
+	if len(five.Users) != 2 || five.Users[0].ID != 5 || five.Users[1].ID != 6 || len(all.Users) != 2 {
+		t.Fatalf("users = %+v / %+v", five.Users, all.Users)
+	}
+	six, err := service.Report(ctx, "current", nil, ReportTarget{UserID: 6})
+	if err != nil || six.Stats == nil || six.Stats.Totals.Sessions != 1 || len(six.Suggestions) != 0 || len(six.Optimizations) != 1 {
+		t.Fatalf("user 6 = %+v stats=%+v, %v", six, six.Stats, err)
+	}
+	// A user without sessions has no report, but the request is valid.
+	if nobody, err := service.Report(ctx, "current", nil, ReportTarget{UserID: 99}); err != nil || nobody.Stats != nil || len(nobody.Suggestions) != 0 {
+		t.Fatalf("unknown user = %+v, %v", nobody, err)
+	}
+	if _, err := service.Report(ctx, "current", scopeOf(keyOne), ReportTarget{UserID: 6}); !errors.Is(err, query.ErrInvalidQuery) {
+		t.Fatalf("developer opened a user: %v", err)
+	}
+	if _, err := service.Report(ctx, "current", nil, ReportTarget{ProjectID: 10, UserID: 5}); !errors.Is(err, query.ErrInvalidQuery) {
+		t.Fatalf("project and user: %v", err)
+	}
+	// A user's suggestions are personal: nobody dismisses them here.
+	if err := service.DismissSuggestion(ctx, rule(five).ID); !errors.Is(err, query.ErrNotFound) {
+		t.Fatalf("dismissed a user suggestion: %v", err)
+	}
+	// The per-user listing and the user filter of the overview.
+	from, to := day.Add(-time.Hour).UnixNano(), day.Add(24*time.Hour).UnixNano()
+	listing, err := service.Users(ctx, from, to)
+	if err != nil || len(listing.Items) != 2 || *listing.Items[0].UserID != 5 || listing.Items[0].Totals.Sessions != 2 ||
+		*listing.Items[1].UserID != 6 || listing.Items[1].Totals.Sessions != 1 {
+		t.Fatalf("user listing = %+v, %v", listing, err)
+	}
+	userSix := int64(6)
+	if overview, err := service.Overview(ctx, from, to, nil, &userSix); err != nil || overview.Current.Sessions != 1 {
+		t.Fatalf("overview of user 6 = %+v, %v", overview.Current, err)
+	}
+	if _, err := service.Overview(ctx, from, to, scopeOf(keyOne), &userSix); !errors.Is(err, query.ErrInvalidQuery) {
+		t.Fatalf("developer overview of a user: %v", err)
+	}
+	if _, err := service.Sessions(ctx, SessionsQuery{FromNS: from, ToNS: to, Scope: scopeOf(keyOne), UserID: &userSix}); !errors.Is(err, query.ErrInvalidQuery) {
+		t.Fatalf("developer session list of a user: %v", err)
 	}
 
 	if _, err := service.Report(ctx, "current", nil, ReportTarget{GroupID: 99}); !errors.Is(err, query.ErrNotFound) {

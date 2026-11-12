@@ -335,6 +335,9 @@ const (
 	ScopeAll     = "all"
 	ScopeProject = "project"
 	ScopeGroup   = "group"
+	// ScopeUser is one NewAPI user across all of that user's API keys; its
+	// scope_key is IDScopeKey(user id). Administrators read it.
+	ScopeUser = "user"
 )
 
 // AllScopeKey is the scope_key of the 'all' scope.
@@ -370,6 +373,18 @@ type FacetScope struct {
 	APIKeyFPR []byte
 	ProjectID *int64
 	UserIDs   []int64
+	// UserID selects one NewAPI user: the facets of that user's sessions, and
+	// the chat digests and sentence fingerprints of that user's API keys (a
+	// digest spans sessions, so it is matched through its key).
+	UserID *int64
+}
+
+// SessionUserTotals is the totals of the sessions of one NewAPI user. UserID
+// is nil for the sessions whose caller was not resolved.
+type SessionUserTotals struct {
+	UserID *int64
+	LastNS int64
+	Totals SessionSignalTotals
 }
 
 // ScopeKey identifies one API key that was active in a period.
