@@ -30,6 +30,9 @@ type Completion struct {
 	InputTokens  int64
 	OutputTokens int64
 	Latency      time.Duration
+	// Truncated reports that the model stopped at the output limit
+	// (finish_reason "length"), so Content may be cut off.
+	Truncated bool
 }
 
 // Completer calls a model; the LLM client implements it and tests fake it.
@@ -204,6 +207,7 @@ func (client *LLMClient) post(ctx context.Context, messages []ChatMessage, schem
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens     int64 `json:"prompt_tokens"`
@@ -218,6 +222,7 @@ func (client *LLMClient) post(ctx context.Context, messages []ChatMessage, schem
 		InputTokens:  decoded.Usage.PromptTokens,
 		OutputTokens: decoded.Usage.CompletionTokens,
 		Latency:      time.Since(started),
+		Truncated:    decoded.Choices[0].FinishReason == "length",
 	}, response.StatusCode, nil
 }
 

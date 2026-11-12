@@ -208,6 +208,18 @@ func TestNarrativeFallsBackToTheTemplate(t *testing.T) {
 	if report.NarrativeSource != "template" || strings.Contains(report.Narrative, "87%") || !strings.HasPrefix(report.Narrative, "本周做了什么：共 3 个会话") {
 		t.Fatalf("narrative (%s) = %q", report.NarrativeSource, report.Narrative)
 	}
+	// A narrative cut off at the output limit is dropped even when what is
+	// left passes the checks.
+	cut := &scriptedModel{narrative: "本周做了什么：共 3 个会话。\n卡在哪里：暂无。\n可以沉淀或改进的点：提交前先跑测试（3 个会话）。", truncated: true}
+	cutStore, cutRunner := reportFixture(t, cut)
+	if _, err := cutRunner.RunOnce(context.Background(), TriggerManual); err != nil {
+		t.Fatal(err)
+	}
+	service, _ = NewQueryService(cutStore, cutRunner, cutRunner.options.Cipher, "local-small")
+	service.now, service.location = cutRunner.options.Now, packZone
+	if report, _ := service.Report(context.Background(), "current", nil, ReportTarget{}); report.NarrativeSource != "template" || cut.textCalls == 0 {
+		t.Fatalf("truncated narrative source = %s, text calls = %d", report.NarrativeSource, cut.textCalls)
+	}
 	// Without a model the template is used directly.
 	plain, runnerNoModel := reportFixture(t, nil)
 	runnerNoModel.options.LLM = nil

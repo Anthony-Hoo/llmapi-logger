@@ -734,8 +734,8 @@ func (runner *Runner) writeNarrative(ctx context.Context, input string, stats We
 		{Role: "system", Content: narrativePrompt},
 		{Role: "user", Content: input},
 	})
-	if err != nil {
-		return fallback, "template"
+	if err != nil || completion.Truncated {
+		return fallback, "template" // a cut-off narrative can still pass the checks below
 	}
 	text := strings.TrimSpace(cleanModelOutput(completion.Content))
 	if text == "" || utf8.RuneCountInString(text) > maxNarrativeRunes || !NarrativeNumbersGrounded(text, input) {

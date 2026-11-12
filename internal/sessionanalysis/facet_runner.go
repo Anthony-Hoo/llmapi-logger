@@ -58,6 +58,7 @@ func (runner *Runner) runFacets(ctx context.Context, run *storage.SessionAnalysi
 	slots := make(chan struct{}, concurrency)
 	var mu sync.Mutex
 	var wait sync.WaitGroup
+	truncated := 0
 	for _, pack := range due {
 		if ctx.Err() != nil {
 			break
@@ -75,6 +76,9 @@ func (runner *Runner) runFacets(ctx context.Context, run *storage.SessionAnalysi
 			defer mu.Unlock()
 			run.L1InputTokens += facet.row.InputTokens
 			run.L1OutputToks += facet.row.OutputTokens
+			if facet.truncated {
+				truncated++
+			}
 			switch {
 			case saveErr != nil || facet.row.Status == FacetFailed:
 				run.L1Failed++
@@ -86,16 +90,26 @@ func (runner *Runner) runFacets(ctx context.Context, run *storage.SessionAnalysi
 		}(pack)
 	}
 	wait.Wait()
+	if truncated > 0 {
+		// A failed row does not say why, so the run names the cause once.
+		options.Logger.Warn("session facet output hit the model output limit",
+			"error_category", "session_facet_truncated", "count", truncated)
+	}
 	return ctx.Err()
 }
 
 type facetResult struct {
 	row  storage.SessionFacet
 	fprs []storage.SessionTextFPR
+	// truncated: the model stopped at its output limit before the facet was
+	// complete.
+	truncated bool
 }
 
 // facetOne decrypts one pack, calls the model, retries once on output that
-// is not a JSON object, and returns the row to store.
+// is not a JSON object, and returns the row to store. Output cut off at the
+// model's output limit is a failed call, not an invalid facet: the same call
+// would be cut off again, and a later run retries it.
 func (runner *Runner) facetOne(ctx context.Context, pack storage.SessionPack) facetResult {
 	options := runner.options
 	row := storage.SessionFacet{
@@ -136,6 +150,9 @@ func (runner *Runner) facetOne(ctx context.Context, pack storage.SessionPack) fa
 		}
 		facet, err = ParseFacet(completion.Content, digest, refs, options.Vocabulary)
 		parsed = err == nil
+		if !parsed && completion.Truncated {
+			return facetResult{row: row, truncated: true}
+		}
 	}
 	if !parsed {
 		row.Status = FacetInvalid

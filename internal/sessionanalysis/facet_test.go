@@ -68,6 +68,8 @@ type scriptedModel struct {
 	calls     int
 	textCalls int
 	narrative string
+	// truncated marks every answer as cut off at the output limit.
+	truncated bool
 }
 
 func (model *scriptedModel) Model() string { return "local-small" }
@@ -79,7 +81,7 @@ func (model *scriptedModel) CompleteText(_ context.Context, messages []ChatMessa
 	if model.err != nil {
 		return Completion{}, model.err
 	}
-	return Completion{Content: model.narrative}, nil
+	return Completion{Content: model.narrative, Truncated: model.truncated}, nil
 }
 
 func (model *scriptedModel) Complete(_ context.Context, messages []ChatMessage, _ map[string]any) (Completion, error) {
@@ -93,7 +95,7 @@ func (model *scriptedModel) Complete(_ context.Context, messages []ChatMessage, 
 	if len(model.answers) > 0 {
 		answer, model.answers = model.answers[0], model.answers[1:]
 	}
-	return Completion{Content: answer, InputTokens: 1000, OutputTokens: 100, Latency: time.Millisecond}, nil
+	return Completion{Content: answer, InputTokens: 1000, OutputTokens: 100, Latency: time.Millisecond, Truncated: model.truncated}, nil
 }
 
 func facetRunner(t *testing.T, store *memoryStore, model Completer, now time.Time) *Runner {
@@ -182,6 +184,37 @@ func TestFacetStageInvalidIsCachedAndOutageIsRetried(t *testing.T) {
 	down.err = nil
 	if run, _ := facetRunner(t, outage, down, settled).RunOnce(ctx, TriggerManual); run.L1OK != 1 {
 		t.Fatalf("recovered run = %+v", run)
+	}
+}
+
+func TestFacetStageTruncatedOutputIsRetried(t *testing.T) {
+	ctx := context.Background()
+	settled := baseTime.Add(30 * time.Hour)
+	key := analysisID(sessionK, bytes.Repeat([]byte{1}, 32))
+
+	// Cut off before the JSON closed: one call, no in-run retry, stored as
+	// failed with its tokens counted.
+	store := newMemoryStore()
+	seedAgentSession(store)
+	model := &scriptedModel{answers: []string{`{"goal":"把导出改成流`}, truncated: true}
+	run, err := facetRunner(t, store, model, settled).RunOnce(ctx, TriggerManual)
+	if err != nil || run.L1Failed != 1 || run.L1Invalid != 0 || model.calls != 1 || run.L1InputTokens != 1000 {
+		t.Fatalf("truncated run = %+v calls=%d err=%v", run, model.calls, err)
+	}
+	if facet := store.facets[key]; facet.Status != FacetFailed || facet.OutputTokens != 100 {
+		t.Fatalf("truncated facet = %+v", facet)
+	}
+	// A later run asks again, unlike an invalid facet.
+	model.truncated = false
+	if run, _ := facetRunner(t, store, model, settled).RunOnce(ctx, TriggerManual); run.L1Candidates != 1 || run.L1OK != 1 || model.calls != 2 {
+		t.Fatalf("retry run = %+v calls=%d", run, model.calls)
+	}
+
+	// An answer that reached the limit but is complete JSON is still a facet.
+	whole := newMemoryStore()
+	seedAgentSession(whole)
+	if run, _ := facetRunner(t, whole, &scriptedModel{truncated: true}, settled).RunOnce(ctx, TriggerManual); run.L1OK != 1 || run.L1Failed != 0 {
+		t.Fatalf("complete answer at the limit = %+v", run)
 	}
 }
 

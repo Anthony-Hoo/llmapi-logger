@@ -109,6 +109,30 @@ func TestLLMClientRequestShapeAndPrefixStability(t *testing.T) {
 	}
 }
 
+func TestLLMClientReportsTruncation(t *testing.T) {
+	reason := "length"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		encoded, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"finish_reason": reason, "message": map[string]any{"role": "assistant", "content": `{"goal":"x`}}},
+			"usage":   map[string]any{"prompt_tokens": 1500, "completion_tokens": 600},
+		})
+		_, _ = writer.Write(encoded)
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewLLMClient(llmConfig(server.URL+"/v1"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut, err := client.Complete(context.Background(), FacetMessages("p", false), nil)
+	if err != nil || !cut.Truncated || cut.OutputTokens != 600 {
+		t.Fatalf("truncated completion = %+v, %v", cut, err)
+	}
+	reason = "stop"
+	if whole, err := client.Complete(context.Background(), FacetMessages("p", false), nil); err != nil || whole.Truncated {
+		t.Fatalf("finished completion = %+v, %v", whole, err)
+	}
+}
+
 func TestLLMClientDropsThinkingSwitchesWhenRejected(t *testing.T) {
 	server, requests := modelServer(t, func(body map[string]any) (int, string) {
 		if _, ok := body["think"]; ok {
