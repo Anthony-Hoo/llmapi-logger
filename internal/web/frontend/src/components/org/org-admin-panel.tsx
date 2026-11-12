@@ -47,7 +47,7 @@ function userLabel(users: NewAPIUser[], id: number): string {
   return user ? `${user.display_name || user.username} (#${id})` : `#${id}`;
 }
 
-/** Administrator tab "项目组与项目" (doc/features/23 section 8). */
+/** Settings section "项目组与项目" of the administrator's "系统配置" menu (doc/features/23 section 8). */
 export function OrgAdminPanel({ client }: { client: ApiClient }) {
   const [catalog, setCatalog] = useState<OrgCatalog | null>(null);
   const [users, setUsers] = useState<NewAPIUser[]>([]);

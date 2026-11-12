@@ -32,6 +32,8 @@ import {
 import { Skeleton } from "./components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
 import { ContentPolicyPanel } from "./components/content-policy-panel";
+import { ReportSettingsPanel } from "./components/settings/report-settings-panel";
+import { SystemSettings, type SettingsSection } from "./components/settings/system-settings";
 import { ConversationView } from "./components/conversation-view";
 // Recharts is only needed by the insights charts, so keep it out of the main chunk.
 const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
@@ -325,7 +327,9 @@ function Dashboard({
   const hasInsights = insightsEnabled(session);
   const hasOrgReports = orgReportsEnabled(session);
   const hasSessionAnalysis = session?.session_analysis_enabled === true;
-  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights" | "org-report" | "org-admin" | "analysis">("audits");
+  // Configuration pages share one entry, "系统配置"; the main navigation
+  // lists reading surfaces only.
+  const [view, setView] = useState<"audits" | "insights" | "org-report" | "analysis" | "settings">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -508,20 +512,10 @@ function Dashboard({
                 </button>
               ) : null}
               {isDeveloper ? null : (
-                <button type="button" className={segmentedItemClassName(view === "rules")} aria-current={view === "rules" ? "page" : undefined} onClick={() => setView("rules")}>
-                  UA 拦截规则
+                <button type="button" className={segmentedItemClassName(view === "settings")} aria-current={view === "settings" ? "page" : undefined} onClick={() => setView("settings")}>
+                  系统配置
                 </button>
               )}
-              {isDeveloper ? null : (
-                <button type="button" className={segmentedItemClassName(view === "content-policy")} aria-current={view === "content-policy" ? "page" : undefined} onClick={() => setView("content-policy")}>
-                  关键词拦截
-                </button>
-              )}
-              {hasOrgReports && !isDeveloper ? (
-                <button type="button" className={segmentedItemClassName(view === "org-admin")} aria-current={view === "org-admin" ? "page" : undefined} onClick={() => setView("org-admin")}>
-                  项目组与项目
-                </button>
-              ) : null}
             </nav>
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
@@ -535,17 +529,11 @@ function Dashboard({
       </header>
 
       <main className="mx-auto max-w-page space-y-section px-gutter py-section">
-        {view === "rules" && !isDeveloper ? (
-          <UserAgentRulesPanel client={client} />
-        ) : view === "content-policy" && !isDeveloper ? (
-          <ContentPolicyPanel client={client} />
+        {view === "settings" && !isDeveloper ? (
+          <SystemSettings sections={settingsSections(client, hasOrgReports, hasSessionAnalysis)} />
         ) : view === "org-report" && hasOrgReports ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <OrgReportView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey} />
-          </Suspense>
-        ) : view === "org-admin" && hasOrgReports && !isDeveloper ? (
-          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
-            <OrgAdminPanel client={client} />
           </Suspense>
         ) : view === "analysis" && hasSessionAnalysis ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
@@ -658,6 +646,38 @@ function Dashboard({
       </main>
     </div>
   );
+}
+
+/**
+ * The pages of the administrator's "系统配置" menu. Project groups need
+ * organisation reports; the report parameters need either feature.
+ */
+export function settingsSections(client: ApiClient, hasOrgReports: boolean, hasSessionAnalysis: boolean): SettingsSection[] {
+  const sections: SettingsSection[] = [
+    { id: "ua-rules", label: "UA 拦截规则", hint: "按 User-Agent 拒绝请求", render: () => <UserAgentRulesPanel client={client} /> },
+    { id: "content-policy", label: "关键词拦截", hint: "按请求内容拦截", render: () => <ContentPolicyPanel client={client} /> },
+  ];
+  if (hasOrgReports) {
+    sections.push({
+      id: "org",
+      label: "项目组与项目",
+      hint: "分组、项目与归属规则",
+      render: () => (
+        <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+          <OrgAdminPanel client={client} />
+        </Suspense>
+      ),
+    });
+  }
+  if (hasOrgReports || hasSessionAnalysis) {
+    sections.push({
+      id: "reports",
+      label: "周报与分析",
+      hint: "周报与分析的运行参数",
+      render: () => <ReportSettingsPanel client={client} hasOrgReports={hasOrgReports} hasSessionAnalysis={hasSessionAnalysis} />,
+    });
+  }
+  return sections;
 }
 
 const emptyRuleInput: UserAgentRuleInput = {
