@@ -57,6 +57,7 @@ import type {
   AnalysisSessionsQuery,
   AnalysisUsers,
 } from "./lib/session-analysis/types";
+import type { AnalysisProbeResult, AnalysisSettingsUpdate, AnalysisSettingsView } from "./lib/settings/types";
 
 const API_BASE = "/api/v1";
 
@@ -103,6 +104,14 @@ export interface ApiClient {
   getComposition: (auditID: string, signal?: AbortSignal) => Promise<CompositionResponse>;
   // Session analysis (doc/features/24-session-analysis.md).
   getAnalysisOverview: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal, userID?: number) => Promise<AnalysisOverview>;
+  /** Administrators only: the session analysis settings in use and where they come from. */
+  getAnalysisSettings: (signal?: AbortSignal) => Promise<AnalysisSettingsView>;
+  /** Saves settings that override the configuration file from the next run on. */
+  saveAnalysisSettings: (update: AnalysisSettingsUpdate, signal?: AbortSignal) => Promise<AnalysisSettingsView>;
+  /** Drops the saved settings; the configuration file applies again. */
+  resetAnalysisSettings: (signal?: AbortSignal) => Promise<AnalysisSettingsView>;
+  /** Validates unsaved settings and sends one synthetic request to the model endpoint. */
+  testAnalysisSettings: (update: AnalysisSettingsUpdate, signal?: AbortSignal) => Promise<AnalysisProbeResult>;
   /** Administrators only: session totals of a period per NewAPI user. */
   listAnalysisUsers: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisUsers>;
   listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
@@ -575,6 +584,26 @@ export function createApiClient(
         suggestions: (result.suggestions ?? []).map((item) => ({ ...item, evidence: item.evidence ?? [] })),
         optimizations: (result.optimizations ?? []).map((item) => ({ ...item, danger: item.danger ?? {}, secrets: item.secrets ?? {} })),
       };
+    },
+
+    getAnalysisSettings(signal) {
+      return requestJSON<AnalysisSettingsView>(`${API_BASE}/settings/session-analysis`, signal);
+    },
+
+    saveAnalysisSettings(update, signal) {
+      return mutateJSON<AnalysisSettingsView>(`${API_BASE}/settings/session-analysis`, "PUT", update, signal);
+    },
+
+    async resetAnalysisSettings(signal) {
+      const response = await sessionFetch(`${API_BASE}/settings/session-analysis`, { method: "DELETE", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+      return (await response.json()) as AnalysisSettingsView;
+    },
+
+    testAnalysisSettings(update, signal) {
+      return mutateJSON<AnalysisProbeResult>(`${API_BASE}/settings/session-analysis/test`, "POST", update, signal);
     },
 
     async dismissAnalysisSuggestion(id, signal) {

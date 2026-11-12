@@ -139,14 +139,47 @@ type Options struct {
 
 // Runner is the daily batch (doc 24 sections 5 and 7).
 type Runner struct {
-	options  Options
-	hour     int
-	minute   int
-	running  atomic.Bool
-	trigger  chan struct{}
-	stop     context.CancelFunc
-	done     chan struct{}
-	stopOnce sync.Once
+	// options is read all through a run, also by the goroutines a run starts.
+	// Its Config and LLM change only at the start of RunOnce, while no run is
+	// in progress (see Apply).
+	options Options
+	// runAt is the daily run time as minutes after midnight.
+	runAt   atomic.Int32
+	pending atomic.Pointer[runtimeSettings]
+	running atomic.Bool
+	trigger chan struct{}
+	// reschedule wakes the loop after the run time changed.
+	reschedule chan struct{}
+	stop       context.CancelFunc
+	done       chan struct{}
+	stopOnce   sync.Once
+}
+
+// runtimeSettings is what Apply hands to the next run.
+type runtimeSettings struct {
+	config config.SessionAnalysisConfig
+	llm    Completer
+}
+
+// Apply replaces the configuration and the model client of the runner. The
+// new values take effect at the start of the next run, never inside a running
+// one; a new daily run time reschedules the loop at once. llm is nil when the
+// model stage is disabled. The caller validates configuration first.
+func (runner *Runner) Apply(configuration config.SessionAnalysisConfig, llm Completer) error {
+	if runner == nil {
+		return errors.New("sessionanalysis: runner unavailable")
+	}
+	hour, minute, err := config.ParseRunAt(configuration.RunAt)
+	if err != nil {
+		return err
+	}
+	runner.pending.Store(&runtimeSettings{config: configuration, llm: llm})
+	runner.runAt.Store(int32(hour*60 + minute))
+	select {
+	case runner.reschedule <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // NewRunner validates the options.
@@ -167,7 +200,9 @@ func NewRunner(options Options) (*Runner, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &Runner{options: options, hour: hour, minute: minute, trigger: make(chan struct{}, 1)}, nil
+	runner := &Runner{options: options, trigger: make(chan struct{}, 1), reschedule: make(chan struct{}, 1)}
+	runner.runAt.Store(int32(hour*60 + minute))
+	return runner, nil
 }
 
 // Start runs the schedule loop until ctx ends or Close is called.
@@ -188,6 +223,9 @@ func (runner *Runner) Start(ctx context.Context) {
 			case <-loopContext.Done():
 				timer.Stop()
 				return
+			case <-runner.reschedule:
+				timer.Stop()
+				continue // the run time changed: wait for the new one
 			case <-runner.trigger:
 				timer.Stop()
 				trigger = TriggerManual
@@ -233,7 +271,8 @@ func (runner *Runner) Running() bool {
 
 func (runner *Runner) untilNextRun() time.Duration {
 	now := runner.options.Now().In(runner.options.Location)
-	next := time.Date(now.Year(), now.Month(), now.Day(), runner.hour, runner.minute, 0, 0, runner.options.Location)
+	runAt := int(runner.runAt.Load())
+	next := time.Date(now.Year(), now.Month(), now.Day(), runAt/60, runAt%60, 0, 0, runner.options.Location)
 	if !next.After(now) {
 		next = next.AddDate(0, 0, 1)
 	}
@@ -254,6 +293,11 @@ func (runner *Runner) RunOnce(ctx context.Context, trigger string) (storage.Sess
 		return storage.SessionAnalysisRun{}, ErrRunInProgress
 	}
 	defer runner.running.Store(false)
+	if next := runner.pending.Swap(nil); next != nil {
+		// Settings saved since the last run. Nothing else reads Config or LLM
+		// while no run is in progress.
+		runner.options.Config, runner.options.LLM = next.config, next.llm
+	}
 	options := runner.options
 	started := options.Now()
 	run := storage.SessionAnalysisRun{StartedAtNS: started.UnixNano(), Trigger: trigger}

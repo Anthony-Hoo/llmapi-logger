@@ -144,6 +144,15 @@ func validateSessionAnalysis(cfg Config) error {
 	return validateSessionLLM(analysis)
 }
 
+// ValidateSessionAnalysisRuntime checks an enabled session_analysis section
+// whose fields were replaced at run time (settings saved from the management
+// UI) with the checks the configuration file gets, so the page can never store
+// what the file would reject.
+func ValidateSessionAnalysisRuntime(analysis SessionAnalysisConfig) error {
+	analysis.Enabled = true
+	return validateSessionAnalysis(Config{Insights: InsightsConfig{Enabled: true}, SessionAnalysis: analysis})
+}
+
 func validateSessionLLM(analysis SessionAnalysisConfig) error {
 	llm := analysis.LLM
 	if !llm.Enabled {

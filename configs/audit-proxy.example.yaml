@@ -52,6 +52,9 @@ org_reports:
 # deterministic per-session signals, plus optional facets from a LOCAL model.
 # Requires insights. The llm block only accepts loopback/private endpoints
 # unless allow_non_local is set.
+# An administrator can change run_at, l1_settle_hours and the llm block (except
+# allow_non_local) from the management UI. Values saved there are stored in the
+# database and override this file until they are reset on the same page.
 session_analysis:
   enabled: false
   run_at: "02:00"

@@ -158,7 +158,7 @@ const (
 // Calibrate compares human labels with the stored facets of the current
 // prompt version and model and stores the per-field agreement.
 func (service *QueryService) Calibrate(ctx context.Context, labels []CalibrationLabel) (CalibrationResult, error) {
-	if service.facets == nil || service.model == "" {
+	if service.facets == nil || service.modelName() == "" {
 		return CalibrationResult{}, invalid("the local model is not enabled")
 	}
 	if len(labels) == 0 || len(labels) > maxCalibrationLabels {
@@ -166,7 +166,7 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 	}
 	compared := map[string]int64{}
 	agreed := map[string]int64{}
-	result := CalibrationResult{PromptVersion: PromptVersion, Model: service.model, Labels: len(labels)}
+	result := CalibrationResult{PromptVersion: PromptVersion, Model: service.modelName(), Labels: len(labels)}
 	for _, label := range labels {
 		key, err := ParseSessionID(label.SessionID)
 		if err != nil {
@@ -192,7 +192,7 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 		if err != nil {
 			return CalibrationResult{}, err
 		}
-		if facet.Status != FacetOK || facet.Kind != storage.PackKindSession || facet.PromptVersion != PromptVersion || facet.Model != service.model {
+		if facet.Status != FacetOK || facet.Kind != storage.PackKindSession || facet.PromptVersion != PromptVersion || facet.Model != service.modelName() {
 			continue
 		}
 		result.Samples++
@@ -233,7 +233,7 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 		return CalibrationResult{}, err
 	}
 	if err := service.facets.SaveFacetCalibration(ctx, storage.FacetCalibration{
-		CreatedAtNS: result.CreatedNS, PromptVersion: PromptVersion, Model: service.model, Samples: result.Samples, Agreement: string(encoded),
+		CreatedAtNS: result.CreatedNS, PromptVersion: PromptVersion, Model: service.modelName(), Samples: result.Samples, Agreement: string(encoded),
 	}); err != nil {
 		return CalibrationResult{}, err
 	}
@@ -306,10 +306,10 @@ func (service *QueryService) hiddenFields(ctx context.Context, promptVersion, mo
 
 // latestCalibration summarizes the newest calibration for the overview.
 func (service *QueryService) latestCalibration(ctx context.Context) *CalibrationResult {
-	if service.facets == nil || service.model == "" {
+	if service.facets == nil || service.modelName() == "" {
 		return nil
 	}
-	calibration, err := service.facets.LatestFacetCalibration(ctx, PromptVersion, service.model)
+	calibration, err := service.facets.LatestFacetCalibration(ctx, PromptVersion, service.modelName())
 	if err != nil {
 		return nil
 	}

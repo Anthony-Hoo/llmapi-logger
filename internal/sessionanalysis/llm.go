@@ -33,6 +33,18 @@ type Completion struct {
 	// Truncated reports that the model stopped at the output limit
 	// (finish_reason "length"), so Content may be cut off.
 	Truncated bool
+	// Reasoned reports that the answer came with reasoning (a reasoning
+	// field or reasoning tokens): the thinking switches did not take.
+	Reasoned bool
+}
+
+// StatusError is a model response with a status other than 200.
+type StatusError struct {
+	Code int
+}
+
+func (err *StatusError) Error() string {
+	return fmt.Sprintf("sessionanalysis: model returned status %d", err.Code)
 }
 
 // Completer calls a model; the LLM client implements it and tests fake it.
@@ -200,18 +212,23 @@ func (client *LLMClient) post(ctx context.Context, messages []ChatMessage, schem
 		return Completion{}, response.StatusCode, fmt.Errorf("sessionanalysis: read model response: %w", err)
 	}
 	if response.StatusCode != http.StatusOK {
-		return Completion{}, response.StatusCode, fmt.Errorf("sessionanalysis: model returned status %d", response.StatusCode)
+		return Completion{}, response.StatusCode, &StatusError{Code: response.StatusCode}
 	}
 	var decoded struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens     int64 `json:"prompt_tokens"`
 			CompletionTokens int64 `json:"completion_tokens"`
+			Details          struct {
+				ReasoningTokens int64 `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil || len(decoded.Choices) == 0 {
@@ -223,6 +240,8 @@ func (client *LLMClient) post(ctx context.Context, messages []ChatMessage, schem
 		OutputTokens: decoded.Usage.CompletionTokens,
 		Latency:      time.Since(started),
 		Truncated:    decoded.Choices[0].FinishReason == "length",
+		Reasoned: decoded.Choices[0].Message.ReasoningContent != "" || decoded.Choices[0].Message.Reasoning != "" ||
+			decoded.Usage.Details.ReasoningTokens > 0 || strings.Contains(decoded.Choices[0].Message.Content, "<think>"),
 	}, response.StatusCode, nil
 }
 

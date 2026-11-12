@@ -81,6 +81,36 @@ session_analysis:
 - **本地端点约束**：`allow_non_local=false` 时，`base_url` 的主机必须是 `localhost`、回环、RFC 1918、CGNAT 或 IPv6 ULA 地址。主机名只在启动时解析不够，HTTP 客户端在拨号时再次校验对端 IP，不符合就拒绝连接，防止 DNS 变化把内容送出去。
 - 分析客户端不复用数据面的 NewAPI rewrite 和上游代理设置，也不读取环境代理变量。
 
+### 4.1 页面上可改的项（2026-11-12）
+
+管理员可以在"系统配置 → 周报与分析"里修改下面这些项并保存，不用改配置文件、不用重启：
+
+| 项 | 说明 |
+| --- | --- |
+| `run_at`、`l1_settle_hours` | 每日运行时间、标注前的静默时间 |
+| `llm.enabled`、`llm.base_url`、`llm.model`、`llm.api_key` | 模型阶段的开关、地址、模型名、Key |
+| `llm.structured_output`、`llm.disable_thinking` | 结构化输出方式、是否关闭思考 |
+| `llm.context_tokens`、`llm.max_output_tokens`、`llm.max_concurrency`、`llm.timeout_seconds`、`llm.max_sessions_per_run` | 上下文长度、输出上限、并发、超时、每轮会话数 |
+
+- **保存的值覆盖配置文件**：存放在 `runtime_settings` 表的 `session_analysis` 一行，重启后仍然生效。"恢复为配置文件的值"删除这一行。保存之后再改配置文件里的同名项不起作用，页面上会标出"页面保存的设置，覆盖配置文件"。
+- **校验与配置文件相同**：保存时把这些值叠加到配置文件上，跑同一套启动校验（含上下文预算和本地端点约束），再用同一个客户端构造函数建客户端。校验不过返回 400 和字段说明，什么都不保存。
+- **只能在配置文件里改的项**：`enabled`、`llm.allow_non_local`、`session_idle_minutes`、`min_user_turns`、`min_active_seconds`、`pack.max_tokens`、`vocabulary_file`、`compliance`。页面不能放开"只允许本机或内网地址"的约束：这条约束检查的是地址本身，网关之后转发到哪里不在检查范围内。
+- **生效时机**：改动交给批处理后，在下一轮运行开始时才替换配置和模型客户端；正在运行的一轮按旧设置跑完。`run_at` 例外，保存后立即按新时间重新排程。
+- **Key**：单独加密存放（AES-GCM，与设置的 JSON 分开），任何接口都不返回，只返回它来自哪里（`none`、`file`、`saved`）。保存时不带 `api_key` 表示沿用当前的，空字符串表示不发送 Key。
+- **换模型的代价**：facet 按模型缓存，换模型后所有输入包都会重新标注，按 `max_sessions_per_run` 分多轮完成。
+- **启动时**：存储打开后把保存的值叠加到配置文件上。保存的值读不出、解不开或与当前配置文件组合后校验不过时（例如文件里调大了 `pack.max_tokens`），记一条 `runtime_settings_invalid` 告警并忽略它，按配置文件启动，不会因此启动失败。
+- **连接测试**：按表单里尚未保存的值做同样的校验，再向模型地址发一条固定的合成请求（"ping"），只返回是否成功、HTTP 状态、耗时、是否被截断、是否带思考内容、是否是 JSON 对象和 Token 数，不返回模型的输出，也不发送任何会话内容。
+- **留痕**：每次保存或恢复记一条日志，不含地址、模型名和 Key。
+
+接口（仅管理员，开发者会话 403，未启用会话分析时 404）：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/v1/settings/session-analysis` | 当前生效的值、来源（`file` / `saved`）、Key 的来源、配置文件里的值、只读项、是否有一轮正在运行 |
+| `PUT /api/v1/settings/session-analysis` | 校验、保存并交给批处理 |
+| `DELETE /api/v1/settings/session-analysis` | 删除保存的值，恢复为配置文件 |
+| `POST /api/v1/settings/session-analysis/test` | 连接测试，不保存 |
+
 ## 5. L0 确定性信号
 
 ### 5.1 会话单元与收口

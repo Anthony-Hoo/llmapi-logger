@@ -122,11 +122,33 @@ func loadSessionAnalysisVocabulary(configuration config.SessionAnalysisConfig) (
 // With it, sessions are booked to projects, service principals keep signals
 // only, and days and weeks follow org_reports.timezone instead of the process
 // time zone (doc 24 section 4).
-func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, projects *orgreport.Service, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
-	analysis := configuration.SessionAnalysis
-	if !analysis.Enabled || store == nil || loader == nil || cipher == nil || insightsVocabulary == nil || fingerprints == nil {
-		return nil, nil, nil
+func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, projects *orgreport.Service, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, *sessionanalysis.SettingsService, error) {
+	fileSection := configuration.SessionAnalysis
+	if !fileSection.Enabled || store == nil || loader == nil || cipher == nil || insightsVocabulary == nil || fingerprints == nil {
+		return nil, nil, nil, nil
 	}
+	// Settings saved from the management UI override the file for the fields
+	// the page edits; an unusable saved section is ignored with a warning.
+	loadContext, cancelLoad := context.WithTimeout(context.Background(), savedSettingsTimeout)
+	analysis := sessionanalysis.LoadEffectiveConfig(loadContext, fileSection, store, cipher, logger)
+	cancelLoad()
+	runner, service, err := assembleSessionAnalysisWith(configuration, analysis, store, loader, cipher, insightsVocabulary, fingerprints, projects, logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	settings, err := sessionanalysis.NewSettingsService(fileSection, store, cipher, runner, service, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("assemble session analysis settings: %w", err)
+	}
+	return runner, service, settings, nil
+}
+
+// savedSettingsTimeout bounds reading the saved settings at startup.
+const savedSettingsTimeout = 10 * time.Second
+
+// assembleSessionAnalysisWith builds the batch and the query service from the
+// effective section: the file's, with saved settings laid over it.
+func assembleSessionAnalysisWith(configuration config.Config, analysis config.SessionAnalysisConfig, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, projects *orgreport.Service, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
 	vocabulary, err := loadSessionAnalysisVocabulary(analysis)
 	if err != nil {
 		return nil, nil, err
@@ -430,8 +452,9 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		orgService = service
 	}
 	var sessionAnalysisService web.SessionAnalysisQuery
+	var sessionAnalysisSettings web.SessionAnalysisSettings
 	if queryService != nil {
-		runner, service, err := assembleSessionAnalysis(configuration, runtime.store, queryService, runtime.cipher, vocabulary, runtime.analysisFingerprints, application.orgReports, logger)
+		runner, service, settings, err := assembleSessionAnalysis(configuration, runtime.store, queryService, runtime.cipher, vocabulary, runtime.analysisFingerprints, application.orgReports, logger)
 		if err != nil {
 			_ = application.closeComponents()
 			return nil, err
@@ -439,6 +462,9 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		application.sessionRunner = runner
 		if service != nil {
 			sessionAnalysisService = service
+		}
+		if settings != nil {
+			sessionAnalysisSettings = settings
 		}
 	}
 	if runtime.store != nil && configuration.RetentionDays > 0 {
@@ -462,7 +488,8 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		Readiness:  application.readiness,
 		Logger:     logger,
 
-		SessionAnalysis: sessionAnalysisService,
+		SessionAnalysis:         sessionAnalysisService,
+		SessionAnalysisSettings: sessionAnalysisSettings,
 	})
 	if err != nil {
 		_ = application.closeComponents()

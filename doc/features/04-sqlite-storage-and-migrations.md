@@ -106,7 +106,7 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 
 ### 3.5 组织项目周报（模块 23，PostgreSQL migration 002）
 
-PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24](24-session-analysis.md)）只由运行时 `migrate()` 在 001 基线之后执行，各自在版本缺失时独立补上，不要求版本连续；离线导入器调用的 `InitializeImportSchema` 仍只建 001 基线（导入目标必须只含已知表），因此导入应在首次启动代理之前完成。这些表都不进 SQLite→PostgreSQL 离线迁移，也都不进完整性链（测试 `TestDerivedOrgTablesStayOutsideTheEvidenceChain` 锁定）。功能关闭时表存在但始终为空。
+PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24](24-session-analysis.md)）只由运行时 `migrate()` 在 001 基线之后执行，各自在版本缺失时独立补上，不要求版本连续；离线导入器调用的 `InitializeImportSchema` 仍只建 001 基线（导入目标必须只含已知表），因此导入应在首次启动代理之前完成。这些表都不进 SQLite→PostgreSQL 离线迁移，也都不进完整性链（测试 `TestDerivedOrgTablesStayOutsideTheEvidenceChain` 锁定）。功能关闭时表存在但始终为空。003 还建了 `runtime_settings`：管理员在管理页面上保存的设置，每个分区一行（目前是 `session_analysis`，`org_reports` 预留），明文 JSON 加一列 AES-GCM 加密的密钥；它覆盖配置文件里的同名项，不随 retention 删除（[24 §4.1](24-session-analysis.md)）。
 
 | 表 | 用途 | 生命周期 |
 | --- | --- | --- |

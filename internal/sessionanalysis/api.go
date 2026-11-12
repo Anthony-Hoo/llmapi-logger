@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"llmapi-logger/internal/query"
@@ -226,8 +227,10 @@ type QueryService struct {
 	facets  FacetStore
 	trigger Trigger
 	cipher  security.Cipher
-	// model is the local model name, empty when the LLM stage is disabled.
-	model    string
+	// model is the local model name, empty when the LLM stage is disabled. It
+	// changes when an administrator saves settings, so it is read through
+	// modelName.
+	model    atomic.Pointer[string]
 	now      func() time.Time
 	location *time.Location
 	// projects is nil unless organisation reports are enabled.
@@ -282,7 +285,22 @@ func NewQueryService(store QueryStore, trigger Trigger, cipher security.Cipher, 
 	if store == nil || cipher == nil {
 		return nil, errors.New("sessionanalysis: nil query store or cipher")
 	}
-	return &QueryService{store: store, facets: store, trigger: trigger, cipher: cipher, model: model, now: time.Now, location: time.Local}, nil
+	service := &QueryService{store: store, facets: store, trigger: trigger, cipher: cipher, now: time.Now, location: time.Local}
+	service.SetModel(model)
+	return service, nil
+}
+
+// SetModel names the model whose facets are current; empty when the model
+// stage is disabled.
+func (service *QueryService) SetModel(model string) {
+	service.model.Store(&model)
+}
+
+func (service *QueryService) modelName() string {
+	if model := service.model.Load(); model != nil {
+		return *model
+	}
+	return ""
 }
 
 func invalid(message string) error {
@@ -326,7 +344,7 @@ func (service *QueryService) Overview(ctx context.Context, fromNS, toNS int64, s
 	response := OverviewResponse{
 		FromNS: fromNS, ToNS: toNS,
 		Current: mapTotals(current), Previous: mapTotals(previous),
-		LLMEnabled: service.model != "", Model: service.model, PromptVersion: PromptVersion,
+		LLMEnabled: service.modelName() != "", Model: service.modelName(), PromptVersion: PromptVersion,
 		Calibration: service.latestCalibration(ctx),
 	}
 	if service.trigger != nil {

@@ -191,6 +191,32 @@ describe("session analysis API client", () => {
     expect(String(fetcher.mock.calls[3][0])).toBe("/api/v1/session-analysis/sessions?from_ns=1&to_ns=2&limit=50&user_id=7");
   });
 
+  it("reads, saves, tests and resets the saved settings", async () => {
+    const view = { source: "file", api_key: "file" };
+    const fetcher = vi.fn<typeof fetch>(async (input) => (String(input).endsWith("/test") ? jsonResponse({ ok: true, latency_ms: 5 }) : jsonResponse(view)));
+    const client = createApiClient(vi.fn(), fetcher);
+    const update = {
+      run_at: "03:30",
+      l1_settle_hours: 24,
+      llm: { enabled: true, base_url: "http://127.0.0.1:11434/v1", model: "m", structured_output: "json_schema" as const, context_tokens: 16384, disable_thinking: true, max_output_tokens: 1500, max_concurrency: 4, timeout_seconds: 120, max_sessions_per_run: 300 },
+    };
+    await expect(client.getAnalysisSettings()).resolves.toEqual(view);
+    expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/settings/session-analysis");
+    await client.saveAnalysisSettings(update);
+    expect(fetcher.mock.calls[1][1]?.method).toBe("PUT");
+    // No api_key in the body unless one was given.
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual(update);
+    await client.saveAnalysisSettings({ ...update, api_key: "" });
+    expect(JSON.parse(String(fetcher.mock.calls[2][1]?.body)).api_key).toBe("");
+    await expect(client.testAnalysisSettings(update)).resolves.toEqual({ ok: true, latency_ms: 5 });
+    expect(String(fetcher.mock.calls[3][0])).toBe("/api/v1/settings/session-analysis/test");
+    expect(fetcher.mock.calls[3][1]?.method).toBe("POST");
+    await expect(client.resetAnalysisSettings()).resolves.toEqual(view);
+    expect(fetcher.mock.calls[4][1]?.method).toBe("DELETE");
+    const failing = createApiClient(vi.fn(), vi.fn<typeof fetch>(async () => jsonResponse({ error: { code: "invalid_settings", message: "session_analysis.llm.max_concurrency must be between 1 and 64, got 99" } }, 400)));
+    await expect(failing.saveAnalysisSettings(update)).rejects.toThrow("max_concurrency must be between 1 and 64");
+  });
+
   it("labels where a session is booked", () => {
     expect(projectLabel({})).toBeNull();
     expect(projectLabel({ bucket: "attributed", project_id: 10, project: "orders" })).toBe("orders");

@@ -27,6 +27,7 @@ type runtimeStore interface {
 	retention.Store
 	sessionanalysis.Store
 	sessionanalysis.QueryStore
+	sessionanalysis.SettingsStore
 	contentpolicy.Repository
 	uaguard.Repository
 	Close() error

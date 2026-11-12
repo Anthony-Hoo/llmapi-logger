@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"llmapi-logger/internal/storage"
 )
@@ -101,6 +102,21 @@ func (store *Store) ActiveAnalysisKeys(context.Context, int64, int64) ([]storage
 
 func (store *Store) ActiveAnalysisProjects(context.Context, int64, int64) ([]int64, error) {
 	return nil, nil
+}
+
+// Settings saved from the management UI need PostgreSQL too: nothing is ever
+// saved here, so the configuration file always applies.
+
+func (store *Store) LoadRuntimeSettings(context.Context, string) (storage.RuntimeSettings, error) {
+	return storage.RuntimeSettings{}, sql.ErrNoRows
+}
+
+func (store *Store) SaveRuntimeSettings(context.Context, storage.RuntimeSettings) error {
+	return errors.New("sqlite: runtime settings need the PostgreSQL store")
+}
+
+func (store *Store) DeleteRuntimeSettings(context.Context, string) error {
+	return nil
 }
 
 func (store *Store) ActiveAnalysisUsers(context.Context, int64, int64) ([]int64, error) {

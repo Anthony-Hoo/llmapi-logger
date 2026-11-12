@@ -225,3 +225,15 @@ CREATE TABLE analysis_period_stats (
     computed_at_ns BIGINT NOT NULL,
     PRIMARY KEY (week_start_ns, scope, scope_key)
 );
+
+-- Settings saved from the management UI (doc 10 section 11). One row per
+-- section holds the fields the page edits and overrides the configuration
+-- file for them; deleting the row returns to the file. secret_enc is the
+-- section's secret (the model API key) as AES-GCM ciphertext; it never appears
+-- in settings.
+CREATE TABLE runtime_settings (
+    section TEXT COLLATE "C" PRIMARY KEY CHECK (section IN ('session_analysis', 'org_reports')),
+    settings TEXT COLLATE "C" NOT NULL,
+    secret_enc BYTEA,
+    updated_at_ns BIGINT NOT NULL
+);

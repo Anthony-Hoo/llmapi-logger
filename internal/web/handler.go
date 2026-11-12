@@ -101,6 +101,8 @@ type Options struct {
 
 	// SessionAnalysis is nil unless session_analysis.enabled.
 	SessionAnalysis SessionAnalysisQuery
+	// SessionAnalysisSettings is nil unless session_analysis.enabled.
+	SessionAnalysisSettings SessionAnalysisSettings
 }
 
 // NewHandler constructs the complete management handler. It rejects an empty
@@ -127,6 +129,8 @@ func NewHandler(options Options) (http.Handler, error) {
 		logger:    options.Logger,
 
 		sessionAnalysis: options.SessionAnalysis,
+
+		sessionAnalysisSettings: options.SessionAnalysisSettings,
 	}
 	handler.authenticator = newManagementAuth(options.AdminToken, options.Developer.usable())
 	handler.auth = handler.authenticator.middleware(handler.serveProtected)
@@ -149,6 +153,8 @@ type managementHandler struct {
 	logger        *slog.Logger
 
 	sessionAnalysis SessionAnalysisQuery
+
+	sessionAnalysisSettings SessionAnalysisSettings
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -203,6 +209,10 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveReady(writer, request)
 	case request.URL.Path == "/api/v1/newapi/callers":
 		handler.serveNewAPICallers(writer, request)
+	case request.URL.Path == sessionAnalysisSettingsPath:
+		handler.serveSessionAnalysisSettings(writer, request)
+	case request.URL.Path == sessionAnalysisSettingsTestPath:
+		handler.serveSessionAnalysisSettingsTest(writer, request)
 	case request.URL.Path == "/api/v1/user-agent-rules":
 		handler.serveUserAgentRuleCollection(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/user-agent-rules/"):

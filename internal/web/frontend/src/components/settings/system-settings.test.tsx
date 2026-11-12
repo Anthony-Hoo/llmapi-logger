@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "../../api";
 import { settingsSections } from "../../app";
-import type { AnalysisOverview } from "../../lib/session-analysis/types";
-import { AnalysisModelCard, OrgSettingsCard, ReportSettingsPanel } from "./report-settings-panel";
+import { contextBudget, draftChanged, draftFromSettings, keySourceLabel, probeSummary, updateFromDraft } from "../../lib/settings/analysis";
+import type { AnalysisSettingsView } from "../../lib/settings/types";
+import { AnalysisFileOnly, AnalysisSettingsCard, AnalysisSettingsFields, AnalysisSettingsStatus, ProbeOutcome } from "./analysis-settings-form";
+import { OrgSettingsCard, ReportSettingsPanel } from "./report-settings-panel";
 import { SystemSettings, type SettingsSection } from "./system-settings";
 
 describe("system settings menu", () => {
@@ -52,18 +54,124 @@ describe("system settings menu", () => {
     expect(org).toContain("codex、claude_code");
     expect(org).toContain("org_reports.flags.max_single_request_roots");
     expect(org).not.toContain("<input");
-
-    const overview = { from_ns: "1", to_ns: "2", running: false, llm_enabled: true, model: "local-small", prompt_version: "facet-v1" } as AnalysisOverview;
-    const model = renderToStaticMarkup(<AnalysisModelCard overview={overview} />);
-    expect(model).toContain("已启用");
-    expect(model).toContain("local-small");
-    expect(model).toContain("facet-v1");
-    const off = renderToStaticMarkup(<AnalysisModelCard overview={{ ...overview, llm_enabled: false, model: undefined }} />);
-    expect(off).toContain("未启用");
-    expect(off).not.toContain("session_analysis.llm.model");
+    expect(org).toContain("这里只读");
 
     const panel = renderToStaticMarkup(<ReportSettingsPanel client={{} as ApiClient} hasOrgReports hasSessionAnalysis />);
     expect(panel).toContain("周报与分析");
-    expect(panel).toContain("这里只读");
+    expect(panel).toContain("会话分析与周度复盘");
+    expect(panel).toContain("覆盖配置文件");
+  });
+});
+
+function settingsView(overrides: Partial<AnalysisSettingsView> = {}): AnalysisSettingsView {
+  const settings = {
+    run_at: "02:00",
+    l1_settle_hours: 24,
+    llm: {
+      enabled: true, base_url: "http://127.0.0.1:11434/v1", model: "local-small", structured_output: "json_schema" as const, context_tokens: 16384,
+      disable_thinking: true, max_output_tokens: 1500, max_concurrency: 1, timeout_seconds: 120, max_sessions_per_run: 300,
+    },
+  };
+  return {
+    source: "file", settings, api_key: "file", file: settings, file_api_key: true, running: false,
+    file_only: { allow_non_local: false, session_idle_minutes: 120, min_user_turns: 2, min_active_seconds: 60, pack_max_tokens: 6000, prompt_reserve_tokens: 2500 },
+    ...overrides,
+  };
+}
+
+describe("session analysis settings form", () => {
+  it("builds the request from the draft and never sends a key that was not typed", () => {
+    const view = settingsView();
+    const draft = draftFromSettings(view.settings);
+    expect(draft.api_key).toBe("");
+    expect(draftChanged(draft, view)).toBe(false);
+    // Unchanged: the same values go back and no api_key field at all.
+    expect(updateFromDraft(draft)).toEqual(view.settings);
+    expect("api_key" in updateFromDraft(draft)).toBe(false);
+
+    const edited = { ...draft, max_concurrency: " 4 ", model: " other-model ", base_url: " http://10.0.0.5:8000/v1 " };
+    expect(draftChanged(edited, view)).toBe(true);
+    const update = updateFromDraft(edited);
+    expect(update.llm.max_concurrency).toBe(4);
+    expect(update.llm.model).toBe("other-model");
+    expect(update.llm.base_url).toBe("http://10.0.0.5:8000/v1");
+
+    expect(updateFromDraft({ ...draft, api_key: "new-key" }).api_key).toBe("new-key");
+    expect(draftChanged({ ...draft, api_key: "new-key" }, view)).toBe(true);
+    // "不使用 Key" wins over anything typed and sends an empty key.
+    expect(updateFromDraft({ ...draft, api_key: "typed", clear_key: true }).api_key).toBe("");
+    expect(draftChanged({ ...draft, clear_key: true }, view)).toBe(true);
+    expect(draftChanged({ ...draft, clear_key: true }, settingsView({ api_key: "none" }))).toBe(false);
+    // Not a whole number: sent as -1 so the server names the field.
+    expect(updateFromDraft({ ...draft, max_output_tokens: "1.5k" }).llm.max_output_tokens).toBe(-1);
+    expect(updateFromDraft({ ...draft, timeout_seconds: "" }).llm.timeout_seconds).toBe(-1);
+  });
+
+  it("checks the context budget and words the key source", () => {
+    const view = settingsView();
+    const draft = draftFromSettings(view.settings);
+    expect(contextBudget(draft, view)).toEqual({ used: 10000, limit: 16384, fits: true });
+    expect(contextBudget({ ...draft, max_output_tokens: "9000" }, view)).toEqual({ used: 17500, limit: 16384, fits: false });
+    expect(contextBudget({ ...draft, context_tokens: "abc" }, view)).toBeNull();
+    expect(keySourceLabel(view)).toContain("配置文件");
+    expect(keySourceLabel(settingsView({ api_key: "saved" }))).toContain("已在页面上保存");
+    expect(keySourceLabel(settingsView({ api_key: "none" }))).toContain("未设置");
+  });
+
+  it("renders the fields without the key in use, with the limits it will hit", () => {
+    const view = settingsView();
+    const draft = draftFromSettings(view.settings);
+    const html = renderToStaticMarkup(<AnalysisSettingsFields view={view} draft={draft} busy={false} onChange={() => undefined} />);
+    expect(html).toContain('type="password"');
+    expect(html).toContain("new-password");
+    expect(html).toMatch(/id="analysis-api_key"[^>]*value=""/);
+    expect(html).toContain("这里不会显示已有的 Key");
+    expect(html).toContain("只能是本机或内网地址");
+    expect(html).toContain("网关之后转发到哪里不在检查范围内");
+    expect(html).toContain("不超过上下文长度 16384");
+    expect(html).not.toContain("换模型后");
+
+    const changed = renderToStaticMarkup(
+      <AnalysisSettingsFields view={view} draft={{ ...draft, model: "other", max_output_tokens: "9000", clear_key: true }} busy={false} onChange={() => undefined} />,
+    );
+    expect(changed).toContain("换模型后，已有的标注都不再算数");
+    expect(changed).toContain("保存会被拒绝");
+    expect(changed).toContain("保存后不发送 Key");
+    const loose = renderToStaticMarkup(
+      <AnalysisSettingsFields view={settingsView({ file_only: { ...view.file_only, allow_non_local: true } })} draft={draft} busy={false} onChange={() => undefined} />,
+    );
+    expect(loose).toContain("已放开非本地地址");
+
+    const fileOnly = renderToStaticMarkup(<AnalysisFileOnly view={view} />);
+    expect(fileOnly).toContain("session_analysis.llm.allow_non_local");
+    expect(fileOnly).toContain("6000 Token");
+    expect(fileOnly).not.toContain("<input");
+  });
+
+  it("says where the settings come from and when a change applies", () => {
+    expect(renderToStaticMarkup(<AnalysisSettingsStatus view={settingsView()} />)).toContain("来自配置文件");
+    const saved = renderToStaticMarkup(<AnalysisSettingsStatus view={settingsView({ source: "saved", updated_ns: "1800000000000000000", running: true })} />);
+    expect(saved).toContain("覆盖配置文件");
+    expect(saved).toContain("保存于");
+    expect(saved).toContain("它仍按旧设置跑完");
+    expect(renderToStaticMarkup(<AnalysisSettingsCard client={{} as ApiClient} />)).toContain("会话分析与周度复盘");
+  });
+
+  it("explains the outcome of a connection test without showing model output", () => {
+    const ok = { ok: true, http_status: 200, latency_ms: 840, truncated: false, reasoned: false, valid_json: true, input_tokens: 20, output_tokens: 6 };
+    expect(probeSummary(ok)).toEqual({ tone: "success", text: "连接成功，用时 840 毫秒（输入 20 / 输出 6 Token）。", notes: [] });
+    const thinking = probeSummary({ ...ok, reasoned: true, truncated: true, valid_json: false });
+    expect(thinking.tone).toBe("warning");
+    expect(thinking.notes).toHaveLength(3);
+    expect(thinking.notes[0]).toContain("没有生效");
+    const unauthorized = probeSummary({ ...ok, ok: false, error: "http_status", http_status: 401 });
+    expect(unauthorized.tone).toBe("danger");
+    expect(unauthorized.text).toContain("HTTP 401");
+    expect(unauthorized.text).toContain("Key 不对或没有填");
+    expect(probeSummary({ ...ok, ok: false, error: "invalid_address", http_status: undefined }).text).toContain("只能是本机或内网地址");
+    expect(probeSummary({ ...ok, ok: false, error: "timeout" }).text).toContain("超时");
+    const html = renderToStaticMarkup(<ProbeOutcome result={{ ...ok, reasoned: true }} />);
+    expect(html).toContain("连接成功");
+    expect(html).toContain("思考会占用输出上限");
   });
 });
