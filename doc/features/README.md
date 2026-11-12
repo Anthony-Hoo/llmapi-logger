@@ -145,10 +145,12 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 20 | [上下文分析与用量洞察](20-context-insights.md) |
 | 21 | [NewAPI 实际计费](21-newapi-billing.md) |
 | 22 | [关键词/模型请求拦截与上游策略拒绝识别](22-content-policy.md) |
+| 23 | [组织项目周报与使用合规（可选，默认关闭）](23-org-project-reports.md) |
+| 24 | [会话记录分析（可选，默认关闭）](24-session-analysis.md) |
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。关键词/模型拦截规则与上游策略拒绝分类见[模块 22](22-content-policy.md)。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。关键词/模型拦截规则与上游策略拒绝分类见[模块 22](22-content-policy.md)。可选的组织项目周报（`org_reports.enabled`，默认关闭，[模块 23](23-org-project-reports.md)）在 parser 内按请求提取加密的项目标识，按管理员配置的项目组与规则归属，按 Agent 树根会话计算 AI 活跃时长并冻结周快照；关闭时不提取、不跑作业、`/api/v1/org/*` 全部 404。可选的会话记录分析（`session_analysis.enabled`，默认关闭，[模块 24](24-session-analysis.md)）每日批处理按 Agent 树根会话计算确定性信号、生成加密的输入包，并可调用只允许本机或内网地址的模型做逐会话标注和周度复盘；管理员可以按用户查看，开发者只看自己 Key 的会话。配置类页面集中在管理页面的“系统配置”里，其中周报与会话分析的部分运行参数可以在页面上修改并覆盖配置文件（[模块 10](10-query-api-and-minimal-web-ui.md) §11）；管理页面有亮色和暗色两套主题（[设计 Token 规范](../design/tokens.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 

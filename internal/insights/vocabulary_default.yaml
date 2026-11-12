@@ -6,6 +6,12 @@
 clients:
   codex:
     priority: 10
+    # Project identity for org reports (doc 23): the body copy is canonical,
+    # the header a compatibility projection.
+    project_body_paths:
+      - {path: client_metadata.x-codex-turn-metadata, kind: codex_turn_metadata}
+    project_headers:
+      - {header: x-codex-turn-metadata, kind: codex_turn_metadata}
     detect:
       user_agent_prefixes: ["codex_cli_rs/"]
       headers_present: [originator, x-codex-parent-thread-id, x-openai-subagent]
@@ -45,6 +51,8 @@ clients:
 
   opencode:
     priority: 30
+    project_headers:
+      - {header: x-opencode-project, kind: opencode_project}
     detect:
       user_agent_prefixes: ["opencode/"]
       headers_present: [x-opencode-client, x-opencode-session-id]
@@ -53,15 +61,67 @@ clients:
 
   dsh:
     priority: 40
+    project_body_paths:
+      - {path: dsh_session_log.session.cwd, kind: cwd}
     detect:
       user_agent_prefixes: ["deepseek-harness/"]
       headers_present: [x-deepseek-harness-session-id]
     node_headers: [x-deepseek-harness-session-id]
-    parent_body_paths: [dsh_session_log.header.parentSession]
+    # deepseek-harness docs/deepseek-llm-api-wire-extensions.md: the session
+    # block carries parentSession (with origin "subagent", delegationDepth,
+    # cwd). header.parentSession is kept as a fallback for older builds that
+    # may have put it there. The pi-ai adapter path sends no session headers
+    # and falls back to content inference.
+    parent_body_paths:
+      - dsh_session_log.session.parentSession
+      - dsh_session_log.header.parentSession
     role_headers:
       - header: x-deepseek-harness-compact
         values:
           "1": compaction
+
+  # Z.ai ZCode (zai-org/ZCode, apps/zcode-cli/packages/adapters/src/model/
+  # runner-attribution.ts). UA ZCode/<ver>, X-Title "Z Code@electron" or
+  # "Z Code@cli". x-session-id is the session id with the sess_ /
+  # subagent_agent_ prefix stripped, so a sub-agent has its own node id.
+  # How a sub-agent names its parent is not verified, so there is no parent
+  # rule: sub-agents link through content matching.
+  zcode:
+    priority: 42
+    detect:
+      user_agent_prefixes: ["ZCode/"]
+      headers_present: [x-zcode-session-type]
+    node_headers: [x-session-id]
+    # The first matching role header wins: query source first, so a compact
+    # request of a main session is a compaction. project_memory_* query
+    # sources have no exact value to map and stay with the session type.
+    role_headers:
+      - header: x-zcode-query-source
+        values:
+          compact: compaction
+          session_title: title
+      - header: x-zcode-session-type
+        values:
+          main: main
+          subagent: subagent
+          side_chat: auxiliary
+          other: auxiliary
+
+  # pi (earendil-works/pi, formerly badlogic/pi-mono; packages/ai/src/utils/
+  # identity.ts, packages/ai/src/api/openai-responses.ts). UA
+  # "pi/<ver> (<platform>; <runtime>/<ver>; <arch>)". Only the OpenAI
+  # Responses provider sends session-id (and x-client-request-id, the same
+  # uuid) by default; Chat Completions and Anthropic send no session id. No
+  # built-in sub-agents; compaction is the side_requests system prefix below.
+  # Detected by User-Agent only: session-id is shared with Codex, and pi's
+  # ChatGPT-backend provider also sends originator: pi, which the codex
+  # header rule would otherwise claim.
+  pi:
+    priority: 45
+    detect:
+      user_agent_prefixes: ["pi/"]
+    root_headers: [session-id]
+    node_headers: [session-id]
 
   # Generic custom agent frameworks (doc section 11). Lowest priority: native
   # client headers win.
@@ -153,6 +213,20 @@ side_requests:
   - role: compaction
     system_prefixes: ["You are a context summarization assistant."]
 
+# User-role text parts that a client injected rather than a person typed
+# (doc/features/24-session-analysis.md section 6.3). Leading whitespace is
+# trimmed and the first 64 characters are compared case-insensitively. The
+# conversation view's user-input outline uses the same list; keep them equal.
+user_input_exclude_prefixes:
+  - "<environment_context"
+  - "<user_instructions"
+  - "<system-reminder"
+  - "<permissions"
+  - "<skill"
+  - "<user-prompt-submit-hook"
+  - "<turn_aborted"
+  - "# agents.md"
+
 file_ops:
   path_keys: [file_path, filePath, path, notebook_path]
   old_keys: [old_string, old_str]
@@ -175,3 +249,34 @@ file_ops:
     bash: {op: shell}
     shell: {op: shell}
     exec_command: {op: shell}
+
+# Project identity signals read from every request, whatever its client
+# (doc/features/23-org-project-reports.md section 5.1). Only the optional
+# organisation reports read them. Text patterns run over system, developer and
+# user text of the first and last messages; the first non-empty capture group
+# is the value and a later match replaces an earlier one (environment update).
+project:
+  headers:
+    - {header: x-agent-project, kind: declared}
+  text_patterns:
+    # Codex <environment_context> and pi >= 0.86 system prompt.
+    - kind: cwd
+      pattern: '(?s)<cwd>\s*([^<\r\n]+?)\s*</cwd>'
+    # Claude Code and ZCode environment block, including "# Environment
+    # update" lines of the form "<new> (was <old>)".
+    - kind: cwd
+      pattern: '(?m)^[ \t]*-[ \t]*Primary working directory:[ \t]*(\S[^\r\n]*?)(?:[ \t]+\(was [^\r\n]*\))?[ \t]*\r?$'
+    # Claude Code project instructions file in the repository root.
+    - kind: root_file
+      pattern: 'Contents of ([^\r\n]+?[\\/]CLAUDE\.md) \(project instructions'
+    # OpenCode <env> block (v2 adds the git top level).
+    - kind: root
+      pattern: '(?m)^[ \t]*Workspace root folder:[ \t]*(\S[^\r\n]*?)[ \t]*\r?$'
+    - kind: cwd
+      pattern: '(?m)^[ \t]*Working directory:[ \t]*(\S[^\r\n]*?)[ \t]*\r?$'
+    # pi project instructions file.
+    - kind: root_file
+      pattern: '<project_instructions path="([^"\r\n]+)"'
+    # pi before 0.86 and dsh: quoted (dsh) or bare (pi) path.
+    - kind: cwd
+      pattern: '(?m)Current working directory:[ \t]*(?:"([^"\r\n]+)"|([^"\s][^\r\n]*?))[ \t]*\.?[ \t]*\r?$'

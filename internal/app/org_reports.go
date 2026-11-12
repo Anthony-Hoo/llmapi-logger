@@ -1,0 +1,100 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/insights"
+	"llmapi-logger/internal/orgreport"
+	"llmapi-logger/internal/parser"
+	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage/postgres"
+)
+
+// orgStore is the persistence the organisation reports need; the PostgreSQL
+// store implements it.
+type orgStore interface {
+	insights.ProjectStore
+	orgreport.Repository
+	orgreport.DataStore
+	orgreport.SnapshotStore
+	orgreport.SettingsStore
+}
+
+// The runtime type assertion in assembleOrgReports is only exercised by an
+// enabled PostgreSQL deployment; pin the contract at compile time.
+var _ orgStore = (*postgres.Store)(nil)
+
+// orgAssembly is what the organisation reports need from the rest of the
+// application. config.Validate already guarantees NewAPI identity and
+// insights; the store must additionally implement orgStore.
+type orgAssembly struct {
+	ctx           context.Context
+	configuration config.Config
+	logger        *slog.Logger
+	store         runtimeStore
+	cipher        security.Cipher
+	vocabulary    *insights.Vocabulary
+	fingerprints  *security.AnalysisFingerprinter
+	worker        *parser.Worker
+}
+
+// vocabularyClients lists the clients a request can be attributed to, for the
+// ranked-clients choice of the settings page.
+func vocabularyClients(vocabulary *insights.Vocabulary) []orgreport.ClientOption {
+	labels := vocabulary.ClientLabels()
+	keys := vocabulary.ClientKeys()
+	clients := make([]orgreport.ClientOption, 0, len(keys))
+	for _, key := range keys {
+		clients = append(clients, orgreport.ClientOption{Key: key, Label: labels[key]})
+	}
+	return clients
+}
+
+// assembleOrgReports builds the organisation report service of an enabled
+// deployment and installs its parser hooks: the project identity extractor
+// on the live path and its backfill.
+func assembleOrgReports(assembly orgAssembly) (*orgreport.Service, error) {
+	settings, err := orgreport.SettingsFromConfig(assembly.configuration.OrgReports, assembly.configuration.NewAPI.UserID)
+	if err != nil {
+		return nil, err
+	}
+	store, ok := assembly.store.(orgStore)
+	if !ok || assembly.cipher == nil || assembly.fingerprints == nil || assembly.vocabulary == nil {
+		return nil, errors.New("org reports need the PostgreSQL store, the audit key and insights")
+	}
+	runner, err := insights.NewProjectRunner(store, assembly.cipher, assembly.vocabulary, assembly.fingerprints)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(assembly.ctx, 10*time.Second)
+	defer cancel()
+	var progress orgreport.AnalysisProgress
+	if assembly.worker != nil {
+		progress = assembly.worker
+	}
+	service, err := orgreport.NewService(ctx, orgreport.Options{
+		Settings: settings, Repository: store, Data: store, Snapshots: store,
+		Cipher: assembly.cipher, Logger: assembly.logger, IdentityVersion: insights.ProjectIdentityVersion,
+		// The freeze job waits for the analysis backfill to reach a week.
+		AnalysisProgress: progress,
+		// Settings saved from the management UI override the file for the
+		// fields the page edits.
+		File: assembly.configuration.OrgReports, SavedSettings: store, Clients: vocabularyClients(assembly.vocabulary),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if assembly.worker != nil {
+		allowlist := append(assembly.vocabulary.HeaderAllowlist(), assembly.vocabulary.ProjectHeaderAllowlist()...)
+		assembly.worker.SetHeaderAllowlist(allowlist)
+		assembly.worker.SetProjectAnalyzer(runner)
+		// Weekly snapshots ride the parser idle cadence; the tick only
+		// starts a guarded goroutine and never blocks parsing.
+		assembly.worker.AddIdleTask(service.SnapshotTick)
+	}
+	return service, nil
+}

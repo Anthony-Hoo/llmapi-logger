@@ -39,6 +39,11 @@ type sessionResponse struct {
 	// InsightsEnabled tells the UI whether the context-insights routes exist, so
 	// it can hide the views that would only answer 404.
 	InsightsEnabled bool `json:"insights_enabled"`
+	// OrgReportsEnabled tells the UI whether the organisation report routes
+	// exist (doc/features/23-org-project-reports.md).
+	OrgReportsEnabled bool `json:"org_reports_enabled"`
+	// SessionAnalysisEnabled likewise reports the session analysis routes.
+	SessionAnalysisEnabled bool `json:"session_analysis_enabled"`
 }
 
 // serveSession is dispatched before the authenticating middleware, because
@@ -71,7 +76,8 @@ func (handler *managementHandler) serveSessionInfo(writer http.ResponseWriter, r
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
 		return
 	}
-	response := sessionResponse{Status: "authenticated", Role: caller.Role, InsightsEnabled: handler.insights != nil}
+	response := sessionResponse{Status: "authenticated", Role: caller.Role, InsightsEnabled: handler.insights != nil,
+		OrgReportsEnabled: handler.org != nil, SessionAnalysisEnabled: handler.sessionAnalysis != nil}
 	if !caller.ExpiresAt.IsZero() {
 		response.ExpiresAt = caller.ExpiresAt.Format(time.RFC3339)
 	}
@@ -120,7 +126,8 @@ func (handler *managementHandler) serveLogin(writer http.ResponseWriter, request
 	expires := handler.authenticator.issueSessionCookie(writer, request)
 	writeJSON(writer, http.StatusOK, sessionResponse{
 		Status: "authenticated", Role: roleAdmin, ExpiresAt: expires.Format(time.RFC3339),
-		InsightsEnabled: handler.insights != nil,
+		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
+		SessionAnalysisEnabled: handler.sessionAnalysis != nil,
 	})
 }
 
@@ -168,7 +175,8 @@ func (handler *managementHandler) loginDeveloper(writer http.ResponseWriter, req
 	handler.logins.recordSuccess(request)
 	response := sessionResponse{
 		Status: "authenticated", Role: roleDeveloper, ExpiresAt: expires.Format(time.RFC3339),
-		InsightsEnabled: handler.insights != nil,
+		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
+		SessionAnalysisEnabled: handler.sessionAnalysis != nil,
 		Identity: &developerIdentity{
 			UserID: payload.UserID, Username: payload.Username,
 			TokenID: payload.TokenID, TokenName: payload.TokenName,

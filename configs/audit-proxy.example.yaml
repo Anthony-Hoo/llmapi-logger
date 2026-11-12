@@ -39,6 +39,46 @@ insights:
   # Optional per-model context-window overrides in tokens, e.g.
   # my-gateway-alias: 200000
   context_windows: {}
+# Optional organisation project reports (doc/features/23). Off by default;
+# enabling it requires newapi.access_token/user_id and insights.enabled.
+# Groups, projects and rules are managed in the admin UI, not here.
+# An administrator can change idle_gap_seconds, ranked_clients and the anomaly
+# thresholds from the management UI; values saved there are stored in the
+# database and override this file until they are reset on the same page.
+org_reports:
+  enabled: false
+  timezone: Asia/Shanghai
+  week_start: monday
+  idle_gap_seconds: 180
+
+# Session analysis (doc/features/24-session-analysis.md): a daily batch of
+# deterministic per-session signals, plus optional facets from a LOCAL model.
+# Requires insights. The llm block only accepts loopback/private endpoints
+# unless allow_non_local is set.
+# An administrator can change run_at, l1_settle_hours and the llm block (except
+# allow_non_local) from the management UI. Values saved there are stored in the
+# database and override this file until they are reset on the same page.
+session_analysis:
+  enabled: false
+  run_at: "02:00"
+  session_idle_minutes: 120
+  l1_settle_hours: 24
+  min_user_turns: 2
+  min_active_seconds: 60
+  vocabulary_file: ""
+  pack:
+    max_tokens: 6000
+  llm:
+    enabled: false
+    base_url: http://127.0.0.1:11434/v1
+    model: ""
+    structured_output: json_schema
+    context_tokens: 16384
+    disable_thinking: true
+    max_output_tokens: 1500
+    max_concurrency: 1
+    timeout_seconds: 120
+    max_sessions_per_run: 300
 
 interceptors:
   require-client-credential:

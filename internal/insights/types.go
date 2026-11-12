@@ -16,7 +16,7 @@ import (
 // AnalysisVersion is bumped whenever stored analysis would change for the same
 // evidence, including a change to the built-in vocabulary. The backfill job
 // recomputes rows with an older version.
-const AnalysisVersion = 8
+const AnalysisVersion = 9
 
 // Composition categories, in display order.
 const (
@@ -189,7 +189,7 @@ type Fingerprinter interface {
 // AgentIdentity is what the request itself says about its agent. Raw IDs are
 // sensitive: only their fingerprints are stored in plaintext columns.
 type AgentIdentity struct {
-	Client     string `json:"client"` // codex | claude_code | opencode | dsh | custom | unknown
+	Client     string `json:"client"` // codex | claude_code | opencode | dsh | zcode | pi | custom | unknown
 	Role       string `json:"role"`
 	RootID     string `json:"root_id,omitempty"`
 	NodeID     string `json:"node_id,omitempty"`

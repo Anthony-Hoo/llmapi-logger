@@ -1,0 +1,459 @@
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"llmapi-logger/internal/storage"
+)
+
+// maxRepeatedSessionKeys bounds the member sessions returned per repeated
+// fingerprint; they are only used to recover the sentence text and evidence.
+const maxRepeatedSessionKeys = 10
+
+// ActiveAnalysisKeys lists the API keys with analysed sessions whose last
+// request falls in [fromNS, toNS). Sessions of service principals do not
+// count: they are not reported.
+func (store *Store) ActiveAnalysisKeys(ctx context.Context, fromNS, toNS int64) ([]storage.ScopeKey, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT s.api_key_fpr, MAX(s.newapi_token_id)
+FROM session_signals AS s
+WHERE s.last_ns >= $1 AND s.last_ns < $2 AND s.api_key_fpr IS NOT NULL AND s.bucket IS DISTINCT FROM 'service'
+GROUP BY s.api_key_fpr
+ORDER BY s.api_key_fpr`, fromNS, toNS)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active analysis keys: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.ScopeKey, 0)
+	for rows.Next() {
+		var key storage.ScopeKey
+		if err := rows.Scan(&key.APIKeyFPR, &key.NewAPITokenID); err != nil {
+			return nil, fmt.Errorf("postgres: scan active analysis key: %w", err)
+		}
+		out = append(out, key)
+	}
+	return out, rows.Err()
+}
+
+// ActiveAnalysisUsers lists the NewAPI users with analysed sessions whose
+// last request falls in [fromNS, toNS), ascending. Sessions of service
+// principals do not count.
+func (store *Store) ActiveAnalysisUsers(ctx context.Context, fromNS, toNS int64) ([]int64, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT DISTINCT s.newapi_user_id
+FROM session_signals AS s
+WHERE s.last_ns >= $1 AND s.last_ns < $2 AND s.newapi_user_id IS NOT NULL AND s.bucket IS DISTINCT FROM 'service'
+ORDER BY s.newapi_user_id`, fromNS, toNS)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active analysis users: %w", err)
+	}
+	defer rows.Close()
+	out := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres: scan active analysis user: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// userKeysSubquery selects the API keys a NewAPI user has sent sessions with;
+// %s is the user id parameter. A key belongs to one user.
+const userKeysSubquery = `(SELECT DISTINCT k.api_key_fpr FROM session_signals AS k WHERE k.newapi_user_id = %s AND k.api_key_fpr IS NOT NULL)`
+
+// ActiveAnalysisProjects lists the projects that sessions whose last request
+// falls in [fromNS, toNS) are booked to, ascending. Service sessions do not
+// count.
+func (store *Store) ActiveAnalysisProjects(ctx context.Context, fromNS, toNS int64) ([]int64, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT DISTINCT s.project_id
+FROM session_signals AS s
+WHERE s.last_ns >= $1 AND s.last_ns < $2 AND s.project_id IS NOT NULL AND s.bucket IS DISTINCT FROM 'service'
+ORDER BY s.project_id`, fromNS, toNS)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active analysis projects: %w", err)
+	}
+	defer rows.Close()
+	out := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres: scan active analysis project: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListPeriodScopeKeys returns the scope keys that have statistics for one
+// week and scope, ascending.
+func (store *Store) ListPeriodScopeKeys(ctx context.Context, weekStartNS int64, scope string) ([][]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT p.scope_key FROM analysis_period_stats AS p
+WHERE p.week_start_ns = $1 AND p.scope = $2
+ORDER BY p.scope_key`, weekStartNS, scope)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list period scopes: %w", err)
+	}
+	defer rows.Close()
+	out := make([][]byte, 0)
+	for rows.Next() {
+		var key []byte
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("postgres: scan period scope: %w", err)
+		}
+		out = append(out, key)
+	}
+	return out, rows.Err()
+}
+
+// FacetEnums returns the plaintext enums of the ok facets whose session's
+// last request falls in [fromNS, toNS). A project or user-list scope reads the
+// facets of session packs only, through their signals row; a chat digest
+// spans sessions and belongs to neither. A single-user scope (UserID) also
+// reads the chat digests of that user's API keys.
+func (store *Store) FacetEnums(ctx context.Context, fromNS, toNS int64, scope storage.FacetScope) ([]storage.FacetEnumRow, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	arguments := []any{fromNS, toNS}
+	push := func(value any) string {
+		arguments = append(arguments, value)
+		return parameter(len(arguments))
+	}
+	join, conditions := "", ""
+	if len(scope.APIKeyFPR) != 0 {
+		conditions += ` AND f.api_key_fpr = ` + push(scope.APIKeyFPR)
+	}
+	if scope.ProjectID != nil || scope.UserIDs != nil {
+		join = ` JOIN session_signals AS s ON s.session_key = f.session_key`
+		conditions += ` AND s.bucket IS DISTINCT FROM 'service'`
+		if scope.ProjectID != nil {
+			conditions += ` AND s.project_id = ` + push(*scope.ProjectID)
+		}
+		if scope.UserIDs != nil {
+			conditions += ` AND s.newapi_user_id = ANY(` + push(scope.UserIDs) + `::bigint[])`
+		}
+	}
+	if scope.UserID != nil {
+		user := push(*scope.UserID)
+		conditions += ` AND (EXISTS (SELECT 1 FROM session_signals AS u WHERE u.session_key = f.session_key AND u.newapi_user_id = ` + user +
+			` AND u.bucket IS DISTINCT FROM 'service')
+       OR (f.kind = 'chat_digest' AND f.api_key_fpr IN ` + fmt.Sprintf(userKeysSubquery, user) + `))`
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT f.prompt_version, f.model, f.kind, COALESCE(f.task_type, ''), COALESCE(f.outcome, ''), COALESCE(f.collaboration, ''), f.friction, f.items
+FROM session_facets AS f`+join+`
+WHERE f.facet_status = 'ok' AND f.last_ns >= $1 AND f.last_ns < $2`+conditions, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read facet enums: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.FacetEnumRow, 0)
+	for rows.Next() {
+		var row storage.FacetEnumRow
+		if err := rows.Scan(&row.PromptVersion, &row.Model, &row.Kind, &row.TaskType, &row.Outcome, &row.Collaboration, &row.Friction, &row.Items); err != nil {
+			return nil, fmt.Errorf("postgres: scan facet enums: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// RepeatedFingerprints groups sentence fingerprints seen since sinceNS by
+// fingerprint and kind (user sentences and model-extracted instructions
+// count as one instruction), keeping those seen in at least two sessions.
+// Adopted reports whether the same fingerprint later appeared in injected
+// rules (AGENTS.md / CLAUDE.md) of the same scope. scope selects one API key,
+// one project or the API keys of one user; its zero value reads everything.
+func (store *Store) RepeatedFingerprints(ctx context.Context, sinceNS int64, scope storage.FacetScope, limit int) ([]storage.RepeatedFPR, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	keyCondition, ruleCondition := "", ""
+	arguments := []any{sinceNS, limit, maxRepeatedSessionKeys}
+	if len(scope.APIKeyFPR) != 0 {
+		arguments = append(arguments, scope.APIKeyFPR)
+		keyCondition += " AND t.api_key_fpr = " + parameter(len(arguments))
+		ruleCondition += " AND r.api_key_fpr = " + parameter(len(arguments))
+	}
+	if scope.ProjectID != nil {
+		arguments = append(arguments, *scope.ProjectID)
+		keyCondition += " AND t.project_id = " + parameter(len(arguments))
+		ruleCondition += " AND r.project_id = " + parameter(len(arguments))
+	}
+	if scope.UserID != nil {
+		arguments = append(arguments, *scope.UserID)
+		keys := fmt.Sprintf(userKeysSubquery, parameter(len(arguments)))
+		keyCondition += " AND t.api_key_fpr IN " + keys
+		ruleCondition += " AND r.api_key_fpr IN " + keys
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+WITH grouped AS (
+    SELECT t.fpr,
+           CASE WHEN t.source = 'facet_skill' THEN 'skill' ELSE 'instruction' END AS kind,
+           COUNT(DISTINCT t.session_key) AS sessions,
+           MIN(t.seen_at_ns) AS first_seen,
+           MAX(t.seen_at_ns) AS last_seen,
+           (ARRAY_AGG(DISTINCT t.session_key))[1:$3] AS session_keys
+    FROM session_text_fprs AS t
+    WHERE t.source IN ('user_text', 'facet_instruction', 'facet_skill') AND t.seen_at_ns >= $1`+keyCondition+`
+    GROUP BY t.fpr, CASE WHEN t.source = 'facet_skill' THEN 'skill' ELSE 'instruction' END
+    HAVING COUNT(DISTINCT t.session_key) >= 2
+)
+SELECT g.fpr, g.kind, g.sessions, g.first_seen, g.last_seen, g.session_keys,
+       EXISTS (SELECT 1 FROM session_text_fprs AS r
+               WHERE r.fpr = g.fpr AND r.source = 'injected_rules' AND r.seen_at_ns >= g.first_seen`+ruleCondition+`)
+FROM grouped AS g
+ORDER BY g.sessions DESC, g.last_seen DESC, g.fpr
+LIMIT $2`, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: group repeated fingerprints: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.RepeatedFPR, 0)
+	for rows.Next() {
+		var row storage.RepeatedFPR
+		// session_keys is bytea[]. go.mod requires Go 1.27, where pgx's stdlib
+		// rows implement driver.RowsColumnScanner and decode it into [][]byte
+		// through the pgx type map; TestSessionReportsStorage covers it on PG.
+		var keys [][]byte
+		if err := rows.Scan(&row.FPR, &row.Kind, &row.Sessions, &row.FirstNS, &row.LastNS, &keys, &row.Adopted); err != nil {
+			return nil, fmt.Errorf("postgres: scan repeated fingerprint: %w", err)
+		}
+		row.SessionKeys = keys
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// UpsertSuggestion inserts or refreshes one suggestion. A dismissed
+// suggestion stays dismissed; an adopted one never returns to open.
+func (store *Store) UpsertSuggestion(ctx context.Context, suggestion storage.Suggestion) error {
+	if ctx == nil {
+		return errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return ErrClosed
+	}
+	if len(suggestion.ScopeKey) != 32 || len(suggestion.FPR) != 32 || len(suggestion.TextEnc) == 0 {
+		return errors.New("postgres: invalid suggestion")
+	}
+	owned := suggestion
+	owned.ScopeKey = append([]byte(nil), suggestion.ScopeKey...)
+	owned.FPR = append([]byte(nil), suggestion.FPR...)
+	owned.TextEnc = append([]byte(nil), suggestion.TextEnc...)
+	if owned.Evidence == "" {
+		owned.Evidence = "[]"
+	}
+	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+		_, err := tx.Exec(`
+INSERT INTO analysis_suggestions (scope, scope_key, newapi_token_id, kind, fpr, support_sessions, first_seen_ns, last_seen_ns,
+    status, text_enc, evidence, updated_at_ns)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (scope, scope_key, kind, fpr) DO UPDATE SET
+    newapi_token_id = excluded.newapi_token_id,
+    support_sessions = GREATEST(analysis_suggestions.support_sessions, excluded.support_sessions),
+    first_seen_ns = LEAST(analysis_suggestions.first_seen_ns, excluded.first_seen_ns),
+    last_seen_ns = GREATEST(analysis_suggestions.last_seen_ns, excluded.last_seen_ns),
+    status = CASE WHEN analysis_suggestions.status = 'dismissed' THEN 'dismissed'
+                  WHEN analysis_suggestions.status = 'adopted_detected' OR excluded.status = 'adopted_detected' THEN 'adopted_detected'
+                  ELSE 'open' END,
+    text_enc = excluded.text_enc, evidence = excluded.evidence, updated_at_ns = excluded.updated_at_ns`,
+			owned.Scope, owned.ScopeKey, owned.NewAPITokenID, owned.Kind, owned.FPR, owned.Support, owned.FirstSeenNS,
+			owned.LastSeenNS, owned.Status, owned.TextEnc, owned.Evidence, owned.UpdatedAtNS)
+		if err != nil {
+			return fmt.Errorf("postgres writer: upsert suggestion: %w", err)
+		}
+		return nil
+	})})
+}
+
+// ListSuggestions returns the suggestions of one scope, open first, then by
+// support.
+func (store *Store) ListSuggestions(ctx context.Context, scope string, scopeKey []byte, tokenID *int64, limit int) ([]storage.Suggestion, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	ownership := "s.scope_key = $2"
+	arguments := []any{scope, scopeKey, limit}
+	if tokenID != nil {
+		ownership = "(s.scope_key = $2 OR s.newapi_token_id = $4)"
+		arguments = append(arguments, *tokenID)
+	}
+	rows, err := store.readerDB.QueryContext(ctx, `
+SELECT s.id, s.scope, s.scope_key, s.newapi_token_id, s.kind, s.fpr, s.support_sessions, s.first_seen_ns, s.last_seen_ns,
+       s.status, s.text_enc, s.evidence, s.updated_at_ns
+FROM analysis_suggestions AS s
+WHERE s.scope = $1 AND `+ownership+`
+ORDER BY (s.status = 'open') DESC, s.support_sessions DESC, s.last_seen_ns DESC, s.id
+LIMIT $3`, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list suggestions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.Suggestion, 0)
+	for rows.Next() {
+		var row storage.Suggestion
+		if err := rows.Scan(&row.ID, &row.Scope, &row.ScopeKey, &row.NewAPITokenID, &row.Kind, &row.FPR, &row.Support,
+			&row.FirstSeenNS, &row.LastSeenNS, &row.Status, &row.TextEnc, &row.Evidence, &row.UpdatedAtNS); err != nil {
+			return nil, fmt.Errorf("postgres: scan suggestion: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// DismissSuggestion marks one suggestion of a scope dismissed. It returns
+// sql.ErrNoRows when no such suggestion exists in that scope.
+func (store *Store) DismissSuggestion(ctx context.Context, id int64, scope string, nowNS int64) error {
+	if ctx == nil {
+		return errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return ErrClosed
+	}
+	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+		result, err := tx.Exec(`UPDATE analysis_suggestions SET status = 'dismissed', updated_at_ns = $3 WHERE id = $1 AND scope = $2`, id, scope, nowNS)
+		if err != nil {
+			return fmt.Errorf("postgres writer: dismiss suggestion: %w", err)
+		}
+		if affected, _ := result.RowsAffected(); affected == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})})
+}
+
+// SavePeriodStats upserts one week of one scope.
+func (store *Store) SavePeriodStats(ctx context.Context, stats storage.PeriodStats) error {
+	if ctx == nil {
+		return errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return ErrClosed
+	}
+	if len(stats.ScopeKey) != 32 || stats.Stats == "" {
+		return errors.New("postgres: invalid period stats")
+	}
+	owned := stats
+	owned.ScopeKey = append([]byte(nil), stats.ScopeKey...)
+	owned.NarrativeEnc = append([]byte(nil), stats.NarrativeEnc...)
+	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+		_, err := tx.Exec(`
+INSERT INTO analysis_period_stats (week_start_ns, scope, scope_key, newapi_token_id, stats, narrative_enc, narrative_source, input_hash, computed_at_ns)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (week_start_ns, scope, scope_key) DO UPDATE SET
+    newapi_token_id = excluded.newapi_token_id, stats = excluded.stats, narrative_enc = excluded.narrative_enc,
+    narrative_source = excluded.narrative_source, input_hash = excluded.input_hash, computed_at_ns = excluded.computed_at_ns`,
+			owned.WeekStartNS, owned.Scope, owned.ScopeKey, owned.NewAPITokenID, owned.Stats, nullableBytes(owned.NarrativeEnc),
+			nullText(owned.NarrativeSource), owned.InputHash, owned.ComputedAtNS)
+		if err != nil {
+			return fmt.Errorf("postgres writer: save period stats: %w", err)
+		}
+		return nil
+	})})
+}
+
+// LoadPeriodStats reads one week of one scope; tokenID also admits rows of a
+// key known only by its NewAPI token. sql.ErrNoRows when absent.
+func (store *Store) LoadPeriodStats(ctx context.Context, weekStartNS int64, scope string, scopeKey []byte, tokenID *int64) (storage.PeriodStats, error) {
+	if ctx == nil {
+		return storage.PeriodStats{}, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return storage.PeriodStats{}, ErrClosed
+	}
+	ownership := "p.scope_key = $3"
+	arguments := []any{weekStartNS, scope, scopeKey}
+	if tokenID != nil {
+		ownership = "(p.scope_key = $3 OR p.newapi_token_id = $4)"
+		arguments = append(arguments, *tokenID)
+	}
+	var stats storage.PeriodStats
+	var source sql.NullString
+	err := store.readerDB.QueryRowContext(ctx, `
+SELECT p.week_start_ns, p.scope, p.scope_key, p.newapi_token_id, p.stats, p.narrative_enc, p.narrative_source, p.input_hash, p.computed_at_ns
+FROM analysis_period_stats AS p
+WHERE p.week_start_ns = $1 AND p.scope = $2 AND `+ownership+`
+ORDER BY (p.scope_key = $3) DESC
+LIMIT 1`, arguments...).Scan(&stats.WeekStartNS, &stats.Scope, &stats.ScopeKey, &stats.NewAPITokenID, &stats.Stats,
+		&stats.NarrativeEnc, &source, &stats.InputHash, &stats.ComputedAtNS)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.PeriodStats{}, sql.ErrNoRows
+		}
+		return storage.PeriodStats{}, fmt.Errorf("postgres: read period stats: %w", err)
+	}
+	stats.NarrativeSource = source.String
+	return stats, nil
+}
+
+// TopCostSessions returns the most expensive sessions selected by filter.
+func (store *Store) TopCostSessions(ctx context.Context, filter storage.SessionSignalFilter, limit int) ([]storage.SessionSignals, error) {
+	if ctx == nil {
+		return nil, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return nil, ErrClosed
+	}
+	where, arguments, err := sessionSignalWhere(filter)
+	if err != nil {
+		return nil, err
+	}
+	arguments = append(arguments, limit)
+	rows, err := store.readerDB.QueryContext(ctx, `SELECT `+sessionSignalColumns+`
+FROM session_signals AS s WHERE `+where+` AND s.cost_usd IS NOT NULL
+ORDER BY s.cost_usd DESC, s.last_ns DESC LIMIT `+parameter(len(arguments)), arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list costly sessions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.SessionSignals, 0)
+	for rows.Next() {
+		row, err := scanSessionSignals(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan costly session: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

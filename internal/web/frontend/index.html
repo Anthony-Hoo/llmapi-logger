@@ -3,7 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Apply a pinned theme before the first paint; without one the page
+      // follows the system preference through CSS alone (src/lib/theme.ts).
+      try {
+        var theme = localStorage.getItem("llmapi-logger:theme");
+        if (theme === "light" || theme === "dark") {
+          document.documentElement.dataset.theme = theme;
+        }
+      } catch (error) {
+        // Storage is unavailable: follow the system preference.
+      }
+    </script>
     <meta name="description" content="llmapi-logger 本地审计管理页面" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>LLM API Audit</title>

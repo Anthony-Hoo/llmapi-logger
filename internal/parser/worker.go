@@ -37,11 +37,18 @@ type Worker struct {
 	headerAllowlist []string
 	analyzer        AuditAnalyzer
 	reconstructor   Reconstructor
+	idleTasks       []IdleTask
+	projectAnalyzer ProjectAnalyzer
 
 	// Only the parser goroutine accesses the insights backfill state.
 	backfillCursor   *storage.AnalysisBackfillCursor
 	backfillSkipped  map[string]struct{}
 	backfillNextScan time.Time
+	// backfillProgress is readable from any goroutine.
+	backfillProgress backfillProgress
+	// Project identity backfill state, parser goroutine only.
+	projectCursor   *storage.ProjectBackfillCursor
+	projectNextScan time.Time
 
 	mu      sync.Mutex
 	started bool
@@ -234,6 +241,8 @@ func (worker *Worker) run(ctx context.Context) {
 			worker.retryProcessingReleases(ctx)
 			worker.scan(ctx)
 			worker.backfill(ctx)
+			worker.projectBackfill(ctx)
+			worker.runIdleTasks(ctx)
 		}
 	}
 }
@@ -312,6 +321,9 @@ func (worker *Worker) analyze(ctx context.Context, audit storage.ParserAudit, in
 		!input.Request.Present || len(input.Request.Data) == 0 {
 		return
 	}
+	// The optional project identity hook is independent of the insights
+	// result; it runs first so an analysis failure cannot skip it.
+	worker.analyzeProject(ctx, audit, input, result)
 	err := runAnalyzer(ctx, analyzer, audit, input, result)
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return

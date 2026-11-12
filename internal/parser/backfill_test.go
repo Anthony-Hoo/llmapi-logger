@@ -3,6 +3,7 @@ package parser_test
 import (
 	"bytes"
 	"context"
+	"math"
 	"testing"
 
 	"llmapi-logger/internal/insights"
@@ -68,6 +69,9 @@ func TestInsightsBackfillFullRetentionAnthropic(t *testing.T) {
 	if got := harness.worker.BackfillForTest(ctx); got != 0 {
 		t.Fatalf("backfill without an analyzer attempted %d audits", got)
 	}
+	if harness.worker.AnalysisBackfillCovered(math.MaxInt64, 0) {
+		t.Fatal("coverage reported without an analyzer")
+	}
 	if harness.hasAnalysis(older) {
 		t.Fatal("disabled insights must not backfill")
 	}
@@ -89,6 +93,10 @@ func TestInsightsBackfillFullRetentionAnthropic(t *testing.T) {
 	// Nothing is left to do, and the empty pass pauses the scan.
 	if got := harness.worker.BackfillForTest(ctx); got != 0 {
 		t.Fatalf("second pass attempted %d audits", got)
+	}
+	// That empty listing closed the pass: every candidate was attempted.
+	if !harness.worker.AnalysisBackfillCovered(math.MaxInt64, 1) {
+		t.Fatal("a completed pass does not report coverage")
 	}
 }
 

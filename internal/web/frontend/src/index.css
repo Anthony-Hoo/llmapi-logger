@@ -4,8 +4,14 @@
  * Design tokens (CSS-first Tailwind v4). doc/design/tokens.md is the spec for
  * every value below; change both together.
  *
- * Colors are plain hex so Tailwind opacity modifiers (bg-primary/10) work via
- * color-mix(). The chart code references the same variables by name
+ * Colors are plain hex, or light-dark(<light>, <dark>) where the two themes
+ * differ, so Tailwind opacity modifiers (bg-primary/10) work via color-mix().
+ * Which side of light-dark() applies follows the color-scheme of :root, set
+ * at the end of this file: the system preference unless the user picked a
+ * theme (data-theme on <html>, see src/lib/theme.ts). The brand and neutral
+ * scales and the category colors are the same in both themes; only the
+ * semantic roles switch.
+ * The chart code references the same variables by name
  * (src/lib/tokens.ts), so this file is the single source of truth for color.
  * static keeps every variable in the output even when only TS references it.
  */
@@ -51,38 +57,42 @@
   --color-white: #ffffff;
 
   /* ---- Semantic surfaces, lines and text ---- */
-  --color-background: #f4f6f9;
-  --color-surface: #ffffff;
-  --color-surface-muted: var(--color-neutral-50);
-  --color-surface-sunken: var(--color-neutral-100);
-  --color-border: var(--color-neutral-200);
-  --color-border-strong: var(--color-neutral-300);
-  --color-foreground: var(--color-neutral-800);
-  --color-muted: var(--color-neutral-600);
-  --color-subtle: #5d6c80;
-  --color-ring: var(--color-primary-500);
-  --color-code: #172331;
+  --color-background: light-dark(#f4f6f9, #0c1117);
+  --color-surface: light-dark(#ffffff, #151c26);
+  --color-surface-muted: light-dark(#f8fafc, #111821);
+  --color-surface-sunken: light-dark(#f1f5f9, #0e141b);
+  --color-surface-sunken-hover: light-dark(#e2e8f0, #1d2733);
+  --color-selected: light-dark(#f0f5fa, #182a3f);
+  --color-border: light-dark(#e2e8f0, #253040);
+  --color-border-strong: light-dark(#cbd5e1, #3a4960);
+  --color-foreground: light-dark(#1e293b, #dde5ee);
+  --color-muted: light-dark(#475569, #a7b3c2);
+  --color-subtle: light-dark(#5d6c80, #8a97a9);
+  --color-ring: light-dark(#4a7aab, #6893bf);
+  --color-link: light-dark(#3b6e9e, #7fa9d4);
+  --color-link-hover: light-dark(#2c5378, #a9c6e3);
+  --color-code: light-dark(#172331, #0a0f15);
   --color-code-foreground: var(--color-neutral-200);
   --color-scrim: var(--color-neutral-950);
 
   /* ---- Status (muted, low saturation): solid / bg / border / fg ---- */
-  --color-success: #2f7d57;
-  --color-success-bg: #edf6f1;
-  --color-success-border: #c3e0cf;
-  --color-success-fg: #1f5e40;
-  --color-warning: #b07514;
-  --color-warning-bg: #fbf5e8;
-  --color-warning-border: #ecd6a8;
-  --color-warning-fg: #7a4f0c;
-  --color-danger: #b23b3b;
-  --color-danger-hover: #9a3030;
-  --color-danger-bg: #fbeeee;
-  --color-danger-border: #efc8c8;
-  --color-danger-fg: #8f2b2b;
-  --color-info: var(--color-primary-600);
-  --color-info-bg: var(--color-primary-50);
-  --color-info-border: var(--color-primary-200);
-  --color-info-fg: var(--color-primary-700);
+  --color-success: light-dark(#2f7d57, #3a9a6c);
+  --color-success-bg: light-dark(#edf6f1, #12261d);
+  --color-success-border: light-dark(#c3e0cf, #1f4a35);
+  --color-success-fg: light-dark(#1f5e40, #8fd3ae);
+  --color-warning: light-dark(#b07514, #c08a25);
+  --color-warning-bg: light-dark(#fbf5e8, #2a2110);
+  --color-warning-border: light-dark(#ecd6a8, #574414);
+  --color-warning-fg: light-dark(#7a4f0c, #e6c170);
+  --color-danger: light-dark(#b23b3b, #c24a4a);
+  --color-danger-hover: light-dark(#9a3030, #ab3d3d);
+  --color-danger-bg: light-dark(#fbeeee, #2b1617);
+  --color-danger-border: light-dark(#efc8c8, #5a2a2c);
+  --color-danger-fg: light-dark(#8f2b2b, #f0a3a3);
+  --color-info: light-dark(#3b6e9e, #4a7aab);
+  --color-info-bg: light-dark(#f0f5fa, #13202e);
+  --color-info-border: light-dark(#c3d5e8, #27425e);
+  --color-info-fg: light-dark(#2c5378, #a9c6e3);
 
   /* ---- Insights composition categories (validated: lightness band, chroma,
          adjacent CVD >= 8, normal-vision >= 15, >= 3:1 on white) ---- */
@@ -94,13 +104,20 @@
   --color-cat-reasoning: #c7608c;
   --color-cat-tool-result: #5f9a3a;
   --color-cat-media: #a0522d;
-  --color-cat-unknown: var(--color-neutral-400);
+  --color-cat-unknown: light-dark(#94a3b8, #64748b);
 
   /* ---- Chart chrome ---- */
-  --color-chart-grid: var(--color-neutral-200);
+  --color-chart-grid: light-dark(#e2e8f0, #232e3c);
   --color-chart-axis: var(--color-subtle);
   --color-chart-cursor: rgb(148 163 184 / 0.16);
-  --color-chart-track: var(--color-neutral-200);
+  --color-chart-track: light-dark(#e2e8f0, #202a38);
+
+  /* ---- Heatmap levels 1-4 (level 0 is chart-track or surface-sunken): the
+         scale runs away from the surface, so it is reversed in the dark theme ---- */
+  --color-heat-1: light-dark(#c3d5e8, #27496c);
+  --color-heat-2: light-dark(#6893bf, #356e9f);
+  --color-heat-3: light-dark(#3b6e9e, #6a9ccb);
+  --color-heat-4: light-dark(#1d3b57, #b6d2ec);
 
   /* ---- Typography: 7-step scale with paired line heights + mono code ---- */
   /* Tailwind 4.3 changed the default sans stack to -apple-system first; keep the v3 stack. */
@@ -151,6 +168,24 @@
 }
 
 @layer base {
+  /*
+   * Theme. Without a choice the page follows the system preference; the
+   * switch in the header sets data-theme on <html> to pin one side. The value
+   * of color-scheme picks the side of every light-dark() token above and also
+   * themes native controls and scrollbars.
+   */
+  :root {
+    color-scheme: light dark;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
   @media (width >= 40rem) {
     :root {
       --spacing-gutter: 1.5rem;

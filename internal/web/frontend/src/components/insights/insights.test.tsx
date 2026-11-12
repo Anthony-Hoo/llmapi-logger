@@ -263,6 +263,8 @@ describe("client labels", () => {
   it("prefers the server map, then built-in names, then the key", () => {
     const labels = { "my-agent": "My Agent", custom: "Renamed" };
     expect(clientLabel("claude_code", labels)).toBe("Claude Code");
+    expect(clientLabel("zcode")).toBe("ZCode");
+    expect(clientLabel("pi")).toBe("pi");
     // A vocabulary label renames a built-in client too, matching the server's
     // group_by=client substitution.
     expect(clientLabel("custom", labels)).toBe("Renamed");

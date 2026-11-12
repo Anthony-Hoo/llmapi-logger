@@ -1,0 +1,27 @@
+{
+  "comment": "Shared fixture of doc/features/24-session-analysis.md section 6.3: the default user_input_exclude_prefixes and cases both the Go vocabulary and the conversation view's user-input outline must classify alike.",
+  "prefixes": [
+    "<environment_context",
+    "<user_instructions",
+    "<system-reminder",
+    "<permissions",
+    "<skill",
+    "<user-prompt-submit-hook",
+    "<turn_aborted",
+    "# agents.md"
+  ],
+  "cases": [
+    {"text": "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>", "injected": true},
+    {"text": "   <system-reminder>note</system-reminder>", "injected": true},
+    {"text": "# AGENTS.md instructions for /work\n- rule", "injected": true},
+    {"text": "<USER_INSTRUCTIONS>upper case</USER_INSTRUCTIONS>", "injected": true},
+    {"text": "<skill_content name=\"x\">", "injected": true},
+    {"text": "<turn_aborted>\nThe user interrupted.</turn_aborted>", "injected": true},
+    {"text": "<permissions instructions>", "injected": true},
+    {"text": "<user-prompt-submit-hook>ok</user-prompt-submit-hook>", "injected": true},
+    {"text": "给订单导出接口加上按日期过滤", "injected": false},
+    {"text": "see <system-reminder> in the middle", "injected": false},
+    {"text": "# Agents overview of the project", "injected": false},
+    {"text": "", "injected": false}
+  ]
+}

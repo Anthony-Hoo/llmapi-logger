@@ -20,6 +20,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./com
 import { Input } from "./components/ui/input";
 import { PageHeader } from "./components/ui/page-header";
 import { segmentedItemClassName, segmentedTrackClassName } from "./components/ui/segmented";
+import { ThemeSwitch } from "./components/ui/theme-switch";
 import { Select } from "./components/ui/select";
 import { Separator } from "./components/ui/separator";
 import {
@@ -32,9 +33,17 @@ import {
 import { Skeleton } from "./components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
 import { ContentPolicyPanel } from "./components/content-policy-panel";
+import { ReportSettingsPanel } from "./components/settings/report-settings-panel";
+import { SystemSettings, type SettingsSection } from "./components/settings/system-settings";
 import { ConversationView } from "./components/conversation-view";
 // Recharts is only needed by the insights charts, so keep it out of the main chunk.
 const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
+// Organisation reports are optional and admin-only; keep them out of the main chunk.
+const OrgAdminPanel = lazy(() => import("./components/org/org-admin-panel").then((module) => ({ default: module.OrgAdminPanel })));
+const OrgReportView = lazy(() => import("./components/org/org-report-view").then((module) => ({ default: module.OrgReportView })));
+const SessionAnalysisView = lazy(() =>
+  import("./components/session-analysis/analysis-view").then((module) => ({ default: module.SessionAnalysisView })),
+);
 import { CompositionSection } from "./components/insights/composition-section";
 import { buildConversationExport } from "./lib/conversation-export";
 import { errorMessage, isAbortError } from "./lib/errors";
@@ -85,6 +94,11 @@ interface LoadedRawBody {
 /** The insights views exist only when the server reports the capability. */
 export function insightsEnabled(session: SessionInfo | null): boolean {
   return session?.insights_enabled === true;
+}
+
+/** The organisation report views exist only when the server enables them. */
+export function orgReportsEnabled(session: SessionInfo | null): boolean {
+  return session?.org_reports_enabled === true;
 }
 
 export function App() {
@@ -226,7 +240,10 @@ function TokenGate({
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-gutter py-12">
+    <main className="relative flex min-h-screen items-center justify-center px-gutter py-12">
+      <div className="absolute right-gutter top-4">
+        <ThemeSwitch />
+      </div>
       <Card className="w-full max-w-md overflow-hidden">
         <div className="h-1 bg-primary" />
         <CardHeader className="gap-4 p-6 pb-4">
@@ -312,7 +329,11 @@ function Dashboard({
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
   const hasInsights = insightsEnabled(session);
-  const [view, setView] = useState<"audits" | "rules" | "content-policy" | "insights">("audits");
+  const hasOrgReports = orgReportsEnabled(session);
+  const hasSessionAnalysis = session?.session_analysis_enabled === true;
+  // Configuration pages share one entry, "系统配置"; the main navigation
+  // lists reading surfaces only.
+  const [view, setView] = useState<"audits" | "insights" | "org-report" | "analysis" | "settings">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -484,17 +505,23 @@ function Dashboard({
                   用量洞察
                 </button>
               ) : null}
-              {isDeveloper ? null : (
-                <button type="button" className={segmentedItemClassName(view === "rules")} aria-current={view === "rules" ? "page" : undefined} onClick={() => setView("rules")}>
-                  UA 拦截规则
+              {hasOrgReports ? (
+                <button type="button" className={segmentedItemClassName(view === "org-report")} aria-current={view === "org-report" ? "page" : undefined} onClick={() => setView("org-report")}>
+                  {isDeveloper ? "我的本周" : "项目周报"}
                 </button>
-              )}
+              ) : null}
+              {hasSessionAnalysis ? (
+                <button type="button" className={segmentedItemClassName(view === "analysis")} aria-current={view === "analysis" ? "page" : undefined} onClick={() => setView("analysis")}>
+                  会话分析
+                </button>
+              ) : null}
               {isDeveloper ? null : (
-                <button type="button" className={segmentedItemClassName(view === "content-policy")} aria-current={view === "content-policy" ? "page" : undefined} onClick={() => setView("content-policy")}>
-                  关键词拦截
+                <button type="button" className={segmentedItemClassName(view === "settings")} aria-current={view === "settings" ? "page" : undefined} onClick={() => setView("settings")}>
+                  系统配置
                 </button>
               )}
             </nav>
+            <ThemeSwitch />
             <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
               <RefreshIcon />
               <span className="hidden sm:inline">刷新</span>
@@ -507,10 +534,16 @@ function Dashboard({
       </header>
 
       <main className="mx-auto max-w-page space-y-section px-gutter py-section">
-        {view === "rules" && !isDeveloper ? (
-          <UserAgentRulesPanel client={client} />
-        ) : view === "content-policy" && !isDeveloper ? (
-          <ContentPolicyPanel client={client} />
+        {view === "settings" && !isDeveloper ? (
+          <SystemSettings sections={settingsSections(client, hasOrgReports, hasSessionAnalysis)} />
+        ) : view === "org-report" && hasOrgReports ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <OrgReportView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey} />
+          </Suspense>
+        ) : view === "analysis" && hasSessionAnalysis ? (
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <SessionAnalysisView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey} />
+          </Suspense>
         ) : view === "insights" && hasInsights ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <InsightsView
@@ -618,6 +651,38 @@ function Dashboard({
       </main>
     </div>
   );
+}
+
+/**
+ * The pages of the administrator's "系统配置" menu. Project groups need
+ * organisation reports; the report parameters need either feature.
+ */
+export function settingsSections(client: ApiClient, hasOrgReports: boolean, hasSessionAnalysis: boolean): SettingsSection[] {
+  const sections: SettingsSection[] = [
+    { id: "ua-rules", label: "UA 拦截规则", hint: "按 User-Agent 拒绝请求", render: () => <UserAgentRulesPanel client={client} /> },
+    { id: "content-policy", label: "关键词拦截", hint: "按请求内容拦截", render: () => <ContentPolicyPanel client={client} /> },
+  ];
+  if (hasOrgReports) {
+    sections.push({
+      id: "org",
+      label: "项目组与项目",
+      hint: "分组、项目与归属规则",
+      render: () => (
+        <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+          <OrgAdminPanel client={client} />
+        </Suspense>
+      ),
+    });
+  }
+  if (hasOrgReports || hasSessionAnalysis) {
+    sections.push({
+      id: "reports",
+      label: "周报与分析",
+      hint: "周报与分析的运行参数",
+      render: () => <ReportSettingsPanel client={client} hasOrgReports={hasOrgReports} hasSessionAnalysis={hasSessionAnalysis} />,
+    });
+  }
+  return sections;
 }
 
 const emptyRuleInput: UserAgentRuleInput = {
@@ -1131,7 +1196,7 @@ export function AuditList({
                     type="button"
                     aria-current={selected ? "true" : undefined}
                     className={`block w-full min-w-0 border-l-2 px-card py-3 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
-                      selected ? "border-l-primary bg-primary-50" : "border-l-transparent hover:bg-surface-muted"
+                      selected ? "border-l-primary bg-selected" : "border-l-transparent hover:bg-surface-muted"
                     }`}
                     onClick={() => onSelect(audit.audit_id)}
                   >

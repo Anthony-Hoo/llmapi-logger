@@ -20,6 +20,7 @@ import (
 	"llmapi-logger/internal/insights/models"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/newapi"
+	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/proxy"
@@ -27,6 +28,7 @@ import (
 	"llmapi-logger/internal/retention"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/sessionanalysis"
 	"llmapi-logger/internal/uaguard"
 	"llmapi-logger/internal/web"
 )
@@ -45,7 +47,9 @@ type App struct {
 	callerWorker    *newapi.Worker
 	userAgentRules  uaguard.RuleSet
 	contentPolicies contentpolicy.RuleSet
+	orgReports      *orgreport.Service
 	retention       *retention.Runner
+	sessionRunner   *sessionanalysis.Runner
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
 	auditStore      runtimeStore
@@ -89,7 +93,118 @@ func ValidateConfig(path string) error {
 	if _, _, _, _, err = assembleDataPlane(configuration); err != nil {
 		return err
 	}
-	return validateInsights(configuration.Insights)
+	if err := validateInsights(configuration.Insights); err != nil {
+		return err
+	}
+	if _, err := loadSessionAnalysisVocabulary(configuration.SessionAnalysis); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loadSessionAnalysisVocabulary returns nil when session analysis is disabled,
+// so a disabled deployment never reads the override file.
+func loadSessionAnalysisVocabulary(configuration config.SessionAnalysisConfig) (*sessionanalysis.Vocabulary, error) {
+	if !configuration.Enabled {
+		return nil, nil
+	}
+	vocabulary, err := sessionanalysis.LoadVocabulary(configuration.VocabularyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load session analysis vocabulary: %w", err)
+	}
+	return vocabulary, nil
+}
+
+// assembleSessionAnalysis wires the daily batch and its management API. It
+// returns nils when the feature is off or its prerequisites are unavailable.
+//
+// projects is the organisation report service, nil when org reports are off.
+// With it, sessions are booked to projects, service principals keep signals
+// only, and days and weeks follow org_reports.timezone instead of the process
+// time zone (doc 24 section 4).
+func assembleSessionAnalysis(configuration config.Config, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, projects *orgreport.Service, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, *sessionanalysis.SettingsService, error) {
+	fileSection := configuration.SessionAnalysis
+	if !fileSection.Enabled || store == nil || loader == nil || cipher == nil || insightsVocabulary == nil || fingerprints == nil {
+		return nil, nil, nil, nil
+	}
+	// Settings saved from the management UI override the file for the fields
+	// the page edits; an unusable saved section is ignored with a warning.
+	loadContext, cancelLoad := context.WithTimeout(context.Background(), savedSettingsTimeout)
+	analysis := sessionanalysis.LoadEffectiveConfig(loadContext, fileSection, store, cipher, logger)
+	cancelLoad()
+	runner, service, err := assembleSessionAnalysisWith(configuration, analysis, store, loader, cipher, insightsVocabulary, fingerprints, projects, logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	settings, err := sessionanalysis.NewSettingsService(fileSection, store, cipher, runner, service, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("assemble session analysis settings: %w", err)
+	}
+	return runner, service, settings, nil
+}
+
+// savedSettingsTimeout bounds reading the saved settings at startup.
+const savedSettingsTimeout = 10 * time.Second
+
+// assembleSessionAnalysisWith builds the batch and the query service from the
+// effective section: the file's, with saved settings laid over it.
+func assembleSessionAnalysisWith(configuration config.Config, analysis config.SessionAnalysisConfig, store runtimeStore, loader sessionanalysis.ConversationLoader, cipher security.Cipher, insightsVocabulary *insights.Vocabulary, fingerprints *security.AnalysisFingerprinter, projects *orgreport.Service, logger *slog.Logger) (*sessionanalysis.Runner, *sessionanalysis.QueryService, error) {
+	vocabulary, err := loadSessionAnalysisVocabulary(analysis)
+	if err != nil {
+		return nil, nil, err
+	}
+	var model sessionanalysis.Completer
+	modelName := ""
+	if analysis.LLM.Enabled {
+		client, err := sessionanalysis.NewLLMClient(analysis.LLM, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("assemble session analysis model client: %w", err)
+		}
+		model, modelName = client, client.Model()
+	}
+	var resolver sessionanalysis.ProjectResolver
+	var location *time.Location
+	weekStartsSunday := false
+	if projects != nil {
+		resolver = projects
+		zone, err := config.OrgLocation(configuration.OrgReports.Timezone)
+		if err != nil {
+			return nil, nil, fmt.Errorf("assemble session analysis time zone: %w", err)
+		}
+		weekStart, err := config.OrgWeekStart(configuration.OrgReports.WeekStart)
+		if err != nil {
+			return nil, nil, fmt.Errorf("assemble session analysis week start: %w", err)
+		}
+		location, weekStartsSunday = zone, weekStart == time.Sunday
+	}
+	runner, err := sessionanalysis.NewRunner(sessionanalysis.Options{
+		Projects:         resolver,
+		Location:         location,
+		WeekStartsSunday: weekStartsSunday,
+		Config:           analysis,
+		RetentionDays:    configuration.RetentionDays,
+		Store:            store,
+		Loader:           loader,
+		Vocabulary:       vocabulary,
+		Insights:         insightsVocabulary,
+		Fingerprints:     fingerprints,
+		Cipher:           cipher,
+		LLM:              model,
+		ClientLabels:     insightsVocabulary.ClientLabels(),
+		Logger:           logger,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("assemble session analysis runner: %w", err)
+	}
+	service, err := sessionanalysis.NewQueryService(store, runner, cipher, modelName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("assemble session analysis service: %w", err)
+	}
+	if resolver != nil {
+		service.UseProjects(resolver)
+		service.UseCalendar(location, weekStartsSunday)
+	}
+	return runner, service, nil
 }
 
 // validateInsights loads every insights override so that --validate-config
@@ -321,6 +436,37 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		insightsService = service
 	}
 	// --- end context insights (WP2) ---
+	// Organisation reports stay entirely unassembled when disabled: no
+	// extractor, no job, no routes (doc/features/23-org-project-reports.md).
+	var orgService web.OrgReports
+	if configuration.OrgReports.Enabled && insightsService != nil {
+		service, err := assembleOrgReports(orgAssembly{
+			ctx: ctx, configuration: configuration, logger: logger, store: runtime.store, cipher: runtime.cipher,
+			vocabulary: vocabulary, fingerprints: runtime.analysisFingerprints, worker: application.parserWorker,
+		})
+		if err != nil {
+			_ = runtime.store.Close()
+			return nil, fmt.Errorf("assemble org reports: %w", err)
+		}
+		application.orgReports = service
+		orgService = service
+	}
+	var sessionAnalysisService web.SessionAnalysisQuery
+	var sessionAnalysisSettings web.SessionAnalysisSettings
+	if queryService != nil {
+		runner, service, settings, err := assembleSessionAnalysis(configuration, runtime.store, queryService, runtime.cipher, vocabulary, runtime.analysisFingerprints, application.orgReports, logger)
+		if err != nil {
+			_ = application.closeComponents()
+			return nil, err
+		}
+		application.sessionRunner = runner
+		if service != nil {
+			sessionAnalysisService = service
+		}
+		if settings != nil {
+			sessionAnalysisSettings = settings
+		}
+	}
 	if runtime.store != nil && configuration.RetentionDays > 0 {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
 		if err != nil {
@@ -337,9 +483,13 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		Users:      newAPIClient,
 		Rules:      userAgentRules,
 		Policies:   contentPolicies,
+		Org:        orgService,
 		Assets:     web.EmbeddedAssets(),
 		Readiness:  application.readiness,
 		Logger:     logger,
+
+		SessionAnalysis:         sessionAnalysisService,
+		SessionAnalysisSettings: sessionAnalysisSettings,
 	})
 	if err != nil {
 		_ = application.closeComponents()
@@ -365,6 +515,9 @@ func (application *App) Run(ctx context.Context) error {
 	}
 	if application.retention != nil {
 		application.retention.Start(ctx)
+	}
+	if application.sessionRunner != nil {
+		application.sessionRunner.Start(ctx)
 	}
 
 	if application.parserWorker != nil {
@@ -552,9 +705,15 @@ func (application *App) closeComponents() error {
 		if application.retention != nil {
 			application.retention.Close()
 		}
+		if application.sessionRunner != nil {
+			application.sessionRunner.Close()
+		}
 		if application.parserWorker != nil {
 			application.parserWorker.Close()
 			application.parserHealthy.Store(false)
+		}
+		if application.orgReports != nil {
+			application.orgReports.WaitSnapshots()
 		}
 		if application.callerWorker != nil {
 			application.callerWorker.Close()

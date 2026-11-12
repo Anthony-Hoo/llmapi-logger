@@ -103,6 +103,25 @@ content/binary 主键都是 32-byte 域分离 SHA-256。binary object 的身份�
 - **明文列只有数值、枚举、计数 JSON 和 keyed HMAC 指纹**。消息正文、工具名、文件路径和原始 Agent ID 只存在 `detail_enc`（AES-256-GCM，AAD 标签 `analysis_detail`，绑定 audit id 与 `analysis_version`），日志同样不得出现。
 - `analysis_version` 随算法升级递增；后台回填（模块 20 §9）按版本重算，不触碰 `parse_status`。索引 `audit_analysis_version_idx` 支撑“缺失或过旧”扫描。
 - 写入走既有单 writer 的 `SaveAnalysis`（按 `audit_id` upsert，并整体替换该 audit 的 spawn hints）；PostgreSQL 运行时在 `detail_root` 被替换时于同一事务内定向裁剪旧链上不再被引用的 `analysis_detail_objects`（模块 12 §4）；失败只记录日志，不影响解析结果。
+
+### 3.5 组织项目周报（模块 23，PostgreSQL migration 002）
+
+PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24](24-session-analysis.md)）只由运行时 `migrate()` 在 001 基线之后执行，各自在版本缺失时独立补上，不要求版本连续；离线导入器调用的 `InitializeImportSchema` 仍只建 001 基线（导入目标必须只含已知表），因此导入应在首次启动代理之前完成。这些表都不进 SQLite→PostgreSQL 离线迁移，也都不进完整性链（测试 `TestDerivedOrgTablesStayOutsideTheEvidenceChain` 锁定）。功能关闭时表存在但始终为空。003 还建了 `runtime_settings`：管理员在管理页面上保存的设置，每个分区一行（`session_analysis` 和 `org_reports`），明文 JSON 加一列 AES-GCM 加密的密钥；它覆盖配置文件里的同名项，不随 retention 删除（[24 §4.1](24-session-analysis.md)、[23 §3](23-org-project-reports.md)）。
+
+| 表 | 用途 | 生命周期 |
+| --- | --- | --- |
+| audit_project_identity | 每个已分析 audit 至多一行：`identity_version`、`source`（`declared`/`codex_turn_metadata`/`agent_header`/`root`/`cwd`/`none`）、`body_scanned`、keyed 指纹 `identity_fpr`/`remote_fpr`/`repo_root_fpr`/`cwd_fpr`，以及加密的 `identity_enc`（规范化 remote、仓库根、cwd、声明名与 OpenCode 项目哈希；AAD 标签 `project_identity`，绑定 audit id 与版本） | 随 audit 级联删除 |
+
+| project_groups | 项目组：名称（大小写不敏感唯一）、启用状态 | 管理数据 |
+| projects | 项目：名称、`group_id`（NULL = 全员统一项目，`RESTRICT` 外键）、启用状态、`rules`（JSON 数组 `{kind, pattern}`，由服务校验）；同一范围内名称唯一 | 管理数据 |
+| group_members | `newapi_user_id` → `group_id`，主键保证每人只属于一个组 | 管理数据 |
+| principal_class | `(kind=user\|token, principal_id)` → `human`/`service` | 管理数据 |
+| org_weekly_snapshots | 每个已冻结的报告周一行：`week_start`（按 `org_reports.timezone` 的周起始本地日期）、`frozen_at_ns`、`generated_at_ns` | **不级联**，超过 retention 仍保留 |
+| org_weekly_stats | `(week_start, section=ranked\|service, newapi_user_id, newapi_token_id, project_id)` → 活跃时长、其他客户端时长、推断会话时长、根会话数、单请求根会话数、请求数、有标识请求数、已计费请求数、Token 四桶、实际计费；`project_id=0` 是用户合计行并携带峰值/平均并行、逐日时长 JSON 与异常标记 JSON；`-1` 未归属、`-2` 无项目上下文；`project_name` 保存冻结时的项目名 | 随所属快照整体替换；与 audit 无外键 |
+
+- 明文列只有枚举、版本和 keyed HMAC 指纹；`source=none` 时指纹与密文都为空（CHECK 约束）。
+- 管理表的写入走同一 `writeOrg` 操作，但沿用策略写入的生命周期（`submitPolicySync`）：一旦被 writer 接收就等待确定的提交或回滚；唯一键/外键冲突映射为 `orgreport.ErrConflict`。
+- 写入走单 writer 的 `writeOrg` 操作（闭包形式，所有 org 写入共用一个 writer 分支）；实时路径在 parser worker 内与 insights 并列执行，回填按 `started_at_ns` 倒序、每 30 秒最多 50 条。
 ## 4. HTTP Body 保存方式
 
 每个阶段仍保存自己的 observed length、SHA-256、状态和时间。流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并：

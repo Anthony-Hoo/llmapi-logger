@@ -29,6 +29,8 @@ type Config struct {
 	ShutdownTimeoutSeconds int                          `yaml:"shutdown_timeout_seconds"`
 	RetentionDays          int                          `yaml:"retention_days"`
 	Insights               InsightsConfig               `yaml:"insights"`
+	OrgReports             OrgReportsConfig             `yaml:"org_reports"`
+	SessionAnalysis        SessionAnalysisConfig        `yaml:"session_analysis"`
 	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
 	Routes                 []RouteConfig                `yaml:"routes"`
 }
@@ -46,6 +48,70 @@ type InsightsConfig struct {
 	PricingFile    string           `yaml:"pricing_file"`
 	VocabularyFile string           `yaml:"vocabulary_file"`
 	ContextWindows map[string]int64 `yaml:"context_windows"`
+}
+
+// OrgReportsConfig controls the optional organisation project reports
+// (doc/features/23-org-project-reports.md). It is off by default; while off
+// nothing is extracted, no job runs and every /api/v1/org route answers 404.
+// Groups, projects and rules live in the database, never in YAML.
+type OrgReportsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Timezone is an IANA zone name; day and week boundaries are local to it.
+	Timezone string `yaml:"timezone"`
+	// WeekStart is monday or sunday.
+	WeekStart string `yaml:"week_start"`
+	// IdleGapSeconds merges request spans of one agent-tree root whose gap is
+	// at most this many seconds.
+	IdleGapSeconds int `yaml:"idle_gap_seconds"`
+	// RankedClients are the agent clients whose active time enters the ranking.
+	// Names are vocabulary client keys and are not checked against the loaded
+	// vocabulary, so a client added later by an override can be listed now.
+	RankedClients     []string                   `yaml:"ranked_clients"`
+	Anomaly           OrgAnomalyConfig           `yaml:"anomaly"`
+	LLMClassification OrgLLMClassificationConfig `yaml:"llm_classification"`
+}
+
+// OrgAnomalyConfig holds the per-week thresholds that flag a ranking row.
+// Flags never exclude a row.
+type OrgAnomalyConfig struct {
+	MaxConcurrentRoots    int `yaml:"max_concurrent_roots"`
+	MaxSingleRequestRoots int `yaml:"max_single_request_roots"`
+}
+
+// OrgLLMClassificationConfig is the switch the original M5 design reserved.
+// That work became the top-level session_analysis section
+// (doc/features/24-session-analysis.md); the switch is kept so existing
+// configuration files still load, and must stay disabled.
+type OrgLLMClassificationConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// Org report defaults (doc/features/23-org-project-reports.md section 3).
+const (
+	DefaultOrgTimezone              = "Asia/Shanghai"
+	DefaultOrgWeekStart             = "monday"
+	DefaultOrgIdleGapSeconds        = 180
+	DefaultOrgMaxConcurrentRoots    = 10
+	DefaultOrgMaxSingleRequestRoots = 200
+)
+
+// DefaultOrgRankedClients returns a fresh copy of the default ranked clients.
+func DefaultOrgRankedClients() []string {
+	return []string{"codex", "claude_code", "opencode", "dsh", "pi", "zcode", "custom"}
+}
+
+// DefaultOrgReports returns the disabled section with every default filled.
+func DefaultOrgReports() OrgReportsConfig {
+	return OrgReportsConfig{
+		Timezone:       DefaultOrgTimezone,
+		WeekStart:      DefaultOrgWeekStart,
+		IdleGapSeconds: DefaultOrgIdleGapSeconds,
+		RankedClients:  DefaultOrgRankedClients(),
+		Anomaly: OrgAnomalyConfig{
+			MaxConcurrentRoots:    DefaultOrgMaxConcurrentRoots,
+			MaxSingleRequestRoots: DefaultOrgMaxSingleRequestRoots,
+		},
+	}
 }
 
 // NewAPIConfig contains both the data-plane upstream settings and the
@@ -102,6 +168,8 @@ func Default() Config {
 		ShutdownTimeoutSeconds: DefaultShutdownTimeoutSecs,
 		RetentionDays:          DefaultRetentionDays,
 		Insights:               InsightsConfig{Enabled: true},
+		OrgReports:             DefaultOrgReports(),
+		SessionAnalysis:        defaultSessionAnalysis(),
 		Interceptors:           make(map[string]InterceptorConfig),
 		Routes:                 make([]RouteConfig, 0),
 	}
