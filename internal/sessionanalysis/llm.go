@@ -162,9 +162,12 @@ func (client *LLMClient) requestBody(messages []ChatMessage, schema map[string]a
 		body["response_format"] = map[string]any{"type": "json_object"}
 	}
 	if thinking {
-		// vLLM / SGLang chat templates and Ollama's think switch.
+		// vLLM / SGLang chat templates, Ollama's think switch, and the
+		// thinking object of DeepSeek-style APIs. Reasoning tokens count
+		// against max_tokens, so a model left thinking truncates its answer.
 		body["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
 		body["think"] = false
+		body["thinking"] = map[string]any{"type": "disabled"}
 	}
 	return json.Marshal(body)
 }

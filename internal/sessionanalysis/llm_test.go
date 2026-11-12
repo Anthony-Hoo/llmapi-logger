@@ -81,6 +81,9 @@ func TestLLMClientRequestShapeAndPrefixStability(t *testing.T) {
 	if kwargs, _ := body["chat_template_kwargs"].(map[string]any); kwargs["enable_thinking"] != false {
 		t.Fatalf("thinking switch missing: %v", body["chat_template_kwargs"])
 	}
+	if thinking, _ := body["thinking"].(map[string]any); thinking["type"] != "disabled" {
+		t.Fatalf("thinking object missing: %v", body["thinking"])
+	}
 	format, _ := body["response_format"].(map[string]any)
 	if format["type"] != "json_schema" {
 		t.Fatalf("response_format = %v", format)
