@@ -294,6 +294,7 @@ org_reports:
 - 本分支的开发环境没有 PostgreSQL：`internal/storage/postgres` 下新增的集成测试（迁移只执行一次且导入基线不建 org 表、身份行往返与级联删除、`TestDerivedOrgTablesStayOutsideTheEvidenceChain`、回填候选倒序、目录 CRUD 与约束、快照往返与 retention 后存活）都会因缺少 `TEST_DATABASE_URL` 跳过，**尚未实际执行**。业务逻辑在纯函数、内存仓库与 HTTP 层测试中覆盖。
   - 更新：合并后，上述 `internal/storage/postgres` 测试已在一次性的 PostgreSQL 18.6 容器上随整个包执行通过（没有跳过）；生产形态数据的口径核对仍未做。
 - §10 M4 要求的“用一份生产形态的脱敏样本离线核对口径”未做（需要真实数据，不在本仓库范围）。
+- **已知问题：在已有历史的库上首次启用时，旧周会在没有项目标识的情况下冻结。** 项目标识回填每 30 秒最多 50 条、从新到旧；而结束超过 72 小时的周不等回填，启动后第一次检查就冻结（记 `org_snapshot_incomplete`），这些周的归属几乎全是“未归属”。在一份有三周多历史的真实数据副本上试运行时，两个旧周在启动两分钟内以这种状态冻结，上一周也在到期时冻结。现在的补救办法是等回填走过对应的周之后，对该周点“重新生成”。还没有修：可选的做法是首次启用时等回填完成再冻结，或回填完成后自动重新生成带 `org_snapshot_incomplete` 的周。
 - §11 第 1–8 项全部仍待确认，尤其：Codex 长/短 `x-codex-turn-metadata` 样本（§11.1）、OpenCode 对 origin 的规范化是否与 `NormalizeRemote` 一致（新增）、ZCode 子 Agent 关联（§11.5）、pi 缓存预热特征（§11.6，确认后需给词表加附属请求规则并让加载器设置 `CacheWarm`）、各客户端真实请求核对（§11.8）。
 - 已被新版代理打开过的空 PostgreSQL 库不能再作为 SQLite→PostgreSQL 离线导入目标（导入器会把 org 表视为未知表）；导入应在首次启动前完成。
 - 与另一会话的词表修正（dsh 父路径、`zcode`/`pi` 客户端、`AnalysisVersion`）合并时，`vocabulary_default.yaml` 与 `vocabulary.go` 可能有文本冲突；本分支只在各客户端块的 `priority` 行后追加 `project_*` 键，并在文件末尾新增 `project:` 段。合并后 pi/ZCode 有了客户端键，共享文本模式仍然生效。
