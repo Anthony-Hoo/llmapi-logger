@@ -2,14 +2,19 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/newapi"
+	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/sessionanalysis"
+	"llmapi-logger/internal/storage"
 )
 
 type fakeAnalysisSettings struct {
@@ -131,6 +136,105 @@ func TestSessionAnalysisSettingsRoutes(t *testing.T) {
 	}
 	if response := serveBody(handler, http.MethodGet, testPath, "", nil); response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET test = %d", response.Code)
+	}
+}
+
+// settingsRows is an in-memory store of saved settings.
+type settingsRows struct {
+	mu   sync.Mutex
+	rows map[string]storage.RuntimeSettings
+}
+
+func (store *settingsRows) LoadRuntimeSettings(_ context.Context, section string) (storage.RuntimeSettings, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	row, ok := store.rows[section]
+	if !ok {
+		return storage.RuntimeSettings{}, sql.ErrNoRows
+	}
+	return row, nil
+}
+
+func (store *settingsRows) SaveRuntimeSettings(_ context.Context, row storage.RuntimeSettings) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.rows == nil {
+		store.rows = map[string]storage.RuntimeSettings{}
+	}
+	store.rows[row.Section] = row
+	return nil
+}
+
+func (store *settingsRows) DeleteRuntimeSettings(_ context.Context, section string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	delete(store.rows, section)
+	return nil
+}
+
+func TestOrgReportsSettingsRoutes(t *testing.T) {
+	t.Parallel()
+	file := config.OrgReportsConfig{Enabled: true, Timezone: "UTC", WeekStart: "monday", IdleGapSeconds: 180, RankedClients: []string{"codex"}}
+	file.Anomaly.MaxConcurrentRoots, file.Anomaly.MaxSingleRequestRoots = 10, 200
+	settings, err := orgreport.SettingsFromConfig(file, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := &settingsRows{}
+	service, err := orgreport.NewService(context.Background(), orgreport.Options{Settings: settings, File: file, SavedSettings: rows})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newDeveloperHandler(t, Options{Developer: developerOptions(t, newapi.TokenIdentity{UserID: 7}, nil), Org: service})
+	cookie := developerSignIn(t, handler)
+	const path = "/api/v1/settings/org-reports"
+	const body = `{"idle_gap_seconds":60,"ranked_clients":["codex","opencode"],"max_concurrent_roots":5,"max_single_request_roots":100}`
+
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		if response := serveBody(handler, method, path, body, cookie); response.Code != http.StatusForbidden {
+			t.Fatalf("developer %s = %d", method, response.Code)
+		}
+	}
+	if len(rows.rows) != 0 {
+		t.Fatal("a refused request saved settings")
+	}
+	initial := decodeOrg[orgreport.SettingsView](t, serveBody(handler, http.MethodGet, path, "", nil))
+	if initial.Source != orgreport.SettingsSourceFile || initial.Settings.IdleGapSeconds != 180 || initial.Timezone != "UTC" || initial.WeekStart != "monday" {
+		t.Fatalf("initial = %+v", initial)
+	}
+	response := serveBody(handler, http.MethodPut, path, body, nil)
+	saved := decodeOrg[orgreport.SettingsView](t, response)
+	if response.Code != http.StatusOK || saved.Source != orgreport.SettingsSourceSaved || saved.Settings.IdleGapSeconds != 60 || len(saved.Settings.RankedClients) != 2 || len(rows.rows) != 1 {
+		t.Fatalf("saved = %d %+v", response.Code, saved)
+	}
+	// The read-only settings endpoint shows the values in use.
+	if public := decodeOrg[orgreport.PublicSettings](t, serveBody(handler, http.MethodGet, "/api/v1/org/settings", "", nil)); public.IdleGapSeconds != 60 || public.MaxConcurrentRoots != 5 {
+		t.Fatalf("public = %+v", public)
+	}
+	// A rejected change answers 400 with the field message and changes nothing.
+	rejected := serveBody(handler, http.MethodPut, path, strings.Replace(body, `"idle_gap_seconds":60`, `"idle_gap_seconds":0`, 1), nil)
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "idle_gap_seconds must be between 1 and 3600") {
+		t.Fatalf("rejected = %d %s", rejected.Code, rejected.Body.String())
+	}
+	for _, bad := range []string{``, `{`, `{"idle_gap_seconds":60,"timezone":"Asia/Shanghai"}`} {
+		if response := serveBody(handler, http.MethodPut, path, bad, nil); response.Code != http.StatusBadRequest {
+			t.Errorf("body %q = %d", bad, response.Code)
+		}
+	}
+	if view := decodeOrg[orgreport.SettingsView](t, serveBody(handler, http.MethodGet, path, "", nil)); view.Settings.IdleGapSeconds != 60 {
+		t.Fatalf("after rejected changes = %+v", view)
+	}
+	reset := decodeOrg[orgreport.SettingsView](t, serveBody(handler, http.MethodDelete, path, "", nil))
+	if reset.Source != orgreport.SettingsSourceFile || reset.Settings.IdleGapSeconds != 180 || len(rows.rows) != 0 {
+		t.Fatalf("reset = %+v", reset)
+	}
+	if response := serveBody(handler, http.MethodPost, path, body, nil); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST = %d", response.Code)
+	}
+	// Organisation reports off: the route does not exist.
+	off := newDeveloperHandler(t, Options{Developer: developerOptions(t, newapi.TokenIdentity{}, nil)})
+	if response := serveBody(off, http.MethodGet, path, "", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("disabled = %d", response.Code)
 	}
 }
 

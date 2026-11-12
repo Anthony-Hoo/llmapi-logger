@@ -57,7 +57,7 @@ import type {
   AnalysisSessionsQuery,
   AnalysisUsers,
 } from "./lib/session-analysis/types";
-import type { AnalysisProbeResult, AnalysisSettingsUpdate, AnalysisSettingsView } from "./lib/settings/types";
+import type { AnalysisProbeResult, AnalysisSettingsUpdate, AnalysisSettingsView, OrgEditableSettings, OrgSettingsView } from "./lib/settings/types";
 
 const API_BASE = "/api/v1";
 
@@ -112,6 +112,12 @@ export interface ApiClient {
   resetAnalysisSettings: (signal?: AbortSignal) => Promise<AnalysisSettingsView>;
   /** Validates unsaved settings and sends one synthetic request to the model endpoint. */
   testAnalysisSettings: (update: AnalysisSettingsUpdate, signal?: AbortSignal) => Promise<AnalysisProbeResult>;
+  /** Administrators only: the weekly report settings in use and where they come from. */
+  getOrgReportSettings: (signal?: AbortSignal) => Promise<OrgSettingsView>;
+  /** Saves weekly report settings that override the configuration file at once. */
+  saveOrgReportSettings: (update: OrgEditableSettings, signal?: AbortSignal) => Promise<OrgSettingsView>;
+  /** Drops the saved weekly report settings; the configuration file applies again. */
+  resetOrgReportSettings: (signal?: AbortSignal) => Promise<OrgSettingsView>;
   /** Administrators only: session totals of a period per NewAPI user. */
   listAnalysisUsers: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisUsers>;
   listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
@@ -604,6 +610,22 @@ export function createApiClient(
 
     testAnalysisSettings(update, signal) {
       return mutateJSON<AnalysisProbeResult>(`${API_BASE}/settings/session-analysis/test`, "POST", update, signal);
+    },
+
+    getOrgReportSettings(signal) {
+      return requestJSON<OrgSettingsView>(`${API_BASE}/settings/org-reports`, signal);
+    },
+
+    saveOrgReportSettings(update, signal) {
+      return mutateJSON<OrgSettingsView>(`${API_BASE}/settings/org-reports`, "PUT", update, signal);
+    },
+
+    async resetOrgReportSettings(signal) {
+      const response = await sessionFetch(`${API_BASE}/settings/org-reports`, { method: "DELETE", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+      return (await response.json()) as OrgSettingsView;
     },
 
     async dismissAnalysisSuggestion(id, signal) {

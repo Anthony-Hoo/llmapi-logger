@@ -217,6 +217,20 @@ describe("session analysis API client", () => {
     await expect(failing.saveAnalysisSettings(update)).rejects.toThrow("max_concurrency must be between 1 and 64");
   });
 
+  it("reads, saves and resets the weekly report settings", async () => {
+    const view = { source: "saved", timezone: "UTC", week_start: "monday" };
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(view));
+    const client = createApiClient(vi.fn(), fetcher);
+    const update = { idle_gap_seconds: 60, ranked_clients: ["codex"], max_concurrent_roots: 5, max_single_request_roots: 100 };
+    await expect(client.getOrgReportSettings()).resolves.toEqual(view);
+    expect(String(fetcher.mock.calls[0][0])).toBe("/api/v1/settings/org-reports");
+    await client.saveOrgReportSettings(update);
+    expect(fetcher.mock.calls[1][1]?.method).toBe("PUT");
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual(update);
+    await client.resetOrgReportSettings();
+    expect(fetcher.mock.calls[2][1]?.method).toBe("DELETE");
+  });
+
   it("labels where a session is booked", () => {
     expect(projectLabel({})).toBeNull();
     expect(projectLabel({ bucket: "attributed", project_id: 10, project: "orders" })).toBe("orders");

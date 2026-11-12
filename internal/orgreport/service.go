@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/security"
 )
 
@@ -56,12 +57,22 @@ type Options struct {
 	// (insights.ProjectIdentityVersion); a week freezes only once every
 	// audit has it. Zero means 1.
 	IdentityVersion int
+	// File is the configuration file's section, and SavedSettings where an
+	// administrator's changes to it are kept. Both are needed to edit
+	// settings at run time; without SavedSettings the file always applies.
+	File          config.OrgReportsConfig
+	SavedSettings SettingsStore
 }
 
 // Service is the organisation report surface used by the web layer and the
 // parser worker's idle cadence.
 type Service struct {
-	settings   Settings
+	// settings is replaced as a whole when an administrator saves a change;
+	// read it through settingsNow.
+	settings   atomic.Pointer[Settings]
+	file       config.OrgReportsConfig
+	saved      SettingsStore
+	settingsMu sync.Mutex
 	repository Repository
 	data       DataStore
 	snapshots  SnapshotStore
@@ -93,10 +104,13 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 		options.IdentityVersion = 1
 	}
 	service := &Service{
-		settings: options.Settings, repository: options.Repository, data: options.Data,
+		file: options.File, saved: options.SavedSettings, repository: options.Repository, data: options.Data,
 		snapshots: options.Snapshots, cipher: options.Cipher, logger: options.Logger, now: options.Now,
 		identityVersion: options.IdentityVersion,
 	}
+	settings := options.Settings
+	service.settings.Store(&settings)
+	service.loadSavedSettings(ctx)
 	catalog := Catalog{}
 	if options.Repository != nil {
 		loaded, err := options.Repository.LoadOrgCatalog(ctx)
@@ -113,9 +127,15 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 	return service, nil
 }
 
+// settingsNow returns the settings in use. The value is never modified after
+// it is stored, its map included.
+func (service *Service) settingsNow() Settings {
+	return *service.settings.Load()
+}
+
 // Settings returns the UI view of the report settings.
 func (service *Service) Settings() PublicSettings {
-	return service.settings.Public()
+	return service.settingsNow().Public()
 }
 
 // Compiled returns the active catalog snapshot.
@@ -125,7 +145,7 @@ func (service *Service) Compiled() *Compiled { return service.current.Load() }
 func (service *Service) Catalog() CatalogView {
 	compiled := service.current.Load()
 	view := CatalogView{Catalog: compiled.Catalog(), ServiceCandidates: []int64{}}
-	if admin := service.settings.AdminUserID; admin > 0 {
+	if admin := service.settingsNow().AdminUserID; admin > 0 {
 		if _, classified := compiled.users[admin]; !classified {
 			view.ServiceCandidates = append(view.ServiceCandidates, admin)
 		}

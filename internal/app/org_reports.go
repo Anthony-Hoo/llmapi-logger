@@ -21,6 +21,7 @@ type orgStore interface {
 	orgreport.Repository
 	orgreport.DataStore
 	orgreport.SnapshotStore
+	orgreport.SettingsStore
 }
 
 // The runtime type assertion in assembleOrgReports is only exercised by an
@@ -62,6 +63,9 @@ func assembleOrgReports(assembly orgAssembly) (*orgreport.Service, error) {
 	service, err := orgreport.NewService(ctx, orgreport.Options{
 		Settings: settings, Repository: store, Data: store, Snapshots: store,
 		Cipher: assembly.cipher, Logger: assembly.logger, IdentityVersion: insights.ProjectIdentityVersion,
+		// Settings saved from the management UI override the file for the
+		// fields the page edits.
+		File: assembly.configuration.OrgReports, SavedSettings: store,
 	})
 	if err != nil {
 		return nil, err

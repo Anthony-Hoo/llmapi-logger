@@ -51,6 +51,26 @@ export interface AnalysisSettingsUpdate extends AnalysisEditableSettings {
   api_key?: string;
 }
 
+/** The weekly report fields an administrator can change from the page. */
+export interface OrgEditableSettings {
+  idle_gap_seconds: number;
+  ranked_clients: string[];
+  max_concurrent_roots: number;
+  max_single_request_roots: number;
+}
+
+export interface OrgSettingsView {
+  /** "saved": a saved section overrides the configuration file. */
+  source: "file" | "saved";
+  updated_ns?: string;
+  settings: OrgEditableSettings;
+  /** What the configuration file says, i.e. what a reset returns to. */
+  file: OrgEditableSettings;
+  /** Read from the configuration file only: they place the week boundaries. */
+  timezone: string;
+  week_start: "monday" | "sunday";
+}
+
 /** Outcome of the connection test; it carries no model output. */
 export interface AnalysisProbeResult {
   ok: boolean;

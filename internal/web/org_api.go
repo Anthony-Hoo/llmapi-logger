@@ -14,6 +14,10 @@ import (
 // caller, so a personal deployment exposes nothing new.
 type OrgReports interface {
 	Settings() orgreport.PublicSettings
+	// Settings saved from the management UI (/api/v1/settings/org-reports).
+	EditableSettings(context.Context) (orgreport.SettingsView, error)
+	UpdateSettings(context.Context, orgreport.EditableSettings) (orgreport.SettingsView, error)
+	ResetSettings(context.Context) (orgreport.SettingsView, error)
 	// Catalog administration (persist, compile, swap).
 	Catalog() orgreport.CatalogView
 	CreateGroup(context.Context, orgreport.GroupInput) (orgreport.Group, error)

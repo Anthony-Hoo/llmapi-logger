@@ -58,6 +58,9 @@ type snapshotJob struct {
 
 type cachedWeek struct {
 	compiled *Compiled
+	// settings is the settings value the week was computed with; a saved
+	// change replaces the pointer, so an older result is never reused.
+	settings *Settings
 	at       time.Time
 	result   WeekResult
 }
@@ -100,7 +103,7 @@ func (service *Service) WaitSnapshots() { service.job.wait.Wait() }
 // freezePending freezes every ended week inside the lookback that has no
 // snapshot yet and whose evidence is fully analysed, oldest first.
 func (service *Service) freezePending(ctx context.Context, now time.Time) {
-	current := service.settings.WeekOf(now)
+	current := service.settingsNow().WeekOf(now)
 	weeks := make([]Week, 0, freezeLookbackWeeks)
 	week := current.Previous()
 	for index := 0; index < freezeLookbackWeeks; index++ {
@@ -145,7 +148,7 @@ func (service *Service) freezePending(ctx context.Context, now time.Time) {
 
 // freeze computes and stores one week.
 func (service *Service) freeze(ctx context.Context, week Week) error {
-	result, compiled, err := service.compute(ctx, week)
+	result, compiled, err := service.compute(ctx, week, service.settings.Load())
 	if err != nil {
 		return err
 	}
@@ -174,28 +177,30 @@ func (service *Service) Regenerate(ctx context.Context, label string) error {
 	return service.freeze(ctx, week)
 }
 
-// compute loads a week with its margins, attributes it and runs the engine.
-func (service *Service) compute(ctx context.Context, week Week) (WeekResult, *Compiled, error) {
+// compute loads a week with its margins, attributes it and runs the engine
+// with one settings value.
+func (service *Service) compute(ctx context.Context, week Week, settings *Settings) (WeekResult, *Compiled, error) {
 	attributed, err := service.load(ctx, week.Start.Add(-loadMargin).UnixNano(), week.End.Add(loadMargin).UnixNano())
 	if err != nil {
 		return WeekResult{}, nil, err
 	}
-	result := ComputeWeek(WeekInput{Week: week, Settings: service.settings, Requests: attributed.Requests, Principals: attributed.Compiled.Principals()})
+	result := ComputeWeek(WeekInput{Week: week, Settings: *settings, Requests: attributed.Requests, Principals: attributed.Compiled.Principals()})
 	return result, attributed.Compiled, nil
 }
 
 // live returns a computed (unfrozen) week, reusing a result computed less
-// than a minute ago with the same catalog snapshot.
+// than a minute ago with the same catalog snapshot and the same settings.
 func (service *Service) live(ctx context.Context, week Week) (WeekResult, *Compiled, error) {
 	compiled := service.current.Load()
+	settings := service.settings.Load()
 	label := week.Label()
 	service.job.cacheMu.Lock()
-	if cached, ok := service.job.cache[label]; ok && cached.compiled == compiled && service.now().Sub(cached.at) < liveCacheTTL {
+	if cached, ok := service.job.cache[label]; ok && cached.compiled == compiled && cached.settings == settings && service.now().Sub(cached.at) < liveCacheTTL {
 		service.job.cacheMu.Unlock()
 		return cached.result, compiled, nil
 	}
 	service.job.cacheMu.Unlock()
-	result, used, err := service.compute(ctx, week)
+	result, used, err := service.compute(ctx, week, settings)
 	if err != nil {
 		return WeekResult{}, nil, err
 	}
@@ -206,7 +211,7 @@ func (service *Service) live(ctx context.Context, week Week) (WeekResult, *Compi
 	if len(service.job.cache) > 16 {
 		service.job.cache = map[string]cachedWeek{}
 	}
-	service.job.cache[label] = cachedWeek{compiled: used, at: service.now(), result: result}
+	service.job.cache[label] = cachedWeek{compiled: used, settings: settings, at: service.now(), result: result}
 	service.job.cacheMu.Unlock()
 	return result, used, nil
 }

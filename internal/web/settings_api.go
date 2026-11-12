@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/sessionanalysis"
 )
 
@@ -74,6 +75,46 @@ func (handler *managementHandler) serveSessionAnalysisSettingsTest(writer http.R
 	// The probe has its own timeout, longer than a query's.
 	result, err := handler.sessionAnalysisSettings.Test(request.Context(), update)
 	handler.writeSettingsResult(writer, result, err)
+}
+
+// orgReportsSettingsPath is the saved section of the weekly report.
+const orgReportsSettingsPath = "/api/v1/settings/org-reports"
+
+// serveOrgReportsSettings reads, saves and resets the weekly report settings
+// an administrator can change (doc 23 section 3). serveProtected has checked
+// the role.
+func (handler *managementHandler) serveOrgReportsSettings(writer http.ResponseWriter, request *http.Request) {
+	if handler.org == nil {
+		writeError(writer, http.StatusNotFound, "not_found", "organisation reports are not enabled")
+		return
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	var view orgreport.SettingsView
+	var err error
+	switch request.Method {
+	case http.MethodGet:
+		view, err = handler.org.EditableSettings(ctx)
+	case http.MethodPut:
+		var edited orgreport.EditableSettings
+		if !decodeOrgBody(writer, request, &edited) {
+			return
+		}
+		view, err = handler.org.UpdateSettings(ctx, edited)
+	case http.MethodDelete:
+		view, err = handler.org.ResetSettings(ctx)
+	default:
+		methodNotAllowed(writer, http.MethodGet, http.MethodPut, http.MethodDelete)
+		return
+	}
+	switch {
+	case err == nil:
+		writeJSON(writer, http.StatusOK, view)
+	case errors.Is(err, orgreport.ErrInvalidSettings):
+		writeError(writer, http.StatusBadRequest, "invalid_settings", orgreport.SettingsMessage(err))
+	default:
+		handler.writeOrgResult(writer, http.StatusOK, nil, err)
+	}
 }
 
 func decodeSettingsBody(writer http.ResponseWriter, request *http.Request) (sessionanalysis.SettingsUpdate, bool) {

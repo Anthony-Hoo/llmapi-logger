@@ -37,6 +37,20 @@ func validateOrgReports(cfg Config) error {
 	if _, err := OrgWeekStart(org.WeekStart); err != nil {
 		return err
 	}
+	if err := ValidateOrgReportsRuntime(org); err != nil {
+		return err
+	}
+	if org.LLMClassification.Enabled {
+		return errors.New("org_reports.llm_classification was replaced by session_analysis and must stay disabled")
+	}
+	return nil
+}
+
+// ValidateOrgReportsRuntime checks the fields of org_reports that an
+// administrator can change at run time (settings saved from the management
+// UI): the idle gap, the ranked clients and the anomaly thresholds. The
+// configuration file gets the same checks.
+func ValidateOrgReportsRuntime(org OrgReportsConfig) error {
 	if org.IdleGapSeconds < 1 || org.IdleGapSeconds > maxOrgIdleGapSeconds {
 		return fmt.Errorf("org_reports.idle_gap_seconds must be between 1 and %d, got %d", maxOrgIdleGapSeconds, org.IdleGapSeconds)
 	}
@@ -58,9 +72,6 @@ func validateOrgReports(cfg Config) error {
 	}
 	if org.Anomaly.MaxSingleRequestRoots < 1 || org.Anomaly.MaxSingleRequestRoots > maxOrgAnomalyLimit {
 		return fmt.Errorf("org_reports.anomaly.max_single_request_roots must be between 1 and %d", maxOrgAnomalyLimit)
-	}
-	if org.LLMClassification.Enabled {
-		return errors.New("org_reports.llm_classification was replaced by session_analysis and must stay disabled")
 	}
 	return nil
 }

@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api";
 import { settingsSections } from "../../app";
 import { contextBudget, draftChanged, draftFromSettings, keySourceLabel, probeSummary, updateFromDraft } from "../../lib/settings/analysis";
-import type { AnalysisSettingsView } from "../../lib/settings/types";
+import { orgDraftChanged, orgDraftFromSettings, orgUpdateFromDraft, parseClients } from "../../lib/settings/org";
+import type { AnalysisSettingsView, OrgSettingsView } from "../../lib/settings/types";
 import { AnalysisFileOnly, AnalysisSettingsCard, AnalysisSettingsFields, AnalysisSettingsStatus, ProbeOutcome } from "./analysis-settings-form";
-import { OrgSettingsCard, ReportSettingsPanel } from "./report-settings-panel";
+import { OrgSettingsCard, OrgSettingsFields } from "./org-settings-form";
+import { ReportSettingsPanel } from "./report-settings-panel";
 import { SystemSettings, type SettingsSection } from "./system-settings";
 
 describe("system settings menu", () => {
@@ -44,22 +46,41 @@ describe("system settings menu", () => {
     expect(settingsSections(client, true, true).map((section) => section.label)).toEqual(["UA 拦截规则", "关键词拦截", "项目组与项目", "周报与分析"]);
   });
 
-  it("shows the report parameters read-only with their configuration keys", () => {
-    const org = renderToStaticMarkup(
-      <OrgSettingsCard settings={{ timezone: "Asia/Shanghai", week_start: "sunday", idle_gap_seconds: 180, ranked_clients: ["codex", "claude_code"], max_concurrent_roots: 10, max_single_request_roots: 200 }} />,
-    );
-    expect(org).toContain("Asia/Shanghai");
-    expect(org).toContain("周日");
-    expect(org).toContain("180 秒");
-    expect(org).toContain("codex、claude_code");
-    expect(org).toContain("org_reports.flags.max_single_request_roots");
-    expect(org).not.toContain("<input");
-    expect(org).toContain("这里只读");
+  it("edits the weekly report parameters and shows the calendar read-only", () => {
+    const settings = { idle_gap_seconds: 180, ranked_clients: ["claude_code", "codex"], max_concurrent_roots: 10, max_single_request_roots: 200 };
+    const view: OrgSettingsView = { source: "file", settings, file: settings, timezone: "Asia/Shanghai", week_start: "sunday" };
+    const draft = orgDraftFromSettings(settings);
+    expect(draft.ranked_clients).toBe("claude_code, codex");
+    expect(orgUpdateFromDraft(draft)).toEqual(settings);
+    expect(orgDraftChanged(draft, view)).toBe(false);
+    // The order of clients does not count as a change; separators are forgiving.
+    expect(orgDraftChanged({ ...draft, ranked_clients: "codex，claude_code" }, view)).toBe(false);
+    expect(parseClients(" codex、 opencode,pi\nzcode ")).toEqual(["codex", "opencode", "pi", "zcode"]);
+    expect(orgDraftChanged({ ...draft, idle_gap_seconds: "60" }, view)).toBe(true);
+    expect(orgUpdateFromDraft({ ...draft, idle_gap_seconds: "3m" }).idle_gap_seconds).toBe(-1);
+
+    const html = renderToStaticMarkup(<OrgSettingsFields view={view} draft={draft} busy={false} onChange={() => undefined} />);
+    expect(html).toContain("来自配置文件");
+    expect(html).toContain('id="org-idle_gap_seconds"');
+    expect(html).toContain("已冻结的周保持原来的快照");
+    // The time zone and the first weekday are shown, not edited.
+    expect(html).toContain("Asia/Shanghai");
+    expect(html).toContain("周日");
+    expect(html).toContain("org_reports.week_start");
+    expect(html).not.toContain('id="org-timezone"');
+    const saved = renderToStaticMarkup(<OrgSettingsFields view={{ ...view, source: "saved", updated_ns: "1800000000000000000" }} draft={draft} busy={false} onChange={() => undefined} />);
+    expect(saved).toContain("覆盖配置文件");
+    expect(saved).toContain("保存于");
 
     const panel = renderToStaticMarkup(<ReportSettingsPanel client={{} as ApiClient} hasOrgReports hasSessionAnalysis />);
     expect(panel).toContain("周报与分析");
     expect(panel).toContain("会话分析与周度复盘");
+    expect(panel).toContain(">项目周报<");
     expect(panel).toContain("覆盖配置文件");
+    // Each card appears only with its feature.
+    expect(renderToStaticMarkup(<ReportSettingsPanel client={{} as ApiClient} hasOrgReports={false} hasSessionAnalysis />)).not.toContain(">项目周报<");
+    expect(renderToStaticMarkup(<ReportSettingsPanel client={{} as ApiClient} hasOrgReports hasSessionAnalysis={false} />)).not.toContain("会话分析与周度复盘");
+    expect(renderToStaticMarkup(<OrgSettingsCard client={{} as ApiClient} />)).toContain(">项目周报<");
   });
 });
 

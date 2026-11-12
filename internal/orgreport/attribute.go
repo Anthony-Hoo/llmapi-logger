@@ -298,9 +298,9 @@ func (service *Service) Preview(ctx context.Context, input PreviewInput) (Previe
 // resolveWeek parses a week label; empty means the current week.
 func (service *Service) resolveWeek(label string) (Week, error) {
 	if label == "" {
-		return service.settings.WeekOf(service.now()), nil
+		return service.settingsNow().WeekOf(service.now()), nil
 	}
-	week, err := service.settings.ParseWeek(label)
+	week, err := service.settingsNow().ParseWeek(label)
 	if err != nil {
 		return Week{}, errors.Join(ErrInvalid, err)
 	}

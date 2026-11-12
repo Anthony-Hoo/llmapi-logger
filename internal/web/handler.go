@@ -213,6 +213,8 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveSessionAnalysisSettings(writer, request)
 	case request.URL.Path == sessionAnalysisSettingsTestPath:
 		handler.serveSessionAnalysisSettingsTest(writer, request)
+	case request.URL.Path == orgReportsSettingsPath:
+		handler.serveOrgReportsSettings(writer, request)
 	case request.URL.Path == "/api/v1/user-agent-rules":
 		handler.serveUserAgentRuleCollection(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/user-agent-rules/"):

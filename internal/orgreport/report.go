@@ -120,7 +120,7 @@ func (service *Service) Weekly(ctx context.Context, query WeeklyQuery) (WeeklyRe
 	}
 	report := WeeklyReport{
 		Week: week.Label(), StartNS: week.Start.UnixNano(), EndNS: week.End.UnixNano(),
-		Timezone: service.settings.Public().Timezone, Metric: metric, GroupID: query.GroupID,
+		Timezone: service.settingsNow().Public().Timezone, Metric: metric, GroupID: query.GroupID,
 		Users: []RankedUser{}, Service: []ServiceRow{}, Projects: []ProjectRef{},
 		Complete: service.now().After(week.End),
 	}
@@ -202,7 +202,7 @@ func (service *Service) Trend(ctx context.Context, weeks int, groupID *int64) (T
 	if weeks <= 0 || weeks > MaxTrendWeeks {
 		return TrendReport{}, ErrInvalid
 	}
-	current := service.settings.WeekOf(service.now())
+	current := service.settingsNow().WeekOf(service.now())
 	labels := make([]string, weeks)
 	week := current
 	for index := weeks - 1; index >= 0; index-- {
@@ -316,8 +316,8 @@ type SelfReport struct {
 // Self returns the caller's own row of the current week and nothing about
 // anyone else. A zero user id (identity unknown) returns an empty report.
 func (service *Service) Self(ctx context.Context, userID int64) (SelfReport, error) {
-	week := service.settings.WeekOf(service.now())
-	report := SelfReport{Week: week.Label(), Timezone: service.settings.Public().Timezone, Projects: []ProjectRef{}}
+	week := service.settingsNow().WeekOf(service.now())
+	report := SelfReport{Week: week.Label(), Timezone: service.settingsNow().Public().Timezone, Projects: []ProjectRef{}}
 	if userID <= 0 {
 		return report, nil
 	}

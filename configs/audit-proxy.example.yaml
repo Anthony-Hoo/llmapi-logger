@@ -42,6 +42,9 @@ insights:
 # Optional organisation project reports (doc/features/23). Off by default;
 # enabling it requires newapi.access_token/user_id and insights.enabled.
 # Groups, projects and rules are managed in the admin UI, not here.
+# An administrator can change idle_gap_seconds, ranked_clients and the anomaly
+# thresholds from the management UI; values saved there are stored in the
+# database and override this file until they are reset on the same page.
 org_reports:
   enabled: false
   timezone: Asia/Shanghai

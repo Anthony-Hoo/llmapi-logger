@@ -96,6 +96,14 @@ org_reports:
 
 启动校验：`enabled=true` 时必须同时配置 `newapi.access_token`/`user_id`（身份）且 `insights.enabled=true`（会话与 Agent 树），否则拒绝启动。项目组、项目和规则存数据库并在管理页维护，不进 YAML，避免把真实仓库名写进配置样例。
 
+**页面上可改的项（2026-11-12）**：管理员可以在"系统配置 → 周报与分析"里修改 `idle_gap_seconds`、`ranked_clients` 和 `anomaly` 的两个阈值并保存。
+
+- 保存的值存放在 `runtime_settings` 表的 `org_reports` 一行，覆盖配置文件里的同名项，重启后仍然生效；"恢复为配置文件的值"删除这一行。保存时跑与启动相同的校验，不过返回 400 和字段说明。
+- 保存后立即生效：未冻结的周（含本周）下一次读取就按新值计算，1 分钟的结果复用也不会返回旧值。**已冻结的周保持原来的快照**，要按新值重算需要对该周点"重新生成"。
+- `enabled`、`timezone`、`week_start` 只能在配置文件里改：后两项决定每一周的起止，改动会移动已经保存的周的边界。
+- 启动时保存的值读不出或校验不过，记一条 `runtime_settings_invalid` 告警并忽略，按配置文件启动。
+- 接口（仅管理员，开发者 403，未启用时 404）：`GET`、`PUT`、`DELETE /api/v1/settings/org-reports`。原有的 `GET /api/v1/org/settings` 返回当前生效的值。
+
 原设计里的子开关 `org_reports.llm_classification` 不再使用：对应的功能由顶层开关 `session_analysis` 提供（[模块 24](24-session-analysis.md) §4）。这个键仍保留在配置结构里，已有的配置文件照常加载，但值必须为 false，设为 true 会拒绝启动。`session_analysis` 只依赖 `insights.enabled`，不依赖 `org_reports`；两者都开启时，会话分析额外得到项目归属、项目与项目组范围的周报（§13.6）。
 
 ## 4. 数据模型（PostgreSQL migration 002）
