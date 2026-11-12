@@ -174,7 +174,7 @@ func (store *Store) FacetEnums(ctx context.Context, fromNS, toNS int64, scope st
        OR (f.kind = 'chat_digest' AND f.api_key_fpr IN ` + fmt.Sprintf(userKeysSubquery, user) + `))`
 	}
 	rows, err := store.readerDB.QueryContext(ctx, `
-SELECT f.kind, COALESCE(f.task_type, ''), COALESCE(f.outcome, ''), COALESCE(f.collaboration, ''), f.friction, f.items
+SELECT f.prompt_version, f.model, f.kind, COALESCE(f.task_type, ''), COALESCE(f.outcome, ''), COALESCE(f.collaboration, ''), f.friction, f.items
 FROM session_facets AS f`+join+`
 WHERE f.facet_status = 'ok' AND f.last_ns >= $1 AND f.last_ns < $2`+conditions, arguments...)
 	if err != nil {
@@ -184,7 +184,7 @@ WHERE f.facet_status = 'ok' AND f.last_ns >= $1 AND f.last_ns < $2`+conditions, 
 	out := make([]storage.FacetEnumRow, 0)
 	for rows.Next() {
 		var row storage.FacetEnumRow
-		if err := rows.Scan(&row.Kind, &row.TaskType, &row.Outcome, &row.Collaboration, &row.Friction, &row.Items); err != nil {
+		if err := rows.Scan(&row.PromptVersion, &row.Model, &row.Kind, &row.TaskType, &row.Outcome, &row.Collaboration, &row.Friction, &row.Items); err != nil {
 			return nil, fmt.Errorf("postgres: scan facet enums: %w", err)
 		}
 		out = append(out, row)

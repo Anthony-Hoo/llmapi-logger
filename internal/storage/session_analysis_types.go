@@ -395,6 +395,10 @@ type ScopeKey struct {
 
 // FacetEnumRow is the plaintext part of one ok facet, for aggregation.
 type FacetEnumRow struct {
+	// PromptVersion and Model produced the row; its calibration decides which
+	// fields a report may show.
+	PromptVersion string
+	Model         string
 	Kind          string
 	TaskType      string
 	Outcome       string

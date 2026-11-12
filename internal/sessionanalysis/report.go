@@ -147,13 +147,22 @@ func (target reportTarget) facets() storage.FacetScope {
 	return storage.FacetScope{APIKeyFPR: target.apiKey, ProjectID: target.projectID, UserIDs: target.userIDs}
 }
 
-func buildWeeklyStats(weekStart time.Time, totals storage.SessionSignalTotals, enums []storage.FacetEnumRow, hidden map[string]bool) WeeklyStats {
+// hiddenFieldsFunc returns the fields the calibration of one prompt version
+// and model put below the bar.
+type hiddenFieldsFunc func(promptVersion, model string) map[string]bool
+
+// buildWeeklyStats counts the facet enums of one week. Each row is filtered by
+// the calibration of the model that produced it: after a model change, rows
+// of both models are counted until every pack is relabelled, and a field the
+// old model failed calibration on stays hidden for its rows.
+func buildWeeklyStats(weekStart time.Time, totals storage.SessionSignalTotals, enums []storage.FacetEnumRow, hiddenFor hiddenFieldsFunc) WeeklyStats {
 	stats := WeeklyStats{
 		WeekStartNS: weekStart.UnixNano(), Totals: mapTotals(totals),
 		TaskTypes: map[string]int64{}, Outcomes: map[string]int64{}, Collaboration: map[string]int64{}, Friction: map[string]int64{},
 	}
 	for _, row := range enums {
 		stats.FacetsOK++
+		hidden := hiddenFor(row.PromptVersion, row.Model)
 		if row.Kind == storage.PackKindChatDigest {
 			var items []DigestFacetItem
 			_ = json.Unmarshal([]byte(row.Items), &items)
@@ -195,13 +204,22 @@ func (runner *Runner) runReports(ctx context.Context) error {
 	}
 	now := options.Now()
 	current := runner.weekStart(now)
-	hidden := map[string]bool{}
-	if options.LLM != nil {
-		if calibration, err := store.LatestFacetCalibration(ctx, PromptVersion, options.LLM.Model()); err == nil {
+	// Calibrations are looked up per (prompt version, model) of the facet
+	// rows, once per run; a pair without any calibration hides nothing.
+	calibrations := map[[2]string]map[string]bool{}
+	hidden := func(promptVersion, model string) map[string]bool {
+		pair := [2]string{promptVersion, model}
+		if fields, ok := calibrations[pair]; ok {
+			return fields
+		}
+		fields := map[string]bool{}
+		if calibration, err := store.LatestFacetCalibration(ctx, promptVersion, model); err == nil {
 			for _, field := range hiddenFieldsOf(calibration) {
-				hidden[field] = true
+				fields[field] = true
 			}
 		}
+		calibrations[pair] = fields
+		return fields
 	}
 	keysSeen := map[string]storage.ScopeKey{}
 	projectsSeen := map[int64]bool{}
@@ -323,7 +341,7 @@ func hiddenFieldsOf(calibration storage.FacetCalibration) []string {
 	return hiddenFrom(stored.Agreement, stored.Compared)
 }
 
-func (runner *Runner) reportScope(ctx context.Context, store ReportStore, weekStart time.Time, target reportTarget, hidden map[string]bool) error {
+func (runner *Runner) reportScope(ctx context.Context, store ReportStore, weekStart time.Time, target reportTarget, hidden hiddenFieldsFunc) error {
 	options := runner.options
 	scope := target.scope
 	from, to := weekStart.UnixNano(), weekStart.AddDate(0, 0, 7).UnixNano()

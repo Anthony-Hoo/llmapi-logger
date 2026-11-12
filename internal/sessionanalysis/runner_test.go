@@ -326,13 +326,15 @@ func (store *memoryStore) SaveFacetCalibration(_ context.Context, calibration st
 	return nil
 }
 
-func (store *memoryStore) LatestFacetCalibration(context.Context, string, string) (storage.FacetCalibration, error) {
+func (store *memoryStore) LatestFacetCalibration(_ context.Context, promptVersion, model string) (storage.FacetCalibration, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if len(store.calib) == 0 {
-		return storage.FacetCalibration{}, sql.ErrNoRows
+	for index := len(store.calib) - 1; index >= 0; index-- {
+		if calibration := store.calib[index]; calibration.PromptVersion == promptVersion && calibration.Model == model {
+			return calibration, nil
+		}
 	}
-	return store.calib[len(store.calib)-1], nil
+	return storage.FacetCalibration{}, sql.ErrNoRows
 }
 
 func testCipher(t *testing.T) security.Cipher {
@@ -863,7 +865,7 @@ func (store *memoryStore) FacetEnums(_ context.Context, fromNS, toNS int64, scop
 	out := make([]storage.FacetEnumRow, 0)
 	for key, facet := range store.facets {
 		if facet.Status == "ok" && facet.LastNS >= fromNS && facet.LastNS < toNS && store.facetInScope(key, facet, scope) {
-			out = append(out, storage.FacetEnumRow{Kind: facet.Kind, TaskType: facet.TaskType, Outcome: facet.Outcome, Collaboration: facet.Collaboration, Friction: facet.Friction, Items: facet.Items})
+			out = append(out, storage.FacetEnumRow{PromptVersion: facet.PromptVersion, Model: facet.Model, Kind: facet.Kind, TaskType: facet.TaskType, Outcome: facet.Outcome, Collaboration: facet.Collaboration, Friction: facet.Friction, Items: facet.Items})
 		}
 	}
 	return out, nil

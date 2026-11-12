@@ -25,6 +25,36 @@ func TestWeekStartIsMondayMidnight(t *testing.T) {
 	}
 }
 
+// After a model change the week holds rows of both models; each is filtered
+// by the calibration of the model that produced it.
+func TestWeeklyStatsApplyEachRowsOwnCalibration(t *testing.T) {
+	enums := []storage.FacetEnumRow{
+		{PromptVersion: PromptVersion, Model: "old-model", Kind: storage.PackKindSession, TaskType: "bugfix", Outcome: "achieved", Friction: `["tool_error"]`},
+		{PromptVersion: PromptVersion, Model: "new-model", Kind: storage.PackKindSession, TaskType: "feature", Outcome: "partial", Friction: `["tool_error"]`},
+	}
+	asked := map[string]int{}
+	hidden := func(promptVersion, model string) map[string]bool {
+		asked[promptVersion+"/"+model]++
+		if model == "old-model" {
+			return map[string]bool{"outcome": true, "friction": true}
+		}
+		return map[string]bool{}
+	}
+	stats := buildWeeklyStats(time.Unix(0, 0), storage.SessionSignalTotals{}, enums, hidden)
+	if stats.FacetsOK != 2 || stats.TaskTypes["bugfix"] != 1 || stats.TaskTypes["feature"] != 1 {
+		t.Fatalf("task types = %v (facets %d)", stats.TaskTypes, stats.FacetsOK)
+	}
+	if len(stats.Outcomes) != 1 || stats.Outcomes["partial"] != 1 {
+		t.Fatalf("outcomes = %v: the old model's hidden field leaked", stats.Outcomes)
+	}
+	if stats.Friction["tool_error"] != 1 {
+		t.Fatalf("friction = %v", stats.Friction)
+	}
+	if asked[PromptVersion+"/old-model"] == 0 || asked[PromptVersion+"/new-model"] == 0 {
+		t.Fatalf("calibrations asked = %v", asked)
+	}
+}
+
 func TestNarrativeNumbersMustComeFromTheInput(t *testing.T) {
 	input := "[覆盖] 会话12(+3) 已分析9\n[信号] 死循环2个会话 结束前未验证3(占有写文件会话25%)"
 	if !NarrativeNumbersGrounded("本周 12 个会话，死循环 2 个，未验证占 25%。", input) {
