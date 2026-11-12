@@ -163,6 +163,28 @@ func TestInheritIdentities(t *testing.T) {
 	}
 }
 
+func TestInheritIdentitiesStaysWithinOneCaller(t *testing.T) {
+	requests := []Request{
+		// Caller k1 identifies its node and root.
+		{AuditID: "k1-a", StartNS: 1, CallerKey: "k1", RootKey: "r", NodeKey: "n", IdentityKey: "repo-a"},
+		// Caller k2 reuses the same root and node ids without any identity.
+		{AuditID: "k2-a", StartNS: 2, CallerKey: "k2", RootKey: "r", NodeKey: "n"},
+		{AuditID: "k2-b", StartNS: 3, CallerKey: "k2", RootKey: "r"},
+		// A later request of k1 still inherits within k1.
+		{AuditID: "k1-b", StartNS: 4, CallerKey: "k1", RootKey: "r", NodeKey: "n"},
+		{AuditID: "k1-c", StartNS: 5, CallerKey: "k1", RootKey: "r"},
+	}
+	if inherited := InheritIdentities(requests); inherited != 2 {
+		t.Fatalf("inherited = %d, want 2", inherited)
+	}
+	want := map[string]string{"k1-a": "repo-a", "k2-a": "", "k2-b": "", "k1-b": "repo-a", "k1-c": "repo-a"}
+	for _, request := range requests {
+		if request.IdentityKey != want[request.AuditID] {
+			t.Errorf("%s identity = %q, want %q", request.AuditID, request.IdentityKey, want[request.AuditID])
+		}
+	}
+}
+
 func TestMajorityTieGoesToTheIdentitySeenFirst(t *testing.T) {
 	requests := []Request{
 		{AuditID: "x2", StartNS: 2, RootKey: "r", NodeKey: "b", IdentityKey: "second"},

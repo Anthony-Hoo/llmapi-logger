@@ -72,6 +72,10 @@ type Request struct {
 	// node, both as opaque strings; empty when insights found none.
 	RootKey string
 	NodeKey string
+	// CallerKey is the caller scope (the API key fingerprint) as an opaque
+	// string; empty when the request carried no key. Identity inheritance
+	// never crosses it: two callers reusing one session id stay apart.
+	CallerKey string
 	// Inferred marks a session linked by the inferred session key (system
 	// prompt fingerprint plus first user message) rather than a client id.
 	Inferred bool

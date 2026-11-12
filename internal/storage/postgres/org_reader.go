@@ -38,7 +38,7 @@ SELECT aa.audit_id, aa.started_at_ns, ar.ended_at_ns,
        COALESCE(aa.u_cache_write, 0), COALESCE(aa.u_output, 0),
        COALESCE(tl.newapi_user_id, 0), COALESCE(tl.newapi_token_id, 0),
        COALESCE(tl.billing_state, ''), tl.quota, tl.quota_per_unit,
-       pi.identity_fpr
+       pi.identity_fpr, ar.api_key_fpr
 FROM audit_analysis AS aa
 JOIN audit_records AS ar ON ar.audit_id = aa.audit_id
 LEFT JOIN token_links AS tl ON tl.audit_id = aa.audit_id
@@ -54,16 +54,17 @@ LIMIT $3`, fromNS, toNS, maxOrgRequestRows+1)
 	for rows.Next() {
 		var request orgreport.Request
 		var endedAtNS sql.NullInt64
-		var rootFPR, nodeFPR, identityFPR []byte
+		var rootFPR, nodeFPR, identityFPR, keyFPR []byte
 		var sessionLink, billingState string
 		var quota sql.NullInt64
 		var quotaPerUnit sql.NullFloat64
 		if err := rows.Scan(&request.AuditID, &request.StartNS, &endedAtNS, &request.Client, &request.Role,
 			&rootFPR, &nodeFPR, &sessionLink,
 			&request.Tokens.Uncached, &request.Tokens.CacheRead, &request.Tokens.CacheWrite, &request.Tokens.Output,
-			&request.UserID, &request.TokenID, &billingState, &quota, &quotaPerUnit, &identityFPR); err != nil {
+			&request.UserID, &request.TokenID, &billingState, &quota, &quotaPerUnit, &identityFPR, &keyFPR); err != nil {
 			return nil, fmt.Errorf("postgres: scan org request: %w", err)
 		}
+		request.CallerKey = hex.EncodeToString(keyFPR)
 		request.EndNS = request.StartNS
 		if endedAtNS.Valid && endedAtNS.Int64 > request.StartNS {
 			request.EndNS = endedAtNS.Int64
@@ -120,9 +121,9 @@ LIMIT $4`, agentRootFPR, nullableBytes(apiKeyFPR), ForwardRejected, maxSessionAu
 	}
 	defer rows.Close()
 	input := orgreport.SessionInput{Requests: make([]orgreport.Request, 0, 64), Identities: make([]orgreport.SealedIdentity, 0, 4)}
-	root := hex.EncodeToString(agentRootFPR)
+	root, caller := hex.EncodeToString(agentRootFPR), hex.EncodeToString(apiKeyFPR)
 	for rows.Next() {
-		request := orgreport.Request{RootKey: root}
+		request := orgreport.Request{RootKey: root, CallerKey: caller}
 		var nodeFPR, identityFPR []byte
 		var extracted bool
 		if err := rows.Scan(&request.AuditID, &request.StartNS, &request.Client, &request.Role, &nodeFPR,

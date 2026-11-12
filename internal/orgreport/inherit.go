@@ -12,8 +12,19 @@ import "sort"
 //     take the majority identity of its root (ties: the identity seen first).
 //  3. A request without a root keeps no identity.
 //
+// Nodes and roots are scoped by caller (CallerKey): a request never inherits
+// the identity of another caller that reused the same client session id.
+//
 // It returns the number of requests that received an inherited identity.
 func InheritIdentities(requests []Request) int {
+	scoped := func(caller, key string) string {
+		if key == "" {
+			return ""
+		}
+		return caller + "\x00" + key
+	}
+	rootOf := func(request Request) string { return scoped(request.CallerKey, request.RootKey) }
+	nodeOf := func(request Request) string { return scoped(request.CallerKey, request.NodeKey) }
 	order := make([]int, len(requests))
 	for index := range order {
 		order[index] = index
@@ -34,19 +45,19 @@ func InheritIdentities(requests []Request) int {
 	nodes := map[string][]int{}
 	for position, index := range order {
 		request := requests[index]
-		if request.RootKey != "" && request.IdentityKey != "" {
-			counter := roots[request.RootKey]
+		if root := rootOf(request); root != "" && request.IdentityKey != "" {
+			counter := roots[root]
 			if counter == nil {
 				counter = &tally{counts: map[string]int{}, first: map[string]int{}}
-				roots[request.RootKey] = counter
+				roots[root] = counter
 			}
 			if _, seen := counter.first[request.IdentityKey]; !seen {
 				counter.first[request.IdentityKey] = position
 			}
 			counter.counts[request.IdentityKey]++
 		}
-		if request.NodeKey != "" {
-			nodes[request.NodeKey] = append(nodes[request.NodeKey], index)
+		if node := nodeOf(request); node != "" {
+			nodes[node] = append(nodes[node], index)
 		}
 	}
 	majority := func(root string) string {
@@ -83,7 +94,7 @@ func InheritIdentities(requests []Request) int {
 			}
 			value := last
 			if value == "" {
-				value = majority(requests[index].RootKey)
+				value = majority(rootOf(requests[index]))
 			}
 			if value != "" {
 				requests[index].IdentityKey = value
@@ -95,7 +106,7 @@ func InheritIdentities(requests []Request) int {
 		if assigned[index] || requests[index].IdentityKey != "" || requests[index].RootKey == "" {
 			continue
 		}
-		if value := majority(requests[index].RootKey); value != "" {
+		if value := majority(rootOf(requests[index])); value != "" {
 			requests[index].IdentityKey = value
 			inherited++
 		}
