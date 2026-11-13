@@ -248,6 +248,16 @@ func loadInsightsVocabulary(configuration config.InsightsConfig) (*insights.Voca
 	return vocabulary, nil
 }
 
+// uiVocabulary is the vocabulary the management UI classifies text with: the
+// loaded insights vocabulary, or the embedded default when insights are
+// disabled (a disabled deployment still never reads the override file).
+func uiVocabulary(loaded *insights.Vocabulary) *insights.Vocabulary {
+	if loaded != nil {
+		return loaded
+	}
+	return insights.DefaultVocabulary()
+}
+
 // installInsights wires the analyzer into the parser worker: it narrows the
 // decrypted request headers to the vocabulary allowlist and links each parsed
 // audit with the analysis fingerprinter.
@@ -490,6 +500,8 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 
 		SessionAnalysis:         sessionAnalysisService,
 		SessionAnalysisSettings: sessionAnalysisSettings,
+
+		InjectedUserTextPrefixes: uiVocabulary(vocabulary).InjectedUserTextPrefixes(),
 	})
 	if err != nil {
 		_ = application.closeComponents()

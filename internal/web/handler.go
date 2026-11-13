@@ -103,6 +103,12 @@ type Options struct {
 	SessionAnalysis SessionAnalysisQuery
 	// SessionAnalysisSettings is nil unless session_analysis.enabled.
 	SessionAnalysisSettings SessionAnalysisSettings
+
+	// InjectedUserTextPrefixes is the effective vocabulary list of lower-cased
+	// prefixes that mark client-injected user text
+	// (insights.Vocabulary.InjectedUserTextPrefixes). The session response
+	// carries it so the conversation view's user-input outline skips that text.
+	InjectedUserTextPrefixes []string
 }
 
 // NewHandler constructs the complete management handler. It rejects an empty
@@ -131,6 +137,8 @@ func NewHandler(options Options) (http.Handler, error) {
 		sessionAnalysis: options.SessionAnalysis,
 
 		sessionAnalysisSettings: options.SessionAnalysisSettings,
+
+		injectedUserTextPrefixes: append([]string(nil), options.InjectedUserTextPrefixes...),
 	}
 	handler.authenticator = newManagementAuth(options.AdminToken, options.Developer.usable())
 	handler.auth = handler.authenticator.middleware(handler.serveProtected)
@@ -155,6 +163,8 @@ type managementHandler struct {
 	sessionAnalysis SessionAnalysisQuery
 
 	sessionAnalysisSettings SessionAnalysisSettings
+
+	injectedUserTextPrefixes []string
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

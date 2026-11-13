@@ -21,6 +21,12 @@ export interface SessionInfo {
   org_reports_enabled?: boolean;
   /** True when session analysis (doc/features/24-session-analysis.md) is enabled. */
   session_analysis_enabled?: boolean;
+  /**
+   * Lower-cased prefixes of client-injected user text from the server's
+   * effective vocabulary; the conversation view's user-input outline skips
+   * text parts that start with one of them.
+   */
+  injected_user_text_prefixes?: string[];
 }
 
 export interface AuditCursor {

@@ -44,6 +44,21 @@ type sessionResponse struct {
 	OrgReportsEnabled bool `json:"org_reports_enabled"`
 	// SessionAnalysisEnabled likewise reports the session analysis routes.
 	SessionAnalysisEnabled bool `json:"session_analysis_enabled"`
+	// InjectedUserTextPrefixes are the lower-cased prefixes of client-injected
+	// user text from the effective vocabulary; the conversation view's
+	// user-input outline skips text parts that start with one of them.
+	InjectedUserTextPrefixes []string `json:"injected_user_text_prefixes,omitempty"`
+}
+
+// authenticatedSession builds the session response for an authenticated
+// caller, with the deployment's feature flags and UI vocabulary filled in.
+func (handler *managementHandler) authenticatedSession(callerRole role) sessionResponse {
+	return sessionResponse{
+		Status: "authenticated", Role: callerRole,
+		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
+		SessionAnalysisEnabled:   handler.sessionAnalysis != nil,
+		InjectedUserTextPrefixes: handler.injectedUserTextPrefixes,
+	}
 }
 
 // serveSession is dispatched before the authenticating middleware, because
@@ -76,8 +91,7 @@ func (handler *managementHandler) serveSessionInfo(writer http.ResponseWriter, r
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
 		return
 	}
-	response := sessionResponse{Status: "authenticated", Role: caller.Role, InsightsEnabled: handler.insights != nil,
-		OrgReportsEnabled: handler.org != nil, SessionAnalysisEnabled: handler.sessionAnalysis != nil}
+	response := handler.authenticatedSession(caller.Role)
 	if !caller.ExpiresAt.IsZero() {
 		response.ExpiresAt = caller.ExpiresAt.Format(time.RFC3339)
 	}
@@ -124,11 +138,9 @@ func (handler *managementHandler) serveLogin(writer http.ResponseWriter, request
 	}
 	handler.logins.recordSuccess(request)
 	expires := handler.authenticator.issueSessionCookie(writer, request)
-	writeJSON(writer, http.StatusOK, sessionResponse{
-		Status: "authenticated", Role: roleAdmin, ExpiresAt: expires.Format(time.RFC3339),
-		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
-		SessionAnalysisEnabled: handler.sessionAnalysis != nil,
-	})
+	response := handler.authenticatedSession(roleAdmin)
+	response.ExpiresAt = expires.Format(time.RFC3339)
+	writeJSON(writer, http.StatusOK, response)
 }
 
 // loginDeveloper authenticates a NewAPI user API key against NewAPI itself and
@@ -173,14 +185,11 @@ func (handler *managementHandler) loginDeveloper(writer http.ResponseWriter, req
 		return
 	}
 	handler.logins.recordSuccess(request)
-	response := sessionResponse{
-		Status: "authenticated", Role: roleDeveloper, ExpiresAt: expires.Format(time.RFC3339),
-		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
-		SessionAnalysisEnabled: handler.sessionAnalysis != nil,
-		Identity: &developerIdentity{
-			UserID: payload.UserID, Username: payload.Username,
-			TokenID: payload.TokenID, TokenName: payload.TokenName,
-		},
+	response := handler.authenticatedSession(roleDeveloper)
+	response.ExpiresAt = expires.Format(time.RFC3339)
+	response.Identity = &developerIdentity{
+		UserID: payload.UserID, Username: payload.Username,
+		TokenID: payload.TokenID, TokenName: payload.TokenName,
 	}
 	writeJSON(writer, http.StatusOK, response)
 }

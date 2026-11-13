@@ -11,7 +11,7 @@
 - 管理面使用独立 listener，默认 `127.0.0.1:8081`。
 - `/api/v1/*`、`/healthz`、`/readyz` 都要求 Bearer token 或有效 HttpOnly Cookie。
 - `/ui/` shell 和静态资源可匿名加载，但不包含审计数据或配置。
-- `POST /api/v1/session` 以一次性 admin token 换取七天 Cookie；`DELETE` 注销；`GET` 返回当前身份供前端引导。
+- `POST /api/v1/session` 以一次性 admin token 换取七天 Cookie；`DELETE` 注销；`GET` 返回当前身份供前端引导。会话响应还带各可选功能的开关，以及 `injected_user_text_prefixes`：当前生效词表里标记"客户端注入的 user 文本"的小写前缀（`user_input_exclude_prefixes` 加 `injection_markers`；insights 关闭时用内置默认词表），供对话视图的用户输入导航使用。
 - 存在两种身份：管理员读取全部记录与站点配置；开发者用 NewAPI 用户 API Key 登录，只读取该 Key 的记录，详见[模块 19](19-developer-key-session.md)。开发者访问管理员专属端点返回 403。
 - `POST /api/v1/session` 按来源地址限流失败登录（5 分钟 10 次 → 429 + `Retry-After`）。
 - 所有证据 JSON、错误、raw、reconstructed 和 timeline 响应都使用 `Cache-Control: no-store`。
@@ -112,7 +112,7 @@ UI 默认只显示 TTFT、Body 首末观测、SSE event count 和 complete 状�
 主要视图：
 
 - 审计列表：时间、调用者、窄模型列和可换行 User-Agent；异常记录显示短状态提示；上游策略拒绝额外显示“上游安全拒绝: <class>”短标签。高级筛选提供 HTTP 状态段和精确状态码、上游拒绝分类下拉，非法状态码或非法分类在字段旁就地提示，修改输入时清除提示，校验失败不提交筛选；有所属 conversation 的行显示会话短 ID，按会话折叠开启且该会话轮数大于 1 时额外显示「N 轮」徽标。列表头提供「按会话折叠」开关，默认开启；查看单个会话（见下）或任何行级筛选生效时该开关均不出现，因为此时应逐轮显示匹配记录。
-- 对话审计：system/developer/user/assistant/tool、reasoning、tool call/result 按原顺序展示。详情头提供「导出会话 JSON」：前端把已获取的解析 conversation 连同关键审计元数据（audit/conversation/turn id、时间、模型、调用者、User-Agent）另存为本地 JSON 文件，面向阅读而非字节重放，不新增服务端导出 API；没有解析 conversation 时按钮禁用。
+- 对话审计：system/developer/user/assistant/tool、reasoning、tool call/result 按原顺序展示。对话右侧有一条随页面吸附的"用户输入导航"：每条人实际输入的 user 消息一个刻度（跳过工具结果和以 `injected_user_text_prefixes` 开头的注入上下文，如 AGENTS.md、环境信息、system reminder），悬停或键盘聚焦显示前 80 个字符的预览，点击滚动到该消息并聚焦，当前阅读位置所在的输入高亮；没有人输入的消息时不显示。详情头提供「导出会话 JSON」：前端把已获取的解析 conversation 连同关键审计元数据（audit/conversation/turn id、时间、模型、调用者、User-Agent）另存为本地 JSON 文件，面向阅读而非字节重放，不新增服务端导出 API；没有解析 conversation 时按钮禁用。
 - 工具流量内联图片：tool call 参数与 tool result 中的 base64 图片（data URL、Anthropic `source.data`、Gemini `inline_data` 三种形态）在展示层渲染为缩略图，点击进入全屏查看器：滚轮以光标为中心缩放、拖动平移、双击在适应屏幕与原始大小间切换，多图时两侧箭头按钮与 ←/→ 方向键循环切换（切换时重置缩放），Esc 或点击背景关闭；展示用 JSON 中的 base64 载荷替换为「[图片 #n 类型 大小]」占位符以保持可读。图片全部来自 data: URL，渲染不发起网络请求；该替换只作用于展示副本，不改写存储值。未识别内容块沿用同一提取逻辑，但用户消息中的图片块在 DTO 中被截断到 4 KiB，通常无法完整渲染。
 - 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载；在详情中位于「存储与原始证据」下，默认折叠。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后清除所有行级筛选及其输入草稿，再对列表应用该 conversation 筛选，保留折叠偏好与服务端身份 scope；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作。清除会话筛选仅移除 conversation；若在会话视图中重新应用了行级筛选，仍按轮次展示，否则按已保存的折叠偏好展示。
 - 流式响应时序：TTFT、event count、首末观测、timeline complete 和按需 timeline 校验。
@@ -232,6 +232,7 @@ type AuditQuery interface {
 - metadata raw 不可读取且 UI 不显示 raw 按钮；full raw 大 Body 内存有界。
 - timeline 完整/截断语义、首末时间和 point count 校验；Body 缺块不改变已封存时间线的 complete。
 - conversation 安全 Markdown、角色顺序、工具关联和未知内容展示。
+- 用户输入导航：注入文本判定与 Go 词表共用 `internal/insights/testdata/user_input_prefixes.json`；会话响应携带 `injected_user_text_prefixes`；刻度只覆盖人输入的消息、每条消息都有跳转锚点。
 - 前端 API、组件、TypeScript 检查和生产构建。
 - 双角色鉴权、会话 API 三态、开发者作用域强制与管理端点 403，详见[模块 19](19-developer-key-session.md)。
 - 未授权响应、静态 shell、列表和日志不泄露 Request-URI、Header、Body、conversation、Token、Key 指纹或主密钥。
