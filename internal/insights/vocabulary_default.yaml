@@ -215,8 +215,9 @@ side_requests:
 
 # User-role text parts that a client injected rather than a person typed
 # (doc/features/24-session-analysis.md section 6.3). Leading whitespace is
-# trimmed and the first 64 characters are compared case-insensitively. The
-# conversation view's user-input outline uses the same list; keep them equal.
+# trimmed and the first 64 characters are compared case-insensitively. Together
+# with injection_markers this is also the list the management UI uses to keep
+# injected context out of the conversation view's user-input outline.
 user_input_exclude_prefixes:
   - "<environment_context"
   - "<user_instructions"

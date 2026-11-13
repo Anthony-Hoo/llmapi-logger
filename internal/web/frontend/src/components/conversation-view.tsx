@@ -1,7 +1,9 @@
+import { useEffect, useId, useMemo, useState } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { extractStructuredContent } from "../lib/images";
+import { buildUserInputOutline, type UserInputOutlineEntry } from "../lib/user-input-outline";
 import { Badge } from "./ui/badge";
 import { blockLabelClassName, codeBlockClassName, emptyStateClassName } from "./ui/styles";
 import { ImageAttachments } from "./image-attachments";
@@ -117,10 +119,24 @@ const markdownComponents: Components = {
   hr: () => <hr className="my-4 border-border-strong" />,
 };
 
-export function ConversationView({ conversation }: { conversation: Conversation | null | undefined }) {
-  const messages = conversation?.messages ?? [];
+const noInjectedPrefixes: readonly string[] = [];
 
-  if (messages.length === 0) {
+export function ConversationView({
+  conversation,
+  injectedUserTextPrefixes = noInjectedPrefixes,
+}: {
+  conversation: Conversation | null | undefined;
+  /** The session's injected_user_text_prefixes; see lib/user-input-outline. */
+  injectedUserTextPrefixes?: readonly string[];
+}) {
+  const messages = conversation?.messages;
+  const anchorPrefix = useId();
+  const outline = useMemo(
+    () => buildUserInputOutline(messages ?? [], injectedUserTextPrefixes),
+    [messages, injectedUserTextPrefixes],
+  );
+
+  if (!messages || messages.length === 0) {
     return (
       <div className={emptyStateClassName}>
         当前记录没有可展示的对话解析结果。原始 HTTP 证据仍可在下方查看。
@@ -139,20 +155,130 @@ export function ConversationView({ conversation }: { conversation: Conversation 
         <span>按代理解析出的原始顺序展示</span>
       </div>
 
-      <ol className="ml-2 space-y-3 border-l-2 border-border pl-5">
-        {messages.map((message, position) => (
-          <ConversationMessageView
-            key={`${message.index}-${position}`}
-            message={message}
-            displayIndex={position + 1}
-          />
-        ))}
-      </ol>
+      <div className={outline.length > 0 ? "grid grid-cols-[minmax(0,1fr)_1.5rem] gap-3" : undefined}>
+        <ol className="ml-2 min-w-0 space-y-3 border-l-2 border-border pl-5">
+          {messages.map((message, position) => (
+            <ConversationMessageView
+              key={`${message.index}-${position}`}
+              message={message}
+              displayIndex={position + 1}
+              anchorID={messageAnchorID(anchorPrefix, position)}
+            />
+          ))}
+        </ol>
+        {outline.length > 0 ? <UserInputRail entries={outline} anchorPrefix={anchorPrefix} /> : null}
+      </div>
     </div>
   );
 }
 
-function ConversationMessageView({ message, displayIndex }: { message: ConversationMessage; displayIndex: number }) {
+function messageAnchorID(prefix: string, position: number): string {
+  return `${prefix}conversation-message-${position}`;
+}
+
+// A message counts as "being read" once its top passes this line, measured
+// from the viewport top: the sticky app header plus some breathing room.
+const activeLinePx = 140;
+
+// Right-edge rail: one tick per typed user input. Hovering or focusing a tick
+// previews the text, clicking scrolls to the message, and the tick of the
+// input currently being read is highlighted. The rail is sticky inside the
+// conversation column, so it shows only while the thread is on screen, and
+// its ticks shrink rather than scroll so a long thread still fits.
+function UserInputRail({ entries, anchorPrefix }: { entries: UserInputOutlineEntry[]; anchorPrefix: string }) {
+  const [active, setActive] = useState<number | null>(null);
+
+  useEffect(() => {
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      let current: number | null = null;
+      for (const entry of entries) {
+        const element = document.getElementById(messageAnchorID(anchorPrefix, entry.position));
+        if (element && element.getBoundingClientRect().top <= activeLinePx) {
+          current = entry.position;
+        }
+      }
+      setActive(current ?? entries[0]?.position ?? null);
+    };
+    const schedule = () => {
+      if (!frame) {
+        frame = window.requestAnimationFrame(update);
+      }
+    };
+    update();
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    return () => {
+      window.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+      if (frame) {
+        window.cancelAnimationFrame(frame);
+      }
+    };
+  }, [entries, anchorPrefix]);
+
+  const jumpTo = (position: number) => {
+    const target = document.getElementById(messageAnchorID(anchorPrefix, position));
+    if (!target) {
+      return;
+    }
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    target.focus({ preventScroll: true });
+    setActive(position);
+  };
+
+  return (
+    <nav
+      aria-label={`用户输入导航，共 ${entries.length} 条`}
+      className="sticky top-[calc(var(--spacing-header)+1rem)] self-start"
+    >
+      <ol className="flex max-h-[calc(100vh-var(--spacing-header)-2rem)] flex-col items-center py-1">
+        {entries.map((entry, order) => {
+          const isActive = entry.position === active;
+          return (
+            <li key={entry.position} className="flex min-h-1 w-full shrink basis-5">
+              <button
+                type="button"
+                aria-label={`第 ${order + 1} 次用户输入（#${entry.displayIndex}）：${entry.preview}`}
+                aria-current={isActive ? "location" : undefined}
+                className="group relative flex w-full items-center justify-center rounded-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => jumpTo(entry.position)}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`h-0.5 rounded-full transition-all motion-reduce:transition-none group-hover:w-5 group-hover:bg-primary group-focus-visible:w-5 group-focus-visible:bg-primary ${
+                    isActive ? "w-5 bg-primary" : "w-3 bg-border-strong"
+                  }`}
+                />
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute right-full top-1/2 z-20 mr-2 hidden w-max max-w-72 -translate-y-1/2 rounded-md border bg-surface px-2 py-1 text-left text-label text-foreground shadow-overlay group-hover:block group-focus-visible:block"
+                >
+                  <span className="line-clamp-2 break-words">
+                    <span className="mr-1.5 tabular-nums text-subtle">{order + 1}.</span>
+                    {entry.preview}
+                  </span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
+function ConversationMessageView({
+  message,
+  displayIndex,
+  anchorID,
+}: {
+  message: ConversationMessage;
+  displayIndex: number;
+  anchorID: string;
+}) {
   const presentation = rolePresentation[message.role] ?? rolePresentation.unknown;
   const isResponse = message.phase === "response";
 
@@ -163,8 +289,10 @@ function ConversationMessageView({ message, displayIndex }: { message: Conversat
         className={`absolute -left-[1.77rem] top-4 h-3 w-3 rounded-full ring-4 ring-surface ${presentation.dot}`}
       />
       <article
+        id={anchorID}
+        tabIndex={-1}
         aria-label={`第 ${displayIndex} 条：${presentation.label}`}
-        className={`min-w-0 rounded-md border p-3 ${presentation.classes}`}
+        className={`min-w-0 scroll-mt-[calc(var(--spacing-header)+3.5rem)] rounded-md border p-3 outline-hidden focus-visible:ring-2 focus-visible:ring-ring ${presentation.classes}`}
       >
         <header className="flex flex-wrap items-center gap-2">
           <span className="text-body font-semibold">{presentation.label}</span>

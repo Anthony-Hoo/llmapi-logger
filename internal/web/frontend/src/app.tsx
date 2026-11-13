@@ -329,6 +329,7 @@ function Dashboard({
   // surfaces that scope excludes; the boundary itself is enforced by the API.
   const isDeveloper = session?.role === "developer";
   const hasInsights = insightsEnabled(session);
+  const injectedUserTextPrefixes = session?.injected_user_text_prefixes;
   const hasOrgReports = orgReportsEnabled(session);
   const hasSessionAnalysis = session?.session_analysis_enabled === true;
   // Configuration pages share one entry, "系统配置"; the main navigation
@@ -550,7 +551,15 @@ function Dashboard({
               client={client}
               isDeveloper={isDeveloper}
               refreshKey={refreshKey}
-              renderAuditDetail={(auditID) => <AuditDetailPanel key={auditID} client={client} insightsEnabled auditID={auditID} />}
+              renderAuditDetail={(auditID) => (
+                <AuditDetailPanel
+                  key={auditID}
+                  client={client}
+                  insightsEnabled
+                  auditID={auditID}
+                  injectedUserTextPrefixes={injectedUserTextPrefixes}
+                />
+              )}
             />
           </Suspense>
         ) : (
@@ -644,6 +653,7 @@ function Dashboard({
             insightsEnabled={hasInsights}
             auditID={selectedID}
             onFilterConversation={filterByConversation}
+            injectedUserTextPrefixes={injectedUserTextPrefixes}
           />
         </div>
           </>
@@ -1322,12 +1332,15 @@ function AuditDetailPanel({
   insightsEnabled: showComposition,
   auditID,
   onFilterConversation,
+  injectedUserTextPrefixes,
 }: {
   client: ApiClient;
   /** Whether the lazily loaded 上下文构成 section may be requested. */
   insightsEnabled: boolean;
   auditID: string | null;
   onFilterConversation?: (conversationID: string) => void;
+  /** The session's injected_user_text_prefixes, for the user-input outline. */
+  injectedUserTextPrefixes?: readonly string[];
 }) {
   const [detail, setDetail] = useState<AuditDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1561,6 +1574,7 @@ function AuditDetailPanel({
             onLoadRaw={loadRawBody}
             onDownloadRaw={downloadRawBody}
             onClearRaw={clearRawBody}
+            injectedUserTextPrefixes={injectedUserTextPrefixes}
           />
         ) : null}
       </CardContent>
@@ -1591,6 +1605,7 @@ export function AuditDetailBody({
   onLoadRaw,
   onDownloadRaw,
   onClearRaw,
+  injectedUserTextPrefixes,
 }: {
   detail: AuditDetail;
   /** Enables the lazily loaded 上下文构成 section; omitted in static renders. */
@@ -1611,6 +1626,8 @@ export function AuditDetailBody({
   onLoadRaw: (side: RawSide) => void;
   onDownloadRaw: (side: RawSide) => void;
   onClearRaw: (side: RawSide) => void;
+  /** The session's injected_user_text_prefixes, for the user-input outline. */
+  injectedUserTextPrefixes?: readonly string[];
 }) {
   const audit = detail.audit;
   const hasConversation = (detail.conversation?.messages.length ?? 0) > 0;
@@ -1673,7 +1690,7 @@ export function AuditDetailBody({
       />
 
       <Section title="对话审计">
-        <ConversationView conversation={detail.conversation} />
+        <ConversationView conversation={detail.conversation} injectedUserTextPrefixes={injectedUserTextPrefixes} />
       </Section>
 
       {client ? (

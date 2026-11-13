@@ -65,6 +65,46 @@ const conversation: Conversation = {
 };
 
 describe("conversation audit view", () => {
+  it("adds a user-input rail after the thread, with a jump target on every message", () => {
+    const thread: Conversation = {
+      schema_version: 1,
+      messages: [
+        {
+          index: 0,
+          role: "user",
+          phase: "request",
+          direction: "client_to_upstream",
+          content: [{ index: 0, type: "text", text: "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>" }],
+        },
+        {
+          index: 1,
+          role: "user",
+          phase: "request",
+          direction: "client_to_upstream",
+          content: [{ index: 0, type: "text", text: "Fix the flaky login test" }],
+        },
+        ...conversation.messages.slice(2),
+      ],
+    };
+
+    const html = renderToStaticMarkup(
+      <ConversationView conversation={thread} injectedUserTextPrefixes={["<environment_context"]} />,
+    );
+    expect(html).toContain("用户输入导航，共 2 条");
+    expect(html).toContain("第 1 次用户输入（#2）：Fix the flaky login test");
+    expect(html).toContain("第 2 次用户输入（#3）：What is the weather?");
+    expect(html.match(/id="[^"]*conversation-message-\d+"/g)).toHaveLength(thread.messages.length);
+    expect(html.indexOf("Fix the flaky login test")).toBeLessThan(html.indexOf("用户输入导航"));
+
+    // Without the session list nothing is treated as injected.
+    expect(renderToStaticMarkup(<ConversationView conversation={thread} />)).toContain("用户输入导航，共 3 条");
+  });
+
+  it("omits the rail when no typed user input exists", () => {
+    const assistantOnly: Conversation = { schema_version: 1, messages: [conversation.messages[3]] };
+    expect(renderToStaticMarkup(<ConversationView conversation={assistantOnly} />)).not.toContain("用户输入导航");
+  });
+
   it("keeps message order and exposes tool call and result evidence", () => {
     const html = renderToStaticMarkup(<ConversationView conversation={conversation} />);
 

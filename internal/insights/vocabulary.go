@@ -57,8 +57,8 @@ type Vocabulary struct {
 	// UserInputExcludePrefixes mark user-role text parts that a client
 	// injected rather than a person typed (doc/features/24-session-analysis.md
 	// section 6.3). Matching trims leading whitespace and compares the first 64
-	// characters case-insensitively. The conversation view's user-input outline
-	// must use the same list.
+	// characters case-insensitively. The management UI's user-input outline
+	// receives the effective list through InjectedUserTextPrefixes.
 	UserInputExcludePrefixes []string `yaml:"user_input_exclude_prefixes"`
 }
 
@@ -107,12 +107,40 @@ var knownProjectKinds = map[string]bool{
 }
 
 // userInputPrefixWindow is how many leading characters IsInjectedUserText
-// inspects, matching the conversation view.
+// inspects. The conversation view's outline uses the same window.
 const userInputPrefixWindow = 64
 
+// InjectedUserTextPrefixes returns the lower-cased prefixes that mark a
+// user-role text part as client-injected: the user_input_exclude_prefixes
+// entries followed by the injection markers, without duplicates. It is the
+// single list IsInjectedUserText matches, and the management session hands it
+// to the UI so that the conversation view's user-input outline classifies
+// text the same way, operator overrides included.
+func (vocab *Vocabulary) InjectedUserTextPrefixes() []string {
+	if vocab == nil {
+		return nil
+	}
+	prefixes := make([]string, 0, len(vocab.UserInputExcludePrefixes)+len(vocab.InjectionMarkers))
+	seen := make(map[string]bool, cap(prefixes))
+	add := func(prefix string) {
+		prefix = strings.ToLower(prefix)
+		if prefix != "" && !seen[prefix] {
+			seen[prefix] = true
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	for _, prefix := range vocab.UserInputExcludePrefixes {
+		add(prefix)
+	}
+	for _, marker := range vocab.InjectionMarkers {
+		add(marker)
+	}
+	return prefixes
+}
+
 // IsInjectedUserText reports whether a user-role text part is client-injected
-// context: it starts with a user_input_exclude_prefixes entry or an
-// injection marker.
+// context: after leading whitespace, its first 64 characters, lower-cased,
+// start with one of InjectedUserTextPrefixes.
 func (vocab *Vocabulary) IsInjectedUserText(text string) bool {
 	if vocab == nil {
 		return false
@@ -122,13 +150,8 @@ func (vocab *Vocabulary) IsInjectedUserText(text string) bool {
 		head = string(runes[:userInputPrefixWindow])
 	}
 	head = strings.ToLower(head)
-	for _, prefix := range vocab.UserInputExcludePrefixes {
+	for _, prefix := range vocab.InjectedUserTextPrefixes() {
 		if strings.HasPrefix(head, prefix) {
-			return true
-		}
-	}
-	for _, marker := range vocab.InjectionMarkers {
-		if strings.HasPrefix(head, strings.ToLower(marker)) {
 			return true
 		}
 	}

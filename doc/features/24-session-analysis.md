@@ -211,7 +211,7 @@ session_analysis:
 3. **筛出人输入的文本**：
    - 只取 `type=text` 的 part；`tool_result`、`reasoning`、`unknown` 类 part 自然被排除。Anthropic 把工具结果放在 user 消息里，也因此被排除。
    - 每个 text part 先 `trimStart`，取前 64 个字符转小写，以下列任一前缀开头的整段视为注入，丢弃：`<environment_context`、`<user_instructions`、`<system-reminder`、`<permissions`、`<skill`、`<user-prompt-submit-hook`、`<turn_aborted`、`# agents.md`，再加上 insights 词表 `injection_markers` 中的其余项。
-   - 这套前缀与主分支对话视图 `buildUserInputOutline`（`conversation-view.tsx` 的 `injectedUserTextPrefixes`）**必须一致**。实现时把列表移进 insights 词表作为唯一来源，新增 `user_input_exclude_prefixes`；前端改为从 API 读取，或者用一个测试锁定两边相等。
+   - 这套前缀与对话视图右侧"用户输入导航"使用同一份列表：insights 词表的 `user_input_exclude_prefixes` 加 `injection_markers` 是唯一来源（`Vocabulary.InjectedUserTextPrefixes`），会话响应以 `injected_user_text_prefixes` 下发给前端，运维覆盖词表后两边同时生效。`internal/insights/testdata/user_input_prefixes.json` 同时驱动 Go 与前端 `src/lib/user-input-outline.ts` 的判定测试。
    - 判定规则相同，拼接方式不同：对话视图只取第一段人输入的文本做预览，输入包按顺序拼接全部人输入的 part，中间空一行。
 4. **段内清理**（只用于输入包）：
    - 删除夹在文本中间的完整 `<system-reminder>…</system-reminder>` 段。前缀判定只能识别出现在开头的注入块。

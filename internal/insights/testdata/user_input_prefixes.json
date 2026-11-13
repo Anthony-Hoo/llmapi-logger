@@ -1,5 +1,5 @@
 {
-  "comment": "Shared fixture of doc/features/24-session-analysis.md section 6.3: the default user_input_exclude_prefixes and cases both the Go vocabulary and the conversation view's user-input outline must classify alike.",
+  "comment": "Shared fixture of doc/features/24-session-analysis.md section 6.3: the default user_input_exclude_prefixes and cases that the Go vocabulary (IsInjectedUserText) and the UI classifier (internal/web/frontend/src/lib/user-input-outline.ts, fed by the session's injected_user_text_prefixes) must classify alike.",
   "prefixes": [
     "<environment_context",
     "<user_instructions",
