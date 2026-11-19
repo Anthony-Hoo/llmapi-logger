@@ -3,6 +3,7 @@ package agentdist
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -17,9 +18,13 @@ const LinkLifetime = 30 * time.Minute
 // derived from admin_token (token digests, session cookies).
 const downloadKeyLabel = "llmapi-logger/agent-download/v1\x00"
 
-// maxSignatureLength bounds the decoded signature: at most 20 digits, the dot
-// and a 32-byte MAC. Anything longer is rejected before decoding.
-const maxSignatureLength = 72
+// nonceSize is the random part of every link, so that two links minted in
+// the same second differ and each has its own download budget.
+const nonceSize = 16
+
+// maxSignatureLength bounds the decoded signature: at most 20 digits, the dot,
+// the nonce and a 32-byte MAC. Anything longer is rejected before decoding.
+const maxSignatureLength = 20 + 1 + nonceSize + sha256.Size
 
 var (
 	// ErrBadSignature means the signature does not verify: malformed,
@@ -56,21 +61,28 @@ func NewSigner(adminToken string, now func() time.Time) (*Signer, error) {
 	return &Signer{key: DownloadKey(adminToken), now: now}, nil
 }
 
-// mac is HMAC-SHA-256(K_dl, expires_unix) over the decimal seconds.
-func (signer *Signer) mac(expires string) []byte {
+// mac is HMAC-SHA-256(K_dl, expires_unix || "." || nonce) over the decimal
+// seconds and the raw nonce bytes.
+func (signer *Signer) mac(expires string, nonce []byte) []byte {
 	hash := hmac.New(sha256.New, signer.key)
-	hash.Write([]byte(expires))
+	hash.Write([]byte(expires + "."))
+	hash.Write(nonce)
 	return hash.Sum(nil)
 }
 
 // Mint returns a signature valid for LinkLifetime from now, and its expiry:
-// BASE64URL(expires_unix || "." || HMAC-SHA-256(K_dl, expires_unix)), with
-// expires_unix in decimal seconds, the MAC as its 32 raw bytes and unpadded
-// URL-safe base64.
+// BASE64URL(expires_unix || "." || nonce || HMAC-SHA-256(K_dl, expires_unix ||
+// "." || nonce)), with expires_unix in decimal seconds, a fresh 16-byte random
+// nonce, the MAC as its 32 raw bytes and unpadded URL-safe base64. The nonce
+// makes every link distinct, so each link has its own download budget.
 func (signer *Signer) Mint() (string, time.Time) {
 	expires := signer.now().Add(LinkLifetime).Truncate(time.Second)
 	unix := strconv.FormatInt(expires.Unix(), 10)
-	payload := append([]byte(unix+"."), signer.mac(unix)...)
+	nonce := make([]byte, nonceSize)
+	// crypto/rand.Read does not fail on supported platforms: it crashes the
+	// program rather than return predictable bytes.
+	_, _ = rand.Read(nonce)
+	payload := append(append([]byte(unix+"."), nonce...), signer.mac(unix, nonce)...)
 	return base64.RawURLEncoding.EncodeToString(payload), expires.UTC()
 }
 
@@ -87,7 +99,7 @@ func (signer *Signer) Verify(signature string) (time.Time, error) {
 		return time.Time{}, ErrBadSignature
 	}
 	dot := bytes.IndexByte(payload, '.')
-	if dot <= 0 || dot > 20 || len(payload)-dot-1 != sha256.Size {
+	if dot <= 0 || dot > 20 || len(payload)-dot-1 != nonceSize+sha256.Size {
 		return time.Time{}, ErrBadSignature
 	}
 	unix := string(payload[:dot])
@@ -99,7 +111,8 @@ func (signer *Signer) Verify(signature string) (time.Time, error) {
 	if len(unix) > 1 && unix[0] == '0' {
 		return time.Time{}, ErrBadSignature
 	}
-	if !hmac.Equal(payload[dot+1:], signer.mac(unix)) {
+	nonce := payload[dot+1 : dot+1+nonceSize]
+	if !hmac.Equal(payload[dot+1+nonceSize:], signer.mac(unix, nonce)) {
 		return time.Time{}, ErrBadSignature
 	}
 	seconds, err := strconv.ParseInt(unix, 10, 64)

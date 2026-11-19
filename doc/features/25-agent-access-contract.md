@@ -109,6 +109,7 @@
 88. **提示里的命令必须在任何本地状态下都能用**（修正第 50 条）：`NOT_LOGGED_IN`、`UNAUTHENTICATED`、`TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_GRANT` 的提示原来写 `llmaudit login`，首次登录时它因缺 `--server` 失败（退出码 2）；`READ_ONLY_TOKEN` 的 `llmaudit login --write` 同理。现在统一写 `llmaudit login --server <server>`（`<server>` 是审计服务器地址；已保存凭据时可省略 `--server`），两种情况下都对。命令行自己知道地址的提示（`LOGIN_TIMEOUT`、粘贴方式的 `NO_TTY`、回环监听失败）直接写入本次登录的地址。`agentcli.CheckCommand` 因此在解析之外还要求命令带上它在某种本地状态下必需的参数（命令表的 `StateFlags`，目前只有 `login` 的 `--server`）；网页侧扫描服务端文本的测试与命令行侧扫描帮助、错误表与源码的测试都用它，占位符替换后检查。`<server>` 这类占位符无法照字面运行，这是有意的：没有凭据时客户端不知道地址。
 89. **`--out` 在请求之前检查**：带 `--out` 的每条命令（`usage trend`、`usage composition`、`analysis session`、`requests export`）在发出请求之前确认文件能写：目录存在、能在其中新建文件（原子替换所用的临时文件，建好即删）、目标不是目录；Windows 上已存在的只读文件也算不可用（那里不能改名覆盖它，POSIX 可以）。不可用时报 `LOCAL_FILE_ERROR`、`details.path` 为目标路径，服务端什么也没收到：输入包与分面不会写查看日志和 `sensitive_read` 行，也不占配额。此前读命令在服务端答复之后才检查目录。
 90. **过宽的凭据存放处**（POSIX）：命令行在读取或替换凭据之前检查状态目录与 `credentials.json`，组或其他用户有任何权限时改成 `0700` 与 `0600`；改不了（例如文件属于别人）时停下，报 `LOCAL_FILE_ERROR`，`details.path` 是那个路径、`details.required_mode` 是要求的权限，`hint` 写明两个权限，不读取也不打印文件内容。此前已存在的宽松目录原样沿用，别人可写的凭据文件照样被读取。Windows 上不做这一步：两者在创建时就只给本人一条 DACL，权限位不描述 Windows 的访问控制。改不了的分支在测试里只能以普通用户运行（root 能改任何文件的权限）。
+91. **每条安装链接有自己的下载额度**（修正 §5）：签名原来只覆盖到期的那一秒，同一秒生成的提示词共用一条链接、共用 30 次下载，一个用户的下载会用掉另一个的额度。现在签名串里带 16 字节随机数并一起参与 MAC：`BASE64URL(expires_unix || "." || nonce || HMAC-SHA-256(K_dl, expires_unix || "." || nonce))`，同一秒的两条链接签名不同、各有 30 次。路径形状 `GET /api/agent/v1/dl/{signature}/{file}`、到期、常数时间比较、计数（按签名串，并发下不超额）都不变；严格的 base64url 解码拒绝末位填充位非零的写法，所以一条链接只有一种写法、一份额度。升级前签出的、不带随机数的链接按“签名不对”处理（404），它们本来最多 30 分钟有效。
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |
@@ -731,7 +732,7 @@
 - 包文件名 `llmapi-audit-<version>-<os>-<arch>.zip`，顶层目录固定为 `llmapi-audit/`。由 `internal/agentdist` 的打包函数（命令 `internal/agentdist/cmd/agentpack`）可重复地打出。
 - **运行时包在哪里**：可执行文件旁边的 `agent-packages/` 目录（镜像里是 `/agent-packages`，`scripts/build.*` 写到 `bin/agent-packages`）。进程启动时读一次：校验清单，并逐个核对包的大小与 SHA-256；之后不再读目录，换包要重启。**版本检查**：清单的 `version` 必须等于服务端的最新版本、`min_compatible` 必须等于最低兼容版本，否则视为没有包（旧包不会被分发）。目录缺失、清单无效、版本不符或文件对不上都不阻止启动：记一条 `agent_packages_unavailable` 告警，两个接口照常应答（§0.1 第 63 条）。
 - 下载接口 `GET /api/agent/v1/dl/<签名>/<文件名>`，登记为 `anonymous`（ID `packages.download`），不接受查询参数。
-  - 签名串 `BASE64URL(expires_unix || "." || HMAC-SHA-256(K_dl, expires_unix))`：`expires_unix` 是十进制秒（不带前导零），MAC 是 32 个原始字节，编码是不带填充的 URL 安全 base64；`K_dl = SHA-256("llmapi-logger/agent-download/v1\x00" + admin_token)`，在 `agentdist` 内部由 `admin_token` 派生，不另存、不记日志。链接有效期 30 分钟，到期时间截到整秒；比新签的链接晚到期超过 1 分钟的签名按“签名不对”处理。MAC 比较是常数时间。
+  - 签名串 `BASE64URL(expires_unix || "." || nonce || HMAC-SHA-256(K_dl, expires_unix || "." || nonce))`：`expires_unix` 是十进制秒（不带前导零），`nonce` 是每条链接新取的 16 个随机字节（§0.1 第 91 条），MAC 是 32 个原始字节，编码是不带填充的 URL 安全 base64；`K_dl = SHA-256("llmapi-logger/agent-download/v1\x00" + admin_token)`，在 `agentdist` 内部由 `admin_token` 派生，不另存、不记日志。链接有效期 30 分钟，到期时间截到整秒；比新签的链接晚到期超过 1 分钟的签名按“签名不对”处理。MAC 比较是常数时间。
   - 文件名必须是清单里的文件或 `manifest.json`，只允许 `[A-Za-z0-9._-]`。文件经 `os.Root` 打开，不会离开包目录。
   - 签名不对、文件不在名单里、本部署没有包：404 `NOT_FOUND`，三者没有差别。过期（签名本身正确）：410 `LINK_EXPIRED`，提示回“Agent 接入”页重新生成。同一条链接超过 30 次：429 `RATE_LIMITED`，`Retry-After` 到链接过期为止。
   - **每条链接的计数**在进程内存里，按签名串计，只计校验通过的请求（清单与包都算一次），过期的条目顺手清掉，最多同时记 4096 条链接；重启清零。门面的令牌配额不适用于这个匿名接口。
