@@ -578,6 +578,44 @@ func TestAgentRegenerateBeyondRetentionMatchesTheWeb(t *testing.T) {
 	}
 }
 
+// A regenerate plan replaces only the week state it showed: a freeze or a
+// regeneration in between, from the web page here, is a VERSION_CONFLICT,
+// and the conflict does not spend the regenerate quota.
+func TestAgentRegenerateRefusesAStateItDidNotShow(t *testing.T) {
+	fixture := newWriteFixture(t)
+	week := orgTestWeek.Format("2006-01-02")
+	body := map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week}}
+	plan := fixture.plan(t, body)
+	if shown := plan.Extras["week"].(map[string]any); shown["frozen"] != false || plan.Target.Version != "0" {
+		t.Fatalf("plan = %+v", plan)
+	}
+	if web := fixture.web(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+week, ""); web.Code != http.StatusNoContent {
+		t.Fatalf("web = %d", web.Code)
+	}
+	saves := fixture.snapshots.saves
+	if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeVersionConflict {
+		t.Fatalf("stale plan = %s", code)
+	}
+	if fixture.snapshots.saves != saves {
+		t.Fatal("a stale plan replaced the snapshot")
+	}
+	// Even at the same clock reading a new regeneration is a new version.
+	fresh := fixture.plan(t, body)
+	if fixture.web(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+week, "").Code != http.StatusNoContent {
+		t.Fatal("web regenerate")
+	}
+	if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+fresh.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeVersionConflict {
+		t.Fatalf("plan before a second web regeneration = %s", code)
+	}
+	// Conflicts gave their quota slots back: six regenerations still run.
+	for index := 0; index < 6; index++ {
+		applied := fixture.planAndApply(t, body)
+		if applied.Target.Version == "" || applied.Target.Version == "0" {
+			t.Fatalf("applied = %+v", applied)
+		}
+	}
+}
+
 // The administrator's change list (contract section 3.2).
 func TestAgentChangesEndpoint(t *testing.T) {
 	fixture := newWriteFixture(t)

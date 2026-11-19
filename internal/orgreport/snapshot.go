@@ -72,6 +72,15 @@ type snapshotJob struct {
 
 	cacheMu sync.Mutex
 	cache   map[string]cachedWeek
+
+	// freezeMu serialises every snapshot write (the background freeze, the
+	// web's Regenerate and the agent's RegenerateIfVersion), so a check of
+	// the stored snapshot and the write that replaces it are one step.
+	freezeMu sync.Mutex
+	// lastStampNS is the last snapshot time written, guarded by freezeMu: a
+	// new snapshot is stamped above it, so two writes never leave the same
+	// generated_at even when the clock repeats a reading.
+	lastStampNS int64
 }
 
 type cachedWeek struct {
@@ -174,15 +183,23 @@ func (service *Service) freezePending(ctx context.Context, now time.Time) {
 
 // freeze computes and stores one week.
 func (service *Service) freeze(ctx context.Context, week Week) error {
+	service.job.freezeMu.Lock()
+	defer service.job.freezeMu.Unlock()
+	return service.freezeLocked(ctx, week)
+}
+
+// freezeLocked is freeze with job.freezeMu held.
+func (service *Service) freezeLocked(ctx context.Context, week Week) error {
 	result, compiled, err := service.compute(ctx, week, service.settings.Load())
 	if err != nil {
 		return err
 	}
-	now := service.now().UnixNano()
+	now := max(service.now().UnixNano(), service.job.lastStampNS+1)
 	snapshot := WeeklySnapshot{Week: week.Label(), FrozenAtNS: now, GeneratedAtNS: now, Result: result, ProjectNames: projectNames(result, compiled)}
 	if err := service.snapshots.SaveWeeklySnapshot(ctx, snapshot); err != nil {
 		return err
 	}
+	service.job.lastStampNS = now
 	service.forget(week.Label())
 	return nil
 }

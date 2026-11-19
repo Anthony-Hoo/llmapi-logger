@@ -68,6 +68,7 @@ type AgentOrgWriter interface {
 	ResetSettingsIfVersion(ctx context.Context, expectedVersion int64) (orgreport.SettingsView, error)
 
 	WeekState(ctx context.Context, label string) (orgreport.WeekState, error)
+	RegenerateIfVersion(ctx context.Context, label string, expectedVersion int64) error
 }
 
 // AgentAnalysisSettingsWriter is sessionanalysis.SettingsService's agent

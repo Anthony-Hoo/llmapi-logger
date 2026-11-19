@@ -204,7 +204,11 @@ func (handler *managementHandler) planWeeklyRegenerate(ctx context.Context, requ
 		return nil, &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "only an ended week can be regenerated",
 			Details: map[string]any{"field": "args.week", "reason": "week_not_ended"}}
 	}
-	plan := newAgentPlan(agentapi.OpWeeklyRegenerate, agentPlanTarget{Kind: "weekly-report", ID: state.Week})
+	// The version is the stored state the plan shows (frozen, frozen_at,
+	// generated_at): a freeze or regeneration in between is a conflict, not
+	// a replacement of a snapshot the user never saw.
+	version := state.Version()
+	plan := newAgentPlan(agentapi.OpWeeklyRegenerate, agentPlanTarget{Kind: "weekly-report", ID: state.Week, Version: agentVersion(version)})
 	plan.view.Extras["week"] = agentWeekState{Week: state.Week, StartAt: agentTime(state.StartNS), EndAt: agentTime(state.EndNS),
 		Ended: state.Ended, Frozen: state.Frozen, FrozenAt: agentTime(state.FrozenAtNS), GeneratedAt: agentTime(state.GeneratedAtNS)}
 	if state.Frozen {
@@ -219,7 +223,15 @@ func (handler *managementHandler) planWeeklyRegenerate(ctx context.Context, requ
 	plan.timeout = orgRegenerateTimeout
 	plan.verify = "llmaudit weekly report --week " + state.Week
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
-		return agentApplied{}, handler.org.Regenerate(ctx, week)
+		if err := org.RegenerateIfVersion(ctx, week, version); err != nil {
+			return agentApplied{}, err
+		}
+		after, err := org.WeekState(ctx, week)
+		if err != nil {
+			// The week was regenerated; only its new version is unknown.
+			return agentApplied{}, nil
+		}
+		return agentApplied{Version: agentVersion(after.Version())}, nil
 	}
 	return plan, nil
 }

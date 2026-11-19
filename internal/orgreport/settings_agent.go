@@ -334,3 +334,40 @@ func (service *Service) WeekState(ctx context.Context, label string) (WeekState,
 	}
 	return state, nil
 }
+
+// Version is the version of the week's stored state: the generated_at of
+// its snapshot, 0 while none is stored. Every snapshot write stamps a value
+// above the previous one.
+func (state WeekState) Version() int64 { return state.GeneratedAtNS }
+
+// RegenerateIfVersion is Regenerate only while the week's stored state is
+// still the one the caller saw (WeekState.Version; 0: no snapshot):
+// otherwise ErrVersionConflict and nothing is written. The comparison and
+// the write hold the snapshot lock, so no other freeze or regeneration can
+// land in between.
+func (service *Service) RegenerateIfVersion(ctx context.Context, label string, expectedVersion int64) error {
+	if service.snapshots == nil {
+		return ErrUnavailable
+	}
+	week, err := service.resolveWeek(label)
+	if err != nil {
+		return err
+	}
+	if !service.now().After(week.End) {
+		return ErrInvalid
+	}
+	service.job.freezeMu.Lock()
+	defer service.job.freezeMu.Unlock()
+	snapshot, exists, err := service.snapshots.LoadWeeklySnapshot(ctx, week.Label())
+	if err != nil {
+		return err
+	}
+	var version int64
+	if exists {
+		version = snapshot.GeneratedAtNS
+	}
+	if version != expectedVersion {
+		return ErrVersionConflict
+	}
+	return service.freezeLocked(ctx, week)
+}

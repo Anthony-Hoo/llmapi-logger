@@ -783,6 +783,36 @@ func TestWeekState(t *testing.T) {
 	}
 }
 
+// RegenerateIfVersion replaces only the stored state the caller saw; every
+// snapshot write is a new version, even at the same clock reading.
+func TestRegenerateIfVersion(t *testing.T) {
+	ctx := context.Background()
+	fixture := newReportFixture(t)
+	service := fixture.service
+	state, err := service.WeekState(ctx, "2026-11-02")
+	if err != nil || state.Version() != 0 {
+		t.Fatalf("state = %+v, %v", state, err)
+	}
+	if err := service.Regenerate(ctx, "2026-11-02"); err != nil {
+		t.Fatal(err)
+	}
+	saves := fixture.snapshots.saves
+	if err := service.RegenerateIfVersion(ctx, "2026-11-02", state.Version()); !errors.Is(err, ErrVersionConflict) || fixture.snapshots.saves != saves {
+		t.Fatalf("stale version = %v (saves %d -> %d)", err, saves, fixture.snapshots.saves)
+	}
+	frozen, _ := service.WeekState(ctx, "2026-11-02")
+	if err := service.RegenerateIfVersion(ctx, "2026-11-02", frozen.Version()); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := service.WeekState(ctx, "2026-11-02")
+	if again.Version() <= frozen.Version() {
+		t.Fatalf("versions %d then %d", frozen.Version(), again.Version())
+	}
+	if err := service.RegenerateIfVersion(ctx, "2026-11-09", 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("current week = %v", err)
+	}
+}
+
 func TestOrgSuccessfulDeletesPrincipalsAndGroupCreate(t *testing.T) {
 	ctx := context.Background()
 	service, repository := agentFixture(t)
