@@ -437,6 +437,42 @@ func TestFailedLookupLimiterHoldsUnderConcurrency(t *testing.T) {
 	}
 }
 
+// A token request cannot make its audit row look like a web-page action: the
+// server's own command value and malformed values become "unknown"; an
+// absent command stays empty.
+func TestClientCommandCannotClaimAServerValue(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, true, true)
+	for _, test := range []struct{ sent, recorded string }{
+		{agentaccess.CommandWeb, agentaccess.CommandUnknown},
+		{"Requests.List", agentaccess.CommandUnknown},
+		{"web page", agentaccess.CommandUnknown},
+		{strings.Repeat("a", 65), agentaccess.CommandUnknown},
+		{"", ""},
+		{"logout", "logout"},
+		{"webhook", "webhook"},
+	} {
+		issued := agentaccesstest.IssueAdmin(t, h.service, agentapi.TierRead)
+		if err := h.service.Logout(ctx, issued.Identity, agentaccess.RequestMeta{Command: test.sent}); err != nil {
+			t.Fatal(err)
+		}
+		rows := h.store.Audit()
+		last := rows[len(rows)-1]
+		if last.Event != agentaccess.EventTokenRevoked || last.Command != test.recorded {
+			t.Errorf("command %q recorded as %q", test.sent, last.Command)
+		}
+	}
+	// The web page's own rows keep the reserved value.
+	issued := agentaccesstest.IssueAdmin(t, h.service, agentapi.TierRead)
+	if err := h.service.RevokeToken(ctx, agentaccess.Viewer{Role: agentapi.RoleAdmin}, issued.Identity.TokenID); err != nil {
+		t.Fatal(err)
+	}
+	rows := h.store.Audit()
+	if last := rows[len(rows)-1]; last.Command != agentaccess.CommandWeb {
+		t.Fatalf("web revocation command = %q", last.Command)
+	}
+}
+
 func asError(err error, target **agentaccess.Error) bool {
 	coded, ok := err.(*agentaccess.Error)
 	if ok {

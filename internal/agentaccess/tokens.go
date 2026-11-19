@@ -221,7 +221,7 @@ func (service *Service) RevokeToken(ctx context.Context, viewer Viewer, id int64
 	if revoked {
 		tokenID := id
 		service.RecordAudit(ctx, storage.AgentAuditEntry{
-			Event: EventTokenRevoked, TokenID: &tokenID, Role: string(viewer.Role), Command: "web",
+			Event: EventTokenRevoked, TokenID: &tokenID, Role: string(viewer.Role), Command: CommandWeb,
 			ObjectKind: ObjectKindToken, ObjectID: formatID(id), Outcome: storage.AgentOutcomeOK,
 		})
 	}
@@ -267,18 +267,35 @@ func bearerToken(header string) (string, bool) {
 	return fields[1], true
 }
 
+// Command values of audit rows. CommandWeb is what the server records for an
+// action taken on the web page; no client may record it. CommandUnknown
+// replaces a client-reported command that is malformed or reserved.
+const (
+	CommandWeb     = "web"
+	CommandUnknown = "unknown"
+)
+
+// reservedCommands are the command values only the server assigns.
+var reservedCommands = map[string]bool{CommandWeb: true}
+
 // cleanCommand keeps a client-reported command name only when it looks like
-// one ("requests.list"); anything else is dropped rather than stored.
+// one ("requests.list") and is not a value the server itself assigns. An
+// absent command stays empty; a malformed or reserved one is recorded as
+// CommandUnknown, so a row never claims to come from the web page and never
+// stores text a client chose.
 func cleanCommand(value string) string {
-	if value == "" || len(value) > 64 {
+	if value == "" {
 		return ""
+	}
+	if len(value) > 64 || reservedCommands[value] {
+		return CommandUnknown
 	}
 	for index := 0; index < len(value); index++ {
 		char := value[index]
 		switch {
 		case char >= 'a' && char <= 'z', char >= '0' && char <= '9', char == '.', char == '-', char == '_':
 		default:
-			return ""
+			return CommandUnknown
 		}
 	}
 	return value

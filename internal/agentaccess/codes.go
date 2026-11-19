@@ -243,7 +243,7 @@ func (service *Service) Approve(ctx context.Context, grantor Grantor, request Au
 
 	service.RecordAudit(ctx, storage.AgentAuditEntry{
 		Event: EventAuthorizeApproved, Role: string(identity.Role), CLIVersion: cliVersion,
-		Command: "web", Outcome: storage.AgentOutcomeOK,
+		Command: CommandWeb, Outcome: storage.AgentOutcomeOK,
 	})
 	authorization := Authorization{Code: code, ExpiresIn: ttl, TokenExpiresAt: identity.ExpiresAt}
 	if request.Mode == ModeLoopback {
@@ -263,7 +263,7 @@ func (service *Service) Deny(ctx context.Context, grantor Grantor, request Autho
 	}
 	service.RecordAudit(ctx, storage.AgentAuditEntry{
 		Event: EventAuthorizeDenied, Role: string(grantor.Role), CLIVersion: cleanVersion(request.CLIVersion),
-		Command: "web", Outcome: storage.AgentOutcomeDenied,
+		Command: CommandWeb, Outcome: storage.AgentOutcomeDenied,
 	})
 	if request.Mode == ModeLoopback {
 		return LoopbackRedirectURI(request.Port), nil
