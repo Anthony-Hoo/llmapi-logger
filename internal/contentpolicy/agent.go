@@ -86,7 +86,9 @@ type RuleChange struct {
 type CreateOptions struct {
 	// RejectDuplicateName refuses the new rule when a rule with the same name
 	// (both trimmed, compared exactly) exists, with an *AlreadyExistsError.
-	// Create itself keeps allowing duplicates, as the web page does.
+	// Create itself keeps allowing duplicates, as the web page does, and so
+	// does the agent facade, which shows RuleDiff.SameName in its plan
+	// instead of setting this.
 	RejectDuplicateName bool
 }
 
@@ -104,6 +106,11 @@ type RuleDiff struct {
 	After             Rule     `json:"after"`
 	Changed           []string `json:"changed"`
 	ScopesSubstituted bool     `json:"scopes_substituted"`
+	// SameName lists, for a planned create, the ids of the rules that already
+	// have the new rule's name (both trimmed, compared exactly). A create is
+	// not refused for it, as the web form does not refuse it; the caller shows
+	// it so that a duplicate is a decision, not an accident.
+	SameName []int64 `json:"same_name,omitempty"`
 }
 
 // Get returns one active rule.
@@ -121,12 +128,19 @@ func (service *Service) CheckCreate(patch RulePatch, options CreateOptions) (Rul
 	if !service.Available() {
 		return RuleDiff{}, ErrUnavailable
 	}
-	rule, err := prepareCreate(service.List(), patch, options)
+	rules := service.List()
+	rule, err := prepareCreate(rules, patch, options)
 	if err != nil {
 		return RuleDiff{}, err
 	}
 	rule.CreatedAtNS, rule.UpdatedAtNS = 0, 0
-	return diffOf(Rule{}, rule, false), nil
+	diff := diffOf(Rule{}, rule, false)
+	for _, existing := range rules {
+		if strings.TrimSpace(existing.Name) == rule.Name {
+			diff.SameName = append(diff.SameName, existing.ID)
+		}
+	}
+	return diff, nil
 }
 
 // CreateFromPatch creates a rule from a patch in which name, enabled, action

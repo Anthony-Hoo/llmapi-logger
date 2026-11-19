@@ -166,20 +166,29 @@ func TestAgentCreateRequiresTheContractFields(t *testing.T) {
 	if created.ID == "" || rule["name_untrusted"] != "padded" || len(rule["scan_scopes"].([]any)) != 7 || rule["action"] != "dry_run" {
 		t.Fatalf("created = %+v rule %v", created, rule)
 	}
+	// A duplicate name is accepted, as the web route accepts it; the plan
+	// names the rule that already has it before the user agrees, and the
+	// create makes a second rule with an id of its own.
 	for _, kind := range []string{"ua-rule", "content-rule"} {
 		set := map[string]any{"name": "padded", "enabled": true, "action": "block", "keywords": []string{"x"}}
+		existing := created.ID
 		if kind == "ua-rule" {
 			set = map[string]any{"name": "dup", "enabled": true, "model_pattern": "^a", "user_agent_pattern": "^b"}
-			fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": kind, "set": set})
+			existing = fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": kind, "set": set}).ID
 		}
-		body := failure(t, fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": kind, "set": set}, fixture.adminWrite))
-		if body.Code != agentapi.CodeAlreadyExists || body.Details["id"] == nil || body.Details["id"] == "" {
-			t.Errorf("%s duplicate = %s %v", kind, body.Code, body.Details)
+		plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": kind, "set": set})
+		if !jsonEqual(plan.Extras["same_name"], []string{existing}) || !strings.Contains(strings.Join(plan.Effects, "\n"), "already exists (id "+existing+")") {
+			t.Errorf("%s duplicate plan = %v %v", kind, plan.Extras, plan.Effects)
+		}
+		second := fixture.apply(t, plan.PlanID)
+		if second.ID == "" || second.ID == existing {
+			t.Errorf("%s duplicate create = %+v", kind, second)
 		}
 	}
-	if body := failure(t, fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": "content-rule",
-		"set": map[string]any{"name": "padded", "enabled": true, "action": "block", "keywords": []string{"x"}}}, fixture.adminWrite)); body.Details["id"] != created.ID {
-		t.Errorf("duplicate names id %v, want %s", body.Details["id"], created.ID)
+	unique := fixture.plan(t, map[string]any{"op": "config.set", "kind": "content-rule",
+		"set": map[string]any{"name": "unique", "enabled": true, "action": "block", "keywords": []string{"x"}}})
+	if _, ok := unique.Extras["same_name"]; ok {
+		t.Errorf("unique name plan = %v", unique.Extras)
 	}
 }
 

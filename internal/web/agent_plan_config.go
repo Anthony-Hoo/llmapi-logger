@@ -201,7 +201,9 @@ func (handler *managementHandler) planUARuleSet(request agentPlanRequest, creati
 	if err != nil {
 		return nil, err
 	}
-	options := uaguard.CreateOptions{RejectDuplicateName: true}
+	// A duplicate name is accepted, as the web route accepts it; the plan says
+	// so (sameNameEffect).
+	options := uaguard.CreateOptions{}
 	if creating {
 		diff, err := rules.CheckCreate(patch, options)
 		if err != nil {
@@ -211,6 +213,7 @@ func (handler *managementHandler) planUARuleSet(request agentPlanRequest, creati
 		plan.view.Creates, plan.untrusted = true, true
 		plan.view.After = agentUARuleView(diff.After)
 		changedOrNothing(plan, diff.Changed)
+		sameNameEffect(plan, "user agent rule", diff.SameName)
 		plan.effect(effectLiveRule)
 		plan.verify = "llmaudit config show --kind ua-rule"
 		plan.apply = func(ctx context.Context) (agentApplied, error) {
@@ -245,6 +248,21 @@ func (handler *managementHandler) planUARuleSet(request agentPlanRequest, creati
 	return plan, nil
 }
 
+// sameNameEffect tells the user, before they agree to a create, that rules
+// with the same name exist and which: the create is not refused for it, as
+// the web form does not refuse it. extras.same_name lists their ids.
+func sameNameEffect(plan *agentPlan, noun string, ids []int64) {
+	if len(ids) == 0 {
+		return
+	}
+	listed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		listed = append(listed, formatAgentID(id))
+	}
+	plan.view.Extras["same_name"] = listed
+	plan.effect("A " + noun + " with this name already exists (id " + strings.Join(listed, ", ") + "); applying the plan creates another one with the same name. To change the existing one instead, make a plan with --id.")
+}
+
 // ---- content-rule ----
 
 func (handler *managementHandler) planContentRuleSet(request agentPlanRequest, creating bool) (*agentPlan, error) {
@@ -256,7 +274,7 @@ func (handler *managementHandler) planContentRuleSet(request agentPlanRequest, c
 	if err != nil {
 		return nil, err
 	}
-	options := contentpolicy.CreateOptions{RejectDuplicateName: true}
+	options := contentpolicy.CreateOptions{}
 	if creating {
 		diff, err := policies.CheckCreate(patch, options)
 		if err != nil {
@@ -266,6 +284,7 @@ func (handler *managementHandler) planContentRuleSet(request agentPlanRequest, c
 		plan.view.Creates, plan.untrusted = true, true
 		plan.view.After = agentContentRuleView(diff.After)
 		changedOrNothing(plan, diff.Changed)
+		sameNameEffect(plan, "content rule", diff.SameName)
 		if patch.ScanScopes == nil {
 			plan.effect("scan_scopes was not given: all seven scopes are scanned, as the web form preselects.")
 		}

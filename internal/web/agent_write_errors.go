@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/contentpolicy"
@@ -59,9 +58,7 @@ func agentWriteFailure(err error) *agentFailure {
 	}
 	var (
 		uaInvalid      *uaguard.ValidationError
-		uaExists       *uaguard.AlreadyExistsError
 		policyInvalid  *contentpolicy.ValidationError
-		policyExists   *contentpolicy.AlreadyExistsError
 		orgInvalid     *orgreport.ValidationError
 		orgSettings    *orgreport.SettingsError
 		analysisSet    *sessionanalysis.SettingsError
@@ -75,10 +72,6 @@ func agentWriteFailure(err error) *agentFailure {
 	case errors.Is(err, uaguard.ErrVersionConflict), errors.Is(err, contentpolicy.ErrVersionConflict),
 		errors.Is(err, orgreport.ErrVersionConflict), errors.Is(err, sessionanalysis.ErrVersionConflict):
 		return &agentFailure{Code: agentapi.CodeVersionConflict}
-	case errors.As(err, &uaExists):
-		return &agentFailure{Code: agentapi.CodeAlreadyExists, Details: map[string]any{"id": strconv.FormatInt(uaExists.ID, 10)}}
-	case errors.As(err, &policyExists):
-		return &agentFailure{Code: agentapi.CodeAlreadyExists, Details: map[string]any{"id": strconv.FormatInt(policyExists.ID, 10)}}
 	case errors.As(err, &uaInvalid):
 		return validationFailure(agentapi.CodeInvalidArgument, uaInvalid.Field, uaInvalid.Reason, uaInvalid.Message)
 	case errors.As(err, &policyInvalid):

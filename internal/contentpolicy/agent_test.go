@@ -458,3 +458,17 @@ func TestPolicyVersionsNeverRepeat(t *testing.T) {
 		t.Fatalf("created version %d repeated (%v)", created.Version(), err)
 	}
 }
+
+// A planned create names the rules that already have its name (trimmed,
+// compared exactly) and is not refused for it, as the web form is not.
+func TestPolicyCheckCreateListsRulesWithTheSameName(t *testing.T) {
+	service, _ := frozenPolicyService(t)
+	diff, err := service.CheckCreate(RulePatch{Name: strPtr(" secrets "), Enabled: boolPtr(true), Action: strPtr(ActionBlock), Keywords: listPtr("k")}, CreateOptions{})
+	if err != nil || !reflect.DeepEqual(diff.SameName, []int64{7}) {
+		t.Fatalf("same name = %v, %v", diff.SameName, err)
+	}
+	other, err := service.CheckCreate(RulePatch{Name: strPtr("other"), Enabled: boolPtr(true), Action: strPtr(ActionBlock), Keywords: listPtr("k")}, CreateOptions{})
+	if err != nil || other.SameName != nil {
+		t.Fatalf("other name = %v, %v", other.SameName, err)
+	}
+}

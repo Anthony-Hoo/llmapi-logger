@@ -390,3 +390,17 @@ func TestARecreatedIDNeverReusesAVersion(t *testing.T) {
 		t.Fatalf("a plan for the deleted rule applied to the new one: %v", err)
 	}
 }
+
+// A planned create names the rules that already have its name (trimmed,
+// compared exactly) and is not refused for it, as the web form is not.
+func TestCheckCreateListsRulesWithTheSameName(t *testing.T) {
+	service, _ := frozenService(t)
+	diff, err := service.CheckCreate(RulePatch{Name: stringPtr("  deepseek "), Enabled: boolPtr(true), ModelPattern: stringPtr("^x"), UserAgentPattern: stringPtr("^y")}, CreateOptions{})
+	if err != nil || !reflect.DeepEqual(diff.SameName, []int64{2}) {
+		t.Fatalf("same name = %v, %v", diff.SameName, err)
+	}
+	other, err := service.CheckCreate(RulePatch{Name: stringPtr("DeepSeek"), Enabled: boolPtr(true), ModelPattern: stringPtr("^x"), UserAgentPattern: stringPtr("^y")}, CreateOptions{})
+	if err != nil || other.SameName != nil {
+		t.Fatalf("other case = %v, %v", other.SameName, err)
+	}
+}
