@@ -291,19 +291,23 @@ func installInsights(worker *parser.Worker, store runtimeStore, cipher security.
 }
 
 // New assembles the route matcher, interceptor engine, and reverse proxy.
-func New(configuration config.Config, logger *slog.Logger) (*App, error) {
-	return NewContext(context.Background(), configuration, logger)
+func New(configuration config.Config, logger *slog.Logger, options ...Option) (*App, error) {
+	return NewContext(context.Background(), configuration, logger, options...)
 }
 
 // NewContext assembles the application using the caller's lifecycle context
 // for startup database work. It deliberately adds no fixed deadline: full
 // integrity verification grows with retained history and must either finish,
 // fail validation, or be explicitly cancelled.
-func NewContext(ctx context.Context, configuration config.Config, logger *slog.Logger) (*App, error) {
-	return newContextWithStore(ctx, configuration, logger, openPostgres)
+func NewContext(ctx context.Context, configuration config.Config, logger *slog.Logger, options ...Option) (*App, error) {
+	return newContextWithStore(ctx, configuration, logger, openPostgres, options...)
 }
 
-func newContextWithStore(ctx context.Context, configuration config.Config, logger *slog.Logger, open storeOpener) (*App, error) {
+func newContextWithStore(ctx context.Context, configuration config.Config, logger *slog.Logger, open storeOpener, options ...Option) (*App, error) {
+	var seams assemblyOptions
+	for _, option := range options {
+		option(&seams)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -507,6 +511,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		_ = application.closeComponents()
 		return nil, fmt.Errorf("assemble agent access: %w", err)
 	}
+	agentDist := assembleAgentDist(configuration, agentAccess, seams.agentPackageDir, logger)
 
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
@@ -526,8 +531,10 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 
 		InjectedUserTextPrefixes: uiVocabulary(vocabulary).InjectedUserTextPrefixes(),
 
-		AgentAccess:   agentAccess,
-		RetentionDays: configuration.RetentionDays,
+		AgentAccess:    agentAccess,
+		AgentDist:      agentDist,
+		AgentPublicURL: configuration.AgentAccess.PublicURL,
+		RetentionDays:  configuration.RetentionDays,
 	})
 	if err != nil {
 		_ = application.closeComponents()

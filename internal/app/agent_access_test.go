@@ -2,13 +2,18 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"llmapi-logger/internal/agentaccess"
+	"llmapi-logger/internal/agentaccess/agentaccesstest"
+	"llmapi-logger/internal/agentdist"
 	"llmapi-logger/internal/web"
 )
 
@@ -72,5 +77,35 @@ func TestEnabledAgentAccessRefusesAStoreWithoutAgentSupport(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "agent access") {
 		t.Fatalf("New with the legacy test store = %v, want an agent access error", err)
+	}
+}
+
+// A deployment without packages still starts: one warning with a stable
+// code, and a service whose endpoints answer that no packages ship here. No
+// agent access means no distribution service at all.
+func TestAgentDistWithoutPackagesWarnsAndStarts(t *testing.T) {
+	configuration := insightsTestConfig(t, "http://192.0.2.1:3000", true, "")
+	configuration.AgentAccess.Enabled = true
+	if service := assembleAgentDist(configuration, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil))); service != nil {
+		t.Fatal("distribution assembled without agent access")
+	}
+	agent, err := agentaccess.New(agentaccess.Options{AdminToken: configuration.AdminToken, Store: agentaccesstest.NewStore()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &bytes.Buffer{}
+	service := assembleAgentDist(configuration, agent, filepath.Join(t.TempDir(), agentdist.PackageDirName), slog.New(slog.NewTextHandler(logs, nil)))
+	if service == nil || !errors.Is(service.LoadError(), agentdist.ErrNoPackages) {
+		t.Fatalf("service %v, load error %v", service, service.LoadError())
+	}
+	if strings.Count(logs.String(), "agent_packages_unavailable") != 1 || strings.Contains(logs.String(), configuration.AdminToken) {
+		t.Fatalf("warning log = %q", logs.String())
+	}
+	// The default directory is next to the executable.
+	logs.Reset()
+	if service := assembleAgentDist(configuration, agent, "", slog.New(slog.NewTextHandler(logs, nil))); service == nil {
+		t.Fatal("no service for the default directory")
+	} else if want, _ := agentdist.DefaultPackageDir(); service.PackageDir() != want {
+		t.Fatalf("package dir %q, want %q", service.PackageDir(), want)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"llmapi-logger/internal/agentaccess"
+	"llmapi-logger/internal/agentdist"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/orgreport"
@@ -59,4 +60,50 @@ func assembleAgentAccess(configuration config.Config, store runtimeStore, develo
 		DeveloperLogins: developer.Enabled && developer.NewAPIURL != "" && developer.Fingerprints != nil && developer.ValidateKey != nil,
 		Logger:          logger,
 	})
+}
+
+// Option adjusts the assembly. The only one is a test seam; production
+// starts pass none.
+type Option func(*assemblyOptions)
+
+type assemblyOptions struct {
+	agentPackageDir string
+}
+
+// WithAgentPackageDir reads the agent packages from dir instead of the
+// agent-packages directory next to the executable. Tests use it: a test
+// binary has no packages beside it.
+func WithAgentPackageDir(dir string) Option {
+	return func(options *assemblyOptions) { options.agentPackageDir = dir }
+}
+
+// assembleAgentDist builds the distribution service of an assembled agent
+// access module (contract section 5). Packages are optional at run time: a
+// missing or broken package directory logs one warning and the two
+// endpoints answer that no packages ship with this deployment, so a build
+// without packages still starts. The download-link key is derived inside
+// agentdist from the admin token; neither is stored here or logged.
+func assembleAgentDist(configuration config.Config, agent *agentaccess.Service, packageDir string, logger *slog.Logger) *agentdist.Service {
+	if agent == nil {
+		return nil
+	}
+	if packageDir == "" {
+		dir, err := agentdist.DefaultPackageDir()
+		if err != nil {
+			logger.Warn("agent packages unavailable", "error_category", "agent_packages_unavailable", "reason", "cannot locate the executable")
+			return nil
+		}
+		packageDir = dir
+	}
+	service, err := agentdist.New(agentdist.Options{PackageDir: packageDir, AdminToken: configuration.AdminToken})
+	if err != nil {
+		logger.Warn("agent packages unavailable", "error_category", "agent_packages_unavailable", "reason", "the download signer could not be built")
+		return nil
+	}
+	if loadErr := service.LoadError(); loadErr != nil {
+		// LoadError names the problem (missing directory, version mismatch,
+		// a file that does not match the manifest) and holds no secret.
+		logger.Warn("agent packages unavailable", "error_category", "agent_packages_unavailable", "reason", loadErr.Error())
+	}
+	return service
 }
