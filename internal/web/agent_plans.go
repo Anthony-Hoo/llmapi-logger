@@ -198,7 +198,7 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 		if !errors.Is(err, context.DeadlineExceeded) {
 			handler.agent.Refund(slot)
 		}
-		record(handler.writeAgentWriteFailure(writer, err))
+		record(handler.writeAgentApplyFailure(writer, err))
 		return
 	}
 	target := plan.view.Target

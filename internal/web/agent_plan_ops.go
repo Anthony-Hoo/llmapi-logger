@@ -10,6 +10,7 @@ import (
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/orgreport"
+	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/sessionanalysis"
 )
 
@@ -79,16 +80,24 @@ func (handler *managementHandler) planAnalysisCalibrate(request agentPlanRequest
 		return nil, err
 	}
 	if !runner.CalibrationAvailable() {
-		return nil, &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "calibration needs the model stage: it is not enabled",
-			Details: map[string]any{"field": "llm.enabled", "reason": "model_stage_disabled"}}
+		return nil, calibrationUnavailable("")
 	}
 	plan := newAgentPlan(agentapi.OpAnalysisCalibrate, agentPlanTarget{Kind: "analysis-calibration"})
 	plan.view.Extras["labels"] = len(labels)
 	plan.effect("Compares these labels with the stored facets of the current model and saves the agreement per field; fields below the agreement bar are hidden from reports.")
 	plan.verify = "llmaudit analysis overview --since 1d"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
+		// The model stage may have been switched off since the plan was made:
+		// the refusal is the plan step's, with what to do next.
+		const again = "The model stage was switched off after this plan was made. Enable it (`llmaudit config set --kind analysis-settings --set llm.enabled=true`), then make a new calibration plan."
+		if !runner.CalibrationAvailable() {
+			return agentApplied{}, calibrationUnavailable(again)
+		}
 		result, err := handler.sessionAnalysis.Calibrate(ctx, labels)
 		if err != nil {
+			if errors.Is(err, query.ErrInvalidQuery) && !runner.CalibrationAvailable() {
+				return agentApplied{}, calibrationUnavailable(again)
+			}
 			return agentApplied{}, err
 		}
 		return agentApplied{Result: agentCalibration{PromptVersion: result.PromptVersion, Model: result.Model, Labels: result.Labels,
@@ -96,6 +105,13 @@ func (handler *managementHandler) planAnalysisCalibrate(request agentPlanRequest
 			HiddenFields: append([]string{}, result.HiddenFields...), CreatedAt: agentTime(result.CreatedNS)}}, nil
 	}
 	return plan, nil
+}
+
+// calibrationUnavailable is the refusal of a calibration while the model
+// stage is off, at plan time and, with hint, at apply time.
+func calibrationUnavailable(hint string) *agentFailure {
+	return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "calibration needs the model stage: it is not enabled", Hint: hint,
+		Details: map[string]any{"field": "llm.enabled", "reason": "model_stage_disabled"}}
 }
 
 func (handler *managementHandler) planAnalysisDismiss(request agentPlanRequest) (*agentPlan, error) {

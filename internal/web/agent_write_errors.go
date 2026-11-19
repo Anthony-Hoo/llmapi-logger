@@ -123,13 +123,40 @@ func agentWriteFailure(err error) *agentFailure {
 	return &agentFailure{Code: code}
 }
 
+// agentApplyFailure classifies an error a plan's execution returned. Typed
+// service errors map exactly as when the plan was made, so the same refusal
+// carries the same code, field and reason at both steps. apply takes no
+// body, so an otherwise unclassified refusal never names field "body": it
+// says the service refused the change when it was applied and asks for a
+// new plan made from the current state.
+func agentApplyFailure(err error) *agentFailure {
+	failure := agentWriteFailure(err)
+	if failure.Code == agentapi.CodeInvalidArgument && failure.Details["field"] == "body" {
+		return &agentFailure{Code: agentapi.CodeInvalidArgument,
+			Message: "the service refused the change when the plan was applied",
+			Hint:    "Something the plan relied on has changed since it was made. Read the current state and make a new plan.",
+			Details: map[string]any{"reason": "refused_at_apply"}}
+	}
+	return failure
+}
+
+// writeAgentApplyFailure is writeAgentWriteFailure for the error of a plan's
+// execution (agentApplyFailure).
+func (handler *managementHandler) writeAgentApplyFailure(writer http.ResponseWriter, err error) agentapi.Code {
+	return handler.writeFailure(writer, err, agentApplyFailure)
+}
+
 // writeAgentWriteFailure answers a failed write and returns the code it
 // wrote. A cancelled request writes nothing, as the web does.
 func (handler *managementHandler) writeAgentWriteFailure(writer http.ResponseWriter, err error) agentapi.Code {
+	return handler.writeFailure(writer, err, agentWriteFailure)
+}
+
+func (handler *managementHandler) writeFailure(writer http.ResponseWriter, err error, classify func(error) *agentFailure) agentapi.Code {
 	if errors.Is(err, context.Canceled) {
 		return ""
 	}
-	failure := agentWriteFailure(err)
+	failure := classify(err)
 	if failure.Code == agentapi.CodeInternal || failure.Code == agentapi.CodeUpstreamUnavailable {
 		handler.logger.Warn("agent facade write failed", "error_code", string(failure.Code), "error_class", storage.ErrorClass(err))
 	}
