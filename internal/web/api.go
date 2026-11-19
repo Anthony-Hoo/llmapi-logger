@@ -246,14 +246,14 @@ func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, req
 		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
 		return
 	}
-	scope := handler.sessionScope(request)
-	filter, cursor, limit, err := parseListQuery(request.URL.Query(), scope != nil)
+	caller := requestPrincipal(request)
+	filter, cursor, limit, err := parseListQuery(request.URL.Query(), !callerMayFilterByCaller(caller))
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid audit list query")
 		return
 	}
 	// Applied after parsing so no query string can reach or replace it.
-	filter.Scope = scope
+	scopeAuditFilter(caller, &filter)
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	page, err := handler.query.List(ctx, filter, cursor, limit)
@@ -534,13 +534,9 @@ func (handler *managementHandler) authorizeAudit(writer http.ResponseWriter, req
 		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
 		return false
 	}
-	scope := handler.sessionScope(request)
-	if scope == nil {
-		return true
-	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
-	if err := handler.query.Authorize(ctx, auditID, scope); err != nil {
+	if err := authorizeAuditRead(ctx, handler.query, requestPrincipal(request), auditID); err != nil {
 		handler.writeQueryError(writer, err)
 		return false
 	}

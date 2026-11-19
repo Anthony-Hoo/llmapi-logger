@@ -290,5 +290,12 @@ func (handler *managementHandler) sessionScope(request *http.Request) *query.Sco
 	if !ok {
 		return nil
 	}
-	return caller.Scope
+	return callerReadScope(caller)
+}
+
+// requestPrincipal returns the authenticated caller of request; the zero
+// principal (no role, no scope) when there is none.
+func requestPrincipal(request *http.Request) principal {
+	caller, _ := principalFrom(request.Context())
+	return caller
 }

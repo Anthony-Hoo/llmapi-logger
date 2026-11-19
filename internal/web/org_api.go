@@ -92,13 +92,8 @@ func (handler *managementHandler) serveOrgSelf(writer http.ResponseWriter, reque
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid org query")
 		return
 	}
-	caller, _ := principalFrom(request.Context())
-	userID := int64(0)
-	if caller.Role == roleDeveloper {
-		userID = caller.Identity.UserID
-	}
 	ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
 	defer cancel()
-	report, err := handler.org.Self(ctx, userID)
+	report, err := handler.org.Self(ctx, selfWeeklyUserID(requestPrincipal(request)))
 	handler.writeOrgResult(writer, http.StatusOK, report, err)
 }
