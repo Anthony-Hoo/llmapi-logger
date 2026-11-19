@@ -869,6 +869,51 @@ func TestAuthorizationLimitsFollowTheApprover(t *testing.T) {
 	}
 }
 
+// Contract section 3.1: a replayed code revokes the token it issued. A
+// passing store error is retried with a short backoff; when every attempt
+// fails the failure is logged and the next replay tries again.
+func TestReplayRevocationIsRetried(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, true, true)
+	authorization := approve(t, h, agentapi.TierRead, agentaccess.ModeLoopback)
+	issued, err := h.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.90", agentaccess.RequestMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.store.FailRevokeTimes = 2
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel() // the replaying client went away; the revocation still runs
+	if _, err := h.service.Exchange(cancelled, authorization.Code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{}); codeOf(err) != agentapi.CodeInvalidGrant {
+		t.Fatalf("replay = %v", err)
+	}
+	if _, err := h.service.Authenticate(ctx, bearer(issued.Token), "192.0.2.92"); codeOf(err) != agentapi.CodeTokenRevoked {
+		t.Fatalf("token after a replay with two failed revocations = %v", err)
+	}
+	if h.store.RevokeAttempts != 3 || strings.Contains(h.logs.String(), "revocation after code replay failed") {
+		t.Fatalf("attempts = %d, logs = %s", h.store.RevokeAttempts, h.logs.String())
+	}
+
+	// Every attempt fails: logged, token live, and the next replay retries.
+	authorization = approve(t, h, agentapi.TierRead, agentaccess.ModeLoopback)
+	issued, err = h.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.90", agentaccess.RequestMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.store.FailRevokeTimes = 100
+	_, _ = h.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{})
+	if _, err := h.service.Authenticate(ctx, bearer(issued.Token), "192.0.2.92"); err != nil {
+		t.Fatalf("token after failed revocations = %v", err)
+	}
+	if h.store.RevokeAttempts != 3+4 || !strings.Contains(h.logs.String(), "revocation after code replay failed") {
+		t.Fatalf("attempts = %d, logs = %s", h.store.RevokeAttempts, h.logs.String())
+	}
+	h.store.FailRevokeTimes = 0
+	_, _ = h.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{})
+	if _, err := h.service.Authenticate(ctx, bearer(issued.Token), "192.0.2.92"); codeOf(err) != agentapi.CodeTokenRevoked {
+		t.Fatalf("token after the next replay = %v", err)
+	}
+}
+
 func TestDeny(t *testing.T) {
 	h := newHarness(t, true, true)
 	redirect, err := h.service.Deny(context.Background(), agentaccess.Grantor{Role: agentapi.RoleAdmin}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.80")

@@ -34,6 +34,11 @@ type Store struct {
 	FailTouch  bool
 	FailAudit  bool
 	FailList   bool
+	// FailRevokeTimes makes that many next revocations fail, then lets them
+	// succeed again: a passing store error.
+	FailRevokeTimes int
+	// RevokeAttempts counts every revocation call, failed ones included.
+	RevokeAttempts int
 }
 
 var _ agentaccess.Store = (*Store)(nil)
@@ -80,7 +85,12 @@ func (store *Store) FindAgentTokenByMAC(_ context.Context, mac []byte) (storage.
 func (store *Store) RevokeAgentToken(_ context.Context, id, atNS int64, scope *storage.AgentTokenScope) (bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.RevokeAttempts++
 	if store.FailRevoke {
+		return false, errors.New("revoke failed")
+	}
+	if store.FailRevokeTimes > 0 {
+		store.FailRevokeTimes--
 		return false, errors.New("revoke failed")
 	}
 	for index := range store.tokens {

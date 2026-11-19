@@ -417,8 +417,33 @@ func (service *Service) Exchange(ctx context.Context, code, verifier, source str
 	return Issued{Token: token, Identity: identity}, nil
 }
 
+// replayRevokeDelays are the waits between the attempts to revoke the token
+// of a replayed code: a short, bounded backoff, so that a passing store
+// error does not leave a token live that may have leaked. After the last
+// attempt the failure is logged; a later replay of the same code, while its
+// record is kept, tries again.
+var replayRevokeDelays = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+
 func (service *Service) revokeReplayed(ctx context.Context, tokenID int64, role agentapi.Role, meta RequestMeta) {
-	revoked, err := service.store.RevokeAgentToken(ctx, tokenID, service.now().UnixNano(), nil)
+	// The replaying client controls the request; going away must not stop
+	// the revocation.
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	var revoked bool
+	var err error
+	for attempt := 0; ; attempt++ {
+		revoked, err = service.store.RevokeAgentToken(revokeCtx, tokenID, service.now().UnixNano(), nil)
+		if err == nil || attempt == len(service.revokeDelays) {
+			break
+		}
+		select {
+		case <-time.After(service.revokeDelays[attempt]):
+		case <-revokeCtx.Done():
+		}
+		if revokeCtx.Err() != nil {
+			break
+		}
+	}
 	if err != nil {
 		service.logger.Warn("agent token revocation after code replay failed", "error_category", "agent_store_unavailable")
 		return

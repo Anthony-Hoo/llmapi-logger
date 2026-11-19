@@ -175,6 +175,7 @@ type Service struct {
 	authorizations *windowLimiter
 	codes          *codeStore
 	quotas         map[Quota]*windowLimiter
+	revokeDelays   []time.Duration
 
 	touchMu   sync.Mutex
 	touchedAt map[int64]time.Time
@@ -213,6 +214,7 @@ func New(options Options) (*Service, error) {
 	service.authorizations = newWindowLimiter(authorizationLimit, authorizationWindow, service.now)
 	service.codes = newCodeStore()
 	service.quotas = newQuotaLimiters(service.now)
+	service.revokeDelays = replayRevokeDelays
 	return service, nil
 }
 
