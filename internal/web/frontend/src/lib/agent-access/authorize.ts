@@ -6,7 +6,7 @@ import type { SessionInfo, SessionRole } from "../../types";
 import type { AgentAccessApi, AgentTier, AuthorizationDecision, AuthorizationMode } from "./types";
 
 /** Every parameter the CLI adds; all of them are removed when the flow ends. */
-export const AUTHORIZE_PARAM_KEYS = ["agent_authorize", "challenge", "state", "port", "mode", "device", "cli"] as const;
+export const AUTHORIZE_PARAM_KEYS = ["agent_authorize", "challenge", "state", "port", "mode", "device", "cli", "tier"] as const;
 
 export const MAX_DEVICE_NAME_CHARS = 64;
 export const MAX_CLI_VERSION_CHARS = 64;
@@ -21,6 +21,11 @@ export interface AuthorizeRequest {
   /** Sanitised: what is shown is what is sent. */
   deviceName: string;
   cliVersion: string;
+  /**
+   * The tier `llmaudit login` asked for (`--write` sends `tier=write`); only a
+   * hint for the preselection, the user's choice on the page decides.
+   */
+  requestedTier: AgentTier;
 }
 
 export type AuthorizeParse =
@@ -102,6 +107,11 @@ export function parseAuthorizeParams(search: string): AuthorizeParse {
     return { kind: "invalid", reason: "授权地址既没有端口也没有指定粘贴方式。" };
   }
 
+  const tier = params.get("tier");
+  if (tier !== null && tier !== "read" && tier !== "write") {
+    return { kind: "invalid", reason: "授权地址里的 tier 只能是 read 或 write。" };
+  }
+
   return {
     kind: "valid",
     request: {
@@ -111,6 +121,7 @@ export function parseAuthorizeParams(search: string): AuthorizeParse {
       ...(parsedPort !== undefined ? { port: parsedPort } : {}),
       deviceName: sanitizeUntrustedText(params.get("device"), MAX_DEVICE_NAME_CHARS),
       cliVersion: sanitizeUntrustedText(params.get("cli"), MAX_CLI_VERSION_CHARS),
+      requestedTier: tier === "write" ? "write" : "read",
     },
   };
 }
@@ -201,6 +212,32 @@ export function tierOptions(role: SessionRole, writeAllowed: boolean): AgentTier
 }
 
 export const tierLabels: Record<AgentTier, string> = { read: "只读", write: "读写" };
+
+export interface InitialTier {
+  tier: AgentTier;
+  /** Why a requested write tier was not preselected; empty otherwise. */
+  downgradeReason: string;
+}
+
+/**
+ * The tier preselected on the page: the one the command line asked for when
+ * the role and the deployment allow it, otherwise read, with the reason.
+ */
+export function initialTier(requested: AgentTier, role: SessionRole, writeAllowed: boolean): InitialTier {
+  if (requested !== "write") {
+    return { tier: "read", downgradeReason: "" };
+  }
+  if (tierOptions(role, writeAllowed).includes("write")) {
+    return { tier: "write", downgradeReason: "" };
+  }
+  return {
+    tier: "read",
+    downgradeReason:
+      role === "admin"
+        ? "命令行申请了读写档，但本部署关闭了经 Agent 的写入，已改为只读档。"
+        : "命令行申请了读写档，但开发者会话只能授权只读档，已改为只读档。",
+  };
+}
 
 /** When the token will expire; the server computes the exact time. */
 export function tokenLifetimeText(role: SessionRole, tier: AgentTier, sessionExpiresAt: string | undefined, format: (iso: string) => string): string {

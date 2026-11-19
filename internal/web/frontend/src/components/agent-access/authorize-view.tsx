@@ -6,6 +6,7 @@ import {
   browserAddressBar,
   clearAuthorizeParams,
   identityLabel,
+  initialTier,
   isFramed,
   submitDecision,
   tierLabels,
@@ -60,7 +61,9 @@ export function AgentAuthorizeView({
 }) {
   const [env] = useState<AuthorizeEnv>(() => envOverride ?? browserEnv());
   const options = session ? tierOptions(session.role, session.agent_write_allowed === true) : [];
-  const [tier, setTier] = useState<AgentTier>("read");
+  // Null until the user picks: the preselection follows the CLI's hint once
+  // the session is known.
+  const [tier, setTier] = useState<AgentTier | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [outcome, setOutcome] = useState<DecisionOutcome | null>(null);
   const inFlight = useRef(false);
@@ -110,7 +113,9 @@ export function AgentAuthorizeView({
 
   const request = parse.request;
   const signedIn: SessionInfo = session;
-  const effectiveTier: AgentTier = options.includes(tier) ? tier : "read";
+  const preselected = initialTier(request.requestedTier, signedIn.role, signedIn.agent_write_allowed === true);
+  const chosen = tier ?? preselected.tier;
+  const effectiveTier: AgentTier = options.includes(chosen) ? chosen : "read";
 
   async function decide(decision: AuthorizationDecision) {
     if (inFlight.current) {
@@ -180,6 +185,7 @@ export function AgentAuthorizeView({
       session={signedIn}
       options={options}
       tier={effectiveTier}
+      tierNote={tier === null ? preselected.downgradeReason : ""}
       onTierChange={setTier}
       submitting={submitting}
       error={outcome?.kind === "error" ? outcome.message : null}
@@ -224,6 +230,7 @@ export function AuthorizeConfirm({
   session,
   options,
   tier,
+  tierNote = "",
   onTierChange,
   submitting,
   error,
@@ -234,6 +241,8 @@ export function AuthorizeConfirm({
   session: SessionInfo;
   options: AgentTier[];
   tier: AgentTier;
+  /** Why the tier the command line asked for is not preselected. */
+  tierNote?: string;
   onTierChange: (tier: AgentTier) => void;
   submitting: boolean;
   error: string | null;
@@ -269,6 +278,7 @@ export function AuthorizeConfirm({
       </dl>
       <fieldset className="space-y-2">
         <legend className="text-label font-medium text-muted">档位</legend>
+        {tierNote ? <p className="text-body-sm text-muted">{tierNote}</p> : null}
         {options.length === 1 ? (
           <p className="text-body">
             <Badge variant="info">{tierLabels.read}</Badge>

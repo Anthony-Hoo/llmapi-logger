@@ -85,6 +85,23 @@ describe("authorization confirm view", () => {
     expect(readOnly).toContain("本部署关闭了经 Agent 的写入");
   });
 
+  it("preselects the tier `llmaudit login --write` asks for when it is allowed", () => {
+    const html = renderAuthorize(admin, { ...loopback, tier: "write" });
+    expect(html).toMatch(/checked="" value="write"/);
+    expect(html).toContain("读写档可以修改系统配置");
+    expect(renderAuthorize(admin, { ...loopback, tier: "read" })).toMatch(/checked="" value="read"/);
+  });
+
+  it("falls back to read and says why when the asked-for write tier is not allowed", () => {
+    const writesOff = renderAuthorize({ ...admin, agent_write_allowed: false }, { ...loopback, tier: "write" });
+    expect(writesOff).not.toContain('value="write"');
+    expect(writesOff).toContain("命令行申请了读写档，但本部署关闭了经 Agent 的写入，已改为只读档。");
+    const developerWrite = renderAuthorize(developer, { ...loopback, tier: "write" });
+    expect(developerWrite).not.toContain('value="write"');
+    expect(developerWrite).toContain("命令行申请了读写档，但开发者会话只能授权只读档，已改为只读档。");
+    expect(renderAuthorize(admin, loopback)).not.toContain("命令行申请了读写档");
+  });
+
   it("gives developer sessions read only, expiring with the web session", () => {
     const html = renderAuthorize(developer, loopback);
     expect(html).not.toContain('type="radio"');
@@ -169,17 +186,19 @@ describe("Agent 接入 page", () => {
     const change: AgentChange = {
       id: 1,
       at: "2026-11-19T00:00:00Z",
-      event: "write_applied",
+      event: "write_failed",
       token_id: 7,
-      command: "rules.ua.update",
-      object_kind: "ua_rule",
+      role: "admin",
+      command: "apply",
+      cli_version: "0.1.0",
+      object_kind: "ua-rule",
       object_id: "12",
       changed_keys: ["enabled"],
       outcome: "failed",
       error_code: "VERSION_CONFLICT",
     };
     const html = renderToStaticMarkup(<ChangesTable changes={[change]} tokens={[token]} />);
-    for (const text of ["laptop", "rules.ua.update", "ua_rule 12", "enabled", "失败", "VERSION_CONFLICT"]) {
+    for (const text of ["laptop", "apply", "ua-rule 12", "enabled", "失败", "VERSION_CONFLICT"]) {
       expect(html).toContain(text);
     }
     expect(renderToStaticMarkup(<ChangesTable changes={[]} tokens={[]} />)).toContain("还没有做过改动");

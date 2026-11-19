@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   clearAuthorizeParams,
   identityLabel,
+  initialTier,
   isExpectedRedirect,
   isFramed,
   parseAuthorizeParams,
@@ -36,7 +37,7 @@ describe("authorization URL parameters", () => {
   it("accepts a loopback request", () => {
     expect(parseAuthorizeParams(search(loopback))).toEqual({
       kind: "valid",
-      request: { challenge, state: "st-123_abc", mode: "loopback", port: 53123, deviceName: "laptop", cliVersion: "0.1.0" },
+      request: { challenge, state: "st-123_abc", mode: "loopback", port: 53123, deviceName: "laptop", cliVersion: "0.1.0", requestedTier: "read" },
     });
     expect(parseAuthorizeParams(search({ ...loopback, port: "1024" })).kind).toBe("valid");
     expect(parseAuthorizeParams(search({ ...loopback, port: "65535" })).kind).toBe("valid");
@@ -46,7 +47,7 @@ describe("authorization URL parameters", () => {
     const parsed = parseAuthorizeParams(search(paste));
     expect(parsed).toEqual({
       kind: "valid",
-      request: { challenge, state: "st-123_abc", mode: "paste", deviceName: "server", cliVersion: "0.1.0" },
+      request: { challenge, state: "st-123_abc", mode: "paste", deviceName: "server", cliVersion: "0.1.0", requestedTier: "read" },
     });
     expect(parsed.kind === "valid" && "port" in parsed.request).toBe(false);
   });
@@ -74,6 +75,9 @@ describe("authorization URL parameters", () => {
       { ...loopback, mode: "paste" },
       { ...paste, mode: "loopback" },
       { ...paste, mode: "" },
+      { ...loopback, tier: "admin" },
+      { ...loopback, tier: "WRITE" },
+      { ...loopback, tier: "" },
     ];
     const withoutPort: Record<string, string> = { ...loopback };
     delete withoutPort.port;
@@ -92,6 +96,26 @@ describe("authorization URL parameters", () => {
     expect(parseAuthorizeParams(`${search(loopback)}&port=60000`).kind).toBe("invalid");
     expect(parseAuthorizeParams(`${search(loopback)}&state=other`).kind).toBe("invalid");
     expect(parseAuthorizeParams(`${search(loopback)}&agent_authorize=1`).kind).toBe("invalid");
+    expect(parseAuthorizeParams(`${search({ ...loopback, tier: "read" })}&tier=write`).kind).toBe("invalid");
+  });
+
+  it("reads the tier login --write asks for as a hint", () => {
+    const write = parseAuthorizeParams(search({ ...loopback, tier: "write" }));
+    expect(write.kind === "valid" && write.request.requestedTier).toBe("write");
+    const read = parseAuthorizeParams(search({ ...paste, tier: "read" }));
+    expect(read.kind === "valid" && read.request.requestedTier).toBe("read");
+  });
+
+  it("preselects the requested tier only when the role and deployment allow it", () => {
+    expect(initialTier("write", "admin", true)).toEqual({ tier: "write", downgradeReason: "" });
+    expect(initialTier("read", "admin", true)).toEqual({ tier: "read", downgradeReason: "" });
+    expect(initialTier("read", "developer", false)).toEqual({ tier: "read", downgradeReason: "" });
+    const writesOff = initialTier("write", "admin", false);
+    expect(writesOff.tier).toBe("read");
+    expect(writesOff.downgradeReason).toContain("本部署关闭了经 Agent 的写入");
+    const developer = initialTier("write", "developer", true);
+    expect(developer.tier).toBe("read");
+    expect(developer.downgradeReason).toContain("开发者会话只能授权只读档");
   });
 
   it("strips control characters and caps untrusted text", () => {
@@ -118,6 +142,7 @@ describe("address bar", () => {
   it("removes only the authorization parameters", () => {
     expect(stripAuthorizeParams(`https://audit.example/ui/${search(loopback)}`)).toBe("/ui/");
     expect(stripAuthorizeParams(`https://audit.example/ui/?keep=1&${new URLSearchParams(paste)}#top`)).toBe("/ui/?keep=1#top");
+    expect(stripAuthorizeParams(`https://audit.example/ui/${search({ ...loopback, tier: "write" })}`)).toBe("/ui/");
   });
 
   it("clears an invalid request at once and keeps a valid one until the decision", () => {
@@ -202,8 +227,8 @@ describe("tiers and identity", () => {
 });
 
 describe("submitting the decision", () => {
-  const loopbackRequest: AuthorizeRequest = { challenge, state: "st/1", mode: "loopback", port: 53123, deviceName: "laptop", cliVersion: "0.1.0" };
-  const pasteRequest: AuthorizeRequest = { challenge, state: "st/1", mode: "paste", deviceName: "server", cliVersion: "0.1.0" };
+  const loopbackRequest: AuthorizeRequest = { challenge, state: "st/1", mode: "loopback", port: 53123, deviceName: "laptop", cliVersion: "0.1.0", requestedTier: "read" };
+  const pasteRequest: AuthorizeRequest = { challenge, state: "st/1", mode: "paste", deviceName: "server", cliVersion: "0.1.0", requestedTier: "read" };
 
   function deps(response: unknown | (() => Promise<unknown>)) {
     const events: string[] = [];
