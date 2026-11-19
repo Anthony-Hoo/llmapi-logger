@@ -6,6 +6,8 @@
 
 管理员身份、数据面字节路径、passthrough、interceptor 放行结论和既有 Cookie 格式都不改变。本模块不引入用户账户、多租户、配额展示或写操作。
 
+开发者仍然没有任何写操作。启用 Agent 接入（[模块 25](25-agent-access.md)，`agent_access.enabled` 默认关闭）后，开发者会话可以在授权确认页为本机的编码 Agent 签发一枚**只读**的 Agent 令牌：它的作用域与签发它的会话逐字段相同（同一 Key 指纹、同一 NewAPI 身份），到期时间不晚于该会话，开发者经 Agent 能读到的与网页上相同，不多也不少；`developer_login` 关闭后已签发的开发者令牌随即失效。开发者可在“Agent 接入”页查看并撤销作用域与自己相同的令牌。
+
 ## 2. 凭据指纹
 
 `security.NormalizeNewAPIKey` 逐字复刻 NewAPI `TokenAuthReadOnly` 的规约：去 `Bearer ` 前缀、去 `sk-` 前缀、取首个 `-` 之前的片段。NewAPI 把 `sk-abc-suffix` 与 `sk-abc` 视为同一 token，指纹必须建立在同一规约上，否则同一把 Key 的不同写法会互相看不见。

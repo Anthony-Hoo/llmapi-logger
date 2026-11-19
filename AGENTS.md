@@ -34,6 +34,8 @@ doc/deployment/                 # 单机、容器与备份说明
 Dockerfile / compose.yaml       # 多阶段镜像与单机 Compose
 
 cmd/audit-proxy/                # 程序入口
+cmd/llmaudit/                   # Agent 接入的命令行（入口；逻辑在 internal/agentcli）
+skill/llmapi-audit/             # Agent 接入的 Skill 包源文件（SKILL.md、references/）
 internal/
   app/                          # 启动、组件组装和数据面三态分发
   config/                       # 配置
@@ -54,6 +56,10 @@ internal/
   retention/                    # 简单保留清理
   streamtimeline/               # SSE offset/time delta 编解码
   observability/                # 安全 JSON 请求日志
+  agentapi/                     # Agent 门面与命令行共用的信封、错误码、接口登记表（只依赖标准库）
+  agentaccess/                  # Agent 令牌、授权码、计划、限流与审计
+  agentcli/                     # 命令行 llmaudit 的实现
+  agentdist/                    # Skill 安装包：清单、签名下载链接、下载处理、安装提示词、可重复打包
   web/
     frontend/                   # React、Vite、shadcn/ui 源码
     dist/                       # 构建后由 Go embed 的静态产物
@@ -74,12 +80,13 @@ tests/                          # 跨模块集成测试
 - 可选的 `newapi` 集成只读同步安全用户目录，并用上游 `X-Oneapi-Request-Id` 查询全站日志回填用户与 Token 身份；不读取或保存完整 API Key，解析失败不影响转发。
 - PostgreSQL 使用持有 session advisory lock 的固定连接和单 writer goroutine，查询使用独立只读连接；多语句证据快照使用 repeatable read。启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
 - 管理 API、health 和 ready 在任何监听地址都必须鉴权：CLI 使用静态 Admin Token，Web UI 使用由该 Token 登录换取的七天 HttpOnly Cookie。可选的 `developer_login` 提供第二种身份：NewAPI 用户用自己的 API Key 登录，以同等只读深度只能看到该 Key 产生的记录；管理端点返回 403，他人记录与本地策略拦截记录返回 404。作用域由主密钥派生的 keyed 指纹加既有 token 关联判定，系统仍不保存完整或打码 API Key。审计主列表只展示调用者、时间、模型、入站 User-Agent、会话归属标识与 scope 内轮次计数；普通列表会逐条只解密该 User-Agent 供展示和子串筛选，不读取其他 Header、Request-URI、Body 或 conversation 内容。详情按需重建 verified conversation/provider JSON；raw request/response Body 只对 `retention_state=full` 开放；assistant 文本使用禁用原始 HTML 的安全 Markdown 展示。
+- 可选的 `agent_access`（默认关闭，模块 25）提供第三种管理面凭据 Agent 令牌：由网页会话在授权确认页签发给本机命令行 `llmaudit`，只能调用 `/api/agent/v1/*` 门面，身份与可见范围同签发它的会话，库里只存 HMAC；门面不接受 Cookie 与管理 Token，`/api/v1/*` 也不接受 Agent 令牌。门面下只有两条匿名路径：`POST /api/agent/v1/token`（一次性授权码加 PKCE 兑换令牌）与 `GET /api/agent/v1/dl/<签名>/<文件名>`（凭 `admin_token` 派生密钥签名、30 分钟有效的链接下载清单内的 Skill 安装包）。门面只组合既有服务，不复制业务校验；凭据类 Header 与查询参数的值不输出，分析模型的 API Key 只能由用户在终端输入。
 - 敏感 Header、raw Body、Query、fallback conversation、content/binary object 和 timeline 使用一个本地 AES-256-GCM key 加密；管理证据响应使用 `Cache-Control: no-store`。
 - 普通 JSON 日志只记录稳定状态和耗时，不记录 Query、Header value、Body、Token、key、密文或底层错误文本。
 
 ## 方向原则
 
-- 优先保持实现简单、可读、单机可运行，不提前引入分布式组件或额外控制面。
+- 优先保持实现简单、可读、单机可运行，不提前引入分布式组件或额外控制面。经确认的例外是模块 25 的 Agent 门面 `/api/agent/v1/*`：它是给本机编码 Agent 用的第二个管理入口，但只组合网页已有的服务，授权与能力都以网页为准，默认关闭。
 - `routes` 只描述需要审计的 LLM API，不用于枚举 NewAPI 的全部普通接口。
 - 四阶段长度/hash、内容对象、重建校验和完整性链共同构成长期证据；只有异常记录承诺长期保留逐字节 raw。
 - 新增审计路径时同时更新 route、受保护路径边界、parser、Nginx 示例和测试。

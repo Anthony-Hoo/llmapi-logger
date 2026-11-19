@@ -39,7 +39,10 @@ bash ./scripts/build.sh
 ~~~text
 bin/audit-proxy-windows-amd64.exe
 bin/audit-proxy-linux-amd64
+bin/agent-packages/            # Agent 接入的 Skill 安装包（五个平台）与 manifest.json
 ~~~
+
+`agent-packages/` 必须与 audit-proxy 二进制放在同一目录下，Agent 接入的下载接口从那里读取；只部署二进制而不带它时，代理照常运行，只是“Agent 接入”页生成不了安装提示词。
 
 构建不会清空 `internal/web/dist`，以保留受跟踪的 `.gitkeep`。在同一工作区重复构建时，旧的哈希资源会一并嵌入二进制，但页面只引用最新资源。正式发布应使用干净 checkout 或 Docker 多阶段构建。
 
@@ -191,8 +194,49 @@ PostgreSQL 数据库与 `audit.key` 必须作为一个备份集保存，使用�
 
 普通 OpenAI 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、4xx/5xx、采集不完整、解析/normalization/重建失败和其他异常保持 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw 返回 410 误判为丢失。
 
-最终镜像只包含 distroless 运行环境、Go 二进制和空的数据/配置挂载目录，不包含 Node、pnpm、前端源码、Go 源码或构建工具。
+最终镜像只包含 distroless 运行环境、Go 二进制、`/agent-packages` 下的 Skill 安装包和空的数据/配置挂载目录，不包含 Node、pnpm、前端源码、Go 源码或构建工具。
 
 ## 8. 上下文洞察
 
 insights 默认启用，无需额外部署步骤。开关、NewAPI 实际计费、上下文窗口与词表覆盖、各客户端（Claude Code、Codex、OpenCode、dsh、ZCode、pi）的接入提示，以及自研 Agent 通过 X-Agent-* Header 归入 Agent 树的约定见[洞察与 Agent 接入指南](insights-and-agent-headers.md)。
+
+## 9. Agent 接入（命令行与 Skill）
+
+Agent 接入让用户本机的编码 Agent（Claude Code、Codex 一类）经命令行 `llmaudit` 代表用户查询审计记录、用量、周报与会话分析，管理员另可修改配置。它**默认关闭**，设计见[模块 25](../features/25-agent-access.md)，接口见[接口合同](../features/25-agent-access-contract.md)。
+
+### 9.1 开启
+
+~~~yaml
+agent_access:
+  enabled: true
+  allow_write: false   # 默认只读；只有确实需要经 Agent 修改配置时才打开
+  public_url: ""       # 写进安装提示词的地址；为空时使用浏览器当前访问的地址
+~~~
+
+开启后网页上出现“Agent 接入”页，两种身份都可见：
+
+- 安装卡片：选择 Agent 种类与平台（可选填写 Skill 目录），生成一段安装提示词，交给本机的 Agent 逐步执行。提示词里带一条 30 分钟内有效、最多下载 30 次的签名链接，Agent 会核对 SHA-256 后才解压，只安装到以 `llmapi-audit` 结尾的目录，并在最后用浏览器授权登录、用 `llmaudit whoami` 验证。链接过期后回到这一页重新生成即可。
+- 已授权设备：设备名、档位、签发与到期时间、最近使用时间，可逐个撤销。管理员另有“Agent 最近的改动”。
+
+`public_url` 应是用户的 Agent 实际能访问到的管理面地址。管理面只在本机 loopback 上时，只有同一台机器上的 Agent 能用；要给其他机器用，必须有意暴露管理端口，后果见[模块 15](../features/15-nginx-and-deployment-integration.md) §1（本程序不提供 TLS；经同一反向代理的客户端共用一个限流计数桶）。
+
+轮换 `admin_token` 会让全部 Agent 令牌和全部未过期的下载链接失效。
+
+### 9.2 升级与回滚顺序
+
+配置加载是严格模式，迁移 004 会让旧版本拒绝启动，所以顺序是固定的：
+
+- **升级**：先部署包含模块 25 的版本，此时配置里没有 `agent_access`，功能关闭，迁移 004 在启动时自动应用；确认运行正常后，再把 `agent_access` 段写进配置并重启。
+- **回滚到不含模块 25 的版本**：
+  1. 从配置里删掉整个 `agent_access` 段（包括 `enabled: false` 的写法），否则旧版本因未知键启动失败。
+  2. 停止新版本后，在库里删除 `agent_tokens`、`agent_audit_log` 两张表，并删除 `schema_migrations` 里版本为 4 的行，否则旧版本因 schema 版本过新拒绝启动。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+  3. 再启动旧版本。已签发的 Agent 令牌随表一起消失；重新升级后用户需要重新授权。
+
+~~~sql
+-- 仅在回滚到不含模块 25 的版本时执行，并且先停止新版本、做好备份
+BEGIN;
+DROP TABLE IF EXISTS agent_audit_log;
+DROP TABLE IF EXISTS agent_tokens;
+DELETE FROM schema_migrations WHERE version = 4;
+COMMIT;
+~~~

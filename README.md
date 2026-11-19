@@ -40,6 +40,7 @@ Client -> Nginx -> llmapi-logger
 - 紧凑审计主列表只展示调用者、时间、模型和 User-Agent；调用者优先使用安全用户目录中的显示名，Token 名称与 ID 分行展示，长 User-Agent 自动换行；路径、状态和原始 HTTP 证据留在详情或高级筛选。
 - loopback 管理端同样强制鉴权；CLI 可用静态 Bearer token，Web UI 登录后使用七天过期的 HttpOnly Cookie；敏感详情和 raw 响应禁止缓存。
 - 可选的开发者登录：NewAPI 用户提交自己的 API Key 即可以同等只读深度审计该 Key 产生的 agent 调用链，看不到他人流量、站点策略配置与被本地策略拦截的记录。
+- 可选的 Agent 接入（默认关闭）：用户本机的编码 Agent 经命令行 `llmaudit` 与 `llmapi-audit` Skill，以授权它的网页身份查询记录、用量、周报与会话分析；管理员在部署允许时还可以先建计划、经用户确认后修改配置。
 - 可选使用 NewAPI 全局管理凭证同步安全用户目录；对响应中的 `X-Oneapi-Request-Id` 异步查询全站日志，回填用户名、用户 ID、Token ID 和 Token 名称。
 - 不保存也不展示用户完整或打码 API Key；开发者会话的归属由主密钥派生的 keyed 指纹判定，指纹不可反查且不进入任何响应或日志。
 - assistant 输出使用安全的 GFM Markdown 展示；禁用原始 HTML、危险链接协议和远程图片加载。
@@ -121,6 +122,10 @@ http://127.0.0.1:8081/ui/
 
 该 Key 由 audit-proxy 转交 NewAPI 自身的 `GET /api/log/token` 校验，只作为这一次请求的凭据，不落库、不写日志、不回显；过期或额度耗尽的 Key 仍可用于审计历史。开发者看不到他人流量、调用者目录、UA 拦截规则、`/healthz`、`/readyz`，也看不到被本地策略拦截的记录（`blocked_by`/`block_code` 描述的是站点防护策略本身）；NewAPI 上游自己返回的 401/403 属于其调用链的真实响应，仍然可见。启用该功能不需要 `newapi.access_token`。
 
+### 让本机的编码 Agent 查询审计数据
+
+把配置中的 `agent_access.enabled` 改为 `true`（默认关闭；升级与回滚顺序见[部署说明](doc/deployment/README.md) §9）后，网页上会多出“Agent 接入”页。在那里选择 Agent 种类与平台，生成一段安装提示词交给本机的 Agent（Claude Code、Codex 一类）执行：它从带签名的临时链接下载 Skill 包、核对 SHA-256、安装到以 `llmapi-audit` 结尾的目录，再由用户在浏览器里授权登录。之后 Agent 经命令行 `llmaudit` 调用 `/api/agent/v1/*`，持有的是一枚独立的 Agent 令牌：不能调用 `/api/v1/*`，可见范围与签发它的网页身份相同（开发者只能是只读档），可随时在“Agent 接入”页撤销。经 Agent 的写入默认关闭（`agent_access.allow_write`），打开后也只对管理员的读写档令牌开放；除设置或清除分析模型 Key 与连接测试外，每次写入都先建计划，再执行这份计划。设计见[模块 25](doc/features/25-agent-access.md)。
+
 管理页面中的“UA 拦截规则”支持新增、编辑、启停和删除。模型与 User-Agent 均使用 Go RE2 正则并默认区分大小写；一条规则的模型正则命中后，请求 User-Agent 必须命中该规则，多条命中规则全部需要通过。无效正则不会保存，也不会替换当前运行中的有效规则。
 
 普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 content object。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值和窄解析摘要。OpenAI verified conversation 从 turn graph、content object 和 binary object 重建，不再复制进 `parsed_json_enc`；没有内容寻址 normalizer 的协议或异常记录仍可在该密文中保存 conversation 回退副本。verified provider request/response 通过 reconstructed API 下载；raw API 仅对 `retention_state=full` 开放，`metadata` 返回 `410 raw_not_retained`。所有管理证据响应均带 `Cache-Control: no-store`。
@@ -151,7 +156,7 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 - PostgreSQL 使用一致快照备份；旧 SQLite 迁移见 [PostgreSQL 迁移指南](doc/deployment/postgresql-migration.md)，不要直接复制活动主 DB 文件。
 - OpenAI verified 2xx/3xx 请求在对象重建校验和语义完整性事件写入成功后删除 raw chunks；拦截、4xx/5xx、采集、解析、上游或重建异常保留 `full` raw。
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
-- 管理端即使只监听 loopback，也必须鉴权；支持 Bearer token 和 Web UI 的七天 HttpOnly Cookie。
+- 管理端即使只监听 loopback，也必须鉴权；支持 Bearer token 和 Web UI 的七天 HttpOnly Cookie。启用 Agent 接入后另有 Agent 令牌，只能调用 `/api/agent/v1/*`；匿名可达的只有用一次性授权码兑换令牌、凭 30 分钟签名链接下载安装包这两条路径。轮换 `admin_token` 会让 Cookie、Agent 令牌和下载链接全部失效。
 - 审计列表只额外返回解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情、reconstructed、timeline 和 full raw 都受 Admin Token 或管理 Cookie 保护并禁止缓存。
 - metadata 记录的权威校验依据是四阶段长度/SHA-256、有序对象引用、provider reconstruction hash 和 HMAC 完整性链；full 异常记录另保留可认证解密的原始字节。
 - 配置文件、数据库和 key 应只允许运行账户访问。
@@ -191,6 +196,7 @@ pnpm build
 - [入站请求拦截链](doc/features/17-request-interceptor-chain.md)
 - [查询 API 与管理页面](doc/features/10-query-api-and-minimal-web-ui.md)
 - [Nginx 与部署](doc/features/15-nginx-and-deployment-integration.md)
+- [Agent 接入](doc/features/25-agent-access.md)
 - [仓库架构说明](AGENTS.md)
 
 ## 许可证

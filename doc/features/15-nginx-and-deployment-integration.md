@@ -13,6 +13,12 @@ Client -> Nginx -> audit-proxy:8080 dispatcher
 
 管理端口 `8081` 不进入公开 Nginx；即使只绑定 `127.0.0.1`，health、ready 和管理 API 也必须鉴权。CLI 可使用静态 Bearer token，Web UI 使用七天过期的 HttpOnly Cookie。
 
+**Agent 接入的例外**（[模块 25](25-agent-access.md)，默认关闭）：命令行 `llmaudit` 在用户自己的机器上运行，直接访问管理面的 `/ui/` 与 `/api/agent/v1/*`。管理面只在本机 loopback 上时，只有同一台机器上的 Agent 能用。要让别的机器上的 Agent 使用，部署者必须有意把管理端口暴露出去（例如单独的、只对内网开放的反向代理或端口映射），这时要清楚：
+
+- 本程序不提供 TLS。直接暴露就是明文 HTTP，Agent 令牌与授权码会在网络上明文传输；命令行对“明文且不是本机”的地址会给出警告。需要的话在前面自行加 TLS 反代，并把 `agent_access.public_url` 写成用户实际访问的 https 地址。
+- 管理 token 的 Bearer 限流和 Agent 令牌的失败限流都按来源地址计数。所有客户端经同一个反向代理进来时它们共用一个来源地址，也就共用一个计数桶：任何一个客户端送够错误的令牌，会让所有经该代理的同类请求在窗口内一律 429。
+- 暴露的是整个管理面，不只是 Agent 接口；网页登录、管理 API 都随之可达，鉴权与限流规则不变。
+
 ## 2. Nginx 路由
 
 仓库提供：
@@ -68,9 +74,10 @@ Gemini 只接受从头到尾锚定的两种模板：
 
 1. Node 24 LTS build stage 安装固定 pnpm 10.15.0，使用 `pnpm-lock.yaml --frozen-lockfile` 构建 React/Vite 资源；`onlyBuiltDependencies` 显式允许 esbuild 安装脚本。
 2. Go 1.27 build stage 将新 dist 覆盖到 embed 目录，并以 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 编译。
-3. distroless nonroot 运行 stage 只复制 Go 二进制和空挂载目录。
+3. `agent-packages` stage 在 Go build stage 之上显式复制 `skill/`，用 `go run ./internal/agentdist/cmd/agentpack` 把命令行 `llmaudit` 交叉编译为 windows/amd64、linux/amd64、linux/arm64、darwin/arm64、darwin/amd64 五个平台（`CGO_ENABLED=0 -trimpath -buildvcs=false -ldflags "-s -w"`），每个平台打一个顶层目录为 `llmapi-audit/` 的 zip，并写出 `manifest.json`。归档可重复：条目按路径排序、时间戳与权限位固定、文本统一 LF（[模块 25](25-agent-access.md)）。
+4. distroless nonroot 运行 stage 只复制 Go 二进制、`/agent-packages`（五个安装包与清单，约 17 MB）和空挂载目录。
 
-最终镜像不含 Node、pnpm、`node_modules`、前端源码、Go 源码、编译器或 SQLite CLI。管理页面由 Go embed 提供。
+最终镜像不含 Node、pnpm、`node_modules`、前端源码、Go 源码、编译器或 SQLite CLI。管理页面由 Go embed 提供。安装包不 embed 进二进制，而是放在二进制旁边的 `agent-packages/` 目录（镜像里是 `/agent-packages`）；目录缺失或清单与文件不符时只有 Agent 接入的下载不可用，代理本身照常启动。
 
 Vite 不清空 `dist`，以保留受跟踪的 `.gitkeep`，保证未构建前端的 checkout 仍可编译 Go 并显示回退页。本地重复构建可能保留旧哈希资源；正式发布使用干净 checkout 或 Docker 多阶段构建，避免把本地历史产物带入发布包。
 
@@ -118,9 +125,11 @@ scripts/build.ps1
 scripts/build.sh
 doc/deployment/README.md
 doc/deployment/backup-and-restore.md
+skill/llmapi-audit/                       # Agent 接入的 Skill 包源文件
+internal/agentdist/cmd/agentpack/         # 打包程序，Dockerfile 与构建脚本共用
 ~~~
 
-构建脚本生成 Windows/Linux amd64 的 CGO=0 二进制。完整启动、配置校验、Nginx 校验和管理面检查见[单机部署说明](../deployment/README.md)。
+构建脚本生成 Windows/Linux amd64 的 CGO=0 二进制，并在输出目录的 `agent-packages/` 下生成五个平台的 Skill 安装包与清单。完整启动、配置校验、Nginx 校验和管理面检查见[单机部署说明](../deployment/README.md)。
 
 ## 8. generation 2 破坏性切换
 
@@ -143,7 +152,7 @@ doc/deployment/backup-and-restore.md
 - 错误 Method、受保护 LLM 路径族、编码近似与危险路径返回 404，NewAPI 零调用。
 - SSE 首块不因 Nginx buffering 延迟，原 Path/Query 保留。
 - 模型 POST 不自动重试。
-- 管理端只发布到宿主机 loopback，并始终要求 Bearer token 或有效管理 Cookie。
+- 管理端只发布到宿主机 loopback，并始终要求 Bearer token 或有效管理 Cookie；为 Agent 接入有意对外暴露时，TLS 与共用来源地址的限流影响已由部署者确认。
 - `newapi.proxy_url` 空值不受环境代理影响；配置显式代理时，审计、passthrough、用户目录和 request-id 日志查询都能经代理到达远程 NewAPI，只有 LLM route 记录四阶段证据。
 - `newapi.access_token`/`newapi.user_id` 配置后每五分钟同步安全用户目录，并异步回填 request ID 对应的用户/Token 身份；失败不影响转发，完整用户 API Key 不进入该链路。
 - 最终镜像不含 Node 或源码，单一 Go 二进制提供 API 和 React UI。
