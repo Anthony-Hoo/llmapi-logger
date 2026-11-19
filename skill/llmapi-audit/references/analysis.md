@@ -11,7 +11,7 @@ llmaudit analysis overview --since 7d
 llmaudit analysis users --since 30d
 ```
 
-One of `--since` or `--from` is required, not both, because a review of all time would be unbounded; `--to` defaults to now and `--since` counts back from it (at most 400 days). The same applies to `analysis sessions`. `meta.state` is the state of the analysis run: `never_run`, `running`, `failed` or `succeeded`. `meta.complete` is false with `facets_incomplete` when some sessions could not be labelled. `analysis users` and `--user-id` are for administrators.
+One of `--since` or `--from` is required, not both, because a review of all time would be unbounded; `--to` defaults to now and `--since` counts back from it. The same applies to `analysis users` and `analysis sessions`; for `analysis overview` and `analysis sessions` the range is at most 400 days. `meta.state` is the state of the analysis run: `never_run`, `running`, `failed` or `succeeded`. `meta.complete` is false with `facets_incomplete` when some sessions could not be labelled. `analysis users` and `--user-id` are for administrators.
 
 ## Sessions
 

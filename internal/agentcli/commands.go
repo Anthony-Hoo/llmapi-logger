@@ -35,6 +35,13 @@ func flagTo() flagSpec {
 		Help: "End of the range: RFC 3339 or YYYY-MM-DD. Default: the server's default."}
 }
 
+// flagToNow is --to of the session analysis reads, whose end defaults to
+// the current time.
+func flagToNow() flagSpec {
+	return flagSpec{Name: "to", Value: "<time>", Query: "to",
+		Help: "End of the range: RFC 3339 or YYYY-MM-DD (a date includes that whole UTC day). Default: now."}
+}
+
 func flagCursor() flagSpec {
 	return flagSpec{Name: "cursor", Value: "<cursor>", Query: "cursor",
 		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Default: none (the first page)."}
@@ -214,7 +221,7 @@ func buildCommands() []*commandSpec {
 			Summary:     "token usage totals grouped by a dimension",
 			Description: "Totals only include records that have been analyzed (data.coverage_unknown).",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (30m, 2h, 7d). Cannot be combined with --from. Default: 7d. The range is at most 400 days."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (30m, 2h, 7d). Cannot be combined with --from. Default: 7d. The range is at most 400 days."},
 				flagFrom(), flagTo(),
 				{Name: "group-by", Value: "<dimension>", Query: "group_by", Help: "model, protocol or client; administrators also caller or token. Default: the server's default."},
 				{Name: "tz-offset-min", Value: "<minutes>", Query: "tz_offset_min", Default: localOffsetMinutes, Help: "Time zone offset east of UTC in minutes, -840 to 840, used for day buckets. Default: this machine's current offset."},
@@ -345,9 +352,9 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "overview"},
 			Summary: "session analysis summary and the state of the last run",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
 				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
-				flagTo(), flagUserID(true),
+				flagToNow(), flagUserID(true),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/overview", Meta: true}},
 			Examples: []string{"llmaudit analysis overview --since 7d"},
@@ -357,9 +364,9 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "users"},
 			Summary: "session analysis per user (administrators)",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (2h, 7d). One of --since or --from is required; not both."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both."},
 				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
-				flagTo(),
+				flagToNow(),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/users", Meta: true}},
 			Examples: []string{"llmaudit analysis users --since 30d"},
@@ -371,7 +378,7 @@ func buildCommands() []*commandSpec {
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
 				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
-				flagTo(),
+				flagToNow(),
 				{Name: "kind", Value: "<kind>", Query: "kind", Help: "agent or chat. Default: both."},
 				{Name: "flags", Value: "<list>", Query: "flags", Help: "Comma-separated session flags to filter by: loop, thrash, unverified, failures, corrections, error_paste, interrupt, heavy_model, danger, secret, compaction. Default: no filter."},
 				flagLimit(1, 200, 50), flagCursor(), flagUserID(true),
