@@ -169,7 +169,10 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 		return
 	}
 	plan := stored.Payload.(*agentPlan)
+	// From here on every row of this apply, failed, timed out or refused by a
+	// quota, says what was attempted: the plan's target and changed keys.
 	audit.ObjectKind, audit.ObjectID = plan.view.Target.Kind, plan.view.Target.ID
+	audit.ChangedKeys = plan.view.ChangedKeys
 	// A long operation's quota counts operations that were started. The slot
 	// is taken before the operation runs, so two concurrent applies cannot
 	// both pass a limit of one, and given back when the service refused to
@@ -204,7 +207,6 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 	}
 	target.Version = applied.Version
 	audit.Event, audit.Outcome, audit.ObjectID = agentaccess.EventWriteApplied, agentaccess.OutcomeOK, target.ID
-	audit.ChangedKeys = plan.view.ChangedKeys
 	handler.agent.RecordWrite(request.Context(), call.Identity, call.Meta, audit)
 	result := agentApplyResult{Op: plan.view.Op, Target: target, Applied: true, Result: applied.Result}
 	if plan.view.Creates {

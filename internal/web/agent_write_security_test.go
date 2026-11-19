@@ -218,7 +218,9 @@ func TestAgentWriteAuditRows(t *testing.T) {
 	if renameRow.ChangedKeys != `["name"]` {
 		t.Errorf("rename row = %+v", renameRow)
 	}
-	if failedRow.Event != "write_failed" || failedRow.Outcome != "failed" || failedRow.ErrorCode != "VERSION_CONFLICT" || failedRow.ObjectID != created.ID {
+	// A failed apply records what it attempted, like an applied one.
+	if failedRow.Event != "write_failed" || failedRow.Outcome != "failed" || failedRow.ErrorCode != "VERSION_CONFLICT" || failedRow.ObjectID != created.ID ||
+		failedRow.ObjectKind != "ua-rule" || failedRow.ChangedKeys != `["enabled"]` {
 		t.Errorf("failed row = %+v", failedRow)
 	}
 	for _, row := range rows {
@@ -349,6 +351,12 @@ func TestAgentRateLimits(t *testing.T) {
 		}
 		if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+fixture.plan(t, `{"op":"analysis.run"}`).PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeRateLimited {
 			t.Fatalf("run after a started run = %s", code)
+		}
+		// The refusal came after the plan was taken: its row names the target.
+		rows := fixture.writeAudits()
+		if last := rows[len(rows)-1]; last.Event != "write_failed" || last.ErrorCode != string(agentapi.CodeRateLimited) ||
+			last.ObjectKind != "analysis-run" || last.ChangedKeys != "[]" {
+			t.Fatalf("rate-limited row = %+v", last)
 		}
 	})
 	t.Run("concurrent runs against a limit of one", func(t *testing.T) {
