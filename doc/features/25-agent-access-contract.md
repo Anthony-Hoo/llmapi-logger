@@ -325,7 +325,7 @@
 **部署级开关**。`agent_access.enabled` 为假时：
 
 - `/api/agent/` 下所有方法、所有路径返回 HTTP 404 与 `FEATURE_DISABLED` 信封，存在的路径与不存在的路径没有差别。
-- `/api/v1/agent-access/*` 返回与其他不存在的路径相同的 404。
+- `/api/v1/agent-access/*` 的回答与 `/api/v1` 下其他不存在的路径相同：管理员 404、开发者 403、未登录 401（§0.1 第 83 条）。
 - 会话响应里 `agent_access_enabled` 为假，前端不显示入口。
 - 既有的“管理令牌当 Bearer 调 `/api/v1/*`”不受影响。
 
