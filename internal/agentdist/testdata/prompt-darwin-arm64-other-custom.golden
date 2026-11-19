@@ -45,8 +45,9 @@ The archive's top level is the directory llmapi-audit/ itself: it contains llmap
    mkdir -p -- "/Users/example/agent-skills" && [ ! -e "/Users/example/agent-skills/llmapi-audit" ] && mv -- "LLMAPI_WORK_DIR/extract/llmapi-audit" "/Users/example/agent-skills/llmapi-audit" && chmod 755 "/Users/example/agent-skills/llmapi-audit/scripts/llmaudit"
    Check: the command exits with status 0.
 
-7. Remove the work directory:
-   rm -rf -- "LLMAPI_WORK_DIR"
+7. Remove the work directory (the command refuses a path that is not the one step 1 created):
+   case "LLMAPI_WORK_DIR" in */llmapi-audit-install.????????) rm -rf -- "LLMAPI_WORK_DIR" ;; *) echo "refused: not the work directory from step 1" >&2; false ;; esac
+   Check: the command exits with status 0.
 
 8. Check that the client runs on this machine:
    "/Users/example/agent-skills/llmapi-audit/scripts/llmaudit" --help

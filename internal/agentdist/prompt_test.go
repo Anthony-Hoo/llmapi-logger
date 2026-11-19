@@ -197,6 +197,12 @@ func TestInstallPromptRequirements(t *testing.T) {
 				if !strings.Contains(prompt, `mktemp -d "${TMPDIR:-/tmp}/llmapi-audit-install.XXXXXXXX"`) || strings.Contains(prompt, "mkdir -p -- \"${TMPDIR") {
 					t.Error("the POSIX work directory is not created with mktemp -d")
 				}
+				// Its removal refuses anything but a path of mktemp's shape (the
+				// eight X of the template are eight characters).
+				if !strings.Contains(prompt, `case "LLMAPI_WORK_DIR" in */llmapi-audit-install.????????) rm -rf -- "LLMAPI_WORK_DIR" ;; *)`) ||
+					strings.Count(prompt, `rm -rf -- "LLMAPI_WORK_DIR"`) != 1 {
+					t.Error("the POSIX work directory is removed without the guard")
+				}
 			}
 			for _, line := range commandLines(prompt) {
 				for _, deletion := range regexp.MustCompile(`(?:rm -rf -- |Remove-Item -LiteralPath )("[^"]*")`).FindAllStringSubmatch(line, -1) {

@@ -383,8 +383,11 @@ func posixPrompt(input PromptInput, info agentInfo, server string, p paths) stri
 	s.add("Move the extracted Skill into place (the skills directory is created if it does not exist; nothing else in it is touched):",
 		"mkdir -p -- "+p.skills+" && [ ! -e "+p.install+" ] && mv -- "+quote(strings.Trim(p.extract, `"`)+"/llmapi-audit")+" "+p.install+" && chmod 755 "+p.binary,
 		"Check: the command exits with status 0.")
-	s.add("Remove the work directory:",
-		"rm -rf -- "+p.work)
+	// The removal refuses any path that is not a work directory mktemp made,
+	// whatever the agent wrote in place of the placeholder.
+	s.add("Remove the work directory (the command refuses a path that is not the one step 1 created):",
+		"case "+p.work+" in */llmapi-audit-install.????????) rm -rf -- "+p.work+" ;; *) echo \"refused: not the work directory from step 1\" >&2; false ;; esac",
+		"Check: the command exits with status 0.")
 	s.add("Check that the client runs on this machine:",
 		p.binary+" --help",
 		"Check: it exits with status 0 and prints the usage of llmaudit.")
