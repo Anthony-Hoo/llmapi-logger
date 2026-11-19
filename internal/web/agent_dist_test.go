@@ -275,3 +275,56 @@ func TestAgentDistributionWithoutPackages(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallLinksAreLimitedPerSession: 20 install links per web session
+// identity in 10 minutes; the 21st is 429 too_many_requests with Retry-After
+// and writes no link_issued row. A developer's budget is separate from the
+// administrator's, and the window reopens after 10 minutes.
+func TestInstallLinksAreLimitedPerSession(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	dir, _ := packTestPackages(t)
+	clock := &distClock{now: time.Now()}
+	withDist(t, env, dir, clock)
+	issued := func() int {
+		count := 0
+		for _, entry := range env.store.Audit() {
+			if entry.Event == agentaccess.EventLinkIssued {
+				count++
+			}
+		}
+		return count
+	}
+	admin := agentCaller{bearer: testAdminToken}
+	body := `{"agent":"codex","platform":"windows-amd64"}`
+	for index := 0; index < agentdist.InstallLinksPerWindow; index++ {
+		if response := env.do(http.MethodPost, agentInstallLinksPath, body, admin); response.Code != http.StatusOK {
+			t.Fatalf("link %d = %d %s", index+1, response.Code, response.Body.String())
+		}
+	}
+	for index := 0; index < 180; index++ {
+		response := env.do(http.MethodPost, agentInstallLinksPath, body, admin)
+		var refused struct {
+			Error struct{ Code string } `json:"error"`
+		}
+		_ = json.Unmarshal(response.Body.Bytes(), &refused)
+		if response.Code != http.StatusTooManyRequests || refused.Error.Code != "too_many_requests" || response.Header().Get("Retry-After") != "600" {
+			t.Fatalf("link beyond the limit = %d %s Retry-After %q", response.Code, response.Body.String(), response.Header().Get("Retry-After"))
+		}
+	}
+	if got := issued(); got != agentdist.InstallLinksPerWindow {
+		t.Fatalf("link_issued rows = %d after 200 requests, want %d", got, agentdist.InstallLinksPerWindow)
+	}
+	// The administrator's web session shares the administrator's budget; a
+	// developer has its own.
+	if response := env.do(http.MethodPost, agentInstallLinksPath, body, agentCaller{cookie: adminSignIn(t, env.handler)}); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("admin cookie after the admin token's 20 = %d", response.Code)
+	}
+	_, developer := issueAgentDeveloper(t, env)
+	if response := env.do(http.MethodPost, agentInstallLinksPath, body, agentCaller{cookie: developer}); response.Code != http.StatusOK {
+		t.Fatalf("developer's first link = %d %s", response.Code, response.Body.String())
+	}
+	clock.now = clock.now.Add(10 * time.Minute)
+	if response := env.do(http.MethodPost, agentInstallLinksPath, body, admin); response.Code != http.StatusOK {
+		t.Fatalf("after the window = %d", response.Code)
+	}
+}

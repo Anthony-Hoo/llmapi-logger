@@ -1,10 +1,13 @@
 package web
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentapi"
@@ -85,6 +88,18 @@ func (handler *managementHandler) serveAgentInstallLink(writer http.ResponseWrit
 		writePackagesMissing(writer)
 		return
 	}
+	// At most 20 links per web session identity in 10 minutes (contract
+	// section 7): each link writes a link_issued row, and a refused request
+	// writes none.
+	if allowed, wait := handler.agentDist.AllowInstallLink(installLinkKey(caller)); !allowed {
+		seconds := int(math.Ceil(wait.Seconds()))
+		if seconds < 1 {
+			seconds = 1
+		}
+		writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+		writeError(writer, http.StatusTooManyRequests, "too_many_requests", "安装链接生成得太频繁，请稍后再试")
+		return
+	}
 	serverURL := handler.agentPublicURL
 	if serverURL == "" {
 		serverURL = browsingBaseURL(request)
@@ -119,6 +134,21 @@ func (handler *managementHandler) serveAgentInstallLink(writer http.ResponseWrit
 		ObjectKind: agentPackageObject, ObjectID: link.File, Outcome: agentaccess.OutcomeOK,
 	})
 	writeJSON(writer, http.StatusOK, link)
+}
+
+// installLinkKey is the web session identity install links are counted by.
+// Sessions carry no server-side id, so it is what a session stands for: the
+// administrator (every administrator session and the admin token share one
+// budget) or one developer's key fingerprint and NewAPI token.
+func installLinkKey(caller principal) string {
+	if caller.Role != roleDeveloper || caller.Scope == nil {
+		return "admin"
+	}
+	key := "developer:" + hex.EncodeToString(caller.Scope.Fingerprint)
+	if caller.Scope.TokenID != nil {
+		key += ":" + strconv.FormatInt(*caller.Scope.TokenID, 10)
+	}
+	return key
 }
 
 func writePackagesMissing(writer http.ResponseWriter) {
