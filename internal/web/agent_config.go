@@ -140,32 +140,48 @@ func agentOrgConfigOf(catalog orgreport.CatalogView, settings orgreport.PublicSe
 			MaxConcurrentRoots: settings.MaxConcurrentRoots, MaxSingleRequestRoots: settings.MaxSingleRequestRoots},
 	}
 	for _, group := range catalog.Groups {
-		out.Groups = append(out.Groups, agentOrgGroup{ID: group.ID, Version: agentVersion(group.UpdatedAtNS), NameUntrusted: group.Name,
-			Enabled: group.Enabled, CreatedAt: agentTime(group.CreatedAtNS), UpdatedAt: agentTime(group.UpdatedAtNS)})
+		out.Groups = append(out.Groups, agentOrgGroupOf(group))
 	}
 	for _, project := range catalog.Projects {
-		rules := make([]agentOrgRule, 0, len(project.Rules))
-		for _, rule := range project.Rules {
-			rules = append(rules, agentOrgRule{Kind: rule.Kind, PatternUntrusted: rule.Pattern})
-		}
-		var groupID *int64
-		if project.GroupID != nil {
-			value := *project.GroupID
-			groupID = &value
-		}
-		out.Projects = append(out.Projects, agentOrgProject{ID: project.ID, Version: agentVersion(project.UpdatedAtNS),
-			NameUntrusted: project.Name, GroupID: groupID, Enabled: project.Enabled, Rules: rules,
-			CreatedAt: agentTime(project.CreatedAtNS), UpdatedAt: agentTime(project.UpdatedAtNS)})
+		out.Projects = append(out.Projects, agentOrgProjectOf(project))
 	}
 	for _, member := range catalog.Members {
-		out.Members = append(out.Members, agentOrgMember{UserID: member.UserID, Version: agentVersion(member.UpdatedAtNS),
-			GroupID: member.GroupID, UpdatedAt: agentTime(member.UpdatedAtNS)})
+		out.Members = append(out.Members, agentOrgMemberOf(member))
 	}
 	for _, principal := range catalog.Principals {
-		out.Principals = append(out.Principals, agentOrgPrincipal{Kind: principal.Kind, ID: principal.ID,
-			Version: agentVersion(principal.UpdatedAtNS), Class: principal.Class, UpdatedAt: agentTime(principal.UpdatedAtNS)})
+		out.Principals = append(out.Principals, agentOrgPrincipalOf(principal))
 	}
 	return out
+}
+
+func agentOrgGroupOf(group orgreport.Group) agentOrgGroup {
+	return agentOrgGroup{ID: group.ID, Version: agentVersion(group.UpdatedAtNS), NameUntrusted: group.Name,
+		Enabled: group.Enabled, CreatedAt: agentTime(group.CreatedAtNS), UpdatedAt: agentTime(group.UpdatedAtNS)}
+}
+
+func agentOrgProjectOf(project orgreport.Project) agentOrgProject {
+	rules := make([]agentOrgRule, 0, len(project.Rules))
+	for _, rule := range project.Rules {
+		rules = append(rules, agentOrgRule{Kind: rule.Kind, PatternUntrusted: rule.Pattern})
+	}
+	var groupID *int64
+	if project.GroupID != nil {
+		value := *project.GroupID
+		groupID = &value
+	}
+	return agentOrgProject{ID: project.ID, Version: agentVersion(project.UpdatedAtNS),
+		NameUntrusted: project.Name, GroupID: groupID, Enabled: project.Enabled, Rules: rules,
+		CreatedAt: agentTime(project.CreatedAtNS), UpdatedAt: agentTime(project.UpdatedAtNS)}
+}
+
+func agentOrgMemberOf(member orgreport.Member) agentOrgMember {
+	return agentOrgMember{UserID: member.UserID, Version: agentVersion(member.UpdatedAtNS),
+		GroupID: member.GroupID, UpdatedAt: agentTime(member.UpdatedAtNS)}
+}
+
+func agentOrgPrincipalOf(principal orgreport.Principal) agentOrgPrincipal {
+	return agentOrgPrincipal{Kind: principal.Kind, ID: principal.ID,
+		Version: agentVersion(principal.UpdatedAtNS), Class: principal.Class, UpdatedAt: agentTime(principal.UpdatedAtNS)}
 }
 
 type agentWeeklySettingsValues struct {

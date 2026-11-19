@@ -154,20 +154,25 @@ func copyCounts[V int64 | float64](counts map[string]V) map[string]V {
 	return out
 }
 
+func agentRunSummaryOf(run *sessionanalysis.RunSummary) *agentRunSummary {
+	if run == nil {
+		return nil
+	}
+	return &agentRunSummary{
+		StartedAt: agentTime(run.StartedNS), FinishedAt: agentTime(run.FinishedNS), Trigger: run.Trigger,
+		Candidates: run.Candidates, Analyzed: run.Analyzed, Skipped: run.Skipped, SkipReasons: copyCounts(run.SkipReasons),
+		FacetsDue: run.FacetsDue, FacetsOK: run.FacetsOK, FacetsInvalid: run.FacetsBad, FacetsFailed: run.FacetsError,
+		ModelInputTokens: run.ModelInput, ModelOutputTokens: run.ModelOutput, Error: run.Error,
+	}
+}
+
 func agentAnalysisOverviewOf(response sessionanalysis.OverviewResponse) agentAnalysisOverview {
 	out := agentAnalysisOverview{
 		FromAt: agentTime(response.FromNS), ToAt: agentTime(response.ToNS),
 		Current: agentSignalTotalsOf(response.Current), Previous: agentSignalTotalsOf(response.Previous),
 		Running: response.Running, LLMEnabled: response.LLMEnabled, Model: response.Model, PromptVersion: response.PromptVersion,
 	}
-	if run := response.LastRun; run != nil {
-		out.LastRun = &agentRunSummary{
-			StartedAt: agentTime(run.StartedNS), FinishedAt: agentTime(run.FinishedNS), Trigger: run.Trigger,
-			Candidates: run.Candidates, Analyzed: run.Analyzed, Skipped: run.Skipped, SkipReasons: copyCounts(run.SkipReasons),
-			FacetsDue: run.FacetsDue, FacetsOK: run.FacetsOK, FacetsInvalid: run.FacetsBad, FacetsFailed: run.FacetsError,
-			ModelInputTokens: run.ModelInput, ModelOutputTokens: run.ModelOutput, Error: run.Error,
-		}
-	}
+	out.LastRun = agentRunSummaryOf(response.LastRun)
 	if calibration := response.Calibration; calibration != nil {
 		out.Calibration = &agentCalibration{
 			PromptVersion: calibration.PromptVersion, Model: calibration.Model, Labels: calibration.Labels,

@@ -116,6 +116,10 @@ type Options struct {
 	// answers FEATURE_DISABLED for every request and /api/v1/agent-access/*
 	// answers 404 (doc/features/25-agent-access.md).
 	AgentAccess *agentaccess.Service
+	// RetentionDays is the deployment's retention_days (0: kept forever). The
+	// facade refuses to regenerate a week whose evidence is older
+	// (doc/features/25-agent-access-contract.md section 0, row 5).
+	RetentionDays int
 }
 
 // NewHandler constructs the complete management handler. It rejects an empty
@@ -149,6 +153,10 @@ func NewHandler(options Options) (http.Handler, error) {
 
 		agent:         options.AgentAccess,
 		agentRegistry: agentapi.NewRegistry(agentapi.Endpoints),
+		retentionDays: options.RetentionDays,
+	}
+	if handler.agent != nil {
+		handler.agentPlans = agentaccess.NewPlanStore(handler.agent.Now, nil)
 	}
 	handler.agentHandlerTable = handler.agentHandlers()
 	if err := bindAgentHandlers(handler.agentRegistry, handler.agentHandlerTable); err != nil {
@@ -183,6 +191,8 @@ type managementHandler struct {
 	agent             *agentaccess.Service
 	agentRegistry     *agentapi.Registry
 	agentHandlerTable map[string]agentHandler
+	agentPlans        *agentaccess.PlanStore
+	retentionDays     int
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

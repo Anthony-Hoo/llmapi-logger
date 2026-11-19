@@ -54,7 +54,21 @@ func (handler *managementHandler) agentHandlers() map[string]agentHandler {
 	for id, serve := range handler.agentReadHandlers() {
 		handlers[id] = serve
 	}
+	for id, serve := range handler.agentWriteHandlers() {
+		handlers[id] = serve
+	}
 	return handlers
+}
+
+// agentWriteHandlers binds the write facade of contract section 4.5.
+func (handler *managementHandler) agentWriteHandlers() map[string]agentHandler {
+	return map[string]agentHandler{
+		agentapi.EndpointPlanCreate:  handler.serveAgentPlanCreate,
+		agentapi.EndpointPlanApply:   handler.serveAgentPlanApply,
+		agentapi.EndpointAPIKeySet:   handler.serveAgentAPIKeySet,
+		agentapi.EndpointAPIKeyClear: handler.serveAgentAPIKeyClear,
+		agentapi.EndpointTestModel:   handler.serveAgentTestModel,
+	}
 }
 
 // agentReadHandlers binds the read facade of contract sections 4.3 and 4.4.
@@ -155,11 +169,57 @@ func (handler *managementHandler) serveAgent(writer http.ResponseWriter, request
 		return
 	}
 	if err := handler.agent.Permit(identity, endpoint); err != nil {
+		handler.recordWriteDenied(request, endpoint, call, identity, err)
+		writeAgentServiceError(writer, err)
+		return
+	}
+	if err := handler.takeAgentQuotas(endpoint, identity); err != nil {
+		handler.recordWriteDenied(request, endpoint, call, identity, err)
 		writeAgentServiceError(writer, err)
 		return
 	}
 	call.Identity, call.Principal = identity, caller
 	serve(writer, request.WithContext(withPrincipal(request.Context(), caller)), call)
+}
+
+// takeAgentQuotas applies the per-token limits of contract section 7 after
+// the token and its permissions passed. Logout is never limited: revoking a
+// token must always work.
+func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, identity agentaccess.Identity) error {
+	switch {
+	case endpoint.ID == "logout":
+		return nil
+	case endpoint.Tier == agentapi.TierRead:
+		if err := handler.agent.Take(agentaccess.QuotaRead, identity); err != nil {
+			return err
+		}
+		if endpoint.ID == "analysis.pack" || endpoint.ID == "analysis.facet" {
+			return handler.agent.Take(agentaccess.QuotaSensitiveRead, identity)
+		}
+		return nil
+	case endpoint.ID == agentapi.EndpointTestModel:
+		return handler.agent.Take(agentaccess.QuotaTestModel, identity)
+	default:
+		return handler.agent.Take(agentaccess.QuotaWrite, identity)
+	}
+}
+
+// recordWriteDenied writes the write_denied row of contract section 3.4 for
+// a refused execution, key change or connection test of an authenticated
+// token. Plan creation is never audited.
+func (handler *managementHandler) recordWriteDenied(request *http.Request, endpoint agentapi.Endpoint, call agentCall, identity agentaccess.Identity, err error) {
+	audit := agentaccess.WriteAudit{Event: agentaccess.EventWriteDenied, Outcome: agentaccess.OutcomeDenied, ErrorCode: agentaccess.CodeOf(err)}
+	switch endpoint.ID {
+	case agentapi.EndpointPlanApply:
+		audit.ObjectKind, audit.ObjectID = "plan", call.Params["plan_id"]
+	case agentapi.EndpointAPIKeySet, agentapi.EndpointAPIKeyClear:
+		audit.ObjectKind, audit.ChangedKeys = agentKeyObject, []string{"api_key"}
+	case agentapi.EndpointTestModel:
+		audit.ObjectKind, audit.ObjectID = agentKeyObject, "test-model"
+	default:
+		return
+	}
+	handler.agent.RecordWrite(request.Context(), identity, call.Meta, audit)
 }
 
 // agentPrincipal maps a token identity onto the principal web sessions use.

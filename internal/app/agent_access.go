@@ -6,7 +6,11 @@ import (
 
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/contentpolicy"
+	"llmapi-logger/internal/orgreport"
+	"llmapi-logger/internal/sessionanalysis"
 	"llmapi-logger/internal/storage/postgres"
+	"llmapi-logger/internal/uaguard"
 	"llmapi-logger/internal/web"
 )
 
@@ -15,6 +19,18 @@ import (
 // organisation reports the store is reached through an optional interface
 // rather than runtimeStore, so the test stores need no stub methods.
 var _ agentaccess.Store = (*postgres.Store)(nil)
+
+// The write facade reaches the services' agent entry points through optional
+// interfaces asserted at use (web.Agent…). A service passed under another
+// type would make every write of its kind UPSTREAM_UNAVAILABLE with all unit
+// tests green, so the concrete types assembled here are pinned too.
+var (
+	_ web.AgentUARuleWriter           = (*uaguard.Service)(nil)
+	_ web.AgentContentRuleWriter      = (*contentpolicy.Service)(nil)
+	_ web.AgentOrgWriter              = (*orgreport.Service)(nil)
+	_ web.AgentAnalysisSettingsWriter = (*sessionanalysis.SettingsService)(nil)
+	_ web.AgentAnalysisRunner         = (*sessionanalysis.QueryService)(nil)
+)
 
 // assembleAgentAccess builds the agent token service of an enabled
 // deployment (doc/features/25-agent-access.md). It returns nil, and the

@@ -526,7 +526,8 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 
 		InjectedUserTextPrefixes: uiVocabulary(vocabulary).InjectedUserTextPrefixes(),
 
-		AgentAccess: agentAccess,
+		AgentAccess:   agentAccess,
+		RetentionDays: configuration.RetentionDays,
 	})
 	if err != nil {
 		_ = application.closeComponents()

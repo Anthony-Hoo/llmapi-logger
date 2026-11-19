@@ -163,10 +163,19 @@ func (handler *managementHandler) agentWeek(writer http.ResponseWriter, values u
 	if !values.Has("week") {
 		return "", true
 	}
+	if failure := handler.agentWeekFailure(week, "week"); failure != nil {
+		failure.write(writer)
+		return "", false
+	}
+	return week, true
+}
+
+// agentWeekFailure is the refusal of a week label that is not a date or not
+// the configured first weekday, naming field; nil when the label passes.
+func (handler *managementHandler) agentWeekFailure(week, field string) *agentFailure {
 	day, err := time.Parse(orgreport.WeekLayout, week)
 	if err != nil {
-		writeAgentFailure(writer, agentapi.CodeInvalidArgument, "week must be a YYYY-MM-DD date", "", map[string]any{"field": "week"})
-		return "", false
+		return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "week must be a YYYY-MM-DD date", Details: map[string]any{"field": field}}
 	}
 	settings := handler.org.Settings()
 	first := time.Monday
@@ -175,12 +184,11 @@ func (handler *managementHandler) agentWeek(writer http.ResponseWriter, values u
 	}
 	if day.Weekday() != first {
 		nearest := day.AddDate(0, 0, -((int(day.Weekday()) - int(first) + 7) % 7))
-		writeAgentFailure(writer, agentapi.CodeInvalidArgument, "week must be the first day of a report week",
-			"Use --week "+nearest.Format(orgreport.WeekLayout)+", the start of the week containing that date.",
-			map[string]any{"field": "week", "week_start": settings.WeekStart})
-		return "", false
+		return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "week must be the first day of a report week",
+			Hint:    "Use --week " + nearest.Format(orgreport.WeekLayout) + ", the start of the week containing that date.",
+			Details: map[string]any{"field": field, "week_start": settings.WeekStart}}
 	}
-	return week, true
+	return nil
 }
 
 func agentGroupID(values url.Values) (*int64, error) {

@@ -5,16 +5,8 @@ package agentapi
 // in WebRouteExceptions; a test in internal/web probes every row against the
 // real handler and scans the handler source for routes this table lacks.
 
-// Facade endpoint IDs reserved for phase 4 (writes). Rows that point at them
-// are marked Pending until the endpoints are registered.
-const (
-	PendingPlanCreate     = "plans.create"
-	PendingPlanApply      = "plans.apply"
-	PendingAPIKeySet      = "config.api-key.set"
-	PendingAPIKeyClear    = "config.api-key.clear"
-	PendingTestModel      = "analysis.test-model"
-	pendingPlanCommandSet = "config set"
-)
+// planCommandSet is the command of every config.set row.
+const planCommandSet = "config set"
 
 // WebRoute maps one method and path of the management API onto the facade.
 // Path segments written {name} stand for one value.
@@ -29,6 +21,7 @@ type WebRoute struct {
 	Commands []string
 	// Pending marks a row whose endpoints belong to a later phase and are not
 	// registered yet. A test refuses a pending row whose endpoints all exist.
+	// Since phase 4 no row is pending.
 	Pending bool
 }
 
@@ -39,10 +32,10 @@ type WebRouteException struct {
 	Reason string
 }
 
-var planEndpoints = []string{PendingPlanCreate, PendingPlanApply}
+var planEndpoints = []string{EndpointPlanCreate, EndpointPlanApply}
 
 func planRoute(method, path, op string, commands ...string) WebRoute {
-	return WebRoute{Method: method, Path: path, Endpoints: planEndpoints, Op: op, Commands: commands, Pending: true}
+	return WebRoute{Method: method, Path: path, Endpoints: planEndpoints, Op: op, Commands: commands}
 }
 
 // WebRoutes is the table of contract section 4.8, one row per method.
@@ -67,16 +60,16 @@ var WebRoutes = []WebRoute{
 	planRoute("POST", "/api/v1/org/weekly/regenerate", "weekly.regenerate", "weekly regenerate", "apply"),
 	{Method: "GET", Path: "/api/v1/org/settings", Endpoints: []string{"config.show"}, Commands: []string{"config show --kind org"}},
 	{Method: "GET", Path: "/api/v1/org/catalog", Endpoints: []string{"config.show"}, Commands: []string{"config show --kind org"}},
-	planRoute("POST", "/api/v1/org/groups", "config.set", pendingPlanCommandSet, "apply"),
-	planRoute("PUT", "/api/v1/org/groups/{id}", "config.set", pendingPlanCommandSet, "apply"),
+	planRoute("POST", "/api/v1/org/groups", "config.set", planCommandSet, "apply"),
+	planRoute("PUT", "/api/v1/org/groups/{id}", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/org/groups/{id}", "config.remove", "config remove", "apply"),
-	planRoute("POST", "/api/v1/org/projects", "config.set", pendingPlanCommandSet, "apply"),
-	planRoute("PUT", "/api/v1/org/projects/{id}", "config.set", pendingPlanCommandSet, "apply"),
+	planRoute("POST", "/api/v1/org/projects", "config.set", planCommandSet, "apply"),
+	planRoute("PUT", "/api/v1/org/projects/{id}", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/org/projects/{id}", "config.remove", "config remove", "apply"),
 	{Method: "POST", Path: "/api/v1/org/projects/preview", Endpoints: []string{"config.project-preview"}, Commands: []string{"config preview-project"}},
-	planRoute("PUT", "/api/v1/org/members/{user_id}", "config.set", pendingPlanCommandSet, "apply"),
+	planRoute("PUT", "/api/v1/org/members/{user_id}", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/org/members/{user_id}", "config.remove", "config remove", "apply"),
-	planRoute("PUT", "/api/v1/org/principals/{kind}/{id}", "config.set", pendingPlanCommandSet, "apply"),
+	planRoute("PUT", "/api/v1/org/principals/{kind}/{id}", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/org/principals/{kind}/{id}", "config.remove", "config remove", "apply"),
 
 	{Method: "GET", Path: "/api/v1/session-analysis/overview", Endpoints: []string{"analysis.overview"}, Commands: []string{"analysis overview"}},
@@ -90,22 +83,22 @@ var WebRoutes = []WebRoute{
 	planRoute("POST", "/api/v1/session-analysis/suggestions/{id}/dismiss", "analysis.dismiss", "analysis dismiss", "apply"),
 
 	{Method: "GET", Path: "/api/v1/user-agent-rules", Endpoints: []string{"config.show"}, Commands: []string{"config show --kind ua-rule"}},
-	planRoute("POST", "/api/v1/user-agent-rules", "config.set", pendingPlanCommandSet, "apply"),
-	planRoute("PUT", "/api/v1/user-agent-rules/{id}", "config.set", pendingPlanCommandSet, "apply"),
+	planRoute("POST", "/api/v1/user-agent-rules", "config.set", planCommandSet, "apply"),
+	planRoute("PUT", "/api/v1/user-agent-rules/{id}", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/user-agent-rules/{id}", "config.remove", "config remove", "apply"),
 	{Method: "GET", Path: "/api/v1/content-policy-rules", Endpoints: []string{"config.show"}, Commands: []string{"config show --kind content-rule"}},
-	planRoute("POST", "/api/v1/content-policy-rules", "config.set", pendingPlanCommandSet, "apply"),
-	planRoute("PUT", "/api/v1/content-policy-rules/{id}", "config.set", pendingPlanCommandSet, "apply"),
+	planRoute("POST", "/api/v1/content-policy-rules", "config.set", planCommandSet, "apply"),
+	planRoute("PUT", "/api/v1/content-policy-rules/{id}", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/content-policy-rules/{id}", "config.remove", "config remove", "apply"),
 
 	{Method: "GET", Path: "/api/v1/settings/org-reports", Endpoints: []string{"config.show"}, Commands: []string{"config show --kind weekly-settings"}},
-	planRoute("PUT", "/api/v1/settings/org-reports", "config.set", pendingPlanCommandSet, "apply"),
+	planRoute("PUT", "/api/v1/settings/org-reports", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/settings/org-reports", "config.reset", "config reset", "apply"),
 	{Method: "GET", Path: "/api/v1/settings/session-analysis", Endpoints: []string{"config.show"}, Commands: []string{"config show --kind analysis-settings"}},
-	{Method: "PUT", Path: "/api/v1/settings/session-analysis", Endpoints: []string{PendingPlanCreate, PendingPlanApply, PendingAPIKeySet, PendingAPIKeyClear},
-		Op: "config.set", Commands: []string{pendingPlanCommandSet, "config set-key", "apply"}, Pending: true},
+	{Method: "PUT", Path: "/api/v1/settings/session-analysis", Endpoints: []string{EndpointPlanCreate, EndpointPlanApply, EndpointAPIKeySet, EndpointAPIKeyClear},
+		Op: OpConfigSet, Commands: []string{planCommandSet, "config set-key", "apply"}},
 	planRoute("DELETE", "/api/v1/settings/session-analysis", "config.reset", "config reset", "apply"),
-	{Method: "POST", Path: "/api/v1/settings/session-analysis/test", Endpoints: []string{PendingTestModel}, Commands: []string{"analysis test-model"}, Pending: true},
+	{Method: "POST", Path: "/api/v1/settings/session-analysis/test", Endpoints: []string{EndpointTestModel}, Commands: []string{"analysis test-model"}},
 
 	{Method: "GET", Path: "/api/v1/newapi/callers", Endpoints: []string{"callers.list"}, Commands: []string{"callers list"}},
 	{Method: "GET", Path: "/healthz", Endpoints: []string{"status"}, Commands: []string{"status"}},
@@ -123,6 +116,7 @@ var WebRouteExceptions = []WebRouteException{
 	{Method: "POST", Path: "/api/v1/agent-access/authorizations", Reason: "agent access pages of the web UI (this module)"},
 	{Method: "GET", Path: "/api/v1/agent-access/tokens", Reason: "agent access pages of the web UI (this module)"},
 	{Method: "DELETE", Path: "/api/v1/agent-access/tokens/{id}", Reason: "agent access pages of the web UI (this module)"},
+	{Method: "GET", Path: "/api/v1/agent-access/changes", Reason: "agent access pages of the web UI (this module): recent agent changes, administrators only"},
 }
 
 // FacadeOnlyEndpoints are facade endpoints with no web route of their own:

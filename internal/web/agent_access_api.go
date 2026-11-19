@@ -12,6 +12,7 @@ import (
 
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/storage"
 )
 
 // Web-side agent access endpoints (contract section 3.2). They use the web
@@ -23,7 +24,9 @@ const (
 	agentAccessPathPrefix     = "/api/v1/agent-access/"
 	agentAuthorizationsPath   = agentAccessPathPrefix + "authorizations"
 	agentTokensPath           = agentAccessPathPrefix + "tokens"
+	agentChangesPath          = agentAccessPathPrefix + "changes"
 	maxAgentAuthorizationBody = 8 << 10
+	defaultAgentChanges       = 50
 )
 
 func isAgentAccessPath(path string) bool {
@@ -57,6 +60,17 @@ func (handler *managementHandler) serveAgentAccess(writer http.ResponseWriter, r
 			return
 		}
 		handler.serveAgentTokenRevoke(writer, request, strings.TrimPrefix(path, agentTokensPath+"/"))
+	case path == agentChangesPath:
+		if request.Method != http.MethodGet {
+			methodNotAllowed(writer, http.MethodGet)
+			return
+		}
+		// This family is dispatched before the administrator check of the
+		// other routes; the change list is administrator-only.
+		if !handler.requireAdmin(writer, request) {
+			return
+		}
+		handler.serveAgentChanges(writer, request)
 	default:
 		http.NotFound(writer, request)
 	}
@@ -212,6 +226,69 @@ func (handler *managementHandler) serveAgentTokenRevoke(writer http.ResponseWrit
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+// agentChangeItem is one row of GET /api/v1/agent-access/changes: an
+// agent_audit_log row of a write event, with the time as RFC 3339 and the
+// changed key names as a list (contract section 3.2). It holds no values.
+type agentChangeItem struct {
+	ID          int64    `json:"id"`
+	At          string   `json:"at"`
+	Event       string   `json:"event"`
+	TokenID     *int64   `json:"token_id"`
+	Role        string   `json:"role"`
+	Command     string   `json:"command"`
+	CLIVersion  string   `json:"cli_version"`
+	ObjectKind  string   `json:"object_kind"`
+	ObjectID    string   `json:"object_id"`
+	ChangedKeys []string `json:"changed_keys"`
+	Outcome     string   `json:"outcome"`
+	ErrorCode   string   `json:"error_code"`
+}
+
+// serveAgentChanges lists the newest write_applied, write_failed and
+// write_denied rows; ?limit= is 1-200, default 50.
+func (handler *managementHandler) serveAgentChanges(writer http.ResponseWriter, request *http.Request) {
+	values := request.URL.Query()
+	for key, entries := range values {
+		if key != "limit" || len(entries) != 1 {
+			writeAgentFieldError(writer, key)
+			return
+		}
+	}
+	limit := defaultAgentChanges
+	if values.Has("limit") {
+		parsed, ok := parseAgentID(values.Get("limit"), false)
+		if !ok || parsed < 1 || parsed > storage.AgentAuditListLimit {
+			writeAgentFieldError(writer, "limit")
+			return
+		}
+		limit = int(parsed)
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
+	entries, err := handler.agent.ListAudit(ctx, limit, agentaccess.WriteEvents)
+	if err != nil {
+		writeAgentAccessError(writer, err)
+		return
+	}
+	items := make([]agentChangeItem, 0, len(entries))
+	for _, entry := range entries {
+		keys := []string{}
+		if entry.ChangedKeys != "" {
+			// Written by RecordWrite as a JSON array of names; an
+			// unreadable value is shown as no keys rather than as text.
+			if json.Unmarshal([]byte(entry.ChangedKeys), &keys) != nil {
+				keys = []string{}
+			}
+		}
+		items = append(items, agentChangeItem{
+			ID: entry.ID, At: formatNS(entry.AtNS), Event: entry.Event, TokenID: entry.TokenID, Role: entry.Role,
+			Command: entry.Command, CLIVersion: entry.CLIVersion, ObjectKind: entry.ObjectKind, ObjectID: entry.ObjectID,
+			ChangedKeys: keys, Outcome: entry.Outcome, ErrorCode: entry.ErrorCode,
+		})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 }
 
 func parseAgentTokenID(raw string) (int64, bool) {

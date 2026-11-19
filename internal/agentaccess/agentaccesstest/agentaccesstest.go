@@ -151,7 +151,13 @@ func (store *Store) ListAgentAudit(_ context.Context, limit int, events []string
 			entries = append(entries, entry)
 		}
 	}
-	sort.SliceStable(entries, func(left, right int) bool { return entries[left].AtNS > entries[right].AtNS })
+	// Newest first, ties by id, as the PostgreSQL query orders them.
+	sort.SliceStable(entries, func(left, right int) bool {
+		if entries[left].AtNS != entries[right].AtNS {
+			return entries[left].AtNS > entries[right].AtNS
+		}
+		return entries[left].ID > entries[right].ID
+	})
 	if limit > 0 && len(entries) > limit {
 		entries = entries[:limit]
 	}
