@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -332,6 +333,39 @@ func TestAgentRateLimits(t *testing.T) {
 		fixture.planAndApply(t, `{"op":"analysis.run"}`)
 		if fixture.trigger.triggered != 2 {
 			t.Fatalf("triggered %d", fixture.trigger.triggered)
+		}
+	})
+	t.Run("a run that did not start keeps the run quota", func(t *testing.T) {
+		fixture := newWriteFixture(t)
+		fixture.trigger.running = true
+		busy := fixture.plan(t, `{"op":"analysis.run"}`)
+		if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+busy.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeRunInProgress {
+			t.Fatalf("busy apply = %s", code)
+		}
+		fixture.trigger.running = false
+		fixture.planAndApply(t, `{"op":"analysis.run"}`)
+		if fixture.trigger.triggered != 1 {
+			t.Fatalf("triggered %d", fixture.trigger.triggered)
+		}
+		if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+fixture.plan(t, `{"op":"analysis.run"}`).PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeRateLimited {
+			t.Fatalf("run after a started run = %s", code)
+		}
+	})
+	t.Run("concurrent runs against a limit of one", func(t *testing.T) {
+		fixture := newWriteFixture(t)
+		first, second := fixture.plan(t, `{"op":"analysis.run"}`), fixture.plan(t, `{"op":"analysis.run"}`)
+		var wait sync.WaitGroup
+		codes := make([]int, 2)
+		for index, id := range []string{first.PlanID, second.PlanID} {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				codes[index] = fixture.facade(http.MethodPost, "/plans/"+id+"/apply", nil, fixture.adminWrite).Code
+			}()
+		}
+		wait.Wait()
+		if fixture.trigger.triggered != 1 || codes[0]+codes[1] != http.StatusOK+http.StatusTooManyRequests {
+			t.Fatalf("codes = %v, triggered = %d", codes, fixture.trigger.triggered)
 		}
 	})
 	t.Run("regenerate", func(t *testing.T) {

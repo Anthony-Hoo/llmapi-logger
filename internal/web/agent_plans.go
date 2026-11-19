@@ -170,8 +170,14 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 	}
 	plan := stored.Payload.(*agentPlan)
 	audit.ObjectKind, audit.ObjectID = plan.view.Target.Kind, plan.view.Target.ID
+	// A long operation's quota counts operations that were started. The slot
+	// is taken before the operation runs, so two concurrent applies cannot
+	// both pass a limit of one, and given back when the service refused to
+	// start it (RUN_IN_PROGRESS, VERSION_CONFLICT, …). A timeout keeps it:
+	// the operation may be running.
+	var slot agentaccess.QuotaSlot
 	if plan.quota != nil {
-		if err := handler.agent.Take(*plan.quota, call.Identity); err != nil {
+		if slot, err = handler.agent.TakeSlot(*plan.quota, call.Identity); err != nil {
 			writeAgentServiceError(writer, err)
 			record(agentaccess.CodeOf(err))
 			return
@@ -185,6 +191,9 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			err = context.DeadlineExceeded
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			handler.agent.Refund(slot)
 		}
 		record(handler.writeAgentWriteFailure(writer, err))
 		return
