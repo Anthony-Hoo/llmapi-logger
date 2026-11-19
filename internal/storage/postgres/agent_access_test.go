@@ -203,7 +203,7 @@ func TestAgentAuditStorageSanitizesHostileText(t *testing.T) {
 			t.Fatalf("accepted %+v", bad)
 		}
 	}
-	entries, err := store.ListAgentAudit(ctx, 10)
+	entries, err := store.ListAgentAudit(ctx, 10, nil)
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("entries = %+v, %v", entries, err)
 	}
@@ -215,8 +215,20 @@ func TestAgentAuditStorageSanitizesHostileText(t *testing.T) {
 		len([]rune(oldest.Command)) > agentAuditTextMax || !strings.HasPrefix(oldest.Command, "requests.list") {
 		t.Fatalf("oldest = %+v", oldest)
 	}
-	if limited, err := store.ListAgentAudit(ctx, 1); err != nil || len(limited) != 1 {
+	if limited, err := store.ListAgentAudit(ctx, 1, nil); err != nil || len(limited) != 1 {
 		t.Fatalf("limited = %+v, %v", limited, err)
+	}
+	// The event filter runs in SQL, before the limit.
+	if err := store.InsertAgentAudit(ctx, storage.AgentAuditEntry{AtNS: 5, Event: "write_applied", TokenID: &tokenID, Role: "admin",
+		ObjectKind: "content-rule", ObjectID: "12", ChangedKeys: `["enabled"]`, Outcome: storage.AgentOutcomeOK}); err != nil {
+		t.Fatal(err)
+	}
+	writes, err := store.ListAgentAudit(ctx, 1, []string{"write_applied", "write_failed", "write_denied"})
+	if err != nil || len(writes) != 1 || writes[0].Event != "write_applied" || writes[0].ChangedKeys != `["enabled"]` {
+		t.Fatalf("writes = %+v, %v", writes, err)
+	}
+	if none, err := store.ListAgentAudit(ctx, 10, []string{"package_downloaded"}); err != nil || len(none) != 0 {
+		t.Fatalf("unmatched filter = %+v, %v", none, err)
 	}
 }
 

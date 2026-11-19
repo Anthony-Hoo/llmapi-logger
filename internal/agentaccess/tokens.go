@@ -222,10 +222,14 @@ func (service *Service) RevokeToken(ctx context.Context, viewer Viewer, id int64
 	return nil
 }
 
-// ListAudit returns the newest audit rows, for the administrator's "recent
-// agent changes" view.
-func (service *Service) ListAudit(ctx context.Context, limit int) ([]storage.AgentAuditEntry, error) {
-	entries, err := service.store.ListAgentAudit(ctx, limit)
+// WriteEvents are the audit events of agent writes: the rows of the
+// administrator's "recent agent changes" view.
+var WriteEvents = []string{EventWriteApplied, EventWriteFailed, EventWriteDenied}
+
+// ListAudit returns the newest audit rows of events (all rows when events is
+// empty), for the administrator's "recent agent changes" view.
+func (service *Service) ListAudit(ctx context.Context, limit int, events []string) ([]storage.AgentAuditEntry, error) {
+	entries, err := service.store.ListAgentAudit(ctx, limit, events)
 	if err != nil {
 		service.logger.Warn("agent audit listing failed", "error_category", "agent_store_unavailable")
 		return nil, fail(agentapi.CodeUpstreamUnavailable)

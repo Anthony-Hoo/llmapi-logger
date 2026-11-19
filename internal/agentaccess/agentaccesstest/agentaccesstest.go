@@ -138,10 +138,19 @@ func (store *Store) InsertAgentAudit(_ context.Context, entry storage.AgentAudit
 	return nil
 }
 
-func (store *Store) ListAgentAudit(_ context.Context, limit int) ([]storage.AgentAuditEntry, error) {
+func (store *Store) ListAgentAudit(_ context.Context, limit int, events []string) ([]storage.AgentAuditEntry, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	entries := append([]storage.AgentAuditEntry(nil), store.audit...)
+	entries := make([]storage.AgentAuditEntry, 0, len(store.audit))
+	for _, entry := range store.audit {
+		selected := len(events) == 0
+		for _, event := range events {
+			selected = selected || entry.Event == event
+		}
+		if selected {
+			entries = append(entries, entry)
+		}
+	}
 	sort.SliceStable(entries, func(left, right int) bool { return entries[left].AtNS > entries[right].AtNS })
 	if limit > 0 && len(entries) > limit {
 		entries = entries[:limit]

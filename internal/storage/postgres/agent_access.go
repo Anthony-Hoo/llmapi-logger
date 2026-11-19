@@ -245,7 +245,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 }
 
 // ListAgentAudit returns the newest audit rows first.
-func (store *Store) ListAgentAudit(ctx context.Context, limit int) ([]storage.AgentAuditEntry, error) {
+// events, when not empty, selects the rows of those events.
+func (store *Store) ListAgentAudit(ctx context.Context, limit int, events []string) ([]storage.AgentAuditEntry, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
 	}
@@ -257,7 +258,8 @@ func (store *Store) ListAgentAudit(ctx context.Context, limit int) ([]storage.Ag
 	}
 	rows, err := store.readerDB.QueryContext(ctx, `
 SELECT id, at_ns, event, token_id, role, command, cli_version, object_kind, object_id, changed_keys, outcome, error_code
-FROM agent_audit_log ORDER BY at_ns DESC, id DESC LIMIT $1`, limit)
+FROM agent_audit_log WHERE cardinality($2::text[]) = 0 OR event = ANY($2::text[])
+ORDER BY at_ns DESC, id DESC LIMIT $1`, limit, append([]string{}, events...))
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list agent audit: %w", err)
 	}

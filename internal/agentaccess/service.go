@@ -33,7 +33,9 @@ type Store interface {
 	TouchAgentToken(ctx context.Context, id, atNS int64) error
 	ListAgentTokens(context.Context, *storage.AgentTokenScope) ([]storage.AgentToken, error)
 	InsertAgentAudit(context.Context, storage.AgentAuditEntry) error
-	ListAgentAudit(context.Context, int) ([]storage.AgentAuditEntry, error)
+	// ListAgentAudit returns the newest rows first; events, when not empty,
+	// selects the rows of those events.
+	ListAgentAudit(ctx context.Context, limit int, events []string) ([]storage.AgentAuditEntry, error)
 }
 
 // Token lifetimes (plan section 5.1). None is ever extended.
@@ -172,6 +174,7 @@ type Service struct {
 	exchanges      *windowLimiter
 	authorizations *windowLimiter
 	codes          *codeStore
+	quotas         map[Quota]*windowLimiter
 
 	touchMu   sync.Mutex
 	touchedAt map[int64]time.Time
@@ -209,6 +212,7 @@ func New(options Options) (*Service, error) {
 	service.exchanges = newWindowLimiter(exchangeFailureLimit, exchangeFailureWindow, service.now)
 	service.authorizations = newWindowLimiter(authorizationLimit, authorizationWindow, service.now)
 	service.codes = newCodeStore()
+	service.quotas = newQuotaLimiters(service.now)
 	return service, nil
 }
 
