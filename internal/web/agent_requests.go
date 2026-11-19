@@ -592,7 +592,25 @@ func (handler *managementHandler) agentAuditDetail(ctx context.Context, call age
 		return query.Detail{}, err
 	}
 	addCallerDisplayName(&detail.Audit, handler.callerDisplayNames())
+	if detail.Audit.UserAgent == nil {
+		// query.Service.Get does not fill the User-Agent the list shows;
+		// take it from the decrypted inbound headers the detail carries, by
+		// the list's own rule (the first User-Agent value).
+		detail.Audit.UserAgent = inboundUserAgent(detail.Headers)
+	}
 	return detail, nil
+}
+
+// inboundUserAgent is the first User-Agent value of the inbound request
+// headers, or nil without one: the value the audit list shows.
+func inboundUserAgent(headers []query.Header) *string {
+	for _, header := range headers {
+		if header.Stage == storage.StageRequestReceived && header.Kind == storage.HeaderKindHeader && strings.EqualFold(header.Name, "user-agent") {
+			value := header.Value
+			return &value
+		}
+	}
+	return nil
 }
 
 // Export kinds of GET /requests/{id}/export/{what}.
