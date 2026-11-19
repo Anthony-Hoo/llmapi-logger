@@ -214,12 +214,22 @@ func TestAgentAccessDisabledIsUniform(t *testing.T) {
 			}
 		}
 	}
-	// The web-side family answers the same 404 as any other missing route,
-	// for both roles.
-	for _, caller := range []agentCaller{{bearer: testAdminToken}, {cookie: cookie}} {
-		for _, call := range [][2]string{{http.MethodPost, agentAuthorizationsPath}, {http.MethodGet, agentTokensPath}, {http.MethodDelete, agentTokensPath + "/1"}, {http.MethodGet, "/api/v1/agent-access/other"}} {
-			if response := env.do(call[0], call[1], authorizationBody(agentapi.TierRead, agentaccess.ModeLoopback, "approve"), caller); response.Code != http.StatusNotFound {
-				t.Fatalf("disabled %s %s = %d", call[0], call[1], response.Code)
+	// The web-side family answers exactly what the same caller gets for an
+	// unknown sibling path under /api/v1: 404 for an administrator, 403 for a
+	// developer, 401 without credentials.
+	describe := func(response *httptest.ResponseRecorder) string {
+		return strconv.Itoa(response.Code) + " " + response.Header().Get("Content-Type") + " " + response.Header().Get("Cache-Control") + " " +
+			response.Header().Get("WWW-Authenticate") + " " + strings.TrimSpace(response.Body.String())
+	}
+	want := map[string]int{"admin": http.StatusNotFound, "developer": http.StatusForbidden, "none": http.StatusUnauthorized}
+	for name, caller := range map[string]agentCaller{"admin": {bearer: testAdminToken}, "developer": {cookie: cookie}, "none": {}} {
+		for _, call := range [][2]string{{http.MethodPost, agentAuthorizationsPath}, {http.MethodGet, agentTokensPath}, {http.MethodDelete, agentTokensPath + "/1"},
+			{http.MethodGet, agentChangesPath}, {http.MethodPost, agentInstallLinksPath}, {http.MethodGet, "/api/v1/agent-access/other"}, {http.MethodGet, "/api/v1/agent-access"}} {
+			body := authorizationBody(agentapi.TierRead, agentaccess.ModeLoopback, "approve")
+			response := env.do(call[0], call[1], body, caller)
+			sibling := env.do(call[0], strings.Replace(call[1], "/agent-access", "/agent-accessx", 1), body, caller)
+			if response.Code != want[name] || describe(response) != describe(sibling) {
+				t.Fatalf("disabled %s %s as %s = %s; sibling = %s", call[0], call[1], name, describe(response), describe(sibling))
 			}
 		}
 	}

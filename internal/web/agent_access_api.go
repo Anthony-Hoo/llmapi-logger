@@ -33,8 +33,9 @@ func isAgentAccessPath(path string) bool {
 	return path == "/api/v1/agent-access" || strings.HasPrefix(path, agentAccessPathPrefix)
 }
 
-// serveAgentAccess answers 404 for every path while the feature is off, for
-// both roles, like the other optional route families.
+// serveAgentAccess serves the family while the feature is on; serveProtected
+// does not dispatch it while the feature is off, so that its paths answer
+// like any unknown /api/v1 path. The check here is a second line.
 func (handler *managementHandler) serveAgentAccess(writer http.ResponseWriter, request *http.Request) {
 	if handler.agent == nil {
 		http.NotFound(writer, request)

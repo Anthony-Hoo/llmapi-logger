@@ -115,7 +115,8 @@ type Options struct {
 
 	// AgentAccess is nil unless agent_access.enabled. While nil the facade
 	// answers FEATURE_DISABLED for every request and /api/v1/agent-access/*
-	// answers 404 (doc/features/25-agent-access.md).
+	// answers what any unknown /api/v1 path answers the same caller
+	// (doc/features/25-agent-access.md).
 	AgentAccess *agentaccess.Service
 	// AgentDist serves the install links and the signed package downloads
 	// (contract section 5). It is only used while AgentAccess is set; nil
@@ -264,9 +265,12 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveOrg(writer, request)
 	case strings.HasPrefix(request.URL.Path, sessionAnalysisPathPrefix):
 		handler.serveSessionAnalysis(writer, request)
-	case isAgentAccessPath(request.URL.Path):
+	case isAgentAccessPath(request.URL.Path) && handler.agent != nil:
 		// Both roles authorize and manage their own agent tokens, so this
-		// family must stay ahead of the administrator-only fallback.
+		// family must stay ahead of the administrator-only fallback. While
+		// the feature is off the family is not dispatched at all: its paths
+		// get exactly what any unknown /api/v1 path gets from the same caller
+		// (403 for a developer, 404 for an administrator).
 		handler.serveAgentAccess(writer, request)
 	case !handler.requireAdmin(writer, request):
 		return
