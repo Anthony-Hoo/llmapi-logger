@@ -14,6 +14,7 @@
 - `POST /api/v1/session` 以一次性 admin token 换取七天 Cookie；`DELETE` 注销；`GET` 返回当前身份供前端引导。会话响应还带各可选功能的开关，以及 `injected_user_text_prefixes`：当前生效词表里标记"客户端注入的 user 文本"的小写前缀（`user_input_exclude_prefixes` 加 `injection_markers`；insights 关闭时用内置默认词表），供对话视图的用户输入导航使用。
 - 存在两种身份：管理员读取全部记录与站点配置；开发者用 NewAPI 用户 API Key 登录，只读取该 Key 的记录，详见[模块 19](19-developer-key-session.md)。开发者访问管理员专属端点返回 403。
 - `POST /api/v1/session` 按来源地址限流失败登录（5 分钟 10 次 → 429 + `Retry-After`）。
+- 带 `Authorization` 头的请求同样按来源地址限流：同一地址 5 分钟内送来 10 个错误的 Bearer 令牌之后，该地址的 Bearer 请求一律返回 429 + `Retry-After`，直到窗口结束，带着正确令牌的也不例外；送对一次会清零计数。它与登录接口各用各的计数器，互不影响；Cookie 会话不受影响。
 - 所有证据 JSON、错误、raw、reconstructed 和 timeline 响应都使用 `Cache-Control: no-store`。
 
 ## 3. 列表 API

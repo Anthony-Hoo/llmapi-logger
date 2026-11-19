@@ -68,7 +68,22 @@ type managementAuth struct {
 	developerKey    [sha256.Size]byte
 	now             func() time.Time
 	developerLogins bool
+	// bearers throttles failed Authorization headers per source address. It is
+	// separate from the sign-in limiter so that a script retrying a wrong
+	// bearer token cannot lock the browser sign-in out, and vice versa.
+	bearers *loginLimiter
 }
+
+// authStatus is the outcome of authenticating one management request.
+type authStatus int
+
+const (
+	authOK authStatus = iota
+	authUnauthorized
+	// authLimited means the source address sent too many wrong bearer tokens;
+	// the request was refused without checking the one it carries.
+	authLimited
+)
 
 func newManagementAuth(adminToken string, developerLogins bool) *managementAuth {
 	return &managementAuth{
@@ -79,6 +94,7 @@ func newManagementAuth(adminToken string, developerLogins bool) *managementAuth 
 		developerKey:    sha256.Sum256([]byte("llmapi-logger/developer-session/v1\x00" + adminToken)),
 		now:             time.Now,
 		developerLogins: developerLogins,
+		bearers:         newLoginLimiter(),
 	}
 }
 
@@ -97,36 +113,62 @@ func principalFrom(ctx context.Context) (principal, bool) {
 // context. Per-route role checks live in serveProtected.
 func (auth *managementAuth) middleware(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		caller, ok := auth.resolve(request)
-		if !ok {
+		caller, status, retryAfter := auth.authenticate(request)
+		switch status {
+		case authOK:
+			next(writer, request.WithContext(withPrincipal(request.Context(), caller)))
+		case authLimited:
+			writer.Header().Set("Cache-Control", "no-store")
+			writeBearerRateLimited(writer, retryAfter)
+		default:
 			writer.Header().Set("WWW-Authenticate", `Bearer realm="audit-proxy"`)
 			writer.Header().Set("Cache-Control", "no-store")
 			writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
-			return
 		}
-		next(writer, request.WithContext(withPrincipal(request.Context(), caller)))
 	})
 }
 
-// resolve identifies the caller. A present Authorization header is answered
-// only as a bearer token and never falls back to the cookie, so a stale browser
-// session cannot rescue a wrong CLI token.
+// resolve identifies the caller and reports only whether it succeeded. Callers
+// that must tell a throttled address apart from a wrong credential use
+// authenticate.
 func (auth *managementAuth) resolve(request *http.Request) (principal, bool) {
+	caller, status, _ := auth.authenticate(request)
+	return caller, status == authOK
+}
+
+// authenticate identifies the caller. A present Authorization header is
+// answered only as a bearer token and never falls back to the cookie, so a
+// stale browser session cannot rescue a wrong CLI token.
+//
+// Wrong bearer tokens are counted per source address. Once an address is over
+// the limit every bearer request from it is refused until the window ends,
+// including one that carries the right token: answering the right token would
+// let guessing continue at full speed. Cookie sessions are not affected.
+func (auth *managementAuth) authenticate(request *http.Request) (principal, authStatus, time.Duration) {
 	if auth == nil || request == nil {
-		return principal{}, false
+		return principal{}, authUnauthorized, 0
 	}
 	if authorization := request.Header.Get("Authorization"); authorization != "" {
+		if allowed, retryAfter := auth.bearers.allow(request); !allowed {
+			return principal{}, authLimited, retryAfter
+		}
 		provided, ok := bearerToken(authorization)
 		if !ok || !auth.validAdminToken(provided) {
-			return principal{}, false
+			auth.bearers.recordFailure(request)
+			return principal{}, authUnauthorized, 0
 		}
-		return principal{Role: roleAdmin}, true
+		auth.bearers.recordSuccess(request)
+		return principal{Role: roleAdmin}, authOK, 0
 	}
 	cookie, err := request.Cookie(sessionCookieName)
 	if err != nil {
-		return principal{}, false
+		return principal{}, authUnauthorized, 0
 	}
-	return auth.validSession(cookie.Value)
+	caller, ok := auth.validSession(cookie.Value)
+	if !ok {
+		return principal{}, authUnauthorized, 0
+	}
+	return caller, authOK, 0
 }
 
 func (auth *managementAuth) validAdminToken(provided string) bool {

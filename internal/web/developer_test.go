@@ -544,6 +544,153 @@ func TestSuccessfulLoginClearsTheFailureCounter(t *testing.T) {
 	}
 }
 
+func TestWrongBearerTokensAreThrottledPerAddress(t *testing.T) {
+	t.Parallel()
+	handler := newDeveloperHandler(t, Options{})
+	now := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
+	handler.authenticator.bearers.now = func() time.Time { return now }
+
+	const address = "203.0.113.10:5678"
+	bearer := func(path, token, remote string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.RemoteAddr = remote
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	for index := 0; index < loginFailureLimit; index++ {
+		if got := bearer("/healthz", "wrong-token", address).Code; got != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want 401", index, got)
+		}
+	}
+	limited := bearer("/healthz", "wrong-token", address)
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after %d wrong tokens = %d, want 429", loginFailureLimit, limited.Code)
+	}
+	if limited.Header().Get("Retry-After") == "" {
+		t.Fatal("throttled bearer request did not advertise Retry-After")
+	}
+	if body := limited.Body.String(); !strings.Contains(body, "too_many_requests") || strings.Contains(body, "wrong-token") {
+		t.Fatalf("throttled bearer body = %q", body)
+	}
+	// The right token is refused too: answering it would let guessing go on.
+	if got := bearer("/healthz", testAdminToken, address).Code; got != http.StatusTooManyRequests {
+		t.Fatalf("throttled correct token status = %d, want 429", got)
+	}
+	// The session endpoint authenticates itself and must throttle the same way.
+	if got := bearer("/api/v1/session", testAdminToken, address).Code; got != http.StatusTooManyRequests {
+		t.Fatalf("throttled session info status = %d, want 429", got)
+	}
+
+	// Another address is unaffected.
+	if got := bearer("/healthz", testAdminToken, "198.51.100.7:1234").Code; got != http.StatusOK {
+		t.Fatalf("unrelated address status = %d, want 200", got)
+	}
+
+	// The sign-in limiter is a separate counter: the same address can still
+	// sign in, and its cookie session is not throttled.
+	login := httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(`{"token":"`+testAdminToken+`"}`))
+	login.RemoteAddr = address
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("sign-in from the throttled address status = %d, want 200", loginResponse.Code)
+	}
+	cookies := loginResponse.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("sign-in set no session cookie")
+	}
+	withCookie := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	withCookie.RemoteAddr = address
+	withCookie.AddCookie(cookies[0])
+	cookieResponse := httptest.NewRecorder()
+	handler.ServeHTTP(cookieResponse, withCookie)
+	if cookieResponse.Code != http.StatusOK {
+		t.Fatalf("cookie session from the throttled address status = %d, want 200", cookieResponse.Code)
+	}
+
+	// The window eventually reopens.
+	now = now.Add(loginFailureWindow + time.Second)
+	if got := bearer("/healthz", testAdminToken, address).Code; got != http.StatusOK {
+		t.Fatalf("status after the window expired = %d, want 200", got)
+	}
+}
+
+func TestBearerFailuresDoNotThrottleSignIn(t *testing.T) {
+	t.Parallel()
+	handler := newDeveloperHandler(t, Options{})
+	const address = "203.0.113.10:5678"
+
+	// Ten wrong sign-ins lock the sign-in endpoint for this address...
+	for index := 0; index < loginFailureLimit; index++ {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(`{"token":"wrong-token"}`))
+		request.RemoteAddr = address
+		handler.ServeHTTP(httptest.NewRecorder(), request)
+	}
+	// ...but a script with the right bearer token keeps working.
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.RemoteAddr = address
+	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("bearer status after throttled sign-ins = %d, want 200", response.Code)
+	}
+}
+
+func TestCorrectBearerTokenClearsTheFailureCounter(t *testing.T) {
+	t.Parallel()
+	handler := newDeveloperHandler(t, Options{})
+	const address = "203.0.113.10:5678"
+	send := func(token string) int {
+		request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		request.RemoteAddr = address
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+
+	for index := 0; index < loginFailureLimit-1; index++ {
+		send("wrong-token")
+	}
+	if got := send(testAdminToken); got != http.StatusOK {
+		t.Fatalf("status = %d, want 200", got)
+	}
+	// A script that sent a few wrong tokens before the right one must not
+	// stay one failure away from a lockout.
+	for index := 0; index < loginFailureLimit-1; index++ {
+		if got := send("wrong-token"); got != http.StatusUnauthorized {
+			t.Fatalf("failure %d after a success status = %d, want 401", index, got)
+		}
+	}
+	if got := send(testAdminToken); got != http.StatusOK {
+		t.Fatalf("status after a fresh short run of failures = %d, want 200", got)
+	}
+}
+
+func TestMalformedAuthorizationHeaderCountsAsAFailure(t *testing.T) {
+	t.Parallel()
+	handler := newDeveloperHandler(t, Options{})
+	const address = "203.0.113.10:5678"
+	for index := 0; index <= loginFailureLimit; index++ {
+		request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		request.RemoteAddr = address
+		request.Header.Set("Authorization", "Basic not-a-bearer")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		want := http.StatusUnauthorized
+		if index == loginFailureLimit {
+			want = http.StatusTooManyRequests
+		}
+		if response.Code != want {
+			t.Fatalf("attempt %d status = %d, want %d", index, response.Code, want)
+		}
+	}
+}
+
 func TestDeveloperLoginRefusesUnusableKeyBeforeContactingNewAPI(t *testing.T) {
 	t.Parallel()
 	called := false
