@@ -206,12 +206,15 @@ func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, id
 
 // recordWriteDenied writes the write_denied row of contract section 3.4 for
 // a refused execution, key change or connection test of an authenticated
-// token. Plan creation is never audited.
+// token. Plan creation is never audited. The rows of one token are capped
+// (QuotaDeniedAudit): beyond the cap the refusal is answered as usual and
+// not recorded, so a token without write rights cannot grow the table at the
+// request rate.
 func (handler *managementHandler) recordWriteDenied(request *http.Request, endpoint agentapi.Endpoint, call agentCall, identity agentaccess.Identity, err error) {
 	audit := agentaccess.WriteAudit{Event: agentaccess.EventWriteDenied, Outcome: agentaccess.OutcomeDenied, ErrorCode: agentaccess.CodeOf(err)}
 	switch endpoint.ID {
 	case agentapi.EndpointPlanApply:
-		audit.ObjectKind, audit.ObjectID = "plan", call.Params["plan_id"]
+		audit.ObjectKind, audit.ObjectID = "plan", auditPlanID(call.Params["plan_id"])
 	case agentapi.EndpointAPIKeySet, agentapi.EndpointAPIKeyClear:
 		audit.ObjectKind, audit.ChangedKeys = agentKeyObject, []string{"api_key"}
 	case agentapi.EndpointTestModel:
@@ -219,7 +222,20 @@ func (handler *managementHandler) recordWriteDenied(request *http.Request, endpo
 	default:
 		return
 	}
+	if handler.agent.Take(agentaccess.QuotaDeniedAudit, identity) != nil {
+		return
+	}
 	handler.agent.RecordWrite(request.Context(), identity, call.Meta, audit)
+}
+
+// auditPlanID is the plan id of a path when it has a plan id's shape, and
+// empty otherwise: the change list shows it, and it must not carry text a
+// client chose.
+func auditPlanID(raw string) string {
+	if agentaccess.ValidPlanID(raw) {
+		return raw
+	}
+	return ""
 }
 
 // agentPrincipal maps a token identity onto the principal web sessions use.

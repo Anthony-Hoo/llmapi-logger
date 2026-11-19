@@ -144,7 +144,7 @@ func (handler *managementHandler) agentPlanFor(ctx context.Context, request agen
 // version inside its own lock.
 func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	planID := call.Params["plan_id"]
-	audit := agentaccess.WriteAudit{Event: agentaccess.EventWriteFailed, ObjectKind: "plan", ObjectID: planID, Outcome: agentaccess.OutcomeFailed}
+	audit := agentaccess.WriteAudit{Event: agentaccess.EventWriteFailed, ObjectKind: "plan", ObjectID: auditPlanID(planID), Outcome: agentaccess.OutcomeFailed}
 	record := func(code agentapi.Code) {
 		if code == "" {
 			// The client went away; the outcome is unknown to it, and the

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,10 @@ func disabledRequest(handler http.Handler, method, path, body, token string) *ht
 	return recorder
 }
 
+// plantedUnsavedKey is the key test-model is given for one probe; it shares
+// nothing with plantedModelKey.
+const plantedUnsavedKey = "probe-only-credential-7731"
+
 // Section 1 of the plan: the key enters only through the key endpoint and
 // test-model, and appears in no response, log line, audit row or plan.
 func TestAgentModelKeyNeverLeaks(t *testing.T) {
@@ -121,9 +126,9 @@ func TestAgentModelKeyNeverLeaks(t *testing.T) {
 	}
 
 	probe := collect(fixture.facade(http.MethodPost, "/analysis/test-model",
-		map[string]any{"set": map[string]any{"llm.model": "probe-model"}, "api_key": plantedModelKey + "-unsaved"}, fixture.adminWrite))
-	if probe.Code != http.StatusOK || !fixture.model.sawKey(plantedModelKey+"-unsaved") {
-		t.Fatalf("test-model = %d %s (model saw the key: %v)", probe.Code, probe.Body.String(), fixture.model.sawKey(plantedModelKey+"-unsaved"))
+		map[string]any{"set": map[string]any{"llm.model": "probe-model"}, "api_key": plantedUnsavedKey}, fixture.adminWrite))
+	if probe.Code != http.StatusOK || !fixture.model.sawKey(plantedUnsavedKey) || fixture.model.sawKey(plantedModelKey) {
+		t.Fatalf("test-model = %d %s (model saw the unsaved key: %v)", probe.Code, probe.Body.String(), fixture.model.sawKey(plantedUnsavedKey))
 	}
 	if now := fixture.show(t, "analysis-settings"); !jsonEqual(now, afterSet) {
 		t.Fatalf("test-model saved something")
@@ -168,7 +173,7 @@ func TestAgentModelKeyNeverLeaks(t *testing.T) {
 			t.Fatal("the key is stored in plain text")
 		}
 	}
-	if strings.Contains(everything, plantedModelKey) {
+	if strings.Contains(everything, plantedModelKey) || strings.Contains(everything, plantedUnsavedKey) {
 		t.Fatal("the key appears in a response, a log line or an audit row")
 	}
 	keyRows := 0
@@ -382,8 +387,13 @@ func TestAgentOperationPlans(t *testing.T) {
 	if dismiss.Target.ID != "42" {
 		t.Fatalf("dismiss plan = %+v", dismiss)
 	}
-	if body := failure(t, fixture.facade(http.MethodPost, "/plans/"+dismiss.PlanID+"/apply", nil, fixture.adminWrite)); body.Code != agentapi.CodeNotFound {
-		t.Fatalf("dismiss unknown = %s", body.Code)
+	fixture.apply(t, dismiss.PlanID)
+	if !jsonEqual(fixture.suggestions.dismissed, []int64{42}) {
+		t.Fatalf("dismissed = %v", fixture.suggestions.dismissed)
+	}
+	unknown := fixture.plan(t, `{"op":"analysis.dismiss","args":{"suggestion_id":99}}`)
+	if body := failure(t, fixture.facade(http.MethodPost, "/plans/"+unknown.PlanID+"/apply", nil, fixture.adminWrite)); body.Code != agentapi.CodeNotFound || !strings.Contains(body.Hint, "llmaudit analysis report") {
+		t.Fatalf("dismiss unknown = %s %s", body.Code, body.Hint)
 	}
 }
 
@@ -431,4 +441,61 @@ func TestAgentChangesEndpoint(t *testing.T) {
 	if response := fixture.web(http.MethodPost, "/api/v1/agent-access/changes", ""); response.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST changes = %d", response.Code)
 	}
+}
+
+// write_denied rows are bounded per token and never carry path text a
+// client chose (section 0.1).
+func TestAgentDeniedRowsAreBounded(t *testing.T) {
+	fixture := newWriteFixture(t)
+	for index := 0; index < 75; index++ {
+		response := fixture.facade(http.MethodPost, "/plans/"+`<script>`+strconv.Itoa(index)+"/apply", nil, fixture.developer)
+		if code := failure(t, response).Code; code != agentapi.CodeForbiddenRole {
+			t.Fatalf("developer apply %d = %s", index, code)
+		}
+	}
+	rows := fixture.writeAudits()
+	if len(rows) != 60 {
+		t.Fatalf("denied rows = %d, want the cap of 60", len(rows))
+	}
+	for _, row := range rows {
+		if row.ObjectID != "" || row.Event != "write_denied" {
+			t.Fatalf("row = %+v", row)
+		}
+	}
+	// Another token keeps its own allowance; a plan id of the right shape is
+	// recorded as it is.
+	planID := fixture.plan(t, `{"op":"analysis.run"}`).PlanID
+	fixture.facade(http.MethodPost, "/plans/"+planID+"/apply", nil, fixture.adminRead)
+	rows = fixture.writeAudits()
+	if last := rows[len(rows)-1]; last.ObjectID != planID || last.ErrorCode != string(agentapi.CodeReadOnlyToken) {
+		t.Fatalf("read token row = %+v", last)
+	}
+}
+
+// Optional modules that are off answer MODULE_DISABLED for their writes, as
+// for their reads; the rules, which are always there, still work.
+func TestAgentWritesOfDisabledModules(t *testing.T) {
+	fixture := newWriteFixtureWith(t, writeFixtureOptions{allowWrite: true, noModules: true})
+	for _, test := range []struct {
+		method, path string
+		body         any
+		module       string
+	}{
+		{http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": "group", "set": map[string]any{"name": "g", "enabled": true}}, "org_reports"},
+		{http.MethodPost, "/plans", map[string]any{"op": "config.reset", "kind": "weekly-settings"}, "org_reports"},
+		{http.MethodPost, "/plans", map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": "2026-11-02"}}, "org_reports"},
+		{http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"run_at": "03:00"}}, "session_analysis"},
+		{http.MethodPost, "/plans", `{"op":"analysis.run"}`, "session_analysis"},
+		{http.MethodPost, "/plans", `{"op":"analysis.dismiss","args":{"suggestion_id":1}}`, "session_analysis"},
+		{http.MethodPut, "/config/analysis-settings/api-key", map[string]any{"api_key": plantedModelKey}, "session_analysis"},
+		{http.MethodDelete, "/config/analysis-settings/api-key", nil, "session_analysis"},
+		{http.MethodPost, "/analysis/test-model", `{}`, "session_analysis"},
+	} {
+		body := failure(t, fixture.facade(test.method, test.path, test.body, fixture.adminWrite))
+		if body.Code != agentapi.CodeModuleDisabled || body.Details["module"] != test.module {
+			t.Errorf("%s %s %v = %s %v", test.method, test.path, test.body, body.Code, body.Details)
+		}
+	}
+	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "ua-rule",
+		"set": map[string]any{"name": "still", "enabled": true, "model_pattern": "^a", "user_agent_pattern": "^b"}})
 }

@@ -185,4 +185,35 @@ func TestAgentWritesMatchTheWebRoutes(t *testing.T) {
 		!jsonEqual(viaWeb["agreement"], viaFacade["agreement"]) || !jsonEqual(viaWeb["compared"], viaFacade["compared"]) {
 		t.Fatalf("calibration differs: web %d %v, facade %v", response.Code, viaWeb, viaFacade)
 	}
+
+	// Dismissing a suggestion.
+	facade.planAndApply(t, `{"op":"analysis.dismiss","args":{"suggestion_id":42}}`)
+	if response := web.web(http.MethodPost, "/api/v1/session-analysis/suggestions/42/dismiss", ""); response.Code != http.StatusOK {
+		t.Fatalf("dismiss via web = %d", response.Code)
+	}
+	if !reflect.DeepEqual(facade.suggestions.dismissed, web.suggestions.dismissed) || len(web.suggestions.dismissed) != 1 {
+		t.Fatalf("dismissed: facade %v, web %v", facade.suggestions.dismissed, web.suggestions.dismissed)
+	}
+
+	// The connection test with an unsaved model and key: the same probe, and
+	// nothing saved on either side.
+	before := facade.configState(t)
+	probe := facade.facade(http.MethodPost, "/analysis/test-model", map[string]any{"set": map[string]any{"llm.model": "probe-model"}, "api_key": plantedUnsavedKey}, facade.adminWrite)
+	body = web.webSettingsBody(t, func(settings map[string]any) {
+		settings["llm"].(map[string]any)["model"] = "probe-model"
+		settings["api_key"] = plantedUnsavedKey
+	})
+	webProbe := web.web(http.MethodPost, "/api/v1/settings/session-analysis/test", body)
+	var facadeResult, webResult map[string]any
+	_ = json.Unmarshal(decodeAgent(t, probe).Data, &facadeResult)
+	_ = json.Unmarshal(webProbe.Body.Bytes(), &webResult)
+	delete(facadeResult, "latency_ms")
+	delete(webResult, "latency_ms")
+	if probe.Code != http.StatusOK || webProbe.Code != http.StatusOK || !reflect.DeepEqual(facadeResult, webResult) ||
+		!facade.model.sawKey(plantedUnsavedKey) || !web.model.sawKey(plantedUnsavedKey) {
+		t.Fatalf("test-model differs: facade %d %v, web %d %v", probe.Code, facadeResult, webProbe.Code, webResult)
+	}
+	if after := facade.configState(t); !reflect.DeepEqual(after, before) {
+		t.Fatal("test-model saved something")
+	}
 }

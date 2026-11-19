@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -76,6 +77,26 @@ func (trigger *fakeRunTrigger) Running() bool {
 	trigger.mu.Lock()
 	defer trigger.mu.Unlock()
 	return trigger.running
+}
+
+// suggestionMemory adds dismissable suggestions to the analysis store: 42
+// and 43 are open all-keys suggestions.
+type suggestionMemory struct {
+	*memoryAnalysisStore
+	mu        sync.Mutex
+	open      map[int64]string
+	dismissed []int64
+}
+
+func (memory *suggestionMemory) DismissSuggestion(_ context.Context, id int64, scope string, _ int64) error {
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	if memory.open[id] != scope {
+		return sql.ErrNoRows
+	}
+	delete(memory.open, id)
+	memory.dismissed = append(memory.dismissed, id)
+	return nil
 }
 
 // nopApplier takes settings changes without a runner.
@@ -154,6 +175,7 @@ type writeFixture struct {
 	org         *orgreport.Service
 	snapshots   *snapshotMemory
 	analysis    *memoryAnalysisStore
+	suggestions *suggestionMemory
 	trigger     *fakeRunTrigger
 	settings    *sessionanalysis.SettingsService
 	settingRows *settingsRows
@@ -211,7 +233,8 @@ func newWriteFixtureWith(t *testing.T, options writeFixtureOptions) *writeFixtur
 
 		fixture.analysis = &memoryAnalysisStore{cipher: cipher, packs: map[string]storage.SessionPack{}, facets: map[string]storage.SessionFacet{}}
 		fixture.analysis.addSession(t, analysisOwnID, testFingerprinter(t).Fingerprint(testDeveloperKey), 7, 42)
-		query, err := sessionanalysis.NewQueryService(fixture.analysis, fixture.trigger, cipher, "local-model")
+		fixture.suggestions = &suggestionMemory{memoryAnalysisStore: fixture.analysis, open: map[int64]string{42: storage.ScopeAll, 43: storage.ScopeAll}}
+		query, err := sessionanalysis.NewQueryService(fixture.suggestions, fixture.trigger, cipher, "local-model")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -48,6 +48,9 @@ func TestPlanStoreSingleUseOwnerAndExpiry(t *testing.T) {
 	if _, err := store.Take(2, plan.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
 		t.Fatalf("foreign take = %v", err)
 	}
+	if !ValidPlanID(plan.ID) || ValidPlanID("pln_x") || ValidPlanID(plan.ID+"=") || ValidPlanID("abc_"+plan.ID[4:]) {
+		t.Fatalf("plan id shape check fails for %q", plan.ID)
+	}
 	taken, err := store.Take(1, plan.ID)
 	if err != nil || taken.Payload != "payload" {
 		t.Fatalf("take = %+v, %v", taken, err)
@@ -127,6 +130,7 @@ func TestQuotasFollowTheContract(t *testing.T) {
 		{QuotaAnalysisRun, 1, 10 * time.Minute, true},
 		{QuotaRegenerate, 6, time.Hour, true},
 		{QuotaTestModel, 12, time.Hour, false},
+		{QuotaDeniedAudit, 60, 10 * time.Minute, false},
 	}
 	for _, test := range cases {
 		clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}

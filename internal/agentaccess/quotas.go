@@ -30,6 +30,10 @@ const (
 	QuotaRegenerate
 	// QuotaTestModel: connection tests of a token.
 	QuotaTestModel
+	// QuotaDeniedAudit bounds the write_denied rows one token can cause: a
+	// refused request is not counted by the write limits, and without it a
+	// token without write rights could add rows at the request rate.
+	QuotaDeniedAudit
 )
 
 // Quota sizes (contract section 7). They are implementation constants, not
@@ -45,6 +49,7 @@ var quotaSizes = map[Quota]struct {
 	QuotaAnalysisRun:   {1, 10 * time.Minute, true},
 	QuotaRegenerate:    {6, time.Hour, true},
 	QuotaTestModel:     {12, time.Hour, false},
+	QuotaDeniedAudit:   {60, 10 * time.Minute, false},
 }
 
 func newQuotaLimiters(now func() time.Time) map[Quota]*windowLimiter {

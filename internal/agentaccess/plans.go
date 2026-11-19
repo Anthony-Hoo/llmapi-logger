@@ -30,6 +30,17 @@ const (
 	planIDBytes  = 16
 )
 
+// ValidPlanID reports whether id has the shape of a plan id: the prefix and
+// 16 random bytes in unpadded base64url. Only such a value is recorded in an
+// audit row; anything else in the path is a client's text.
+func ValidPlanID(id string) bool {
+	if len(id) != len(planIDPrefix)+22 || id[:len(planIDPrefix)] != planIDPrefix {
+		return false
+	}
+	_, err := base64.RawURLEncoding.Strict().DecodeString(id[len(planIDPrefix):])
+	return err == nil
+}
+
 // Plan is one stored plan.
 type Plan struct {
 	ID        string

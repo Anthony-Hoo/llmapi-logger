@@ -43,6 +43,12 @@ import (
 // accept for every possible input (only the shapes exercised end to end), or
 // that a command in a hint is the right advice.
 
+// endpointsWithoutCommand are facade endpoints no llmaudit command calls,
+// with the reason. They are exempt from the parity and unknown-parameter
+// checks; the signed package download of phase 5 belongs here (it is fetched
+// by the install prompt, not by a command).
+var endpointsWithoutCommand = map[string]string{}
+
 // cliSamplePath fills a CLI route's {name} segments.
 func cliSamplePath(path string) string {
 	segments := strings.Split(path, "/")
@@ -88,6 +94,9 @@ func TestCLIRoutesMatchTheFacade(t *testing.T) {
 	}
 	// Parity: what the server reads, some command can send.
 	for _, endpoint := range agentapi.Endpoints {
+		if _, exempt := endpointsWithoutCommand[endpoint.ID]; exempt {
+			continue
+		}
 		if !reached[endpoint.ID] {
 			t.Errorf("no command calls %s %s (%s)", endpoint.Method, endpoint.Pattern, endpoint.ID)
 		}
@@ -131,6 +140,9 @@ func TestEveryFacadeEndpointRefusesUnknownParameters(t *testing.T) {
 	// so reads go to the read fixture, which has every module on.
 	writes, reads := newWriteFixture(t), newReadFixture(t)
 	for _, endpoint := range agentapi.Endpoints {
+		if _, exempt := endpointsWithoutCommand[endpoint.ID]; exempt {
+			continue
+		}
 		path := agentapi.PathPrefix + cliSamplePath(strings.ReplaceAll(endpoint.Pattern, "{kind}", "ua-rule")) + "?zz_unknown=1"
 		env, token := writes.agentEnv, writes.adminWrite
 		if endpoint.Tier == agentapi.TierRead {
@@ -146,11 +158,21 @@ func TestEveryFacadeEndpointRefusesUnknownParameters(t *testing.T) {
 
 // cliRunner runs the real CLI against a fixture's handler.
 type cliRunner struct {
-	t      *testing.T
-	env    *agentcli.Env
-	stdout bytes.Buffer
-	stderr bytes.Buffer
+	t        *testing.T
+	env      *agentcli.Env
+	stdout   bytes.Buffer
+	stderr   bytes.Buffer
+	terminal *keyTerminal
 }
+
+// keyTerminal is an interactive terminal where the user types key.
+type keyTerminal struct {
+	key string
+}
+
+func (terminal *keyTerminal) IsInteractive() bool { return true }
+
+func (terminal *keyTerminal) ReadLineNoEcho() ([]byte, error) { return []byte(terminal.key), nil }
 
 func newCLIRunner(t *testing.T, fixture *writeFixture, token string) *cliRunner {
 	t.Helper()
@@ -161,7 +183,7 @@ func newCLIRunner(t *testing.T, fixture *writeFixture, token string) *cliRunner 
 	if err := os.WriteFile(filepath.Join(home, "credentials.json"), credentials, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runner := &cliRunner{t: t}
+	runner := &cliRunner{t: t, terminal: &keyTerminal{}}
 	runner.env = &agentcli.Env{
 		Stdin: strings.NewReader(""), Stdout: &runner.stdout, Stderr: &runner.stderr,
 		Getenv: func(name string) string {
@@ -173,6 +195,7 @@ func newCLIRunner(t *testing.T, fixture *writeFixture, token string) *cliRunner 
 		HomeDir:          func() (string, error) { return "", errors.New("not used") },
 		Hostname:         func() (string, error) { return "test-host", nil },
 		UTCOffsetMinutes: func() int { return 0 },
+		Terminal:         runner.terminal,
 	}
 	return runner
 }
@@ -248,6 +271,25 @@ func TestRealCLIAgainstTheFacade(t *testing.T) {
 	cli.planAndApply("analysis", "calibrate", "--file", labels)
 	cli.planAndApply("analysis", "run")
 	cli.run("analysis", "test-model", "--set", "llm.model=probe")
+	// The key typed at the no-echo prompt, with the characters the CLI must
+	// escape by hand.
+	saved, unsaved := `sk-"typed"\key-0042`, `probe"only\key-0043`
+	cli.terminal.key = saved
+	if set := cli.run("config", "set-key", "--kind", "analysis-settings"); set["api_key"] != "saved" {
+		t.Fatalf("set-key = %v", set)
+	}
+	cli.run("analysis", "test-model")
+	if !fixture.model.sawKey(saved) {
+		t.Fatal("the model did not receive the key typed for set-key")
+	}
+	cli.terminal.key = unsaved
+	cli.run("analysis", "test-model", "--prompt-key", "--set", "llm.model=probe")
+	if !fixture.model.sawKey(unsaved) {
+		t.Fatal("the model did not receive the key typed for --prompt-key")
+	}
+	if strings.Contains(cli.stdout.String()+cli.stderr.String()+fixture.logs.String(), "key-004") {
+		t.Fatal("a typed key appears in the CLI output or the server log")
+	}
 	if cleared := cli.run("config", "set-key", "--kind", "analysis-settings", "--clear"); cleared["api_key"] != "none" {
 		t.Fatalf("clear = %v", cleared)
 	}
