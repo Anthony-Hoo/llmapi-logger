@@ -218,7 +218,7 @@ agent_access:
 - 安装卡片：选择 Agent 种类与平台（可选填写 Skill 目录），生成一段安装提示词，交给本机的 Agent 逐步执行。提示词里带一条 30 分钟内有效、最多下载 30 次的签名链接，Agent 会核对 SHA-256 后才解压，只安装到以 `llmapi-audit` 结尾的目录，并在最后用浏览器授权登录、用 `llmaudit whoami` 验证。链接过期后回到这一页重新生成即可。
 - 已授权设备：设备名、档位、签发与到期时间、最近使用时间，可逐个撤销。管理员另有“Agent 最近的改动”。
 
-`public_url` 应是用户的 Agent 实际能访问到的管理面地址。管理面只在本机 loopback 上时，只有同一台机器上的 Agent 能用；要给其他机器用，必须有意暴露管理端口，后果见[模块 15](../features/15-nginx-and-deployment-integration.md) §1（本程序不提供 TLS；经同一反向代理的客户端共用一个限流计数桶）。
+`public_url` 应是用户的 Agent 实际能访问到的管理面地址。为空时取浏览器这次访问的协议与 Host（不读 `X-Forwarded-*`），所以 TLS 终止在反向代理、或管理面挂在子路径下时必须设置它；它只能由 ASCII 字母、数字与 `-._~:/%[]` 组成，否则启动报错。管理面只在本机 loopback 上时，只有同一台机器上的 Agent 能用；要给其他机器用，必须有意暴露管理端口，后果见[模块 15](../features/15-nginx-and-deployment-integration.md) §1（本程序不提供 TLS；经同一反向代理的客户端共用一个限流计数桶）。
 
 轮换 `admin_token` 会让全部 Agent 令牌和全部未过期的下载链接失效。
 
