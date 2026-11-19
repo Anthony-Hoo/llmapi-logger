@@ -60,7 +60,7 @@ llmaudit analysis test-model
 llmaudit analysis test-model --set llm.model=example-model --set llm.base_url=https://llm.example.com/v1
 ```
 
-This probes the model with the saved settings, optionally overridden for this test by `--set` (nothing is saved). Exit code 6 with `data.ok: false` means the probe ran and failed; report `data` to the user. To test a key that is not saved yet, the user runs `llmaudit analysis test-model --prompt-key` in their own terminal and types the key there; you cannot pass a key.
+This probes the model with the saved settings, optionally overridden for this test by `--set` (nothing is saved). The key in use is only sent to the saved address: a `--set llm.base_url=...` that differs from it is refused with `INVALID_ARGUMENT`, `details.reason: saved_key_not_sent_to_unsaved_address`, before anything is sent. Then either plan and apply the address change first (the plan shows the address to the user), or ask the user to run the test with `--prompt-key` in their own terminal. Exit code 6 with `data.ok: false` means the probe ran and failed; report `data` to the user. To test a key that is not saved yet, the user runs `llmaudit analysis test-model --prompt-key` in their own terminal and types the key there; you cannot pass a key.
 
 Be aware that a test with `--set llm.base_url=…` sends the saved key to that address. Only use an address the user gave you.
 

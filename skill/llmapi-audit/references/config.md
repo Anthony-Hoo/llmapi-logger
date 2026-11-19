@@ -79,7 +79,7 @@ Without `--id`, `config set` creates an object; with it, it changes only the fie
 | `weekly-settings` | none | `idle_gap_seconds`, `ranked_clients` (list), `max_concurrent_roots`, `max_single_request_roots` | |
 | `analysis-settings` | none | `run_at`, `l1_settle_hours`, `llm.enabled`, `llm.base_url`, `llm.model`, `llm.structured_output`, `llm.context_tokens`, `llm.disable_thinking`, `llm.max_output_tokens`, `llm.max_concurrency`, `llm.timeout_seconds`, `llm.max_sessions_per_run` | |
 
-`enabled` (and `action` for keyword rules) must always be given when creating; the server does not guess them. Two rules of the same kind with the same name are refused with `ALREADY_EXISTS` when created here (`details.id` is the existing one): change that one instead. `llmaudit config set --help` prints the same table.
+`enabled` (and `action` for keyword rules) must always be given when creating; the server does not guess them. A rule may be created with the name of an existing one, as on the web page; the plan then says so in `effects` and lists the existing rule in `extras.same_name`. Point that out to the user: they may want to change the existing rule (`--id`) instead. `llmaudit config set --help` prints the same table.
 
 ### Passing values
 
@@ -93,6 +93,6 @@ Without `--id`, `config set` creates an object; with it, it changes only the fie
 
 ## What an agent cannot do
 
-- **Set the analysis model's API key.** The user runs `llmaudit config set-key --kind analysis-settings` in their own terminal and types the key without echo; the command refuses to run without an interactive terminal (`NO_TTY`). There is no flag, environment variable or file that carries a key, and `api_key` is not a field of `config set`. Clearing the saved key involves no secret: `llmaudit config set-key --kind analysis-settings --clear` (it applies at once, without a plan, so get the user's agreement first).
+- **Set the analysis model's API key.** The user runs `llmaudit config set-key --kind analysis-settings` in their own terminal and types the key without echo; the command refuses to run without an interactive terminal (`NO_TTY`). There is no flag, environment variable or file that carries a key, and `api_key` is not a field of `config set`. Clearing the key involves no secret but cannot be undone by you: `llmaudit config set-key --kind analysis-settings --clear` creates a plan (`changed_keys: ["api_key"]`, `extras.api_key` shows the key source before and after); apply it with `llmaudit apply <plan-id>` only after the user agrees. A plan that changes `llm.base_url` while a key is in use says in `effects` that the key will be sent to the new address.
 - **Bulk changes.** The web page can mark all service candidates at once; here each one is a separate plan.
 - **Anything a developer token asks for in this group**, and any change with a read-only token or with agent writes disabled: those are made on the web page.
