@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -437,6 +438,8 @@ func TestAgentJourneyAdministrator(t *testing.T) {
 	}
 	if record := cli.read("requests", "get", audits[0].AuditID); record["audit_id"] != audits[0].AuditID {
 		t.Fatalf("requests get %v", record)
+	} else {
+		assertDetailMatchesListItem(t, items[0].(map[string]any), record)
 	}
 	cli.read("usage", "overview", "--since", "1d", "--group-by", "model")
 	cli.read("weekly", "trend")
@@ -635,6 +638,8 @@ func TestAgentJourneyDeveloper(t *testing.T) {
 	}
 	if record := cli.read("requests", "get", own); record["audit_id"] != own {
 		t.Fatalf("own record %v", record)
+	} else {
+		assertDetailMatchesListItem(t, items[0].(map[string]any), record)
 	}
 	cli.fails(agentapi.CodeNotFound, "requests", "get", foreign)
 	cli.fails(agentapi.CodeForbiddenRole, "config", "set", "--kind", "ua-rule", "--set", "name=developer rule", "--set", "enabled=false",
@@ -650,4 +655,19 @@ func TestAgentJourneyDeveloper(t *testing.T) {
 		secrets = append(secrets, []byte(code))
 	}
 	assertPostgresRowsDoNotContain(t, cfg.DatabaseURL, secrets)
+}
+
+// assertDetailMatchesListItem: on the real query service every field the
+// list item and the detail share has the same value, and the User-Agent the
+// list shows is in the detail too (it was once always null there).
+func assertDetailMatchesListItem(t *testing.T, item, detail map[string]any) {
+	t.Helper()
+	for key, want := range item {
+		if got, ok := detail[key]; !ok || !reflect.DeepEqual(got, want) {
+			t.Errorf("requests get %s = %v, requests list has %v", key, got, want)
+		}
+	}
+	if item["user_agent_untrusted"] == nil {
+		t.Errorf("the journey record has no User-Agent in the list: %v", item)
+	}
 }
