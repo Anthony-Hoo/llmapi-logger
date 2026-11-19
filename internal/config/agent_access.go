@@ -39,10 +39,25 @@ func validateAgentAccess(cfg Config) error {
 	return nil
 }
 
+// maxPublicURLLength is the install prompt's limit for the server URL.
+const maxPublicURLLength = 2048
+
+// publicURLChar is the install prompt's character set for the server URL:
+// letters, digits and - . _ ~ : / % [ ].
+func publicURLChar(char byte) bool {
+	switch {
+	case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+		return true
+	default:
+		return strings.IndexByte("-._~:/%[]", char) >= 0
+	}
+}
+
 // validatePublicURL accepts an http(s) address with a host and, unlike the
 // upstream URLs, an optional path: the management plane may be published
 // below a prefix by a reverse proxy. Userinfo, a query and a fragment are
-// rejected because they would end up verbatim in a prompt an agent executes.
+// rejected because they would end up verbatim in a prompt an agent executes,
+// and so is every character outside publicURLChar (contract section 8.1).
 func validatePublicURL(value string) error {
 	const name = "agent_access.public_url"
 	if strings.TrimSpace(value) != value || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
@@ -50,6 +65,19 @@ func validatePublicURL(value string) error {
 	}
 	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
 		return fmt.Errorf("%s must not contain control characters", name)
+	}
+	// The install prompt writes this address into shell commands inside
+	// double quotes (internal/agentdist cleanServerURL), and refuses any
+	// character a shell could interpret there. The same rule here makes a
+	// value the prompt would refuse a startup error instead of a failing
+	// install-links request.
+	if len(value) > maxPublicURLLength {
+		return fmt.Errorf("%s is longer than %d characters", name, maxPublicURLLength)
+	}
+	for index := 0; index < len(value); index++ {
+		if !publicURLChar(value[index]) {
+			return fmt.Errorf("%s may contain only ASCII letters, digits and - . _ ~ : / %% [ ]", name)
+		}
 	}
 	u, err := url.Parse(value)
 	if err != nil {

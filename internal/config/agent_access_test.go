@@ -58,6 +58,7 @@ func TestAgentAccessPublicURL(t *testing.T) {
 		"https://audit.example.com/",
 		"https://audit.example.com/prefix/admin",
 		"http://[2001:db8::1]:8081",
+		"https://audit.example.com/admin_1/v~2/a%20b",
 	}
 	for _, value := range valid {
 		cfg := testConfig()
@@ -80,6 +81,25 @@ func TestAgentAccessPublicURL(t *testing.T) {
 		" https://audit.example.com",
 		"https://audit.example.com/a b",
 		"https://audit.example.com/\x01",
+		// Characters the install prompt refuses inside its shell commands.
+		"https://audit.example.com/a$b",
+		"https://audit.example.com/a`b",
+		`https://audit.example.com/a"b`,
+		"https://audit.example.com/a'b",
+		`https://audit.example.com/a\b`,
+		"https://audit.example.com/a;b",
+		"https://audit.example.com/a&b",
+		"https://audit.example.com/a!b",
+		"https://audit.example.com/a(b)",
+		"https://audit.example.com/a+b",
+		"https://audit.example.com/a,b",
+		"https://audit.example.com/a=b",
+		"https://audit.example.com/a*b",
+		"https://audit.example.com/a@b",
+		"https://audit.example.com/a|b",
+		"https://audit.example.com/a<b>",
+		"https://bücher.example.com",
+		"https://audit.example.com/" + strings.Repeat("a", 2048),
 	}
 	for _, value := range invalid {
 		cfg := testConfig()
@@ -88,6 +108,9 @@ func TestAgentAccessPublicURL(t *testing.T) {
 		if err == nil {
 			t.Errorf("public_url %q accepted", value)
 			continue
+		}
+		if !strings.Contains(err.Error(), "agent_access.public_url") {
+			t.Errorf("error for %q does not name the key: %v", value, err)
 		}
 		if strings.Contains(err.Error(), "secret") {
 			t.Errorf("error for %q echoed userinfo: %v", value, err)
