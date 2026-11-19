@@ -64,18 +64,45 @@ func newQuotaLimiters(now func() time.Time) map[Quota]*windowLimiter {
 // with RATE_LIMITED (and the wait) when the window is full. A refused event is
 // not counted.
 func (service *Service) Take(quota Quota, identity Identity) error {
+	_, err := service.TakeSlot(quota, identity)
+	return err
+}
+
+// QuotaSlot is one event counted by TakeSlot. Refund gives it back.
+type QuotaSlot struct {
+	quota Quota
+	slot  limiterSlot
+}
+
+// TakeSlot is Take for an event that may turn out not to count: the caller
+// keeps the slot and hands it to Refund when, for instance, the operation it
+// stood for was never started.
+func (service *Service) TakeSlot(quota Quota, identity Identity) (QuotaSlot, error) {
 	limiter, ok := service.quotas[quota]
 	if !ok {
-		return fail(agentapi.CodeInternal)
+		return QuotaSlot{}, fail(agentapi.CodeInternal)
 	}
 	key := "global"
 	if !quotaSizes[quota].global {
 		key = strconv.FormatInt(identity.TokenID, 10)
 	}
-	if allowed, wait := limiter.take(key); !allowed {
-		return &Error{Code: agentapi.CodeRateLimited, RetryAfter: wait}
+	slot, allowed, wait := limiter.takeSlot(key)
+	if !allowed {
+		return QuotaSlot{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: wait}
 	}
-	return nil
+	return QuotaSlot{quota: quota, slot: slot}, nil
+}
+
+// Refund gives back an event TakeSlot counted, in the window it was counted
+// in; after that window has ended it changes nothing. The zero slot is
+// ignored, so a caller may refund a slot it never took.
+func (service *Service) Refund(slot QuotaSlot) {
+	if service == nil {
+		return
+	}
+	if limiter, ok := service.quotas[slot.quota]; ok {
+		limiter.refund(slot.slot)
+	}
 }
 
 // WriteAudit describes one write_applied, write_failed or write_denied row.
