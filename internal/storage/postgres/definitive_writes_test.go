@@ -115,31 +115,16 @@ func TestAdmittedUserAgentRuleWritesPublishDespiteCallerCancellation(t *testing.
 	}
 }
 
-// The administrator actions below cannot be undone (a dismissed suggestion
-// stays dismissed, a regenerated week replaces its snapshot) or decide whether
-// content is handed out (the view log). Their caller must receive what really
-// happened, not an early context error.
+// The administrator actions below cannot be undone: a dismissed suggestion
+// stays dismissed, the latest calibration decides which fields reports hide,
+// and a regenerated week replaces its snapshot. Their caller must receive what
+// really happened, not an early context error.
 func TestAdmittedAdministratorWritesReturnTheDefinitiveResult(t *testing.T) {
-	sessionKey := make([]byte, 32)
-	sessionKey[0] = 7
-
 	cases := []struct {
 		name  string
 		write func(context.Context, *Store) error
 		check func(*testing.T, *Store, error)
 	}{
-		{
-			name: "analysis view",
-			write: func(ctx context.Context, writer *Store) error {
-				return writer.RecordAnalysisView(ctx, storage.AnalysisView{AtNS: 1, ViewerRole: "admin", Resource: "pack", SessionKey: sessionKey})
-			},
-			check: func(t *testing.T, store *Store, err error) {
-				if err != nil {
-					t.Fatalf("view log returned %v, want nil", err)
-				}
-				assertTableCount(t, store.readerDB, "analysis_view_log", 1)
-			},
-		},
 		{
 			name: "facet calibration",
 			write: func(ctx context.Context, writer *Store) error {

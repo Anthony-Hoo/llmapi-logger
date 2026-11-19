@@ -1,6 +1,6 @@
 # 模块 25：Agent 接入（开发计划）
 
-> 状态：设计已确认，未实现
+> 状态：设计已确认；阶段 0（两项前置修复）已实现，阶段 1–5 未实现
 > 日期：2026-11-19
 > 依赖：[09 本地加密、完整性与脱敏](09-security-encryption-and-redaction.md)、[10 查询 API 与 React UI](10-query-api-and-minimal-web-ui.md)、[19 开发者 API Key 会话](19-developer-key-session.md)、[17 请求拦截链](17-request-interceptor-chain.md)、[22 关键词策略](22-content-policy.md)、[23 组织项目周报](23-org-project-reports.md)、[24 会话记录分析](24-session-analysis.md)
 > 接口的精确定义见 [接口合同](25-agent-access-contract.md)，实现以合同为准。落地后配置、表和 API 按惯例并入 01/04/10。

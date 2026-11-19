@@ -640,7 +640,7 @@ func TestBearerFailuresDoNotThrottleSignIn(t *testing.T) {
 	}
 }
 
-func TestCorrectBearerTokenClearsTheFailureCounter(t *testing.T) {
+func TestCorrectBearerTokenDoesNotClearTheFailureCounter(t *testing.T) {
 	t.Parallel()
 	handler := newDeveloperHandler(t, Options{})
 	const address = "203.0.113.10:5678"
@@ -653,21 +653,21 @@ func TestCorrectBearerTokenClearsTheFailureCounter(t *testing.T) {
 		return response.Code
 	}
 
-	for index := 0; index < loginFailureLimit-1; index++ {
-		send("wrong-token")
-	}
-	if got := send(testAdminToken); got != http.StatusOK {
-		t.Fatalf("status = %d, want 200", got)
-	}
-	// A script that sent a few wrong tokens before the right one must not
-	// stay one failure away from a lockout.
+	// A working script shares the address with someone guessing. Its good
+	// requests must not hand the guesser a fresh allowance.
 	for index := 0; index < loginFailureLimit-1; index++ {
 		if got := send("wrong-token"); got != http.StatusUnauthorized {
-			t.Fatalf("failure %d after a success status = %d, want 401", index, got)
+			t.Fatalf("failure %d status = %d, want 401", index, got)
+		}
+		if got := send(testAdminToken); got != http.StatusOK {
+			t.Fatalf("good request %d status = %d, want 200", index, got)
 		}
 	}
-	if got := send(testAdminToken); got != http.StatusOK {
-		t.Fatalf("status after a fresh short run of failures = %d, want 200", got)
+	if got := send("wrong-token"); got != http.StatusUnauthorized {
+		t.Fatalf("tenth failure status = %d, want 401", got)
+	}
+	if got := send(testAdminToken); got != http.StatusTooManyRequests {
+		t.Fatalf("status after ten failures interleaved with successes = %d, want 429", got)
 	}
 }
 

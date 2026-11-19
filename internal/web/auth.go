@@ -144,6 +144,11 @@ func (auth *managementAuth) resolve(request *http.Request) (principal, bool) {
 // the limit every bearer request from it is refused until the window ends,
 // including one that carries the right token: answering the right token would
 // let guessing continue at full speed. Cookie sessions are not affected.
+//
+// Unlike a sign-in, a right bearer token does not clear the counter. Bearer
+// traffic is continuous (health checks, scripts), so clearing on success would
+// let anyone who shares an address with a working script keep guessing: each
+// good request would hand them nine more tries.
 func (auth *managementAuth) authenticate(request *http.Request) (principal, authStatus, time.Duration) {
 	if auth == nil || request == nil {
 		return principal{}, authUnauthorized, 0
@@ -157,7 +162,6 @@ func (auth *managementAuth) authenticate(request *http.Request) (principal, auth
 			auth.bearers.recordFailure(request)
 			return principal{}, authUnauthorized, 0
 		}
-		auth.bearers.recordSuccess(request)
 		return principal{Role: roleAdmin}, authOK, 0
 	}
 	cookie, err := request.Cookie(sessionCookieName)
