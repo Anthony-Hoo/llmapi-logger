@@ -66,6 +66,9 @@ func TestPostgresAgentAccessFlow(t *testing.T) {
 	serve := func(application *App, method, path, body, bearer string) (int, []byte) {
 		t.Helper()
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		if body != "" {
+			request.Header.Set("Content-Type", "application/json")
+		}
 		if bearer != "" {
 			request.Header.Set("Authorization", "Bearer "+bearer)
 		}
@@ -186,6 +189,9 @@ func TestPostgresAgentWriteFlow(t *testing.T) {
 	serve := func(method, path, body, bearer string) (int, []byte) {
 		t.Helper()
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		if body != "" {
+			request.Header.Set("Content-Type", "application/json")
+		}
 		if bearer != "" {
 			request.Header.Set("Authorization", "Bearer "+bearer)
 		}

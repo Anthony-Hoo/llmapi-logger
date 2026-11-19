@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,6 +49,9 @@ func (handler *managementHandler) serveAgentAccess(writer http.ResponseWriter, r
 			methodNotAllowed(writer, http.MethodPost)
 			return
 		}
+		if !requireJSONContent(writer, request) {
+			return
+		}
 		handler.serveAgentAuthorization(writer, request)
 	case path == agentTokensPath:
 		if request.Method != http.MethodGet {
@@ -66,6 +70,9 @@ func (handler *managementHandler) serveAgentAccess(writer http.ResponseWriter, r
 			methodNotAllowed(writer, http.MethodPost)
 			return
 		}
+		if !requireJSONContent(writer, request) {
+			return
+		}
 		handler.serveAgentInstallLink(writer, request)
 	case path == agentChangesPath:
 		if request.Method != http.MethodGet {
@@ -81,6 +88,20 @@ func (handler *managementHandler) serveAgentAccess(writer http.ResponseWriter, r
 	default:
 		http.NotFound(writer, request)
 	}
+}
+
+// requireJSONContent answers 415 unless the request declares a JSON body
+// (Content-Type application/json, parameters allowed). A browser sends a
+// cross-site form or text/plain POST without a CORS preflight; requiring
+// application/json means such a request never reaches a state-changing
+// handler of this family, whatever the session cookie's SameSite does.
+func requireJSONContent(writer http.ResponseWriter, request *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err == nil && mediaType == "application/json" {
+		return true
+	}
+	writeError(writer, http.StatusUnsupportedMediaType, "unsupported_media_type", "the request body must be sent as application/json")
+	return false
 }
 
 // agentViewer maps the web session onto the viewer of the token list.

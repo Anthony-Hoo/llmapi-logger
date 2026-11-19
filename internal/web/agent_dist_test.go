@@ -216,6 +216,7 @@ func TestAgentInstallLinkInputs(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, agentInstallLinksPath, strings.NewReader(`{"agent":"codex","platform":"linux-amd64"}`))
 	request.Host = "audit.example.com:80$(id)"
 	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	env.handler.ServeHTTP(response, request)
 	if code, _ := fieldOf(response); response.Code != http.StatusBadRequest || code != "server_url_unusable" || !strings.Contains(response.Body.String(), "agent_access.public_url") {

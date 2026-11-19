@@ -78,8 +78,13 @@ type agentCaller struct {
 	remote string
 }
 
+// do sends one request. A request with a body is sent as application/json, as
+// the page and the CLI send it; headers can override Content-Type.
 func (env agentEnv) do(method, path, body string, caller agentCaller, headers ...string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if caller.cookie != nil {
 		request.AddCookie(caller.cookie)
 	}
@@ -687,6 +692,34 @@ func TestAgentAuthorizationEndpoint(t *testing.T) {
 	}
 	if response := env.do(http.MethodGet, "/api/v1/agent-access/nothing", "", admin); response.Code != http.StatusNotFound {
 		t.Fatalf("unknown agent-access path = %d", response.Code)
+	}
+}
+
+// Contract section 3.2: the state-changing web-side endpoints take only a
+// JSON body, so a cross-site form or text/plain POST, which a browser sends
+// without a CORS preflight, never reaches them.
+func TestAgentAccessPostsRequireJSON(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	cookie := adminSignIn(t, env.handler)
+	body := authorizationBody(agentapi.TierRead, agentaccess.ModePaste, "approve")
+	for _, path := range []string{agentAuthorizationsPath, agentInstallLinksPath} {
+		for _, contentType := range []string{"text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "", "application/jsonx", "text/json"} {
+			response := env.do(http.MethodPost, path, body, agentCaller{cookie: cookie}, "Content-Type", contentType,
+				"Origin", "https://attacker.example", "Sec-Fetch-Site", "cross-site")
+			if response.Code != http.StatusUnsupportedMediaType || !strings.Contains(response.Body.String(), "unsupported_media_type") {
+				t.Fatalf("POST %s as %q = %d %s", path, contentType, response.Code, response.Body.String())
+			}
+		}
+		// The method is checked first.
+		if response := env.do(http.MethodGet, path, "", agentCaller{cookie: cookie}, "Content-Type", "text/plain"); response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET %s = %d", path, response.Code)
+		}
+	}
+	if len(env.store.Audit()) != 0 {
+		t.Fatalf("a refused request was audited: %+v", env.store.Audit())
+	}
+	if response := env.do(http.MethodPost, agentAuthorizationsPath, body, agentCaller{cookie: cookie}, "Content-Type", "application/json; charset=utf-8"); response.Code != http.StatusOK {
+		t.Fatalf("JSON with parameters = %d %s", response.Code, response.Body.String())
 	}
 }
 
