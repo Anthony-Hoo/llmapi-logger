@@ -140,12 +140,17 @@ func TestSetKeyFromTerminal(t *testing.T) {
 		t.Fatal("an empty key was sent")
 	}
 
-	// --clear reads nothing.
+	// --clear reads nothing and only creates a plan.
 	h.terminal.interactive = false
 	h.terminal.reads = 0
-	server.setResponder(respondJSON(200, `{"ok":true,"data":{"api_key":"none"}}`))
+	server.reset()
+	server.setResponder(respondJSON(200, `{"ok":true,"data":{"plan_id":"pln_example","op":"config.clear-key"}}`))
 	if exit := h.run("config", "set-key", "--kind", "analysis-settings", "--clear"); exit != 0 || h.terminal.reads != 0 {
 		t.Fatalf("clear: exit %d reads %d", exit, h.terminal.reads)
+	}
+	if requests := server.recorded(); len(requests) != 1 || requests[0].Method != "POST" || requests[0].Path != agentapi.PathPrefix+"/plans" ||
+		!jsonEqual(t, requests[0].Body, `{"op":"config.clear-key","kind":"analysis-settings"}`) {
+		t.Fatalf("clear request = %+v", requests)
 	}
 }
 

@@ -79,7 +79,8 @@ type AgentAnalysisSettingsWriter interface {
 	CheckReset(ctx context.Context, expectedVersion int64) (sessionanalysis.SettingsDiff, error)
 	ResetIfVersion(ctx context.Context, expectedVersion int64) (sessionanalysis.SettingsView, error)
 	SetAPIKey(ctx context.Context, key string) (sessionanalysis.SettingsView, error)
-	ClearAPIKey(ctx context.Context) (sessionanalysis.SettingsView, error)
+	CheckClearAPIKey(ctx context.Context, expectedVersion int64) (sessionanalysis.SettingsDiff, error)
+	ClearAPIKeyIfVersion(ctx context.Context, expectedVersion int64) (sessionanalysis.SettingsView, error)
 	TestPatch(ctx context.Context, patch sessionanalysis.SettingsPatch, key *string) (sessionanalysis.ProbeResult, error)
 }
 

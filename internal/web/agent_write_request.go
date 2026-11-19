@@ -50,6 +50,7 @@ var planFields = map[string][]string{
 	agentapi.OpConfigSet:         {"kind", "id", "set", "add", "remove", "expected_version"},
 	agentapi.OpConfigRemove:      {"kind", "id", "expected_version"},
 	agentapi.OpConfigReset:       {"kind"},
+	agentapi.OpConfigClearKey:    {"kind"},
 	agentapi.OpAnalysisRun:       {},
 	agentapi.OpAnalysisCalibrate: {"args"},
 	agentapi.OpAnalysisDismiss:   {"args"},

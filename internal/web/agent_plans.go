@@ -126,6 +126,8 @@ func (handler *managementHandler) agentPlanFor(ctx context.Context, request agen
 		return handler.planConfigRemove(ctx, request)
 	case agentapi.OpConfigReset:
 		return handler.planConfigReset(ctx, request)
+	case agentapi.OpConfigClearKey:
+		return handler.planConfigClearKey(ctx, request)
 	case agentapi.OpAnalysisRun:
 		return handler.planAnalysisRun(ctx)
 	case agentapi.OpAnalysisCalibrate:

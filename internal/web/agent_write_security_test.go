@@ -25,7 +25,6 @@ var writeCells = []struct {
 	{http.MethodPost, "/plans", `{"op":"analysis.run"}`, false},
 	{http.MethodPost, "/plans/pln_unknown/apply", ``, true},
 	{http.MethodPut, "/config/analysis-settings/api-key", `{}`, true},
-	{http.MethodDelete, "/config/analysis-settings/api-key", ``, true},
 	{http.MethodPost, "/analysis/test-model", `{"bogus":1}`, true},
 }
 
@@ -70,8 +69,9 @@ func TestAgentWriteRejectionMatrix(t *testing.T) {
 			t.Errorf("feature off %s %s = %d %s", cell.method, cell.path, recorder.Code, recorder.Body.String())
 		}
 	}
-	// write_denied rows: one per refused apply, key change and test, none for
-	// plan creation; the developer's carry its role.
+	// write_denied rows: one per refused apply, key setting and test, none
+	// for plan creation (clearing the key is a plan); the developer's carry
+	// its role.
 	denied := map[string]int{}
 	for _, row := range on.writeAudits() {
 		if row.Event != "write_denied" {
@@ -82,7 +82,7 @@ func TestAgentWriteRejectionMatrix(t *testing.T) {
 		}
 		denied[row.Role+" "+row.ErrorCode]++
 	}
-	if denied["admin READ_ONLY_TOKEN"] != 4 || denied["developer FORBIDDEN_ROLE"] != 4 {
+	if denied["admin READ_ONLY_TOKEN"] != 3 || denied["developer FORBIDDEN_ROLE"] != 3 {
 		t.Errorf("write_denied rows = %v", denied)
 	}
 	offDenied := 0
@@ -91,7 +91,7 @@ func TestAgentWriteRejectionMatrix(t *testing.T) {
 			offDenied++
 		}
 	}
-	if offDenied != 4 {
+	if offDenied != 3 {
 		t.Errorf("allow_write off rows = %d", offDenied)
 	}
 }
@@ -157,10 +157,13 @@ func TestAgentModelKeyNeverLeaks(t *testing.T) {
 	collect(fixture.facade(http.MethodPost, "/analysis/test-model", `{"api_key":"`+plantedModelKey+`","set":{"llm.timeout_seconds":0}}`, fixture.adminWrite))
 	collect(fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"api_key": plantedModelKey}}, fixture.adminWrite))
 
-	clear := collect(fixture.facade(http.MethodDelete, "/config/analysis-settings/api-key", nil, fixture.adminWrite))
-	if clear.Code != http.StatusOK || !strings.Contains(clear.Body.String(), `"api_key":"none"`) {
-		t.Fatalf("clear key = %d %s", clear.Code, clear.Body.String())
+	clearPlan := collect(fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.clear-key", "kind": "analysis-settings"}, fixture.adminWrite))
+	if clearPlan.Code != http.StatusOK {
+		t.Fatalf("clear key plan = %d %s", clearPlan.Code, clearPlan.Body.String())
 	}
+	var plan planResponse
+	_ = json.Unmarshal(decodeAgent(t, clearPlan).Data, &plan)
+	collect(fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite))
 	afterClear := fixture.show(t, "analysis-settings")
 	if !jsonEqual(afterClear["settings"], before["settings"]) || afterClear["api_key"] != "none" {
 		t.Fatalf("clearing the key changed other settings: %v", afterClear)
@@ -261,6 +264,56 @@ func TestAgentTestModelKeepsTheKeyAtTheAddressInEffect(t *testing.T) {
 	model := fixture.plan(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"llm.model": "other-model"}})
 	if strings.Contains(strings.Join(model.Effects, "\n"), "API key") {
 		t.Fatalf("a model change claims the key moves: %v", model.Effects)
+	}
+}
+
+// Clearing the model key loses a value the agent cannot restore, so it is a
+// plan like every other change; apply executes it. Setting a key stays a
+// terminal-only write without a plan.
+func TestAgentClearingTheKeyIsAPlan(t *testing.T) {
+	fixture := newWriteFixture(t)
+	if response := fixture.facade(http.MethodPut, "/config/analysis-settings/api-key", map[string]any{"api_key": plantedModelKey}, fixture.adminWrite); response.Code != http.StatusOK {
+		t.Fatalf("set key = %d", response.Code)
+	}
+	// The old one-step endpoint is gone.
+	if code := failure(t, fixture.facade(http.MethodDelete, "/config/analysis-settings/api-key", nil, fixture.adminWrite)).Code; code != agentapi.CodeNotFound {
+		t.Fatalf("DELETE api-key = %s", code)
+	}
+	body := map[string]any{"op": "config.clear-key", "kind": "analysis-settings"}
+	if code := failure(t, fixture.facade(http.MethodPost, "/plans", body, fixture.adminRead)).Code; code != agentapi.CodeReadOnlyToken {
+		t.Fatalf("read token = %s", code)
+	}
+	for _, bad := range []map[string]any{{"op": "config.clear-key"}, {"op": "config.clear-key", "kind": "weekly-settings"}, {"op": "config.clear-key", "kind": "analysis-settings", "set": map[string]any{}}} {
+		if code := failure(t, fixture.facade(http.MethodPost, "/plans", bad, fixture.adminWrite)).Code; code != agentapi.CodeInvalidArgument {
+			t.Errorf("%v = %s", bad, code)
+		}
+	}
+	plan := fixture.plan(t, body)
+	effects := strings.Join(plan.Effects, "\n")
+	if plan.Op != "config.clear-key" || plan.Target.Kind != "analysis-settings" || plan.Target.Version == "0" || !jsonEqual(plan.ChangedKeys, []string{"api_key"}) ||
+		!jsonEqual(plan.Extras["api_key"], map[string]string{"before": "saved", "after": "none"}) ||
+		!strings.Contains(effects, "Only the user can set a key again") || !strings.Contains(effects, "llmaudit config set-key --kind analysis-settings") {
+		t.Fatalf("plan = %+v", plan)
+	}
+	if shown := fixture.show(t, "analysis-settings"); shown["api_key"] != "saved" {
+		t.Fatal("creating the plan cleared the key")
+	}
+	applied := fixture.apply(t, plan.PlanID)
+	if shown := fixture.show(t, "analysis-settings"); shown["api_key"] != "none" || applied.Target.Version == plan.Target.Version {
+		t.Fatalf("after apply = %v, %+v", shown, applied)
+	}
+	rows := fixture.writeAudits()
+	if last := rows[len(rows)-1]; last.Event != "write_applied" || last.ObjectKind != "analysis-settings" || last.ChangedKeys != `["api_key"]` {
+		t.Fatalf("audit row = %+v", last)
+	}
+	// A change in between is a conflict; with no key in use nothing changes.
+	stale := fixture.plan(t, body)
+	if !jsonEqual(stale.ChangedKeys, []string{}) {
+		t.Fatalf("clear without a key = %+v", stale)
+	}
+	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"run_at": "04:00"}})
+	if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+stale.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeVersionConflict {
+		t.Fatalf("stale clear = %s", code)
 	}
 }
 
@@ -707,7 +760,7 @@ func TestAgentWritesOfDisabledModules(t *testing.T) {
 		{http.MethodPost, "/plans", `{"op":"analysis.run"}`, "session_analysis"},
 		{http.MethodPost, "/plans", `{"op":"analysis.dismiss","args":{"suggestion_id":1}}`, "session_analysis"},
 		{http.MethodPut, "/config/analysis-settings/api-key", map[string]any{"api_key": plantedModelKey}, "session_analysis"},
-		{http.MethodDelete, "/config/analysis-settings/api-key", nil, "session_analysis"},
+		{http.MethodPost, "/plans", map[string]any{"op": "config.clear-key", "kind": "analysis-settings"}, "session_analysis"},
 		{http.MethodPost, "/analysis/test-model", `{}`, "session_analysis"},
 	} {
 		body := failure(t, fixture.facade(test.method, test.path, test.body, fixture.adminWrite))

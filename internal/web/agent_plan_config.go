@@ -857,3 +857,46 @@ func (handler *managementHandler) planConfigReset(ctx context.Context, request a
 	}
 	return plan, nil
 }
+
+// ---- config.clear-key ----
+
+// planConfigClearKey plans clearing the analysis model's API key. Setting a
+// key is not a plan: the user types it at a terminal and it never enters the
+// agent's context. Clearing carries no value, but it removes one the agent
+// cannot restore, so the user sees it and agrees before it happens. Once
+// applied the key source is none, as when the web form's key field is
+// emptied.
+func (handler *managementHandler) planConfigClearKey(ctx context.Context, request agentPlanRequest) (*agentPlan, error) {
+	if err := checkWriteKind(request.Kind, []string{"analysis-settings"}); err != nil {
+		return nil, err
+	}
+	settings, err := handler.agentAnalysisSettingsWriter()
+	if err != nil {
+		return nil, err
+	}
+	diff, err := settings.CheckClearAPIKey(ctx, sessionanalysis.AnyVersion)
+	if err != nil {
+		return nil, err
+	}
+	version := diff.Version
+	plan := newAgentPlan(agentapi.OpConfigClearKey, agentPlanTarget{Kind: "analysis-settings", Version: agentVersion(version)})
+	plan.view.Before, plan.view.After = agentAnalysisSettingsValuesOf(diff.Before), agentAnalysisSettingsValuesOf(diff.After)
+	plan.view.Extras["api_key"] = map[string]string{"before": diff.KeySource, "after": sessionanalysis.KeyNone}
+	changed := []string{"api_key"}
+	if diff.KeySource == sessionanalysis.KeyNone {
+		changed = []string{}
+	}
+	changedOrNothing(plan, changed)
+	if diff.KeySource != sessionanalysis.KeyNone {
+		plan.effect("Removes the API key in use (" + diff.KeySource + " key): the model is called without a key from then on. " +
+			"Only the user can set a key again, by typing it at a terminal with `llmaudit config set-key --kind analysis-settings`; " +
+			"the configuration file's key comes back only with `llmaudit config reset --kind analysis-settings`.")
+	}
+	plan.effect(effectAnalysis)
+	plan.verify = "llmaudit config show --kind analysis-settings"
+	plan.apply = func(ctx context.Context) (agentApplied, error) {
+		view, err := settings.ClearAPIKeyIfVersion(ctx, version)
+		return agentApplied{Version: agentVersion(view.UpdatedNS)}, err
+	}
+	return plan, nil
+}

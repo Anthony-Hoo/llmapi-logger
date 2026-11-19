@@ -12,8 +12,9 @@ import (
 )
 
 // The two writes that do not go through a plan (contract section 4.5.3):
-// setting or clearing the analysis model's API key, and the connection test.
-// A plan echoes its content back, so the key never goes into one. The key is
+// setting the analysis model's API key, and the connection test. A plan
+// echoes its content back, so a key never goes into one; clearing the key
+// carries no value and is a plan (config.clear-key, agent_plan_config.go). The key is
 // read from the body into a string that goes to the service and nowhere
 // else: no response, log line, audit row or error message contains it.
 
@@ -81,7 +82,7 @@ func (handler *managementHandler) serveAgentAPIKeySet(writer http.ResponseWriter
 		}
 	}
 	if key == "" {
-		handler.failKeyWrite(writer, request, call, keys, fieldFailure("api_key", "api_key is required and must not be empty; clear the key with DELETE"))
+		handler.failKeyWrite(writer, request, call, keys, fieldFailure("api_key", "api_key is required and must not be empty; clearing the key is a plan: llmaudit config set-key --kind analysis-settings --clear"))
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), agentWriteTimeout)
@@ -96,35 +97,6 @@ func (handler *managementHandler) serveAgentAPIKeySet(writer http.ResponseWriter
 	envelope := agentapi.Success(agentKeySource{APIKey: view.APIKey})
 	envelope.NextActions = []string{"Test the model with the saved key: `llmaudit analysis test-model`."}
 	writeAgentOK(writer, envelope)
-}
-
-// serveAgentAPIKeyClear is DELETE /config/analysis-settings/api-key. The key
-// source is then none: the configuration file's key comes back only with a
-// reset, as on the web page.
-func (handler *managementHandler) serveAgentAPIKeyClear(writer http.ResponseWriter, request *http.Request, call agentCall) {
-	keys := []string{"api_key"}
-	settings, err := handler.agentAnalysisSettingsWriter()
-	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
-		return
-	}
-	if _, err := agentCallParams(request, call); err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
-		return
-	}
-	if err := emptyAgentBody(writer, request); err != nil {
-		handler.failKeyWrite(writer, request, call, keys, fieldFailure("body", "clearing the key takes no request body"))
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), agentWriteTimeout)
-	defer cancel()
-	view, err := settings.ClearAPIKey(ctx)
-	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
-		return
-	}
-	handler.recordKeyWrite(request, call, keys, "")
-	writeAgentOK(writer, agentapi.Success(agentKeySource{APIKey: view.APIKey}))
 }
 
 // serveAgentTestModel is POST /analysis/test-model, body {set?, api_key?}:

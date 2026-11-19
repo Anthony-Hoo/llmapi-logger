@@ -86,7 +86,7 @@ func commandCases(t *testing.T) []commandCase {
 		{name: "config set patch file wins when later", args: []string{"config", "set", "--kind", "content-rule", "--set", "name=first", "--patch-file", patch}, method: "POST", path: "/plans", body: `{"kind":"content-rule","op":"config.set","set":{"model_pattern":"^a\\d+$","name":"from-file"}}`},
 		{name: "config remove", args: []string{"config", "remove", "--kind", "ua-rule", "--id", "3", "--if-version", "5"}, method: "POST", path: "/plans", body: `{"op":"config.remove","kind":"ua-rule","id":"3","expected_version":"5"}`, errorCodes: append(planErrors, agentapi.CodeConflict)},
 		{name: "config reset", args: []string{"config", "reset", "--kind", "weekly-settings"}, method: "POST", path: "/plans", body: `{"op":"config.reset","kind":"weekly-settings"}`, errorCodes: planErrors},
-		{name: "config set-key clear", args: []string{"config", "set-key", "--kind", "analysis-settings", "--clear"}, method: "DELETE", path: "/config/analysis-settings/api-key", errorCodes: []agentapi.Code{agentapi.CodeReadOnlyToken, agentapi.CodeWriteDisabled}},
+		{name: "config set-key clear", args: []string{"config", "set-key", "--kind", "analysis-settings", "--clear"}, method: "POST", path: "/plans", body: `{"op":"config.clear-key","kind":"analysis-settings"}`, errorCodes: planErrors},
 		{name: "callers list", args: []string{"callers", "list"}, method: "GET", path: "/callers", errorCodes: []agentapi.Code{agentapi.CodeForbiddenRole, agentapi.CodeUpstreamUnavailable}},
 		{name: "status", args: []string{"status"}, method: "GET", path: "/status", errorCodes: []agentapi.Code{agentapi.CodeForbiddenRole}},
 		{name: "apply", args: []string{"apply", "pln_abc"}, method: "POST", path: "/plans/pln_abc/apply", errorCodes: []agentapi.Code{agentapi.CodePlanNotFound, agentapi.CodePlanExpired, agentapi.CodeVersionConflict, agentapi.CodeRunInProgress, agentapi.CodeWriteDisabled}},
@@ -242,7 +242,7 @@ func TestRoutesCoverEveryCommand(t *testing.T) {
 		}
 	}
 	setKey := byCommand["config set-key"]
-	if len(setKey) != 2 || setKey[0].Method != "PUT" || !reflect.DeepEqual(setKey[0].Body, []string{"api_key"}) || setKey[1].Method != "DELETE" || setKey[1].Body != nil {
+	if len(setKey) != 2 || setKey[0].Method != "PUT" || !reflect.DeepEqual(setKey[0].Body, []string{"api_key"}) || setKey[1].Method != "POST" || setKey[1].Path != "/plans" || !reflect.DeepEqual(setKey[1].Body, []string{"kind", "op"}) {
 		t.Errorf("set-key routes = %+v", setKey)
 	}
 }

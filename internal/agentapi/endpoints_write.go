@@ -7,17 +7,15 @@ var WriteEndpoints = []Endpoint{
 	{ID: EndpointPlanCreate, Method: "POST", Pattern: "/plans", Access: AccessAdmin, Tier: TierWrite},
 	{ID: EndpointPlanApply, Method: "POST", Pattern: "/plans/{plan_id}/apply", Access: AccessAdmin, Tier: TierWrite},
 	{ID: EndpointAPIKeySet, Method: "PUT", Pattern: "/config/analysis-settings/api-key", Access: AccessAdmin, Tier: TierWrite},
-	{ID: EndpointAPIKeyClear, Method: "DELETE", Pattern: "/config/analysis-settings/api-key", Access: AccessAdmin, Tier: TierWrite},
 	{ID: EndpointTestModel, Method: "POST", Pattern: "/analysis/test-model", Access: AccessAdmin, Tier: TierWrite},
 }
 
 // IDs of the write endpoints.
 const (
-	EndpointPlanCreate  = "plans.create"
-	EndpointPlanApply   = "plans.apply"
-	EndpointAPIKeySet   = "config.api-key.set"
-	EndpointAPIKeyClear = "config.api-key.clear"
-	EndpointTestModel   = "analysis.test-model"
+	EndpointPlanCreate = "plans.create"
+	EndpointPlanApply  = "plans.apply"
+	EndpointAPIKeySet  = "config.api-key.set"
+	EndpointTestModel  = "analysis.test-model"
 )
 
 // Plan operations (contract section 4.5.1).
@@ -29,10 +27,14 @@ const (
 	OpAnalysisCalibrate = "analysis.calibrate"
 	OpAnalysisDismiss   = "analysis.dismiss"
 	OpWeeklyRegenerate  = "weekly.regenerate"
+	// OpConfigClearKey clears the analysis model's API key. Setting a key is
+	// not a plan (the user types it at a terminal); clearing is, because the
+	// agent cannot restore what it removes.
+	OpConfigClearKey = "config.clear-key"
 )
 
 // PlanOps lists every op value POST /plans accepts.
-var PlanOps = []string{OpConfigSet, OpConfigRemove, OpConfigReset, OpAnalysisRun, OpAnalysisCalibrate, OpAnalysisDismiss, OpWeeklyRegenerate}
+var PlanOps = []string{OpConfigSet, OpConfigRemove, OpConfigReset, OpConfigClearKey, OpAnalysisRun, OpAnalysisCalibrate, OpAnalysisDismiss, OpWeeklyRegenerate}
 
 // WriteKinds are the kind values of config.set and config.remove (contract
 // section 4.5.2); config.reset accepts only the two settings sections.

@@ -50,11 +50,10 @@ var agentQueryParams = map[string][]string{
 	"callers.list":           {},
 	"status":                 {},
 
-	"plans.create":         {},
-	"plans.apply":          {},
-	"config.api-key.set":   {},
-	"config.api-key.clear": {},
-	"analysis.test-model":  {},
+	"plans.create":        {},
+	"plans.apply":         {},
+	"config.api-key.set":  {},
+	"analysis.test-model": {},
 }
 
 // agentCallParams checks the query string of call against its endpoint's

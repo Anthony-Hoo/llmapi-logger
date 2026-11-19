@@ -535,16 +535,17 @@ func buildCommands() []*commandSpec {
 		},
 		{
 			Path:    []string{"config", "set-key"},
-			Summary: "set or clear the analysis model API key (administrators, write tier)",
+			Summary: "set the analysis model API key, or plan clearing it (administrators, write tier)",
 			Description: "Reads the key from the interactive terminal without echo; the user must type it. There is no flag, environment variable or file for the key. " +
-				"Fails with NO_TTY when stdin is not a terminal: ask the user to run the command themselves. --clear reads nothing and may be run by an agent.",
+				"Fails with NO_TTY when stdin is not a terminal: ask the user to run the command themselves. " +
+				"--clear reads nothing and only creates a plan (a key cannot be restored by an agent); `llmaudit apply <plan-id>` executes it after the user agrees.",
 			Flags: []flagSpec{
 				{Name: "kind", Value: "analysis-settings", Required: true, Help: "analysis-settings, the only accepted value. Required."},
-				{Name: "clear", Kind: boolFlag, Help: "Stop sending a key: the key source becomes none, as when the web form's key field is emptied; the configuration file's key comes back only with `llmaudit config reset --kind analysis-settings`. Default: off."},
+				{Name: "clear", Kind: boolFlag, Help: "Plan to stop sending a key: once applied the key source is none, as when the web form's key field is emptied; the configuration file's key comes back only with `llmaudit config reset --kind analysis-settings`. Default: off."},
 			},
 			Routes: []routeSpec{
 				{Method: "PUT", Path: "/config/analysis-settings/api-key", Body: []string{"api_key"}},
-				{Method: "DELETE", Path: "/config/analysis-settings/api-key"},
+				{Method: "POST", Path: "/plans", Body: []string{"kind", "op"}},
 			},
 			Examples: []string{"llmaudit config set-key --kind analysis-settings", "llmaudit config set-key --kind analysis-settings --clear"},
 			Run:      runSetKey,

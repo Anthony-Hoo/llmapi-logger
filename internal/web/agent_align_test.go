@@ -291,8 +291,12 @@ func TestRealCLIAgainstTheFacade(t *testing.T) {
 	if strings.Contains(cli.stdout.String()+cli.stderr.String()+fixture.logs.String(), "key-004") {
 		t.Fatal("a typed key appears in the CLI output or the server log")
 	}
-	if cleared := cli.run("config", "set-key", "--kind", "analysis-settings", "--clear"); cleared["api_key"] != "none" {
+	// Clearing is a plan the user agrees to, then apply.
+	if cleared := cli.planAndApply("config", "set-key", "--kind", "analysis-settings", "--clear"); cleared["applied"] != true {
 		t.Fatalf("clear = %v", cleared)
+	}
+	if shown := cli.run("config", "show", "--kind", "analysis-settings"); shown["api_key"] != "none" {
+		t.Fatalf("after clearing = %v", shown)
 	}
 	cli.run("whoami")
 }
@@ -307,6 +311,7 @@ var dynamicSamples = map[string]string{
 	"strings.Join(agentTestModelBodyFields, \", \")": "set, api_key",
 	"nearest.Format(orgreport.WeekLayout)":           "2026-11-02",
 	"keyTarget.Field":                                "llm.base_url",
+	"diff.KeySource":                                 "saved",
 }
 
 // serverCommandTexts returns every string the server code of internal/web

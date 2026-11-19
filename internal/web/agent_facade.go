@@ -65,11 +65,10 @@ func (handler *managementHandler) agentHandlers() map[string]agentHandler {
 // agentWriteHandlers binds the write facade of contract section 4.5.
 func (handler *managementHandler) agentWriteHandlers() map[string]agentHandler {
 	return map[string]agentHandler{
-		agentapi.EndpointPlanCreate:  handler.serveAgentPlanCreate,
-		agentapi.EndpointPlanApply:   handler.serveAgentPlanApply,
-		agentapi.EndpointAPIKeySet:   handler.serveAgentAPIKeySet,
-		agentapi.EndpointAPIKeyClear: handler.serveAgentAPIKeyClear,
-		agentapi.EndpointTestModel:   handler.serveAgentTestModel,
+		agentapi.EndpointPlanCreate: handler.serveAgentPlanCreate,
+		agentapi.EndpointPlanApply:  handler.serveAgentPlanApply,
+		agentapi.EndpointAPIKeySet:  handler.serveAgentAPIKeySet,
+		agentapi.EndpointTestModel:  handler.serveAgentTestModel,
 	}
 }
 
@@ -213,7 +212,7 @@ func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, id
 }
 
 // recordWriteDenied writes the write_denied row of contract section 3.4 for
-// a refused execution, key change or connection test of an authenticated
+// a refused execution, key setting or connection test of an authenticated
 // token. Plan creation is never audited. The rows of one token are capped
 // (QuotaDeniedAudit): beyond the cap the refusal is answered as usual and
 // not recorded, so a token without write rights cannot grow the table at the
@@ -223,7 +222,7 @@ func (handler *managementHandler) recordWriteDenied(request *http.Request, endpo
 	switch endpoint.ID {
 	case agentapi.EndpointPlanApply:
 		audit.ObjectKind, audit.ObjectID = "plan", auditPlanID(call.Params["plan_id"])
-	case agentapi.EndpointAPIKeySet, agentapi.EndpointAPIKeyClear:
+	case agentapi.EndpointAPIKeySet:
 		audit.ObjectKind, audit.ChangedKeys = agentKeyObject, []string{"api_key"}
 	case agentapi.EndpointTestModel:
 		audit.ObjectKind, audit.ObjectID = agentKeyObject, "test-model"

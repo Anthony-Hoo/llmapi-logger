@@ -378,11 +378,13 @@ func runSetKey(inv *invocation) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	put, remove := &inv.spec.Routes[0], &inv.spec.Routes[1]
+	put, plan := &inv.spec.Routes[0], &inv.spec.Routes[1]
 	if inv.has("clear") {
+		// Clearing loses a value only the user can type again, so it is a
+		// plan like every other change; nothing is cleared until apply.
 		ctx, cancel := inv.context()
 		defer cancel()
-		envelope, err := c.call(ctx, inv, remove, remove.Path, nil, nil)
+		envelope, err := c.call(ctx, inv, plan, plan.Path, nil, map[string]any{"op": agentapi.OpConfigClearKey, "kind": "analysis-settings"})
 		if err != nil {
 			return nil, err
 		}

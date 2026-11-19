@@ -208,6 +208,37 @@ func (service *SettingsService) ClearAPIKey(ctx context.Context) (SettingsView, 
 	return service.replaceKey(ctx, "")
 }
 
+// CheckClearAPIKey reports what ClearAPIKeyIfVersion would do: the section's
+// version and where the key in use comes from (KeySource); Before and After
+// are the settings, which a clear keeps. expectedVersion may be AnyVersion.
+func (service *SettingsService) CheckClearAPIKey(ctx context.Context, expectedVersion int64) (SettingsDiff, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	current, keySource, version := service.current(ctx)
+	if expectedVersion != AnyVersion && version != expectedVersion {
+		return SettingsDiff{}, ErrVersionConflict
+	}
+	settings := editableOf(current)
+	return SettingsDiff{Version: version, Before: settings, After: settings, Changed: []string{}, KeySource: keySource}, nil
+}
+
+// ClearAPIKeyIfVersion is ClearAPIKey only while the section's version still
+// equals expectedVersion; otherwise ErrVersionConflict and nothing is
+// written.
+func (service *SettingsService) ClearAPIKeyIfVersion(ctx context.Context, expectedVersion int64) (SettingsView, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	current, _, version, err := service.currentForWrite(ctx)
+	if err != nil {
+		return SettingsView{}, err
+	}
+	if version != exact(expectedVersion) {
+		return SettingsView{}, ErrVersionConflict
+	}
+	empty := ""
+	return service.update(ctx, SettingsUpdate{EditableSettings: editableOf(current), APIKey: &empty})
+}
+
 func (service *SettingsService) replaceKey(ctx context.Context, key string) (SettingsView, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()

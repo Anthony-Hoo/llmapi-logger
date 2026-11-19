@@ -95,7 +95,7 @@ var WebRoutes = []WebRoute{
 	planRoute("PUT", "/api/v1/settings/org-reports", "config.set", planCommandSet, "apply"),
 	planRoute("DELETE", "/api/v1/settings/org-reports", "config.reset", "config reset", "apply"),
 	{Method: "GET", Path: "/api/v1/settings/session-analysis", Endpoints: []string{"config.show"}, Commands: []string{"config show --kind analysis-settings"}},
-	{Method: "PUT", Path: "/api/v1/settings/session-analysis", Endpoints: []string{EndpointPlanCreate, EndpointPlanApply, EndpointAPIKeySet, EndpointAPIKeyClear},
+	{Method: "PUT", Path: "/api/v1/settings/session-analysis", Endpoints: []string{EndpointPlanCreate, EndpointPlanApply, EndpointAPIKeySet},
 		Op: OpConfigSet, Commands: []string{planCommandSet, "config set-key", "apply"}},
 	planRoute("DELETE", "/api/v1/settings/session-analysis", "config.reset", "config reset", "apply"),
 	{Method: "POST", Path: "/api/v1/settings/session-analysis/test", Endpoints: []string{EndpointTestModel}, Commands: []string{"analysis test-model"}},
