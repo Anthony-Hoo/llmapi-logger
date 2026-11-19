@@ -72,19 +72,31 @@ func outPath(inv *invocation) (string, error) {
 	return target, nil
 }
 
-// writeOut writes data to --out and replaces it with the file summary; meta
-// and the explanatory fields stay as the server sent them.
+// writeOut writes {"meta": …, "data": …} to --out and replaces data on
+// stdout with the file summary; meta and the explanatory fields stay as the
+// server sent them. The file carries meta so that a file read later still
+// says whether its data is complete; its data is byte for byte what stdout
+// would carry without --out.
 func (inv *invocation) writeOut(envelope *serverEnvelope, server string) (*result, error) {
 	data, err := compactData(envelope.Data)
 	if err != nil {
 		return nil, err
 	}
+	meta := []byte("null")
+	if len(envelope.Meta) > 0 {
+		if meta, err = compactData(envelope.Meta); err != nil {
+			return nil, err
+		}
+	}
+	content := make([]byte, 0, len(meta)+len(data)+20)
+	content = append(append(append(append(content, `{"meta":`...), meta...), `,"data":`...), data...)
+	content = append(content, '}')
 	target, err := outPath(inv)
 	if err != nil {
 		return nil, err
 	}
 	size, sum, err := writeAtomic(target, false, func(writer io.Writer) error {
-		_, err := writer.Write(data)
+		_, err := writer.Write(content)
 		return err
 	})
 	if err != nil {

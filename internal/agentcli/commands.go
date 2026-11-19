@@ -22,7 +22,7 @@ var allCommands = sync.OnceValue(buildCommands)
 // the default.
 func flagSince() flagSpec {
 	return flagSpec{Name: "since", Value: "<duration>", Query: "since",
-		Help: "Look back this far from now: a number and a unit m, h or d (30m, 2h, 7d). Cannot be combined with --from. Default: the server's default range."}
+		Help: "Look back this far from --to (or now): a positive number and a unit s, m, h, d or w (30m, 2h, 7d, 2w). Cannot be combined with --from. Default: the server's default range."}
 }
 
 func flagFrom() flagSpec {
@@ -46,7 +46,7 @@ func flagLimit(minimum, maximum, fallback int) flagSpec {
 }
 
 func flagOut(required bool, what string) flagSpec {
-	help := "Write " + what + " to this file (replaced atomically) and print {path, bytes, sha256} with the original meta instead. The directory must exist."
+	help := "Write {\"meta\": …, \"data\": …} to this file, data being " + what + " exactly as stdout would carry it (the file is replaced atomically), and print {path, bytes, sha256} with the original meta instead. The directory must exist."
 	if required {
 		help += " Required."
 	} else {
@@ -157,7 +157,12 @@ func buildCommands() []*commandSpec {
 				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path, e.g. /v1/chat/completions. Default: all."},
 				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results). Default: all."},
 				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id. Default: all."},
-				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when a row filter is given (data.collapse_applied says what happened). Default: off."},
+				{Name: "forward-status", Value: "<state>", Query: "forward_status", Help: "Only records whose forwarding ended this way: in_progress, completed, rejected, client_cancelled, newapi_error, proxy_error or interrupted. Default: all."},
+				{Name: "blocked-by", Value: "<interceptor>", Query: "blocked_by", Help: "Only records a local policy blocked with this interceptor, e.g. content_policy or user_agent. Default: all."},
+				{Name: "block-code", Value: "<code>", Query: "block_code", Help: "Only records blocked with this block code, e.g. body_too_large. Default: all."},
+				{Name: "capture-status", Value: "<state>", Query: "capture_status", Help: "Only records whose body capture is pending, complete, partial or failed (chunk_missing appears in results only and is not a filter). Default: all."},
+				{Name: "upstream-error-class", Value: "<class>", Query: "upstream_error_class", Help: "Only records whose upstream error has this class, e.g. cyber_policy. Default: all."},
+				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when a row filter is given (data.collapse_applied says what happened). Default: off, i.e. one row per conversation as the web page shows it."},
 				flagLimit(1, 200, 50), flagCursor(),
 				{Name: "user-id", Value: "<id>", Query: "user_id", Help: "Administrators only: NewAPI user ID. Default: all."},
 				{Name: "username", Value: "<name>", Query: "username", Help: "Administrators only: NewAPI user name. Default: all."},
@@ -216,7 +221,7 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"usage", "sessions"},
 			Summary: "list usage sessions (agent, session and conversation cards)",
 			Flags: []flagSpec{
-				flagSince(),
+				flagSince(), flagFrom(), flagTo(),
 				{Name: "sort", Value: "<order>", Query: "sort", Help: "recent, tokens or context. Default: the server's default."},
 				flagLimit(1, 100, 20), flagCursor(),
 			},
@@ -355,7 +360,9 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "sessions"},
 			Summary: "list analyzed sessions",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (2h, 7d). The existing service needs a range, so give it. Default: none."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
+				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
+				flagTo(),
 				{Name: "kind", Value: "<kind>", Query: "kind", Help: "agent or chat. Default: both."},
 				{Name: "flags", Value: "<list>", Query: "flags", Help: "Comma-separated session flags to filter by: loop, thrash, unverified, failures, corrections, error_paste, interrupt, heavy_model, danger, secret, compaction. Default: no filter."},
 				flagLimit(1, 200, 50), flagCursor(), flagUserID(true),
@@ -468,7 +475,7 @@ func buildCommands() []*commandSpec {
 				{Name: "week", Value: "<YYYY-MM-DD>", Body: "week", Help: "First day of the week to try, on the deployment's week start day. Default: the current week."},
 				{Name: "project-id", Value: "<id>", Body: "project_id", Help: "Project being edited: it is left out of the matches counted as belonging to other projects (as the web form does). Default: none."},
 			},
-			Routes:   []routeSpec{{Method: "POST", Path: "/config/project-preview"}},
+			Routes:   []routeSpec{{Method: "POST", Path: "/config/project-preview", Meta: true}},
 			Timeout:  40 * time.Second,
 			Examples: []string{"llmaudit config preview-project --group-id 2 --rule repo_name:example-repo"},
 			Run:      runPreview,
@@ -530,7 +537,7 @@ func buildCommands() []*commandSpec {
 				"Fails with NO_TTY when stdin is not a terminal: ask the user to run the command themselves. --clear reads nothing and may be run by an agent.",
 			Flags: []flagSpec{
 				{Name: "kind", Value: "analysis-settings", Required: true, Help: "analysis-settings, the only accepted value. Required."},
-				{Name: "clear", Kind: boolFlag, Help: "Remove the saved key instead of setting one; the file key, if any, applies again. Default: off."},
+				{Name: "clear", Kind: boolFlag, Help: "Stop sending a key: the key source becomes none, as when the web form's key field is emptied; the configuration file's key comes back only with `llmaudit config reset --kind analysis-settings`. Default: off."},
 			},
 			Routes: []routeSpec{
 				{Method: "PUT", Path: "/config/analysis-settings/api-key", Body: []string{"api_key"}},

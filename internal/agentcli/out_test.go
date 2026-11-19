@@ -38,8 +38,17 @@ func TestOutFileEqualsDataByteForByte(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(content, plain["data"]) {
-		t.Fatalf("file %q != stdout data %q", content, plain["data"])
+	// The file is {"meta": …, "data": …}; its data is stdout's data byte for
+	// byte, and its meta tells a later reader whether the data is complete.
+	if want := `{"meta":` + string(plain["meta"]) + `,"data":` + string(plain["data"]) + `}`; string(content) != want {
+		t.Fatalf("file %q != %q", content, want)
+	}
+	var stored struct {
+		Meta agentapi.Meta   `json:"meta"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(content, &stored); err != nil || stored.Meta.Complete || stored.Meta.IncompleteReason != "truncated" {
+		t.Fatalf("file meta %+v (%v)", stored.Meta, err)
 	}
 	var summary struct {
 		Path   string `json:"path"`
@@ -79,7 +88,7 @@ func TestPackRequiresOut(t *testing.T) {
 		t.Fatalf("pack request %s %v", request.Path, request.Query)
 	}
 	content, _ := os.ReadFile(target)
-	if string(content) != `{"view_logged":true,"text_untrusted":"long"}` {
+	if string(content) != `{"meta":`+okMeta+`,"data":{"view_logged":true,"text_untrusted":"long"}}` {
 		t.Fatalf("pack file %s", content)
 	}
 }
