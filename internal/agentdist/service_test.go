@@ -107,7 +107,7 @@ func TestServeDownloadExpiredIsGone(t *testing.T) {
 		t.Fatalf("status %d, want 410", recorder.Code)
 	}
 	body := failureOf(t, recorder)
-	if body.Details["reason"] != "link_expired" || !strings.Contains(body.Hint, "Agent access page") {
+	if body.Code != agentapi.CodeLinkExpired || !strings.Contains(body.Hint, "Agent access page") {
 		t.Fatalf("expired body %+v", body)
 	}
 }

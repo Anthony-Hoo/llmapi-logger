@@ -27,6 +27,7 @@ const (
 	CodeVersionConflict     Code = "VERSION_CONFLICT"
 	CodePlanNotFound        Code = "PLAN_NOT_FOUND"
 	CodePlanExpired         Code = "PLAN_EXPIRED"
+	CodeLinkExpired         Code = "LINK_EXPIRED"
 	CodeRunInProgress       Code = "RUN_IN_PROGRESS"
 	CodeNotReady            Code = "NOT_READY"
 	CodeNotRetained         Code = "NOT_RETAINED"
@@ -127,6 +128,9 @@ var codeTable = map[Code]CodeSpec{
 	CodePlanExpired: {HTTPStatus: http.StatusGone, ExitCode: ExitError,
 		Message: "the plan has expired",
 		Hint:    "Create a new plan."},
+	CodeLinkExpired: {HTTPStatus: http.StatusGone, ExitCode: ExitError,
+		Message: "the download link has expired",
+		Hint:    "Ask the user to generate a new install prompt on the Agent access page of the web UI."},
 	CodeRunInProgress: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
 		Message: "a session analysis run is already in progress",
 		Hint:    "Do not trigger another run; check progress with `llmaudit analysis overview --since 1d`."},

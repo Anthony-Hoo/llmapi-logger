@@ -280,9 +280,7 @@ type DownloadResult struct {
 //   - signature that does not verify, a file name outside [A-Za-z0-9._-], a
 //     file that is neither manifest.json nor listed in it, or no packages on
 //     this server: 404 NOT_FOUND, all alike;
-//   - a correctly signed but expired link: 410 with code NOT_FOUND and
-//     details.reason "link_expired" (the shared table has no 410 code for
-//     this; see the report);
+//   - a correctly signed but expired link: 410 LINK_EXPIRED;
 //   - more than DownloadsPerLink downloads with one link: 429 RATE_LIMITED
 //     with Retry-After until the link expires;
 //   - otherwise 200 with the file.
@@ -294,10 +292,10 @@ func (service *Service) ServeDownload(writer http.ResponseWriter, request *http.
 	expires, err := service.signer.Verify(signature)
 	switch {
 	case errors.Is(err, ErrLinkExpired):
-		return writeDownloadFailure(writer, http.StatusGone, agentapi.CodeNotFound,
+		return writeDownloadFailure(writer, agentapi.HTTPStatus(agentapi.CodeLinkExpired), agentapi.CodeLinkExpired,
 			"this download link has expired",
 			"Ask the user to generate a new install prompt on the Agent access page of the web UI.",
-			map[string]any{"reason": "link_expired"}, "")
+			nil, "")
 	case err != nil:
 		return notFound(writer)
 	}

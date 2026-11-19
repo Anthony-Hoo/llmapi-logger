@@ -25,13 +25,14 @@ General rules: do not retry a command more than once unless the table says so; n
 | `VERSION_CONFLICT` | 1 | The object changed after the plan was created. | Read it again with `llmaudit config show --kind <kind>`, tell the user what changed, and create a new plan. |
 | `PLAN_NOT_FOUND` | 1 | The plan does not exist, was already applied (successfully or not), or belongs to another token. | Create a new plan and show it to the user again. |
 | `PLAN_EXPIRED` | 1 | The plan is older than 10 minutes. | Create a new plan and show it to the user again. |
+| `LINK_EXPIRED` | 1 | An install download link is past its 30 minutes (only the install prompt's downloads see this). | Stop the install and ask the user to generate a new install prompt on the Agent access page; an old link never works again. |
 | `RUN_IN_PROGRESS` | 1 | A session analysis run is already running. | Do not start another; follow it with `llmaudit analysis overview --since 1d`. |
 | `NOT_READY` | 1 | The evidence is still being captured, or the reconstruction is not available yet. | Read it again later; tell the user it is not ready yet. |
 | `NOT_RETAINED` | 1 | The raw body was released after it was verified against the reconstruction. | Export `request` or `response` (the reconstruction) instead. This is not data loss. |
 | `EVIDENCE_UNAVAILABLE` | 1 | The stored evidence failed its integrity check. | Tell the user; do not retry. |
-| `RATE_LIMITED` | 1 | Too many requests; the response carries `Retry-After` (seconds). | Wait until then and try once more. Pack and facet reads have a lower limit: do not poll them. |
+| `RATE_LIMITED` | 1 | Too many requests; `details.retry_after_seconds` says how long to wait. | Wait until then and try once more. Pack and facet reads have a lower limit: do not poll them. |
 | `UPSTREAM_UNAVAILABLE` | 1 | A dependency of the server (its database, the gateway) is unavailable, or a view log could not be written. | Try once more a little later; if it fails again, tell the user. |
-| `TIMEOUT` | 1 | The server did not finish in time. | For a read, narrow the range or page size and retry once. For `apply`, do not apply again: check with the matching read command whether the change took effect. |
+| `TIMEOUT` | 1 | The server did not finish in time, or the client gave up after the command's own timeout (then `details.source` is `client`; `--help` of the command shows the limit). | For a read, narrow the range or page size and retry once. For `apply`, do not apply again: check with the matching read command whether the change took effect. |
 | `INVALID_GRANT` | 4 | The login's one-time code was invalid, expired, already used, or did not match. | Ask the user to run `llmaudit login` again. |
 | `INTERNAL` | 1 | An unexpected server error. | Tell the user; do not retry. |
 
@@ -40,7 +41,7 @@ General rules: do not retry a command more than once unless the table says so; n
 | Code | Exit | Meaning | What to do |
 |---|---|---|---|
 | `NOT_LOGGED_IN` | 4 | There are no local credentials. | Ask the user to run `llmaudit login --server <server>` with their audit server's address. |
-| `NETWORK_ERROR` | 1 | The server could not be reached (address, DNS, TLS, proxy, server down). | Tell the user, with the message. Do not retry a write; for `apply`, check whether it took effect first. |
+| `NETWORK_ERROR` | 1 | The server could not be reached (address, DNS, TLS, proxy, server down); `details.reason` is `connect` or `tls`. | Tell the user, with the message. With `tls` the certificate could not be verified: the user can point `ca_file` in config.json of the state directory at their CA; you do not edit it, and you never read credentials.json. Do not retry a write; for `apply`, check whether it took effect first. |
 | `INVALID_RESPONSE` | 1 | The answer was not a valid envelope, or a read result lacked `meta`. Often a proxy or a wrong server address. | Tell the user; check with them that the server address is the audit server's web UI. |
 | `REDIRECT_REFUSED` | 1 | The server answered with a redirect, which the client does not follow (for example http to https). | Tell the user; they log in again with the final address (`llmaudit login --server <server>`). |
 | `LOGIN_TIMEOUT` | 4 | Nobody approved in the browser within 5 minutes. | Ask the user whether they want to try again; they can run `llmaudit login` themselves. |
@@ -51,5 +52,5 @@ General rules: do not retry a command more than once unless the table says so; n
 ## Other situations
 
 - **An empty list.** Check `meta.complete` and `next_cursor` first; with `--user-agent` an empty page can have a next page. Only an empty, complete, last page means "none".
-- **Install link problems.** A download that answers HTTP 410 used an expired link (they last 30 minutes); HTTP 404 means a wrong or incomplete link; HTTP 429 means the link was used too often. In every case the user generates a new install prompt on the Agent access page.
+- **Install link problems.** A download that answers HTTP 410 (`LINK_EXPIRED`) used an expired link (they last 30 minutes); HTTP 404 means a wrong or incomplete link; HTTP 429 means the link was used too often. In every case the user generates a new install prompt on the Agent access page.
 - **The Skill seems to be missing** after installing: most agents load skills when a session starts. Ask the user to start a new session.
