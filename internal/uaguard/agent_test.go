@@ -57,8 +57,13 @@ func (repository *rowRepository) CreateUserAgentRule(_ context.Context, rule Rul
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	repository.writes++
-	rule.ID = repository.nextID
-	repository.nextID++
+	// Like the PostgreSQL store, keep the id the service assigned.
+	if rule.ID <= 0 {
+		rule.ID = repository.nextID
+	}
+	if rule.ID >= repository.nextID {
+		repository.nextID = rule.ID + 1
+	}
 	repository.rows[rule.ID] = rule
 	return rule, nil
 }
@@ -357,5 +362,31 @@ func TestRulePatchDecodesStrictly(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"enabled":false}`), &patch); err != nil || patch.Enabled == nil || *patch.Enabled || patch.Name != nil {
 		t.Fatalf("patch = %+v, %v", patch, err)
+	}
+}
+
+// Rule ids are assigned by the service (highest + 1), so deleting the last
+// rule and creating another reuses its id. With the clock repeating a
+// reading, the new rule must still not inherit the deleted rule's version,
+// or a plan made for the deleted rule would apply to the new one.
+func TestARecreatedIDNeverReusesAVersion(t *testing.T) {
+	ctx := context.Background()
+	service, _ := frozenService(t)
+	patched, err := service.Patch(ctx, 2, 60, RulePatch{Enabled: boolPtr(false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteIfVersion(ctx, 2, patched.Version()); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateFromPatch(ctx, RulePatch{Name: stringPtr("again"), Enabled: boolPtr(true), ModelPattern: stringPtr("^m"), UserAgentPattern: stringPtr("^c")}, CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != 2 || created.Version() == patched.Version() {
+		t.Fatalf("recreated rule %d has version %d, the deleted one had %d", created.ID, created.Version(), patched.Version())
+	}
+	if _, err := service.Patch(ctx, 2, patched.Version(), RulePatch{Enabled: boolPtr(false)}); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("a plan for the deleted rule applied to the new one: %v", err)
 	}
 }

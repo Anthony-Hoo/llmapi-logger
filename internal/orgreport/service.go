@@ -97,6 +97,8 @@ type Service struct {
 
 	mu      sync.Mutex
 	current atomic.Pointer[Compiled]
+	// stampNS is the last catalog version issued, guarded by mu.
+	stampNS int64
 
 	job snapshotJob
 }
@@ -138,6 +140,18 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 		return nil, fmt.Errorf("orgreport: compile persisted catalog: %w", err)
 	}
 	service.current.Store(compiled)
+	for _, group := range catalog.Groups {
+		service.stampNS = max(service.stampNS, group.UpdatedAtNS)
+	}
+	for _, project := range catalog.Projects {
+		service.stampNS = max(service.stampNS, project.UpdatedAtNS)
+	}
+	for _, member := range catalog.Members {
+		service.stampNS = max(service.stampNS, member.UpdatedAtNS)
+	}
+	for _, principal := range catalog.Principals {
+		service.stampNS = max(service.stampNS, principal.UpdatedAtNS)
+	}
 	return service, nil
 }
 
@@ -245,10 +259,14 @@ func (service *Service) candidate(mutate func(*Catalog) error) (Catalog, error) 
 }
 
 // nextVersion stamps a write of an object whose version was previous: the
-// clock, but never a value at or below previous, so two successive writes
-// never leave the same version even when the clock repeats a reading.
+// clock, but never a value at or below previous or any stamp issued before
+// (stampNS), so two successive writes never leave the same version even when
+// the clock repeats a reading, and a member or classification deleted and set
+// again never gets its old version back. The caller holds service.mu.
 func (service *Service) nextVersion(previous int64) int64 {
-	return max(service.timestamp(), previous+1)
+	version := max(service.timestamp(), previous+1, service.stampNS+1)
+	service.stampNS = version
+	return version
 }
 
 // GroupInput is the editable part of a group.
@@ -430,17 +448,17 @@ func deleteProjectMutation(id, expected int64, removed *Project) func(*Catalog) 
 
 // SetMember puts a user into a group, moving it out of any other.
 func (service *Service) SetMember(ctx context.Context, userID, groupID int64) (Member, error) {
-	member := Member{UserID: userID, GroupID: groupID, UpdatedAtNS: service.timestamp()}
-	err := service.change(ctx, setMemberMutation(&member, AnyVersion, nil), func(ctx context.Context, _ *Catalog) error {
+	member := Member{UserID: userID, GroupID: groupID}
+	err := service.change(ctx, setMemberMutation(&member, AnyVersion, service.nextVersion, nil), func(ctx context.Context, _ *Catalog) error {
 		return service.repository.SetGroupMember(ctx, member)
 	})
 	return member, err
 }
 
-// setMemberMutation upserts *member. An existing row's version is never
-// reused: member's stamp is raised above it. expected 0 requires that the
-// user has no group yet; previous receives the row replaced, if any.
-func setMemberMutation(member *Member, expected int64, previous **Member) func(*Catalog) error {
+// setMemberMutation upserts *member, stamping it with stamp(the replaced
+// row's version, 0 for a new row). expected 0 requires that the user has no
+// group yet; previous receives the row replaced, if any.
+func setMemberMutation(member *Member, expected int64, stamp func(int64) int64, previous **Member) func(*Catalog) error {
 	return func(catalog *Catalog) error {
 		for index := range catalog.Members {
 			if catalog.Members[index].UserID == member.UserID {
@@ -451,7 +469,7 @@ func setMemberMutation(member *Member, expected int64, previous **Member) func(*
 				if previous != nil {
 					*previous = &existing
 				}
-				member.UpdatedAtNS = max(member.UpdatedAtNS, existing.UpdatedAtNS+1)
+				member.UpdatedAtNS = stamp(existing.UpdatedAtNS)
 				catalog.Members[index] = *member
 				return nil
 			}
@@ -459,6 +477,7 @@ func setMemberMutation(member *Member, expected int64, previous **Member) func(*
 		if !versionMatches(0, expected) {
 			return ErrVersionConflict
 		}
+		member.UpdatedAtNS = stamp(0)
 		catalog.Members = append(catalog.Members, *member)
 		return nil
 	}
@@ -491,15 +510,15 @@ func deleteMemberMutation(userID, expected int64, removed *Member) func(*Catalog
 
 // SetPrincipal classifies a user or token.
 func (service *Service) SetPrincipal(ctx context.Context, kind string, id int64, class string) (Principal, error) {
-	principal := Principal{Kind: kind, ID: id, Class: class, UpdatedAtNS: service.timestamp()}
-	err := service.change(ctx, setPrincipalMutation(&principal, AnyVersion, nil), func(ctx context.Context, _ *Catalog) error {
+	principal := Principal{Kind: kind, ID: id, Class: class}
+	err := service.change(ctx, setPrincipalMutation(&principal, AnyVersion, service.nextVersion, nil), func(ctx context.Context, _ *Catalog) error {
 		return service.repository.SetPrincipalClass(ctx, principal)
 	})
 	return principal, err
 }
 
 // setPrincipalMutation upserts *principal like setMemberMutation.
-func setPrincipalMutation(principal *Principal, expected int64, previous **Principal) func(*Catalog) error {
+func setPrincipalMutation(principal *Principal, expected int64, stamp func(int64) int64, previous **Principal) func(*Catalog) error {
 	return func(catalog *Catalog) error {
 		for index := range catalog.Principals {
 			if catalog.Principals[index].Kind == principal.Kind && catalog.Principals[index].ID == principal.ID {
@@ -510,7 +529,7 @@ func setPrincipalMutation(principal *Principal, expected int64, previous **Princ
 				if previous != nil {
 					*previous = &existing
 				}
-				principal.UpdatedAtNS = max(principal.UpdatedAtNS, existing.UpdatedAtNS+1)
+				principal.UpdatedAtNS = stamp(existing.UpdatedAtNS)
 				catalog.Principals[index] = *principal
 				return nil
 			}
@@ -518,6 +537,7 @@ func setPrincipalMutation(principal *Principal, expected int64, previous **Princ
 		if !versionMatches(0, expected) {
 			return ErrVersionConflict
 		}
+		principal.UpdatedAtNS = stamp(0)
 		catalog.Principals = append(catalog.Principals, *principal)
 		return nil
 	}

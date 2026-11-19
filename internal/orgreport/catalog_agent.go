@@ -35,6 +35,9 @@ func versionMatches(version, expected int64) bool {
 	return expected == AnyVersion || version == expected
 }
 
+// keepVersion is the stamp of a check: it allocates no version.
+func keepVersion(previous int64) int64 { return previous }
+
 // exact turns AnyVersion into a value no object has.
 func exact(version int64) int64 {
 	if version < 0 {
@@ -211,7 +214,7 @@ func (service *Service) CheckPatchGroup(id, expectedVersion int64, patch GroupPa
 		return GroupDiff{}, err
 	}
 	var before, after Group
-	_, err := service.candidate(patchGroupMutation(id, expectedVersion, patch, func(previous int64) int64 { return previous }, &before, &after))
+	_, err := service.candidate(patchGroupMutation(id, expectedVersion, patch, keepVersion, &before, &after))
 	if err != nil {
 		return GroupDiff{}, retarget(err, ObjectGroup, id, "")
 	}
@@ -361,7 +364,7 @@ func (service *Service) CheckPatchProject(id, expectedVersion int64, change Proj
 		return ProjectDiff{}, err
 	}
 	var before, after Project
-	_, err := service.candidate(patchProjectMutation(id, expectedVersion, change, func(previous int64) int64 { return previous }, &before, &after))
+	_, err := service.candidate(patchProjectMutation(id, expectedVersion, change, keepVersion, &before, &after))
 	if err != nil {
 		return ProjectDiff{}, retarget(err, ObjectProject, id, "")
 	}
@@ -533,7 +536,7 @@ func (service *Service) CheckSetMember(userID, groupID, expectedVersion int64) (
 	}
 	member := Member{UserID: userID, GroupID: groupID}
 	var previous *Member
-	if _, err := service.candidate(setMemberMutation(&member, expectedVersion, &previous)); err != nil {
+	if _, err := service.candidate(setMemberMutation(&member, expectedVersion, keepVersion, &previous)); err != nil {
 		return MemberDiff{}, retarget(err, ObjectMember, userID, "")
 	}
 	member.UpdatedAtNS = 0
@@ -547,8 +550,8 @@ func (service *Service) CheckSetMember(userID, groupID, expectedVersion int64) (
 // version still equals expectedVersion; 0 requires that the user has no
 // group yet.
 func (service *Service) SetMemberIfVersion(ctx context.Context, userID, groupID, expectedVersion int64) (Member, error) {
-	member := Member{UserID: userID, GroupID: groupID, UpdatedAtNS: service.timestamp()}
-	err := service.change(ctx, setMemberMutation(&member, exact(expectedVersion), nil), func(ctx context.Context, _ *Catalog) error {
+	member := Member{UserID: userID, GroupID: groupID}
+	err := service.change(ctx, setMemberMutation(&member, exact(expectedVersion), service.nextVersion, nil), func(ctx context.Context, _ *Catalog) error {
 		return service.repository.SetGroupMember(ctx, member)
 	})
 	if err != nil {
@@ -590,7 +593,7 @@ func (service *Service) CheckSetPrincipal(kind string, id int64, class string, e
 	}
 	principal := Principal{Kind: kind, ID: id, Class: class}
 	var previous *Principal
-	if _, err := service.candidate(setPrincipalMutation(&principal, expectedVersion, &previous)); err != nil {
+	if _, err := service.candidate(setPrincipalMutation(&principal, expectedVersion, keepVersion, &previous)); err != nil {
 		return PrincipalDiff{}, retarget(err, ObjectPrincipal, id, kind)
 	}
 	principal.UpdatedAtNS = 0
@@ -604,8 +607,8 @@ func (service *Service) CheckSetPrincipal(kind string, id int64, class string, e
 // classification's version still equals expectedVersion; 0 requires that it
 // is not classified yet.
 func (service *Service) SetPrincipalIfVersion(ctx context.Context, kind string, id int64, class string, expectedVersion int64) (Principal, error) {
-	principal := Principal{Kind: kind, ID: id, Class: class, UpdatedAtNS: service.timestamp()}
-	err := service.change(ctx, setPrincipalMutation(&principal, exact(expectedVersion), nil), func(ctx context.Context, _ *Catalog) error {
+	principal := Principal{Kind: kind, ID: id, Class: class}
+	err := service.change(ctx, setPrincipalMutation(&principal, exact(expectedVersion), service.nextVersion, nil), func(ctx context.Context, _ *Catalog) error {
 		return service.repository.SetPrincipalClass(ctx, principal)
 	})
 	if err != nil {

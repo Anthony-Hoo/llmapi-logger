@@ -782,3 +782,84 @@ func TestWeekState(t *testing.T) {
 		t.Fatalf("without snapshots = %v", err)
 	}
 }
+
+func TestOrgSuccessfulDeletesPrincipalsAndGroupCreate(t *testing.T) {
+	ctx := context.Background()
+	service, repository := agentFixture(t)
+
+	// Principal: check, set, check-delete, delete; the rows and the
+	// published catalog agree after each write and a check changes nothing.
+	plan, err := service.CheckSetPrincipal(PrincipalUser, 9, ClassService, 0)
+	if err != nil || plan.Before != nil || plan.After.Class != ClassService {
+		t.Fatalf("plan = %+v, %v", plan, err)
+	}
+	set, err := service.SetPrincipalIfVersion(ctx, PrincipalUser, 9, ClassService, 0)
+	if err != nil || set.Version() == 0 {
+		t.Fatalf("set = %+v, %v", set, err)
+	}
+	if !reflect.DeepEqual(repository.rows(), service.Catalog().Catalog) {
+		t.Fatal("database and snapshot differ after set")
+	}
+	rows, snapshot := repository.rows(), service.current.Load()
+	removed, err := service.CheckDeletePrincipal(PrincipalUser, 9, set.Version())
+	if err != nil || removed != set || !reflect.DeepEqual(repository.rows(), rows) || service.current.Load() != snapshot {
+		t.Fatalf("check delete = %+v, %v", removed, err)
+	}
+	if err := service.DeletePrincipalIfVersion(ctx, PrincipalUser, 9, set.Version()); err != nil {
+		t.Fatal(err)
+	}
+	// Set again at the same clock reading: never the deleted version.
+	again, err := service.SetPrincipalIfVersion(ctx, PrincipalUser, 9, ClassService, 0)
+	if err != nil || again.Version() == set.Version() {
+		t.Fatalf("re-set = %+v (deleted had %d), %v", again, set.Version(), err)
+	}
+	if err := service.DeletePrincipalIfVersion(ctx, PrincipalUser, 9, set.Version()); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("a plan for the deleted classification applied: %v", err)
+	}
+
+	// The same for a membership.
+	member, err := service.SetMemberIfVersion(ctx, 8, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteMemberIfVersion(ctx, 8, member.Version()); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := service.SetMember(ctx, 8, 2); err != nil || again.Version() == member.Version() {
+		t.Fatalf("re-set member = %+v (deleted had %d), %v", again, member.Version(), err)
+	}
+
+	// Successful deletes of a project, the members of a group, the group.
+	project := projectOf(t, service, 10)
+	if err := service.DeleteProjectIfVersion(ctx, 10, project.Version()); err != nil {
+		t.Fatal(err)
+	}
+	removedMember, err := service.CheckDeleteMember(7, AnyVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteMemberIfVersion(ctx, 7, removedMember.Version()); err != nil {
+		t.Fatal(err)
+	}
+	group := groupOf(t, service, 1)
+	if removed, err := service.CheckDeleteGroup(1, group.Version()); err != nil || removed != group {
+		t.Fatalf("check delete group = %+v, %v", removed, err)
+	}
+	if err := service.DeleteGroupIfVersion(ctx, 1, group.Version()); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateGroupFromPatch(ctx, GroupPatch{Name: strp("  Ops "), Enabled: boolp(false)})
+	if err != nil || created.Name != "Ops" || created.Enabled || created.ID != 101 {
+		t.Fatalf("created = %+v, %v", created, err)
+	}
+	if _, err := service.CreateGroupFromPatch(ctx, GroupPatch{Name: strp("ops"), Enabled: boolp(true)}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate create = %v", err)
+	}
+	if _, err := service.CreateGroupFromPatch(ctx, GroupPatch{Name: strp("x")}); err == nil {
+		t.Fatal("a group without enabled was created")
+	}
+	final := repository.rows()
+	if !reflect.DeepEqual(final, service.Catalog().Catalog) || len(final.Groups) != 2 || len(final.Projects) != 1 {
+		t.Fatalf("final database %+v, snapshot %+v", final, service.Catalog().Catalog)
+	}
+}

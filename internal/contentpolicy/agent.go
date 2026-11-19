@@ -308,6 +308,12 @@ func mergeChange(current Rule, change RuleChange, substitute bool) (Rule, bool, 
 		rule.Enabled = *set.Enabled
 	}
 	if set.Action != nil {
+		// normalizeInput turns an empty action into "block", the web
+		// form's default; an explicit empty action here is a mistake, not a
+		// request to start blocking.
+		if strings.TrimSpace(*set.Action) == "" {
+			return Rule{}, false, invalidField("action", ReasonInvalidValue, "action must be block or dry_run")
+		}
 		rule.Action = *set.Action
 	}
 	if set.ModelPattern != nil {

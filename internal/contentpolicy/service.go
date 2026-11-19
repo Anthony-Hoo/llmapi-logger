@@ -55,6 +55,8 @@ type Service struct {
 	mu         sync.Mutex
 	current    atomic.Pointer[snapshot]
 	now        func() time.Time
+	// stamped is the last version timestamp issued, guarded by mu.
+	stamped int64
 }
 
 // New loads and compiles persisted rules. A nil repository is supported for
@@ -372,8 +374,11 @@ func (service *Service) commitDelete(ctx context.Context, rules []Rule, index in
 	return nil
 }
 
+// timestamp stamps a write: the clock, raised above every rule's version and
+// above every stamp this service has issued (stamped), so a version is never
+// reused. The caller holds service.mu.
 func (service *Service) timestamp() int64 {
-	now := service.now().UnixNano()
+	now := max(service.now().UnixNano(), service.stamped+1)
 	current := service.current.Load()
 	if current != nil {
 		for _, rule := range current.public {
@@ -382,6 +387,7 @@ func (service *Service) timestamp() int64 {
 			}
 		}
 	}
+	service.stamped = now
 	return now
 }
 

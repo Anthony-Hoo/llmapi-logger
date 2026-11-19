@@ -413,3 +413,48 @@ func TestPolicyChangeDecodesStrictly(t *testing.T) {
 		t.Fatal("a scalar field was accepted as a list edit")
 	}
 }
+
+func TestPolicyExplicitEmptyActionIsRefused(t *testing.T) {
+	service, _ := frozenPolicyService(t)
+	for _, call := range []func() error{
+		func() error {
+			_, err := service.CheckPatch(7, 60, RuleChange{Set: RulePatch{Action: strPtr(" ")}})
+			return err
+		},
+		func() error {
+			_, err := service.CheckCreate(RulePatch{Name: strPtr("n"), Enabled: boolPtr(true), Action: strPtr(""), Keywords: listPtr("k")}, CreateOptions{})
+			return err
+		},
+	} {
+		var invalid *ValidationError
+		if err := call(); !errors.As(err, &invalid) || invalid.Field != "action" || invalid.Reason != ReasonInvalidValue {
+			t.Fatalf("empty action = %v", err)
+		}
+	}
+	// The web route keeps defaulting an empty action to block.
+	if rule, err := service.Create(context.Background(), RuleInput{Name: "web", Keywords: []string{"k"}}); err != nil || rule.Action != ActionBlock {
+		t.Fatalf("web create = %+v, %v", rule, err)
+	}
+}
+
+func TestPolicyVersionsNeverRepeat(t *testing.T) {
+	ctx := context.Background()
+	service, _ := frozenPolicyService(t)
+	seen := map[int64]bool{60: true}
+	rule, _ := service.Get(7)
+	for range 3 {
+		var err error
+		rule, err = service.Patch(ctx, 7, rule.Version(), RuleChange{})
+		if err != nil || seen[rule.Version()] {
+			t.Fatalf("version %d repeated (%v)", rule.Version(), err)
+		}
+		seen[rule.Version()] = true
+	}
+	if err := service.DeleteIfVersion(ctx, 7, rule.Version()); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateFromPatch(ctx, RulePatch{Name: strPtr("n"), Enabled: boolPtr(true), Action: strPtr(ActionBlock), Keywords: listPtr("k")}, CreateOptions{})
+	if err != nil || seen[created.Version()] {
+		t.Fatalf("created version %d repeated (%v)", created.Version(), err)
+	}
+}
