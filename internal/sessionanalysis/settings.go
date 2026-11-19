@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -96,6 +97,12 @@ type SettingsUpdate struct {
 // ErrInvalidSettings wraps a validation message that is safe to show: it
 // names a field and its limits, never a secret.
 var ErrInvalidSettings = errors.New("sessionanalysis: invalid settings")
+
+// ErrSettingsUnavailable wraps a failure to read the saved section from the
+// store (not a missing or unusable row). Reads then run on the configuration
+// file; a write refuses with it and saves nothing, because a write that
+// started from the file's values would save them over the saved section.
+var ErrSettingsUnavailable = errors.New("sessionanalysis: saved settings could not be read")
 
 // SettingsMessage returns the field message of an ErrInvalidSettings error,
 // and "" for any other error.
@@ -211,7 +218,7 @@ func loadSaved(ctx context.Context, file config.SessionAnalysisConfig, store Set
 		return file, fileKey, 0, nil
 	}
 	if err != nil {
-		return file, fileKey, 0, err
+		return file, fileKey, 0, fmt.Errorf("%w: %w", ErrSettingsUnavailable, err)
 	}
 	var saved savedSection
 	decoder := json.NewDecoder(strings.NewReader(row.Settings))
@@ -317,20 +324,41 @@ func (service *SettingsService) Get(ctx context.Context) (SettingsView, error) {
 // its version (the saved row's time; 0 when the file applies, including when
 // the saved section is unusable). The caller holds mu.
 func (service *SettingsService) current(ctx context.Context) (config.SessionAnalysisConfig, string, int64) {
+	current, keySource, version, _ := service.currentFor(ctx, false)
+	return current, keySource, version
+}
+
+// currentForWrite is current for a write: when the saved section cannot be
+// read from the store it fails with ErrSettingsUnavailable instead of
+// falling back to the file. A row that was read but cannot be used (it no
+// longer decodes, decrypts or validates) is the file-applies state, as for a
+// read, and stays writable. The caller holds mu.
+func (service *SettingsService) currentForWrite(ctx context.Context) (config.SessionAnalysisConfig, string, int64, error) {
+	return service.currentFor(ctx, true)
+}
+
+func (service *SettingsService) currentFor(ctx context.Context, write bool) (config.SessionAnalysisConfig, string, int64, error) {
 	current, keySource, version, err := loadSaved(ctx, service.file, service.store, service.cipher)
 	if err != nil {
+		if write && errors.Is(err, ErrSettingsUnavailable) {
+			return config.SessionAnalysisConfig{}, "", 0, err
+		}
 		current, keySource, version = service.file, KeyNone, 0
 		if service.file.LLM.APIKey != "" {
 			keySource = KeyFile
 		}
 	}
-	return current, keySource, version
+	return current, keySource, version, nil
 }
 
 // candidate resolves an update against what is in use: the configuration it
-// would produce, where its key comes from, and the version it replaces.
-func (service *SettingsService) candidate(ctx context.Context, update SettingsUpdate) (config.SessionAnalysisConfig, string, int64, error) {
-	current, keySource, version := service.current(ctx)
+// would produce, where its key comes from, and the version it replaces. For a
+// write (forWrite) a store read failure is an error rather than the file.
+func (service *SettingsService) candidate(ctx context.Context, update SettingsUpdate, forWrite bool) (config.SessionAnalysisConfig, string, int64, error) {
+	current, keySource, version, err := service.currentFor(ctx, forWrite)
+	if err != nil {
+		return config.SessionAnalysisConfig{}, "", 0, err
+	}
 	apiKey := current.LLM.APIKey
 	if update.APIKey != nil {
 		apiKey, keySource = *update.APIKey, KeySaved
@@ -358,7 +386,7 @@ func (service *SettingsService) Update(ctx context.Context, update SettingsUpdat
 
 // update is Update with mu held.
 func (service *SettingsService) update(ctx context.Context, update SettingsUpdate) (SettingsView, error) {
-	candidate, keySource, version, err := service.candidate(ctx, update)
+	candidate, keySource, version, err := service.candidate(ctx, update, true)
 	if err != nil {
 		return SettingsView{}, err
 	}
@@ -509,7 +537,7 @@ func probeModel(ctx context.Context, candidate config.SessionAnalysisConfig) Pro
 // synthetic call to the model endpoint.
 func (service *SettingsService) Test(ctx context.Context, update SettingsUpdate) (ProbeResult, error) {
 	service.mu.Lock()
-	candidate, _, _, err := service.candidate(ctx, update)
+	candidate, _, _, err := service.candidate(ctx, update, false)
 	probe := service.probe
 	service.mu.Unlock()
 	if err != nil {

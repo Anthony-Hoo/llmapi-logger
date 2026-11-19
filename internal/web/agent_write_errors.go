@@ -104,6 +104,9 @@ func agentWriteFailure(err error) *agentFailure {
 		return validationFailure(agentapi.CodeInvalidArgument, field, "", "invalid calibration label")
 	case errors.Is(err, sessionanalysis.ErrRunInProgress):
 		return &agentFailure{Code: agentapi.CodeRunInProgress}
+	case errors.Is(err, sessionanalysis.ErrSettingsUnavailable):
+		// The saved section could not be read; nothing was written.
+		return &agentFailure{Code: agentapi.CodeUpstreamUnavailable}
 	}
 	code := agentErrorCodeOf(err)
 	if code == agentapi.CodeInvalidArgument {

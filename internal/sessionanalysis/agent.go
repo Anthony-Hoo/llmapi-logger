@@ -116,11 +116,11 @@ type SettingsDiff struct {
 func (service *SettingsService) CheckPatch(ctx context.Context, expectedVersion int64, patch SettingsPatch) (SettingsDiff, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	diff, update, err := service.preparePatch(ctx, expectedVersion, patch)
+	diff, update, err := service.preparePatch(ctx, expectedVersion, patch, false)
 	if err != nil {
 		return SettingsDiff{}, err
 	}
-	candidate, _, _, err := service.candidate(ctx, update)
+	candidate, _, _, err := service.candidate(ctx, update, false)
 	if err != nil {
 		return SettingsDiff{}, err
 	}
@@ -142,7 +142,7 @@ func (service *SettingsService) CheckPatch(ctx context.Context, expectedVersion 
 func (service *SettingsService) Patch(ctx context.Context, expectedVersion int64, patch SettingsPatch) (SettingsView, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	_, update, err := service.preparePatch(ctx, exact(expectedVersion), patch)
+	_, update, err := service.preparePatch(ctx, exact(expectedVersion), patch, true)
 	if err != nil {
 		return SettingsView{}, err
 	}
@@ -177,7 +177,11 @@ func (service *SettingsService) CheckReset(ctx context.Context, expectedVersion 
 func (service *SettingsService) ResetIfVersion(ctx context.Context, expectedVersion int64) (SettingsView, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	if _, _, version := service.current(ctx); version != exact(expectedVersion) {
+	_, _, version, err := service.currentForWrite(ctx)
+	if err != nil {
+		return SettingsView{}, err
+	}
+	if version != exact(expectedVersion) {
 		return SettingsView{}, ErrVersionConflict
 	}
 	return service.reset(ctx)
@@ -205,7 +209,12 @@ func (service *SettingsService) ClearAPIKey(ctx context.Context) (SettingsView, 
 func (service *SettingsService) replaceKey(ctx context.Context, key string) (SettingsView, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	current, _, _ := service.current(ctx)
+	// A key write resubmits the settings in use; it must never start from the
+	// file's values because the saved row could not be read.
+	current, _, _, err := service.currentForWrite(ctx)
+	if err != nil {
+		return SettingsView{}, err
+	}
 	return service.update(ctx, SettingsUpdate{EditableSettings: editableOf(current), APIKey: &key})
 }
 
@@ -216,9 +225,13 @@ func exact(version int64) int64 {
 	return version
 }
 
-// preparePatch merges a patch into the section in use. The caller holds mu.
-func (service *SettingsService) preparePatch(ctx context.Context, expectedVersion int64, patch SettingsPatch) (SettingsDiff, SettingsUpdate, error) {
-	current, keySource, version := service.current(ctx)
+// preparePatch merges a patch into the section in use. For a write a store
+// read failure is an error rather than the file. The caller holds mu.
+func (service *SettingsService) preparePatch(ctx context.Context, expectedVersion int64, patch SettingsPatch, forWrite bool) (SettingsDiff, SettingsUpdate, error) {
+	current, keySource, version, err := service.currentFor(ctx, forWrite)
+	if err != nil {
+		return SettingsDiff{}, SettingsUpdate{}, err
+	}
 	if expectedVersion != AnyVersion && version != expectedVersion {
 		return SettingsDiff{}, SettingsUpdate{}, ErrVersionConflict
 	}

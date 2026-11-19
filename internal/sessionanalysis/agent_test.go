@@ -229,7 +229,7 @@ func TestSettingsErrorsNameTheField(t *testing.T) {
 			t.Fatalf("%+v = %v (%+v)", test.patch, err, invalid)
 		}
 		// The web route fails with the same text.
-		_, update, _ := service.preparePatch(ctx, AnyVersion, test.patch)
+		_, update, _ := service.preparePatch(ctx, AnyVersion, test.patch, false)
 		if _, webErr := service.Update(ctx, update); webErr == nil || webErr.Error() != err.Error() || SettingsMessage(webErr) != invalid.Message {
 			t.Fatalf("web = %v, agent = %v", webErr, err)
 		}
@@ -284,5 +284,85 @@ func TestValidateCalibrationLabels(t *testing.T) {
 	query.SetModel("")
 	if query.CalibrationAvailable() {
 		t.Fatal("calibration available without a model")
+	}
+}
+
+// A write never starts from the configuration file because the saved row
+// could not be read: SetAPIKey, ClearAPIKey, Patch, ResetIfVersion and the
+// web's Update refuse with ErrSettingsUnavailable and save nothing, while
+// reads still fall back to the file. A saved row that was read but can no
+// longer be used is the file-applies state and stays writable.
+func TestWritesRefuseWhenTheSavedSectionCannotBeRead(t *testing.T) {
+	ctx := context.Background()
+	writes := map[string]func(*SettingsService, int64) error{
+		"set key": func(service *SettingsService, _ int64) error {
+			_, err := service.SetAPIKey(ctx, "rotated-key-0002")
+			return err
+		},
+		"clear key": func(service *SettingsService, _ int64) error { _, err := service.ClearAPIKey(ctx); return err },
+		"patch": func(service *SettingsService, version int64) error {
+			_, err := service.Patch(ctx, version, SettingsPatch{RunAt: ptr("04:00")})
+			return err
+		},
+		"reset": func(service *SettingsService, version int64) error {
+			_, err := service.ResetIfVersion(ctx, version)
+			return err
+		},
+		"update": func(service *SettingsService, _ int64) error {
+			view, _ := service.Get(ctx)
+			_, err := service.Update(ctx, SettingsUpdate{EditableSettings: view.Settings})
+			return err
+		},
+	}
+	for name, write := range writes {
+		t.Run(name, func(t *testing.T) {
+			service, store, _, _ := settingsFixture(t)
+			initial, _ := service.Get(ctx)
+			edited := initial.Settings
+			edited.RunAt, edited.LLM.Model, edited.LLM.MaxConcurrency = "03:30", "page-model", 4
+			saved, err := service.Update(ctx, SettingsUpdate{EditableSettings: edited, APIKey: ptr("page-key-9999")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.mu.Lock()
+			before := store.rows[storage.SettingsSessionAnalysis]
+			store.fail = errors.New("transient: connection reset")
+			store.mu.Unlock()
+			err = write(service, saved.UpdatedNS)
+			if !errors.Is(err, ErrSettingsUnavailable) {
+				t.Fatalf("write on an unreadable store = %v", err)
+			}
+			// Reads keep falling back to the file.
+			if view, err := service.Get(ctx); err != nil || view.Source != SourceFile {
+				t.Fatalf("read on an unreadable store = %+v, %v", view, err)
+			}
+			store.mu.Lock()
+			store.fail = nil
+			after := store.rows[storage.SettingsSessionAnalysis]
+			store.mu.Unlock()
+			if after.UpdatedAtNS != before.UpdatedAtNS || after.Settings != before.Settings || !bytes.Equal(after.SecretEnc, before.SecretEnc) {
+				t.Fatal("a refused write changed the saved row")
+			}
+			view, _ := service.Get(ctx)
+			if view.Settings.LLM.Model != "page-model" || view.APIKey != KeySaved || view.UpdatedNS != saved.UpdatedNS {
+				t.Fatalf("saved section after the refused write = %+v", view)
+			}
+		})
+	}
+
+	// An unusable saved row is not a read failure: the file applies and a
+	// key write starts from it.
+	service, store, _, _ := settingsFixture(t)
+	initial, _ := service.Get(ctx)
+	if _, err := service.Update(ctx, SettingsUpdate{EditableSettings: initial.Settings, APIKey: ptr("page-key-9999")}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	broken := store.rows[storage.SettingsSessionAnalysis]
+	broken.Settings = `{"run_at":"02:00","unknown":1}`
+	store.rows[storage.SettingsSessionAnalysis] = broken
+	store.mu.Unlock()
+	if view, err := service.SetAPIKey(ctx, "rotated-key-0002"); err != nil || view.APIKey != KeySaved {
+		t.Fatalf("key write over an unusable row = %+v, %v", view, err)
 	}
 }
