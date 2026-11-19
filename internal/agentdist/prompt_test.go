@@ -188,12 +188,20 @@ func TestInstallPromptRequirements(t *testing.T) {
 				t.Fatal("the step before the last is not the login")
 			}
 
-			// Every command that deletes targets the install or the work directory only.
-			work := "llmapi-audit-install-" + input.Package.SHA256[:12]
+			// Every command that deletes targets the install or the work directory
+			// only: on POSIX the private one mktemp creates (its printed path
+			// replaces the placeholder), on Windows the one in the user's TEMP.
+			work := `$env:TEMP\llmapi-audit-install-` + input.Package.SHA256[:12]
+			if !platform.Windows() {
+				work = posixWorkDir
+				if !strings.Contains(prompt, `mktemp -d "${TMPDIR:-/tmp}/llmapi-audit-install.XXXXXXXX"`) || strings.Contains(prompt, "mkdir -p -- \"${TMPDIR") {
+					t.Error("the POSIX work directory is not created with mktemp -d")
+				}
+			}
 			for _, line := range commandLines(prompt) {
 				for _, deletion := range regexp.MustCompile(`(?:rm -rf -- |Remove-Item -LiteralPath )("[^"]*")`).FindAllStringSubmatch(line, -1) {
 					target := strings.Trim(deletion[1], `"`)
-					if target != install && !strings.HasSuffix(target, work) {
+					if target != install && target != work {
 						t.Errorf("deletes %q, which is neither the install directory nor the work directory", target)
 					}
 				}
@@ -289,6 +297,10 @@ func TestInstallPromptCustomDirectories(t *testing.T) {
 		{windowsAMD64, `C:\Tools\skills`, `C:\Tools\skills\llmapi-audit`},
 		{windowsAMD64, `c:/Tools/skills/`, `C:\Tools\skills\llmapi-audit`},
 		{windowsAMD64, `D:\skills\llmapi-audit\`, `D:\skills\llmapi-audit`},
+		// The Skill directory itself in another letter case is not nested.
+		{windowsAMD64, `C:\Tools\skills\LLMAPI-AUDIT`, `C:\Tools\skills\llmapi-audit`},
+		{darwinARM64, "/Users/example/skills/LlmApi-Audit", "/Users/example/skills/llmapi-audit"},
+		{linuxAMD64, "/opt/skills/Llmapi-Audit/", "/opt/skills/llmapi-audit"},
 	}
 	for _, c := range cases {
 		prompt, err := InstallPrompt(promptInput(c.platform, AgentClaudeCode, c.input))
@@ -309,14 +321,14 @@ func TestInstallPromptRejectsBadSkillsDir(t *testing.T) {
 		`/opt/"skills"`, "/opt/'skills'", "/opt/`id`", "/opt/$(id)", "/opt/${HOME}", "/opt/skills;rm",
 		"/opt/skills&", "/opt/a|b", "/opt/a<b", "/opt/a>b", "/opt/a(b)", "/opt/*", "/opt/a?", "/opt/a[1]",
 		"/opt/a{b}", "/opt/a!b", "/opt/a#b", "/opt/a%b", "/opt/a^b", "/opt/a~b", "/opt/a=b", "/opt/a,b",
-		`/opt/a\b`, "/opt/a:b", "/opt/ skills", "/opt/skills /x", "/llmapi-audit", "C:\\skills",
+		`/opt/a\b`, "/opt/a:b", "/opt/ skills", "/opt/skills /x", "/llmapi-audit", "/LLMAPI-Audit", "C:\\skills",
 		"/" + strings.Repeat("a", 250),
 	}
 	windows := []string{
 		`skills`, `\skills`, `\\server\share\skills`, `C:`, `C:\`, `C:skills`, `1:\skills`, `C:\a\..\b`,
 		`C:\a\.\b`, `C:\a\\b`, `C:\a:b`, `C:\a.\b`, `C:\%USERPROFILE%\skills`, `C:\a&b`, `C:\a^b`, `C:\a!b`,
 		"C:\\a\nb", `C:\a"b`, `C:\a'b`, "C:\\a`b", `C:\$env:TEMP`, `C:\a;b`, `C:\a|b`, `/opt/skills`,
-		`C:\llmapi-audit`,
+		`C:\llmapi-audit`, `C:\LLMAPI-AUDIT`,
 	}
 	check := func(platform Platform, value string) {
 		prompt, err := InstallPrompt(promptInput(platform, AgentClaudeCode, value))

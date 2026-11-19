@@ -4,7 +4,7 @@ Rules for this whole task:
 - Execute the numbered steps below in order, one at a time, running each command exactly as written. Do not skip, merge or reorder steps.
 - If a command fails or a step's check does not hold, stop at once. Do not try to repair it and do not continue with later steps. Tell the user which step failed and show the exact output.
 - Use only the download link in this prompt. Never fetch the package from any other address, mirror or repository, and never switch to another install method (a package manager, a git clone, building from source, copying files by hand).
-- Change nothing outside the install directory C:\Tools\agent skills\llmapi-audit. Never delete or modify its parent directory C:\Tools\agent skills or anything else in it. The one exception is the temporary work directory $env:TEMP\llmapi-audit-install-0123456789ab that this prompt creates and removes.
+- Change nothing outside the install directory C:\Tools\agent skills\llmapi-audit. Never delete or modify its parent directory C:\Tools\agent skills or anything else in it. The one exception is the temporary work directory $env:TEMP\llmapi-audit-install-0123456789ab, which this prompt creates and removes.
 - Nothing here asks for a password, an API key or a token, and you must not ask the user for one. The login in a later step is authorized by the user in the browser.
 - Every command below is one complete PowerShell command and contains no single quote. If your shell tool runs PowerShell, run it as written; if it runs bash or another shell, run it as: powershell -NoProfile -Command '<the command>'. Nothing depends on variables from an earlier step.
 
