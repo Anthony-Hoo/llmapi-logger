@@ -147,6 +147,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 22 | [关键词/模型请求拦截与上游策略拒绝识别](22-content-policy.md) |
 | 23 | [组织项目周报与使用合规（可选，默认关闭）](23-org-project-reports.md) |
 | 24 | [会话记录分析（可选，默认关闭）](24-session-analysis.md) |
+| 25 | [Agent 接入（可选，默认关闭；设计已确认，未实现）](25-agent-access.md)，[接口合同](25-agent-access-contract.md) |
 
 ## 10. 当前实现范围
 
