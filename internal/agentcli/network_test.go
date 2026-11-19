@@ -38,10 +38,10 @@ func TestTimeouts(t *testing.T) {
 	want := map[string]time.Duration{
 		"weekly me": 40 * time.Second, "weekly report": 40 * time.Second, "weekly trend": 40 * time.Second,
 		"weekly project": 40 * time.Second, "weekly unattributed": 40 * time.Second, "weekly regenerate": 40 * time.Second,
-		"config preview-project": 40 * time.Second,
-		"requests export":        60 * time.Second,
-		"analysis test-model":    70 * time.Second,
-		"apply":                  130 * time.Second,
+		"config preview-project": 40 * time.Second, "config set": 40 * time.Second,
+		"requests export":     60 * time.Second,
+		"analysis test-model": 70 * time.Second,
+		"apply":               130 * time.Second,
 	}
 	for _, spec := range allCommands() {
 		expected, special := want[spec.name()]

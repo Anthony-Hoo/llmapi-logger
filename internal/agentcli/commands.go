@@ -498,6 +498,8 @@ func buildCommands() []*commandSpec {
 				{Name: "if-version", Value: "<version>", Body: "expected_version", Help: "Expected version of the object (from `llmaudit config show --kind <kind>`). Default: the version when the plan is created."},
 			},
 			Routes: planRoute(),
+			// A project plan runs the preview on the server (up to 30 seconds).
+			Timeout: 40 * time.Second,
 			Examples: []string{
 				"llmaudit config set --kind content-rule --id 12 --set enabled=false",
 				"llmaudit config set --kind content-rule --set name=example --set enabled=true --set action=dry_run --set-json keywords='[\"example\"]'",
