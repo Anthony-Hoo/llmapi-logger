@@ -13,6 +13,8 @@ import (
 	"strings"
 	"unicode"
 
+	"llmapi-logger/internal/agentaccess"
+	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
@@ -109,6 +111,11 @@ type Options struct {
 	// (insights.Vocabulary.InjectedUserTextPrefixes). The session response
 	// carries it so the conversation view's user-input outline skips that text.
 	InjectedUserTextPrefixes []string
+
+	// AgentAccess is nil unless agent_access.enabled. While nil the facade
+	// answers FEATURE_DISABLED for every request and /api/v1/agent-access/*
+	// answers 404 (doc/features/25-agent-access.md).
+	AgentAccess *agentaccess.Service
 }
 
 // NewHandler constructs the complete management handler. It rejects an empty
@@ -139,6 +146,13 @@ func NewHandler(options Options) (http.Handler, error) {
 		sessionAnalysisSettings: options.SessionAnalysisSettings,
 
 		injectedUserTextPrefixes: append([]string(nil), options.InjectedUserTextPrefixes...),
+
+		agent:         options.AgentAccess,
+		agentRegistry: agentapi.NewRegistry(agentapi.Endpoints),
+	}
+	handler.agentHandlerTable = handler.agentHandlers()
+	if err := bindAgentHandlers(handler.agentRegistry, handler.agentHandlerTable); err != nil {
+		return nil, err
 	}
 	handler.authenticator = newManagementAuth(options.AdminToken, options.Developer.usable())
 	handler.auth = handler.authenticator.middleware(handler.serveProtected)
@@ -165,9 +179,19 @@ type managementHandler struct {
 	sessionAnalysisSettings SessionAnalysisSettings
 
 	injectedUserTextPrefixes []string
+
+	agent             *agentaccess.Service
+	agentRegistry     *agentapi.Registry
+	agentHandlerTable map[string]agentHandler
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	// The facade has its own authentication and never reaches the session
+	// or admin-token middleware.
+	if isAgentPath(request.URL.Path) {
+		handler.serveAgent(writer, request)
+		return
+	}
 	if request.URL.Path == "/api/v1/session" {
 		handler.serveSession(writer, request)
 		return
@@ -184,6 +208,12 @@ func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request 
 		}
 		http.Redirect(writer, request, "/ui/", http.StatusTemporaryRedirect)
 	case request.URL.Path == "/ui" || strings.HasPrefix(request.URL.Path, "/ui/"):
+		if handler.agent != nil {
+			// The UI now hosts the agent authorization page; a framing site
+			// must not be able to click "authorize" for the user.
+			writer.Header().Set("X-Frame-Options", "DENY")
+			writer.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		}
 		handler.static.ServeHTTP(writer, request)
 	default:
 		http.NotFound(writer, request)
@@ -211,6 +241,10 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveOrg(writer, request)
 	case strings.HasPrefix(request.URL.Path, sessionAnalysisPathPrefix):
 		handler.serveSessionAnalysis(writer, request)
+	case isAgentAccessPath(request.URL.Path):
+		// Both roles authorize and manage their own agent tokens, so this
+		// family must stay ahead of the administrator-only fallback.
+		handler.serveAgentAccess(writer, request)
 	case !handler.requireAdmin(writer, request):
 		return
 	case request.URL.Path == "/healthz":

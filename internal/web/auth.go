@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/storage"
 )
@@ -49,6 +50,11 @@ type principal struct {
 	// Scope is nil for administrators and always set for developers.
 	Scope    *query.Scope
 	Identity developerIdentity
+	// AgentTokenID and Tier are set only for an agent token on the facade
+	// (doc/features/25-agent-access.md section 5.2); both are zero for a
+	// web session or the admin token.
+	AgentTokenID int64
+	Tier         agentapi.Tier
 }
 
 // developerSessionPayload travels inside the signed cookie. Short names keep the

@@ -48,6 +48,11 @@ type sessionResponse struct {
 	// user text from the effective vocabulary; the conversation view's
 	// user-input outline skips text parts that start with one of them.
 	InjectedUserTextPrefixes []string `json:"injected_user_text_prefixes,omitempty"`
+	// AgentAccessEnabled tells the UI whether the agent access pages and
+	// /api/v1/agent-access exist; AgentWriteAllowed whether an administrator
+	// may authorize a read-write agent token (doc/features/25-agent-access.md).
+	AgentAccessEnabled bool `json:"agent_access_enabled"`
+	AgentWriteAllowed  bool `json:"agent_write_allowed"`
 }
 
 // authenticatedSession builds the session response for an authenticated
@@ -58,6 +63,8 @@ func (handler *managementHandler) authenticatedSession(callerRole role) sessionR
 		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
 		SessionAnalysisEnabled:   handler.sessionAnalysis != nil,
 		InjectedUserTextPrefixes: handler.injectedUserTextPrefixes,
+		AgentAccessEnabled:       handler.agent != nil,
+		AgentWriteAllowed:        handler.agent.AllowWrite(),
 	}
 }
 
