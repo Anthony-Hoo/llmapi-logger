@@ -158,7 +158,7 @@ func buildCommands() []*commandSpec {
 				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results). Default: all."},
 				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id. Default: all."},
 				{Name: "forward-status", Value: "<state>", Query: "forward_status", Help: "Only records whose forwarding ended this way: in_progress, completed, rejected, client_cancelled, newapi_error, proxy_error or interrupted. Default: all."},
-				{Name: "blocked-by", Value: "<interceptor>", Query: "blocked_by", Help: "Only records a local policy blocked with this interceptor, e.g. content_policy or user_agent. Default: all."},
+				{Name: "blocked-by", Value: "<interceptor>", Query: "blocked_by", Help: "Only records a local policy blocked with this interceptor, e.g. content_policy or user_agent_policy (the interceptor id stored as blocked_by). Default: all."},
 				{Name: "block-code", Value: "<code>", Query: "block_code", Help: "Only records blocked with this block code, e.g. body_too_large. Default: all."},
 				{Name: "capture-status", Value: "<state>", Query: "capture_status", Help: "Only records whose body capture is pending, complete, partial or failed (chunk_missing appears in results only and is not a filter). Default: all."},
 				{Name: "upstream-error-class", Value: "<class>", Query: "upstream_error_class", Help: "Only records whose upstream error has this class, e.g. cyber_policy. Default: all."},
