@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -785,8 +786,14 @@ func TestExchangeAndAuthorizationLimiters(t *testing.T) {
 
 	limited := newHarness(t, true, true)
 	for attempt := range 20 {
-		if _, err := limited.service.Approve(ctx, agentaccess.Grantor{Role: agentapi.RoleAdmin}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.71"); err != nil {
+		authorization, err := limited.service.Approve(ctx, agentaccess.Grantor{Role: agentapi.RoleAdmin}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.71")
+		if err != nil {
 			t.Fatalf("authorization %d = %v", attempt, err)
+		}
+		// Redeemed, so that only the rate limit and not the cap on open
+		// codes (TestAuthorizationLimitsFollowTheApprover) is in play.
+		if _, err := limited.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.71", agentaccess.RequestMeta{}); err != nil {
+			t.Fatalf("exchange %d = %v", attempt, err)
 		}
 	}
 	if _, err := limited.service.Approve(ctx, agentaccess.Grantor{Role: agentapi.RoleAdmin}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.71"); codeOf(err) != agentapi.CodeRateLimited {
@@ -794,6 +801,71 @@ func TestExchangeAndAuthorizationLimiters(t *testing.T) {
 	}
 	if _, err := limited.service.Deny(ctx, agentaccess.Grantor{Role: agentapi.RoleAdmin}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.71"); codeOf(err) != agentapi.CodeRateLimited {
 		t.Fatalf("deny from a limited address = %v", err)
+	}
+}
+
+// The authorization limiter and the cap on open codes follow the approving
+// identity, not the address: behind one proxy address a developer session
+// neither uses up the administrator's allowance nor fills the code store.
+func TestAuthorizationLimitsFollowTheApprover(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, true, true)
+	const proxy = "10.0.0.1"
+	developer := agentaccess.Grantor{Role: agentapi.RoleDeveloper, Scope: agentaccesstest.DeveloperScope(1, 42), SessionExpiresAt: h.clock.Now().Add(time.Hour)}
+	other := agentaccess.Grantor{Role: agentapi.RoleDeveloper, Scope: agentaccesstest.DeveloperScope(2, 43), SessionExpiresAt: h.clock.Now().Add(time.Hour)}
+	admin := agentaccess.Grantor{Role: agentapi.RoleAdmin}
+	bad := agentaccesstest.Request(agentapi.TierRead)
+	bad.Mode = "x"
+	for range 20 {
+		if _, err := h.service.Deny(ctx, developer, bad, proxy); codeOf(err) != agentapi.CodeInvalidArgument {
+			t.Fatalf("invalid deny = %v", err)
+		}
+	}
+	if _, err := h.service.Approve(ctx, developer, agentaccesstest.Request(agentapi.TierRead), proxy); codeOf(err) != agentapi.CodeRateLimited {
+		t.Fatalf("developer after 20 requests = %v", err)
+	}
+	if _, err := h.service.Approve(ctx, admin, agentaccesstest.Request(agentapi.TierRead), proxy); err != nil {
+		t.Fatalf("administrator from the same address = %v", err)
+	}
+
+	// Open (unredeemed, unexpired) codes are capped per identity.
+	h = newHarness(t, true, true)
+	paste := agentaccesstest.Request(agentapi.TierRead)
+	paste.Mode, paste.Port = agentaccess.ModePaste, 0
+	var first agentaccess.Authorization
+	for index := range 8 {
+		authorization, err := h.service.Approve(ctx, developer, paste, "2001:db8::"+strconv.Itoa(index))
+		if err != nil {
+			t.Fatalf("open code %d = %v", index, err)
+		}
+		if index == 0 {
+			first = authorization
+		}
+	}
+	_, err := h.service.Approve(ctx, developer, paste, "2001:db8::99")
+	var coded *agentaccess.Error
+	if !asError(err, &coded) || coded.Code != agentapi.CodeRateLimited || coded.RetryAfter <= 0 || coded.RetryAfter > first.ExpiresIn {
+		t.Fatalf("ninth open code = %v", err)
+	}
+	if _, err := h.service.Approve(ctx, other, paste, proxy); err != nil {
+		t.Fatalf("another developer = %v", err)
+	}
+	if _, err := h.service.Approve(ctx, admin, agentaccesstest.Request(agentapi.TierRead), proxy); err != nil {
+		t.Fatalf("administrator = %v", err)
+	}
+	// A redeemed code no longer counts.
+	if _, err := h.service.Exchange(ctx, first.Code, agentaccesstest.Verifier, proxy, agentaccess.RequestMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.Approve(ctx, developer, paste, proxy); err != nil {
+		t.Fatalf("after a redemption = %v", err)
+	}
+	// Neither does an expired one.
+	h.clock.Advance(5*time.Minute + time.Second)
+	for index := range 8 {
+		if _, err := h.service.Approve(ctx, developer, paste, proxy); err != nil {
+			t.Fatalf("after expiry %d = %v", index, err)
+		}
 	}
 }
 

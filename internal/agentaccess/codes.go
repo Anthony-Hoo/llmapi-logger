@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"io"
 	"strconv"
 	"sync"
@@ -28,6 +29,10 @@ const (
 	// maxCodes bounds the in-memory store; authorizations beyond it are
 	// refused until entries expire.
 	maxCodes = 1024
+	// maxCodesPerApprover bounds the unredeemed, unexpired codes of one
+	// approving identity, so that one session cannot fill the store and stop
+	// every other identity from authorizing.
+	maxCodesPerApprover = 8
 
 	codeRandomBytes   = 32
 	codeEncodedChars  = 43
@@ -84,6 +89,8 @@ type Issued struct {
 }
 
 type codeEntry struct {
+	// approver is the approving identity's limiter key (approverKey).
+	approver   string
 	challenge  string
 	identity   Identity
 	expiresAt  time.Time
@@ -110,6 +117,22 @@ func (store *codeStore) sweepLocked(now time.Time) {
 			delete(store.entries, key)
 		}
 	}
+}
+
+// openLocked counts approver's codes that can still be redeemed (neither
+// redeemed nor expired) and reports when the first of them expires.
+func (store *codeStore) openLocked(approver string, now time.Time) (int, time.Time) {
+	open, soonest := 0, time.Time{}
+	for _, entry := range store.entries {
+		if entry.approver != approver || entry.redeemed || !now.Before(entry.expiresAt) {
+			continue
+		}
+		open++
+		if soonest.IsZero() || entry.expiresAt.Before(soonest) {
+			soonest = entry.expiresAt
+		}
+	}
+	return open, soonest
 }
 
 // LoopbackRedirectURI is the only callback accepted: http, the IPv4 loopback
@@ -140,10 +163,33 @@ func validateMode(request AuthorizationRequest) error {
 	return nil
 }
 
+// approverKey is the authorization limiter's key for a web session: the
+// approving identity, not its address, so that sessions sharing an address
+// (behind one reverse proxy, say) do not use up each other's allowance. Every
+// administrator session is the one administrator identity; a developer is
+// the scope of the key it signed in with. It is derived before the grantor
+// is validated, so a malformed grantor is counted too, under its address.
+func approverKey(grantor Grantor, source string) string {
+	switch {
+	case grantor.Role == agentapi.RoleAdmin:
+		return "admin"
+	case grantor.Role == agentapi.RoleDeveloper && grantor.Scope != nil && len(grantor.Scope.Fingerprint) > 0:
+		key := "developer:" + hex.EncodeToString(grantor.Scope.Fingerprint) + ":"
+		if grantor.Scope.TokenID != nil {
+			key += strconv.FormatInt(*grantor.Scope.TokenID, 10)
+		}
+		return key
+	default:
+		return "source:" + source
+	}
+}
+
 // Approve records an approved authorization and returns its code. source is
-// the web session's address for the authorization limiter.
+// the web session's address, used by the authorization limiter only for a
+// grantor that names no identity.
 func (service *Service) Approve(ctx context.Context, grantor Grantor, request AuthorizationRequest, source string) (Authorization, error) {
-	if allowed, retryAfter := service.authorizations.take(source); !allowed {
+	approver := approverKey(grantor, source)
+	if allowed, retryAfter := service.authorizations.take(approver); !allowed {
 		return Authorization{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: retryAfter}
 	}
 	if err := validateMode(request); err != nil {
@@ -228,12 +274,16 @@ func (service *Service) Approve(ctx context.Context, grantor Grantor, request Au
 		ttl = pasteCodeTTL
 	}
 	entry := &codeEntry{
-		challenge: request.Challenge, identity: identity,
+		approver: approver, challenge: request.Challenge, identity: identity,
 		expiresAt: now.Add(ttl), forgetAt: now.Add(ttl + redeemedCodeMemory), deviceName: deviceName,
 	}
 	key := sha256.Sum256([]byte(code))
 	service.codes.mu.Lock()
 	service.codes.sweepLocked(now)
+	if open, soonest := service.codes.openLocked(approver, now); open >= maxCodesPerApprover {
+		service.codes.mu.Unlock()
+		return Authorization{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: soonest.Sub(now)}
+	}
 	if len(service.codes.entries) >= maxCodes {
 		service.codes.mu.Unlock()
 		return Authorization{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: ttl}
@@ -253,9 +303,10 @@ func (service *Service) Approve(ctx context.Context, grantor Grantor, request Au
 }
 
 // Deny records a refused authorization and returns the loopback callback the
-// page sends the refusal to (empty in paste mode).
+// page sends the refusal to (empty in paste mode). It shares Approve's
+// limiter key.
 func (service *Service) Deny(ctx context.Context, grantor Grantor, request AuthorizationRequest, source string) (string, error) {
-	if allowed, retryAfter := service.authorizations.take(source); !allowed {
+	if allowed, retryAfter := service.authorizations.take(approverKey(grantor, source)); !allowed {
 		return "", &Error{Code: agentapi.CodeRateLimited, RetryAfter: retryAfter}
 	}
 	if err := validateMode(request); err != nil {

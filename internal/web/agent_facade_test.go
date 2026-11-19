@@ -680,6 +680,45 @@ func TestAgentAuthorizationEndpoint(t *testing.T) {
 	}
 }
 
+// Behind one proxy address a developer session neither uses up the
+// administrator's authorization allowance nor fills the code store
+// (contract section 7: per approving identity).
+func TestAgentAuthorizationLimitsFollowTheSession(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	developer := developerSignIn(t, env.handler)
+	const proxy = "10.0.0.1"
+	for index := 0; index < 20; index++ {
+		env.do(http.MethodPost, agentAuthorizationsPath, `{"challenge":"x","mode":"x","device_name":"","cli_version":"","tier":"read","decision":"deny"}`,
+			agentCaller{cookie: developer, remote: proxy})
+	}
+	limited := env.do(http.MethodPost, agentAuthorizationsPath, authorizationBody(agentapi.TierRead, agentaccess.ModePaste, "approve"), agentCaller{cookie: developer, remote: proxy})
+	if limited.Code != http.StatusTooManyRequests || strings.Contains(limited.Body.String(), "address") {
+		t.Fatalf("developer after 20 requests = %d %s", limited.Code, limited.Body.String())
+	}
+	if response := env.do(http.MethodPost, agentAuthorizationsPath, authorizationBody(agentapi.TierRead, agentaccess.ModeLoopback, "approve"), agentCaller{bearer: testAdminToken, remote: proxy}); response.Code != http.StatusOK {
+		t.Fatalf("administrator from the same address = %d %s", response.Code, response.Body.String())
+	}
+
+	env = newAgentEnv(t, agentEnvOptions{})
+	developer = developerSignIn(t, env.handler)
+	approved := 0
+	for address := 0; address < 4; address++ {
+		for index := 0; index < 5; index++ {
+			response := env.do(http.MethodPost, agentAuthorizationsPath, authorizationBody(agentapi.TierRead, agentaccess.ModePaste, "approve"),
+				agentCaller{cookie: developer, remote: "2001:db8::" + strconv.Itoa(address)})
+			if response.Code == http.StatusOK {
+				approved++
+			}
+		}
+	}
+	if approved != 8 {
+		t.Fatalf("open codes of one developer = %d, want 8", approved)
+	}
+	if response := env.do(http.MethodPost, agentAuthorizationsPath, authorizationBody(agentapi.TierRead, agentaccess.ModeLoopback, "approve"), agentCaller{bearer: testAdminToken, remote: "192.0.2.10"}); response.Code != http.StatusOK {
+		t.Fatalf("administrator after a developer's codes = %d %s", response.Code, response.Body.String())
+	}
+}
+
 // Contract section 3.1 through the HTTP surface: replay, expiry, verifier
 // mismatch.
 func TestAgentCodeExchangeThroughTheFacade(t *testing.T) {

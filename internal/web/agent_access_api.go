@@ -345,7 +345,7 @@ func writeAgentAccessError(writer http.ResponseWriter, err error) {
 		if coded != nil {
 			wait = coded.RetryAfter
 		}
-		writeRateLimited(writer, wait, "too many agent authorizations from this address, try again later")
+		writeRateLimited(writer, wait, "too many agent authorizations by this session, try again later")
 	case agentapi.CodeForbiddenRole:
 		writeError(writer, http.StatusForbidden, "forbidden", "this session cannot authorize agent tokens")
 	case agentapi.CodeRoleUnavailable:
