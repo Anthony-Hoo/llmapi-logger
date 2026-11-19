@@ -261,6 +261,11 @@ func (store *Store) RecordAnalysisView(ctx context.Context, view storage.Analysi
 		return errors.New("postgres: invalid analysis view")
 	}
 	key := append([]byte(nil), view.SessionKey...)
+	// This stays on the ordinary batched path on purpose. Packs and facets are
+	// read endpoints a developer session can call freely; a policy write runs
+	// alone and cuts the batch being collected, which would let reads slow the
+	// capture writer down. The cost is that a reader cancelled after admission
+	// may leave one extra view logged.
 	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
 		_, err := tx.Exec(`
 INSERT INTO analysis_view_log (at_ns, viewer_role, viewer_user_id, viewer_token_id, resource, session_key)

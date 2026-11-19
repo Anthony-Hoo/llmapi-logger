@@ -173,7 +173,8 @@ func (store *Store) SaveFacetCalibration(ctx context.Context, calibration storag
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+	// An administrator action: wait for a definitive outcome once admitted.
+	return store.submitPolicySync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
 		_, err := tx.Exec(`INSERT INTO facet_calibrations (created_at_ns, prompt_version, model, samples, agreement) VALUES ($1, $2, $3, $4, $5)`,
 			calibration.CreatedAtNS, calibration.PromptVersion, calibration.Model, calibration.Samples, calibration.Agreement)
 		if err != nil {
