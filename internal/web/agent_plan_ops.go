@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"llmapi-logger/internal/agentaccess"
@@ -142,6 +143,34 @@ func (handler *managementHandler) planAnalysisDismiss(request agentPlanRequest) 
 	return plan, nil
 }
 
+// retentionEffect describes, for a week that starts before the retention
+// window, what regenerating it does. The web route regenerates such a week
+// too; the plan makes the loss visible before the user agrees. Retention
+// deletes requests by their start time, and a regenerated snapshot is
+// computed only from the requests still stored, so the requests of the week
+// that started before the cutoff are missing from it. "" when the week is
+// inside the window or nothing is ever deleted.
+func (handler *managementHandler) retentionEffect(state orgreport.WeekState) string {
+	if handler.retentionDays <= 0 {
+		return ""
+	}
+	cutoff := handler.agent.Now().Add(-time.Duration(handler.retentionDays) * 24 * time.Hour)
+	if state.StartNS >= cutoff.UnixNano() {
+		return ""
+	}
+	days := strconv.Itoa(handler.retentionDays)
+	lost := "the requests of this week that started before " + cutoff.UTC().Format(time.RFC3339) + " have been deleted"
+	if state.EndNS <= cutoff.UnixNano() {
+		lost = "every request of this week has been deleted"
+	}
+	text := "This week is older than the retention window (retention_days = " + days + "): " + lost +
+		", so the new snapshot counts only the requests still stored"
+	if state.Frozen {
+		return text + " and replaces the frozen one; what the frozen snapshot counted for the deleted requests is lost and cannot be recovered."
+	}
+	return text + "."
+}
+
 type agentWeekState struct {
 	Week        string  `json:"week"`
 	StartAt     *string `json:"start_at"`
@@ -175,14 +204,6 @@ func (handler *managementHandler) planWeeklyRegenerate(ctx context.Context, requ
 		return nil, &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "only an ended week can be regenerated",
 			Details: map[string]any{"field": "args.week", "reason": "week_not_ended"}}
 	}
-	if handler.retentionDays > 0 {
-		cutoff := handler.agent.Now().Add(-time.Duration(handler.retentionDays) * 24 * time.Hour)
-		if state.StartNS < cutoff.UnixNano() {
-			return nil, &agentFailure{Code: agentapi.CodeInvalidArgument,
-				Message: "the week starts before the retention period: its evidence has been deleted, so regenerating it would lose data",
-				Details: map[string]any{"field": "args.week", "reason": "past_retention", "retention_days": handler.retentionDays}}
-		}
-	}
 	plan := newAgentPlan(agentapi.OpWeeklyRegenerate, agentPlanTarget{Kind: "weekly-report", ID: state.Week})
 	plan.view.Extras["week"] = agentWeekState{Week: state.Week, StartAt: agentTime(state.StartNS), EndAt: agentTime(state.EndNS),
 		Ended: state.Ended, Frozen: state.Frozen, FrozenAt: agentTime(state.FrozenAtNS), GeneratedAt: agentTime(state.GeneratedAtNS)}
@@ -190,6 +211,9 @@ func (handler *managementHandler) planWeeklyRegenerate(ctx context.Context, requ
 		plan.effect("Replaces the frozen snapshot of this week with one computed from the current catalog and evidence.")
 	} else {
 		plan.effect("Freezes this week now with a snapshot computed from the current catalog and evidence.")
+	}
+	if effect := handler.retentionEffect(state); effect != "" {
+		plan.effect(effect)
 	}
 	plan.quota = quota(agentaccess.QuotaRegenerate)
 	plan.timeout = orgRegenerateTimeout

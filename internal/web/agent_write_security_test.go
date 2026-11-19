@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/agentaccess/agentaccesstest"
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/storage"
 )
@@ -489,11 +490,12 @@ func TestAgentOperationPlans(t *testing.T) {
 	}
 	fixture.trigger.running = false
 
+	// A week older than the retention window is not refused (the web route
+	// regenerates it too): TestAgentRegenerateBeyondRetentionMatchesTheWeb.
 	for _, test := range []struct {
 		week, reason string
 	}{
 		{orgTestWeek.AddDate(0, 0, 7).Format("2006-01-02"), "week_not_ended"},
-		{orgTestWeek.AddDate(0, 0, -56).Format("2006-01-02"), "past_retention"},
 	} {
 		body := failure(t, fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": test.week}}, fixture.adminWrite))
 		if body.Code != agentapi.CodeInvalidArgument || body.Details["reason"] != test.reason || body.Details["field"] != "args.week" {
@@ -540,6 +542,39 @@ func TestAgentOperationPlans(t *testing.T) {
 	unknown := fixture.plan(t, `{"op":"analysis.dismiss","args":{"suggestion_id":99}}`)
 	if body := failure(t, fixture.facade(http.MethodPost, "/plans/"+unknown.PlanID+"/apply", nil, fixture.adminWrite)); body.Code != agentapi.CodeNotFound || !strings.Contains(body.Hint, "llmaudit analysis report") {
 		t.Fatalf("dismiss unknown = %s %s", body.Code, body.Hint)
+	}
+}
+
+// Parity: the web route regenerates a week older than the retention window,
+// so the agent does too; the plan says what regenerating it loses.
+func TestAgentRegenerateBeyondRetentionMatchesTheWeb(t *testing.T) {
+	fixture := newWriteFixture(t)
+	week := orgTestWeek.Format("2006-01-02")
+	inside := fixture.plan(t, map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week}})
+	if strings.Contains(strings.Join(inside.Effects, "\n"), "retention") {
+		t.Fatalf("a week inside the window mentions retention: %v", inside.Effects)
+	}
+	// The test week is now about 50 days old, retention is 30 days.
+	fixture.clock.Advance(40 * 24 * time.Hour)
+	fixture.adminWrite = agentaccesstest.IssueAdmin(t, fixture.service, agentapi.TierWrite).Token
+	if web := fixture.web(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+week, ""); web.Code != http.StatusNoContent {
+		t.Fatalf("web = %d", web.Code)
+	}
+	old := fixture.plan(t, map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week}})
+	effects := strings.Join(old.Effects, "\n")
+	if !strings.Contains(effects, "older than the retention window (retention_days = 30)") || !strings.Contains(effects, "every request of this week has been deleted") ||
+		!strings.Contains(effects, "cannot be recovered") {
+		t.Fatalf("effects = %v", old.Effects)
+	}
+	fixture.apply(t, old.PlanID)
+
+	// A week that only began before the cutoff loses only its first days.
+	partial := newWriteFixture(t)
+	partial.clock.Advance(23 * 24 * time.Hour) // the cutoff falls inside the test week
+	partial.adminWrite = agentaccesstest.IssueAdmin(t, partial.service, agentapi.TierWrite).Token
+	plan := partial.plan(t, map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week}})
+	if effects := strings.Join(plan.Effects, "\n"); !strings.Contains(effects, "that started before") || strings.Contains(effects, "cannot be recovered") {
+		t.Fatalf("partial effects = %v", plan.Effects)
 	}
 }
 

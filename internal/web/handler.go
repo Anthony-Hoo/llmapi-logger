@@ -126,9 +126,9 @@ type Options struct {
 	// AgentPublicURL is agent_access.public_url: the server address written
 	// into install prompts. Empty means the address the browser is using.
 	AgentPublicURL string
-	// RetentionDays is the deployment's retention_days (0: kept forever). The
-	// facade refuses to regenerate a week whose evidence is older
-	// (doc/features/25-agent-access-contract.md section 0, row 5).
+	// RetentionDays is the deployment's retention_days (0: kept forever). A
+	// weekly.regenerate plan of a week older than it says what regenerating
+	// loses (doc/features/25-agent-access-contract.md section 0.1).
 	RetentionDays int
 }
 
