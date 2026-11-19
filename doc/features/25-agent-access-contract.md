@@ -3,7 +3,7 @@
 > 状态：已定稿，未实现
 > 日期：2026-11-19
 > 配套：[模块 25 开发计划](25-agent-access.md)。两者不一致时以本合同为准；本合同与代码不一致时，改代码或在 §0.1 追加一条并改合同，不允许两边各说各的。
-> 既有类型的字段名都抄自代码（`internal/query`、`internal/insights`、`internal/orgreport`、`internal/sessionanalysis`、`internal/uaguard`、`internal/contentpolicy`），实现时发现出入按 §0.1 处理。
+> 既有类型的字段名、枚举取值与限制取自一次对代码的整体提取（`internal/query`、`internal/insights`、`internal/orgreport`、`internal/sessionanalysis`、`internal/uaguard`、`internal/contentpolicy`、`internal/web`），其中只抽查了三处（周评的 `week` 取值、重新生成周报的“已结束”规则、采集状态的字面值）。实现每个接口前对照类型定义再核一遍，发现出入按 §0.1 处理。
 
 ## 0. 相对方案的修正
 
@@ -22,6 +22,11 @@
 | 9 | 新的存储接口加进 `runtimeStore` | 以可选接口接入，装配时做类型断言 | 应用层的测试用另一种存储实现，加进 `runtimeStore` 会迫使它补空实现；组织周报已是这种做法 |
 | 10 | 会话分析汇总不向开发者输出全站运行状态 | 照网页现状输出 | “授权不变”：网页现在对开发者显示这些字段 |
 | 11 | 两类规则新建时防重复靠“同名则拒绝” | 保留，且只对经门面的新建生效；规则本身没有数量上限，门面也不另设 | 网页允许同名，门面不改既有服务的默认行为 |
+| 12 | 读命令 `rules list`、`org catalog`、`settings show` | 并成一条 `config show --kind …` | 与写命令的 `--kind` 同一套类别，少三条命令 |
+| 13 | 写命令直接带 `--apply <计划编号>` | 单独一条 `apply <计划编号>`，不接受任何业务参数 | 保证执行的就是建好的那份计划 |
+| 14 | 没有按用户汇总的命令 | 新增 `analysis users` | 网页上管理员有这个视图，对应既有路由 `…/session-analysis/users` |
+| 15 | Header 只在详情里看 | `requests export --what headers` 可导出全部阶段的 Header | 详情默认只给入站阶段，避免输出过长 |
+| 16 | 连接测试不能带 Key | 新增 `--prompt-key`，Key 由用户在终端输入 | 网页表单可以用尚未保存的 Key 测试 |
 
 ### 0.1 实施中确认的口径
 
@@ -327,10 +332,15 @@
 适用于 Header 的值与 Request-URI 查询参数的值。命中下面任一条，就不输出值，只给 `value_omitted: "credential"` 与 `length`：
 
 1. 名称（不分大小写）等于 `authorization`、`proxy-authorization`、`cookie`、`set-cookie`、`x-api-key`、`x-goog-api-key`、`api-key`、`key`。
-2. 名称（不分大小写）包含 `token`、`secret`、`password`、`passwd`、`credential`、`signature`、`api-key`、`apikey`、`api_key`、`session`。
+2. 名称（不分大小写）等于 `token`，或以 `-token`、`_token` 结尾，或包含 `secret`、`password`、`passwd`、`credential`、`signature`、`api-key`、`apikey`、`api_key`。
 3. 取值以 `Bearer `、`Basic `、`sk-`、`lla_` 开头（不分大小写，忽略前导空白）。
 
-其余的值原样输出在 `value_untrusted` 里。这份规则是 `internal/agentapi` 里的一个函数，命令行与服务端共用；测试断言既有的四种凭据传输方式（`Authorization` 的 Bearer 与裸值、`X-Api-Key`、`X-Goog-Api-Key`、查询参数 `key`）在任何门面响应里都不出现原值。
+其余的值原样输出在 `value_untrusted` 里。规则有意收得窄：名称里带 `session` 或 `tokens` 的不算凭据，否则会把 `X-Agent-Session-Id` 这类用来识别 Agent 的头和带 `tokens` 的限流、用量头一起藏掉。
+
+这份规则是 `internal/agentapi` 里的一个函数，命令行与服务端共用。两组测试：
+
+- 既有的四种凭据传输方式（`Authorization` 的 Bearer 与裸值、`X-Api-Key`、`X-Goog-Api-Key`、查询参数 `key`）在任何门面响应里都不出现原值。
+- `X-Agent-Session-Id`、`X-Agent-Id`、`X-Agent-Parent-Id`、`X-Agent-Role`、`X-Agent-Name`、`X-Agent-Project`、`User-Agent`、`X-Oneapi-Request-Id` 的值照常输出。
 
 **做不到的**：对话正文、工具结果、原始 Body、重建结果里本身带着的密钥，这里不处理。
 
@@ -446,7 +456,15 @@
 }
 ```
 
-- 建计划做完整校验：把合并后的对象交给既有服务的校验逻辑（规范化、正则编译、目录整体编译），不通过就是 `INVALID_ARGUMENT`，`details.field` 与 `message` 取自既有的安全文案。
+- 建计划做完整校验，不通过就是 `INVALID_ARGUMENT`，`details.field` 与 `message` 取自既有的安全文案。校验由各服务新增的“只校验、不保存”入口完成（开发计划 §8.2），门面不自己写校验。各操作在计划阶段校验的内容：
+
+| 操作 | 计划阶段校验什么 |
+|---|---|
+| `config.set`、`config.remove`、`config.reset` | 对象存在（修改与删除）；合并后的对象通过该服务的全部规范化与校验（正则编译、目录整体编译、设置的取值范围与上下文预算）；删除的前置条件（项目组下没有项目与成员） |
+| `analysis.run` | 运行器可用。已在运行不算校验失败：计划照建，`extras.running` 为真，执行时返回 `RUN_IN_PROGRESS` |
+| `analysis.calibrate` | 条数在 1–1000 之间；每条的 `session_id` 是 64 位十六进制；各字段取值在枚举内；模型阶段已启用。不比对分面，比对在执行时做 |
+| `analysis.dismiss` | ID 是正整数。建议是否存在、是否可忽略在执行时由服务判定 |
+| `weekly.regenerate` | `week` 是合法的周起始日；该周已结束；快照存储可用；保留期的检查（§0 第 5 行） |
 - `effects` 是给人读的后果说明，由服务端按操作类型生成，例如“启用后立即对线上请求生效”“未冻结的周将按新规则重新归属”“换模型后全部输入包将重新标注”。
 - `extras`：项目的新建与修改带 `preview`（既有预览的结果）；删除带 `deleted_object`（被删对象的完整内容）；重新生成周报带 `week`（`ended`、`frozen`、`frozen_at`）；触发分析带当前的 `running` 与 `last_run`。
 - 计划存在进程内存里，10 分钟有效，绑定令牌。执行时重新检查：令牌仍有效且是读写档；`allow_write` 仍为真；对象版本仍等于 `target.version`（否则 `VERSION_CONFLICT`）。
@@ -733,7 +751,7 @@
 | 令牌校验失败 | 5 分钟 10 次 | 来源地址 | 独立于网页登录的计数器；只有“格式正确但查不到”计数 |
 | 兑换令牌 | 5 分钟 10 次失败 | 来源地址 | 成功不计 |
 | 授权确认 | 5 分钟 20 次 | 网页会话的来源地址 | |
-| 下载安装包 | 每条链接 1 小时 30 次 | 签名串 | |
+| 下载安装包 | 每条链接在其 30 分钟有效期内 30 次 | 签名串 | |
 | 读请求 | 每分钟 120 次 | 令牌 | |
 | 输入包与分面的读取 | 每分钟 20 次 | 令牌 | 每次都会写查看日志 |
 | 建计划加执行计划 | 10 分钟 60 次 | 令牌 | |
@@ -775,6 +793,7 @@ agent_access:
 - 限流、授权码、计划都在进程内存里，重启清零。未兑换的授权码与未执行的计划在重启后作废。
 - 持读写档令牌的 Agent 如果照着记录内容里的指令去做，改动会直接生效，服务端无法分辨。“先建计划再执行”两步都可以由 Agent 自己完成，它只防误操作。
 - 分析模型的地址可经 Agent 修改；它决定下一轮分析把输入包与已保存的 Key 发往哪里。
+- **“Key 由用户在终端输入”是命令行一侧的控制，服务端分辨不了请求体里的 Key 是谁填的。** 本地凭据文件 Agent 也读得到，拿到令牌后可以不经命令行直接调用门面，包括设置 Key 的接口。Skill 纪律里写明不读取凭据文件、不绕过命令行；这两条只靠纪律。
 - 连接测试带地址时，会用已保存的 Key 去请求那个地址。这是既有行为，网页相同。
 - 开发者的 Key 在 NewAPI 被禁用后，已签发的开发者令牌仍可用到原定的到期时间。
 - 洞察的各项总数只含已分析的记录，既有服务不提供覆盖率。
