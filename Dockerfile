@@ -31,10 +31,21 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     mkdir -p /out/rootfs/data /out/rootfs/etc/audit-proxy
 
 
+# Agent access Skill packages (doc/features/25-agent-access-contract.md
+# section 5): llmaudit cross-compiled for five platforms, one reproducible zip
+# per platform and manifest.json. The server serves them from agent-packages
+# next to its binary, i.e. /agent-packages in the final image.
+FROM go-build AS agent-packages
+
+COPY skill/ ./skill/
+RUN go run ./internal/agentdist/cmd/agentpack -skill skill/llmapi-audit -out /out/agent-packages
+
+
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=go-build /out/audit-proxy /audit-proxy
 COPY --from=go-build /out/audit-import /audit-import
+COPY --from=agent-packages /out/agent-packages /agent-packages
 COPY --from=go-build --chown=65532:65532 /out/rootfs/data /data
 COPY --from=go-build --chown=65532:65532 /out/rootfs/etc/audit-proxy /etc/audit-proxy
 

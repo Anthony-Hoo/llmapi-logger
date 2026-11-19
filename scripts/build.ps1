@@ -65,9 +65,24 @@ finally {
     if ($null -eq $previousGoarch) { Remove-Item Env:GOARCH -ErrorAction SilentlyContinue } else { $env:GOARCH = $previousGoarch }
 }
 
+# Agent access Skill packages: cross-compiles llmaudit for every platform and
+# writes the archives and manifest.json to agent-packages next to the server
+# binaries, where audit-proxy looks for them. Runs with the host GOOS/GOARCH
+# restored above, because go run executes the packer on this machine.
+$agentPackages = Join-Path $outputPath "agent-packages"
+Push-Location $repositoryRoot
+try {
+    & go run ./internal/agentdist/cmd/agentpack -skill skill/llmapi-audit -out $agentPackages
+    if ($LASTEXITCODE -ne 0) { throw "Agent package build failed with exit code $LASTEXITCODE" }
+}
+finally {
+    Pop-Location
+}
+
 Write-Host "Built:"
 Write-Host "  $(Join-Path $outputPath 'audit-proxy-windows-amd64.exe')"
 Write-Host "  $(Join-Path $outputPath 'audit-proxy-linux-amd64')"
 
 Write-Host "  $(Join-Path $outputPath 'audit-import-windows-amd64.exe')"
 Write-Host "  $(Join-Path $outputPath 'audit-import-linux-amd64')"
+Write-Host "  $agentPackages"

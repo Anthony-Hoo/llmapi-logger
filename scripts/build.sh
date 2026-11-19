@@ -37,8 +37,17 @@ mkdir -p "$output_directory"
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output_directory/audit-import-linux-amd64" ./cmd/audit-import
 )
 
+# Agent access Skill packages: cross-compiles llmaudit for every platform and
+# writes the archives and manifest.json to agent-packages next to the server
+# binaries, where audit-proxy looks for them.
+(
+    cd "$repository_root"
+    go run ./internal/agentdist/cmd/agentpack -skill skill/llmapi-audit -out "$output_directory/agent-packages"
+)
+
 printf 'Built:\n  %s\n  %s\n' \
     "$output_directory/audit-proxy-windows-amd64.exe" \
     "$output_directory/audit-proxy-linux-amd64"
 
 printf "Import tools: %s and %s\n" "$output_directory/audit-import-windows-amd64.exe" "$output_directory/audit-import-linux-amd64"
+printf "Agent packages: %s\n" "$output_directory/agent-packages"
