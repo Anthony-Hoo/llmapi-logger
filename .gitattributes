@@ -5,3 +5,8 @@
 *.md text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+
+# Skill package sources ship inside the agent packages; keep them LF on every
+# checkout so the archives are identical whichever platform builds them.
+skill/** text eol=lf
+internal/agentdist/testdata/*.golden text eol=lf
