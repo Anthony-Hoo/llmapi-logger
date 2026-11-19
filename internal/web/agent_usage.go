@@ -101,7 +101,7 @@ type agentHeatmapDay struct {
 }
 
 type agentGroupUsage struct {
-	Key            string           `json:"key"`
+	KeyUntrusted   string           `json:"key_untrusted"`
 	LabelUntrusted string           `json:"label_untrusted"`
 	Usage          agentUsageTotals `json:"usage"`
 }
@@ -140,7 +140,7 @@ func agentUsageOverviewOf(response insights.OverviewResponse) agentUsageOverview
 		out.Heatmap = append(out.Heatmap, agentHeatmapDay{Day: day.Day, Requests: day.Requests, Sessions: day.Sessions})
 	}
 	for _, group := range response.Groups {
-		out.Groups = append(out.Groups, agentGroupUsage{Key: group.Key, LabelUntrusted: group.Label, Usage: agentUsageTotalsOf(group.Usage)})
+		out.Groups = append(out.Groups, agentGroupUsage{KeyUntrusted: group.Key, LabelUntrusted: group.Label, Usage: agentUsageTotalsOf(group.Usage)})
 	}
 	return out
 }
@@ -205,7 +205,7 @@ type agentSessionCard struct {
 	LastAt          *string             `json:"last_at"`
 	Steps           int64               `json:"steps"`
 	Turns           int64               `json:"turns"`
-	Models          []string            `json:"models"`
+	ModelsUntrusted []string            `json:"models_untrusted"`
 	Usage           agentUsageTotals    `json:"usage"`
 	LastComposition agentCategoryValues `json:"last_composition"`
 	LastPromptTotal *int64              `json:"last_prompt_total"`
@@ -229,7 +229,7 @@ func agentUsageSessionsOf(response insights.SessionsResponse) agentUsageSessions
 		item := agentSessionCard{
 			SessionID: card.SessionID, SessionLink: card.SessionLink, TreeID: card.TreeID, Protocol: card.Protocol,
 			Client: card.Client, Role: card.Role, FirstAt: agentTime(card.FirstNS), LastAt: agentTime(card.LastNS),
-			Steps: card.Steps, Turns: card.Turns, Models: append([]string{}, card.Models...),
+			Steps: card.Steps, Turns: card.Turns, ModelsUntrusted: append([]string{}, card.Models...),
 			Usage: agentUsageTotalsOf(card.Usage), LastComposition: agentCategoryValuesOf(card.LastEstimate),
 			LastPromptTotal: card.LastPrompt, ContextWindow: card.ContextWindow, Subagents: card.Subagents,
 		}
@@ -280,24 +280,24 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 }
 
 type agentTrendStep struct {
-	AuditID       string              `json:"audit_id"`
-	StartedAt     *string             `json:"started_at"`
-	Turn          int64               `json:"turn"`
-	TurnStart     bool                `json:"turn_start"`
-	Model         string              `json:"model"`
-	Role          string              `json:"role"`
-	Estimate      agentCategoryValues `json:"estimate"`
-	Usage         agentUsage          `json:"usage"`
-	PromptTotal   *int64              `json:"prompt_total"`
-	Events        []string            `json:"events"`
-	AppendedItems *int64              `json:"appended_items"`
-	RemovedItems  *int64              `json:"removed_items"`
-	StopReason    string              `json:"stop_reason,omitempty"`
-	ResponseKinds []string            `json:"response_kinds"`
-	FirstEventMS  *float64            `json:"first_event_ms"`
-	GenerationMS  *float64            `json:"generation_ms"`
-	ClientGapMS   *float64            `json:"client_gap_ms"`
-	CostUSD       *float64            `json:"cost_usd"`
+	AuditID        string              `json:"audit_id"`
+	StartedAt      *string             `json:"started_at"`
+	Turn           int64               `json:"turn"`
+	TurnStart      bool                `json:"turn_start"`
+	ModelUntrusted string              `json:"model_untrusted"`
+	Role           string              `json:"role"`
+	Estimate       agentCategoryValues `json:"estimate"`
+	Usage          agentUsage          `json:"usage"`
+	PromptTotal    *int64              `json:"prompt_total"`
+	Events         []string            `json:"events"`
+	AppendedItems  *int64              `json:"appended_items"`
+	RemovedItems   *int64              `json:"removed_items"`
+	StopReason     string              `json:"stop_reason,omitempty"`
+	ResponseKinds  []string            `json:"response_kinds"`
+	FirstEventMS   *float64            `json:"first_event_ms"`
+	GenerationMS   *float64            `json:"generation_ms"`
+	ClientGapMS    *float64            `json:"client_gap_ms"`
+	CostUSD        *float64            `json:"cost_usd"`
 }
 
 type agentTrend struct {
@@ -314,7 +314,7 @@ func agentTrendOf(response insights.TrendResponse) agentTrend {
 	for _, step := range response.Steps {
 		out.Steps = append(out.Steps, agentTrendStep{
 			AuditID: step.AuditID, StartedAt: agentTime(step.StartedAtNS), Turn: step.Turn, TurnStart: step.TurnStart,
-			Model: step.Model, Role: step.Role, Estimate: agentCategoryValuesOf(step.Estimate), Usage: agentUsageOf(step.Usage),
+			ModelUntrusted: step.Model, Role: step.Role, Estimate: agentCategoryValuesOf(step.Estimate), Usage: agentUsageOf(step.Usage),
 			PromptTotal: step.PromptTotal, Events: append([]string{}, step.Events...),
 			AppendedItems: step.AppendedItems, RemovedItems: step.RemovedItems, StopReason: step.StopReason,
 			ResponseKinds: append([]string{}, step.ResponseKinds...), FirstEventMS: step.FirstEventMS,
@@ -348,7 +348,7 @@ func (handler *managementHandler) serveAgentUsageTrend(writer http.ResponseWrite
 		handler.writeAgentServiceFailure(writer, err, agentUsageNotFoundHint)
 		return
 	}
-	writeAgentRead(writer, agentTrendOf(response), truncatedMeta(response.Truncated), false)
+	writeAgentRead(writer, agentTrendOf(response), truncatedMeta(response.Truncated), true)
 }
 
 type agentTreeNode struct {
@@ -416,7 +416,7 @@ func (handler *managementHandler) serveAgentUsageTree(writer http.ResponseWriter
 type agentCompositionItem struct {
 	Index            int    `json:"index"`
 	Category         string `json:"category"`
-	Role             string `json:"role"`
+	RoleUntrusted    string `json:"role_untrusted"`
 	Kind             string `json:"kind"`
 	Tokens           int64  `json:"tokens"`
 	LabelUntrusted   string `json:"label_untrusted,omitempty"`
@@ -425,9 +425,9 @@ type agentCompositionItem struct {
 }
 
 type agentToolDef struct {
-	NameUntrusted string `json:"name_untrusted"`
-	Tokens        int64  `json:"tokens"`
-	Source        string `json:"source"`
+	NameUntrusted   string `json:"name_untrusted"`
+	Tokens          int64  `json:"tokens"`
+	SourceUntrusted string `json:"source_untrusted"`
 }
 
 type agentFileOp struct {
@@ -458,7 +458,7 @@ type agentCompositionDiff struct {
 type agentComposition struct {
 	AuditID         string                 `json:"audit_id"`
 	AnalysisVersion int                    `json:"analysis_version"`
-	Model           string                 `json:"model"`
+	ModelUntrusted  string                 `json:"model_untrusted"`
 	Usage           agentUsage             `json:"usage"`
 	PromptTotal     *int64                 `json:"prompt_total"`
 	Estimate        agentCategoryValues    `json:"estimate"`
@@ -477,7 +477,7 @@ type agentComposition struct {
 
 func agentCompositionOf(response insights.CompositionResponse) agentComposition {
 	out := agentComposition{
-		AuditID: response.AuditID, AnalysisVersion: response.AnalysisVersion, Model: response.Model,
+		AuditID: response.AuditID, AnalysisVersion: response.AnalysisVersion, ModelUntrusted: response.Model,
 		Usage: agentUsageOf(response.Usage), PromptTotal: response.PromptTotal, Estimate: agentCategoryValuesOf(response.Estimate),
 		ContextWindow: response.ContextWindow, Items: make([]agentCompositionItem, 0, len(response.Items)),
 		Tools: make([]agentToolDef, 0, len(response.Tools)), FileOps: make([]agentFileOp, 0, len(response.FileOps)),
@@ -494,11 +494,11 @@ func agentCompositionOf(response insights.CompositionResponse) agentComposition 
 		out.Anchored = &anchored
 	}
 	for _, item := range response.Items {
-		out.Items = append(out.Items, agentCompositionItem{Index: item.Index, Category: item.Category, Role: item.Role, Kind: item.Kind,
+		out.Items = append(out.Items, agentCompositionItem{Index: item.Index, Category: item.Category, RoleUntrusted: item.Role, Kind: item.Kind,
 			Tokens: item.Tokens, LabelUntrusted: item.Label, SummaryUntrusted: item.Summary, Change: item.Change})
 	}
 	for _, tool := range response.Tools {
-		out.Tools = append(out.Tools, agentToolDef{NameUntrusted: tool.Name, Tokens: tool.Tokens, Source: tool.Source})
+		out.Tools = append(out.Tools, agentToolDef{NameUntrusted: tool.Name, Tokens: tool.Tokens, SourceUntrusted: tool.Source})
 	}
 	for _, op := range response.FileOps {
 		out.FileOps = append(out.FileOps, agentFileOp{ToolUntrusted: op.Tool, Op: op.Op, PathUntrusted: op.Path,

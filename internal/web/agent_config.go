@@ -340,7 +340,7 @@ type agentCallerEntry struct {
 	UsernameUntrusted    string `json:"username_untrusted"`
 	DisplayNameUntrusted string `json:"display_name_untrusted"`
 	Status               int    `json:"status"`
-	Group                string `json:"group"`
+	GroupUntrusted       string `json:"group_untrusted"`
 }
 
 // serveAgentCallers is GET /callers (administrators).
@@ -355,7 +355,7 @@ func (handler *managementHandler) serveAgentCallers(writer http.ResponseWriter, 
 		snapshot := handler.users.Snapshot()
 		for _, user := range snapshot.Users {
 			items = append(items, agentCallerEntry{ID: user.ID, UsernameUntrusted: user.Username, DisplayNameUntrusted: user.DisplayName,
-				Status: user.Status, Group: user.Group})
+				Status: user.Status, GroupUntrusted: user.Group})
 		}
 		if !snapshot.RefreshedAt.IsZero() {
 			refreshedAt = agentTime(snapshot.RefreshedAt.UnixNano())

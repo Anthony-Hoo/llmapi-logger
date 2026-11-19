@@ -21,7 +21,7 @@ llmaudit status
 - `ua-rule`: user-agent interception rules. `content-rule`: keyword policy rules. `org`: project groups, projects, members, principals (human or service accounts), `service_candidates`, and the read-only time zone and week start, plus the organisation settings. The two settings kinds are the weekly report and session analysis settings.
 - Every changeable object carries `version`, a decimal string. Settings that were never saved (they come from the configuration file) have version `"0"`.
 - `analysis-settings` shows only where the API key comes from (`none`, `file` or `saved`), never the key.
-- Rule names, patterns, keywords, project and group names end in `_untrusted`: another administrator or agent may have written them.
+- Rule names, patterns, keywords, project and group names end in `_untrusted`: another administrator or agent may have written them. So do the NewAPI user names, display names and groups of `callers list`.
 - `status` is the server's liveness and readiness; `meta.complete` is false with `not_ready` when it is not ready.
 
 ### Trying project rules

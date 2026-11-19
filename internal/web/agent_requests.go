@@ -104,7 +104,7 @@ type agentAuditItem struct {
 	Protocol           string          `json:"protocol"`
 	ParserName         string          `json:"parser_name"`
 	Method             string          `json:"method"`
-	Path               string          `json:"path"`
+	Path               string          `json:"path_untrusted"`
 	Mode               string          `json:"mode"`
 	StatusCode         *int            `json:"status_code"`
 	TTFTMS             *float64        `json:"ttft_ms"`
@@ -113,13 +113,13 @@ type agentAuditItem struct {
 	Capture            string          `json:"capture"`
 	CallerStatus       string          `json:"caller_status"`
 	CallerFinal        bool            `json:"caller_final"`
-	RequestModel       *string         `json:"request_model"`
-	ResponseModel      *string         `json:"response_model"`
+	RequestModel       *string         `json:"request_model_untrusted"`
+	ResponseModel      *string         `json:"response_model_untrusted"`
 	BlockedBy          *string         `json:"blocked_by"`
 	BlockCode          *string         `json:"block_code"`
 	ErrorCode          *string         `json:"error_code"`
-	ParsedErrorType    *string         `json:"parsed_error_type"`
-	ParsedErrorCode    *string         `json:"parsed_error_code"`
+	ParsedErrorType    *string         `json:"parsed_error_type_untrusted"`
+	ParsedErrorCode    *string         `json:"parsed_error_code_untrusted"`
 	UpstreamErrorClass *string         `json:"upstream_error_class"`
 	NewAPIRequestID    *string         `json:"newapi_request_id"`
 	Caller             agentCallerView `json:"caller"`
@@ -304,12 +304,12 @@ func (handler *managementHandler) authorizeAgentAudit(ctx context.Context, call 
 // _at and credential values masked.
 
 type agentQueryParam struct {
-	Name string `json:"name"`
+	Name string `json:"name_untrusted"`
 	agentapi.MaskedValue
 }
 
 type agentRequestURI struct {
-	Path  string            `json:"path"`
+	Path  string            `json:"path_untrusted"`
 	Query []agentQueryParam `json:"query"`
 	// QueryUnparsed is set when the query string could not be split into
 	// parameters; no value is output then.
@@ -357,7 +357,7 @@ type agentStage struct {
 	State         string  `json:"state"`
 	Proto         string  `json:"proto"`
 	Method        string  `json:"method"`
-	Host          string  `json:"host"`
+	Host          string  `json:"host_untrusted"`
 	StatusCode    *int    `json:"status_code"`
 	ContentLength *int64  `json:"content_length"`
 	StartedAt     *string `json:"started_at"`
@@ -368,7 +368,7 @@ type agentStage struct {
 type agentHeader struct {
 	Stage      string `json:"stage"`
 	Kind       string `json:"kind"`
-	Name       string `json:"name"`
+	Name       string `json:"name_untrusted"`
 	ValueIndex int    `json:"value_index"`
 	agentapi.MaskedValue
 }
@@ -408,16 +408,16 @@ type agentParsed struct {
 	ParserName         string  `json:"parser_name"`
 	ParserVersion      string  `json:"parser_version"`
 	Status             string  `json:"status"`
-	RequestModel       *string `json:"request_model"`
-	ResponseModel      *string `json:"response_model"`
+	RequestModel       *string `json:"request_model_untrusted"`
+	ResponseModel      *string `json:"response_model_untrusted"`
 	RequestedStream    *bool   `json:"requested_stream"`
 	ObservedStream     *bool   `json:"observed_stream"`
-	ResponseID         *string `json:"response_id"`
+	ResponseID         *string `json:"response_id_untrusted"`
 	UsageInput         *int64  `json:"usage_input"`
 	UsageOutput        *int64  `json:"usage_output"`
 	UsageTotal         *int64  `json:"usage_total"`
-	ErrorType          *string `json:"error_type"`
-	ErrorCode          *string `json:"error_code"`
+	ErrorType          *string `json:"error_type_untrusted"`
+	ErrorCode          *string `json:"error_code_untrusted"`
 	UpstreamErrorClass *string `json:"upstream_error_class"`
 	MessageCount       *int64  `json:"message_count"`
 	ToolCallCount      *int64  `json:"tool_call_count"`
@@ -441,8 +441,8 @@ type agentTurn struct {
 	RequestReconstructionSHA256  string  `json:"request_reconstruction_sha256"`
 	ResponseReconstructionSHA256 string  `json:"response_reconstruction_sha256"`
 	ReconstructionStatus         string  `json:"reconstruction_status"`
-	PreviousResponseID           *string `json:"previous_response_id"`
-	ResponseID                   *string `json:"response_id"`
+	PreviousResponseID           *string `json:"previous_response_id_untrusted"`
+	ResponseID                   *string `json:"response_id_untrusted"`
 	CreatedAt                    *string `json:"created_at"`
 }
 

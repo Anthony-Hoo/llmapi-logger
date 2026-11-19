@@ -155,10 +155,10 @@ func buildCommands() []*commandSpec {
 			Description: "Developers see only the records of their own API key. Page with --cursor until next_cursor is empty; with --user-agent a page can be empty while a next page still exists.",
 			Flags: []flagSpec{
 				flagSince(), flagFrom(), flagTo(),
-				{Name: "model", Value: "<model>", Query: "model", Help: "Only this request model. Default: all."},
+				{Name: "model", Value: "<model>", Query: "model", Help: "Only this request model (request_model_untrusted in results). Default: all."},
 				{Name: "status", Value: "<status>", Query: "status", Help: "error, 4xx, 5xx, or one HTTP status code 100-599. Default: all."},
-				{Name: "user-agent", Value: "<text>", Query: "user_agent", Help: "Only records whose inbound User-Agent contains this text. Default: all."},
-				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path, e.g. /v1/chat/completions. Default: all."},
+				{Name: "user-agent", Value: "<text>", Query: "user_agent", Help: "Only records whose inbound User-Agent (user_agent_untrusted in results) contains this text. Default: all."},
+				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path (path_untrusted in results), e.g. /v1/chat/completions. Default: all."},
 				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results). Default: all."},
 				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id. Default: all."},
 				{Name: "forward-status", Value: "<state>", Query: "forward_status", Help: "Only records whose forwarding ended this way: in_progress, completed, rejected, client_cancelled, newapi_error, proxy_error or interrupted. Default: all."},
