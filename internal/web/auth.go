@@ -155,17 +155,21 @@ func (auth *managementAuth) resolve(request *http.Request) (principal, bool) {
 // traffic is continuous (health checks, scripts), so clearing on success would
 // let anyone who shares an address with a working script keep guessing: each
 // good request would hand them nine more tries.
+//
+// The token is compared first (constant time, no I/O) and the limit is then
+// checked and the failure counted in one step, so concurrent wrong tokens
+// from one address cannot all pass the check before the first is counted.
 func (auth *managementAuth) authenticate(request *http.Request) (principal, authStatus, time.Duration) {
 	if auth == nil || request == nil {
 		return principal{}, authUnauthorized, 0
 	}
 	if authorization := request.Header.Get("Authorization"); authorization != "" {
-		if allowed, retryAfter := auth.bearers.allow(request); !allowed {
+		provided, ok := bearerToken(authorization)
+		valid := ok && auth.validAdminToken(provided)
+		if allowed, retryAfter := auth.bearers.checkAndRecord(request, !valid); !allowed {
 			return principal{}, authLimited, retryAfter
 		}
-		provided, ok := bearerToken(authorization)
-		if !ok || !auth.validAdminToken(provided) {
-			auth.bearers.recordFailure(request)
+		if !valid {
 			return principal{}, authUnauthorized, 0
 		}
 		return principal{Role: roleAdmin}, authOK, 0

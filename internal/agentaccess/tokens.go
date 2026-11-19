@@ -43,19 +43,25 @@ func (service *Service) tokenMAC(token string) []byte {
 // address is over the limit every token request from it is refused until the
 // window ends, a valid token included, so guessing cannot continue at full
 // speed behind a working client.
+//
+// The attempt holds its place in the limiter before the lookup runs and gives
+// it back unless the lookup found no row, so concurrent guesses from one
+// address cannot all be looked up before the first failure is counted: at
+// most the limit of lookups are ever in flight or failed per window.
 func (service *Service) Authenticate(ctx context.Context, authorization, source string) (Identity, error) {
 	token, ok := bearerToken(authorization)
 	if !ok || !agentapi.ValidTokenFormat(token) {
 		return Identity{}, fail(agentapi.CodeUnauthenticated)
 	}
-	if allowed, retryAfter := service.lookups.allow(source); !allowed {
+	if allowed, retryAfter := service.lookups.reserve(source); !allowed {
 		return Identity{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: retryAfter}
 	}
 	row, err := service.store.FindAgentTokenByMAC(ctx, service.tokenMAC(token))
 	if errors.Is(err, storage.ErrAgentTokenNotFound) {
-		service.lookups.record(source)
+		service.lookups.confirm(source)
 		return Identity{}, fail(agentapi.CodeUnauthenticated)
 	}
+	service.lookups.release(source)
 	if err != nil {
 		service.logger.Warn("agent token lookup failed", "error_category", "agent_store_unavailable")
 		return Identity{}, fail(agentapi.CodeUpstreamUnavailable)

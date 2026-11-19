@@ -359,6 +359,84 @@ func TestFailedLookupLimiter(t *testing.T) {
 	}
 }
 
+// gatedStore holds every token lookup until release is closed, and counts the
+// lookups that reached it.
+type gatedStore struct {
+	*agentaccesstest.Store
+	mu      sync.Mutex
+	lookups int
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func (store *gatedStore) FindAgentTokenByMAC(ctx context.Context, mac []byte) (storage.AgentToken, error) {
+	store.mu.Lock()
+	store.lookups++
+	store.mu.Unlock()
+	store.arrived <- struct{}{}
+	<-store.release
+	return store.Store.FindAgentTokenByMAC(ctx, mac)
+}
+
+// Contract section 7: N concurrent wrong tokens from one address cause at
+// most the limit of lookups. Each attempt holds its place before the lookup
+// runs, so the attempts beyond the limit are refused while the first ten are
+// still in flight.
+func TestFailedLookupLimiterHoldsUnderConcurrency(t *testing.T) {
+	inner := agentaccesstest.NewStore()
+	store := &gatedStore{Store: inner, arrived: make(chan struct{}, 64), release: make(chan struct{})}
+	service, err := agentaccess.New(agentaccess.Options{AdminToken: testAdminToken, Store: store, AllowWrite: true, DeveloperLogins: true,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const guesses = 60
+	results := make(chan agentapi.Code, guesses)
+	var wait sync.WaitGroup
+	for index := range guesses {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			token := agentapi.TokenPrefix + fmt.Sprintf("%043d", index)
+			_, err := service.Authenticate(context.Background(), bearer(token), "203.0.113.7")
+			results <- codeOf(err)
+		}()
+	}
+	// Ten lookups are in flight; every other attempt must already have been
+	// refused without reaching the store.
+	for range 10 {
+		<-store.arrived
+	}
+	limited := 0
+	for range guesses - 10 {
+		if code := <-results; code != agentapi.CodeRateLimited {
+			t.Fatalf("attempt beyond the limit = %s", code)
+		}
+		limited++
+	}
+	close(store.release)
+	wait.Wait()
+	close(results)
+	for code := range results {
+		if code != agentapi.CodeUnauthenticated {
+			t.Fatalf("looked-up attempt = %s", code)
+		}
+	}
+	if store.lookups != 10 || limited != guesses-10 {
+		t.Fatalf("lookups = %d, limited = %d", store.lookups, limited)
+	}
+
+	// A lookup that finds a token gives its place back: ten valid tokens in
+	// a row from one address are never limited.
+	h := newHarness(t, true, true)
+	valid := agentaccesstest.IssueAdmin(t, h.service, agentapi.TierRead)
+	for attempt := range 30 {
+		if _, err := h.service.Authenticate(context.Background(), bearer(valid.Token), "203.0.113.8"); err != nil {
+			t.Fatalf("valid token %d = %v", attempt, err)
+		}
+	}
+}
+
 func asError(err error, target **agentaccess.Error) bool {
 	coded, ok := err.(*agentaccess.Error)
 	if ok {
