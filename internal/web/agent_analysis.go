@@ -478,6 +478,12 @@ type agentFacet struct {
 	ViewLogged              bool                          `json:"view_logged"`
 }
 
+// agentFacetEvidenceFields are the facet fields evidence may refer to.
+var agentFacetEvidenceFields = map[string]bool{
+	"goal": true, "task_type": true, "outcome": true, "collaboration": true, "work_relevance": true,
+	"friction": true, "instructions": true, "skill_candidate": true, "items": true,
+}
+
 func agentFacetOf(response sessionanalysis.FacetResponse) agentFacet {
 	out := agentFacet{
 		SessionID: response.SessionID, PackID: response.PackID, Kind: response.Kind, Status: response.Status,
@@ -493,6 +499,11 @@ func agentFacetOf(response sessionanalysis.FacetResponse) agentFacet {
 		out.Items = append(out.Items, agentFacetItem{Ref: item.Ref, TaskType: item.TaskType, WorkRelevance: item.WorkRelevance})
 	}
 	for field, refs := range response.Evidence {
+		// The model names the evidence keys freely; only the facet's own
+		// field names are output, so no model-written text becomes a key.
+		if !agentFacetEvidenceFields[field] {
+			continue
+		}
 		converted := make([]agentEvidenceRef, 0, len(refs))
 		for _, ref := range refs {
 			converted = append(converted, agentEvidenceRef{LabelUntrusted: ref.Label, AuditID: ref.AuditID})

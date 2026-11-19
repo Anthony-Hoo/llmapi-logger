@@ -249,7 +249,7 @@ func plantSweepAnalysis(t *testing.T, fixture *readFixture) {
 		t.Fatal(err)
 	}
 	text, _ := json.Marshal(map[string]any{"goal": sweepMarker, "instructions": []string{sweepMarker}, "skill_candidate": sweepMarker,
-		"evidence": map[string][]string{"goal": {"E1"}}})
+		"evidence": map[string][]string{"goal": {"E1"}, sweepMarker: {"E1"}}})
 	facet := store.facets[sweepAnalysisID]
 	if facet.TextEnc, err = store.cipher.Encrypt(facetAAD, text); err != nil {
 		t.Fatal(err)
