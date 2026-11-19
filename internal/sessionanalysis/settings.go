@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -164,7 +163,7 @@ func validateCandidate(candidate config.SessionAnalysisConfig, requireModel bool
 		checked.LLM.Enabled = true
 	}
 	if err := config.ValidateSessionAnalysisRuntime(checked); err != nil {
-		return fmt.Errorf("%w: %s", ErrInvalidSettings, err.Error())
+		return settingsError(err.Error())
 	}
 	return nil
 }
@@ -177,7 +176,7 @@ func buildModel(candidate config.SessionAnalysisConfig) (Completer, string, erro
 	}
 	client, err := NewLLMClient(candidate.LLM, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: the model client rejected the address", ErrInvalidSettings)
+		return nil, "", settingsError("the model client rejected the address")
 	}
 	return client, client.Model(), nil
 }
@@ -263,6 +262,9 @@ type SettingsService struct {
 	query   *QueryService
 	logger  *slog.Logger
 	now     func() time.Time
+	// savedNS is the highest version this service has stored, guarded by mu;
+	// see nextVersion.
+	savedNS int64
 	// probe is replaced in tests.
 	probe func(ctx context.Context, candidate config.SessionAnalysisConfig) ProbeResult
 }
@@ -311,16 +313,24 @@ func (service *SettingsService) Get(ctx context.Context) (SettingsView, error) {
 	return service.view(effective, keySource, updatedNS), nil
 }
 
-// candidate resolves an update against what is in use: the configuration it
-// would produce, and where its key comes from.
-func (service *SettingsService) candidate(ctx context.Context, update SettingsUpdate) (config.SessionAnalysisConfig, string, error) {
-	current, keySource, _, err := loadSaved(ctx, service.file, service.store, service.cipher)
+// current returns the configuration in use, where its key comes from and
+// its version (the saved row's time; 0 when the file applies, including when
+// the saved section is unusable). The caller holds mu.
+func (service *SettingsService) current(ctx context.Context) (config.SessionAnalysisConfig, string, int64) {
+	current, keySource, version, err := loadSaved(ctx, service.file, service.store, service.cipher)
 	if err != nil {
-		current, keySource = service.file, KeyNone
+		current, keySource, version = service.file, KeyNone, 0
 		if service.file.LLM.APIKey != "" {
 			keySource = KeyFile
 		}
 	}
+	return current, keySource, version
+}
+
+// candidate resolves an update against what is in use: the configuration it
+// would produce, where its key comes from, and the version it replaces.
+func (service *SettingsService) candidate(ctx context.Context, update SettingsUpdate) (config.SessionAnalysisConfig, string, int64, error) {
+	current, keySource, version := service.current(ctx)
 	apiKey := current.LLM.APIKey
 	if update.APIKey != nil {
 		apiKey, keySource = *update.APIKey, KeySaved
@@ -328,7 +338,14 @@ func (service *SettingsService) candidate(ctx context.Context, update SettingsUp
 			keySource = KeyNone
 		}
 	}
-	return overlay(service.file, update.EditableSettings, apiKey), keySource, nil
+	return overlay(service.file, update.EditableSettings, apiKey), keySource, version, nil
+}
+
+// nextVersion stamps a save: the clock, raised above the version replaced
+// and every version this service stored, so two successive saves never
+// share a version even when the clock repeats a reading. The caller holds mu.
+func (service *SettingsService) nextVersion(replaced int64) int64 {
+	return max(service.now().UnixNano(), replaced+1, service.savedNS+1)
 }
 
 // Update validates, saves and applies a change. The saved section overrides
@@ -336,7 +353,12 @@ func (service *SettingsService) candidate(ctx context.Context, update SettingsUp
 func (service *SettingsService) Update(ctx context.Context, update SettingsUpdate) (SettingsView, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	candidate, keySource, err := service.candidate(ctx, update)
+	return service.update(ctx, update)
+}
+
+// update is Update with mu held.
+func (service *SettingsService) update(ctx context.Context, update SettingsUpdate) (SettingsView, error) {
+	candidate, keySource, version, err := service.candidate(ctx, update)
 	if err != nil {
 		return SettingsView{}, err
 	}
@@ -351,7 +373,7 @@ func (service *SettingsService) Update(ctx context.Context, update SettingsUpdat
 	if err != nil {
 		return SettingsView{}, err
 	}
-	row := storage.RuntimeSettings{Section: storage.SettingsSessionAnalysis, Settings: string(encoded), UpdatedAtNS: service.now().UnixNano()}
+	row := storage.RuntimeSettings{Section: storage.SettingsSessionAnalysis, Settings: string(encoded), UpdatedAtNS: service.nextVersion(version)}
 	if keySource == KeySaved {
 		aad, err := settingsKeyAAD()
 		if err != nil {
@@ -364,6 +386,7 @@ func (service *SettingsService) Update(ctx context.Context, update SettingsUpdat
 	if err := service.store.SaveRuntimeSettings(ctx, row); err != nil {
 		return SettingsView{}, err
 	}
+	service.savedNS = row.UpdatedAtNS
 	if err := service.apply(candidate, model, modelName); err != nil {
 		return SettingsView{}, err
 	}
@@ -377,6 +400,11 @@ func (service *SettingsService) Update(ctx context.Context, update SettingsUpdat
 func (service *SettingsService) Reset(ctx context.Context) (SettingsView, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	return service.reset(ctx)
+}
+
+// reset is Reset with mu held.
+func (service *SettingsService) reset(ctx context.Context) (SettingsView, error) {
 	if err := validateCandidate(service.file, false); err != nil {
 		return SettingsView{}, err
 	}
@@ -481,7 +509,7 @@ func probeModel(ctx context.Context, candidate config.SessionAnalysisConfig) Pro
 // synthetic call to the model endpoint.
 func (service *SettingsService) Test(ctx context.Context, update SettingsUpdate) (ProbeResult, error) {
 	service.mu.Lock()
-	candidate, _, err := service.candidate(ctx, update)
+	candidate, _, _, err := service.candidate(ctx, update)
 	probe := service.probe
 	service.mu.Unlock()
 	if err != nil {

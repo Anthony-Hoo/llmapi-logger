@@ -168,22 +168,9 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 	agreed := map[string]int64{}
 	result := CalibrationResult{PromptVersion: PromptVersion, Model: service.modelName(), Labels: len(labels)}
 	for _, label := range labels {
-		key, err := ParseSessionID(label.SessionID)
+		key, _, err := checkCalibrationLabel(label)
 		if err != nil {
 			return CalibrationResult{}, err
-		}
-		for field, value := range map[string]string{"task_type": label.TaskType, "outcome": label.Outcome, "collaboration": label.Collaboration, "work_relevance": label.WorkRelevance} {
-			if value == "" {
-				continue
-			}
-			if !contains(enumFor(field), value) {
-				return CalibrationResult{}, invalid("unknown label value for " + field)
-			}
-		}
-		for _, value := range label.Friction {
-			if !contains(FrictionKinds, value) {
-				return CalibrationResult{}, invalid("unknown friction label")
-			}
 		}
 		facet, err := service.facets.LoadSessionFacet(ctx, key)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -238,6 +225,30 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 		return CalibrationResult{}, err
 	}
 	return result, nil
+}
+
+// checkCalibrationLabel is Calibrate's check of one label: the session id,
+// then the enum fields, then the friction kinds. It returns the session key
+// and, on failure, the JSON name of the field that failed.
+func checkCalibrationLabel(label CalibrationLabel) ([]byte, string, error) {
+	key, err := ParseSessionID(label.SessionID)
+	if err != nil {
+		return nil, "session_id", err
+	}
+	for field, value := range map[string]string{"task_type": label.TaskType, "outcome": label.Outcome, "collaboration": label.Collaboration, "work_relevance": label.WorkRelevance} {
+		if value == "" {
+			continue
+		}
+		if !contains(enumFor(field), value) {
+			return nil, field, invalid("unknown label value for " + field)
+		}
+	}
+	for _, value := range label.Friction {
+		if !contains(FrictionKinds, value) {
+			return nil, "friction", invalid("unknown friction label")
+		}
+	}
+	return key, "", nil
 }
 
 func enumFor(field string) []string {
