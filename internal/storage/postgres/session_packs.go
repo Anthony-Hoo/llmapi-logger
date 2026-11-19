@@ -261,7 +261,10 @@ func (store *Store) RecordAnalysisView(ctx context.Context, view storage.Analysi
 		return errors.New("postgres: invalid analysis view")
 	}
 	key := append([]byte(nil), view.SessionKey...)
-	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+	// The caller withholds the content when this fails, so the answer must be
+	// definitive: a cancelled reader must not leave a view logged that it was
+	// told had failed.
+	return store.submitPolicySync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
 		_, err := tx.Exec(`
 INSERT INTO analysis_view_log (at_ns, viewer_role, viewer_user_id, viewer_token_id, resource, session_key)
 VALUES ($1, $2, $3, $4, $5, $6)`, view.AtNS, view.ViewerRole, view.ViewerUserID, view.ViewerTokenID, view.Resource, key)

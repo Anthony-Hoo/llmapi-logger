@@ -40,6 +40,12 @@ ORDER BY id`)
 	return rules, nil
 }
 
+// Rule writes use the policy lifecycle (submitPolicySync): once the writer has
+// admitted one, the caller waits for a definitive commit or rollback even if
+// its own context is cancelled. The service publishes its in-memory snapshot
+// only after a nil result, so a cancelled request can no longer leave the
+// database changed while the enforced rules stay as they were.
+
 // CreateUserAgentRule inserts one rule with the service-assigned stable ID.
 func (store *Store) CreateUserAgentRule(ctx context.Context, rule uaguard.Rule) (uaguard.Rule, error) {
 	if ctx == nil {
@@ -48,7 +54,7 @@ func (store *Store) CreateUserAgentRule(ctx context.Context, rule uaguard.Rule) 
 	if store == nil || store.isClosed() {
 		return uaguard.Rule{}, ErrClosed
 	}
-	if err := store.submitSync(ctx, writeRequest{kind: writeCreateUserAgentRule, data: rule}); err != nil {
+	if err := store.submitPolicySync(ctx, writeRequest{kind: writeCreateUserAgentRule, data: rule}); err != nil {
 		return uaguard.Rule{}, err
 	}
 	return rule, nil
@@ -62,7 +68,7 @@ func (store *Store) UpdateUserAgentRule(ctx context.Context, rule uaguard.Rule) 
 	if store == nil || store.isClosed() {
 		return uaguard.Rule{}, ErrClosed
 	}
-	if err := store.submitSync(ctx, writeRequest{kind: writeUpdateUserAgentRule, data: rule}); err != nil {
+	if err := store.submitPolicySync(ctx, writeRequest{kind: writeUpdateUserAgentRule, data: rule}); err != nil {
 		return uaguard.Rule{}, err
 	}
 	return rule, nil
@@ -76,7 +82,7 @@ func (store *Store) DeleteUserAgentRule(ctx context.Context, id int64) error {
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeDeleteUserAgentRule, data: id})
+	return store.submitPolicySync(ctx, writeRequest{kind: writeDeleteUserAgentRule, data: id})
 }
 
 func requireAffectedRule(result interface{ RowsAffected() (int64, error) }) error {
