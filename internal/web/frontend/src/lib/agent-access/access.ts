@@ -134,29 +134,15 @@ export function formatDateTime(value: string | null | undefined): string {
   }).format(date);
 }
 
-/** changed_keys is a list of key names; a JSON-encoded list is accepted too. */
+/** The changed key names; anything that is not a list of names shows as none. */
 export function changedKeys(change: AgentChange): string[] {
-  const value = change.changed_keys;
-  if (Array.isArray(value)) {
-    return value.filter((key): key is string => typeof key === "string");
-  }
-  if (typeof value === "string" && value.trim() !== "") {
-    try {
-      const parsed: unknown = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === "string") : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
+  const value: unknown = change.changed_keys;
+  return Array.isArray(value) ? value.filter((key): key is string => typeof key === "string") : [];
 }
 
-/** The device behind a change: the row's own name, the token list's, or the token number. */
+/** The device behind a change: the token list's name for its token, or the token number. */
 export function changeDevice(change: AgentChange, tokens: AgentToken[]): string {
-  if (change.device_name) {
-    return change.device_name;
-  }
-  if (change.token_id === null || change.token_id === undefined || change.token_id === "") {
+  if (change.token_id === null || change.token_id === undefined) {
     return "—";
   }
   const token = tokens.find((item) => String(item.id) === String(change.token_id));

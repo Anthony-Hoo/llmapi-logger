@@ -68,25 +68,28 @@ export interface InstallLink {
 }
 
 /**
- * One row of agent_audit_log as the changes endpoint returns it. The contract
- * names the columns but not the JSON; this mirrors the table with the
- * nanosecond column as an RFC 3339 `at`.
+ * One row of GET /api/v1/agent-access/changes (contract §3.2): a write_applied,
+ * write_failed or write_denied row of agent_audit_log, newest first. Absent
+ * text columns are empty strings; the device name comes from the token list.
  */
 export interface AgentChange {
-  id: number | string;
+  id: number;
+  /** RFC 3339 UTC. */
   at: string;
-  event: string;
-  token_id?: number | string | null;
-  device_name?: string | null;
-  role?: string | null;
-  command?: string | null;
-  cli_version?: string | null;
-  object_kind?: string | null;
-  object_id?: string | null;
-  /** An array of key names; a JSON-encoded array string is accepted too. */
-  changed_keys?: string[] | string | null;
-  outcome: string;
-  error_code?: string | null;
+  event: "write_applied" | "write_failed" | "write_denied" | string;
+  token_id: number | null;
+  role: string;
+  /** The command the client reported, e.g. "apply"; recorded, never trusted. */
+  command: string;
+  cli_version: string;
+  /** e.g. "content-rule", "analysis-settings", "plan". */
+  object_kind: string;
+  object_id: string;
+  /** Names of the changed fields only, never values. */
+  changed_keys: string[];
+  outcome: "ok" | "denied" | "failed" | string;
+  /** The facade error code of a failed or denied write; empty otherwise. */
+  error_code: string;
 }
 
 export interface AgentChangeList {

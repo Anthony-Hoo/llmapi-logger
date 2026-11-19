@@ -85,14 +85,26 @@ describe("devices and changes", () => {
   });
 
   it("reads changed keys and names the device of a change", () => {
-    const change: AgentChange = { id: 1, at: "2026-11-19T00:00:00Z", event: "write_applied", token_id: 7, outcome: "ok", changed_keys: ["enabled", "name"] };
+    // The row exactly as GET /api/v1/agent-access/changes writes it.
+    const change: AgentChange = {
+      id: 1,
+      at: "2026-11-19T00:00:00Z",
+      event: "write_applied",
+      token_id: 7,
+      role: "admin",
+      command: "apply",
+      cli_version: "0.1.0",
+      object_kind: "content-rule",
+      object_id: "12",
+      changed_keys: ["enabled", "name"],
+      outcome: "ok",
+      error_code: "",
+    };
     expect(changedKeys(change)).toEqual(["enabled", "name"]);
-    expect(changedKeys({ ...change, changed_keys: '["a","b"]' })).toEqual(["a", "b"]);
-    expect(changedKeys({ ...change, changed_keys: "not json" })).toEqual([]);
-    expect(changedKeys({ ...change, changed_keys: null })).toEqual([]);
+    expect(changedKeys({ ...change, changed_keys: [] })).toEqual([]);
+    expect(changedKeys({ ...change, changed_keys: "not a list" as unknown as string[] })).toEqual([]);
     expect(changeDevice(change, [token])).toBe("laptop");
     expect(changeDevice({ ...change, token_id: 9 }, [token])).toBe("令牌 #9");
-    expect(changeDevice({ ...change, device_name: "desk" }, [token])).toBe("desk");
     expect(changeDevice({ ...change, token_id: null }, [token])).toBe("—");
   });
 });
