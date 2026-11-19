@@ -322,3 +322,29 @@ func ValidateCalibrationLabels(labels []CalibrationLabel) error {
 func (service *QueryService) CalibrationAvailable() bool {
 	return service != nil && service.facets != nil && service.modelName() != ""
 }
+
+// RunState is what TriggerRun depends on and what a caller about to trigger
+// a run should know, read without a time range.
+type RunState struct {
+	// Available is false when no runner is attached: TriggerRun then fails.
+	Available bool
+	// Running reports a run in progress: TriggerRun then fails with
+	// ErrRunInProgress.
+	Running bool
+	// LastRun is the latest batch run, nil when there has been none.
+	LastRun *RunSummary
+}
+
+// RunState reads the runner state and the latest run. It starts nothing.
+func (service *QueryService) RunState(ctx context.Context) (RunState, error) {
+	state := RunState{Available: service.trigger != nil}
+	if service.trigger != nil {
+		state.Running = service.trigger.Running()
+	}
+	last, err := service.lastRun(ctx)
+	if err != nil {
+		return RunState{}, err
+	}
+	state.LastRun = last
+	return state, nil
+}
