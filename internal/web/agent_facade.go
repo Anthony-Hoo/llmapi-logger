@@ -185,18 +185,24 @@ func (handler *managementHandler) serveAgent(writer http.ResponseWriter, request
 }
 
 // takeAgentQuotas applies the per-token limits of contract section 7 after
-// the token and its permissions passed. Logout is never limited: revoking a
-// token must always work.
+// the token and its permissions passed. Logout is never limited by a quota:
+// revoking a token must always work. A request refused by one quota leaves
+// the others as they were: a pack read refused by the sensitive-read quota
+// gives back the general read slot it took.
 func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, identity agentaccess.Identity) error {
 	switch {
 	case endpoint.ID == "logout":
 		return nil
 	case endpoint.Tier == agentapi.TierRead:
-		if err := handler.agent.Take(agentaccess.QuotaRead, identity); err != nil {
+		read, err := handler.agent.TakeSlot(agentaccess.QuotaRead, identity)
+		if err != nil {
 			return err
 		}
 		if endpoint.ID == "analysis.pack" || endpoint.ID == "analysis.facet" {
-			return handler.agent.Take(agentaccess.QuotaSensitiveRead, identity)
+			if err := handler.agent.Take(agentaccess.QuotaSensitiveRead, identity); err != nil {
+				handler.agent.Refund(read)
+				return err
+			}
 		}
 		return nil
 	case endpoint.ID == agentapi.EndpointTestModel:

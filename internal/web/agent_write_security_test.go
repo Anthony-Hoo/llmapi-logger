@@ -276,6 +276,29 @@ func TestAgentRateLimits(t *testing.T) {
 			t.Fatal("ordinary reads are not held by the sensitive limit")
 		}
 	})
+	t.Run("a refused pack keeps the read slot", func(t *testing.T) {
+		fixture := newWriteFixture(t)
+		path := "/analysis/sessions/" + analysisOwnID + "/pack"
+		refused := 0
+		// 20 packs pass and take 20 read slots; the next 100 are refused by the
+		// sensitive limit and must take none.
+		for index := 0; index < 120; index++ {
+			if fixture.facade(http.MethodGet, path, nil, fixture.developer).Code == http.StatusTooManyRequests {
+				refused++
+			}
+		}
+		if refused != 100 {
+			t.Fatalf("refused packs = %d, want 100", refused)
+		}
+		for index := 0; index < 100; index++ {
+			if response := fixture.facade(http.MethodGet, "/whoami", nil, fixture.developer); response.Code != http.StatusOK {
+				t.Fatalf("read %d after refused packs = %d %s", index, response.Code, response.Body.String())
+			}
+		}
+		if code := failure(t, fixture.facade(http.MethodGet, "/whoami", nil, fixture.developer)).Code; code != agentapi.CodeRateLimited {
+			t.Fatalf("121st counted read = %s", code)
+		}
+	})
 	t.Run("writes", func(t *testing.T) {
 		fixture := newWriteFixture(t)
 		for index := 0; index < 60; index++ {
