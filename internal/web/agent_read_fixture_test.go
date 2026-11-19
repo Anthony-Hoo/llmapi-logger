@@ -343,7 +343,9 @@ func (store *memoryAnalysisStore) LoadSessionFacet(_ context.Context, key []byte
 	return facet, nil
 }
 
-func (store *memoryAnalysisStore) SaveFacetCalibration(context.Context, storage.FacetCalibration) error { return nil }
+func (store *memoryAnalysisStore) SaveFacetCalibration(context.Context, storage.FacetCalibration) error {
+	return nil
+}
 
 func (store *memoryAnalysisStore) LatestFacetCalibration(context.Context, string, string) (storage.FacetCalibration, error) {
 	return storage.FacetCalibration{}, sql.ErrNoRows
