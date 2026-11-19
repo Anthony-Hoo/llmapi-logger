@@ -883,7 +883,7 @@ func TestNoAgentSecretLeaks(t *testing.T) {
 		strings.Contains(tokenResponse.Body.String(), string(fingerprint)) || strings.Contains(tokenResponse.Body.String(), "fpr") {
 		t.Fatal("an issuing response carries another secret")
 	}
-	if !strings.Contains(audit, `"Command":"probe"`) && !strings.Contains(audit, "token_issued") {
+	if !strings.Contains(audit, "token_issued") || !strings.Contains(audit, "authorize_approved") {
 		t.Fatalf("audit rows missing: %s", audit)
 	}
 }

@@ -207,7 +207,10 @@ func (service *Service) Approve(ctx context.Context, grantor Grantor, request Au
 		identity.ExpiresAt = expires.Truncate(time.Second)
 		identity.Scope = &Scope{
 			Fingerprint: append([]byte(nil), scope.Fingerprint...), TokenID: cloneInt64(scope.TokenID),
-			UserID: scope.UserID, Username: scope.Username, TokenName: scope.TokenName,
+			// The names are display-only copies of what NewAPI reported; they
+			// are cleaned like the device name so that an odd token name can
+			// never make the storage write fail after the code is consumed.
+			UserID: scope.UserID, Username: cleanDisplayText(scope.Username, 256), TokenName: cleanDisplayText(scope.TokenName, 256),
 		}
 		if !identity.ExpiresAt.After(now) {
 			return Authorization{}, fail(agentapi.CodeUnauthenticated)

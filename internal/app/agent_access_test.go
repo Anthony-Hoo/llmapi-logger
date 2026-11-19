@@ -1,12 +1,15 @@
 package app
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"llmapi-logger/internal/web"
 )
 
 func TestAgentAccessIsUnassembledWhenDisabled(t *testing.T) {
@@ -34,6 +37,25 @@ func TestAgentAccessIsUnassembledWhenDisabled(t *testing.T) {
 	application.adminServer.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("disabled web-side route = %d", response.Code)
+	}
+}
+
+// Contract 0.1 #11: an available-mode start without a database leaves the
+// module unassembled with a warning instead of failing the process.
+func TestEnabledAgentAccessWithoutAStoreStaysOff(t *testing.T) {
+	logs := &bytes.Buffer{}
+	configuration := insightsTestConfig(t, "http://192.0.2.1:3000", true, "")
+	configuration.AgentAccess.Enabled = true
+	service, err := assembleAgentAccess(configuration, nil, web.DeveloperLogin{}, slog.New(slog.NewTextHandler(logs, nil)))
+	if service != nil || err != nil {
+		t.Fatalf("assemble without a store = %v, %v", service, err)
+	}
+	if !strings.Contains(logs.String(), "agent_access_unavailable") {
+		t.Fatalf("no warning logged: %q", logs.String())
+	}
+	configuration.AgentAccess.Enabled = false
+	if service, err := assembleAgentAccess(configuration, nil, web.DeveloperLogin{}, slog.New(slog.NewTextHandler(io.Discard, nil))); service != nil || err != nil {
+		t.Fatalf("disabled assemble = %v, %v", service, err)
 	}
 }
 

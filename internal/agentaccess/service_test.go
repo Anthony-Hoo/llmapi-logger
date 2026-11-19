@@ -466,6 +466,20 @@ func TestAuthorizationPlaceholdersAndCleaning(t *testing.T) {
 	}
 }
 
+// NewAPI names are display-only; odd ones are cleaned before they reach
+// storage, where they would otherwise fail the write after the code is spent.
+func TestDeveloperIdentityNamesAreCleaned(t *testing.T) {
+	h := newHarness(t, true, true)
+	scope := agentaccesstest.DeveloperScope(3, 42)
+	scope.Username = "dev\x00eloper\x1b"
+	scope.TokenName = strings.Repeat("n", 400)
+	issued := agentaccesstest.IssueDeveloper(t, h.service, scope, h.clock.Now().Add(time.Hour))
+	if issued.Identity.Scope.Username != "developer" || len(issued.Identity.Scope.TokenName) != 256 ||
+		!bytes.Equal(issued.Identity.Scope.Fingerprint, scope.Fingerprint) || *issued.Identity.Scope.TokenID != 42 {
+		t.Fatalf("identity = %+v", issued.Identity.Scope)
+	}
+}
+
 func approve(t *testing.T, h harness, tier agentapi.Tier, mode string) agentaccess.Authorization {
 	t.Helper()
 	request := agentaccesstest.Request(tier)
@@ -583,7 +597,7 @@ func TestAuthorizationCodes(t *testing.T) {
 		}
 	})
 
-	t.Run("developer login turned off before exchange", func(t *testing.T) {
+	t.Run("codes do not survive a restart", func(t *testing.T) {
 		h := newHarness(t, true, true)
 		authorization, err := h.service.Approve(ctx, agentaccess.Grantor{Role: agentapi.RoleDeveloper, Scope: agentaccesstest.DeveloperScope(1, 1), SessionExpiresAt: h.clock.Now().Add(time.Hour)}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.52")
 		if err != nil {

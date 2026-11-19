@@ -296,6 +296,12 @@ func cleanVersion(value string) string {
 // surrounding space and caps the name at 64 characters. The page shows it as
 // plain text.
 func cleanDeviceName(value string) string {
+	return cleanDisplayText(value, 64)
+}
+
+// cleanDisplayText removes invalid bytes and control characters, trims
+// surrounding space and caps the text at max characters.
+func cleanDisplayText(value string, max int) string {
 	if !utf8.ValidString(value) {
 		value = strings.ToValidUTF8(value, "")
 	}
@@ -306,8 +312,8 @@ func cleanDeviceName(value string) string {
 		return char
 	}, value)
 	value = strings.TrimSpace(value)
-	if utf8.RuneCountInString(value) > 64 {
-		value = strings.TrimSpace(string([]rune(value)[:64]))
+	if utf8.RuneCountInString(value) > max {
+		value = strings.TrimSpace(string([]rune(value)[:max]))
 	}
 	return value
 }
