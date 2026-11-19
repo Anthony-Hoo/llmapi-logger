@@ -166,7 +166,7 @@ func parseAgentID(value string, allowNegative bool) (int64, bool) {
 	if allowNegative && strings.HasPrefix(value, "-") {
 		digits = value[1:]
 	}
-	if !asciiDigits(digits) || len(digits) > 18 {
+	if !asciiDigits(digits) || len(digits) > 19 {
 		return 0, false
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
