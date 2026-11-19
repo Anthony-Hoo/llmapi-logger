@@ -35,6 +35,13 @@ func flagTo() flagSpec {
 		Help: "End of the range: RFC 3339 or YYYY-MM-DD. Default: the server's default."}
 }
 
+// flagToNow is --to of the session analysis reads, whose end defaults to
+// the current time.
+func flagToNow() flagSpec {
+	return flagSpec{Name: "to", Value: "<time>", Query: "to",
+		Help: "End of the range: RFC 3339 or YYYY-MM-DD (a date includes that whole UTC day). Default: now."}
+}
+
 func flagCursor() flagSpec {
 	return flagSpec{Name: "cursor", Value: "<cursor>", Query: "cursor",
 		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Default: none (the first page)."}
@@ -46,7 +53,7 @@ func flagLimit(minimum, maximum, fallback int) flagSpec {
 }
 
 func flagOut(required bool, what string) flagSpec {
-	help := "Write {\"meta\": …, \"data\": …} to this file, data being " + what + " exactly as stdout would carry it (the file is replaced atomically), and print {path, bytes, sha256} with the original meta instead. The directory must exist."
+	help := "Write {\"meta\": …, \"data\": …} to this file, data being " + what + " exactly as stdout would carry it (the file is replaced atomically), and print {path, bytes, sha256} with the original meta instead. The directory must exist and accept the file; this is checked before the server is asked, and an unusable --out fails with LOCAL_FILE_ERROR."
 	if required {
 		help += " Required."
 	} else {
@@ -106,7 +113,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:    []string{"login"},
 			Summary: "authorize this machine in the browser and save an agent token",
-			Description: "Opens the authorization page of the server in the browser and waits up to 5 minutes for the user to approve. " +
+			Description: "Opens the authorization page of the server in the browser and waits up to " + loginWaitText + " for the user to approve. " +
 				"The token is saved in credentials.json under the state directory (LLMAUDIT_HOME, default ~/.llmaudit) and never printed. " +
 				"The user, not the agent, should run this command.",
 			Flags: []flagSpec{
@@ -115,9 +122,13 @@ func buildCommands() []*commandSpec {
 				{Name: "write", Kind: boolFlag, Help: "Ask for the read-write tier (administrators, when the deployment allows writes). The tier is finally chosen on the web page. Default: off (read-only)."},
 				{Name: "device", Value: "<name>", Help: "Device name shown on the authorization page and in the device list, at most 64 characters; control characters are removed. Default: this machine's host name."},
 			},
-			Routes:   []routeSpec{{Method: "POST", Path: "/token", Body: []string{"code", "code_verifier"}}},
-			Examples: []string{"llmaudit login --server https://audit.example.com", "llmaudit login --server https://audit.example.com --no-browser", "llmaudit login --write"},
-			Run:      runLogin,
+			Routes:  []routeSpec{{Method: "POST", Path: "/token", Body: []string{"code", "code_verifier"}}},
+			Wait:    loginWait,
+			WaitFor: "the browser approval or the pasted code",
+			// Required on the first login (runLogin).
+			StateFlags: []string{"server"},
+			Examples:   []string{"llmaudit login --server https://audit.example.com", "llmaudit login --server https://audit.example.com --no-browser", "llmaudit login --server https://audit.example.com --write"},
+			Run:        runLogin,
 		},
 		{
 			Path:        []string{"logout"},
@@ -151,10 +162,10 @@ func buildCommands() []*commandSpec {
 			Description: "Developers see only the records of their own API key. Page with --cursor until next_cursor is empty; with --user-agent a page can be empty while a next page still exists.",
 			Flags: []flagSpec{
 				flagSince(), flagFrom(), flagTo(),
-				{Name: "model", Value: "<model>", Query: "model", Help: "Only this request model. Default: all."},
+				{Name: "model", Value: "<model>", Query: "model", Help: "Only this request model (request_model_untrusted in results). Default: all."},
 				{Name: "status", Value: "<status>", Query: "status", Help: "error, 4xx, 5xx, or one HTTP status code 100-599. Default: all."},
-				{Name: "user-agent", Value: "<text>", Query: "user_agent", Help: "Only records whose inbound User-Agent contains this text. Default: all."},
-				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path, e.g. /v1/chat/completions. Default: all."},
+				{Name: "user-agent", Value: "<text>", Query: "user_agent", Help: "Only records whose inbound User-Agent (user_agent_untrusted in results) contains this text. Default: all."},
+				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path (path_untrusted in results), e.g. /v1/chat/completions. Default: all."},
 				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results). Default: all."},
 				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id. Default: all."},
 				{Name: "forward-status", Value: "<state>", Query: "forward_status", Help: "Only records whose forwarding ended this way: in_progress, completed, rejected, client_cancelled, newapi_error, proxy_error or interrupted. Default: all."},
@@ -162,7 +173,7 @@ func buildCommands() []*commandSpec {
 				{Name: "block-code", Value: "<code>", Query: "block_code", Help: "Only records blocked with this block code, e.g. body_too_large. Default: all."},
 				{Name: "capture-status", Value: "<state>", Query: "capture_status", Help: "Only records whose body capture is pending, complete, partial or failed (chunk_missing appears in results only and is not a filter). Default: all."},
 				{Name: "upstream-error-class", Value: "<class>", Query: "upstream_error_class", Help: "Only records whose upstream error has this class, e.g. cyber_policy. Default: all."},
-				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when a row filter is given (data.collapse_applied says what happened). Default: off, i.e. one row per conversation as the web page shows it."},
+				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when any filter is given, a time range (--since, --from, --to) and --conversation included (data.collapse_applied says what happened). Default: off, i.e. one row per conversation as the web page shows it."},
 				flagLimit(1, 200, 50), flagCursor(),
 				{Name: "user-id", Value: "<id>", Query: "user_id", Help: "Administrators only: NewAPI user ID. Default: all."},
 				{Name: "username", Value: "<name>", Query: "username", Help: "Administrators only: NewAPI user name. Default: all."},
@@ -170,6 +181,7 @@ func buildCommands() []*commandSpec {
 				{Name: "token-name", Value: "<name>", Query: "token_name", Help: "Administrators only: NewAPI token name. Default: all."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests", Meta: true}},
+			Columns:  []string{"audit_id", "started_at", "state", "status_code", "request_model_untrusted", "path_untrusted", "conversation_turns", "blocked_by"},
 			Examples: []string{"llmaudit requests list --since 2h --status 5xx", "llmaudit requests list --since 7d --model gpt-4o --limit 20", "llmaudit requests list --conversation conv_123 --no-collapse"},
 			Run:      runRead,
 		},
@@ -188,13 +200,13 @@ func buildCommands() []*commandSpec {
 		{
 			Path:    []string{"requests", "export"},
 			Summary: "write the conversation, headers, a reconstructed or raw body, or a timeline of one record to a file",
-			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. " +
+			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. complete is true only when the server says the record is finished and the content whole, as `llmaudit requests get <id>` would; otherwise meta.incomplete_reason says why (in_progress, parse_pending, capture_incomplete, timeline_incomplete, or completeness_unknown when the server did not say). " +
 				"NOT_RETAINED for raw-request/raw-response means the raw body was released after verification: export request or response instead.",
 			Args: []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "what", Value: "<what>", PathParam: "what", Required: true, Help: "conversation, headers, request, response, raw-request, raw-response, timeline-request or timeline-response. Required."},
 				{Name: "out", Value: "<file>", Required: true,
-					Help: "Write the exported content itself to this file, with no envelope around it (the file is replaced atomically), and print {path, bytes, sha256, complete, missing_chunks?} with meta.state exported. The directory must exist. Required."},
+					Help: "Write the exported content itself to this file, with no envelope around it (the file is replaced atomically), and print {path, bytes, sha256, complete, missing_chunks?} with meta.state exported. The directory must exist and accept the file; this is checked before the server is asked, and an unusable --out fails with LOCAL_FILE_ERROR. Required."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests/{id}/export/{what}", Raw: true}},
 			Timeout:  60 * time.Second,
@@ -209,7 +221,7 @@ func buildCommands() []*commandSpec {
 			Summary:     "token usage totals grouped by a dimension",
 			Description: "Totals only include records that have been analyzed (data.coverage_unknown).",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (30m, 2h, 7d). Cannot be combined with --from. Default: 7d. The range is at most 400 days."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (30m, 2h, 7d). Cannot be combined with --from. Default: 7d. The range is at most 400 days."},
 				flagFrom(), flagTo(),
 				{Name: "group-by", Value: "<dimension>", Query: "group_by", Help: "model, protocol or client; administrators also caller or token. Default: the server's default."},
 				{Name: "tz-offset-min", Value: "<minutes>", Query: "tz_offset_min", Default: localOffsetMinutes, Help: "Time zone offset east of UTC in minutes, -840 to 840, used for day buckets. Default: this machine's current offset."},
@@ -227,6 +239,7 @@ func buildCommands() []*commandSpec {
 				flagLimit(1, 100, 20), flagCursor(),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/usage/sessions", Meta: true}},
+			Columns:  []string{"session_id", "last_at", "client", "role", "steps", "turns", "subagents"},
 			Examples: []string{"llmaudit usage sessions --since 24h --sort tokens --limit 10"},
 			Run:      runRead,
 		},
@@ -278,6 +291,7 @@ func buildCommands() []*commandSpec {
 				{Name: "metric", Value: "<metric>", Query: "metric", Help: "hours, tokens or cost. Default: the server's default."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/weekly/report", Meta: true}},
+			Columns:  []string{"rank", "user_id", "group_id", "active_seconds", "requests", "cost_usd"},
 			Timeout:  40 * time.Second,
 			Examples: []string{"llmaudit weekly report", "llmaudit weekly report --week 2026-01-05 --metric tokens"},
 			Run:      runRead,
@@ -315,6 +329,7 @@ func buildCommands() []*commandSpec {
 				flagLimit(1, 200, 20),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/weekly/unattributed", Meta: true}},
+			Columns:  []string{"kind", "value_untrusted", "requests", "users"},
 			Timeout:  40 * time.Second,
 			Examples: []string{"llmaudit weekly unattributed --limit 50"},
 			Run:      runRead,
@@ -337,9 +352,9 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "overview"},
 			Summary: "session analysis summary and the state of the last run",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
 				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
-				flagTo(), flagUserID(true),
+				flagToNow(), flagUserID(true),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/overview", Meta: true}},
 			Examples: []string{"llmaudit analysis overview --since 7d"},
@@ -349,9 +364,9 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "users"},
 			Summary: "session analysis per user (administrators)",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (2h, 7d). One of --since or --from is required; not both."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both."},
 				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
-				flagTo(),
+				flagToNow(),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/users", Meta: true}},
 			Examples: []string{"llmaudit analysis users --since 30d"},
@@ -363,12 +378,13 @@ func buildCommands() []*commandSpec {
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
 				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
-				flagTo(),
+				flagToNow(),
 				{Name: "kind", Value: "<kind>", Query: "kind", Help: "agent or chat. Default: both."},
 				{Name: "flags", Value: "<list>", Query: "flags", Help: "Comma-separated session flags to filter by: loop, thrash, unverified, failures, corrections, error_paste, interrupt, heavy_model, danger, secret, compaction. Default: no filter."},
 				flagLimit(1, 200, 50), flagCursor(), flagUserID(true),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/sessions", Meta: true}},
+			Columns:  []string{"session_id", "last_at", "kind", "client", "model_untrusted", "requests", "task_type", "outcome"},
 			Examples: []string{"llmaudit analysis sessions --since 7d --kind agent --limit 20"},
 			Run:      runRead,
 		},
@@ -438,7 +454,7 @@ func buildCommands() []*commandSpec {
 			Description: "Probes the model with the saved settings, overridden by --set values that are not saved. Exit code 6 when the probe ran but failed (data.ok false). " +
 				"--prompt-key asks the user for a key in the terminal without echo; there is no other way to pass a key.",
 			Flags: []flagSpec{
-				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is empty, anything else a string. Not api_key. Repeatable. Default: the saved settings."},
+				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is JSON null (refused here: only a project's group_id accepts null), anything else a string. Not api_key. Repeatable. Default: the saved settings."},
 				{Name: "prompt-key", Kind: boolFlag, Help: "Read an API key for this test from the interactive terminal without echo; it is not saved. Fails with NO_TTY when stdin is not a terminal. Default: use the saved key."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/analysis/test-model", Body: []string{"api_key"}}},
@@ -462,6 +478,7 @@ func buildCommands() []*commandSpec {
 				{Method: "GET", Path: "/config/weekly-settings", Meta: true},
 				{Method: "GET", Path: "/config/analysis-settings", Meta: true},
 			},
+			Columns:  []string{"id", "name_untrusted", "enabled", "version"},
 			Examples: []string{"llmaudit config show --kind content-rule", "llmaudit config show --kind org"},
 			Select:   selectConfigShow,
 			Run:      runRead,
@@ -491,7 +508,7 @@ func buildCommands() []*commandSpec {
 			Flags: []flagSpec{
 				{Name: "kind", Value: "<kind>", Body: "kind", Required: true, Help: "One of " + configKinds + ". Required."},
 				{Name: "id", Value: "<id>", Body: "id", Help: "Object to change: a number; for member a NewAPI user ID; for principal user:<id> or token:<id>. Omit to create (not for member, principal or the two settings). Default: none."},
-				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Set a field, split at the first '='. true/false are booleans, decimal numbers are numbers, null is empty, anything else is a string (use --set-json for a string that looks like a number). Repeatable. Default: none."},
+				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Set a field, split at the first '='. true/false are booleans, decimal numbers are numbers, null is JSON null (accepted only for a project's group_id, meaning the organization-wide project; use --set-json <field>='\"\"' for an empty string), anything else is a string (use --set-json for a string that looks like a number). Repeatable. Default: none."},
 				{Name: "set-json", Kind: listFlag, Value: "<field>=<json>", Body: "set", Help: "Set a field to a JSON value (lists, or strings with special characters). Repeatable. Default: none."},
 				{Name: "patch-file", Kind: listFlag, Value: "<file>", Body: "set", Help: "JSON object file whose keys are field names. Recommended for regular expressions and keyword lists. Repeatable. Default: none."},
 				{Name: "add", Kind: listFlag, Value: "<field>=<value>", Body: "add", Help: "Add one element to a list field (keywords, scan_scopes, ranked_clients, rules); a rules value is <kind>:<pattern>. Repeatable. Not allowed when creating. Default: none."},
@@ -554,6 +571,7 @@ func buildCommands() []*commandSpec {
 			Path:     []string{"callers", "list"},
 			Summary:  "NewAPI users and tokens known to the server (administrators)",
 			Routes:   []routeSpec{{Method: "GET", Path: "/callers", Meta: true}},
+			Columns:  []string{"id", "username_untrusted", "display_name_untrusted", "group_untrusted", "status"},
 			Examples: []string{"llmaudit callers list"},
 			Run:      runRead,
 		},

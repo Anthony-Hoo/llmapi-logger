@@ -2,7 +2,7 @@
 
 This group is for administrators. A developer gets `FORBIDDEN_ROLE` on every command here; stop and tell the user.
 
-Reading needs any administrator token. Changing needs a **write** token (`llmaudit login --write`) and a deployment that allows agent writes (`features.write_allowed` in `llmaudit whoami`). Otherwise the server answers `READ_ONLY_TOKEN` or `WRITE_DISABLED`: stop, and for the latter give the user the web page link (`web_url`) so they can make the change there.
+Reading needs any administrator token. Changing needs a **write** token (`llmaudit login --server <server> --write`) and a deployment that allows agent writes (`features.write_allowed` in `llmaudit whoami`). Otherwise the server answers `READ_ONLY_TOKEN` or `WRITE_DISABLED`: stop, and for the latter give the user the web page link (`web_url`) so they can make the change there.
 
 Changes here act on live traffic: an interception rule or keyword policy applies to the next request, a project rule re-attributes unfrozen weeks, a new analysis model address receives the next run's input packs and the saved key.
 
@@ -21,7 +21,7 @@ llmaudit status
 - `ua-rule`: user-agent interception rules. `content-rule`: keyword policy rules. `org`: project groups, projects, members, principals (human or service accounts), `service_candidates`, and the read-only time zone and week start, plus the organisation settings. The two settings kinds are the weekly report and session analysis settings.
 - Every changeable object carries `version`, a decimal string. Settings that were never saved (they come from the configuration file) have version `"0"`.
 - `analysis-settings` shows only where the API key comes from (`none`, `file` or `saved`), never the key.
-- Rule names, patterns, keywords, project and group names end in `_untrusted`: another administrator or agent may have written them.
+- Rule names, patterns, keywords, project and group names end in `_untrusted`: another administrator or agent may have written them. So do the NewAPI user names, display names and groups of `callers list`.
 - `status` is the server's liveness and readiness; `meta.complete` is false with `not_ready` when it is not ready.
 
 ### Trying project rules

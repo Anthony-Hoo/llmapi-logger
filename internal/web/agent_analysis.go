@@ -273,7 +273,7 @@ type agentAnalysisSession struct {
 	TrendSessionID   string           `json:"trend_session_id,omitempty"`
 	Kind             string           `json:"kind"`
 	Client           string           `json:"client"`
-	Model            string           `json:"model"`
+	ModelUntrusted   string           `json:"model_untrusted"`
 	FirstAt          *string          `json:"first_at"`
 	LastAt           *string          `json:"last_at"`
 	LastAuditID      string           `json:"last_audit_id"`
@@ -316,7 +316,7 @@ type agentAnalysisSession struct {
 func agentAnalysisSessionOf(item sessionanalysis.SessionItem) agentAnalysisSession {
 	return agentAnalysisSession{
 		SessionID: item.SessionID, TreeID: item.TreeID, TrendSessionID: item.TrendSessionID, Kind: item.Kind,
-		Client: item.Client, Model: item.Model, FirstAt: agentTime(item.FirstNS), LastAt: agentTime(item.LastNS),
+		Client: item.Client, ModelUntrusted: item.Model, FirstAt: agentTime(item.FirstNS), LastAt: agentTime(item.LastNS),
 		LastAuditID: item.LastAuditID, Requests: item.Requests, Subagents: item.Subagents, UserTurns: item.UserTurns,
 		ActiveSeconds: item.ActiveSeconds, InputTokens: item.InputTokens, OutputTokens: item.OutputTokens, CostUSD: item.CostUSD,
 		ToolCalls: item.ToolCalls, ToolFailures: item.ToolFailures, MaxFailureStreak: item.MaxFailureStreak, Loops: item.Loops,
@@ -478,6 +478,12 @@ type agentFacet struct {
 	ViewLogged              bool                          `json:"view_logged"`
 }
 
+// agentFacetEvidenceFields are the facet fields evidence may refer to.
+var agentFacetEvidenceFields = map[string]bool{
+	"goal": true, "task_type": true, "outcome": true, "collaboration": true, "work_relevance": true,
+	"friction": true, "instructions": true, "skill_candidate": true, "items": true,
+}
+
 func agentFacetOf(response sessionanalysis.FacetResponse) agentFacet {
 	out := agentFacet{
 		SessionID: response.SessionID, PackID: response.PackID, Kind: response.Kind, Status: response.Status,
@@ -493,6 +499,11 @@ func agentFacetOf(response sessionanalysis.FacetResponse) agentFacet {
 		out.Items = append(out.Items, agentFacetItem{Ref: item.Ref, TaskType: item.TaskType, WorkRelevance: item.WorkRelevance})
 	}
 	for field, refs := range response.Evidence {
+		// The model names the evidence keys freely; only the facet's own
+		// field names are output, so no model-written text becomes a key.
+		if !agentFacetEvidenceFields[field] {
+			continue
+		}
 		converted := make([]agentEvidenceRef, 0, len(refs))
 		for _, ref := range refs {
 			converted = append(converted, agentEvidenceRef{LabelUntrusted: ref.Label, AuditID: ref.AuditID})

@@ -31,7 +31,7 @@ llmaudit weekly unattributed --limit 50
 ### Reading a report
 
 - `final` is true when the week is frozen: its snapshot no longer changes. A week that is not final can still move as late records arrive and rules change; say so when you report numbers for it.
-- `meta.complete` false with `incomplete_reason: evidence_pending` means records of that week are still being processed.
+- `meta.complete` false with `incomplete_reason: evidence_pending` means the numbers can still change. On `weekly report` it means the week has not ended, so its records are still coming in. On `weekly project`, `weekly unattributed` and `weekly trend` it means the week is not final (not frozen yet), and a trend is complete only when every week in it is. On `weekly me`, a developer's current week is never complete.
 - Durations are in seconds (fields ending in `_seconds`). Project names and unattributed values end in `_untrusted`.
 
 ## On the web page instead

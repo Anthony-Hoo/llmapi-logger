@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -45,6 +46,9 @@ func loadCredentials(env *Env) (*credentials, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := securePrivateState(dir); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(filepath.Join(dir, credentialsFile))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, &cliError{Code: agentapi.CodeNotLoggedIn}
@@ -66,6 +70,9 @@ func saveCredentials(env *Env, creds *credentials) error {
 	}
 	if err := ensurePrivateDir(dir); err != nil {
 		return localFileError("cannot create the state directory", nil)
+	}
+	if err := securePrivateState(dir); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
@@ -110,6 +117,25 @@ func loadConfig(env *Env) (localConfig, error) {
 		return config, localFileError("config.json is not valid: it accepts only {\"ca_file\": \"<path>\"}", nil)
 	}
 	return config, nil
+}
+
+// securePrivateState makes the state directory and credentials.json private
+// (on POSIX: 0700 and 0600) when group or others can access them, and stops
+// with LOCAL_FILE_ERROR naming the path and the required modes when that
+// fails. The file's content is never read here or printed.
+func securePrivateState(dir string) error {
+	file := filepath.Join(dir, credentialsFile)
+	for _, item := range []struct {
+		path string
+		mode os.FileMode
+	}{{dir, 0o700}, {file, 0o600}} {
+		if err := tightenPrivate(item.path, item.mode); err != nil {
+			return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is accessible to other users and could not be made private",
+				Hint:    "Make it private and run the command again: the state directory needs mode 0700 and credentials.json mode 0600 (chmod 700 <dir>; chmod 600 <dir>/credentials.json), both owned by you.",
+				Details: map[string]any{"path": item.path, "required_mode": fmt.Sprintf("%04o", item.mode)}}
+		}
+	}
+	return nil
 }
 
 func ensurePrivateDir(dir string) error {

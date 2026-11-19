@@ -1,7 +1,6 @@
 package agentcli
 
 import (
-	"errors"
 	"go/parser"
 	"go/token"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/agentapi"
 )
@@ -18,6 +18,7 @@ import (
 // text and hints, so the command can be parsed for real.
 var placeholders = strings.NewReplacer(
 	"<url>", "https://audit.example.com",
+	"<server>", "https://audit.example.com",
 	"<kind>", "ua-rule",
 	"<pattern>", "example",
 	"<week>", "2026-01-05",
@@ -71,9 +72,7 @@ func assertParses(t *testing.T, source, line string) {
 		t.Errorf("%s: %q does not start with llmaudit", source, line)
 		return
 	}
-	_, err := parse(&Env{}, words[1:])
-	var help *errHelp
-	if err != nil && !errors.As(err, &help) {
+	if err := CheckCommand(words[1:]); err != nil {
 		t.Errorf("%s: %q does not parse: %v", source, line, err)
 	}
 }
@@ -182,5 +181,87 @@ func TestStandardLibraryOnly(t *testing.T) {
 				t.Errorf("%s imports %s", file, path)
 			}
 		}
+	}
+}
+
+// TestHelpStatesTheTimeoutApplied: the timeout each command's help prints is
+// the one its requests run under, and login's help also names the wait for
+// the browser or the pasted code (the same constant the wait uses).
+func TestHelpStatesTheTimeoutApplied(t *testing.T) {
+	for _, spec := range allCommands() {
+		help := commandHelp(spec)
+		inv := &invocation{env: &Env{}, spec: spec}
+		ctx, cancel := inv.context()
+		deadline, _ := ctx.Deadline()
+		cancel()
+		if applied := time.Until(deadline); applied > spec.timeout() || applied < spec.timeout()-time.Second {
+			t.Errorf("%s: requests run under %s, spec says %s", spec.name(), applied, spec.timeout())
+		}
+		if !strings.Contains(help, spec.timeout().String()) {
+			t.Errorf("%s: help does not print the request timeout %s", spec.name(), spec.timeout())
+		}
+		if spec.Wait > 0 && !strings.Contains(help, "Timeout: up to "+spec.Wait.String()) {
+			t.Errorf("%s: help does not print the wait %s", spec.name(), spec.Wait)
+		}
+	}
+	login, _, _ := findCommand(allCommands(), []string{"login"})
+	if login.Wait != (&Env{}).loginTimeout() || login.Wait != 5*time.Minute {
+		t.Fatalf("login help wait %s, real wait %s", login.Wait, (&Env{}).loginTimeout())
+	}
+	if help := commandHelp(login); !strings.Contains(help, "Timeout: up to 5m0s waiting for the browser approval or the pasted code, then 15s") ||
+		!strings.Contains(strings.Join(strings.Fields(help), " "), "waits up to "+loginWaitText) {
+		t.Fatalf("login help:\n%s", help)
+	}
+}
+
+// TestHelpOnNull: no help text says null means empty; where --set is
+// documented, null is JSON null that only a project's group_id accepts.
+func TestHelpOnNull(t *testing.T) {
+	for _, spec := range allCommands() {
+		help := strings.Join(strings.Fields(commandHelp(spec)), " ")
+		if strings.Contains(help, "null is empty") {
+			t.Errorf("%s help says null is empty", spec.name())
+		}
+		if spec.flag("set") != nil && !strings.Contains(help, "null is JSON null") {
+			t.Errorf("%s help does not say what null is", spec.name())
+		}
+	}
+}
+
+// TestLoginHintsWorkWithoutSavedCredentials: the hint of a client without
+// credentials names a login command that works on a first login, i.e. one
+// that carries --server (a bare `llmaudit login` fails there with
+// INVALID_ARGUMENT), and so do the hints of the server's credential codes.
+func TestLoginHintsWorkWithoutSavedCredentials(t *testing.T) {
+	h := newHarness(t)
+	body := h.expectFailure(h.run("whoami"), agentapi.CodeNotLoggedIn, 4)
+	hints := []string{body.Hint}
+	for _, code := range []agentapi.Code{agentapi.CodeUnauthenticated, agentapi.CodeTokenExpired, agentapi.CodeTokenRevoked,
+		agentapi.CodeInvalidGrant, agentapi.CodeReadOnlyToken, agentapi.CodeNotLoggedIn} {
+		spec, _ := agentapi.Lookup(code)
+		hints = append(hints, spec.Hint)
+	}
+	for _, hint := range hints {
+		commands := inlineCommand.FindAllStringSubmatch(hint, -1)
+		if len(commands) == 0 {
+			t.Errorf("hint %q names no command", hint)
+		}
+		for _, match := range commands {
+			words := strings.Fields(placeholders.Replace(match[1]))
+			if err := CheckCommand(words[1:]); err != nil {
+				t.Errorf("hint %q: %v", hint, err)
+			}
+			if words[1] == "login" {
+				// Without saved credentials the command line itself must get past
+				// the --server check (it then fails only for want of a browser).
+				inv, err := parse(h.env, words[1:])
+				if err != nil || inv.value("server") == "" {
+					t.Errorf("hint %q: login without --server", hint)
+				}
+			}
+		}
+	}
+	if CheckCommand([]string{"login"}) == nil || CheckCommand([]string{"login", "--write"}) == nil {
+		t.Fatal("CheckCommand accepts a login that fails on a first login")
 	}
 }

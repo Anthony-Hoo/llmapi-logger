@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -108,6 +109,13 @@ func TestExport(t *testing.T) {
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(request.URL.Path, agentapi.PathPrefix+"/requests/complete/"):
+			writer.Header().Set("X-Audit-Complete", "true")
+		case strings.HasPrefix(request.URL.Path, agentapi.PathPrefix+"/requests/running/"):
+			writer.Header().Set("X-Audit-Complete", "false")
+			writer.Header().Set("X-Audit-Incomplete-Reason", "in_progress")
+		}
 		_, _ = io.WriteString(writer, `{"messages":[]}`)
 	})
 	h := newHarness(t)
@@ -151,8 +159,23 @@ func TestExport(t *testing.T) {
 	if content, _ := os.ReadFile(conversation); string(content) != `{"messages":[]}` {
 		t.Fatalf("conversation %s", content)
 	}
-	if envelope := h.success(); strings.Contains(string(envelope["data"]), "missing_chunks") || !strings.Contains(string(envelope["data"]), `"complete":true`) {
-		t.Fatalf("json export data %s", envelope["data"])
+	// No completeness header: the server did not say, so the export is not
+	// called complete (contract 0.1 items 49(e) and 96).
+	if envelope := h.success(); strings.Contains(string(envelope["data"]), "missing_chunks") || !strings.Contains(string(envelope["data"]), `"complete":false`) ||
+		string(envelope["meta"]) != `{"state":"exported","complete":false,"incomplete_reason":"completeness_unknown"}` {
+		t.Fatalf("json export without a header: data %s meta %s", envelope["data"], envelope["meta"])
+	}
+	for id, want := range map[string]string{
+		"complete": `{"state":"exported","complete":true,"incomplete_reason":""}`,
+		"running":  `{"state":"exported","complete":false,"incomplete_reason":"in_progress"}`,
+	} {
+		if exit := h.run("requests", "export", id, "--what", "conversation", "--out", conversation); exit != 0 {
+			t.Fatalf("exit %d", exit)
+		}
+		envelope := h.success()
+		if string(envelope["meta"]) != want || strings.Contains(want, "true") != strings.Contains(string(envelope["data"]), `"complete":true`) {
+			t.Fatalf("%s export: data %s meta %s", id, envelope["data"], envelope["meta"])
+		}
 	}
 
 	failed := filepath.Join(dir, "request.bin")
@@ -170,5 +193,90 @@ func assertNoTempFiles(t *testing.T, dir string) {
 		if strings.HasPrefix(entry.Name(), tempPrefix) {
 			t.Fatalf("temporary file left behind: %s", entry.Name())
 		}
+	}
+}
+
+// TestUnusableOutFailsBeforeAnyRequest: for every command that takes --out,
+// an --out that cannot be written is LOCAL_FILE_ERROR and nothing reaches
+// the server, so a failed command logs no sensitive view and uses no quota.
+func TestUnusableOutFailsBeforeAnyRequest(t *testing.T) {
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	dir := t.TempDir()
+	aFile := writeFile(t, filepath.Join(dir, "plain.txt"), "x")
+	readOnly := writeFile(t, filepath.Join(dir, "read-only.json"), "keep")
+	if err := os.Chmod(readOnly, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readOnly, 0o600) })
+	unusable := map[string]string{
+		"missing directory":         filepath.Join(dir, "no-such-dir", "out.json"),
+		"a directory":               dir,
+		"parent is not a directory": filepath.Join(aFile, "out.json"),
+	}
+	if runtime.GOOS == "windows" {
+		// Windows cannot rename over a read-only file (POSIX can, so there
+		// it is a usable target).
+		unusable["read-only file"] = readOnly
+	} else if os.Geteuid() != 0 {
+		// A directory without write permission (permission bits do not stop
+		// root, so this case needs an ordinary user).
+		locked := filepath.Join(t.TempDir(), "locked")
+		if err := os.Mkdir(locked, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+		unusable["directory not writable"] = filepath.Join(locked, "out.json")
+	}
+	samples := map[string][]string{
+		"usage trend":       {"usage", "trend", "ses_1"},
+		"usage composition": {"usage", "composition", "77"},
+		"analysis session":  {"analysis", "session", sessionHex, "--pack"},
+		"requests export":   {"requests", "export", "77", "--what", "conversation"},
+	}
+	covered := 0
+	for _, spec := range allCommands() {
+		if spec.flag("out") == nil {
+			continue
+		}
+		args, ok := samples[spec.name()]
+		if !ok {
+			t.Errorf("%s takes --out but has no sample here", spec.name())
+			continue
+		}
+		covered++
+		for name, target := range unusable {
+			server.reset()
+			h.expectFailure(h.run(append(append([]string{}, args...), "--out", target)...), agentapi.CodeLocalFileError, 1)
+			if len(server.recorded()) != 0 {
+				t.Errorf("%s with --out %s reached the server", spec.name(), name)
+			}
+		}
+		assertNoTempFiles(t, dir)
+	}
+	if covered != len(samples) {
+		t.Fatalf("covered %d commands with --out", covered)
+	}
+	if data, _ := os.ReadFile(readOnly); string(data) != "keep" {
+		t.Fatalf("read-only file changed to %q", data)
+	}
+}
+
+// TestPrettyTableColumns: a command's preferred columns come first in its
+// order, the rest alphabetically, eight at most; nested values are no column.
+func TestPrettyTableColumns(t *testing.T) {
+	items := []any{
+		map[string]any{"zeta": 1, "alpha": "a", "state": "running", "audit_id": "x", "nested": map[string]any{"a": 1}, "list": []any{1}},
+		map[string]any{"beta": 2, "status_code": 200, "path_untrusted": "/p", "c": 1, "d": 2, "e": 3, "f": 4},
+	}
+	_, columns := tableOf(items, []string{"audit_id", "missing", "state", "status_code", "path_untrusted"})
+	want := []string{"audit_id", "state", "status_code", "path_untrusted", "alpha", "beta", "c", "d"}
+	if strings.Join(columns, " ") != strings.Join(want, " ") {
+		t.Fatalf("columns %v, want %v", columns, want)
+	}
+	_, columns = tableOf(items, nil)
+	if strings.Join(columns, " ") != "alpha audit_id beta c d e f path_untrusted" {
+		t.Fatalf("fallback columns %v", columns)
 	}
 }

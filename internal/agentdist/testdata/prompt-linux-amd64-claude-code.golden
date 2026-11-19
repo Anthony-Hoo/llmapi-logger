@@ -4,9 +4,9 @@ Rules for this whole task:
 - Execute the numbered steps below in order, one at a time, running each command exactly as written. Do not skip, merge or reorder steps.
 - If a command fails or a step's check does not hold, stop at once. Do not try to repair it and do not continue with later steps. Tell the user which step failed and show the exact output.
 - Use only the download link in this prompt. Never fetch the package from any other address, mirror or repository, and never switch to another install method (a package manager, a git clone, building from source, copying files by hand).
-- Change nothing outside the install directory $HOME/.claude/skills/llmapi-audit. Never delete or modify its parent directory $HOME/.claude/skills or anything else in it. The one exception is the temporary work directory ${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab that this prompt creates and removes.
+- Change nothing outside the install directory $HOME/.claude/skills/llmapi-audit. Never delete or modify its parent directory $HOME/.claude/skills or anything else in it. The one exception is the temporary work directory LLMAPI_WORK_DIR (the private directory step 1 creates with mktemp), which this prompt creates and removes.
 - Nothing here asks for a password, an API key or a token, and you must not ask the user for one. The login in a later step is authorized by the user in the browser.
-- Run the commands in a POSIX shell (sh, bash or zsh). Every command is complete on its own; nothing depends on shell variables from an earlier step.
+- Run the commands in a POSIX shell (sh, bash or zsh). Every command is complete on its own; nothing depends on shell variables from an earlier step. The one value carried from step to step is the work directory path that step 1 prints: write it in place of LLMAPI_WORK_DIR in every later command, inside the double quotes as shown.
 
 Final install directory: $HOME/.claude/skills/llmapi-audit
 Package file: llmapi-audit-0.1.0-linux-amd64.zip (3456789 bytes)
@@ -14,23 +14,24 @@ Expected SHA-256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
 The download link is valid until 2026-01-02T03:34:05Z. HTTP 410 (Gone) means it has expired: stop and ask the user to generate a new install prompt on the Agent access page of the web UI. HTTP 404 means the link or file is not valid: stop and report it.
 The archive's top level is the directory llmapi-audit/ itself: it contains llmapi-audit/SKILL.md, llmapi-audit/VERSION, llmapi-audit/references/ and llmapi-audit/scripts/llmaudit. It is extracted into a work directory and then moved to the install directory as a whole, so it is never nested twice.
 
-1. Create an empty work directory (a leftover one from an earlier run of this prompt is removed first):
-   rm -rf -- "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab" && mkdir -p -- "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab"
-   Check: the command exits with status 0.
+1. Create a private work directory with a random name:
+   mktemp -d "${TMPDIR:-/tmp}/llmapi-audit-install.XXXXXXXX"
+   Check: the command exits with status 0 and prints one absolute path made only of letters, digits and the characters / . _ -. If nothing is printed or the path has any other character (a space, for example), stop.
+   From now on write that exact path wherever a command says LLMAPI_WORK_DIR. Never run a command that still contains LLMAPI_WORK_DIR itself.
 
 2. Download the package from the link in this prompt, and only from it:
-   curl -fsS --max-redirs 0 -o "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/llmapi-audit-0.1.0-linux-amd64.zip" "https://audit.example.com/api/agent/v1/dl/MTc2NzMyNjI0NS5leGFtcGxlLXNpZ25hdHVyZQ/llmapi-audit-0.1.0-linux-amd64.zip"
+   curl -fsS --max-redirs 0 -o "LLMAPI_WORK_DIR/llmapi-audit-0.1.0-linux-amd64.zip" "https://audit.example.com/api/agent/v1/dl/MTc2NzMyNjI0NS5leGFtcGxlLXNpZ25hdHVyZQ/llmapi-audit-0.1.0-linux-amd64.zip"
    Check: the command exits with status 0. If curl reports HTTP 410, the link has expired; if it reports another error, stop either way.
 
 3. Verify the SHA-256 digest of the download:
-   sha256sum "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/llmapi-audit-0.1.0-linux-amd64.zip"
+   sha256sum "LLMAPI_WORK_DIR/llmapi-audit-0.1.0-linux-amd64.zip"
    Check: the first field printed is exactly 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef. If it differs in any character, stop: do not extract or run the file, and tell the user the digest did not match.
 
 4. Extract the archive into the work directory:
-   unzip -q "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/llmapi-audit-0.1.0-linux-amd64.zip" -d "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/extract"
-   If unzip is not installed, run this instead: python3 -m zipfile -e "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/llmapi-audit-0.1.0-linux-amd64.zip" "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/extract"
+   unzip -q "LLMAPI_WORK_DIR/llmapi-audit-0.1.0-linux-amd64.zip" -d "LLMAPI_WORK_DIR/extract"
+   If unzip is not installed, run this instead: python3 -m zipfile -e "LLMAPI_WORK_DIR/llmapi-audit-0.1.0-linux-amd64.zip" "LLMAPI_WORK_DIR/extract"
    If neither unzip nor python3 is available, stop and ask the user to install unzip.
-   Then run: ls -A "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/extract" && ls "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/extract/llmapi-audit/scripts/llmaudit"
+   Then run: ls -A "LLMAPI_WORK_DIR/extract" && ls "LLMAPI_WORK_DIR/extract/llmapi-audit/scripts/llmaudit"
    Check: the first listing shows exactly one entry, llmapi-audit, and the second command finds the file.
 
 5. Check what is at the install directory now:
@@ -41,11 +42,12 @@ The archive's top level is the directory llmapi-audit/ itself: it contains llmap
    - foreign: something else is there. Stop. Delete nothing, and show the user the listing so they can decide what to do.
 
 6. Move the extracted Skill into place (the skills directory is created if it does not exist; nothing else in it is touched):
-   mkdir -p -- "$HOME/.claude/skills" && [ ! -e "$HOME/.claude/skills/llmapi-audit" ] && mv -- "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab/extract/llmapi-audit" "$HOME/.claude/skills/llmapi-audit" && chmod 755 "$HOME/.claude/skills/llmapi-audit/scripts/llmaudit"
+   mkdir -p -- "$HOME/.claude/skills" && [ ! -e "$HOME/.claude/skills/llmapi-audit" ] && mv -- "LLMAPI_WORK_DIR/extract/llmapi-audit" "$HOME/.claude/skills/llmapi-audit" && chmod 755 "$HOME/.claude/skills/llmapi-audit/scripts/llmaudit"
    Check: the command exits with status 0.
 
-7. Remove the work directory:
-   rm -rf -- "${TMPDIR:-/tmp}/llmapi-audit-install-0123456789ab"
+7. Remove the work directory (the command refuses a path that is not the one step 1 created):
+   case "LLMAPI_WORK_DIR" in */llmapi-audit-install.????????) rm -rf -- "LLMAPI_WORK_DIR" ;; *) echo "refused: not the work directory from step 1" >&2; false ;; esac
+   Check: the command exits with status 0.
 
 8. Check that the client runs on this machine:
    "$HOME/.claude/skills/llmapi-audit/scripts/llmaudit" --help

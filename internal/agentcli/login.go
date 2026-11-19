@@ -130,11 +130,11 @@ func runLogin(inv *invocation) (*result, error) {
 		params.Set("mode", "paste")
 		authorizeURL := server + "/ui/?" + params.Encode()
 		fmt.Fprintf(env.Stderr, "Open this address in a browser, sign in and approve:\n\n  %s\n\n", authorizeURL)
-		code, err = readPastedCode(ctx, env)
+		code, err = readPastedCode(ctx, env, server)
 	} else {
 		listener, port, listenErr := listenLoopback()
 		if listenErr != nil {
-			return nil, &cliError{Code: agentapi.CodeNetworkError, Message: "cannot listen on 127.0.0.1 for the browser callback; try `llmaudit login --no-browser`"}
+			return nil, &cliError{Code: agentapi.CodeNetworkError, Message: "cannot listen on 127.0.0.1 for the browser callback; try `llmaudit login --server " + server + " --no-browser`"}
 		}
 		params.Set("port", strconv.Itoa(port))
 		authorizeURL := server + "/ui/?" + params.Encode()
@@ -142,7 +142,7 @@ func runLogin(inv *invocation) (*result, error) {
 		if env.OpenBrowser != nil {
 			_ = env.OpenBrowser(authorizeURL)
 		}
-		code, err = waitForCallback(ctx, listener, port, state)
+		code, err = waitForCallback(ctx, listener, port, state, server)
 	}
 	if err != nil {
 		return nil, err
@@ -211,7 +211,7 @@ type callbackResult struct {
 // waitForCallback serves http://127.0.0.1:<port>/callback until a request
 // with the right state arrives. Other paths, hosts and states are ignored and
 // the wait goes on, up to the context deadline.
-func waitForCallback(ctx context.Context, listener net.Listener, port int, state string) (string, error) {
+func waitForCallback(ctx context.Context, listener net.Listener, port int, state, server string) (string, error) {
 	results := make(chan callbackResult, 1)
 	expectedHost := "127.0.0.1:" + strconv.Itoa(port)
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -243,12 +243,12 @@ func waitForCallback(ctx context.Context, listener net.Listener, port int, state
 		default:
 		}
 	})
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = server.Serve(listener) }()
+	callback := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = callback.Serve(listener) }()
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		_ = callback.Shutdown(shutdownCtx)
 	}()
 	select {
 	case outcome := <-results:
@@ -257,13 +257,13 @@ func waitForCallback(ctx context.Context, listener net.Listener, port int, state
 		}
 		return outcome.code, nil
 	case <-ctx.Done():
-		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login` again and approve within 5 minutes."}
+		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login --server " + server + "` again and approve within " + loginWaitText + "."}
 	}
 }
 
 // readPastedCode reads the one-time code the page shows. Empty lines are
 // skipped; end of input without a code is NO_TTY.
-func readPastedCode(ctx context.Context, env *Env) (string, error) {
+func readPastedCode(ctx context.Context, env *Env, server string) (string, error) {
 	lines := make(chan string)
 	failed := make(chan struct{})
 	go func() {
@@ -295,9 +295,9 @@ func readPastedCode(ctx context.Context, env *Env) (string, error) {
 	case <-failed:
 		fmt.Fprintln(env.Stderr)
 		return "", &cliError{Code: agentapi.CodeNoTTY, Message: "no authorization code was entered",
-			Hint: "Ask the user to run `llmaudit login --no-browser` themselves in a terminal and paste the code the page shows."}
+			Hint: "Ask the user to run `llmaudit login --server " + server + " --no-browser` themselves in a terminal and paste the code the page shows."}
 	case <-ctx.Done():
-		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login --no-browser` again and paste the code within 5 minutes."}
+		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login --server " + server + " --no-browser` again and paste the code within " + loginWaitText + "."}
 	}
 }
 

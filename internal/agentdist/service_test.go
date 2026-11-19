@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -309,5 +311,81 @@ func TestDefaultPackageDir(t *testing.T) {
 	}
 	if filepath.Base(dir) != PackageDirName || !filepath.IsAbs(dir) {
 		t.Fatalf("DefaultPackageDir = %q", dir)
+	}
+}
+
+// TestLinksMintedInOneSecondHaveSeparateBudgets: two install prompts minted
+// in the same second carry different links, and using up one link's 30
+// downloads leaves the other's untouched.
+func TestLinksMintedInOneSecondHaveSeparateBudgets(t *testing.T) {
+	dir, _ := packedDir(t)
+	c := newClock()
+	service, err := New(Options{PackageDir: dir, AdminToken: testAdminToken, Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.InstallLink("https://audit.example.com", InstallLinkRequest{Agent: AgentClaudeCode, Platform: "linux-amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.InstallLink("https://audit.example.com", InstallLinkRequest{Agent: AgentClaudeCode, Platform: "linux-amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureOf := func(prompt string) string {
+		marker := "/api/agent/v1/dl/"
+		start := strings.Index(prompt, marker)
+		if start < 0 {
+			t.Fatal("no link in the prompt")
+		}
+		rest := prompt[start+len(marker):]
+		return rest[:strings.IndexByte(rest, '/')]
+	}
+	one, two := signatureOf(first.Prompt), signatureOf(second.Prompt)
+	if one == two || first.ExpiresAt != second.ExpiresAt {
+		t.Fatalf("links of one second: %s and %s", one, two)
+	}
+	for index := 0; index < DownloadsPerLink; index++ {
+		if result := service.ServeDownload(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), one, first.File); result.Status != http.StatusOK {
+			t.Fatalf("download %d of the first link = %d", index+1, result.Status)
+		}
+	}
+	if result := service.ServeDownload(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), one, first.File); result.Status != http.StatusTooManyRequests {
+		t.Fatalf("31st download of the first link = %d", result.Status)
+	}
+	if result := service.ServeDownload(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), two, second.File); result.Status != http.StatusOK {
+		t.Fatalf("first download of the second link after the first's 30 = %d %s", result.Status, result.Code)
+	}
+}
+
+// TestConcurrentDownloadsRespectCap: 100 concurrent downloads with one link,
+// exactly DownloadsPerLink succeed and the rest are refused.
+func TestConcurrentDownloadsRespectCap(t *testing.T) {
+	dir, manifest := packedDir(t)
+	c := newClock()
+	service, err := New(Options{PackageDir: dir, AdminToken: testAdminToken, Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, _ := service.signer.Mint()
+	file := manifest.Packages[0].File
+	var ok, limited atomic.Int64
+	var wait sync.WaitGroup
+	for index := 0; index < 100; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			request := httptest.NewRequest(http.MethodGet, "/api/agent/v1/dl/"+signature+"/"+file, nil)
+			switch service.ServeDownload(httptest.NewRecorder(), request, signature, file).Status {
+			case http.StatusOK:
+				ok.Add(1)
+			case http.StatusTooManyRequests:
+				limited.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	if ok.Load() != DownloadsPerLink || limited.Load() != 100-DownloadsPerLink {
+		t.Fatalf("200: %d, 429: %d", ok.Load(), limited.Load())
 	}
 }

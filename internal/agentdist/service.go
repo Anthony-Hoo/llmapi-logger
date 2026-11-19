@@ -77,6 +77,51 @@ type Service struct {
 
 	mu        sync.Mutex
 	downloads map[string]*linkUse
+	// issued counts install links per web session identity.
+	issued map[string]*linkUse
+}
+
+// Install links one web session identity may request per window (contract
+// section 7). Every request counts, and a refused one is not counted.
+const (
+	InstallLinksPerWindow = 20
+	InstallLinkWindow     = 10 * time.Minute
+)
+
+// AllowInstallLink counts one install-link request for key (the web session
+// identity) in a fixed window that starts at its first request, and reports
+// how long to wait when the window is full; a refused request is not
+// counted. Expired windows are dropped on the way, and at most
+// maxTrackedLinks identities are tracked (a new one beyond that waits for
+// the oldest window).
+func (service *Service) AllowInstallLink(key string) (bool, time.Duration) {
+	now := service.now()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.issued == nil {
+		service.issued = map[string]*linkUse{}
+	}
+	var soonest time.Time
+	for tracked, use := range service.issued {
+		if !now.Before(use.expires) {
+			delete(service.issued, tracked)
+		} else if soonest.IsZero() || use.expires.Before(soonest) {
+			soonest = use.expires
+		}
+	}
+	use := service.issued[key]
+	if use == nil {
+		if len(service.issued) >= maxTrackedLinks {
+			return false, soonest.Sub(now)
+		}
+		use = &linkUse{expires: now.Add(InstallLinkWindow)}
+		service.issued[key] = use
+	}
+	if use.count >= InstallLinksPerWindow {
+		return false, use.expires.Sub(now)
+	}
+	use.count++
+	return true, 0
 }
 
 type linkUse struct {

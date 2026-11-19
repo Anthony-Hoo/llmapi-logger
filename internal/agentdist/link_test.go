@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,12 +36,26 @@ func TestSignatureFormat(t *testing.T) {
 		t.Fatalf("signature is not unpadded base64url: %v", err)
 	}
 	unix := strconv.FormatInt(expires.Unix(), 10)
-	mac := hmac.New(sha256.New, DownloadKey(testAdminToken))
-	mac.Write([]byte(unix))
-	want := append([]byte(unix+"."), mac.Sum(nil)...)
-	if string(payload) != string(want) {
-		t.Fatal("payload is not expires_unix || \".\" || HMAC-SHA-256(K_dl, expires_unix)")
+	if len(payload) != len(unix)+1+16+32 || string(payload[:len(unix)+1]) != unix+"." {
+		t.Fatalf("payload is not expires_unix || \".\" || 16-byte nonce || 32-byte MAC: %d bytes", len(payload))
 	}
+	nonce := payload[len(unix)+1 : len(unix)+17]
+	if string(payload) != string(signWith(unix, nonce)) {
+		t.Fatal("MAC is not HMAC-SHA-256(K_dl, expires_unix || \".\" || nonce)")
+	}
+	// Two links of the same second differ in their nonce.
+	second, sameExpiry := signer.Mint()
+	if second == signature || !sameExpiry.Equal(expires) {
+		t.Fatalf("two links minted in one second are equal: %s", signature)
+	}
+}
+
+// signWith builds a payload exactly as the contract describes it.
+func signWith(unix string, nonce []byte) []byte {
+	mac := hmac.New(sha256.New, DownloadKey(testAdminToken))
+	mac.Write([]byte(unix + "."))
+	mac.Write(nonce)
+	return append(append([]byte(unix+"."), nonce...), mac.Sum(nil)...)
 }
 
 func TestVerifyRoundTripAndExpiry(t *testing.T) {
@@ -93,7 +108,12 @@ func TestVerifyRejectsMalformed(t *testing.T) {
 	clk := newClock()
 	signer, _ := NewSigner(testAdminToken, clk.Now)
 	signature, _ := signer.Mint()
+	nonce := make([]byte, 16)
 	sign := func(unix string) string {
+		return base64.RawURLEncoding.EncodeToString(signWith(unix, nonce))
+	}
+	// The format before nonces: expires_unix || "." || HMAC(K_dl, expires_unix).
+	legacy := func(unix string) string {
 		mac := hmac.New(sha256.New, DownloadKey(testAdminToken))
 		mac.Write([]byte(unix))
 		return base64.RawURLEncoding.EncodeToString(append([]byte(unix+"."), mac.Sum(nil)...))
@@ -111,13 +131,30 @@ func TestVerifyRejectsMalformed(t *testing.T) {
 		"negative":        sign("-" + expires),
 		"far future":      sign(strconv.FormatInt(clk.now.Add(48*time.Hour).Unix(), 10)),
 		"non digit":       sign(expires[:5] + "a" + expires[6:]),
+		"without nonce":   legacy(expires),
+		"short nonce":     base64.RawURLEncoding.EncodeToString(signWith(expires, nonce[:8])),
 	}
 	for name, input := range cases {
 		if _, err := signer.Verify(input); !errors.Is(err, ErrBadSignature) {
 			t.Errorf("%s: %v, want ErrBadSignature", name, err)
 		}
 	}
-	if _, err := signer.Verify(sign(expires)); err != nil {
+	// The same payload spelled with non-zero padding bits in the last
+	// character is refused, so one link has one spelling and one budget.
+	canonical := sign(expires)
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	if len(canonical)%4 == 0 {
+		t.Fatal("the payload length leaves no padding bits; pick another length")
+	}
+	last := strings.IndexByte(alphabet, canonical[len(canonical)-1])
+	respelled := canonical[:len(canonical)-1] + string(alphabet[last|1])
+	if decoded, err := base64.RawURLEncoding.DecodeString(respelled); err != nil || string(decoded) != string(signWith(expires, nonce)) {
+		t.Fatal("the respelling does not decode leniently to the same payload; the case tests nothing")
+	}
+	if _, err := signer.Verify(respelled); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("non-canonical spelling: %v, want ErrBadSignature", err)
+	}
+	if _, err := signer.Verify(canonical); err != nil {
 		t.Fatalf("a correctly signed near expiry was rejected: %v", err)
 	}
 }

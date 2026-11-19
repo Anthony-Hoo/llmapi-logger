@@ -87,11 +87,13 @@ type paths struct {
 	skills  string // the skills directory (parent of install)
 	install string // always ends in llmapi-audit
 	work    string // temporary work directory
-	zip     string
-	extract string
-	binary  string
-	shown   string // install directory as shown to the user
-	parent  string // skills directory as shown to the user
+	// workShown names the work directory in the rules of the prompt.
+	workShown string
+	zip       string
+	extract   string
+	binary    string
+	shown     string // install directory as shown to the user
+	parent    string // skills directory as shown to the user
 }
 
 // InstallPrompt returns the text an AI agent executes step by step to install
@@ -186,8 +188,10 @@ func shellSafeURL(value string) bool {
 // macOS, X:\... on Windows), with no "." or ".." segment, and only letters,
 // digits, spaces and . _ - + besides the separators: that excludes newlines,
 // control characters, quotes and every shell metacharacter. When the path
-// already ends in llmapi-audit, its parent is the skills directory, so the
-// Skill is never nested in a second llmapi-audit directory.
+// already ends in llmapi-audit, in any letter case (Windows and the default
+// macOS file systems ignore case; Linux is treated the same to be safe), its
+// parent is the skills directory, so the Skill is never nested in a second
+// llmapi-audit directory.
 func cleanSkillsDir(raw string, platform Platform) (string, error) {
 	fail := func(message string) (string, error) {
 		return "", &InputError{Field: "skills_dir", Message: message}
@@ -237,7 +241,7 @@ func cleanSkillsDir(raw string, platform Platform) (string, error) {
 			return fail("skills_dir segments must not end with a dot on Windows")
 		}
 	}
-	if segments[len(segments)-1] == SkillName {
+	if strings.EqualFold(segments[len(segments)-1], SkillName) {
 		segments = segments[:len(segments)-1]
 		if len(segments) == 0 {
 			return fail("skills_dir must not be the root of a drive or file system")
@@ -250,9 +254,16 @@ func isASCIILetter(char byte) bool {
 	return (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')
 }
 
-// shortDigest names the work directory after the package, so a rerun of the
-// same prompt reuses (and first clears) the same directory and nothing else.
+// shortDigest names the Windows work directory after the package, so a rerun
+// of the same prompt reuses (and first clears) the same directory and nothing
+// else. It lives in $env:TEMP, which is the user's own directory.
 func shortDigest(pkg Package) string { return pkg.SHA256[:12] }
+
+// posixWorkDir stands for the work directory in the POSIX prompt. Step 1
+// creates it with mktemp -d (private, with a random name, in the shared
+// temporary directory) and the agent writes the printed path in its place:
+// a fixed path there could be created first by another local user.
+const posixWorkDir = "LLMAPI_WORK_DIR"
 
 func buildPaths(platform Platform, info agentInfo, custom string, pkg Package) paths {
 	var p paths
@@ -265,6 +276,7 @@ func buildPaths(platform Platform, info agentInfo, custom string, pkg Package) p
 		install := skills + `\` + SkillName
 		p.skills, p.install = quote(skills), quote(install)
 		p.work = quote(`$env:TEMP\` + work)
+		p.workShown = `$env:TEMP\` + work
 		p.zip = quote(`$env:TEMP\` + work + `\` + pkg.File)
 		p.extract = quote(`$env:TEMP\` + work + `\extract`)
 		p.binary = quote(install + `\scripts\` + platform.BinaryName())
@@ -277,9 +289,10 @@ func buildPaths(platform Platform, info agentInfo, custom string, pkg Package) p
 	}
 	install := skills + "/" + SkillName
 	p.skills, p.install = quote(skills), quote(install)
-	p.work = quote("${TMPDIR:-/tmp}/" + work)
-	p.zip = quote("${TMPDIR:-/tmp}/" + work + "/" + pkg.File)
-	p.extract = quote("${TMPDIR:-/tmp}/" + work + "/extract")
+	p.work = quote(posixWorkDir)
+	p.workShown = posixWorkDir + " (the private directory step 1 creates with mktemp)"
+	p.zip = quote(posixWorkDir + "/" + pkg.File)
+	p.extract = quote(posixWorkDir + "/extract")
 	p.binary = quote(install + "/scripts/" + platform.BinaryName())
 	p.shown, p.parent = install, skills
 	return p
@@ -316,7 +329,7 @@ func header(builder *strings.Builder, input PromptInput, info agentInfo, server 
 	builder.WriteString("- Execute the numbered steps below in order, one at a time, running each command exactly as written. Do not skip, merge or reorder steps.\n")
 	builder.WriteString("- If a command fails or a step's check does not hold, stop at once. Do not try to repair it and do not continue with later steps. Tell the user which step failed and show the exact output.\n")
 	builder.WriteString("- Use only the download link in this prompt. Never fetch the package from any other address, mirror or repository, and never switch to another install method (a package manager, a git clone, building from source, copying files by hand).\n")
-	fmt.Fprintf(builder, "- Change nothing outside the install directory %s. Never delete or modify its parent directory %s or anything else in it. The one exception is the temporary work directory %s that this prompt creates and removes.\n", p.shown, p.parent, strings.Trim(p.work, `"`))
+	fmt.Fprintf(builder, "- Change nothing outside the install directory %s. Never delete or modify its parent directory %s or anything else in it. The one exception is the temporary work directory %s, which this prompt creates and removes.\n", p.shown, p.parent, p.workShown)
 	builder.WriteString("- Nothing here asks for a password, an API key or a token, and you must not ask the user for one. The login in a later step is authorized by the user in the browser.\n")
 	if shellNote != "" {
 		builder.WriteString("- " + shellNote + "\n")
@@ -337,7 +350,7 @@ func footer(builder *strings.Builder, info agentInfo, p paths) {
 
 func posixPrompt(input PromptInput, info agentInfo, server string, p paths) string {
 	var builder strings.Builder
-	header(&builder, input, info, server, p, "Run the commands in a POSIX shell (sh, bash or zsh). Every command is complete on its own; nothing depends on shell variables from an earlier step.")
+	header(&builder, input, info, server, p, "Run the commands in a POSIX shell (sh, bash or zsh). Every command is complete on its own; nothing depends on shell variables from an earlier step. The one value carried from step to step is the work directory path that step 1 prints: write it in place of "+posixWorkDir+" in every later command, inside the double quotes as shown.")
 	link := input.LinkPrefix + input.Package.File
 	platform := input.Package.Platform()
 	digest := "sha256sum " + p.zip
@@ -345,9 +358,10 @@ func posixPrompt(input PromptInput, info agentInfo, server string, p paths) stri
 		digest = "shasum -a 256 " + p.zip
 	}
 	s := &steps{builder: &builder}
-	s.add("Create an empty work directory (a leftover one from an earlier run of this prompt is removed first):",
-		"rm -rf -- "+p.work+" && mkdir -p -- "+p.work,
-		"Check: the command exits with status 0.")
+	s.add("Create a private work directory with a random name:",
+		`mktemp -d "${TMPDIR:-/tmp}/llmapi-audit-install.XXXXXXXX"`,
+		"Check: the command exits with status 0 and prints one absolute path made only of letters, digits and the characters / . _ -. If nothing is printed or the path has any other character (a space, for example), stop.",
+		"From now on write that exact path wherever a command says "+posixWorkDir+". Never run a command that still contains "+posixWorkDir+" itself.")
 	s.add("Download the package from the link in this prompt, and only from it:",
 		"curl -fsS --max-redirs 0 -o "+p.zip+` "`+link+`"`,
 		"Check: the command exits with status 0. If curl reports HTTP 410, the link has expired; if it reports another error, stop either way.")
@@ -369,8 +383,11 @@ func posixPrompt(input PromptInput, info agentInfo, server string, p paths) stri
 	s.add("Move the extracted Skill into place (the skills directory is created if it does not exist; nothing else in it is touched):",
 		"mkdir -p -- "+p.skills+" && [ ! -e "+p.install+" ] && mv -- "+quote(strings.Trim(p.extract, `"`)+"/llmapi-audit")+" "+p.install+" && chmod 755 "+p.binary,
 		"Check: the command exits with status 0.")
-	s.add("Remove the work directory:",
-		"rm -rf -- "+p.work)
+	// The removal refuses any path that is not a work directory mktemp made,
+	// whatever the agent wrote in place of the placeholder.
+	s.add("Remove the work directory (the command refuses a path that is not the one step 1 created):",
+		"case "+p.work+" in */llmapi-audit-install.????????) rm -rf -- "+p.work+" ;; *) echo \"refused: not the work directory from step 1\" >&2; false ;; esac",
+		"Check: the command exits with status 0.")
 	s.add("Check that the client runs on this machine:",
 		p.binary+" --help",
 		"Check: it exits with status 0 and prints the usage of llmaudit.")

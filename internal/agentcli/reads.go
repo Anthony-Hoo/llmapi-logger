@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 
 	"llmapi-logger/internal/agentapi"
@@ -24,6 +26,14 @@ func runRead(inv *invocation) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// An unusable --out fails before the server is asked, so a failed command
+	// neither logs a sensitive view nor uses quota.
+	target := ""
+	if inv.has("out") {
+		if target, err = outPath(inv); err != nil {
+			return nil, err
+		}
+	}
 	c, err := inv.client()
 	if err != nil {
 		return nil, err
@@ -34,8 +44,8 @@ func runRead(inv *invocation) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if inv.has("out") {
-		return inv.writeOut(envelope, c.server)
+	if target != "" {
+		return inv.writeOut(envelope, c.server, target)
 	}
 	return &result{envelope: envelope, server: c.server}, nil
 }
@@ -58,16 +68,36 @@ type outSummary struct {
 	MissingChunks *bool  `json:"missing_chunks,omitempty"`
 }
 
+// outPath resolves --out and checks, before anything is sent, that the file
+// can be written there: the directory exists and takes a new file (the
+// temporary file the atomic replace uses), the target is not a directory,
+// and on Windows an existing file is not read-only (it is opened for writing
+// and not truncated).
 func outPath(inv *invocation) (string, error) {
 	target, err := filepath.Abs(inv.value("out"))
 	if err != nil {
 		return "", localFileError("the --out path is not usable", map[string]any{"field": "--out"})
 	}
+	details := map[string]any{"field": "--out", "path": target}
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
-		return "", localFileError("--out names a directory; give a file name", map[string]any{"field": "--out", "path": target})
+		return "", localFileError("--out names a directory; give a file name", details)
 	}
 	if info, err := os.Stat(filepath.Dir(target)); err != nil || !info.IsDir() {
-		return "", localFileError("the directory of --out does not exist", map[string]any{"field": "--out", "path": target})
+		return "", localFileError("the directory of --out does not exist", details)
+	}
+	probe, probePath, err := createTemp(filepath.Dir(target), false)
+	if err != nil {
+		return "", localFileError("the directory of --out does not accept a new file", details)
+	}
+	_ = probe.Close()
+	_ = os.Remove(probePath)
+	// Windows cannot rename over a read-only file; POSIX can.
+	if info, err := os.Lstat(target); err == nil && info.Mode().IsRegular() && runtime.GOOS == "windows" {
+		existing, err := os.OpenFile(target, os.O_WRONLY, 0)
+		if err != nil {
+			return "", localFileError("the existing --out file cannot be replaced", details)
+		}
+		_ = existing.Close()
 	}
 	return target, nil
 }
@@ -77,7 +107,7 @@ func outPath(inv *invocation) (string, error) {
 // server sent them. The file carries meta so that a file read later still
 // says whether its data is complete; its data is byte for byte what stdout
 // would carry without --out.
-func (inv *invocation) writeOut(envelope *serverEnvelope, server string) (*result, error) {
+func (inv *invocation) writeOut(envelope *serverEnvelope, server, target string) (*result, error) {
 	data, err := compactData(envelope.Data)
 	if err != nil {
 		return nil, err
@@ -91,10 +121,6 @@ func (inv *invocation) writeOut(envelope *serverEnvelope, server string) (*resul
 	content := make([]byte, 0, len(meta)+len(data)+20)
 	content = append(append(append(append(content, `{"meta":`...), meta...), `,"data":`...), data...)
 	content = append(content, '}')
-	target, err := outPath(inv)
-	if err != nil {
-		return nil, err
-	}
 	size, sum, err := writeAtomic(target, false, func(writer io.Writer) error {
 		_, err := writer.Write(content)
 		return err
@@ -160,11 +186,7 @@ func runExport(inv *invocation) (*result, error) {
 		return nil, localFileError("cannot write the --out file", map[string]any{"field": "--out", "path": target})
 	}
 	summary := outSummary{Path: target, Bytes: size, SHA256: sum}
-	complete := true
-	if value := response.Header.Get("X-Audit-Complete"); value != "" {
-		parsed, parseErr := strconv.ParseBool(value)
-		complete = parseErr == nil && parsed
-	}
+	complete, reason := exportCompleteness(response.Header)
 	summary.Complete = &complete
 	if value := response.Header.Get("X-Audit-Missing-Chunks"); value != "" {
 		missing, parseErr := strconv.ParseBool(value)
@@ -172,15 +194,34 @@ func runExport(inv *invocation) (*result, error) {
 			summary.MissingChunks = &missing
 		}
 	}
-	reason := ""
-	if !complete {
-		reason = "capture_incomplete"
-	}
 	data, _ := json.Marshal(summary)
 	meta, _ := json.Marshal(agentapi.Meta{State: "exported", Complete: complete, IncompleteReason: reason})
 	ok := true
 	return &result{envelope: &serverEnvelope{OK: &ok, Data: data, Meta: meta}, server: c.server}, nil
 }
+
+// exportCompleteness reads the completeness headers of an export. Only an
+// explicit X-Audit-Complete: true is complete; a missing header means the
+// server did not say, so the export is not called complete (contract
+// section 0.1 items 49(e) and 96). The reason is the server's
+// X-Audit-Incomplete-Reason when it is a plain reason word, otherwise
+// capture_incomplete for an explicit "false" and completeness_unknown for a
+// missing header.
+func exportCompleteness(header http.Header) (bool, string) {
+	value := header.Get("X-Audit-Complete")
+	if value == "true" {
+		return true, ""
+	}
+	if reason := header.Get("X-Audit-Incomplete-Reason"); reasonPattern.MatchString(reason) {
+		return false, reason
+	}
+	if value == "" {
+		return false, "completeness_unknown"
+	}
+	return false, "capture_incomplete"
+}
+
+var reasonPattern = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
 
 // runVersion reports the client version and, when it can reach the server,
 // the two version headers. Failing to reach the server is not an error.

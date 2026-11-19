@@ -77,12 +77,23 @@ type commandSpec struct {
 	Summary     string
 	Description string
 	// Fields is printed as it is, after the description.
-	Fields   string
-	Args     []argSpec
-	Flags    []flagSpec
-	Routes   []routeSpec
-	Timeout  time.Duration
-	Examples []string
+	Fields  string
+	Args    []argSpec
+	Flags   []flagSpec
+	Routes  []routeSpec
+	Timeout time.Duration
+	// Wait is an interactive wait before the request (login's browser or
+	// pasted code), with WaitFor saying what is waited for; help prints it.
+	Wait    time.Duration
+	WaitFor string
+	// Columns is the preferred column order of --pretty tables; columns not
+	// named here follow alphabetically, at most eight in all.
+	Columns []string
+	// StateFlags are flags the command needs in some local state, such as
+	// login's --server before anything is saved. A command written into a
+	// hint cannot know that state, so CheckCommand requires them.
+	StateFlags []string
+	Examples   []string
 	// Select picks the route; nil means Routes[0].
 	Select func(*invocation) (*routeSpec, error)
 	Run    func(*invocation) (*result, error)

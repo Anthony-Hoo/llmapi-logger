@@ -104,7 +104,7 @@ type agentAuditItem struct {
 	Protocol           string          `json:"protocol"`
 	ParserName         string          `json:"parser_name"`
 	Method             string          `json:"method"`
-	Path               string          `json:"path"`
+	Path               string          `json:"path_untrusted"`
 	Mode               string          `json:"mode"`
 	StatusCode         *int            `json:"status_code"`
 	TTFTMS             *float64        `json:"ttft_ms"`
@@ -113,13 +113,13 @@ type agentAuditItem struct {
 	Capture            string          `json:"capture"`
 	CallerStatus       string          `json:"caller_status"`
 	CallerFinal        bool            `json:"caller_final"`
-	RequestModel       *string         `json:"request_model"`
-	ResponseModel      *string         `json:"response_model"`
+	RequestModel       *string         `json:"request_model_untrusted"`
+	ResponseModel      *string         `json:"response_model_untrusted"`
 	BlockedBy          *string         `json:"blocked_by"`
 	BlockCode          *string         `json:"block_code"`
 	ErrorCode          *string         `json:"error_code"`
-	ParsedErrorType    *string         `json:"parsed_error_type"`
-	ParsedErrorCode    *string         `json:"parsed_error_code"`
+	ParsedErrorType    *string         `json:"parsed_error_type_untrusted"`
+	ParsedErrorCode    *string         `json:"parsed_error_code_untrusted"`
 	UpstreamErrorClass *string         `json:"upstream_error_class"`
 	NewAPIRequestID    *string         `json:"newapi_request_id"`
 	Caller             agentCallerView `json:"caller"`
@@ -304,12 +304,12 @@ func (handler *managementHandler) authorizeAgentAudit(ctx context.Context, call 
 // _at and credential values masked.
 
 type agentQueryParam struct {
-	Name string `json:"name"`
+	Name string `json:"name_untrusted"`
 	agentapi.MaskedValue
 }
 
 type agentRequestURI struct {
-	Path  string            `json:"path"`
+	Path  string            `json:"path_untrusted"`
 	Query []agentQueryParam `json:"query"`
 	// QueryUnparsed is set when the query string could not be split into
 	// parameters; no value is output then.
@@ -357,7 +357,7 @@ type agentStage struct {
 	State         string  `json:"state"`
 	Proto         string  `json:"proto"`
 	Method        string  `json:"method"`
-	Host          string  `json:"host"`
+	Host          string  `json:"host_untrusted"`
 	StatusCode    *int    `json:"status_code"`
 	ContentLength *int64  `json:"content_length"`
 	StartedAt     *string `json:"started_at"`
@@ -368,7 +368,7 @@ type agentStage struct {
 type agentHeader struct {
 	Stage      string `json:"stage"`
 	Kind       string `json:"kind"`
-	Name       string `json:"name"`
+	Name       string `json:"name_untrusted"`
 	ValueIndex int    `json:"value_index"`
 	agentapi.MaskedValue
 }
@@ -408,16 +408,16 @@ type agentParsed struct {
 	ParserName         string  `json:"parser_name"`
 	ParserVersion      string  `json:"parser_version"`
 	Status             string  `json:"status"`
-	RequestModel       *string `json:"request_model"`
-	ResponseModel      *string `json:"response_model"`
+	RequestModel       *string `json:"request_model_untrusted"`
+	ResponseModel      *string `json:"response_model_untrusted"`
 	RequestedStream    *bool   `json:"requested_stream"`
 	ObservedStream     *bool   `json:"observed_stream"`
-	ResponseID         *string `json:"response_id"`
+	ResponseID         *string `json:"response_id_untrusted"`
 	UsageInput         *int64  `json:"usage_input"`
 	UsageOutput        *int64  `json:"usage_output"`
 	UsageTotal         *int64  `json:"usage_total"`
-	ErrorType          *string `json:"error_type"`
-	ErrorCode          *string `json:"error_code"`
+	ErrorType          *string `json:"error_type_untrusted"`
+	ErrorCode          *string `json:"error_code_untrusted"`
 	UpstreamErrorClass *string `json:"upstream_error_class"`
 	MessageCount       *int64  `json:"message_count"`
 	ToolCallCount      *int64  `json:"tool_call_count"`
@@ -441,8 +441,8 @@ type agentTurn struct {
 	RequestReconstructionSHA256  string  `json:"request_reconstruction_sha256"`
 	ResponseReconstructionSHA256 string  `json:"response_reconstruction_sha256"`
 	ReconstructionStatus         string  `json:"reconstruction_status"`
-	PreviousResponseID           *string `json:"previous_response_id"`
-	ResponseID                   *string `json:"response_id"`
+	PreviousResponseID           *string `json:"previous_response_id_untrusted"`
+	ResponseID                   *string `json:"response_id_untrusted"`
 	CreatedAt                    *string `json:"created_at"`
 }
 
@@ -592,7 +592,25 @@ func (handler *managementHandler) agentAuditDetail(ctx context.Context, call age
 		return query.Detail{}, err
 	}
 	addCallerDisplayName(&detail.Audit, handler.callerDisplayNames())
+	if detail.Audit.UserAgent == nil {
+		// query.Service.Get does not fill the User-Agent the list shows;
+		// take it from the decrypted inbound headers the detail carries, by
+		// the list's own rule (the first User-Agent value).
+		detail.Audit.UserAgent = inboundUserAgent(detail.Headers)
+	}
 	return detail, nil
+}
+
+// inboundUserAgent is the first User-Agent value of the inbound request
+// headers, or nil without one: the value the audit list shows.
+func inboundUserAgent(headers []query.Header) *string {
+	for _, header := range headers {
+		if header.Stage == storage.StageRequestReceived && header.Kind == storage.HeaderKindHeader && strings.EqualFold(header.Name, "user-agent") {
+			value := header.Value
+			return &value
+		}
+	}
+	return nil
 }
 
 // Export kinds of GET /requests/{id}/export/{what}.
@@ -635,14 +653,19 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	// Every export says whether it is complete, from the record's state
+	// exactly as `requests get` derives meta (and, for a timeline or a raw
+	// body, from the content's own completeness too).
+	detail, err := handler.query.Get(ctx, auditID, callerReadScope(call.Principal))
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	record := auditDetailMeta(detail.Audit)
 	switch what {
 	case "conversation", "headers":
-		detail, err := handler.query.Get(ctx, auditID, callerReadScope(call.Principal))
-		if err != nil {
-			handler.writeAgentServiceFailure(writer, err, "")
-			return
-		}
 		if what == "headers" {
+			setExportCompleteness(writer.Header(), record, true, "")
 			writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
 			return
 		}
@@ -651,6 +674,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 				"The record has not been parsed yet or carries no conversation. Check `parse` with `llmaudit requests get <id>`.", nil)
 			return
 		}
+		setExportCompleteness(writer.Header(), record, true, "")
 		writeJSON(writer, http.StatusOK, detail.Conversation)
 	case "request", "response":
 		reconstructed, err := handler.query.ReconstructTurn(ctx, auditID)
@@ -662,6 +686,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		if what == "response" {
 			body = reconstructed.Response
 		}
+		setExportCompleteness(writer.Header(), record, true, "")
 		writeJSON(writer, http.StatusOK, body)
 	case "timeline-request", "timeline-response":
 		timeline, err := handler.query.Timeline(ctx, auditID, query.Side(strings.TrimPrefix(what, "timeline-")))
@@ -677,15 +702,44 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		for _, point := range timeline.Points {
 			out.Points = append(out.Points, agentTimelinePoint{Offset: point.Offset, ObservedAt: agentTime(point.AtNS)})
 		}
+		setExportCompleteness(writer.Header(), record, timeline.Complete, exportIncompleteTimeline)
 		writeJSON(writer, http.StatusOK, out)
 	default:
-		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")))
+		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")), record)
+	}
+}
+
+// Completeness headers of an export (contract section 0.1 item 96). The
+// export body is the content itself, so whether it is complete travels in
+// headers: X-Audit-Complete is "true" or "false", and when false
+// X-Audit-Incomplete-Reason names why. The client reads a missing or
+// non-"true" header as incomplete.
+const (
+	headerExportComplete       = "X-Audit-Complete"
+	headerExportIncomplete     = "X-Audit-Incomplete-Reason"
+	exportIncompleteTimeline   = "timeline_incomplete"
+	exportIncompleteRawCapture = auditIncompleteCapture
+)
+
+// setExportCompleteness writes the completeness of an export: the record's
+// own meta first (in_progress, parse_pending, capture_incomplete, as
+// `requests get` reports it), then the content's flag with contentReason.
+func setExportCompleteness(header http.Header, record agentapi.Meta, contentComplete bool, contentReason string) {
+	complete, reason := record.Complete, record.IncompleteReason
+	if complete && !contentComplete {
+		complete, reason = false, contentReason
+	}
+	header.Set(headerExportComplete, strconv.FormatBool(complete))
+	if complete {
+		header.Del(headerExportIncomplete)
+	} else {
+		header.Set(headerExportIncomplete, reason)
 	}
 }
 
 // serveAgentRaw streams one raw body with the X-Audit-* metadata headers of
 // the web route. An error before the first byte is a failure envelope.
-func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx context.Context, auditID string, side query.Side) {
+func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx context.Context, auditID string, side query.Side, record agentapi.Meta) {
 	metadata, err := handler.query.RawMeta(ctx, auditID, side)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
@@ -696,7 +750,9 @@ func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx 
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("X-Audit-Observed-Length", strconv.FormatInt(metadata.ObservedLength, 10))
 	header.Set("X-Audit-Stored-Length", strconv.FormatInt(metadata.StoredLength, 10))
-	header.Set("X-Audit-Complete", strconv.FormatBool(metadata.Complete))
+	// X-Audit-Complete is the web route's value ANDed with the record's
+	// state, so an unfinished record's raw body is never called complete.
+	setExportCompleteness(header, record, metadata.Complete, exportIncompleteRawCapture)
 	header.Set("X-Audit-Missing-Chunks", strconv.FormatBool(metadata.MissingChunks))
 	if metadata.SHA256 != "" {
 		header.Set("X-Audit-SHA256", metadata.SHA256)
@@ -709,6 +765,7 @@ func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx 
 		}
 		if !stream.Committed() {
 			clearRawHeaders(header)
+			header.Del(headerExportIncomplete)
 			handler.writeAgentServiceFailure(writer, err, "")
 		}
 		return

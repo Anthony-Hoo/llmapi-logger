@@ -152,7 +152,11 @@ func (handler *managementHandler) serveAgentWeeklyMe(writer http.ResponseWriter,
 	} else {
 		actions = append(actions, weeklyMeAction(call.Principal))
 	}
-	writeAgentRead(writer, out, agentMetaOK(), true, actions...)
+	// "My week" is always the current, open week, so a developer's row (or
+	// its absence so far) can still change; an administrator token or an
+	// unknown user has no row at all, and that cannot change (contract
+	// section 4.3.4).
+	writeAgentRead(writer, out, weeklyFinalMeta(selfWeeklyUserID(call.Principal) == 0), true, actions...)
 }
 
 // agentWeek checks a week parameter against the configured first weekday so
@@ -301,13 +305,52 @@ func (handler *managementHandler) serveAgentWeeklyReport(writer http.ResponseWri
 	writeAgentRead(writer, agentWeeklyReportOf(report), weeklyReportMeta(report), true)
 }
 
+// agentIncompleteEvidencePending is the reason a weekly read is not final.
+const agentIncompleteEvidencePending = "evidence_pending"
+
 // weeklyReportMeta takes completeness from the report itself.
 func weeklyReportMeta(report orgreport.WeeklyReport) agentapi.Meta {
 	meta := agentMetaOK()
 	if !report.Complete {
-		meta.Complete, meta.IncompleteReason = false, "evidence_pending"
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteEvidencePending
 	}
 	return meta
+}
+
+// weeklyFinalMeta is the meta of a weekly read whose services give no
+// completeness of their own (contract section 0.1 item 95): complete only
+// when the data is final, i.e. it comes from a frozen week; data of an open
+// week, or of an ended week not frozen yet, can still change.
+func weeklyFinalMeta(final bool) agentapi.Meta {
+	meta := agentMetaOK()
+	if !final {
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteEvidencePending
+	}
+	return meta
+}
+
+// agentWeekStates is the optional read of a week's frozen state the
+// orgreport service offers (the plans use it too).
+type agentWeekStates interface {
+	WeekState(ctx context.Context, label string) (orgreport.WeekState, error)
+}
+
+// weekFrozen reports whether the week label (empty: the current week) has a
+// frozen snapshot. Without a snapshot store no week is ever final.
+func (handler *managementHandler) weekFrozen(ctx context.Context, label string) bool {
+	states, ok := handler.org.(agentWeekStates)
+	if !ok {
+		return false
+	}
+	if label == "" {
+		current, err := handler.org.Self(ctx, 0)
+		if err != nil {
+			return false
+		}
+		label = current.Week
+	}
+	state, err := states.WeekState(ctx, label)
+	return err == nil && state.Frozen
 }
 
 // weeklyMeAction explains an empty "my week" by its cause.
@@ -370,12 +413,15 @@ func (handler *managementHandler) serveAgentWeeklyTrend(writer http.ResponseWrit
 		return
 	}
 	out := agentWeeklyTrend{Weeks: make([]agentTrendWeek, 0, len(report.Weeks)), Projects: agentProjectRefs(report.Projects)}
+	final := true
 	for _, week := range report.Weeks {
+		final = final && week.Frozen
 		out.Weeks = append(out.Weeks, agentTrendWeek{Week: week.Week, Frozen: week.Frozen, Final: week.Frozen,
 			ActiveSeconds: agentSeconds(week.ActiveNS), Tokens: week.Tokens, CostUSD: week.CostUSD, Users: week.Users,
 			Projects: agentProjectCells(week.Projects)})
 	}
-	writeAgentRead(writer, out, agentMetaOK(), true)
+	// A trend is final only when every week in it is.
+	writeAgentRead(writer, out, weeklyFinalMeta(final), true)
 }
 
 type agentProjectContributor struct {
@@ -427,7 +473,7 @@ func (handler *managementHandler) serveAgentWeeklyProject(writer http.ResponseWr
 		out.Contributors = append(out.Contributors, agentProjectContributor{UserID: contributor.UserID, GroupID: contributor.GroupID,
 			agentProjectCell: agentProjectCellOf(contributor.ProjectCell)})
 	}
-	writeAgentRead(writer, out, agentMetaOK(), true)
+	writeAgentRead(writer, out, weeklyFinalMeta(report.Frozen), true)
 }
 
 type agentDraftRule struct {
@@ -474,5 +520,7 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 		items = append(items, agentUnattributedEntry{Kind: entry.Kind, ValueUntrusted: entry.Value, Requests: entry.Requests,
 			Users: entry.Users, DraftRule: agentDraftRule{Kind: entry.DraftRule.Kind, PatternUntrusted: entry.DraftRule.Pattern}})
 	}
-	writeAgentRead(writer, map[string]any{"items": items}, agentMetaOK(), true)
+	// The entries are always computed live; they are final once the week is
+	// frozen.
+	writeAgentRead(writer, map[string]any{"items": items}, weeklyFinalMeta(handler.weekFrozen(ctx, week)), true)
 }
