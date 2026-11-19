@@ -50,25 +50,27 @@ func TestLooseCredentialStoreIsTightened(t *testing.T) {
 }
 
 // TestSecurePrivateStateFailureNamesPathAndModes: when tightening fails the
-// command stops with LOCAL_FILE_ERROR naming the path and the modes.
+// command stops with LOCAL_FILE_ERROR naming the path and the modes. A
+// credentials.json that is a link to a kernel file others can read cannot be
+// made private, not even by root.
 func TestSecurePrivateStateFailureNamesPathAndModes(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can change the mode of any file; the failure needs an ordinary user")
+	// A file others can read whose mode cannot be changed, not even by
+	// root: kernel files on read-only or chmod-refusing mounts. Probing with
+	// the file's own mode changes nothing when chmod does succeed.
+	target := ""
+	for _, candidate := range []string{"/proc/version", "/proc/sys/kernel/osrelease", "/sys/kernel/uevent_seqnum", "/sys/class/net/lo/address"} {
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().Perm()&0o077 != 0 && os.Chmod(candidate, info.Mode().Perm()) != nil {
+			target = candidate
+			break
+		}
 	}
-	parent := t.TempDir()
-	dir := filepath.Join(parent, "state")
+	if target == "" {
+		t.Skip("no file readable by others whose mode cannot be changed; the failure cannot be forced here")
+	}
+	dir := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
-	}
-	// A credentials.json owned by someone else cannot be chmod-ed; the
-	// closest an ordinary user gets is a symlink to a file it does not own.
-	target := "/etc/hostname"
-	if _, err := os.Stat(target); err != nil {
-		t.Skip("no file owned by another user to point at")
-	}
-	info, _ := os.Stat(target)
-	if info.Mode().Perm()&0o077 == 0 {
-		t.Skip(target + " is not readable by others")
 	}
 	if err := os.Symlink(target, filepath.Join(dir, credentialsFile)); err != nil {
 		t.Fatal(err)
@@ -78,5 +80,8 @@ func TestSecurePrivateStateFailureNamesPathAndModes(t *testing.T) {
 	if !ok || cliErr.Code != "LOCAL_FILE_ERROR" || cliErr.Details["path"] != filepath.Join(dir, credentialsFile) ||
 		cliErr.Details["required_mode"] != "0600" || !strings.Contains(cliErr.Hint, "0600") || !strings.Contains(cliErr.Hint, "0700") {
 		t.Fatalf("err %#v", err)
+	}
+	if strings.Contains(cliErr.Message+cliErr.Hint, "Linux version") {
+		t.Fatal("the file's content was printed")
 	}
 }
