@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 
@@ -185,11 +186,7 @@ func runExport(inv *invocation) (*result, error) {
 		return nil, localFileError("cannot write the --out file", map[string]any{"field": "--out", "path": target})
 	}
 	summary := outSummary{Path: target, Bytes: size, SHA256: sum}
-	complete := true
-	if value := response.Header.Get("X-Audit-Complete"); value != "" {
-		parsed, parseErr := strconv.ParseBool(value)
-		complete = parseErr == nil && parsed
-	}
+	complete, reason := exportCompleteness(response.Header)
 	summary.Complete = &complete
 	if value := response.Header.Get("X-Audit-Missing-Chunks"); value != "" {
 		missing, parseErr := strconv.ParseBool(value)
@@ -197,15 +194,34 @@ func runExport(inv *invocation) (*result, error) {
 			summary.MissingChunks = &missing
 		}
 	}
-	reason := ""
-	if !complete {
-		reason = "capture_incomplete"
-	}
 	data, _ := json.Marshal(summary)
 	meta, _ := json.Marshal(agentapi.Meta{State: "exported", Complete: complete, IncompleteReason: reason})
 	ok := true
 	return &result{envelope: &serverEnvelope{OK: &ok, Data: data, Meta: meta}, server: c.server}, nil
 }
+
+// exportCompleteness reads the completeness headers of an export. Only an
+// explicit X-Audit-Complete: true is complete; a missing header means the
+// server did not say, so the export is not called complete (contract
+// section 0.1 items 49(e) and 96). The reason is the server's
+// X-Audit-Incomplete-Reason when it is a plain reason word, otherwise
+// capture_incomplete for an explicit "false" and completeness_unknown for a
+// missing header.
+func exportCompleteness(header http.Header) (bool, string) {
+	value := header.Get("X-Audit-Complete")
+	if value == "true" {
+		return true, ""
+	}
+	if reason := header.Get("X-Audit-Incomplete-Reason"); reasonPattern.MatchString(reason) {
+		return false, reason
+	}
+	if value == "" {
+		return false, "completeness_unknown"
+	}
+	return false, "capture_incomplete"
+}
+
+var reasonPattern = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
 
 // runVersion reports the client version and, when it can reach the server,
 // the two version headers. Failing to reach the server is not an error.

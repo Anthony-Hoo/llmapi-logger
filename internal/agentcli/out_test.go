@@ -109,6 +109,13 @@ func TestExport(t *testing.T) {
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(request.URL.Path, agentapi.PathPrefix+"/requests/complete/"):
+			writer.Header().Set("X-Audit-Complete", "true")
+		case strings.HasPrefix(request.URL.Path, agentapi.PathPrefix+"/requests/running/"):
+			writer.Header().Set("X-Audit-Complete", "false")
+			writer.Header().Set("X-Audit-Incomplete-Reason", "in_progress")
+		}
 		_, _ = io.WriteString(writer, `{"messages":[]}`)
 	})
 	h := newHarness(t)
@@ -152,8 +159,23 @@ func TestExport(t *testing.T) {
 	if content, _ := os.ReadFile(conversation); string(content) != `{"messages":[]}` {
 		t.Fatalf("conversation %s", content)
 	}
-	if envelope := h.success(); strings.Contains(string(envelope["data"]), "missing_chunks") || !strings.Contains(string(envelope["data"]), `"complete":true`) {
-		t.Fatalf("json export data %s", envelope["data"])
+	// No completeness header: the server did not say, so the export is not
+	// called complete (contract 0.1 items 49(e) and 96).
+	if envelope := h.success(); strings.Contains(string(envelope["data"]), "missing_chunks") || !strings.Contains(string(envelope["data"]), `"complete":false`) ||
+		string(envelope["meta"]) != `{"state":"exported","complete":false,"incomplete_reason":"completeness_unknown"}` {
+		t.Fatalf("json export without a header: data %s meta %s", envelope["data"], envelope["meta"])
+	}
+	for id, want := range map[string]string{
+		"complete": `{"state":"exported","complete":true,"incomplete_reason":""}`,
+		"running":  `{"state":"exported","complete":false,"incomplete_reason":"in_progress"}`,
+	} {
+		if exit := h.run("requests", "export", id, "--what", "conversation", "--out", conversation); exit != 0 {
+			t.Fatalf("exit %d", exit)
+		}
+		envelope := h.success()
+		if string(envelope["meta"]) != want || strings.Contains(want, "true") != strings.Contains(string(envelope["data"]), `"complete":true`) {
+			t.Fatalf("%s export: data %s meta %s", id, envelope["data"], envelope["meta"])
+		}
 	}
 
 	failed := filepath.Join(dir, "request.bin")

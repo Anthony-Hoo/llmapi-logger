@@ -192,7 +192,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:    []string{"requests", "export"},
 			Summary: "write the conversation, headers, a reconstructed or raw body, or a timeline of one record to a file",
-			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. " +
+			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. complete is true only when the server says the record is finished and the content whole, as `llmaudit requests get <id>` would; otherwise meta.incomplete_reason says why (in_progress, parse_pending, capture_incomplete, timeline_incomplete, or completeness_unknown when the server did not say). " +
 				"NOT_RETAINED for raw-request/raw-response means the raw body was released after verification: export request or response instead.",
 			Args: []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
 			Flags: []flagSpec{

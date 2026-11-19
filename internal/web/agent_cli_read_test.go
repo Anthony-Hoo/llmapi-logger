@@ -2,16 +2,22 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/agentaccess"
+	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/agentcli"
+	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/storage"
 )
 
 // The real CLI against the real read facade: what a developer's agent sees.
@@ -113,5 +119,89 @@ func TestCLIUnusableOutLogsNoView(t *testing.T) {
 	cli.mustRun("analysis", "session", analysisOwnID, "--pack", "--out", filepath.Join(t.TempDir(), "pack.json"))
 	if fixture.analysis.viewCount() != views+1 || sensitiveReads(fixture) != sensitive+1 {
 		t.Fatalf("a successful pack read was not logged")
+	}
+}
+
+// addUnfinishedRecord prepends an own record whose forwarding is still in
+// progress, whose parse is pending and whose capture is partial.
+func addUnfinishedRecord(fixture *readFixture, id string) {
+	record := fixtureAudit(id, 10*time.Second, fixture.ownFingerprint, 42, storage.ForwardInProgress, nil)
+	record.detail.Audit.ParseStatus = storage.ParsePending
+	record.detail.Audit.CaptureStatus = storage.CapturePartial
+	record.detail.Audit.EndedAtNS = nil
+	record.detail.Audit.StatusCode = nil
+	fixture.audits.records = append([]auditRecord{record}, fixture.audits.records...)
+}
+
+// partialTimelines reports every stream timeline as incomplete.
+type partialTimelines struct{ *scopedAudits }
+
+func (audits partialTimelines) Timeline(ctx context.Context, auditID string, side query.Side) (query.StreamTimeline, error) {
+	timeline, err := audits.scopedAudits.Timeline(ctx, auditID, side)
+	timeline.Complete = false
+	return timeline, err
+}
+
+type exportData struct {
+	Path     string `json:"path"`
+	Complete *bool  `json:"complete"`
+}
+
+// An export is complete exactly when `requests get` of the same record says
+// complete (and, for a timeline or a raw body, the content is complete): an
+// unfinished record's exports say complete=false with the reason get gives,
+// in meta and in data.complete.
+func TestCLIExportCompletenessFollowsTheRecord(t *testing.T) {
+	fixture := newReadFixture(t)
+	addUnfinishedRecord(fixture, "unfinished-own")
+	cli := newReadCLI(t, fixture, fixture.developer)
+	dir := t.TempDir()
+	kinds := []string{"conversation", "headers", "request", "response", "timeline-request", "timeline-response", "raw-request", "raw-response"}
+
+	for _, id := range []string{"unfinished-own", "own-1"} {
+		detail := cli.mustRun("requests", "get", id)
+		for _, what := range kinds {
+			export := cli.mustRun("requests", "export", id, "--what", what, "--out", filepath.Join(dir, id+"-"+what))
+			var data exportData
+			_ = json.Unmarshal(export.Data, &data)
+			if export.Meta.State != "exported" || export.Meta.Complete != detail.Meta.Complete ||
+				export.Meta.IncompleteReason != detail.Meta.IncompleteReason || data.Complete == nil || *data.Complete != detail.Meta.Complete {
+				t.Errorf("%s export %s: meta %+v data %s; requests get meta %+v", id, what, export.Meta, export.Data, detail.Meta)
+			}
+		}
+		if id == "unfinished-own" && (detail.Meta.Complete || detail.Meta.IncompleteReason != auditIncompleteInProgress) {
+			t.Fatalf("precondition: the unfinished record's detail is %+v", detail.Meta)
+		}
+	}
+
+	// A complete record whose timeline is not: the timeline export says so.
+	fixture.handler.query = partialTimelines{fixture.audits}
+	export := cli.mustRun("requests", "export", "own-1", "--what", "timeline-response", "--out", filepath.Join(dir, "timeline.json"))
+	content, _ := os.ReadFile(filepath.Join(dir, "timeline.json"))
+	if export.Meta.Complete || export.Meta.IncompleteReason != exportIncompleteTimeline || !strings.Contains(string(content), `"complete":false`) {
+		t.Fatalf("incomplete timeline: meta %+v, file %s", export.Meta, content)
+	}
+}
+
+// The facade sends the completeness headers on every export kind, and the
+// raw body's X-Audit-Complete is the web route's value only for a finished
+// record.
+func TestAgentExportCompletenessHeaders(t *testing.T) {
+	fixture := newReadFixture(t)
+	addUnfinishedRecord(fixture, "unfinished-own")
+	for _, what := range agentapi.ExportKinds {
+		for id, want := range map[string]string{"own-1": "true", "unfinished-own": "false"} {
+			response := fixture.facade(http.MethodGet, "/requests/"+id+"/export/"+what, "", fixture.developer)
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s %s = %d %s", id, what, response.Code, response.Body.String())
+			}
+			reason := response.Header().Get("X-Audit-Incomplete-Reason")
+			if response.Header().Get("X-Audit-Complete") != want || (want == "true") != (reason == "") {
+				t.Errorf("%s %s: X-Audit-Complete %q, reason %q", id, what, response.Header().Get("X-Audit-Complete"), reason)
+			}
+			if want == "false" && reason != auditIncompleteInProgress {
+				t.Errorf("%s %s: reason %q, want the detail's in_progress", id, what, reason)
+			}
+		}
 	}
 }

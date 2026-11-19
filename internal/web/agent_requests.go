@@ -635,14 +635,19 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	// Every export says whether it is complete, from the record's state
+	// exactly as `requests get` derives meta (and, for a timeline or a raw
+	// body, from the content's own completeness too).
+	detail, err := handler.query.Get(ctx, auditID, callerReadScope(call.Principal))
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	record := auditDetailMeta(detail.Audit)
 	switch what {
 	case "conversation", "headers":
-		detail, err := handler.query.Get(ctx, auditID, callerReadScope(call.Principal))
-		if err != nil {
-			handler.writeAgentServiceFailure(writer, err, "")
-			return
-		}
 		if what == "headers" {
+			setExportCompleteness(writer.Header(), record, true, "")
 			writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
 			return
 		}
@@ -651,6 +656,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 				"The record has not been parsed yet or carries no conversation. Check `parse` with `llmaudit requests get <id>`.", nil)
 			return
 		}
+		setExportCompleteness(writer.Header(), record, true, "")
 		writeJSON(writer, http.StatusOK, detail.Conversation)
 	case "request", "response":
 		reconstructed, err := handler.query.ReconstructTurn(ctx, auditID)
@@ -662,6 +668,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		if what == "response" {
 			body = reconstructed.Response
 		}
+		setExportCompleteness(writer.Header(), record, true, "")
 		writeJSON(writer, http.StatusOK, body)
 	case "timeline-request", "timeline-response":
 		timeline, err := handler.query.Timeline(ctx, auditID, query.Side(strings.TrimPrefix(what, "timeline-")))
@@ -677,15 +684,44 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		for _, point := range timeline.Points {
 			out.Points = append(out.Points, agentTimelinePoint{Offset: point.Offset, ObservedAt: agentTime(point.AtNS)})
 		}
+		setExportCompleteness(writer.Header(), record, timeline.Complete, exportIncompleteTimeline)
 		writeJSON(writer, http.StatusOK, out)
 	default:
-		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")))
+		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")), record)
+	}
+}
+
+// Completeness headers of an export (contract section 0.1 item 96). The
+// export body is the content itself, so whether it is complete travels in
+// headers: X-Audit-Complete is "true" or "false", and when false
+// X-Audit-Incomplete-Reason names why. The client reads a missing or
+// non-"true" header as incomplete.
+const (
+	headerExportComplete       = "X-Audit-Complete"
+	headerExportIncomplete     = "X-Audit-Incomplete-Reason"
+	exportIncompleteTimeline   = "timeline_incomplete"
+	exportIncompleteRawCapture = auditIncompleteCapture
+)
+
+// setExportCompleteness writes the completeness of an export: the record's
+// own meta first (in_progress, parse_pending, capture_incomplete, as
+// `requests get` reports it), then the content's flag with contentReason.
+func setExportCompleteness(header http.Header, record agentapi.Meta, contentComplete bool, contentReason string) {
+	complete, reason := record.Complete, record.IncompleteReason
+	if complete && !contentComplete {
+		complete, reason = false, contentReason
+	}
+	header.Set(headerExportComplete, strconv.FormatBool(complete))
+	if complete {
+		header.Del(headerExportIncomplete)
+	} else {
+		header.Set(headerExportIncomplete, reason)
 	}
 }
 
 // serveAgentRaw streams one raw body with the X-Audit-* metadata headers of
 // the web route. An error before the first byte is a failure envelope.
-func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx context.Context, auditID string, side query.Side) {
+func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx context.Context, auditID string, side query.Side, record agentapi.Meta) {
 	metadata, err := handler.query.RawMeta(ctx, auditID, side)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
@@ -696,7 +732,9 @@ func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx 
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("X-Audit-Observed-Length", strconv.FormatInt(metadata.ObservedLength, 10))
 	header.Set("X-Audit-Stored-Length", strconv.FormatInt(metadata.StoredLength, 10))
-	header.Set("X-Audit-Complete", strconv.FormatBool(metadata.Complete))
+	// X-Audit-Complete is the web route's value ANDed with the record's
+	// state, so an unfinished record's raw body is never called complete.
+	setExportCompleteness(header, record, metadata.Complete, exportIncompleteRawCapture)
 	header.Set("X-Audit-Missing-Chunks", strconv.FormatBool(metadata.MissingChunks))
 	if metadata.SHA256 != "" {
 		header.Set("X-Audit-SHA256", metadata.SHA256)
@@ -709,6 +747,7 @@ func (handler *managementHandler) serveAgentRaw(writer http.ResponseWriter, ctx 
 		}
 		if !stream.Committed() {
 			clearRawHeaders(header)
+			header.Del(headerExportIncomplete)
 			handler.writeAgentServiceFailure(writer, err, "")
 		}
 		return
