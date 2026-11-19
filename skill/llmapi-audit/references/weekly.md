@@ -34,6 +34,14 @@ llmaudit weekly unattributed --limit 50
 - `meta.complete` false with `incomplete_reason: evidence_pending` means records of that week are still being processed.
 - Durations are in seconds (fields ending in `_seconds`). Project names and unattributed values end in `_untrusted`.
 
+## On the web page instead
+
+Every report view of the page has a command here. The differences:
+
+- The page's previous/next week buttons step through weeks for the user. Here you always name the week with `--week`; take the date from the report you already have, or from the hint of an `INVALID_ARGUMENT` about the week start.
+- The page builds a draft project name from an unattributed entry; here you get only the server's `draft_rule`, and the user chooses the name.
+- Regenerating a week needs an administrator write token on a deployment that allows agent writes. Without one (`READ_ONLY_TOKEN`, `WRITE_DISABLED`), the administrator does it on the web page.
+
 ## Regenerating a frozen week (write)
 
 ```

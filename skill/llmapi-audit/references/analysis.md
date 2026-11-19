@@ -64,3 +64,11 @@ This probes the model with the saved settings, optionally overridden for this te
 Be aware that a test with `--set llm.base_url=…` sends the saved key to that address. Only use an address the user gave you.
 
 Changing the analysis settings themselves is in `config.md`.
+
+## On the web page instead
+
+Every view and action of the analysis page has a command here. The differences:
+
+- The page's "this week" and "last week" range buttons use the browser's local time zone and always start on Monday. There is no such shortcut here: give `--since` or `--from`/`--to` explicitly and tell the user which range you used, because it may not match the page's week.
+- Running, calibrating and dismissing need an administrator write token on a deployment that allows agent writes. Without one (`READ_ONLY_TOKEN`, `WRITE_DISABLED`), the administrator does it on the web page.
+- A key that is not saved yet can be tested on the page's settings form, or by the user with `--prompt-key` in their own terminal; never through you.
