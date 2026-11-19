@@ -1,0 +1,141 @@
+package app
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/config"
+)
+
+// The whole agent flow against PostgreSQL: authorize, exchange, whoami, a
+// restart that keeps the token, logout, and the audit rows.
+func TestPostgresAgentAccessFlow(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL required for PostgreSQL application integration")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schema := fmt.Sprintf("app_agent_test_%d", time.Now().UnixNano())
+	if _, err = db.ExecContext(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer db.ExecContext(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal("invalid test DSN")
+	}
+	values := parsed.Query()
+	values.Set("search_path", schema)
+	parsed.RawQuery = values.Encode()
+
+	cfg := config.Default()
+	cfg.DatabaseURL = parsed.String()
+	cfg.KeyPath = filepath.Join(t.TempDir(), "audit.key")
+	cfg.AdminToken = "synthetic-test-admin-token-0123456789"
+	cfg.NewAPI.URL = "http://192.0.2.1:3000"
+	cfg.RetentionDays = 0
+	cfg.AgentAccess.Enabled = true
+	cfg.Routes = []config.RouteConfig{{ID: "chat", Method: "POST", Path: "/v1/chat/completions", Match: "exact", Parser: "openai.chat_completions"}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	application, err := NewContext(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(application *App, method, path, body, bearer string) (int, []byte) {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		if bearer != "" {
+			request.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		response := httptest.NewRecorder()
+		application.adminServer.Handler().ServeHTTP(response, request)
+		return response.Code, response.Body.Bytes()
+	}
+
+	const verifier = "postgres-agent-flow-verifier-0123456789-abcdefgh"
+	digest := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	status, body := serve(application, http.MethodPost, "/api/v1/agent-access/authorizations",
+		`{"challenge":"`+challenge+`","mode":"paste","device_name":"ci","cli_version":"0.1.0","tier":"read","decision":"approve"}`, cfg.AdminToken)
+	var authorization struct {
+		Code string `json:"code"`
+	}
+	if status != http.StatusOK || json.Unmarshal(body, &authorization) != nil || authorization.Code == "" {
+		t.Fatalf("authorize = %d %s", status, body)
+	}
+	status, body = serve(application, http.MethodPost, "/api/agent/v1/token", `{"code":"`+authorization.Code+`","code_verifier":"`+verifier+`"}`, "")
+	var envelope agentapi.Response
+	var token struct {
+		Token string `json:"token"`
+	}
+	if status != http.StatusOK || json.Unmarshal(body, &envelope) != nil || json.Unmarshal(envelope.Data, &token) != nil || !agentapi.ValidTokenFormat(token.Token) {
+		t.Fatalf("exchange = %d %s", status, body)
+	}
+	if status, body = serve(application, http.MethodGet, "/api/agent/v1/whoami", "", token.Token); status != http.StatusOK || !strings.Contains(string(body), `"role":"admin"`) {
+		t.Fatalf("whoami = %d %s", status, body)
+	}
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewContext(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if status, body = serve(reopened, http.MethodGet, "/api/agent/v1/whoami", "", token.Token); status != http.StatusOK {
+		t.Fatalf("whoami after restart = %d %s", status, body)
+	}
+	if status, body = serve(reopened, http.MethodGet, "/api/v1/agent-access/tokens", "", cfg.AdminToken); status != http.StatusOK ||
+		!strings.Contains(string(body), `"device_name":"ci"`) || strings.Contains(string(body), token.Token) {
+		t.Fatalf("token list = %d %s", status, body)
+	}
+	if status, body = serve(reopened, http.MethodPost, "/api/agent/v1/logout", "", token.Token); status != http.StatusOK {
+		t.Fatalf("logout = %d %s", status, body)
+	}
+	if status, body = serve(reopened, http.MethodGet, "/api/agent/v1/whoami", "", token.Token); status != http.StatusUnauthorized || !strings.Contains(string(body), "TOKEN_REVOKED") {
+		t.Fatalf("whoami after logout = %d %s", status, body)
+	}
+	var events []string
+	rows, err := db.QueryContext(ctx, `SELECT event FROM `+schema+`.agent_audit_log ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var event string
+		if err := rows.Scan(&event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	rows.Close()
+	if strings.Join(events, ",") != "authorize_approved,token_issued,token_revoked" {
+		t.Fatalf("audit events = %v", events)
+	}
+	var leaked int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM `+schema+`.agent_audit_log WHERE concat_ws(' ', command, cli_version, object_id, changed_keys, error_code) LIKE '%lla_%'`).Scan(&leaked); err != nil || leaked != 0 {
+		t.Fatalf("audit rows holding a token = %d, %v", leaked, err)
+	}
+}

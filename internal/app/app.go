@@ -499,9 +499,18 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		}
 	}
 
+	developerLogin := developerLoginOptions(configuration, runtime.fingerprints)
+	// Agent access stays entirely unassembled when disabled: no service, no
+	// in-memory state, and the facade answers FEATURE_DISABLED.
+	agentAccess, err := assembleAgentAccess(configuration, runtime.store, developerLogin, logger)
+	if err != nil {
+		_ = application.closeComponents()
+		return nil, fmt.Errorf("assemble agent access: %w", err)
+	}
+
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
-		Developer:  developerLoginOptions(configuration, runtime.fingerprints),
+		Developer:  developerLogin,
 		Query:      queryService,
 		Insights:   insightsService, // context insights (WP2)
 		Users:      newAPIClient,
@@ -516,6 +525,8 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		SessionAnalysisSettings: sessionAnalysisSettings,
 
 		InjectedUserTextPrefixes: uiVocabulary(vocabulary).InjectedUserTextPrefixes(),
+
+		AgentAccess: agentAccess,
 	})
 	if err != nil {
 		_ = application.closeComponents()
