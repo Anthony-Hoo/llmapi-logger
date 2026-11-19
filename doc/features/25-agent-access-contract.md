@@ -1,6 +1,6 @@
 # 模块 25：Agent 接入接口合同（实施依据）
 
-> 状态：已定稿；阶段 0、阶段 1、阶段 2 的只读门面与阶段 4 的写入（计划与执行、Key 与连接测试、写入审计与改动列表、全部限速）已实现，命令行与服务端、前端已对齐并由测试锁定（细节见 §0.1 第 4–56 条）；阶段 5 的安装链接与下载未实现
+> 状态：已定稿；阶段 0、阶段 1、阶段 2 的只读门面与阶段 4 的写入（计划与执行、Key 与连接测试、写入审计与改动列表、全部限速）已实现，命令行与服务端、前端已对齐并由测试锁定（细节见 §0.1 第 4–58 条）；阶段 5 的安装链接与下载未实现
 > 日期：2026-11-19
 > 配套：[模块 25 开发计划](25-agent-access.md)。两者不一致时以本合同为准；本合同与代码不一致时，改代码或在 §0.1 追加一条并改合同，不允许两边各说各的。
 > 既有类型的字段名、枚举取值与限制取自一次对代码的整体提取（`internal/query`、`internal/insights`、`internal/orgreport`、`internal/sessionanalysis`、`internal/uaguard`、`internal/contentpolicy`、`internal/web`），其中只抽查了三处（周评的 `week` 取值、重新生成周报的“已结束”规则、采集状态的字面值）。实现每个接口前对照类型定义再核一遍，发现出入按 §0.1 处理。
@@ -69,12 +69,12 @@
 30. **路由对照表在 `internal/agentapi/routes.go`**（阶段 2）：写路由所在行标为待实现（`Pending`），指向预留的门面接口 ID `plans.create`、`plans.apply`、`config.api-key.set`、`config.api-key.clear`、`analysis.test-model`；这些 ID 注册之后测试要求去掉标记。`/metrics` 经 `protectedPath` 鉴权却没有处理函数（一律 404），在测试里列为“不是路由”。
 31. **§7 的读接口限速未实现**（阶段 2）：每分钟 120 次读、每分钟 20 次输入包与分面读取都还没有做，留到写入与限频一起实现的阶段 4。（阶段 4 已实现，见第 45 条。）
 32. **写接口的登记与复查**（阶段 4）：`plans.create`（`POST /plans`）、`plans.apply`（`POST /plans/{plan_id}/apply`）、`config.api-key.set`（`PUT /config/analysis-settings/api-key`）、`config.api-key.clear`（`DELETE` 同一路径）、`analysis.test-model`（`POST /analysis/test-model`）都登记为 `admin` / `write`。“执行时重新检查令牌、档位、`allow_write`”就是分发器对执行请求本身再走一遍第 4 条的顺序：令牌在建计划与执行之间被撤销、过期，或部署重启后 `allow_write` 关闭，执行请求分别得到 `TOKEN_REVOKED`、`TOKEN_EXPIRED`、`WRITE_DISABLED`，计划不被消耗。`internal/agentapi/routes.go` 不再有待实现的行。
-33. **计划的存放**（阶段 4）：类型 `agentaccess.PlanStore`，实例归网页处理器所有（与令牌服务分开，部署开关的变化不清空它；进程重启清空）。计划编号 `pln_` 加 16 字节随机数的 base64url。别的令牌拿着编号执行：`PLAN_NOT_FOUND`，且不消耗这份计划（主人仍可执行）。过期的计划第一次被执行时答 `PLAN_EXPIRED` 并删除，此后是 `PLAN_NOT_FOUND`；过期计划最多再留 10 分钟供识别。同时存在的计划最多 1024 份，满了是 `RATE_LIMITED`（`Retry-After` 为最早到期的那份的剩余时间）。计划在执行前就从存放处取出：任何通过了分发器的执行请求都会用掉它，包括执行失败（版本冲突、校验失败、`RUN_IN_PROGRESS`）以及被全局的触发分析、重新生成周报限速拒绝的情形。执行请求不接受请求体（空或 `{}` 以外是 `INVALID_ARGUMENT`，`field: body`）。
+33. **计划的存放**（阶段 4）：类型 `agentaccess.PlanStore`，实例归网页处理器所有（与令牌服务分开，部署开关的变化不清空它；进程重启清空）。计划编号 `pln_` 加 16 字节随机数的 base64url。别的令牌拿着编号执行：`PLAN_NOT_FOUND`，且不消耗这份计划（主人仍可执行）。过期的计划第一次被执行时答 `PLAN_EXPIRED` 并删除，此后是 `PLAN_NOT_FOUND`；过期计划最多再留 10 分钟供识别。同时存在的计划最多 1024 份，满了是 `RATE_LIMITED`（`Retry-After` 为最早到期的那份的剩余时间）。计划在执行前就从存放处取出：通过了分发器、且查询参数与请求体合法的执行请求都会用掉它，包括执行失败（版本冲突、校验失败、`RUN_IN_PROGRESS`）以及被全局的触发分析、重新生成周报限速拒绝的情形。执行请求不接受请求体（空或 `{}` 以外是 `INVALID_ARGUMENT`，`field: body`）。
 34. **`POST /plans` 的线上格式**（阶段 4，与命令行对齐）：顶层字段只有 `op`、`kind`、`id`、`set`、`add`、`remove`、`expected_version`、`args`；未知字段、以及当前 `op` 用不到的字段（见下表）都是 `INVALID_ARGUMENT`，`details.field` 是该字段名。`id`、`expected_version` 必须是 JSON 字符串（`id` 为十进制数字、`user:<id>` 或 `token:<id>`；`expected_version` 为十进制数字串，可以是 `"0"`，表示“尚不存在”或“来自配置文件”）。`set` 的键是扁平的字段名，分析设置用带点的写法（`{"llm.model": …}`）；`add`、`remove` 是 `{字段: [元素…]}`；项目规则的元素是 `{kind, pattern}`。`args.suggestion_id` 必须是 JSON 数字（字符串 `"42"` 被拒绝），`args.week` 是字符串，`args.labels` 是标注数组。`set` 里的 `null` 只在项目的 `group_id` 上有意义（统一项目），其他字段给 `null` 是 `INVALID_ARGUMENT`——指针字段的 `null` 在服务里等于“不改”，接受它会让一次修改静默地什么都不做；要把字符串置空用 `--set-json <字段>='""'`。请求体上限 512 KiB，必须恰好是一个 JSON 值。各 `op` 用到的字段：`config.set` 用 `kind`、`id`、`set`、`add`、`remove`、`expected_version`；`config.remove` 用 `kind`、`id`、`expected_version`；`config.reset` 只用 `kind`；`analysis.run` 不用任何字段；另外三个只用 `args`，其中的键分别必须恰为 `labels`、`suggestion_id`、`week`。
 35. **写入的错误细节**（阶段 4）：`details.field` 用可设置字段的名字（`name`、`llm.model`、`rules[2].pattern`、`args.labels[0].task_type`），不加 `set.` 前缀；`details.reason` 是服务给出的稳定原因码（如 `required`、`not_present`、`set_and_edited`、`added_and_removed`、`unknown_client`、`invalid_regexp`、`week_not_ended`、`past_retention`）；`message` 是服务原有的安全文案（不含提交的值）。组织目录的冲突类原因（组下还有项目或成员、重名）是 `CONFLICT`，同样带 `field` 与 `reason`。`ALREADY_EXISTS` 的 `details.id` 是已有规则 ID 的十进制字符串。四个服务的版本冲突都是 `VERSION_CONFLICT`。同一字段同时出现在 `set` 和 `add`/`remove` 里由门面在调用服务之前拒绝，`field` 是该字段。
 36. **规范化都在服务里**（阶段 4）：§4.7 列出的网页前端处理（去首尾空白、关键词规则空扫描范围的替换、`ranked_clients` 的去重排序与丢弃词表外的键、项目规则 `pattern` 去空白）由各服务的入口完成，门面不另做一份。门面只把服务报告的结果转给调用方：关键词规则发生了扫描范围替换时 `effects` 里说明；`ranked_clients` 被丢掉的键放在 `extras.dropped_clients` 并在 `effects` 里列出。
 37. **计划对象的细节**（阶段 4）：`before`、`after`、`extras.deleted_object` 用与 §4.3.6 配置读取完全相同的对象形状与 `_untrusted` 命名，含 UA 规则、关键词规则、项目组、项目时响应带 `notice`。新建时 `before` 为 `null`、`target.id` 与 `target.version` 为空串、`after` 的 `id` 为 0；删除时 `before` 即被删对象、`after` 为 `null`；成员与主体分类尚不存在时 `before` 为 `null`、`target.version` 为 `"0"`。两段设置的 `before`/`after` 是可修改的取值（与读取里的 `settings` 同形），分析设置的计划另带 `extras.api_key`（Key 的来源，不含值）。不改配置的四种操作的 `target`：`analysis-run`、`analysis-calibration`、`analysis-suggestion`（`id` 为建议 ID）、`weekly-report`（`id` 为周），`version` 为空串。`changed_keys` 取服务算出的字段名列表（分析设置用带点写法；新建时是与零值不同的字段）；值都已在效果中时 `changed_keys` 为空并在 `effects` 里说明，执行仍会盖一个新版本。项目的计划在规则非空时附 `extras.preview`（形状同 `config preview-project` 的结果），规则为空时不附并在 `effects` 里说明。`extras.week` 是 `{week, start_at, end_at, ended, frozen, frozen_at, generated_at}`；`extras.running`、`extras.last_run`（形状同 `analysis overview` 的 `last_run`）；校准的计划带 `extras.labels`（条数）。建计划的 `next_actions` 给出 `llmaudit apply <plan_id>`。执行结果 `{op, target: {kind, id, version}, applied: true, id?, result?}`：`target.version` 是写入后的新版本；新建时 `id` 是新对象的 ID；校准的 `result` 是本次的一致性结果（形状同 `analysis overview` 的 `calibration`）。执行结果的 `next_actions` 给出核对用的读命令。
-38. **执行的超时与取消**（阶段 4）：执行一份计划最长 10 秒，重新生成周报 2 分钟；服务一旦开始写入，调用方断开连接不会让写入中途放弃（超时仍然生效）。调用方在写入结果出来之前断开时，审计行记为 `write_failed`、`error_code: TIMEOUT`。版本比较在各服务自己的锁内完成。
+38. **执行的超时与取消**（阶段 4）：执行一份计划最长 10 秒，重新生成周报 2 分钟；计划取出之后，调用方断开连接不会让写入中途放弃（超时仍然生效），写入照常完成，审计行按实际结果记 `write_applied` 或 `write_failed`（超时是 `TIMEOUT`）；调用方因此看不到结果，按 §6.3 先读取核对。设置、清除 Key 同样不因断开而放弃。版本比较在各服务自己的锁内完成。
 39. **重新生成周报的计划阶段检查**（阶段 4）：先查日期格式与是否部署配置的周起始日（同第 29 条，`field: args.week`），再由 `orgreport.WeekState` 判定是合法的报告周、快照存储可用；未结束的周是 `INVALID_ARGUMENT`，`reason: week_not_ended`；`retention_days > 0` 且该周的起始早于“现在减保留天数”时是 `INVALID_ARGUMENT`，`reason: past_retention`，`details.retention_days` 给出天数。保留天数经 `web.Options.RetentionDays` 由装配代码传入。
 40. **其余三种操作**（阶段 4）：`analysis.run` 的计划经新增的只读入口 `sessionanalysis.QueryService.RunState`（不需要时间范围）读运行器是否存在、是否在运行与上一轮；没有运行器是 `UPSTREAM_UNAVAILABLE`。`analysis.calibrate` 的计划在标注合法、但模型阶段未启用时是 `INVALID_ARGUMENT`，`field: llm.enabled`、`reason: model_stage_disabled`。`analysis.dismiss` 的建议不存在或不可忽略在执行时才知道，是 `NOT_FOUND`，`hint` 指向 `llmaudit analysis report`。
 41. **Key 与连接测试的线上格式**（阶段 4）：`PUT …/api-key` 的请求体恰为 `{"api_key": "<非空字符串>"}`（16 KiB 以内，其他字段或空串是 `INVALID_ARGUMENT`），响应 `{api_key: "saved"}`；`DELETE …/api-key` 不接受请求体，响应恒为 `{api_key: "none"}`（见第 52 条）。`POST /analysis/test-model` 的请求体是 `{set?, api_key?}`：`set` 与 `config.set` 的分析设置同一套扁平字段（`api_key`、`llm.api_key` 在 `set` 里一律拒绝），经服务的 `CheckPatch` 合并到当前设置上（不保存），再交给既有的测试入口；`api_key` 省略时用当前在用的 Key。任何错误响应、日志、审计行、计划里都不出现 Key 的值，`set` 里放了 Key 的请求被拒绝时也不回显它。
@@ -93,6 +93,8 @@
 54. **§4.7 的一行更正**：分析设置的 `run_at`、`llm.base_url`、`llm.model`，服务端（既有路由经由的 `overlay` 与门面经由的 `Patch`）本来就去首尾空白，§4.7 原来“服务端对下列字段不去空白”对这一行不成立；已改表。
 55. **新建的必填字段**（阶段 4，测试锁定）：UA 规则四个字段全要；关键词规则缺 `enabled` 或 `action` 拒绝（服务层默认的“拦截”不会因省略而生效），`scan_scopes` 省略为全部七类并在 `effects` 里说明；项目组缺 `enabled` 拒绝；项目缺 `enabled` 或 `group_id`（统一项目要显式 `null`）拒绝。新建不接受 `add`、`remove`、`expected_version`。两类规则的重名检查在建计划与执行时各做一次。
 56. **组织目录与设置之外的门面输出**：`config.show` 等读接口不变；写接口的结果不带 `meta`（不是读结果），带 `_untrusted` 字段时带 `notice`。
+57. **`write_denied` 行的上限与取值**（阶段 4）：被分发器拒绝的请求不经过写入限速，没有写权限的令牌本可以按请求速率往审计表里加行；所以每枚令牌每 10 分钟最多记 60 行 `write_denied`，超出后照常拒绝、不再记录。路径里的计划编号只在形如 `pln_` 加 22 个 base64url 字符时才写进 `object_id`，否则留空——改动列表会显示它，不能带调用方任意写的文本。
+58. **`config set` 的超时**（阶段 4）：服务端建计划最长 30 秒（项目的计划要跑一次预览，与网页的周报类读取同一上限）；命令行的 `config set` 因此用 40 秒（与 `config preview-project` 相同），其余只建计划的命令仍是 15 秒，`weekly regenerate` 40 秒。
 
 ## 1. 目录与归属
 
@@ -586,7 +588,7 @@
 
 | 门面操作 | 等价的既有路由 | 既有路由层做的事 | 门面如何等价处理 | 有意的不同 |
 |---|---|---|---|---|
-| `config.set` / `config.remove`，`ua-rule` | `POST`、`PUT`、`DELETE /api/v1/user-agent-rules[/{id}]` | 请求体上限 16 KiB；拒绝未知字段与尾随数据；10 秒超时；错误映射 | 字段白名单即“拒绝未知字段”；计划体上限 96 KiB；执行超时 10 秒；错误映射到 §2.3 | 按字段合并、版本检查；新建时同名即拒绝 |
+| `config.set` / `config.remove`，`ua-rule` | `POST`、`PUT`、`DELETE /api/v1/user-agent-rules[/{id}]` | 请求体上限 16 KiB；拒绝未知字段与尾随数据；10 秒超时；错误映射 | 字段白名单即“拒绝未知字段”；计划体上限 512 KiB（一切 `op` 共用一个上限，取校准的上限，§0.1 第 34 条）；执行超时 10 秒；错误映射到 §2.3 | 按字段合并、版本检查；新建时同名即拒绝 |
 | 同上，`content-rule` | `…/content-policy-rules[/{id}]` | 请求体上限 96 KiB；其余同上；响应不回显提交内容 | 同上。计划里会回显 `before` 与 `after`，这是计划的用途；执行结果只回 `id` 与 `version` | 同上；新建时 `action` 必填 |
 | 同上，`group`、`project` | `…/org/groups[/{id}]`、`…/org/projects[/{id}]` | 请求体上限 64 KiB；拒绝未知字段；10 秒超时 | 同上；项目的计划里附预览结果 | 按字段合并、版本检查 |
 | 同上，`member`、`principal` | `PUT`、`DELETE …/org/members/{user_id}`、`…/org/principals/{kind}/{id}` | 同上 | 同上 | 版本检查 |
@@ -731,7 +733,7 @@
 - `--help` 对每个参数写明取值、约束、默认值。帮助文本是 Agent 的说明书。
 - 本地状态目录默认 `~/.llmaudit/`，可用环境变量 `LLMAUDIT_HOME` 改位置。里面有 `credentials.json`（服务器地址、令牌、到期时间；仅本人可读，原子替换）与 `config.json`（可选的 CA 文件路径）。
 - 网络：默认校验证书，不跟随跳转。服务器地址是明文 HTTP 且主机不是回环地址时，`login` 成功后在标准错误打印一次警告。
-- 超时：默认 15 秒；`weekly *`、`config preview-project` 40 秒；`requests export` 60 秒；`analysis test-model` 70 秒；执行 `weekly.regenerate` 的计划 130 秒。
+- 超时：默认 15 秒；`weekly *`、`config preview-project`、`config set` 40 秒；`requests export` 60 秒；`analysis test-model` 70 秒；`apply` 一律 130 秒（§0.1 第 49、58 条）。
 - 超时或网络错误之后不自动重试写操作。读操作不自动重试。
 - 输出里的说明性文本（`message`、`hint`、`next_actions`）若出现符合令牌格式的串，替换成 `lla_***`；业务字段不做任何替换。
 
@@ -818,6 +820,7 @@
 | 触发分析 | 10 分钟 1 次 | 全局 | 另有既有的“不与自身重叠” |
 | 重新生成周报 | 1 小时 6 次 | 全局 | |
 | 连接测试 | 1 小时 12 次 | 令牌 | |
+| `write_denied` 审计行 | 10 分钟 60 行 | 令牌 | 超出后照常拒绝，只是不再写审计行（§0.1 第 57 条） |
 
 这些数字是实现常量，不做成配置项。
 
