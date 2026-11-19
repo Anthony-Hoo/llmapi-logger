@@ -484,7 +484,7 @@ func TestAgentDispatchOrder(t *testing.T) {
 	// Unregistered paths and wrong methods are NOT_FOUND, before
 	// authentication.
 	for _, call := range [][2]string{
-		{http.MethodGet, "/api/agent/v1/requests"}, {http.MethodGet, "/api/agent/v1/"}, {http.MethodGet, "/api/agent/v2/whoami"},
+		{http.MethodGet, "/api/agent/v1/nothing"}, {http.MethodPost, "/api/agent/v1/requests"}, {http.MethodGet, "/api/agent/v1/"}, {http.MethodGet, "/api/agent/v2/whoami"},
 		{http.MethodGet, "/api/agent/x"}, {http.MethodPost, "/api/agent/v1/whoami"}, {http.MethodGet, "/api/agent/v1/token"},
 		{http.MethodGet, "/api/agent/v1/whoami/"}, {http.MethodGet, "/api/agent/v1/../v1/audits"},
 	} {

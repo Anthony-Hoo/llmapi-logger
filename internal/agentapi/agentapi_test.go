@@ -97,10 +97,7 @@ func TestEnvelopesHaveTheContractShape(t *testing.T) {
 }
 
 func TestRegistryMatch(t *testing.T) {
-	registry := NewRegistry(append(Endpoints,
-		Endpoint{ID: "probe.item", Method: "GET", Pattern: "/requests/{id}", Access: AccessAny, Tier: TierRead},
-		Endpoint{ID: "probe.export", Method: "GET", Pattern: "/requests/{id}/export/{what}", Access: AccessAny, Tier: TierRead},
-	))
+	registry := NewRegistry(Endpoints)
 	cases := []struct {
 		method, path, id string
 		params           map[string]string
@@ -108,8 +105,8 @@ func TestRegistryMatch(t *testing.T) {
 		{"GET", "/api/agent/v1/whoami", "whoami", nil},
 		{"POST", "/api/agent/v1/token", "token.exchange", nil},
 		{"POST", "/api/agent/v1/logout", "logout", nil},
-		{"GET", "/api/agent/v1/requests/a1", "probe.item", map[string]string{"id": "a1"}},
-		{"GET", "/api/agent/v1/requests/a1/export/headers", "probe.export", map[string]string{"id": "a1", "what": "headers"}},
+		{"GET", "/api/agent/v1/requests/a1", "requests.get", map[string]string{"id": "a1"}},
+		{"GET", "/api/agent/v1/requests/a1/export/headers", "requests.export", map[string]string{"id": "a1", "what": "headers"}},
 		{"POST", "/api/agent/v1/whoami", "", nil},
 		{"GET", "/api/agent/v1/whoami/", "", nil},
 		{"GET", "/api/agent/v1/requests/", "", nil},

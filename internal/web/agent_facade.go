@@ -46,10 +46,43 @@ type agentHandler func(http.ResponseWriter, *http.Request, agentCall)
 // agentHandlers binds every registry ID to its handler. NewHandler refuses to
 // build when the registry and this table disagree.
 func (handler *managementHandler) agentHandlers() map[string]agentHandler {
-	return map[string]agentHandler{
+	handlers := map[string]agentHandler{
 		"token.exchange": handler.serveAgentToken,
 		"whoami":         handler.serveAgentWhoami,
 		"logout":         handler.serveAgentLogout,
+	}
+	for id, serve := range handler.agentReadHandlers() {
+		handlers[id] = serve
+	}
+	return handlers
+}
+
+// agentReadHandlers binds the read facade of contract sections 4.3 and 4.4.
+func (handler *managementHandler) agentReadHandlers() map[string]agentHandler {
+	return map[string]agentHandler{
+		"requests.list":          handler.serveAgentRequests,
+		"requests.get":           handler.serveAgentRequest,
+		"requests.export":        handler.serveAgentRequestExport,
+		"usage.composition":      handler.serveAgentUsageComposition,
+		"usage.overview":         handler.serveAgentUsageOverview,
+		"usage.sessions":         handler.serveAgentUsageSessions,
+		"usage.trend":            handler.serveAgentUsageTrend,
+		"usage.tree":             handler.serveAgentUsageTree,
+		"weekly.me":              handler.serveAgentWeeklyMe,
+		"weekly.report":          handler.serveAgentWeeklyReport,
+		"weekly.trend":           handler.serveAgentWeeklyTrend,
+		"weekly.project":         handler.serveAgentWeeklyProject,
+		"weekly.unattributed":    handler.serveAgentWeeklyUnattributed,
+		"analysis.overview":      handler.serveAgentAnalysisOverview,
+		"analysis.users":         handler.serveAgentAnalysisUsers,
+		"analysis.sessions":      handler.serveAgentAnalysisSessions,
+		"analysis.pack":          handler.serveAgentAnalysisPack,
+		"analysis.facet":         handler.serveAgentAnalysisFacet,
+		"analysis.report":        handler.serveAgentAnalysisReport,
+		"config.show":            handler.serveAgentConfigShow,
+		"config.project-preview": handler.serveAgentProjectPreview,
+		"callers.list":           handler.serveAgentCallers,
+		"status":                 handler.serveAgentStatus,
 	}
 }
 

@@ -218,23 +218,29 @@ func (handler *managementHandler) serveReady(writer http.ResponseWriter, request
 		methodNotAllowed(writer, http.MethodGet)
 		return
 	}
+	status := handler.readyStatus(request.Context())
+	responseStatus := http.StatusOK
+	if status.Status == "not_ready" {
+		responseStatus = http.StatusServiceUnavailable
+	}
+	writeJSON(writer, responseStatus, status)
+}
+
+// readyStatus is the readiness /readyz and the facade's status report.
+func (handler *managementHandler) readyStatus(ctx context.Context) ReadyStatus {
 	status := ReadyStatus{
 		Status:        "healthy",
 		Database:      "ok",
 		EncryptionKey: "ok",
 	}
 	if handler.readiness != nil {
-		status = handler.readiness(request.Context())
+		status = handler.readiness(ctx)
 	} else if handler.query == nil || !handler.query.Healthy() {
 		status.Status = "degraded"
 		status.Database = "unavailable"
 		status.EncryptionKey = "unknown"
 	}
-	responseStatus := http.StatusOK
-	if status.Status == "not_ready" {
-		responseStatus = http.StatusServiceUnavailable
-	}
-	writeJSON(writer, responseStatus, status)
+	return status
 }
 
 func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, request *http.Request) {

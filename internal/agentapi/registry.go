@@ -52,11 +52,11 @@ type Endpoint struct {
 
 // Endpoints is the facade registry. Each phase appends its endpoints here
 // together with the server handler bound to the same ID.
-var Endpoints = []Endpoint{
+var Endpoints = append([]Endpoint{
 	{ID: "token.exchange", Method: "POST", Pattern: "/token", Access: AccessAnonymous, Tier: TierRead},
 	{ID: "whoami", Method: "GET", Pattern: "/whoami", Access: AccessAny, Tier: TierRead},
 	{ID: "logout", Method: "POST", Pattern: "/logout", Access: AccessAny, Tier: TierRead},
-}
+}, ReadEndpoints...)
 
 // Registry resolves request paths against a list of endpoints.
 type Registry struct {
