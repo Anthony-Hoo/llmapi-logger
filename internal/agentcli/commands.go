@@ -32,7 +32,7 @@ func flagFrom() flagSpec {
 
 func flagTo() flagSpec {
 	return flagSpec{Name: "to", Value: "<time>", Query: "to",
-		Help: "End of the range: RFC 3339 or YYYY-MM-DD. Default: now."}
+		Help: "End of the range: RFC 3339 or YYYY-MM-DD. Default: the server's default."}
 }
 
 func flagCursor() flagSpec {
@@ -69,6 +69,33 @@ func flagUserID(query bool) flagSpec {
 }
 
 const configKinds = "ua-rule, content-rule, group, project, member, principal, weekly-settings, analysis-settings"
+
+// configFields is the settable field table of contract section 4.5.2.
+const configFields = `Fields per --kind (required when creating in brackets):
+  ua-rule            name, enabled, model_pattern, user_agent_pattern
+                     [all four]
+  content-rule       name, enabled, action (block or dry_run), model_pattern,
+                     scan_scopes (list; all seven when omitted on create),
+                     keywords (list)  [name, enabled, action, keywords]
+  group              name, enabled  [both]
+  project            name, group_id (number, or null for the organization-wide
+                     project), enabled, rules (list of <kind>:<pattern>, kind
+                     repo_url, repo_name, path_glob or agent_project)
+                     [name, group_id, enabled, rules]
+  member             group_id; --id is the NewAPI user ID (always a change)
+  principal          class (human or service); --id is user:<id> or
+                     token:<id> (always a change)
+  weekly-settings    idle_gap_seconds, ranked_clients (list),
+                     max_concurrent_roots, max_single_request_roots
+  analysis-settings  run_at, l1_settle_hours, llm.enabled, llm.base_url,
+                     llm.model, llm.structured_output, llm.context_tokens,
+                     llm.disable_thinking, llm.max_output_tokens,
+                     llm.max_concurrency, llm.timeout_seconds,
+                     llm.max_sessions_per_run (field names as written,
+                     with the dot)
+List fields: --set replaces the whole list; --add and --remove change single
+elements.
+`
 
 func planRoute() []routeSpec {
 	return []routeSpec{{Method: "POST", Path: "/plans", Body: []string{"op"}}}
@@ -128,7 +155,7 @@ func buildCommands() []*commandSpec {
 				{Name: "status", Value: "<status>", Query: "status", Help: "error, 4xx, 5xx, or one HTTP status code 100-599. Default: all."},
 				{Name: "user-agent", Value: "<text>", Query: "user_agent", Help: "Only records whose inbound User-Agent contains this text. Default: all."},
 				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path, e.g. /v1/chat/completions. Default: all."},
-				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol, as shown in the protocol field of results. Default: all."},
+				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results). Default: all."},
 				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id. Default: all."},
 				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when a row filter is given (data.collapse_applied says what happened). Default: off."},
 				flagLimit(1, 200, 50), flagCursor(),
@@ -328,9 +355,9 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "sessions"},
 			Summary: "list analyzed sessions",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (2h, 7d). Required (the server needs a range)."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from now (2h, 7d). The existing service needs a range, so give it. Default: none."},
 				{Name: "kind", Value: "<kind>", Query: "kind", Help: "agent or chat. Default: both."},
-				{Name: "flags", Value: "<list>", Query: "flags", Help: "Comma-separated session flags (the server's 11 flag names); only sessions with these flags. Default: no filter."},
+				{Name: "flags", Value: "<list>", Query: "flags", Help: "Comma-separated session flags to filter by: loop, thrash, unverified, failures, corrections, error_paste, interrupt, heavy_model, danger, secret, compaction. Default: no filter."},
 				flagLimit(1, 200, 50), flagCursor(), flagUserID(true),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/sessions", Meta: true}},
@@ -403,7 +430,7 @@ func buildCommands() []*commandSpec {
 			Description: "Probes the model with the saved settings, overridden by --set values that are not saved. Exit code 6 when the probe ran but failed (data.ok false). " +
 				"--prompt-key asks the user for a key in the terminal without echo; there is no other way to pass a key.",
 			Flags: []flagSpec{
-				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings value for this test, split at the first '='; true/false are booleans, decimal numbers are numbers, null is empty, anything else a string. Repeatable. Default: the saved settings."},
+				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is empty, anything else a string. Not api_key. Repeatable. Default: the saved settings."},
 				{Name: "prompt-key", Kind: boolFlag, Help: "Read an API key for this test from the interactive terminal without echo; it is not saved. Fails with NO_TTY when stdin is not a terminal. Default: use the saved key."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/analysis/test-model", Body: []string{"api_key"}}},
@@ -437,13 +464,13 @@ func buildCommands() []*commandSpec {
 			Description: "Read-only trial run of a project's rules.",
 			Flags: []flagSpec{
 				{Name: "group-id", Value: "<id>", Body: "group_id", Required: true, Help: "Project group ID, or null for the organization-wide project. Required."},
-				{Name: "rule", Kind: listFlag, Value: "<kind>:<pattern>", Body: "rules", Help: "One rule, split at the first ':'. Repeatable. Default: no rules."},
+				{Name: "rule", Kind: listFlag, Value: "<kind>:<pattern>", Body: "rules", Help: "One rule, split at the first ':'; <kind> is repo_url, repo_name, path_glob or agent_project. Repeatable. Default: no rules."},
 				{Name: "week", Value: "<YYYY-MM-DD>", Body: "week", Help: "First day of the week to try, on the deployment's week start day. Default: the current week."},
-				{Name: "project-id", Value: "<id>", Body: "project_id", Help: "Existing project being edited, so its own matches are not counted as conflicts. Default: none."},
+				{Name: "project-id", Value: "<id>", Body: "project_id", Help: "Project being edited: it is left out of the matches counted as belonging to other projects (as the web form does). Default: none."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/config/project-preview"}},
 			Timeout:  40 * time.Second,
-			Examples: []string{"llmaudit config preview-project --group-id 2 --rule repo:example-repo"},
+			Examples: []string{"llmaudit config preview-project --group-id 2 --rule repo_name:example-repo"},
 			Run:      runPreview,
 		},
 		{
@@ -451,7 +478,8 @@ func buildCommands() []*commandSpec {
 			Summary: "plan: create or change a configuration object (administrators, write tier)",
 			Description: "Only creates a plan and prints it (before, after, effects); `llmaudit apply <plan-id>` executes it. Without --id a new object is created. " +
 				"--set, --set-json and --patch-file can be mixed; when they name the same field the one given later on the command line wins. " +
-				"A field may not appear in both --set and --add/--remove.",
+				"A field may not appear in both --set and --add/--remove. The API key is not a field: the user sets it with `llmaudit config set-key --kind analysis-settings`.",
+			Fields: configFields,
 			Flags: []flagSpec{
 				{Name: "kind", Value: "<kind>", Body: "kind", Required: true, Help: "One of " + configKinds + ". Required."},
 				{Name: "id", Value: "<id>", Body: "id", Help: "Object to change: a number; for member a NewAPI user ID; for principal user:<id> or token:<id>. Omit to create (not for member, principal or the two settings). Default: none."},
@@ -466,7 +494,7 @@ func buildCommands() []*commandSpec {
 			Examples: []string{
 				"llmaudit config set --kind content-rule --id 12 --set enabled=false",
 				"llmaudit config set --kind content-rule --set name=example --set enabled=true --set action=dry_run --set-json keywords='[\"example\"]'",
-				"llmaudit config set --kind project --id 7 --add rules=repo:example-repo --if-version 1763500000000000000",
+				"llmaudit config set --kind project --id 7 --add rules=repo_name:example-repo --if-version 1763500000000000000",
 				"llmaudit config set --kind analysis-settings --set llm.enabled=true --patch-file settings.json",
 			},
 			Run: runPlan("config.set"),

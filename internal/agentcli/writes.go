@@ -37,7 +37,21 @@ func splitAssignment(flag, value string) (string, string, error) {
 	if !ok || strings.TrimSpace(field) == "" {
 		return "", "", usageError("--"+flag, fmt.Sprintf("--%s takes <field>=<value>", flag))
 	}
+	if err := refuseKeyField(field); err != nil {
+		return "", "", err
+	}
 	return field, raw, nil
+}
+
+// refuseKeyField keeps the API key out of every value a command line or
+// file can carry: it only enters through the no-echo terminal prompt.
+func refuseKeyField(field string) error {
+	if strings.EqualFold(strings.TrimSpace(field), "api_key") {
+		return &cliError{Code: agentapi.CodeInvalidArgument, Message: "api_key cannot be given as a value; nothing was sent",
+			Hint:    "Ask the user to run `llmaudit config set-key --kind analysis-settings` themselves in a terminal.",
+			Details: map[string]any{"field": "api_key"}}
+	}
+	return nil
 }
 
 // strictJSON decodes exactly one JSON value.
@@ -95,6 +109,9 @@ func setValues(inv *invocation) (map[string]any, error) {
 				return nil, usageError("--patch-file", "--patch-file must hold one JSON object whose keys are field names")
 			}
 			for field, raw := range fields {
+				if err := refuseKeyField(field); err != nil {
+					return nil, err
+				}
 				set[field] = raw
 			}
 		}

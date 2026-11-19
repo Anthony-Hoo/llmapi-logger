@@ -76,11 +76,13 @@ type commandSpec struct {
 	Path        []string
 	Summary     string
 	Description string
-	Args        []argSpec
-	Flags       []flagSpec
-	Routes      []routeSpec
-	Timeout     time.Duration
-	Examples    []string
+	// Fields is printed as it is, after the description.
+	Fields   string
+	Args     []argSpec
+	Flags    []flagSpec
+	Routes   []routeSpec
+	Timeout  time.Duration
+	Examples []string
 	// Select picks the route; nil means Routes[0].
 	Select func(*invocation) (*routeSpec, error)
 	Run    func(*invocation) (*result, error)

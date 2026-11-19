@@ -64,6 +64,18 @@ func TestSetKeyNeedsATerminal(t *testing.T) {
 	h.env.Terminal = pipe
 	h.env.Stdin = reader
 	writeFile(t, filepath.Join(h.home, "api_key"), testSecret)
+	patch := writeFile(t, filepath.Join(t.TempDir(), "patch.json"), `{"llm.model":"m","api_key":"sk-test-in-file"}`)
+	for _, args := range [][]string{
+		{"analysis", "test-model", "--set", "api_key=" + testSecret},
+		{"config", "set", "--kind", "analysis-settings", "--set", "api_key=" + testSecret},
+		{"config", "set", "--kind", "analysis-settings", "--set-json", `API_KEY="sk-test-json"`},
+		{"config", "set", "--kind", "analysis-settings", "--patch-file", patch},
+	} {
+		body := h.expectFailure(h.run(args...), agentapi.CodeInvalidArgument, 2)
+		if body.Details["field"] != "api_key" || !strings.Contains(body.Hint, "llmaudit config set-key --kind analysis-settings") {
+			t.Errorf("%v: %+v", args[:3], body)
+		}
+	}
 	for _, args := range [][]string{
 		{"config", "set-key", "--kind", "analysis-settings"},
 		{"analysis", "test-model", "--prompt-key"},

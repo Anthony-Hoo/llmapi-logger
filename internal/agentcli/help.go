@@ -67,6 +67,9 @@ func commandHelp(spec *commandSpec) string {
 	if spec.Description != "" {
 		builder.WriteString("\n" + wrap(spec.Description, 78, "") + "\n")
 	}
+	if spec.Fields != "" {
+		builder.WriteString("\n" + spec.Fields)
+	}
 	if len(spec.Args) > 0 {
 		builder.WriteString("\nArguments:\n")
 		for _, arg := range spec.Args {
