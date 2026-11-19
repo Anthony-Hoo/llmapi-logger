@@ -10,20 +10,21 @@ llmaudit usage overview --from 2026-01-01 --to 2026-01-31 --tz-offset-min 480
 ```
 
 - `--group-by`: `model`, `protocol` or `client`; administrators also `caller` or `token`.
-- Day buckets use `--tz-offset-min` (minutes east of UTC); the default is this machine's offset.
+- Day buckets use `--tz-offset-min` (minutes east of UTC); the default is this machine's offset. It moves only the buckets, not the range: a `YYYY-MM-DD` in `--from`/`--to` is always a whole UTC day. For local-day boundaries give RFC 3339 times with the offset, for example `--from 2026-01-01T00:00:00+08:00`.
 - Totals only include records that have been analysed. The server cannot say how many records are still waiting, so `data.coverage_unknown` is true: do not present the totals as "all traffic". `data.billing_complete` is false while some requests are not billed yet; cost figures are then provisional.
 
 ## Sessions
 
 ```
 llmaudit usage sessions --since 24h --sort tokens --limit 10
+llmaudit usage sessions --from 2026-01-05 --to 2026-01-11 --sort context
 llmaudit usage trend ses_123 --out trend.json
 llmaudit usage tree 0123456789abcdef01234567
 llmaudit usage composition 12345 --out composition.json
 ```
 
-- `usage sessions` lists session cards, sorted by `recent`, `tokens` or `context`. Page with `--cursor`.
-- `usage trend <session>` shows the context size step by step; use `--out` for long sessions.
+- `usage sessions` lists session cards, sorted by `recent`, `tokens` or `context`. The range is `--since`, or `--from`/`--to` (RFC 3339 or `YYYY-MM-DD`, whole UTC days), as for `requests list`. Page with `--cursor`.
+- `usage trend <session>` shows the context size step by step; use `--out` for long sessions. With `--out` (here and for `usage composition`) the file holds `{"meta": …, "data": …}`, so it still says whether it is complete when you read it later, and stdout carries `{path, bytes, sha256}` with the same `meta`.
 - `usage tree <tree>` shows an agent tree (the tree ID is 24 hexadecimal characters, from a session card).
 - `usage composition <record>` shows what one request's context was made of (system prompt, tools, history, …).
 - When the server truncated a trend, tree or composition, `meta.complete` is false with `incomplete_reason: truncated`. Say that the picture is partial.

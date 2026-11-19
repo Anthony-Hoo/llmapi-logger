@@ -193,7 +193,8 @@ func buildCommands() []*commandSpec {
 			Args: []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "what", Value: "<what>", PathParam: "what", Required: true, Help: "conversation, headers, request, response, raw-request, raw-response, timeline-request or timeline-response. Required."},
-				flagOut(true, "the exported content"),
+				{Name: "out", Value: "<file>", Required: true,
+					Help: "Write the exported content itself to this file, with no envelope around it (the file is replaced atomically), and print {path, bytes, sha256, complete, missing_chunks?} with meta.state exported. The directory must exist. Required."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests/{id}/export/{what}", Raw: true}},
 			Timeout:  60 * time.Second,

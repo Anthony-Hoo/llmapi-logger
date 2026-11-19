@@ -83,7 +83,7 @@ Without `--id`, `config set` creates an object; with it, it changes only the fie
 
 ### Passing values
 
-- `--set <field>=<value>` splits at the first `=`. `true`/`false` become booleans, decimal numbers become numbers, `null` is empty, anything else is a string.
+- `--set <field>=<value>` splits at the first `=`. `true`/`false` become booleans, decimal numbers become numbers, `null` is JSON null, anything else is a string. The server accepts `null` only for a project's `group_id` (the organisation-wide project) and refuses it for every other field, because there it would mean "leave unchanged" and the change would silently do nothing; to empty a string, use `--set-json <field>='""'`.
 - `--set-json <field>=<json>` takes a JSON value: lists, and strings that look like numbers or contain special characters.
 - `--patch-file <file>` reads a JSON object whose keys are field names. Use it for regular expressions and keyword lists, so that no shell quoting can change them.
 - `--add <field>=<value>` and `--remove <field>=<value>` change one element of a list field (`keywords`, `scan_scopes`, `ranked_clients`, `rules`; a rule is `<kind>:<pattern>`). They are repeatable, not allowed when creating, and a field cannot be in both `--set` and `--add`/`--remove`.
