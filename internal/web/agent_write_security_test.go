@@ -304,9 +304,15 @@ func TestAgentRateLimits(t *testing.T) {
 	})
 	t.Run("writes", func(t *testing.T) {
 		fixture := newWriteFixture(t)
-		for index := 0; index < 60; index++ {
+		// Plan creations and applies share the write quota. Half of the 60 are
+		// applies of an unknown plan, since one token holds at most
+		// agentaccess.MaxPlansPerToken live plans.
+		for index := 0; index < 30; index++ {
 			if response := fixture.facade(http.MethodPost, "/plans", `{"op":"analysis.run"}`, fixture.adminWrite); response.Code != http.StatusOK {
 				t.Fatalf("plan %d = %d %s", index, response.Code, response.Body.String())
+			}
+			if code := failure(t, fixture.facade(http.MethodPost, "/plans/pln_AAAAAAAAAAAAAAAAAAAAAA/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodePlanNotFound {
+				t.Fatalf("apply %d = %s", index, code)
 			}
 		}
 		limited := fixture.facade(http.MethodPost, "/plans", `{"op":"analysis.run"}`, fixture.adminWrite)

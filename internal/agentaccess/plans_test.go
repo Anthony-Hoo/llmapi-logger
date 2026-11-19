@@ -75,13 +75,15 @@ func TestPlanStoreSingleUseOwnerAndExpiry(t *testing.T) {
 func TestPlanStoreIsBounded(t *testing.T) {
 	clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}
 	store := NewPlanStore(clock.Now, nil)
-	for range MaxPlans {
-		if _, err := store.Put(1, nil); err != nil {
+	// The store is filled by many tokens: one token alone stops at its own
+	// cap (TestPlanStoreCapsEachToken).
+	for index := range MaxPlans {
+		if _, err := store.Put(int64(index/MaxPlansPerToken+1), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var coded *Error
-	if _, err := store.Put(1, nil); !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited || coded.RetryAfter <= 0 {
+	if _, err := store.Put(999, nil); !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited || coded.RetryAfter <= 0 {
 		t.Fatalf("full store = %v", err)
 	}
 	clock.Advance(PlanLifetime)
@@ -91,6 +93,46 @@ func TestPlanStoreIsBounded(t *testing.T) {
 	clock.Advance(planRetention)
 	if _, err := store.Put(1, nil); err != nil || store.Len() > 2 {
 		t.Fatalf("sweep left %d plans (%v)", store.Len(), err)
+	}
+}
+
+// One token cannot exhaust the store for the others: beyond its own cap its
+// plans are refused, other tokens are unaffected, and taking or expiry makes
+// room again.
+func TestPlanStoreCapsEachToken(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}
+	store := NewPlanStore(clock.Now, nil)
+	var first Plan
+	for index := range MaxPlansPerToken {
+		plan, err := store.Put(1, nil)
+		if err != nil {
+			t.Fatalf("plan %d: %v", index, err)
+		}
+		if index == 0 {
+			first = plan
+		}
+		clock.Advance(time.Second)
+	}
+	var coded *Error
+	_, err := store.Put(1, nil)
+	if !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited ||
+		coded.RetryAfter != first.ExpiresAt.Sub(clock.Now()) {
+		t.Fatalf("plan beyond the token's cap = %v", err)
+	}
+	if _, err := store.Put(2, nil); err != nil {
+		t.Fatalf("another token refused: %v", err)
+	}
+	if _, err := store.Take(1, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(1, nil); err != nil {
+		t.Fatalf("a taken plan makes room: %v", err)
+	}
+	clock.Advance(PlanLifetime)
+	for range MaxPlansPerToken {
+		if _, err := store.Put(1, nil); err != nil {
+			t.Fatalf("expired plans make room: %v", err)
+		}
 	}
 }
 

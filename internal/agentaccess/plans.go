@@ -23,11 +23,15 @@ const (
 	// planRetention keeps an expired plan this much longer, so applying it
 	// says PLAN_EXPIRED rather than PLAN_NOT_FOUND.
 	planRetention = 10 * time.Minute
-	// MaxPlans bounds the plans held at once across all tokens. The write
-	// limit (60 per token in 10 minutes) bounds one token far below it.
-	MaxPlans     = 1024
-	planIDPrefix = "pln_"
-	planIDBytes  = 16
+	// MaxPlans bounds the plans held at once across all tokens.
+	MaxPlans = 1024
+	// MaxPlansPerToken bounds the live plans of one token, so that one token
+	// cannot fill the store for every other. A plan beyond it is refused with
+	// RATE_LIMITED (no plan a user was shown disappears); the wait is until
+	// that token's first plan expires.
+	MaxPlansPerToken = 32
+	planIDPrefix     = "pln_"
+	planIDBytes      = 16
 )
 
 // ValidPlanID reports whether id has the shape of a plan id: the prefix and
@@ -69,7 +73,8 @@ func NewPlanStore(now func() time.Time, random io.Reader) *PlanStore {
 }
 
 // Put stores payload as a new plan of tokenID. It fails with RATE_LIMITED
-// when MaxPlans live plans are held.
+// when the token holds MaxPlansPerToken live plans or MaxPlans plans are held
+// in all.
 func (store *PlanStore) Put(tokenID int64, payload any) (Plan, error) {
 	random := make([]byte, planIDBytes)
 	if _, err := io.ReadFull(store.random, random); err != nil {
@@ -79,6 +84,18 @@ func (store *PlanStore) Put(tokenID int64, payload any) (Plan, error) {
 	defer store.mu.Unlock()
 	now := store.now()
 	store.sweepLocked(now)
+	own, ownSoonest := 0, now.Add(PlanLifetime)
+	for _, plan := range store.plans {
+		if plan.TokenID == tokenID && now.Before(plan.ExpiresAt) {
+			own++
+			if plan.ExpiresAt.Before(ownSoonest) {
+				ownSoonest = plan.ExpiresAt
+			}
+		}
+	}
+	if own >= MaxPlansPerToken {
+		return Plan{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: ownSoonest.Sub(now)}
+	}
 	if len(store.plans) >= MaxPlans {
 		soonest := now.Add(PlanLifetime)
 		for _, plan := range store.plans {
