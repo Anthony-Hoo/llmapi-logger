@@ -222,6 +222,19 @@ func validateInsights(configuration config.InsightsConfig) error {
 	return nil
 }
 
+// warnWeakAdminToken logs once at startup when admin_token is shorter than
+// recommended. Neither the token nor its length is logged.
+func warnWeakAdminToken(configuration config.Config, logger *slog.Logger) {
+	if !configuration.WeakAdminToken() {
+		return
+	}
+	logger.Warn("admin_token is shorter than recommended; use a long random value",
+		"config_key", "admin_token",
+		"recommended_min_bytes", config.RecommendedAdminTokenBytes,
+		"error_category", "weak_admin_token",
+	)
+}
+
 // warnDeprecatedInsights logs once at startup that insights.pricing_file no
 // longer has any effect (doc/features/21-newapi-billing.md). The path itself
 // is not logged.
@@ -306,6 +319,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		return nil, err
 	}
 	warnDeprecatedInsights(configuration.Insights, logger)
+	warnWeakAdminToken(configuration, logger)
 	newAPIClient, err := assembleNewAPIClient(configuration.NewAPI, upstreamProxy)
 	if err != nil {
 		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)

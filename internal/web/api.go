@@ -86,8 +86,12 @@ func (handler *managementHandler) serveSessionInfo(writer http.ResponseWriter, r
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
 		return
 	}
-	caller, ok := handler.authenticator.resolve(request)
-	if !ok {
+	caller, status, retryAfter := handler.authenticator.authenticate(request)
+	if status == authLimited {
+		writeBearerRateLimited(writer, retryAfter)
+		return
+	}
+	if status != authOK {
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "valid management session or bearer token required")
 		return
 	}

@@ -12,6 +12,18 @@ const (
 	DefaultRetentionDays                   = 30
 )
 
+// RecommendedAdminTokenBytes is the shortest admin_token that does not earn a
+// startup warning. Shorter tokens still start, so that an upgrade never locks
+// an existing deployment out; the wrong-token limiter is what makes guessing
+// impractical, and length is the second line.
+const RecommendedAdminTokenBytes = 24
+
+// WeakAdminToken reports whether the configured admin_token is shorter than
+// recommended. It never looks at the token's content.
+func (cfg Config) WeakAdminToken() bool {
+	return len(cfg.AdminToken) < RecommendedAdminTokenBytes
+}
+
 // Config is the complete user-facing configuration for one audit-proxy
 // process. Only deployment-critical upstream and lifecycle timeouts are
 // exposed; storage and worker tuning values remain internal defaults.

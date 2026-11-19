@@ -102,10 +102,21 @@ func loginLimiterKey(request *http.Request) string {
 }
 
 func writeLoginRateLimited(writer http.ResponseWriter, retryAfter time.Duration) {
+	writeRateLimited(writer, retryAfter, "too many failed sign-in attempts, try again later")
+}
+
+// writeBearerRateLimited answers a bearer request from an address that sent
+// too many wrong tokens. The code matches the sign-in limiter so clients
+// handle both the same way.
+func writeBearerRateLimited(writer http.ResponseWriter, retryAfter time.Duration) {
+	writeRateLimited(writer, retryAfter, "too many failed bearer tokens from this address, try again later")
+}
+
+func writeRateLimited(writer http.ResponseWriter, retryAfter time.Duration, message string) {
 	seconds := int(retryAfter.Round(time.Second) / time.Second)
 	if seconds < 1 {
 		seconds = 1
 	}
 	writer.Header().Set("Retry-After", strconv.Itoa(seconds))
-	writeError(writer, http.StatusTooManyRequests, "too_many_requests", "too many failed sign-in attempts, try again later")
+	writeError(writer, http.StatusTooManyRequests, "too_many_requests", message)
 }

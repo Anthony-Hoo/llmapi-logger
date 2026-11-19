@@ -8,7 +8,8 @@
 
 ## 2. 管理面边界
 
-- `admin_token` 在任何 `admin_listen` 上都必填，包括 loopback。
+- `admin_token` 在任何 `admin_listen` 上都必填，包括 loopback。短于 24 字节时启动日志给出一条 `weak_admin_token` 告警，不拒绝启动。
+- 错误的 Bearer 令牌按来源地址限流（5 分钟 10 次），与登录接口的限流分开计数。
 - `/api/v1/*`、`/healthz`、`/readyz` 要求 Bearer token 或有效管理 Cookie。
 - 只有不含数据的 `/ui/` shell、CSS 和 JS 可以匿名加载。
 - Cookie 固定七天过期，包含版本、绝对过期时间和 HMAC，不包含原始 admin token；设置 `HttpOnly`、`SameSite=Strict`、`Path=/`、`Max-Age/Expires`，HTTPS 请求额外设置 `Secure`。
