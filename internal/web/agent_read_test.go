@@ -1005,6 +1005,38 @@ func TestAgentErrorClassesAreSplitWithoutText(t *testing.T) {
 	}
 }
 
+type testSQLState string
+
+func (state testSQLState) Error() string    { return "sqlstate " + string(state) }
+func (state testSQLState) SQLState() string { return string(state) }
+
+// Database conditions that pass on their own are retryable, never INTERNAL;
+// a constraint or syntax error still is INTERNAL.
+func TestAgentTransientDatabaseErrorsAreUpstreamUnavailable(t *testing.T) {
+	for state, want := range map[string]agentapi.Code{
+		"57014": agentapi.CodeUpstreamUnavailable, // statement timeout or cancel
+		"53300": agentapi.CodeUpstreamUnavailable, // too many connections
+		"57P01": agentapi.CodeUpstreamUnavailable, // admin shutdown
+		"57P02": agentapi.CodeUpstreamUnavailable, // crash shutdown
+		"57P03": agentapi.CodeUpstreamUnavailable, // cannot connect now
+		"08006": agentapi.CodeUpstreamUnavailable, // connection failure
+		"08001": agentapi.CodeUpstreamUnavailable,
+		"40P01": agentapi.CodeUpstreamUnavailable, // deadlock
+		"40001": agentapi.CodeUpstreamUnavailable, // serialization failure
+		"55P03": agentapi.CodeUpstreamUnavailable, // lock not available
+		"23505": agentapi.CodeInternal,
+		"42601": agentapi.CodeInternal,
+	} {
+		if got := agentErrorCodeOf(fmt.Errorf("query: list: %w", testSQLState(state))); got != want {
+			t.Errorf("SQLSTATE %s = %s, want %s", state, got, want)
+		}
+	}
+	// A deadline still wins over the database's own report of it.
+	if got := agentErrorCodeOf(errors.Join(context.DeadlineExceeded, testSQLState("57014"))); got != agentapi.CodeTimeout {
+		t.Errorf("deadline with 57014 = %s", got)
+	}
+}
+
 // --- parameters -------------------------------------------------------------
 
 func TestAgentReadParameters(t *testing.T) {

@@ -323,9 +323,26 @@ func agentErrorCodeOf(err error) agentapi.Code {
 // service), the facade form of the web API's 503 "unavailable".
 var errAgentUnavailable = errors.New("web: dependency unavailable")
 
+// transientSQLStates are the PostgreSQL conditions that pass on their own
+// (contract section 0.1 item 85): statement timeout or cancel (57014), too
+// many connections (53300), administrator shutdown, crash shutdown and
+// "cannot connect now" (57P01-57P03). Connection exceptions (class 08) and
+// the lock, deadlock and serialization failures already have a storage error
+// class. The shared storage.ErrorClass is left alone because the web routes
+// report its classes.
+var transientSQLStates = map[string]bool{"57014": true, "53300": true, "57P01": true, "57P02": true, "57P03": true}
+
+func transientSQLState(err error) bool {
+	var state interface{ SQLState() string }
+	return errors.As(err, &state) && transientSQLStates[state.SQLState()]
+}
+
 // storageUnavailable reports the storage error classes that mean "cannot be
 // reached right now" rather than a fault in this request.
 func storageUnavailable(err error) bool {
+	if transientSQLState(err) {
+		return true
+	}
 	switch storage.ErrorClass(err) {
 	case "closed", "queue_full", "postgres_connection", "postgres_busy", "postgres_read_only",
 		"postgres_full", "postgres_io_error", "sqlite_busy", "sqlite_read_only", "sqlite_full", "sqlite_io_error":
