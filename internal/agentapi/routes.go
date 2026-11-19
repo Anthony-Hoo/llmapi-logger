@@ -117,8 +117,10 @@ var WebRouteExceptions = []WebRouteException{
 	{Method: "GET", Path: "/api/v1/agent-access/tokens", Reason: "agent access pages of the web UI (this module)"},
 	{Method: "DELETE", Path: "/api/v1/agent-access/tokens/{id}", Reason: "agent access pages of the web UI (this module)"},
 	{Method: "GET", Path: "/api/v1/agent-access/changes", Reason: "agent access pages of the web UI (this module): recent agent changes, administrators only"},
+	{Method: "POST", Path: "/api/v1/agent-access/install-links", Reason: "agent access pages of the web UI (this module): the install prompt with its signed download link"},
 }
 
 // FacadeOnlyEndpoints are facade endpoints with no web route of their own:
-// the CLI's sign-in, identity and sign-out.
-var FacadeOnlyEndpoints = []string{"token.exchange", "whoami", "logout"}
+// the CLI's sign-in, identity and sign-out, and the signed package download
+// the install prompt fetches.
+var FacadeOnlyEndpoints = []string{"token.exchange", "whoami", "logout", EndpointDownload}

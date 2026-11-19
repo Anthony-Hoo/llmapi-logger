@@ -60,6 +60,12 @@ func (handler *managementHandler) serveAgentAccess(writer http.ResponseWriter, r
 			return
 		}
 		handler.serveAgentTokenRevoke(writer, request, strings.TrimPrefix(path, agentTokensPath+"/"))
+	case path == agentInstallLinksPath:
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer, http.MethodPost)
+			return
+		}
+		handler.serveAgentInstallLink(writer, request)
 	case path == agentChangesPath:
 		if request.Method != http.MethodGet {
 			methodNotAllowed(writer, http.MethodGet)

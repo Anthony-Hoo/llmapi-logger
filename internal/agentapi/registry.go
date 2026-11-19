@@ -50,12 +50,18 @@ type Endpoint struct {
 	Tier    Tier
 }
 
+// EndpointDownload is the signed package download of contract section 5:
+// anonymous, fetched by the install prompt rather than by a command. The
+// signature in the path is what authorizes it.
+const EndpointDownload = "packages.download"
+
 // Endpoints is the facade registry. Each phase appends its endpoints here
 // together with the server handler bound to the same ID.
 var Endpoints = append(append([]Endpoint{
 	{ID: "token.exchange", Method: "POST", Pattern: "/token", Access: AccessAnonymous, Tier: TierRead},
 	{ID: "whoami", Method: "GET", Pattern: "/whoami", Access: AccessAny, Tier: TierRead},
 	{ID: "logout", Method: "POST", Pattern: "/logout", Access: AccessAny, Tier: TierRead},
+	{ID: EndpointDownload, Method: "GET", Pattern: "/dl/{signature}/{file}", Access: AccessAnonymous, Tier: TierRead},
 }, ReadEndpoints...), WriteEndpoints...)
 
 // Registry resolves request paths against a list of endpoints.

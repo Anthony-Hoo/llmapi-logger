@@ -50,6 +50,8 @@ func (handler *managementHandler) agentHandlers() map[string]agentHandler {
 		"token.exchange": handler.serveAgentToken,
 		"whoami":         handler.serveAgentWhoami,
 		"logout":         handler.serveAgentLogout,
+
+		agentapi.EndpointDownload: handler.serveAgentDownload,
 	}
 	for id, serve := range handler.agentReadHandlers() {
 		handlers[id] = serve

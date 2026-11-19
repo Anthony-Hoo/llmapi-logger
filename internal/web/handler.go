@@ -15,6 +15,7 @@ import (
 
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/agentdist"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/query"
@@ -116,6 +117,14 @@ type Options struct {
 	// answers FEATURE_DISABLED for every request and /api/v1/agent-access/*
 	// answers 404 (doc/features/25-agent-access.md).
 	AgentAccess *agentaccess.Service
+	// AgentDist serves the install links and the signed package downloads
+	// (contract section 5). It is only used while AgentAccess is set; nil
+	// there makes every download NOT_FOUND and install-links answer that no
+	// packages ship with this deployment.
+	AgentDist *agentdist.Service
+	// AgentPublicURL is agent_access.public_url: the server address written
+	// into install prompts. Empty means the address the browser is using.
+	AgentPublicURL string
 	// RetentionDays is the deployment's retention_days (0: kept forever). The
 	// facade refuses to regenerate a week whose evidence is older
 	// (doc/features/25-agent-access-contract.md section 0, row 5).
@@ -151,9 +160,11 @@ func NewHandler(options Options) (http.Handler, error) {
 
 		injectedUserTextPrefixes: append([]string(nil), options.InjectedUserTextPrefixes...),
 
-		agent:         options.AgentAccess,
-		agentRegistry: agentapi.NewRegistry(agentapi.Endpoints),
-		retentionDays: options.RetentionDays,
+		agent:          options.AgentAccess,
+		agentDist:      options.AgentDist,
+		agentPublicURL: options.AgentPublicURL,
+		agentRegistry:  agentapi.NewRegistry(agentapi.Endpoints),
+		retentionDays:  options.RetentionDays,
 	}
 	if handler.agent != nil {
 		handler.agentPlans = agentaccess.NewPlanStore(handler.agent.Now, nil)
@@ -192,6 +203,8 @@ type managementHandler struct {
 	agentRegistry     *agentapi.Registry
 	agentHandlerTable map[string]agentHandler
 	agentPlans        *agentaccess.PlanStore
+	agentDist         *agentdist.Service
+	agentPublicURL    string
 	retentionDays     int
 }
 

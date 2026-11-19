@@ -45,9 +45,10 @@ import (
 
 // endpointsWithoutCommand are facade endpoints no llmaudit command calls,
 // with the reason. They are exempt from the parity and unknown-parameter
-// checks; the signed package download of phase 5 belongs here (it is fetched
-// by the install prompt, not by a command).
-var endpointsWithoutCommand = map[string]string{}
+// checks.
+var endpointsWithoutCommand = map[string]string{
+	agentapi.EndpointDownload: "the signed package download is fetched by the install prompt (curl or Invoke-WebRequest), not by a command; its own tests check that it refuses query parameters",
+}
 
 // cliSamplePath fills a CLI route's {name} segments.
 func cliSamplePath(path string) string {

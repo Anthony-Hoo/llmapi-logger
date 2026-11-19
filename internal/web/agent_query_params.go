@@ -3,6 +3,8 @@ package web
 import (
 	"net/http"
 	"net/url"
+
+	"llmapi-logger/internal/agentapi"
 )
 
 // agentQueryParams is, per facade endpoint, every query parameter its
@@ -14,6 +16,9 @@ var agentQueryParams = map[string][]string{
 	"token.exchange": {},
 	"whoami":         {},
 	"logout":         {},
+
+	// The signed download takes no parameter: the link is the whole request.
+	agentapi.EndpointDownload: {},
 
 	"requests.list": {"from", "to", "since", "cursor", "limit", "protocol", "path", "model", "user_agent",
 		"status", "forward_status", "blocked_by", "block_code", "capture_status", "upstream_error_class", "conversation", "collapse",
