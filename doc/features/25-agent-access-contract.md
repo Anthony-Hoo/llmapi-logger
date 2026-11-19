@@ -1,6 +1,6 @@
 # 模块 25：Agent 接入接口合同（实施依据）
 
-> 状态：已定稿；阶段 0、阶段 1、阶段 2 的只读门面与阶段 4 的写入（计划与执行、Key 与连接测试、写入审计与改动列表、全部限速）已实现，命令行与服务端、前端已对齐并由测试锁定（细节见 §0.1 第 4–58 条）；阶段 5 的安装链接与下载未实现
+> 状态：已定稿；全部阶段已实现（阶段 0、1、2、4、5；阶段 3 不存在）：只读门面、写入、安装链接与签名下载都已接入，命令行与服务端、前端已对齐并由测试锁定，两条端到端旅程（管理员、开发者）在 PostgreSQL 上跑通（细节见 §0.1 第 4–66 条）。未验证：没有在真实浏览器里走过页面；没有构建过容器镜像；没有接真实的 NewAPI；本机没有跑 `-race`
 > 日期：2026-11-19
 > 配套：[模块 25 开发计划](25-agent-access.md)。两者不一致时以本合同为准；本合同与代码不一致时，改代码或在 §0.1 追加一条并改合同，不允许两边各说各的。
 > 既有类型的字段名、枚举取值与限制取自一次对代码的整体提取（`internal/query`、`internal/insights`、`internal/orgreport`、`internal/sessionanalysis`、`internal/uaguard`、`internal/contentpolicy`、`internal/web`），其中只抽查了三处（周评的 `week` 取值、重新生成周报的“已结束”规则、采集状态的字面值）。实现每个接口前对照类型定义再核一遍，发现出入按 §0.1 处理。
@@ -95,7 +95,14 @@
 56. **组织目录与设置之外的门面输出**：`config.show` 等读接口不变；写接口的结果不带 `meta`（不是读结果），带 `_untrusted` 字段时带 `notice`。
 57. **`write_denied` 行的上限与取值**（阶段 4）：被分发器拒绝的请求不经过写入限速，没有写权限的令牌本可以按请求速率往审计表里加行；所以每枚令牌每 10 分钟最多记 60 行 `write_denied`，超出后照常拒绝、不再记录。路径里的计划编号只在形如 `pln_` 加 22 个 base64url 字符时才写进 `object_id`，否则留空——改动列表会显示它，不能带调用方任意写的文本。
 58. **`config set` 的超时**（阶段 4）：服务端建计划最长 30 秒（项目的计划要跑一次预览，与网页的周报类读取同一上限）；命令行的 `config set` 因此用 40 秒（与 `config preview-project` 相同），其余只建计划的命令仍是 15 秒，`weekly regenerate` 40 秒。
-
+59. **`LINK_EXPIRED`**（阶段 5，修正 §2.3 与 §5）：过期的下载链接原本答 410 加 `NOT_FOUND`、在 `details.reason` 里写 `link_expired`，因为错误表里没有 410 的码。新增错误码 `LINK_EXPIRED`（HTTP 410，退出码 1），下载接口对签名正确而已过期的链接用它，不再带 `details.reason`；命令行经共用错误表得到退出码，Skill 的排错表有它的一行。签名不对仍是 404 `NOT_FOUND`，所以过期的回答不会证实一个猜出来的签名。
+60. **`install-links` 的线上格式**（阶段 5，与前端对齐）：请求体恰为 `{agent, platform, skills_dir?}`（前端只在 `agent: "other"` 且填了目录时发 `skills_dir`），4 KiB 以内、恰好一个 JSON 值；未知字段或格式不对是 400 `invalid_argument`、`field: body`。`agent`、`platform`、`skills_dir` 不合法是 400 `invalid_argument`，`field` 为该字段，`message` 是 `agentdist` 给出的可展示文案；`agent: "other"` 必须给 `skills_dir`。本部署没有可用的包（目录缺失、清单无效、版本不符、没有该平台的包，或分发服务没有装配）时是 503 `packages_unavailable`，`message` 固定为“安装包未随本次部署提供”，页面原样显示。成功是 200 `{prompt, expires_at}`（RFC 3339 UTC）。两种身份都可调用；功能关闭时与其余 `/api/v1/agent-access/*` 一样 404。
+61. **提示词里的服务器地址**（阶段 5）：`public_url` 非空时用它；否则用浏览器这次访问所用的地址——连接本身是 TLS 时 `https`，否则 `http`，加 `Host` 头。`X-Forwarded-*`、`Forwarded` 一律不读，因为任何客户端都能设置它们。由此在 TLS 终止于反向代理、或管理面挂在子路径下的部署里，不设 `public_url` 得到的会是错误的地址：这类部署必须设置 `public_url`。`Host` 里有提示词拒绝的字符时答 400 `server_url_unusable`，提示管理员设置 `agent_access.public_url`，不是 500。
+62. **分发的审计行**（阶段 5）：`link_issued` 在成功返回提示词时写，`role` 为网页会话的身份、`command` 为 `web`、`token_id` 为空、`object_kind` 为 `agent_package`、`object_id` 为提示词下载的包文件名。`package_downloaded` 只在文件真正送出（200）时写，`object_id` 为送出的文件（包或 `manifest.json`），`role`、`command`、`token_id` 为空。404、410、429 与参数错误都不写：这些回答任何人都能按请求速率触发，写进审计表会让匿名客户端把它撑大（与第 57 条同理）；送出的次数受每条链接 30 次的上限约束，链接又只能由已登录的人生成。任何行都不含签名、链接或 `admin_token`。
+63. **运行时的包与装配**（阶段 5，修正开发计划 §10）：分发服务只在 Agent 接入模块装配成功时构建（功能关闭、或 `available` 模式下数据库不可用时都不构建，下载答 `NOT_FOUND`，`install-links` 答 `packages_unavailable`），读可执行文件旁边的 `agent-packages/`。包目录缺失、损坏或版本不符不阻止启动，只记一条 `error_category: agent_packages_unavailable` 的告警，原因文本不含路径以外的机密；包在启动时读一次并校验大小与摘要，运行中不重读。装配另有一个只给测试用的选项 `app.WithAgentPackageDir`（测试二进制旁边没有包）；时钟不需要另开口子，端到端测试用同一个 `admin_token` 自己签一条已过期的链接。
+64. **`public_url` 的字符**（阶段 5，修正 §8.1 与第 16 条）：原来的校验接受提示词会拒绝的地址（如路径里带 `$`、`'`、`+`、`=`、非 ASCII 字母），这样的配置能启动，却让每次生成提示词都失败。现在配置校验用与提示词相同的规则：ASCII 字母、数字与 `-._~:/%[]`，最长 2048 个字符，其余照旧（`http`/`https`、有主机、可带端口与路径、没有用户信息、查询串与片段）；不合规时启动失败，错误信息写明 `agent_access.public_url`。
+65. **下载接口的登记与对齐**（阶段 5）：门面登记表里 ID 为 `packages.download`、`GET /dl/{signature}/{file}`、`anonymous`、`read`；分发器照常先查功能开关、再查命令行版本（`curl` 不带版本头，不受影响），匿名接口不经令牌与配额。参数表里它的一行为空（不接受任何查询参数，违者 `INVALID_ARGUMENT`）。它没有对应的命令：在对齐测试的 `endpointsWithoutCommand` 里写明“由安装提示词用 curl 或 Invoke-WebRequest 获取”，在路由对照表的 `FacadeOnlyEndpoints` 里与登录三件套并列。`POST /api/v1/agent-access/install-links` 列在 `WebRouteExceptions` 里。
+66. **Skill 与命令行帮助的更正**（阶段 5）：对照命令行现状改了 Skill 的若干处（`requests list` 新增的筛选、两个会话列表的 `--from`/`--to`、`--out` 文件的形状、`login --write` 只是预选档位、日期形式的 `--to` 含当天、时间范围也会关掉折叠、`null` 只对项目的 `group_id` 有意义、命令行自己的超时与 `details.retry_after_seconds` 等）。`requests export --out` 的帮助文本原来说文件里是 `{"meta","data"}`，与实现（第 47 条：导出只写内容本身）不符，改了帮助文本。
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |
@@ -199,6 +206,7 @@
 | `VERSION_CONFLICT` | 409 | 对象在建计划之后被改过 | 1 | 重新读取对象，重新建计划 |
 | `PLAN_NOT_FOUND` | 404 | 计划不存在、已执行或不属于这枚令牌 | 1 | 重新建计划 |
 | `PLAN_EXPIRED` | 410 | 计划超过 10 分钟 | 1 | 重新建计划 |
+| `LINK_EXPIRED` | 410 | 安装包的下载链接已过 30 分钟有效期（只有安装提示词里的下载会遇到） | 1 | 停止安装，请用户回
 | `RUN_IN_PROGRESS` | 409 | 已有一轮会话分析在运行 | 1 | 不要重复触发；用 `analysis overview` 看进度 |
 | `NOT_READY` | 409 | 证据还在采集，或重建尚不可用 | 1 | 稍后再读 |
 | `NOT_RETAINED` | 410 | 原始 Body 已在校验后释放 | 1 | 改导出重建结果；这不是数据丢失 |
@@ -260,7 +268,7 @@
 | `POST /api/v1/agent-access/authorizations` | `{challenge, mode: "loopback"\|"paste", port?, device_name, cli_version, tier, decision: "approve"\|"deny"}`；`port` 是数字，仅回环方式出现；`state` 不发送 | 批准：`{code, expires_in（秒）, redirect_uri?}`；拒绝：`{denied: true, redirect_uri?}`；`redirect_uri` 恰为 `http://127.0.0.1:<port>/callback`，不带查询串，粘贴方式不返回 | 回环方式的拒绝也回跳，由页面拼上 `error=access_denied` 与 `state`；细节见 §0.1 第 8 条 |
 | `GET /api/v1/agent-access/tokens` | — | `{items: [{id, display_prefix, role, tier, device_name, cli_version, created_at, expires_at, last_used_at, revoked_at}]}`；未设置的时间为 `null` | 开发者只看到作用域与本会话相同的；管理员看到全部；含已撤销与已过期的令牌（§0.1 第 9 条） |
 | `DELETE /api/v1/agent-access/tokens/{id}` | — | 204 | 幂等：已撤销、已过期、查不到都返回 204。开发者只能撤销自己可见的 |
-| `POST /api/v1/agent-access/install-links` | `{agent, platform, skills_dir?}` | `{prompt, expires_at}` | 生成安装提示词，内含临时签名链接 |
+| `POST /api/v1/agent-access/install-links` | `{agent, platform, skills_dir?}`，不接受其他字段 | `{prompt, expires_at}` | 生成安装提示词，内含临时签名链接；错误与服务器地址的取法见 §0.1 第 60、61 条 |
 | `GET /api/v1/agent-access/changes` | `?limit=`（默认 50，1–200） | `{items: [{id, at, event, token_id, role, command, cli_version, object_kind, object_id, changed_keys, outcome, error_code}]}`，只含 `write_*` 三种事件，新的在前 | 仅管理员；“Agent 最近的改动”；细节见 §0.1 第 46 条 |
 
 会话响应（`GET /api/v1/session`）新增两个布尔字段：`agent_access_enabled`、`agent_write_allowed`。
@@ -288,7 +296,7 @@
 | `authorize_approved`、`authorize_denied` | 确认页提交 | `token_id` 为空 |
 | `token_issued`、`token_exchange_failed` | 兑换 | 失败不记授权码 |
 | `token_revoked` | 网页撤销、`logout`、授权码重放 | |
-| `link_issued`、`package_downloaded` | 生成安装链接、下载 | |
+| `link_issued`、`package_downloaded` | 生成安装链接、下载成功 | 只记成功送出的文件；取值见 §0.1 第 62 条 |
 | `write_applied`、`write_failed`、`write_denied` | 执行计划、设置或清除 Key、连接测试 | `changed_keys` 只记键名 |
 | `sensitive_read` | 经门面读取输入包或分面 | 既有的查看日志照常另写一条 |
 
@@ -713,14 +721,16 @@
 
 ## 5. 安装包分发
 
-- 清单 `manifest.json`：`{version, min_compatible, packages: [{os, arch, file, sha256, size}]}`。
-- 包文件名 `llmapi-audit-<version>-<os>-<arch>.zip`，顶层目录固定为 `llmapi-audit/`。
-- 下载接口 `GET /api/agent/v1/dl/<签名>/<文件名>`，登记为 `anonymous`。
-  - 签名串 `BASE64URL(expires_unix || "." || HMAC-SHA-256(K_dl, expires_unix))`，`K_dl = SHA-256("llmapi-logger/agent-download/v1\x00" + admin_token)`。链接有效期 30 分钟。
-  - 文件名必须是清单里的文件或 `manifest.json`，只允许 `[A-Za-z0-9._-]`。
-  - 签名不对、文件不在名单里：404。过期：410，信封里提示回“Agent 接入”页重新生成。
+- 清单 `manifest.json`：`{version, min_compatible, packages: [{os, arch, file, sha256, size}]}`，严格解析（未知字段、尾随内容都拒绝）。五个平台：`windows-amd64`、`linux-amd64`、`linux-arm64`、`darwin-arm64`、`darwin-amd64`。
+- 包文件名 `llmapi-audit-<version>-<os>-<arch>.zip`，顶层目录固定为 `llmapi-audit/`。由 `internal/agentdist` 的打包函数（命令 `internal/agentdist/cmd/agentpack`）可重复地打出。
+- **运行时包在哪里**：可执行文件旁边的 `agent-packages/` 目录（镜像里是 `/agent-packages`，`scripts/build.*` 写到 `bin/agent-packages`）。进程启动时读一次：校验清单，并逐个核对包的大小与 SHA-256；之后不再读目录，换包要重启。**版本检查**：清单的 `version` 必须等于服务端的最新版本、`min_compatible` 必须等于最低兼容版本，否则视为没有包（旧包不会被分发）。目录缺失、清单无效、版本不符或文件对不上都不阻止启动：记一条 `agent_packages_unavailable` 告警，两个接口照常应答（§0.1 第 63 条）。
+- 下载接口 `GET /api/agent/v1/dl/<签名>/<文件名>`，登记为 `anonymous`（ID `packages.download`），不接受查询参数。
+  - 签名串 `BASE64URL(expires_unix || "." || HMAC-SHA-256(K_dl, expires_unix))`：`expires_unix` 是十进制秒（不带前导零），MAC 是 32 个原始字节，编码是不带填充的 URL 安全 base64；`K_dl = SHA-256("llmapi-logger/agent-download/v1\x00" + admin_token)`，在 `agentdist` 内部由 `admin_token` 派生，不另存、不记日志。链接有效期 30 分钟，到期时间截到整秒；比新签的链接晚到期超过 1 分钟的签名按“签名不对”处理。MAC 比较是常数时间。
+  - 文件名必须是清单里的文件或 `manifest.json`，只允许 `[A-Za-z0-9._-]`。文件经 `os.Root` 打开，不会离开包目录。
+  - 签名不对、文件不在名单里、本部署没有包：404 `NOT_FOUND`，三者没有差别。过期（签名本身正确）：410 `LINK_EXPIRED`，提示回“Agent 接入”页重新生成。同一条链接超过 30 次：429 `RATE_LIMITED`，`Retry-After` 到链接过期为止。
+  - **每条链接的计数**在进程内存里，按签名串计，只计校验通过的请求（清单与包都算一次），过期的条目顺手清掉，最多同时记 4096 条链接；重启清零。门面的令牌配额不适用于这个匿名接口。
   - 链接不是登录凭据，只能下载这几类文件。
-- 安装提示词由 `POST /api/v1/agent-access/install-links` 返回。生成函数是纯函数，测试锁定全文。`skills_dir` 只接受完整路径，拒绝含 `..`、换行、控制字符、引号与 shell 元字符的输入；最终安装目录固定以 `llmapi-audit` 结尾。
+- 安装提示词由 `POST /api/v1/agent-access/install-links` 返回。生成函数是纯函数，测试锁定全文。`skills_dir` 只接受完整路径，拒绝含 `..`、换行、控制字符、引号与 shell 元字符的输入；最终安装目录固定以 `llmapi-audit` 结尾。提示词里的服务器地址取法见 §0.1 第 61 条。
 - 功能关闭时下载接口与门面一样返回 `FEATURE_DISABLED`。
 
 ## 6. 命令行合同
@@ -813,7 +823,7 @@
 | 令牌校验失败 | 5 分钟 10 次 | 来源地址 | 独立于网页登录的计数器；只有“格式正确但查不到”计数 |
 | 兑换令牌 | 5 分钟 10 次失败 | 来源地址 | 成功不计 |
 | 授权确认 | 5 分钟 20 次 | 网页会话的来源地址 | |
-| 下载安装包 | 每条链接在其 30 分钟有效期内 30 次 | 签名串 | |
+| 下载安装包 | 每条链接在其 30 分钟有效期内 30 次 | 签名串 | 清单与包都计；只计校验通过的请求（§5） |
 | 读请求 | 每分钟 120 次 | 令牌 | |
 | 输入包与分面的读取 | 每分钟 20 次 | 令牌 | 每次都会写查看日志 |
 | 建计划加执行计划 | 10 分钟 60 次 | 令牌 | |
@@ -836,7 +846,7 @@ agent_access:
 ```
 
 - 整段可省略，三个键都有默认值。
-- `public_url` 非空时必须是 `http` 或 `https` 地址，有主机，没有用户信息、查询串与片段。
+- `public_url` 非空时必须是 `http` 或 `https` 地址，有主机，可带端口与路径，没有用户信息、查询串与片段；只能由 ASCII 字母、数字与 `-._~:/%[]` 组成，最长 2048 个字符（安装提示词把它写进 shell 命令的双引号里，同一条规则在那里也检查）。不合规时启动报错，错误信息里写明 `agent_access.public_url`（§0.1 第 64 条）。
 - 配置加载是严格模式，写了未知键或类型不对时启动报错。
 
 ### 8.2 需要的密钥
