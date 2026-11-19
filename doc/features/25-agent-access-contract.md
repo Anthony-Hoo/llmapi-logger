@@ -108,6 +108,7 @@
 87. **帮助里的 `null`**：`config set --set` 与 `analysis test-model --set` 的帮助原来写“null is empty”，与第 34 条不符。现在写明 `null` 是 JSON `null`，只有项目的 `group_id` 接受它（统一项目），`analysis test-model` 的 `--set` 里一律被拒绝；要置空字符串用 `--set-json <字段>='""'`。测试要求带 `--set` 的命令帮助都这样说明。
 88. **提示里的命令必须在任何本地状态下都能用**（修正第 50 条）：`NOT_LOGGED_IN`、`UNAUTHENTICATED`、`TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_GRANT` 的提示原来写 `llmaudit login`，首次登录时它因缺 `--server` 失败（退出码 2）；`READ_ONLY_TOKEN` 的 `llmaudit login --write` 同理。现在统一写 `llmaudit login --server <server>`（`<server>` 是审计服务器地址；已保存凭据时可省略 `--server`），两种情况下都对。命令行自己知道地址的提示（`LOGIN_TIMEOUT`、粘贴方式的 `NO_TTY`、回环监听失败）直接写入本次登录的地址。`agentcli.CheckCommand` 因此在解析之外还要求命令带上它在某种本地状态下必需的参数（命令表的 `StateFlags`，目前只有 `login` 的 `--server`）；网页侧扫描服务端文本的测试与命令行侧扫描帮助、错误表与源码的测试都用它，占位符替换后检查。`<server>` 这类占位符无法照字面运行，这是有意的：没有凭据时客户端不知道地址。
 89. **`--out` 在请求之前检查**：带 `--out` 的每条命令（`usage trend`、`usage composition`、`analysis session`、`requests export`）在发出请求之前确认文件能写：目录存在、能在其中新建文件（原子替换所用的临时文件，建好即删）、目标不是目录；Windows 上已存在的只读文件也算不可用（那里不能改名覆盖它，POSIX 可以）。不可用时报 `LOCAL_FILE_ERROR`、`details.path` 为目标路径，服务端什么也没收到：输入包与分面不会写查看日志和 `sensitive_read` 行，也不占配额。此前读命令在服务端答复之后才检查目录。
+90. **过宽的凭据存放处**（POSIX）：命令行在读取或替换凭据之前检查状态目录与 `credentials.json`，组或其他用户有任何权限时改成 `0700` 与 `0600`；改不了（例如文件属于别人）时停下，报 `LOCAL_FILE_ERROR`，`details.path` 是那个路径、`details.required_mode` 是要求的权限，`hint` 写明两个权限，不读取也不打印文件内容。此前已存在的宽松目录原样沿用，别人可写的凭据文件照样被读取。Windows 上不做这一步：两者在创建时就只给本人一条 DACL，权限位不描述 Windows 的访问控制。改不了的分支在测试里只能以普通用户运行（root 能改任何文件的权限）。
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |
@@ -746,7 +747,7 @@
 - 成功：标准输出一个信封，退出码 0。失败：标准错误一个失败信封，退出码按 §2.3。
 - `--pretty` 输出给人读的简表；默认是紧凑 JSON。
 - `--help` 对每个参数写明取值、约束、默认值。帮助文本是 Agent 的说明书。
-- 本地状态目录默认 `~/.llmaudit/`，可用环境变量 `LLMAUDIT_HOME` 改位置。里面有 `credentials.json`（服务器地址、令牌、到期时间；仅本人可读，原子替换）与 `config.json`（可选的 CA 文件路径）。
+- 本地状态目录默认 `~/.llmaudit/`，可用环境变量 `LLMAUDIT_HOME` 改位置。里面有 `credentials.json`（服务器地址、令牌、到期时间；仅本人可读，原子替换；POSIX 上权限过宽时先收紧，见 §0.1 第 90 条）与 `config.json`（可选的 CA 文件路径）。
 - 网络：默认校验证书，不跟随跳转。服务器地址是明文 HTTP 且主机不是回环地址时，`login` 成功后在标准错误打印一次警告。
 - 超时：`login` 等待浏览器批准或粘贴的授权码最长 5 分钟，之后兑换请求 15 秒（§0.1 第 86 条）；其余命令默认 15 秒；`weekly *`、`config preview-project`、`config set` 40 秒；`requests export` 60 秒；`analysis test-model` 70 秒；`apply` 一律 130 秒（§0.1 第 49、58 条）。
 - 超时或网络错误之后不自动重试写操作。读操作不自动重试。

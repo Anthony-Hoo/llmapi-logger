@@ -119,3 +119,8 @@ func createPrivateDir(path string) error {
 	}
 	return nil
 }
+
+// tightenPrivate does nothing on Windows: the state directory and the
+// credentials file get an owner-only DACL when they are created, and mode
+// bits do not describe Windows access.
+func tightenPrivate(string, os.FileMode) error { return nil }
