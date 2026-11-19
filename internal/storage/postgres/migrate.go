@@ -23,10 +23,11 @@ var derivedMigrations = []struct {
 }{
 	{2, "migrations/002_org_reports.sql"},
 	{3, "migrations/003_session_analysis.sql"},
+	{4, "migrations/004_agent_access.sql"},
 }
 
 // latestSchemaVersion is the newest version this binary understands.
-const latestSchemaVersion = 3
+const latestSchemaVersion = 4
 
 func migrate(ctx context.Context, conn *sql.Conn) error {
 	tx, err := conn.BeginTx(ctx, nil)
