@@ -105,31 +105,28 @@ func TestEveryReadEndpointHasASampleCall(t *testing.T) {
 }
 
 // Plan section 12: every read endpoint against an admin read token, an admin
-// write token, a developer token and the feature switched off.
+// write token, a developer token, the write switch off (reads are not
+// affected) and the whole feature off.
 func TestAgentReadRejectionMatrix(t *testing.T) {
-	fixture := newReadFixture(t)
-	// The only expected non-gate failure: this fixture's session analysis
-	// store has no weekly reports, so the report is NOT_FOUND on both sides.
-	notFound := map[string]bool{"analysis.report": true}
 	disabled := newDeveloperHandler(t, Options{Developer: developerOptions(t, agentTestIdentity, nil)})
-	for _, call := range readCalls() {
-		endpoint := endpointByID(call.id)
-		for kind, token := range map[string]string{"admin read": fixture.adminRead, "admin write": fixture.adminWrite, "developer": fixture.developer} {
-			want := agentapi.Code("")
-			if notFound[call.id] {
-				want = agentapi.CodeNotFound
+	for _, allowWrite := range []bool{true, false} {
+		fixture := newReadFixtureWrites(t, allowWrite)
+		for _, call := range readCalls() {
+			endpoint := endpointByID(call.id)
+			for kind, token := range map[string]string{"admin read": fixture.adminRead, "admin write": fixture.adminWrite, "developer": fixture.developer} {
+				want := agentapi.Code("")
+				if kind == "developer" && endpoint.Access == agentapi.AccessAdmin {
+					want = agentapi.CodeForbiddenRole
+				}
+				if got := facadeOutcome(t, fixture.facade(call.method, call.path, call.body, token)); got != want {
+					t.Errorf("allow_write=%v %s %s %s = %q, want %q", allowWrite, kind, call.method, call.path, got, want)
+				}
 			}
-			if kind == "developer" && endpoint.Access == agentapi.AccessAdmin {
-				want = agentapi.CodeForbiddenRole
+			off := agentEnv{handler: disabled}
+			response := off.do(call.method, agentapi.PathPrefix+call.path, call.body, agentCaller{bearer: fixture.adminRead})
+			if got := agentErrorCode(t, response); got != agentapi.CodeFeatureDisabled {
+				t.Errorf("feature off %s = %s", call.path, got)
 			}
-			if got := facadeOutcome(t, fixture.facade(call.method, call.path, call.body, token)); got != want {
-				t.Errorf("%s %s %s = %q, want %q", kind, call.method, call.path, got, want)
-			}
-		}
-		off := agentEnv{handler: disabled}
-		response := off.do(call.method, agentapi.PathPrefix+call.path, call.body, agentCaller{bearer: fixture.adminRead})
-		if got := agentErrorCode(t, response); got != agentapi.CodeFeatureDisabled {
-			t.Errorf("feature off %s = %s", call.path, got)
 		}
 	}
 }
@@ -333,20 +330,23 @@ func TestAgentReadParity(t *testing.T) {
 	}
 	for _, identity := range identities {
 		for _, call := range readCalls() {
-			if identity.role == agentapi.RoleDeveloper && endpointByID(call.id).Access == agentapi.AccessAdmin {
-				continue
-			}
 			label := identity.name + " " + call.path
 			web := corpus{}
-			webOK := true
+			webOK, webForbidden := true, false
 			var webBodies [][]byte
 			for _, path := range call.web {
 				response := fixture.web(call.method, path, call.body, identity.cookie)
 				webOK = webOK && response.Code == http.StatusOK
+				webForbidden = webForbidden || response.Code == http.StatusForbidden
 				web.add(response.Body.Bytes())
 				webBodies = append(webBodies, response.Body.Bytes())
 			}
 			response := fixture.facade(call.method, call.path, call.body, identity.token)
+			// The registry's access column agrees with the web: a route the
+			// web refuses this identity is FORBIDDEN_ROLE, and only such a one.
+			if facadeForbidden := facadeOutcome(t, response) == agentapi.CodeForbiddenRole; facadeForbidden != webForbidden {
+				t.Errorf("%s: facade forbidden=%v, web forbidden=%v", label, facadeForbidden, webForbidden)
+			}
 			if (response.Code == http.StatusOK) != webOK {
 				t.Errorf("%s: facade %d, web ok=%v", label, response.Code, webOK)
 				continue
@@ -366,9 +366,17 @@ func TestAgentReadParity(t *testing.T) {
 						webIDs[id] = true
 					}
 				}
+				facadeIDs := map[string]bool{}
 				for _, id := range collectIDs(data, key) {
+					facadeIDs[id] = true
 					if !webIDs[id] {
 						t.Errorf("%s: facade lists %s %s the web does not", label, key, id)
+					}
+				}
+				// ... and no fewer: the same query lists the same records.
+				for id := range webIDs {
+					if !facadeIDs[id] {
+						t.Errorf("%s: web lists %s %s the facade does not", label, key, id)
 					}
 				}
 			}
@@ -835,6 +843,123 @@ func TestAgentAnalysisAndReportCompleteness(t *testing.T) {
 	report := agentWeeklyReportOf(orgreport.WeeklyReport{Frozen: true, Complete: false})
 	if !report.Final || report.Complete {
 		t.Errorf("weekly = %+v", report)
+	}
+}
+
+// pagedQuery answers List with a fixed page.
+type pagedQuery struct {
+	fakeQuery
+	page query.Page
+}
+
+func (queries *pagedQuery) List(context.Context, query.Filter, query.Cursor, int) (query.Page, error) {
+	return queries.page, nil
+}
+
+// The completeness rules of contract sections 4.1 and 4.3, row by row,
+// through the facade where the fixture can produce the case.
+func TestAgentReadCompletenessRows(t *testing.T) {
+	fixture := newReadFixture(t)
+	meta := func(path string) (*agentapi.Meta, agentapi.Response) {
+		t.Helper()
+		response := fixture.facade(http.MethodGet, path, "", fixture.adminRead)
+		decoded := decodeAgent(t, response)
+		if response.Code != http.StatusOK || decoded.Meta == nil {
+			t.Fatalf("%s = %d %s", path, response.Code, response.Body.String())
+		}
+		return decoded.Meta, decoded
+	}
+
+	// Session analysis report: not computed, below the contributor minimum.
+	if got, _ := meta("/analysis/report"); !got.Complete {
+		t.Fatalf("report = %+v", got)
+	}
+	stats := fixture.reports.stats
+	fixture.reports.stats = nil
+	if got, _ := meta("/analysis/report"); got.Complete || got.IncompleteReason != "not_computed" {
+		t.Fatalf("report without stats = %+v", got)
+	}
+	fixture.reports.stats = &sessionanalysis.WeeklyStats{Limited: true}
+	if got, _ := meta("/analysis/report"); got.Complete || got.IncompleteReason != "below_contributor_minimum" {
+		t.Fatalf("limited report = %+v", got)
+	}
+	fixture.reports.stats = stats
+
+	// Weekly report: complete follows the report.
+	if got := weeklyReportMeta(orgreport.WeeklyReport{Complete: false}); got.Complete || got.IncompleteReason != "evidence_pending" {
+		t.Fatalf("weekly incomplete = %+v", got)
+	}
+	if got := weeklyReportMeta(orgreport.WeeklyReport{Complete: true}); !got.Complete || got.IncompleteReason != "" {
+		t.Fatalf("weekly complete = %+v", got)
+	}
+
+	// status: not_ready is a 200 with complete=false.
+	fixture.handler.readiness = func(context.Context) ReadyStatus {
+		return ReadyStatus{Status: "not_ready", Database: "unavailable", EncryptionKey: "ok", ParserQueue: 3}
+	}
+	if got, decoded := meta("/status"); got.Complete || got.IncompleteReason != "not_ready" || got.State != "not_ready" ||
+		!strings.Contains(string(decoded.Data), `"parser_queue":3`) {
+		t.Fatalf("not ready = %+v %s", got, decoded.Data)
+	}
+	fixture.handler.readiness = nil
+	if got, _ := meta("/status"); !got.Complete || got.State != "healthy" {
+		t.Fatalf("ready = %+v", got)
+	}
+
+	// version on every modifiable object: the last modification time, "0"
+	// for a settings section that was never saved.
+	_, rules := meta("/config/content-rule")
+	if !strings.Contains(string(rules.Data), `"version":"9"`) {
+		t.Fatalf("content rule = %s", rules.Data)
+	}
+	_, settings := meta("/config/analysis-settings")
+	if !strings.Contains(string(settings.Data), `"version":"0"`) {
+		t.Fatalf("analysis settings = %s", settings.Data)
+	}
+
+	// collapse_applied is honest: any row filter or conversation turns it off.
+	for path, want := range map[string]bool{
+		"/requests": true, "/requests?collapse=false": false, "/requests?model=gpt-test": false, "/requests?conversation=conv-x": false,
+	} {
+		if got := readData(t, fixture.facade(http.MethodGet, path, "", fixture.adminRead))["collapse_applied"]; got != want {
+			t.Errorf("%s collapse_applied = %v", path, got)
+		}
+	}
+
+	// Usage overview: coverage is unknown, billing completeness is explicit.
+	if got, decoded := meta("/usage/overview?" + fixtureWindow); !got.Complete || !strings.Contains(string(decoded.Data), `"coverage_unknown":true`) ||
+		len(decoded.NextActions) == 0 {
+		t.Fatalf("overview = %+v %v", got, decoded.NextActions)
+	}
+	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 2}}); !overview.BillingComplete || !overview.CoverageUnknown {
+		t.Fatalf("billed overview = %+v", overview)
+	}
+	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 1, UnbilledRequests: 1}}); overview.BillingComplete {
+		t.Fatalf("unbilled overview = %+v", overview)
+	}
+
+	// My week explains an empty row by its cause.
+	if _, decoded := meta("/weekly/me"); len(decoded.NextActions) != 1 || decoded.NextActions[0] != agentWeeklyMeAdmin {
+		t.Fatalf("admin week actions = %v", decoded.NextActions)
+	}
+	if weeklyMeAction(principal{Role: roleDeveloper}) != agentWeeklyMeUnknown ||
+		weeklyMeAction(principal{Role: roleDeveloper, Identity: developerIdentity{UserID: 7}}) != agentWeeklyMeIdle {
+		t.Fatal("developer week actions")
+	}
+
+	// An empty page that still has a next page says so.
+	env := newAgentEnv(t, agentEnvOptions{})
+	paged := &pagedQuery{page: query.Page{Items: []query.AuditSummary{}, NextCursor: &query.Cursor{BeforeStartedAtNS: 5, BeforeID: "a"}}}
+	env.handler.query = paged
+	token := issueAgentAdmin(t, env, agentapi.TierRead)
+	decoded := decodeAgent(t, env.do(http.MethodGet, agentapi.PathPrefix+"/requests?user_agent=codex", "", agentCaller{bearer: token}))
+	if len(decoded.NextActions) != 1 || decoded.NextActions[0] != agentEmptyPageAction || !strings.Contains(string(decoded.Data), `"next_cursor":"`) {
+		t.Fatalf("empty page = %+v %s", decoded.NextActions, decoded.Data)
+	}
+	paged.page = query.Page{Items: []query.AuditSummary{{AuditID: "a"}}}
+	if decoded := decodeAgent(t, env.do(http.MethodGet, agentapi.PathPrefix+"/requests", "", agentCaller{bearer: token})); len(decoded.NextActions) != 0 ||
+		!strings.Contains(string(decoded.Data), `"next_cursor":""`) {
+		t.Fatalf("last page = %+v %s", decoded.NextActions, decoded.Data)
 	}
 }
 

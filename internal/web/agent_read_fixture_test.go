@@ -388,12 +388,39 @@ func (store *memoryAnalysisStore) addSession(t *testing.T, id string, fingerprin
 		Items: `[{"ref":"a","task_type":"bugfix","work_relevance":"work"}]`, InvalidFields: `[]`, TextEnc: textEnc, CreatedAtNS: last}
 }
 
+// reportingAnalysis is the real QueryService with a canned weekly report:
+// the report reads thirteen store methods that this fixture does not model.
+// Ownership of the report (D8) is the service's and is not exercised here.
+type reportingAnalysis struct {
+	*sessionanalysis.QueryService
+	stats *sessionanalysis.WeeklyStats
+}
+
+func (analysis *reportingAnalysis) Report(_ context.Context, week string, scope *query.Scope, target sessionanalysis.ReportTarget) (sessionanalysis.ReportResponse, error) {
+	if week != "" && week != "current" && week != "previous" {
+		return sessionanalysis.ReportResponse{}, query.ErrInvalidQuery
+	}
+	at := fixtureBase.UnixNano()
+	response := sessionanalysis.ReportResponse{WeekStartNS: at, Scope: "all", Stats: analysis.stats, Narrative: "a steady week",
+		NarrativeSource: "model", ComputedNS: at, Optimizations: []sessionanalysis.SessionItem{},
+		Suggestions: []sessionanalysis.SuggestionItem{{ID: 1, Kind: "skill", Text: "write a skill", Sessions: 2, Status: "open",
+			FirstSeenNS: at, LastSeenNS: at, Evidence: []string{"E1"}}}}
+	if scope != nil {
+		response.Scope = "person"
+	}
+	if target.UserID != 0 {
+		response.Scope, response.ScopeID = "user", target.UserID
+	}
+	return response, nil
+}
+
 // readFixture is a handler with every module enabled and one token of each
 // kind.
 type readFixture struct {
 	agentEnv
 	audits         *scopedAudits
 	analysis       *memoryAnalysisStore
+	reports        *reportingAnalysis
 	adminRead      string
 	adminWrite     string
 	developer      string
@@ -403,6 +430,14 @@ type readFixture struct {
 }
 
 func newReadFixture(t *testing.T) *readFixture {
+	t.Helper()
+	return newReadFixtureWrites(t, true)
+}
+
+// newReadFixtureWrites builds the fixture with agent_access.allow_write set
+// to allowWrite; the write token is issued either way, as one issued before
+// the switch was turned off.
+func newReadFixtureWrites(t *testing.T, allowWrite bool) *readFixture {
 	t.Helper()
 	own := testFingerprinter(t).Fingerprint(testDeveloperKey)
 	other := bytes.Repeat([]byte{0x77}, len(own))
@@ -448,6 +483,8 @@ func newReadFixture(t *testing.T) *readFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reports := &reportingAnalysis{QueryService: analysisService, stats: &sessionanalysis.WeeklyStats{WeekStartNS: fixtureBase.UnixNano(),
+		Totals: sessionanalysis.SignalTotals{Sessions: 1}, TaskTypes: map[string]int64{"bugfix": 1}}}
 
 	org, _ := newOrgTestService(t)
 	rules, err := uaguard.New(context.Background(), nil)
@@ -457,7 +494,7 @@ func newReadFixture(t *testing.T) *readFixture {
 	agentStore := agentaccesstest.NewStore()
 	logs := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	service, err := agentaccess.New(agentaccess.Options{AdminToken: testAdminToken, Store: agentStore, AllowWrite: true, DeveloperLogins: true, Logger: logger})
+	service, err := agentaccess.New(agentaccess.Options{AdminToken: testAdminToken, Store: agentStore, AllowWrite: allowWrite, DeveloperLogins: true, Logger: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,16 +504,16 @@ func newReadFixture(t *testing.T) *readFixture {
 			RefreshedAt: fixtureBase}},
 		Rules: rules, Policies: &fakeContentPolicyRules{items: []contentpolicy.Rule{{ID: 1, Name: "r", Enabled: true, Action: "block",
 			Keywords: []string{"secret-word"}, UpdatedAtNS: 9}}},
-		Org: org, SessionAnalysis: analysisService, SessionAnalysisSettings: &fakeAnalysisSettings{},
+		Org: org, SessionAnalysis: reports, SessionAnalysisSettings: &fakeAnalysisSettings{},
 		AgentAccess: service, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := agentEnv{handler: handlerValue.(*managementHandler), service: service, store: agentStore, logs: logs}
-	fixture := &readFixture{agentEnv: env, audits: audits, analysis: analysis, ownFingerprint: own}
+	fixture := &readFixture{agentEnv: env, audits: audits, analysis: analysis, reports: reports, ownFingerprint: own}
 	fixture.adminRead = issueAgentAdmin(t, env, agentapi.TierRead)
-	fixture.adminWrite = issueAgentAdmin(t, env, agentapi.TierWrite)
+	fixture.adminWrite = agentaccesstest.IssueAdmin(t, mustService(t, env, true), agentapi.TierWrite).Token
 	fixture.developer, fixture.developerWeb = issueAgentDeveloper(t, env)
 	fixture.adminWeb = adminSignIn(t, env.handler)
 	return fixture

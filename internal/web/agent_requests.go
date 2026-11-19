@@ -175,7 +175,7 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	filter, cursor, limit, collapse, err := handler.agentAuditFilter(values, call.Principal)
+	filter, cursor, limit, err := handler.agentAuditFilter(values, call.Principal)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -189,7 +189,7 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 		return
 	}
 	handler.addCallerDisplayNames(page.Items)
-	list := agentAuditList{Items: make([]agentAuditItem, 0, len(page.Items)), CollapseApplied: collapse && collapseApplies(filter)}
+	list := agentAuditList{Items: make([]agentAuditItem, 0, len(page.Items)), CollapseApplied: filter.Collapses()}
 	for _, item := range page.Items {
 		list.Items = append(list.Items, agentAuditItemOf(item))
 	}
@@ -203,33 +203,23 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 	writeAgentRead(writer, list, agentMetaOK(), true, actions...)
 }
 
-// collapseApplies restates query.Filter's rule "collapse is ignored when a
-// conversation or any row filter is set", to report it honestly.
-func collapseApplies(filter query.Filter) bool {
-	return filter.Conversation == "" && filter.FromNS == nil && filter.ToNS == nil && filter.Protocol == "" &&
-		filter.Path == "" && filter.Model == "" && filter.UserAgent == "" && filter.StatusCode == nil &&
-		filter.StatusClass == "" && filter.ForwardStatus == "" && filter.BlockedBy == "" && filter.BlockCode == "" &&
-		filter.CaptureStatus == "" && filter.NewAPIUserID == nil && filter.Username == "" && filter.NewAPITokenID == nil &&
-		filter.TokenName == "" && filter.UpstreamErrorClass == ""
-}
-
-func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal) (query.Filter, query.Cursor, int, bool, error) {
+func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal) (query.Filter, query.Cursor, int, error) {
 	var filter query.Filter
 	var cursor query.Cursor
 	if !callerMayFilterByCaller(caller) {
 		for _, key := range agentCallerFilterKeys {
 			if values.Has(key) {
-				return filter, cursor, 0, false, argError(key)
+				return filter, cursor, 0, argError(key)
 			}
 		}
 	}
 	limit, err := parseAgentLimit(values, query.DefaultLimit, query.MaxLimit)
 	if err != nil {
-		return filter, cursor, 0, false, err
+		return filter, cursor, 0, err
 	}
 	timeRange, err := parseAgentRange(values, handler.agent.Now())
 	if err != nil {
-		return filter, cursor, 0, false, err
+		return filter, cursor, 0, err
 	}
 	filter.FromNS = timeRange.FromNS
 	if timeRange.ToNS != nil {
@@ -244,7 +234,7 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 		default:
 			code, ok := parseAgentID(status, false)
 			if !ok || code < 100 || code > 599 {
-				return filter, cursor, 0, false, argError("status")
+				return filter, cursor, 0, argError("status")
 			}
 			value := int(code)
 			filter.StatusCode = &value
@@ -259,28 +249,28 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 		}
 		id, ok := parseAgentID(values.Get(numeric.name), false)
 		if !ok {
-			return filter, cursor, 0, false, argError(numeric.name)
+			return filter, cursor, 0, argError(numeric.name)
 		}
 		*numeric.target = &id
 	}
 	if values.Has("capture_status") && values.Get("capture_status") == "chunk_missing" {
 		// The service accepts only the four states it filters on (contract
 		// section 0, row 6); chunk_missing appears in results only.
-		return filter, cursor, 0, false, argError("capture_status")
+		return filter, cursor, 0, argError("capture_status")
 	}
 	collapse, err := parseAgentBool(values, "collapse", true)
 	if err != nil {
-		return filter, cursor, 0, false, err
+		return filter, cursor, 0, err
 	}
 	inner, err := unwrapAgentCursor(agentCursorAudits, values.Get("cursor"))
 	if err != nil {
-		return filter, cursor, 0, false, err
+		return filter, cursor, 0, err
 	}
 	if inner != "" {
 		timeText, id, ok := strings.Cut(inner, ":")
 		at, parsed := parseAgentID(timeText, false)
 		if !ok || !parsed || at <= 0 || id == "" {
-			return filter, cursor, 0, false, argError("cursor")
+			return filter, cursor, 0, argError("cursor")
 		}
 		cursor = query.Cursor{BeforeStartedAtNS: at, BeforeID: id}
 	}
@@ -297,7 +287,7 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 	filter.Username = values.Get("username")
 	filter.TokenName = values.Get("token_name")
 	filter.CollapseConversations = collapse
-	return filter, cursor, limit, collapse, nil
+	return filter, cursor, limit, nil
 }
 
 // authorizeAgentAudit runs the shared ownership gate for one audit id.

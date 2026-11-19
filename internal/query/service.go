@@ -81,7 +81,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		TokenName:             filter.TokenName,
 		UpstreamErrorClass:    filter.UpstreamErrorClass,
 		ConversationID:        filter.Conversation,
-		CollapseConversations: filter.CollapseConversations && filter.Conversation == "" && !filter.hasRowFilters(),
+		CollapseConversations: filter.Collapses(),
 		Scope:                 storageScope(filter.Scope),
 	}
 	storageCursor := storage.AuditQueryCursor{
@@ -112,6 +112,12 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		page.NextCursor = &Cursor{BeforeStartedAtNS: last.StartedAtNS, BeforeID: last.AuditID}
 	}
 	return page, nil
+}
+
+// Collapses reports whether List folds conversations for filter: collapse was
+// asked for and neither a conversation nor any row filter is set.
+func (filter Filter) Collapses() bool {
+	return filter.CollapseConversations && filter.Conversation == "" && !filter.hasRowFilters()
 }
 
 // Filtering must precede collapse, including the User-Agent match performed

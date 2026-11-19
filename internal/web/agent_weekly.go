@@ -16,7 +16,9 @@ import (
 
 const (
 	agentModuleOrgReports = "org_reports"
-	agentWeeklyMeAction   = "This identity has no weekly row of its own: administrator tokens and developers whose NewAPI user is unknown read an empty row. Administrators use `llmaudit weekly report`."
+	agentWeeklyMeAdmin    = "An administrator token has no weekly row of its own; use `llmaudit weekly report` for everybody's rows."
+	agentWeeklyMeUnknown  = "This developer token's NewAPI user is unknown, so there is no weekly row to read."
+	agentWeeklyMeIdle     = "No activity was recorded for this user in the current week yet."
 )
 
 type agentTokens struct {
@@ -148,7 +150,7 @@ func (handler *managementHandler) serveAgentWeeklyMe(writer http.ResponseWriter,
 		row := agentUserRowOf(*report.Row)
 		out.Row = &row
 	} else {
-		actions = append(actions, agentWeeklyMeAction)
+		actions = append(actions, weeklyMeAction(call.Principal))
 	}
 	writeAgentRead(writer, out, agentMetaOK(), true, actions...)
 }
@@ -288,11 +290,28 @@ func (handler *managementHandler) serveAgentWeeklyReport(writer http.ResponseWri
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	writeAgentRead(writer, agentWeeklyReportOf(report), weeklyReportMeta(report), true)
+}
+
+// weeklyReportMeta takes completeness from the report itself.
+func weeklyReportMeta(report orgreport.WeeklyReport) agentapi.Meta {
 	meta := agentMetaOK()
 	if !report.Complete {
 		meta.Complete, meta.IncompleteReason = false, "evidence_pending"
 	}
-	writeAgentRead(writer, agentWeeklyReportOf(report), meta, true)
+	return meta
+}
+
+// weeklyMeAction explains an empty "my week" by its cause.
+func weeklyMeAction(caller principal) string {
+	switch {
+	case caller.Role != roleDeveloper:
+		return agentWeeklyMeAdmin
+	case selfWeeklyUserID(caller) == 0:
+		return agentWeeklyMeUnknown
+	default:
+		return agentWeeklyMeIdle
+	}
 }
 
 type agentTrendWeek struct {
