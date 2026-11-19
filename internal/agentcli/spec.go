@@ -86,6 +86,9 @@ type commandSpec struct {
 	// pasted code), with WaitFor saying what is waited for; help prints it.
 	Wait    time.Duration
 	WaitFor string
+	// Columns is the preferred column order of --pretty tables; columns not
+	// named here follow alphabetically, at most eight in all.
+	Columns []string
 	// StateFlags are flags the command needs in some local state, such as
 	// login's --server before anything is saved. A command written into a
 	// hint cannot know that state, so CheckCommand requires them.

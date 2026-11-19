@@ -205,3 +205,38 @@ func TestAgentExportCompletenessHeaders(t *testing.T) {
 		}
 	}
 }
+
+// `requests list --pretty` shows the columns a person needs first: id, start
+// time, state, status code, model and path, so a running, a blocked and a
+// succeeded record are told apart.
+func TestCLIPrettyRequestsListShowsState(t *testing.T) {
+	fixture := newReadFixture(t)
+	addUnfinishedRecord(fixture, "unfinished-own")
+	cli := newReadCLI(t, fixture, fixture.developer)
+	if exit := cli.run("requests", "list", "--no-collapse", "--pretty"); exit != 0 {
+		t.Fatalf("exit %d %s", exit, cli.stderr.String())
+	}
+	output := cli.stdout.String()
+	lines := strings.Split(output, "\n")
+	header := ""
+	for index, line := range lines {
+		if strings.TrimSpace(line) == "items:" && index+1 < len(lines) {
+			header = lines[index+1]
+		}
+	}
+	columns := strings.Fields(header)
+	want := []string{"audit_id", "started_at", "state", "status_code", "request_model_untrusted", "path_untrusted"}
+	if len(columns) < len(want) {
+		t.Fatalf("columns %v\n%s", columns, output)
+	}
+	for index, name := range want {
+		if columns[index] != name {
+			t.Fatalf("column %d is %q, want %q; columns %v", index+1, columns[index], name, columns)
+		}
+	}
+	for _, value := range []string{"running", "succeeded", "blocked"} {
+		if !strings.Contains(output, " "+value+" ") {
+			t.Errorf("the table does not show the state %q:\n%s", value, output)
+		}
+	}
+}

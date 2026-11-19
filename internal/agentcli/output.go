@@ -22,12 +22,14 @@ func maskTokens(text string) string {
 	return tokenPattern.ReplaceAllString(text, agentapi.TokenPrefix+"***")
 }
 
-func renderPrettySuccess(envelope outEnvelope) string {
+// renderPrettySuccess renders a success for people. columns is the
+// command's preferred column order for tables (see tableOf).
+func renderPrettySuccess(envelope outEnvelope, columns []string) string {
 	var builder strings.Builder
 	builder.WriteString("ok\n")
 	var data any
 	if err := decodeNumbers(envelope.Data, &data); err == nil {
-		renderValue(&builder, "", data, 0)
+		renderValue(&builder, "", data, 0, columns)
 	}
 	if len(envelope.Meta) > 0 {
 		var meta map[string]any
@@ -76,7 +78,7 @@ func decodeNumbers(raw []byte, target any) error {
 	return decoder.Decode(target)
 }
 
-func renderValue(builder *strings.Builder, label string, value any, depth int) {
+func renderValue(builder *strings.Builder, label string, value any, depth int, preferred []string) {
 	indent := strings.Repeat("  ", depth)
 	switch typed := value.(type) {
 	case map[string]any:
@@ -90,10 +92,10 @@ func renderValue(builder *strings.Builder, label string, value any, depth int) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			renderValue(builder, key, typed[key], depth)
+			renderValue(builder, key, typed[key], depth, preferred)
 		}
 	case []any:
-		if rows, columns := tableOf(typed); rows != nil {
+		if rows, columns := tableOf(typed, preferred); rows != nil {
 			if label != "" {
 				builder.WriteString(indent + label + ":\n")
 			}
@@ -119,36 +121,52 @@ func renderValue(builder *strings.Builder, label string, value any, depth int) {
 	}
 }
 
-// tableOf turns a list of objects into rows with the scalar columns (at most
-// eight, in first-seen order).
-func tableOf(items []any) ([]map[string]any, []string) {
+// maxTableColumns bounds a --pretty table.
+const maxTableColumns = 8
+
+// tableOf turns a list of objects into rows with at most eight scalar
+// columns: first the preferred columns the rows have, in their order, then
+// the other scalar columns alphabetically.
+func tableOf(items []any, preferred []string) ([]map[string]any, []string) {
 	if len(items) == 0 {
 		return nil, nil
 	}
 	rows := make([]map[string]any, 0, len(items))
-	var columns []string
-	seen := map[string]bool{}
+	scalar := map[string]bool{}
 	for _, item := range items {
 		row, ok := item.(map[string]any)
 		if !ok {
 			return nil, nil
 		}
 		rows = append(rows, row)
-		keys := make([]string, 0, len(row))
-		for key := range row {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			switch row[key].(type) {
+		for key, value := range row {
+			switch value.(type) {
 			case map[string]any, []any:
-				continue
-			}
-			if !seen[key] && len(columns) < 8 {
-				seen[key] = true
-				columns = append(columns, key)
+			default:
+				scalar[key] = true
 			}
 		}
+	}
+	var columns []string
+	used := map[string]bool{}
+	for _, key := range preferred {
+		if scalar[key] && !used[key] && len(columns) < maxTableColumns {
+			used[key] = true
+			columns = append(columns, key)
+		}
+	}
+	rest := make([]string, 0, len(scalar))
+	for key := range scalar {
+		if !used[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		if len(columns) == maxTableColumns {
+			break
+		}
+		columns = append(columns, key)
 	}
 	if len(columns) == 0 {
 		return nil, nil

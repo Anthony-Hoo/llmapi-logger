@@ -262,3 +262,21 @@ func TestUnusableOutFailsBeforeAnyRequest(t *testing.T) {
 		t.Fatalf("read-only file changed to %q", data)
 	}
 }
+
+// TestPrettyTableColumns: a command's preferred columns come first in its
+// order, the rest alphabetically, eight at most; nested values are no column.
+func TestPrettyTableColumns(t *testing.T) {
+	items := []any{
+		map[string]any{"zeta": 1, "alpha": "a", "state": "running", "audit_id": "x", "nested": map[string]any{"a": 1}, "list": []any{1}},
+		map[string]any{"beta": 2, "status_code": 200, "path_untrusted": "/p", "c": 1, "d": 2, "e": 3, "f": 4},
+	}
+	_, columns := tableOf(items, []string{"audit_id", "missing", "state", "status_code", "path_untrusted"})
+	want := []string{"audit_id", "state", "status_code", "path_untrusted", "alpha", "beta", "c", "d"}
+	if strings.Join(columns, " ") != strings.Join(want, " ") {
+		t.Fatalf("columns %v, want %v", columns, want)
+	}
+	_, columns = tableOf(items, nil)
+	if strings.Join(columns, " ") != "alpha audit_id beta c d e f path_untrusted" {
+		t.Fatalf("fallback columns %v", columns)
+	}
+}

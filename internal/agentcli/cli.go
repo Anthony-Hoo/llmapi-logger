@@ -176,7 +176,7 @@ func Run(args []string, env *Env) int {
 	if err != nil {
 		return writeFailure(env, inv.pretty, asCLIError(err))
 	}
-	if err := writeSuccess(env, inv.pretty, outcome); err != nil {
+	if err := writeSuccess(env, inv.pretty, outcome, inv.spec.Columns); err != nil {
 		return writeFailure(env, inv.pretty, asCLIError(err))
 	}
 	return outcome.exit
@@ -210,7 +210,7 @@ type outEnvelope struct {
 	Notice      string          `json:"notice,omitempty"`
 }
 
-func writeSuccess(env *Env, prettyOutput bool, outcome *result) error {
+func writeSuccess(env *Env, prettyOutput bool, outcome *result, columns []string) error {
 	source := outcome.envelope
 	envelope := outEnvelope{OK: true, Data: source.Data, Meta: source.Meta, WebPath: source.WebPath, Notice: source.Notice}
 	for _, action := range source.NextActions {
@@ -220,7 +220,7 @@ func writeSuccess(env *Env, prettyOutput bool, outcome *result) error {
 		envelope.WebURL = strings.TrimRight(outcome.server, "/") + source.WebPath
 	}
 	if prettyOutput {
-		_, err := io.WriteString(env.Stdout, renderPrettySuccess(envelope))
+		_, err := io.WriteString(env.Stdout, renderPrettySuccess(envelope, columns))
 		return err
 	}
 	encoded, err := encodeJSON(envelope)
