@@ -82,7 +82,7 @@ type agentApplyResult struct {
 // serveAgentPlanCreate is POST /plans. It changes nothing and writes no
 // audit row (contract section 3.4).
 func (handler *managementHandler) serveAgentPlanCreate(writer http.ResponseWriter, request *http.Request, call agentCall) {
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentWriteFailure(writer, err)
 		return
 	}
@@ -154,7 +154,7 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 		audit.ErrorCode = code
 		handler.agent.RecordWrite(request.Context(), call.Identity, call.Meta, audit)
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		record(handler.writeAgentWriteFailure(writer, err))
 		return
 	}

@@ -168,9 +168,7 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 		handler.writeAgentServiceFailure(writer, errAgentUnavailable, "")
 		return
 	}
-	values, err := agentParams(request, "from", "to", "since", "cursor", "limit", "protocol", "path", "model", "user_agent",
-		"status", "forward_status", "blocked_by", "block_code", "capture_status", "upstream_error_class", "conversation", "collapse",
-		"user_id", "username", "token_id", "token_name")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -561,7 +559,7 @@ func agentAuditDetailOf(detail query.Detail, allHeaders bool) agentAuditDetail {
 
 // serveAgentRequest is GET /requests/{id}.
 func (handler *managementHandler) serveAgentRequest(writer http.ResponseWriter, request *http.Request, call agentCall) {
-	values, err := agentParams(request, "headers")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -622,7 +620,7 @@ type agentTimeline struct {
 // content itself, not an envelope; errors are failure envelopes.
 func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	what := call.Params["what"]
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -650,7 +648,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		}
 		if detail.Conversation == nil {
 			writeAgentFailure(writer, agentapi.CodeNotFound, "the record has no parsed conversation",
-				"The record has not been parsed yet or carries no conversation. Check `parse` with `llmaudit requests get`.", nil)
+				"The record has not been parsed yet or carries no conversation. Check `parse` with `llmaudit requests get <id>`.", nil)
 			return
 		}
 		writeJSON(writer, http.StatusOK, detail.Conversation)

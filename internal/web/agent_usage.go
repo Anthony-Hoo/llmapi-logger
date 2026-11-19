@@ -160,7 +160,7 @@ func (handler *managementHandler) serveAgentUsageOverview(writer http.ResponseWr
 	if !handler.agentInsightsReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "from", "to", "since", "group_by", "tz_offset_min")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -246,7 +246,7 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 	if !handler.agentInsightsReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "from", "to", "since", "sort", "cursor", "limit")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -337,7 +337,7 @@ func (handler *managementHandler) serveAgentUsageTrend(writer http.ResponseWrite
 	if !handler.agentInsightsReady(writer) {
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -399,7 +399,7 @@ func (handler *managementHandler) serveAgentUsageTree(writer http.ResponseWriter
 	if !handler.agentInsightsReady(writer) {
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -517,7 +517,7 @@ func (handler *managementHandler) serveAgentUsageComposition(writer http.Respons
 	if !handler.agentInsightsReady(writer) {
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}

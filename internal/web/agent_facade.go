@@ -318,7 +318,14 @@ type agentTokenResponse struct {
 
 // serveAgentToken exchanges an authorization code (anonymous). The plaintext
 // token appears in this response and nowhere else.
+// agentTokenBodyFields are the fields of the exchange body.
+var agentTokenBodyFields = []string{"code", "code_verifier"}
+
 func (handler *managementHandler) serveAgentToken(writer http.ResponseWriter, request *http.Request, call agentCall) {
+	if _, err := agentCallParams(request, call); err != nil {
+		writeAgentError(writer, agentapi.CodeInvalidArgument, map[string]any{"field": err.(agentArgError).field})
+		return
+	}
 	request.Body = http.MaxBytesReader(writer, request.Body, maxAgentTokenBodyBytes)
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -368,7 +375,11 @@ type agentWhoamiResponse struct {
 
 // serveAgentWhoami describes the calling token. It is a read result and so
 // carries meta.
-func (handler *managementHandler) serveAgentWhoami(writer http.ResponseWriter, _ *http.Request, call agentCall) {
+func (handler *managementHandler) serveAgentWhoami(writer http.ResponseWriter, request *http.Request, call agentCall) {
+	if _, err := agentCallParams(request, call); err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
 	identity := call.Identity
 	writeAgentOK(writer, agentapi.ReadSuccess(agentWhoamiResponse{
 		Role: identity.Role, Tier: identity.Tier,
@@ -385,6 +396,10 @@ func (handler *managementHandler) serveAgentWhoami(writer http.ResponseWriter, _
 
 // serveAgentLogout revokes the calling token.
 func (handler *managementHandler) serveAgentLogout(writer http.ResponseWriter, request *http.Request, call agentCall) {
+	if _, err := agentCallParams(request, call); err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	if err := handler.agent.Logout(ctx, call.Identity, call.Meta); err != nil {

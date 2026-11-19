@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentapi"
@@ -20,6 +21,9 @@ import (
 const maxAgentKeyBodyBytes = maxSettingsBodyBytes
 
 const agentKeyObject = "analysis-settings"
+
+// agentTestModelBodyFields are the fields of the test-model body.
+var agentTestModelBodyFields = []string{"set", "api_key"}
 
 type agentKeySource struct {
 	APIKey string `json:"api_key"`
@@ -51,7 +55,7 @@ func (handler *managementHandler) serveAgentAPIKeySet(writer http.ResponseWriter
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
@@ -104,7 +108,7 @@ func (handler *managementHandler) serveAgentAPIKeyClear(writer http.ResponseWrit
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
@@ -133,7 +137,7 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
@@ -164,7 +168,7 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 			}
 			key = &value
 		default:
-			handler.failKeyWrite(writer, request, call, keys, fieldFailure(name, "unknown field "+name+"; the body is {set?, api_key?}"))
+			handler.failKeyWrite(writer, request, call, keys, fieldFailure(name, "unknown field "+name+"; the fields are "+strings.Join(agentTestModelBodyFields, ", ")))
 			return
 		}
 	}

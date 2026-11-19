@@ -285,7 +285,7 @@ func agentAnalysisSettingsOf(view sessionanalysis.SettingsView) agentAnalysisSet
 
 // serveAgentConfigShow is GET /config/{kind} (administrators).
 func (handler *managementHandler) serveAgentConfigShow(writer http.ResponseWriter, request *http.Request, call agentCall) {
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -344,8 +344,8 @@ type agentCallerEntry struct {
 }
 
 // serveAgentCallers is GET /callers (administrators).
-func (handler *managementHandler) serveAgentCallers(writer http.ResponseWriter, request *http.Request, _ agentCall) {
-	if _, err := agentParams(request); err != nil {
+func (handler *managementHandler) serveAgentCallers(writer http.ResponseWriter, request *http.Request, call agentCall) {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -374,8 +374,8 @@ type agentReady struct {
 
 // serveAgentStatus is GET /status (administrators): /healthz and /readyz in
 // one read. not_ready is a result here, not an error.
-func (handler *managementHandler) serveAgentStatus(writer http.ResponseWriter, request *http.Request, _ agentCall) {
-	if _, err := agentParams(request); err != nil {
+func (handler *managementHandler) serveAgentStatus(writer http.ResponseWriter, request *http.Request, call agentCall) {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -400,11 +400,11 @@ type agentPreview struct {
 
 // serveAgentProjectPreview is POST /config/project-preview (administrators,
 // read tier: it persists nothing). The body is the web route's.
-func (handler *managementHandler) serveAgentProjectPreview(writer http.ResponseWriter, request *http.Request, _ agentCall) {
+func (handler *managementHandler) serveAgentProjectPreview(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	if !handler.agentOrgReady(writer) {
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}

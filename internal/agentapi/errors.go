@@ -129,7 +129,7 @@ var codeTable = map[Code]CodeSpec{
 		Hint:    "Create a new plan."},
 	CodeRunInProgress: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
 		Message: "a session analysis run is already in progress",
-		Hint:    "Do not trigger another run; check progress with `llmaudit analysis overview`."},
+		Hint:    "Do not trigger another run; check progress with `llmaudit analysis overview --since 1d`."},
 	CodeNotReady: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
 		Message: "the evidence is not ready yet",
 		Hint:    "Read it again later."},

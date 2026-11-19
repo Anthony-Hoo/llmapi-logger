@@ -207,7 +207,7 @@ func (handler *managementHandler) serveAgentAnalysisOverview(writer http.Respons
 	if !handler.agentAnalysisReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "from", "to", "since", "user_id")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -239,11 +239,11 @@ type agentUserTotals struct {
 }
 
 // serveAgentAnalysisUsers is GET /analysis/users (administrators).
-func (handler *managementHandler) serveAgentAnalysisUsers(writer http.ResponseWriter, request *http.Request, _ agentCall) {
+func (handler *managementHandler) serveAgentAnalysisUsers(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	if !handler.agentAnalysisReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "from", "to", "since")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -343,7 +343,7 @@ func (handler *managementHandler) serveAgentAnalysisSessions(writer http.Respons
 	if !handler.agentAnalysisReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "from", "to", "since", "kind", "flags", "cursor", "limit", "user_id")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -421,7 +421,7 @@ func (handler *managementHandler) serveAgentAnalysisPack(writer http.ResponseWri
 	if !handler.agentAnalysisReady(writer) {
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -508,7 +508,7 @@ func (handler *managementHandler) serveAgentAnalysisFacet(writer http.ResponseWr
 	if !handler.agentAnalysisReady(writer) {
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -615,7 +615,7 @@ func (handler *managementHandler) serveAgentAnalysisReport(writer http.ResponseW
 	if !handler.agentAnalysisReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "week", "user_id", "project_id", "group_id")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return

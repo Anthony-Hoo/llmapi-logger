@@ -133,7 +133,7 @@ func (handler *managementHandler) serveAgentWeeklyMe(writer http.ResponseWriter,
 	if !handler.agentOrgReady(writer) {
 		return
 	}
-	if _, err := agentParams(request); err != nil {
+	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -273,11 +273,11 @@ func agentWeeklyReportOf(report orgreport.WeeklyReport) agentWeeklyReport {
 }
 
 // serveAgentWeeklyReport is GET /weekly/report (administrators).
-func (handler *managementHandler) serveAgentWeeklyReport(writer http.ResponseWriter, request *http.Request, _ agentCall) {
+func (handler *managementHandler) serveAgentWeeklyReport(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	if !handler.agentOrgReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "week", "group_id", "metric")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -339,11 +339,11 @@ type agentWeeklyTrend struct {
 }
 
 // serveAgentWeeklyTrend is GET /weekly/trend (administrators).
-func (handler *managementHandler) serveAgentWeeklyTrend(writer http.ResponseWriter, request *http.Request, _ agentCall) {
+func (handler *managementHandler) serveAgentWeeklyTrend(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	if !handler.agentOrgReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "weeks", "group_id")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -399,7 +399,7 @@ func (handler *managementHandler) serveAgentWeeklyProject(writer http.ResponseWr
 	if !handler.agentOrgReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "week")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -444,11 +444,11 @@ type agentUnattributedEntry struct {
 }
 
 // serveAgentWeeklyUnattributed is GET /weekly/unattributed (administrators).
-func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.ResponseWriter, request *http.Request, _ agentCall) {
+func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	if !handler.agentOrgReady(writer) {
 		return
 	}
-	values, err := agentParams(request, "week", "limit")
+	values, err := agentCallParams(request, call)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
