@@ -84,9 +84,13 @@ type commandSpec struct {
 	Timeout time.Duration
 	// Wait is an interactive wait before the request (login's browser or
 	// pasted code), with WaitFor saying what is waited for; help prints it.
-	Wait     time.Duration
-	WaitFor  string
-	Examples []string
+	Wait    time.Duration
+	WaitFor string
+	// StateFlags are flags the command needs in some local state, such as
+	// login's --server before anything is saved. A command written into a
+	// hint cannot know that state, so CheckCommand requires them.
+	StateFlags []string
+	Examples   []string
 	// Select picks the route; nil means Routes[0].
 	Select func(*invocation) (*routeSpec, error)
 	Run    func(*invocation) (*result, error)

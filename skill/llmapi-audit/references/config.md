@@ -2,7 +2,7 @@
 
 This group is for administrators. A developer gets `FORBIDDEN_ROLE` on every command here; stop and tell the user.
 
-Reading needs any administrator token. Changing needs a **write** token (`llmaudit login --write`) and a deployment that allows agent writes (`features.write_allowed` in `llmaudit whoami`). Otherwise the server answers `READ_ONLY_TOKEN` or `WRITE_DISABLED`: stop, and for the latter give the user the web page link (`web_url`) so they can make the change there.
+Reading needs any administrator token. Changing needs a **write** token (`llmaudit login --server <server> --write`) and a deployment that allows agent writes (`features.write_allowed` in `llmaudit whoami`). Otherwise the server answers `READ_ONLY_TOKEN` or `WRITE_DISABLED`: stop, and for the latter give the user the web page link (`web_url`) so they can make the change there.
 
 Changes here act on live traffic: an interception rule or keyword policy applies to the next request, a project rule re-attributes unfrozen weeks, a new analysis model address receives the next run's input packs and the saved key.
 

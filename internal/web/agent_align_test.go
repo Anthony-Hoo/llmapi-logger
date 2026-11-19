@@ -411,7 +411,7 @@ func TestServerCommandsParseWithTheCLI(t *testing.T) {
 	if checked < 20 {
 		t.Fatalf("only %d commands found; the scan is probably broken", checked)
 	}
-	for _, want := range []string{"llmaudit login", "llmaudit apply pln_example", "llmaudit config show --kind ua-rule", "llmaudit weekly report --week 2026-11-02"} {
+	for _, want := range []string{"llmaudit login --server <server>", "llmaudit apply pln_example", "llmaudit config show --kind ua-rule", "llmaudit weekly report --week 2026-11-02"} {
 		found := false
 		for text := range texts {
 			for _, command := range commandsIn(text) {

@@ -106,6 +106,7 @@
 85. **会自行消失的数据库状况可以重试**（修正第 26 条）：门面把 SQLSTATE `57014`（语句超时或取消）、`53300`（连接数已满）、`57P01`、`57P02`、`57P03`（管理员关闭、崩溃后关闭、暂不接受连接）归为 `UPSTREAM_UNAVAILABLE`，与已有的连接异常（08 类）、死锁、串行化失败、锁等待超时一致；此前它们是 `INTERNAL`（“不重试”）。分类在门面里做（`internal/web/agent_params.go`），共用的 `storage.ErrorClass` 不改，既有网页路由的返回不变。请求自身的截止时间仍先判定为 `TIMEOUT`，调用方取消仍不写响应。
 86. **`login --help` 写明真实的等待时间**：此前 `login` 的帮助只打印兑换请求的 15 秒，实际等待浏览器或粘贴授权码最长 5 分钟。现在帮助打印“最长 5 分钟等待批准，之后 15 秒用于请求”，等待时间、说明文字与超时提示取自同一个常量；测试逐条核对每条命令帮助里打印的超时与它的请求实际使用的超时（其余命令本来一致：每条命令的每个请求都用该命令的超时，`config set-key` 与 `--prompt-key` 等待用户输入 Key 的时间不计）。
 87. **帮助里的 `null`**：`config set --set` 与 `analysis test-model --set` 的帮助原来写“null is empty”，与第 34 条不符。现在写明 `null` 是 JSON `null`，只有项目的 `group_id` 接受它（统一项目），`analysis test-model` 的 `--set` 里一律被拒绝；要置空字符串用 `--set-json <字段>='""'`。测试要求带 `--set` 的命令帮助都这样说明。
+88. **提示里的命令必须在任何本地状态下都能用**（修正第 50 条）：`NOT_LOGGED_IN`、`UNAUTHENTICATED`、`TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_GRANT` 的提示原来写 `llmaudit login`，首次登录时它因缺 `--server` 失败（退出码 2）；`READ_ONLY_TOKEN` 的 `llmaudit login --write` 同理。现在统一写 `llmaudit login --server <server>`（`<server>` 是审计服务器地址；已保存凭据时可省略 `--server`），两种情况下都对。命令行自己知道地址的提示（`LOGIN_TIMEOUT`、粘贴方式的 `NO_TTY`、回环监听失败）直接写入本次登录的地址。`agentcli.CheckCommand` 因此在解析之外还要求命令带上它在某种本地状态下必需的参数（命令表的 `StateFlags`，目前只有 `login` 的 `--server`）；网页侧扫描服务端文本的测试与命令行侧扫描帮助、错误表与源码的测试都用它，占位符替换后检查。`<server>` 这类占位符无法照字面运行，这是有意的：没有凭据时客户端不知道地址。
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |
@@ -193,7 +194,7 @@
 | 错误码 | HTTP | 含义 | 退出码 | Agent 下一步 |
 |---|---|---|---|---|
 | `FEATURE_DISABLED` | 404 | 本部署没有开启 Agent 接入 | 1 | 告诉用户当前环境未开通；不重试，不重新登录，不清本地凭据 |
-| `UNAUTHENTICATED` | 401 | 没带令牌，或令牌无效 | 4 | 停下，请用户运行 `llmaudit login` |
+| `UNAUTHENTICATED` | 401 | 没带令牌，或令牌无效 | 4 | 停下，请用户运行 `llmaudit login --server <server>` |
 | `TOKEN_EXPIRED` | 401 | 令牌已过期 | 4 | 同上 |
 | `TOKEN_REVOKED` | 401 | 令牌已被撤销 | 4 | 同上，并说明是被撤销 |
 | `ROLE_UNAVAILABLE` | 401 | 开发者登录已被关闭，开发者令牌失效 | 4 | 告诉用户联系管理员 |
@@ -217,7 +218,7 @@
 | `RATE_LIMITED` | 429 | 超过限速；带 `Retry-After` | 1 | 等到 `Retry-After` 之后再试一次 |
 | `UPSTREAM_UNAVAILABLE` | 502 | 依赖不可用（存储、NewAPI） | 1 | 稍后再试一次 |
 | `TIMEOUT` | 503 | 处理超时 | 1 | 缩小范围后重试；写操作先读取确认是否已生效 |
-| `INVALID_GRANT` | 400 | 授权码无效、过期、已用过，或校验串不符 | 4 | 重新运行 `llmaudit login` |
+| `INVALID_GRANT` | 400 | 授权码无效、过期、已用过，或校验串不符 | 4 | 请用户重新运行 `llmaudit login --server <server>` |
 | `INTERNAL` | 500 | 未归类的错误 | 1 | 告诉用户，不重试 |
 
 既有接口里“未归类的错误一律 503”被拆开：存储不可用是 `UPSTREAM_UNAVAILABLE`，超时是 `TIMEOUT`，其余是 `INTERNAL`。

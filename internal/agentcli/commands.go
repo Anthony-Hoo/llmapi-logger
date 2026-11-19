@@ -115,11 +115,13 @@ func buildCommands() []*commandSpec {
 				{Name: "write", Kind: boolFlag, Help: "Ask for the read-write tier (administrators, when the deployment allows writes). The tier is finally chosen on the web page. Default: off (read-only)."},
 				{Name: "device", Value: "<name>", Help: "Device name shown on the authorization page and in the device list, at most 64 characters; control characters are removed. Default: this machine's host name."},
 			},
-			Routes:   []routeSpec{{Method: "POST", Path: "/token", Body: []string{"code", "code_verifier"}}},
-			Wait:     loginWait,
-			WaitFor:  "the browser approval or the pasted code",
-			Examples: []string{"llmaudit login --server https://audit.example.com", "llmaudit login --server https://audit.example.com --no-browser", "llmaudit login --write"},
-			Run:      runLogin,
+			Routes:  []routeSpec{{Method: "POST", Path: "/token", Body: []string{"code", "code_verifier"}}},
+			Wait:    loginWait,
+			WaitFor: "the browser approval or the pasted code",
+			// Required on the first login (runLogin).
+			StateFlags: []string{"server"},
+			Examples:   []string{"llmaudit login --server https://audit.example.com", "llmaudit login --server https://audit.example.com --no-browser", "llmaudit login --server https://audit.example.com --write"},
+			Run:        runLogin,
 		},
 		{
 			Path:        []string{"logout"},
