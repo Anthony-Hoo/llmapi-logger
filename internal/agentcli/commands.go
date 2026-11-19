@@ -440,7 +440,7 @@ func buildCommands() []*commandSpec {
 			Description: "Probes the model with the saved settings, overridden by --set values that are not saved. Exit code 6 when the probe ran but failed (data.ok false). " +
 				"--prompt-key asks the user for a key in the terminal without echo; there is no other way to pass a key.",
 			Flags: []flagSpec{
-				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is empty, anything else a string. Not api_key. Repeatable. Default: the saved settings."},
+				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is JSON null (refused here: only a project's group_id accepts null), anything else a string. Not api_key. Repeatable. Default: the saved settings."},
 				{Name: "prompt-key", Kind: boolFlag, Help: "Read an API key for this test from the interactive terminal without echo; it is not saved. Fails with NO_TTY when stdin is not a terminal. Default: use the saved key."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/analysis/test-model", Body: []string{"api_key"}}},
@@ -493,7 +493,7 @@ func buildCommands() []*commandSpec {
 			Flags: []flagSpec{
 				{Name: "kind", Value: "<kind>", Body: "kind", Required: true, Help: "One of " + configKinds + ". Required."},
 				{Name: "id", Value: "<id>", Body: "id", Help: "Object to change: a number; for member a NewAPI user ID; for principal user:<id> or token:<id>. Omit to create (not for member, principal or the two settings). Default: none."},
-				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Set a field, split at the first '='. true/false are booleans, decimal numbers are numbers, null is empty, anything else is a string (use --set-json for a string that looks like a number). Repeatable. Default: none."},
+				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Set a field, split at the first '='. true/false are booleans, decimal numbers are numbers, null is JSON null (accepted only for a project's group_id, meaning the organization-wide project; use --set-json <field>='\"\"' for an empty string), anything else is a string (use --set-json for a string that looks like a number). Repeatable. Default: none."},
 				{Name: "set-json", Kind: listFlag, Value: "<field>=<json>", Body: "set", Help: "Set a field to a JSON value (lists, or strings with special characters). Repeatable. Default: none."},
 				{Name: "patch-file", Kind: listFlag, Value: "<file>", Body: "set", Help: "JSON object file whose keys are field names. Recommended for regular expressions and keyword lists. Repeatable. Default: none."},
 				{Name: "add", Kind: listFlag, Value: "<field>=<value>", Body: "add", Help: "Add one element to a list field (keywords, scan_scopes, ranked_clients, rules); a rules value is <kind>:<pattern>. Repeatable. Not allowed when creating. Default: none."},

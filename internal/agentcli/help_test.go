@@ -215,3 +215,17 @@ func TestHelpStatesTheTimeoutApplied(t *testing.T) {
 		t.Fatalf("login help:\n%s", help)
 	}
 }
+
+// TestHelpOnNull: no help text says null means empty; where --set is
+// documented, null is JSON null that only a project's group_id accepts.
+func TestHelpOnNull(t *testing.T) {
+	for _, spec := range allCommands() {
+		help := strings.Join(strings.Fields(commandHelp(spec)), " ")
+		if strings.Contains(help, "null is empty") {
+			t.Errorf("%s help says null is empty", spec.name())
+		}
+		if spec.flag("set") != nil && !strings.Contains(help, "null is JSON null") {
+			t.Errorf("%s help does not say what null is", spec.name())
+		}
+	}
+}
