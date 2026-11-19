@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -170,5 +171,72 @@ func assertNoTempFiles(t *testing.T, dir string) {
 		if strings.HasPrefix(entry.Name(), tempPrefix) {
 			t.Fatalf("temporary file left behind: %s", entry.Name())
 		}
+	}
+}
+
+// TestUnusableOutFailsBeforeAnyRequest: for every command that takes --out,
+// an --out that cannot be written is LOCAL_FILE_ERROR and nothing reaches
+// the server, so a failed command logs no sensitive view and uses no quota.
+func TestUnusableOutFailsBeforeAnyRequest(t *testing.T) {
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	dir := t.TempDir()
+	aFile := writeFile(t, filepath.Join(dir, "plain.txt"), "x")
+	readOnly := writeFile(t, filepath.Join(dir, "read-only.json"), "keep")
+	if err := os.Chmod(readOnly, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readOnly, 0o600) })
+	unusable := map[string]string{
+		"missing directory":         filepath.Join(dir, "no-such-dir", "out.json"),
+		"a directory":               dir,
+		"parent is not a directory": filepath.Join(aFile, "out.json"),
+	}
+	if runtime.GOOS == "windows" {
+		// Windows cannot rename over a read-only file (POSIX can, so there
+		// it is a usable target).
+		unusable["read-only file"] = readOnly
+	} else if os.Geteuid() != 0 {
+		// A directory without write permission (permission bits do not stop
+		// root, so this case needs an ordinary user).
+		locked := filepath.Join(t.TempDir(), "locked")
+		if err := os.Mkdir(locked, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+		unusable["directory not writable"] = filepath.Join(locked, "out.json")
+	}
+	samples := map[string][]string{
+		"usage trend":       {"usage", "trend", "ses_1"},
+		"usage composition": {"usage", "composition", "77"},
+		"analysis session":  {"analysis", "session", sessionHex, "--pack"},
+		"requests export":   {"requests", "export", "77", "--what", "conversation"},
+	}
+	covered := 0
+	for _, spec := range allCommands() {
+		if spec.flag("out") == nil {
+			continue
+		}
+		args, ok := samples[spec.name()]
+		if !ok {
+			t.Errorf("%s takes --out but has no sample here", spec.name())
+			continue
+		}
+		covered++
+		for name, target := range unusable {
+			server.reset()
+			h.expectFailure(h.run(append(append([]string{}, args...), "--out", target)...), agentapi.CodeLocalFileError, 1)
+			if len(server.recorded()) != 0 {
+				t.Errorf("%s with --out %s reached the server", spec.name(), name)
+			}
+		}
+		assertNoTempFiles(t, dir)
+	}
+	if covered != len(samples) {
+		t.Fatalf("covered %d commands with --out", covered)
+	}
+	if data, _ := os.ReadFile(readOnly); string(data) != "keep" {
+		t.Fatalf("read-only file changed to %q", data)
 	}
 }

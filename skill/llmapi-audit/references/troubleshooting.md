@@ -47,7 +47,7 @@ General rules: do not retry a command more than once unless the table says so; n
 | `LOGIN_TIMEOUT` | 4 | Nobody approved in the browser within 5 minutes. | Ask the user whether they want to try again; they can run `llmaudit login --server <server>` themselves. |
 | `LOGIN_DENIED` | 4 | The user chose "deny" on the authorization page. | Respect it. Do not start another login unless the user asks. |
 | `NO_TTY` | 2 | The command needs an interactive terminal (entering an API key, or pasting a login code). | Ask the user to run that exact command in their own terminal. Do not look for another way to pass the value. |
-| `LOCAL_FILE_ERROR` | 1 | A local file could not be read or written (`--out`, `--file`, `--patch-file`, the state directory). | Check the path in `details` (the directory must exist), fix it and run again. |
+| `LOCAL_FILE_ERROR` | 1 | A local file could not be read or written (`--out`, `--file`, `--patch-file`, the state directory). An unusable `--out` is found before anything is sent to the server, so nothing was read or logged there. | Check the path in `details` (the directory must exist and be writable), fix it and run again. |
 
 ## Other situations
 

@@ -107,6 +107,7 @@
 86. **`login --help` 写明真实的等待时间**：此前 `login` 的帮助只打印兑换请求的 15 秒，实际等待浏览器或粘贴授权码最长 5 分钟。现在帮助打印“最长 5 分钟等待批准，之后 15 秒用于请求”，等待时间、说明文字与超时提示取自同一个常量；测试逐条核对每条命令帮助里打印的超时与它的请求实际使用的超时（其余命令本来一致：每条命令的每个请求都用该命令的超时，`config set-key` 与 `--prompt-key` 等待用户输入 Key 的时间不计）。
 87. **帮助里的 `null`**：`config set --set` 与 `analysis test-model --set` 的帮助原来写“null is empty”，与第 34 条不符。现在写明 `null` 是 JSON `null`，只有项目的 `group_id` 接受它（统一项目），`analysis test-model` 的 `--set` 里一律被拒绝；要置空字符串用 `--set-json <字段>='""'`。测试要求带 `--set` 的命令帮助都这样说明。
 88. **提示里的命令必须在任何本地状态下都能用**（修正第 50 条）：`NOT_LOGGED_IN`、`UNAUTHENTICATED`、`TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_GRANT` 的提示原来写 `llmaudit login`，首次登录时它因缺 `--server` 失败（退出码 2）；`READ_ONLY_TOKEN` 的 `llmaudit login --write` 同理。现在统一写 `llmaudit login --server <server>`（`<server>` 是审计服务器地址；已保存凭据时可省略 `--server`），两种情况下都对。命令行自己知道地址的提示（`LOGIN_TIMEOUT`、粘贴方式的 `NO_TTY`、回环监听失败）直接写入本次登录的地址。`agentcli.CheckCommand` 因此在解析之外还要求命令带上它在某种本地状态下必需的参数（命令表的 `StateFlags`，目前只有 `login` 的 `--server`）；网页侧扫描服务端文本的测试与命令行侧扫描帮助、错误表与源码的测试都用它，占位符替换后检查。`<server>` 这类占位符无法照字面运行，这是有意的：没有凭据时客户端不知道地址。
+89. **`--out` 在请求之前检查**：带 `--out` 的每条命令（`usage trend`、`usage composition`、`analysis session`、`requests export`）在发出请求之前确认文件能写：目录存在、能在其中新建文件（原子替换所用的临时文件，建好即删）、目标不是目录；Windows 上已存在的只读文件也算不可用（那里不能改名覆盖它，POSIX 可以）。不可用时报 `LOCAL_FILE_ERROR`、`details.path` 为目标路径，服务端什么也没收到：输入包与分面不会写查看日志和 `sensitive_read` 行，也不占配额。此前读命令在服务端答复之后才检查目录。
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |
@@ -782,7 +783,7 @@
 | `callers list` | `GET /callers` | — |
 | `status` | `GET /status` | — |
 
-带 `--out` 的读命令把 `{"meta": …, "data": …}` 写入文件，标准输出的 `data` 换成 `{path, bytes, sha256}`，`meta` 照原样保留。文件里的 `data` 与不带 `--out` 时的 `data` 逐字节相同，`meta` 是同一份，所以日后单独读文件也知道内容是否完整。原始导出（`requests export`）只写内容本身，它的 `meta` 只在标准输出上（§0.1 第 47 条）。写文件用“临时文件加原子改名”，临时文件用短的固定前缀。
+带 `--out` 的读命令把 `{"meta": …, "data": …}` 写入文件，标准输出的 `data` 换成 `{path, bytes, sha256}`，`meta` 照原样保留。文件里的 `data` 与不带 `--out` 时的 `data` 逐字节相同，`meta` 是同一份，所以日后单独读文件也知道内容是否完整。原始导出（`requests export`）只写内容本身，它的 `meta` 只在标准输出上（§0.1 第 47 条）。写文件用“临时文件加原子改名”，临时文件用短的固定前缀。`--out` 在发出任何请求之前检查（§0.1 第 89 条）。
 
 ### 6.3 写命令
 
