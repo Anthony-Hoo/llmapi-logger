@@ -810,7 +810,7 @@ func TestExchangeAndAuthorizationLimiters(t *testing.T) {
 func TestAuthorizationLimitsFollowTheApprover(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, true, true)
-	const proxy = "10.0.0.1"
+	const proxy = "198.51.100.44"
 	developer := agentaccess.Grantor{Role: agentapi.RoleDeveloper, Scope: agentaccesstest.DeveloperScope(1, 42), SessionExpiresAt: h.clock.Now().Add(time.Hour)}
 	other := agentaccess.Grantor{Role: agentapi.RoleDeveloper, Scope: agentaccesstest.DeveloperScope(2, 43), SessionExpiresAt: h.clock.Now().Add(time.Hour)}
 	admin := agentaccess.Grantor{Role: agentapi.RoleAdmin}

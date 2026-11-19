@@ -729,7 +729,7 @@ func TestAgentAccessPostsRequireJSON(t *testing.T) {
 func TestAgentAuthorizationLimitsFollowTheSession(t *testing.T) {
 	env := newAgentEnv(t, agentEnvOptions{})
 	developer := developerSignIn(t, env.handler)
-	const proxy = "10.0.0.1"
+	const proxy = "198.51.100.44"
 	for index := 0; index < 20; index++ {
 		env.do(http.MethodPost, agentAuthorizationsPath, `{"challenge":"x","mode":"x","device_name":"","cli_version":"","tier":"read","decision":"deny"}`,
 			agentCaller{cookie: developer, remote: proxy})
