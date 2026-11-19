@@ -173,7 +173,7 @@ func buildCommands() []*commandSpec {
 				{Name: "block-code", Value: "<code>", Query: "block_code", Help: "Only records blocked with this block code, e.g. body_too_large. Default: all."},
 				{Name: "capture-status", Value: "<state>", Query: "capture_status", Help: "Only records whose body capture is pending, complete, partial or failed (chunk_missing appears in results only and is not a filter). Default: all."},
 				{Name: "upstream-error-class", Value: "<class>", Query: "upstream_error_class", Help: "Only records whose upstream error has this class, e.g. cyber_policy. Default: all."},
-				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when a row filter is given (data.collapse_applied says what happened). Default: off, i.e. one row per conversation as the web page shows it."},
+				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when any filter is given, a time range (--since, --from, --to) and --conversation included (data.collapse_applied says what happened). Default: off, i.e. one row per conversation as the web page shows it."},
 				flagLimit(1, 200, 50), flagCursor(),
 				{Name: "user-id", Value: "<id>", Query: "user_id", Help: "Administrators only: NewAPI user ID. Default: all."},
 				{Name: "username", Value: "<name>", Query: "username", Help: "Administrators only: NewAPI user name. Default: all."},
