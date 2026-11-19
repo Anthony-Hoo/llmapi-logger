@@ -22,7 +22,10 @@ func (store *Store) SaveWeeklySnapshot(ctx context.Context, snapshot orgreport.W
 	if err != nil {
 		return err
 	}
-	return store.submitOrg(ctx, func(transaction dbTransaction) error {
+	// Replacing a frozen week is not undoable, so the caller (the freeze job or
+	// an administrator's regenerate) must learn what actually happened: use the
+	// policy lifecycle instead of returning early on cancellation.
+	return store.submitOrgAdmin(ctx, func(transaction dbTransaction) error {
 		if _, err := transaction.Exec(`DELETE FROM org_weekly_snapshots WHERE week_start = $1`, snapshot.Week); err != nil {
 			return fmt.Errorf("postgres writer: replace weekly snapshot: %w", err)
 		}

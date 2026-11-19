@@ -351,7 +351,8 @@ func (store *Store) DismissSuggestion(ctx context.Context, id int64, scope strin
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
+	// An administrator action: wait for a definitive outcome once admitted.
+	return store.submitPolicySync(ctx, writeRequest{kind: writeDerived, data: derivedWrite(func(tx dbTransaction) error {
 		result, err := tx.Exec(`UPDATE analysis_suggestions SET status = 'dismissed', updated_at_ns = $3 WHERE id = $1 AND scope = $2`, id, scope, nowNS)
 		if err != nil {
 			return fmt.Errorf("postgres writer: dismiss suggestion: %w", err)
