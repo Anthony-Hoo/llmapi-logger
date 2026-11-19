@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/agentapi"
 )
@@ -182,5 +183,35 @@ func TestStandardLibraryOnly(t *testing.T) {
 				t.Errorf("%s imports %s", file, path)
 			}
 		}
+	}
+}
+
+// TestHelpStatesTheTimeoutApplied: the timeout each command's help prints is
+// the one its requests run under, and login's help also names the wait for
+// the browser or the pasted code (the same constant the wait uses).
+func TestHelpStatesTheTimeoutApplied(t *testing.T) {
+	for _, spec := range allCommands() {
+		help := commandHelp(spec)
+		inv := &invocation{env: &Env{}, spec: spec}
+		ctx, cancel := inv.context()
+		deadline, _ := ctx.Deadline()
+		cancel()
+		if applied := time.Until(deadline); applied > spec.timeout() || applied < spec.timeout()-time.Second {
+			t.Errorf("%s: requests run under %s, spec says %s", spec.name(), applied, spec.timeout())
+		}
+		if !strings.Contains(help, spec.timeout().String()) {
+			t.Errorf("%s: help does not print the request timeout %s", spec.name(), spec.timeout())
+		}
+		if spec.Wait > 0 && !strings.Contains(help, "Timeout: up to "+spec.Wait.String()) {
+			t.Errorf("%s: help does not print the wait %s", spec.name(), spec.Wait)
+		}
+	}
+	login, _, _ := findCommand(allCommands(), []string{"login"})
+	if login.Wait != (&Env{}).loginTimeout() || login.Wait != 5*time.Minute {
+		t.Fatalf("login help wait %s, real wait %s", login.Wait, (&Env{}).loginTimeout())
+	}
+	if help := commandHelp(login); !strings.Contains(help, "Timeout: up to 5m0s waiting for the browser approval or the pasted code, then 15s") ||
+		!strings.Contains(strings.Join(strings.Fields(help), " "), "waits up to "+loginWaitText) {
+		t.Fatalf("login help:\n%s", help)
 	}
 }

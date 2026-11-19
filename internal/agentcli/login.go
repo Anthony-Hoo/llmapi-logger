@@ -257,7 +257,7 @@ func waitForCallback(ctx context.Context, listener net.Listener, port int, state
 		}
 		return outcome.code, nil
 	case <-ctx.Done():
-		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login` again and approve within 5 minutes."}
+		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login` again and approve within " + loginWaitText + "."}
 	}
 }
 
@@ -297,7 +297,7 @@ func readPastedCode(ctx context.Context, env *Env) (string, error) {
 		return "", &cliError{Code: agentapi.CodeNoTTY, Message: "no authorization code was entered",
 			Hint: "Ask the user to run `llmaudit login --no-browser` themselves in a terminal and paste the code the page shows."}
 	case <-ctx.Done():
-		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login --no-browser` again and paste the code within 5 minutes."}
+		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login --no-browser` again and paste the code within " + loginWaitText + "."}
 	}
 }
 

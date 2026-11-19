@@ -60,8 +60,15 @@ func (env *Env) loginTimeout() time.Duration {
 	if env.LoginTimeout > 0 {
 		return env.LoginTimeout
 	}
-	return 5 * time.Minute
+	return loginWait
 }
+
+// loginWait is how long login waits for the browser approval or the pasted
+// code; the help, the description and the hints quote it.
+const loginWait = 5 * time.Minute
+
+// loginWaitText is loginWait in words, for hints.
+const loginWaitText = "5 minutes"
 
 func (env *Env) utcOffsetMinutes() int {
 	if env.UTCOffsetMinutes != nil {

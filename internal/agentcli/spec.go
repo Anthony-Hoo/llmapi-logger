@@ -77,11 +77,15 @@ type commandSpec struct {
 	Summary     string
 	Description string
 	// Fields is printed as it is, after the description.
-	Fields   string
-	Args     []argSpec
-	Flags    []flagSpec
-	Routes   []routeSpec
-	Timeout  time.Duration
+	Fields  string
+	Args    []argSpec
+	Flags   []flagSpec
+	Routes  []routeSpec
+	Timeout time.Duration
+	// Wait is an interactive wait before the request (login's browser or
+	// pasted code), with WaitFor saying what is waited for; help prints it.
+	Wait     time.Duration
+	WaitFor  string
 	Examples []string
 	// Select picks the route; nil means Routes[0].
 	Select func(*invocation) (*routeSpec, error)

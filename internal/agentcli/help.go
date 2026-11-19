@@ -93,7 +93,11 @@ func commandHelp(spec *commandSpec) string {
 	}
 	builder.WriteString("\nGlobal flags:\n")
 	builder.WriteString(globalFlagsHelp())
-	fmt.Fprintf(&builder, "\nTimeout: %s.\n", spec.timeout())
+	if spec.Wait > 0 {
+		fmt.Fprintf(&builder, "\nTimeout: up to %s waiting for %s, then %s for the request to the server.\n", spec.Wait, spec.WaitFor, spec.timeout())
+	} else {
+		fmt.Fprintf(&builder, "\nTimeout: %s.\n", spec.timeout())
+	}
 	if len(spec.Examples) > 0 {
 		builder.WriteString("\nExamples:\n")
 		for _, example := range spec.Examples {

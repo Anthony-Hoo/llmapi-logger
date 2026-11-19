@@ -106,7 +106,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:    []string{"login"},
 			Summary: "authorize this machine in the browser and save an agent token",
-			Description: "Opens the authorization page of the server in the browser and waits up to 5 minutes for the user to approve. " +
+			Description: "Opens the authorization page of the server in the browser and waits up to " + loginWaitText + " for the user to approve. " +
 				"The token is saved in credentials.json under the state directory (LLMAUDIT_HOME, default ~/.llmaudit) and never printed. " +
 				"The user, not the agent, should run this command.",
 			Flags: []flagSpec{
@@ -116,6 +116,8 @@ func buildCommands() []*commandSpec {
 				{Name: "device", Value: "<name>", Help: "Device name shown on the authorization page and in the device list, at most 64 characters; control characters are removed. Default: this machine's host name."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/token", Body: []string{"code", "code_verifier"}}},
+			Wait:     loginWait,
+			WaitFor:  "the browser approval or the pasted code",
 			Examples: []string{"llmaudit login --server https://audit.example.com", "llmaudit login --server https://audit.example.com --no-browser", "llmaudit login --write"},
 			Run:      runLogin,
 		},

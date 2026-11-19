@@ -104,6 +104,7 @@
 65. **下载接口的登记与对齐**（阶段 5）：门面登记表里 ID 为 `packages.download`、`GET /dl/{signature}/{file}`、`anonymous`、`read`；分发器照常先查功能开关、再查命令行版本（`curl` 不带版本头，不受影响），匿名接口不经令牌与配额。参数表里它的一行为空（不接受任何查询参数，违者 `INVALID_ARGUMENT`）。它没有对应的命令：在对齐测试的 `endpointsWithoutCommand` 里写明“由安装提示词用 curl 或 Invoke-WebRequest 获取”，在路由对照表的 `FacadeOnlyEndpoints` 里与登录三件套并列。`POST /api/v1/agent-access/install-links` 列在 `WebRouteExceptions` 里。
 66. **Skill 与命令行帮助的更正**（阶段 5）：对照命令行现状改了 Skill 的若干处（`requests list` 新增的筛选、两个会话列表的 `--from`/`--to`、`--out` 文件的形状、`login --write` 只是预选档位、日期形式的 `--to` 含当天、时间范围也会关掉折叠、`null` 只对项目的 `group_id` 有意义、命令行自己的超时与 `details.retry_after_seconds` 等）。`requests export --out` 的帮助文本原来说文件里是 `{"meta","data"}`，与实现（第 47 条：导出只写内容本身）不符，改了帮助文本。
 85. **会自行消失的数据库状况可以重试**（修正第 26 条）：门面把 SQLSTATE `57014`（语句超时或取消）、`53300`（连接数已满）、`57P01`、`57P02`、`57P03`（管理员关闭、崩溃后关闭、暂不接受连接）归为 `UPSTREAM_UNAVAILABLE`，与已有的连接异常（08 类）、死锁、串行化失败、锁等待超时一致；此前它们是 `INTERNAL`（“不重试”）。分类在门面里做（`internal/web/agent_params.go`），共用的 `storage.ErrorClass` 不改，既有网页路由的返回不变。请求自身的截止时间仍先判定为 `TIMEOUT`，调用方取消仍不写响应。
+86. **`login --help` 写明真实的等待时间**：此前 `login` 的帮助只打印兑换请求的 15 秒，实际等待浏览器或粘贴授权码最长 5 分钟。现在帮助打印“最长 5 分钟等待批准，之后 15 秒用于请求”，等待时间、说明文字与超时提示取自同一个常量；测试逐条核对每条命令帮助里打印的超时与它的请求实际使用的超时（其余命令本来一致：每条命令的每个请求都用该命令的超时，`config set-key` 与 `--prompt-key` 等待用户输入 Key 的时间不计）。
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |
@@ -744,7 +745,7 @@
 - `--help` 对每个参数写明取值、约束、默认值。帮助文本是 Agent 的说明书。
 - 本地状态目录默认 `~/.llmaudit/`，可用环境变量 `LLMAUDIT_HOME` 改位置。里面有 `credentials.json`（服务器地址、令牌、到期时间；仅本人可读，原子替换）与 `config.json`（可选的 CA 文件路径）。
 - 网络：默认校验证书，不跟随跳转。服务器地址是明文 HTTP 且主机不是回环地址时，`login` 成功后在标准错误打印一次警告。
-- 超时：默认 15 秒；`weekly *`、`config preview-project`、`config set` 40 秒；`requests export` 60 秒；`analysis test-model` 70 秒；`apply` 一律 130 秒（§0.1 第 49、58 条）。
+- 超时：`login` 等待浏览器批准或粘贴的授权码最长 5 分钟，之后兑换请求 15 秒（§0.1 第 86 条）；其余命令默认 15 秒；`weekly *`、`config preview-project`、`config set` 40 秒；`requests export` 60 秒；`analysis test-model` 70 秒；`apply` 一律 130 秒（§0.1 第 49、58 条）。
 - 超时或网络错误之后不自动重试写操作。读操作不自动重试。
 - 输出里的说明性文本（`message`、`hint`、`next_actions`）若出现符合令牌格式的串，替换成 `lla_***`；业务字段不做任何替换。
 
