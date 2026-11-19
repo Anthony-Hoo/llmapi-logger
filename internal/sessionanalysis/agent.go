@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"llmapi-logger/internal/config"
 )
 
 // Entry points that edit the saved analysis settings one field at a time
@@ -236,6 +238,13 @@ func (service *SettingsService) preparePatch(ctx context.Context, expectedVersio
 		return SettingsDiff{}, SettingsUpdate{}, ErrVersionConflict
 	}
 	before := editableOf(current)
+	edited := mergeSettingsPatch(before, patch)
+	return SettingsDiff{Version: version, Before: before, After: edited, KeySource: keySource}, SettingsUpdate{EditableSettings: edited}, nil
+}
+
+// mergeSettingsPatch returns before with the patch's fields set and run_at,
+// llm.base_url and llm.model trimmed, as the page does.
+func mergeSettingsPatch(before EditableSettings, patch SettingsPatch) EditableSettings {
 	edited := before
 	if patch.RunAt != nil {
 		edited.RunAt = *patch.RunAt
@@ -255,7 +264,66 @@ func (service *SettingsService) preparePatch(ctx context.Context, expectedVersio
 	setInt(&edited.LLM.TimeoutSeconds, llm.TimeoutSeconds)
 	setInt(&edited.LLM.MaxSessionsRun, llm.MaxSessionsRun)
 	edited.RunAt, edited.LLM.BaseURL, edited.LLM.Model = strings.TrimSpace(edited.RunAt), strings.TrimSpace(edited.LLM.BaseURL), strings.TrimSpace(edited.LLM.Model)
-	return SettingsDiff{Version: version, Before: before, After: edited, KeySource: keySource}, SettingsUpdate{EditableSettings: edited}, nil
+	return edited
+}
+
+// ModelTargetFields are the fields that decide where a model request is
+// sent: the address, and the guard that lets it leave the local network
+// (file-only today, so no patch can change it, but compared all the same).
+var ModelTargetFields = []string{"llm.base_url", "llm.allow_non_local"}
+
+// TargetChange names the first of ModelTargetFields whose value differs
+// between two configurations, "" when they send to the same place.
+func TargetChange(before, after config.SessionAnalysisConfig) string {
+	switch {
+	case strings.TrimSpace(before.LLM.BaseURL) != strings.TrimSpace(after.LLM.BaseURL):
+		return "llm.base_url"
+	case before.LLM.AllowNonLocal != after.LLM.AllowNonLocal:
+		return "llm.allow_non_local"
+	}
+	return ""
+}
+
+// KeyTargetError refuses a connection test that would send the key in use
+// (the saved key or the configuration file's) to a destination that is not
+// the one in effect. Field is the first differing field of
+// ModelTargetFields. Nothing was sent.
+type KeyTargetError struct {
+	Field string
+}
+
+func (err *KeyTargetError) Error() string {
+	return "sessionanalysis: the key in use is not sent to an address that is not in effect"
+}
+
+// TestPatch is the connection test of the agent facade: the settings in use
+// with patch merged in (nothing saved), probed with key or, when key is nil,
+// with the key in use. The key in use only goes to the destination in
+// effect: when the merged settings would send the request elsewhere and the
+// caller brought no key of its own, it refuses with *KeyTargetError before
+// any request is made. The comparison and the probe's configuration come
+// from one read under the service lock.
+func (service *SettingsService) TestPatch(ctx context.Context, patch SettingsPatch, key *string) (ProbeResult, error) {
+	service.mu.Lock()
+	current, _, _ := service.current(ctx)
+	edited := mergeSettingsPatch(editableOf(current), patch)
+	apiKey := current.LLM.APIKey
+	if key != nil {
+		apiKey = *key
+	}
+	candidate := overlay(service.file, edited, apiKey)
+	if key == nil && current.LLM.APIKey != "" {
+		if field := TargetChange(current, candidate); field != "" {
+			service.mu.Unlock()
+			return ProbeResult{}, &KeyTargetError{Field: field}
+		}
+	}
+	probe := service.probe
+	service.mu.Unlock()
+	if err := validateCandidate(candidate, true); err != nil {
+		return ProbeResult{}, err
+	}
+	return probe(ctx, candidate), nil
 }
 
 func setBool(target *bool, value *bool) {

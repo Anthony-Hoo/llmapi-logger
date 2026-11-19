@@ -182,14 +182,16 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		keys = append(keys, "api_key")
 	}
 	checkCtx, cancel := context.WithTimeout(request.Context(), agentWriteTimeout)
-	diff, err := settings.CheckPatch(checkCtx, sessionanalysis.AnyVersion, patch)
+	_, err = settings.CheckPatch(checkCtx, sessionanalysis.AnyVersion, patch)
 	cancel()
 	if err != nil {
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
-	// The probe has its own timeout, as on the web route.
-	result, err := handler.sessionAnalysisSettings.Test(request.Context(), sessionanalysis.SettingsUpdate{EditableSettings: diff.After, APIKey: key})
+	// The probe has its own timeout, as on the web route. Without a key typed
+	// for this request the key in use goes only to the destination in effect:
+	// TestPatch refuses any other before sending anything.
+	result, err := settings.TestPatch(request.Context(), patch, key)
 	key = nil
 	if err != nil {
 		handler.failKeyWrite(writer, request, call, keys, err)

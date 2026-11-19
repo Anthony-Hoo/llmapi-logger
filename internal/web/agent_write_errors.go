@@ -66,6 +66,7 @@ func agentWriteFailure(err error) *agentFailure {
 		orgSettings    *orgreport.SettingsError
 		analysisSet    *sessionanalysis.SettingsError
 		calibrationBad *sessionanalysis.LabelError
+		keyTarget      *sessionanalysis.KeyTargetError
 		argument       agentArgError
 	)
 	switch {
@@ -104,6 +105,13 @@ func agentWriteFailure(err error) *agentFailure {
 		return validationFailure(agentapi.CodeInvalidArgument, field, "", "invalid calibration label")
 	case errors.Is(err, sessionanalysis.ErrRunInProgress):
 		return &agentFailure{Code: agentapi.CodeRunInProgress}
+	case errors.As(err, &keyTarget):
+		return &agentFailure{Code: agentapi.CodeInvalidArgument,
+			Message: "the API key in use is only sent to the model address in effect; " + keyTarget.Field + " differs from it",
+			Hint: "Either save the address first with `llmaudit config set --kind analysis-settings --set " + keyTarget.Field + "=<value>` and " +
+				"`llmaudit apply <plan-id>` (the plan shows the new address to the user), or ask the user to run " +
+				"`llmaudit analysis test-model --set " + keyTarget.Field + "=<value> --prompt-key` in their own terminal and type a key for this test.",
+			Details: map[string]any{"field": keyTarget.Field, "reason": "saved_key_not_sent_to_unsaved_address"}}
 	case errors.Is(err, sessionanalysis.ErrSettingsUnavailable):
 		// The saved section could not be read; nothing was written.
 		return &agentFailure{Code: agentapi.CodeUpstreamUnavailable}

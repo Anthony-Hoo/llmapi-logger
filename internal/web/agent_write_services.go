@@ -79,6 +79,7 @@ type AgentAnalysisSettingsWriter interface {
 	ResetIfVersion(ctx context.Context, expectedVersion int64) (sessionanalysis.SettingsView, error)
 	SetAPIKey(ctx context.Context, key string) (sessionanalysis.SettingsView, error)
 	ClearAPIKey(ctx context.Context) (sessionanalysis.SettingsView, error)
+	TestPatch(ctx context.Context, patch sessionanalysis.SettingsPatch, key *string) (sessionanalysis.ProbeResult, error)
 }
 
 // AgentAnalysisRunner is sessionanalysis.QueryService's plan-time reads.

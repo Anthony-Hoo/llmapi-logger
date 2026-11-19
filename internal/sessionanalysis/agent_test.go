@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/storage"
 )
 
@@ -364,5 +365,44 @@ func TestWritesRefuseWhenTheSavedSectionCannotBeRead(t *testing.T) {
 	store.mu.Unlock()
 	if view, err := service.SetAPIKey(ctx, "rotated-key-0002"); err != nil || view.APIKey != KeySaved {
 		t.Fatalf("key write over an unusable row = %+v, %v", view, err)
+	}
+}
+
+// TestPatch sends the key in use only to the destination in effect; a
+// typed key may go anywhere the settings allow.
+func TestTestPatchKeepsTheKeyInUseAtTheAddressInEffect(t *testing.T) {
+	ctx := context.Background()
+	service, _, _, _ := settingsFixture(t)
+	var probed []config.SessionAnalysisConfig
+	service.probe = func(_ context.Context, candidate config.SessionAnalysisConfig) ProbeResult {
+		probed = append(probed, candidate)
+		return ProbeResult{OK: true}
+	}
+	moved := SettingsPatch{LLM: LLMPatch{BaseURL: ptr("http://10.9.9.9:8000/v1")}}
+	_, err := service.TestPatch(ctx, moved, nil)
+	var target *KeyTargetError
+	if !errors.As(err, &target) || target.Field != "llm.base_url" || len(probed) != 0 {
+		t.Fatalf("file key to another address = %v, %d probes", err, len(probed))
+	}
+	typed := "typed-key-0003"
+	if _, err := service.TestPatch(ctx, moved, &typed); err != nil || len(probed) != 1 || probed[0].LLM.APIKey != typed || probed[0].LLM.BaseURL != "http://10.9.9.9:8000/v1" {
+		t.Fatalf("typed key = %v %+v", err, probed)
+	}
+	view, _ := service.Get(ctx)
+	same := SettingsPatch{LLM: LLMPatch{BaseURL: ptr("  " + view.Settings.LLM.BaseURL + " "), Model: ptr("other-model")}}
+	if _, err := service.TestPatch(ctx, same, nil); err != nil || len(probed) != 2 || probed[1].LLM.APIKey != fileSection().LLM.APIKey {
+		t.Fatalf("address in effect = %v %+v", err, probed)
+	}
+	if _, err := service.ClearAPIKey(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.TestPatch(ctx, moved, nil); err != nil || len(probed) != 3 || probed[2].LLM.APIKey != "" {
+		t.Fatalf("no key in use = %v %+v", err, probed)
+	}
+	file := fileSection()
+	other := file
+	other.LLM.AllowNonLocal = !file.LLM.AllowNonLocal
+	if TargetChange(file, other) != "llm.allow_non_local" || TargetChange(file, file) != "" {
+		t.Fatal("TargetChange misses a destination field")
 	}
 }

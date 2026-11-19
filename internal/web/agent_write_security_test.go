@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -185,6 +186,80 @@ func TestAgentModelKeyNeverLeaks(t *testing.T) {
 	}
 	if keyRows != 2 {
 		t.Fatalf("key audit rows = %d", keyRows)
+	}
+}
+
+// The key in use (saved or from the configuration file) never goes with a
+// connection test to an address that is not the one in effect: the agent
+// could choose that address. The test is refused before anything is sent;
+// with a key typed for this request, or with no key in use, it runs.
+func TestAgentTestModelKeepsTheKeyAtTheAddressInEffect(t *testing.T) {
+	fixture := newWriteFixture(t)
+	if response := fixture.facade(http.MethodPut, "/config/analysis-settings/api-key", map[string]any{"api_key": plantedModelKey}, fixture.adminWrite); response.Code != http.StatusOK {
+		t.Fatalf("set key = %d %s", response.Code, response.Body.String())
+	}
+	elsewhere := newModelServer(t)
+	refused := failure(t, fixture.facade(http.MethodPost, "/analysis/test-model",
+		map[string]any{"set": map[string]any{"llm.base_url": elsewhere.URL + "/v1"}}, fixture.adminWrite))
+	if refused.Code != agentapi.CodeInvalidArgument || refused.Details["field"] != "llm.base_url" ||
+		refused.Details["reason"] != "saved_key_not_sent_to_unsaved_address" ||
+		!strings.Contains(refused.Hint, "llmaudit config set --kind analysis-settings") || !strings.Contains(refused.Hint, "llmaudit apply") ||
+		!strings.Contains(refused.Hint, "--prompt-key") {
+		t.Fatalf("test-model to another address = %+v", refused)
+	}
+	if len(elsewhere.authorization) != 0 || fixture.model.sawKey(plantedModelKey) {
+		t.Fatal("a request was sent")
+	}
+	rows := fixture.writeAudits()
+	if last := rows[len(rows)-1]; last.Event != "write_failed" || last.ErrorCode != string(agentapi.CodeInvalidArgument) || last.ChangedKeys != `["llm.base_url"]` {
+		t.Fatalf("audit row = %+v", last)
+	}
+
+	// The address in effect, or another field, keeps the key in use.
+	if response := fixture.facade(http.MethodPost, "/analysis/test-model", map[string]any{"set": map[string]any{
+		"llm.base_url": " " + fixture.model.URL + "/v1 ", "llm.model": "other-model"}}, fixture.adminWrite); response.Code != http.StatusOK || !fixture.model.sawKey(plantedModelKey) {
+		t.Fatalf("test-model at the address in effect = %d %s", response.Code, response.Body.String())
+	}
+	// A key typed for this request may go to the unsaved address, alone.
+	if response := fixture.facade(http.MethodPost, "/analysis/test-model", map[string]any{"set": map[string]any{"llm.base_url": elsewhere.URL + "/v1"},
+		"api_key": plantedUnsavedKey}, fixture.adminWrite); response.Code != http.StatusOK || !elsewhere.sawKey(plantedUnsavedKey) || elsewhere.sawKey(plantedModelKey) {
+		t.Fatalf("test-model with a typed key = %d %s", response.Code, response.Body.String())
+	}
+
+	// The configuration file's key is held back the same way.
+	fresh := newWriteFixture(t)
+	other := newModelServer(t)
+	if code := failure(t, fresh.facade(http.MethodPost, "/analysis/test-model", map[string]any{"set": map[string]any{"llm.base_url": other.URL + "/v1"}}, fresh.adminWrite)).Code; code != agentapi.CodeInvalidArgument ||
+		len(other.authorization) != 0 {
+		t.Fatalf("file key to another address = %s, %d requests", code, len(other.authorization))
+	}
+	// With no key in use there is nothing to hold back.
+	if _, err := fresh.settings.ClearAPIKey(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if response := fresh.facade(http.MethodPost, "/analysis/test-model", map[string]any{"set": map[string]any{"llm.base_url": other.URL + "/v1"}}, fresh.adminWrite); response.Code != http.StatusOK || len(other.authorization) != 1 {
+		t.Fatalf("test-model without a key = %d %s", response.Code, response.Body.String())
+	}
+
+	// The web form's test is unchanged: an administrator in a browser may
+	// test the address typed in the form with the key in use.
+	webTarget := newModelServer(t)
+	body := fixture.webSettingsBody(t, func(settings map[string]any) {
+		settings["llm"].(map[string]any)["base_url"] = webTarget.URL + "/v1"
+	})
+	if response := fixture.web(http.MethodPost, "/api/v1/settings/session-analysis/test", body); response.Code != http.StatusOK || !webTarget.sawKey(plantedModelKey) {
+		t.Fatalf("web test = %d %s", response.Code, response.Body.String())
+	}
+
+	// A plan that moves the address while a key is in use says the key goes
+	// there from then on.
+	plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"llm.base_url": elsewhere.URL + "/v1"}})
+	if !strings.Contains(strings.Join(plan.Effects, "\n"), "API key in use (saved key) will be sent to the new address") {
+		t.Fatalf("plan effects = %v", plan.Effects)
+	}
+	model := fixture.plan(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"llm.model": "other-model"}})
+	if strings.Contains(strings.Join(model.Effects, "\n"), "API key") {
+		t.Fatalf("a model change claims the key moves: %v", model.Effects)
 	}
 }
 

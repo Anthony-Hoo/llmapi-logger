@@ -26,7 +26,7 @@ const (
 	effectCatalog    = "Weeks that are not frozen yet are attributed again with the changed catalog; frozen weeks keep their snapshot until regenerated."
 	effectWeekly     = "Applies to weeks that are not frozen yet; frozen weeks keep their snapshot until regenerated."
 	effectAnalysis   = "The next session analysis run uses these settings; a run in progress keeps the settings it started with."
-	effectModelMoved = "The model or its address changes: the next run labels every input pack with it and sends the saved API key to that address."
+	effectModelMoved = "The model or its address changes: the next run labels every input pack with it."
 	effectDeleteOnly = "There is no recycle bin: extras.deleted_object is the only copy of the object after the plan is applied."
 )
 
@@ -640,12 +640,26 @@ func (handler *managementHandler) planAnalysisSettingsSet(ctx context.Context, r
 	if contains(diff.Changed, "llm.base_url") || contains(diff.Changed, "llm.model") {
 		plan.effect(effectModelMoved)
 	}
+	if diff.KeySource != sessionanalysis.KeyNone && changesModelTarget(diff.Changed) {
+		plan.effect("The API key in use (" + diff.KeySource + " key) will be sent to the new address in after.llm.base_url from then on, by every run and every connection test.")
+	}
 	plan.verify = "llmaudit config show --kind analysis-settings"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
 		view, err := settings.Patch(ctx, version, patch)
 		return agentApplied{Version: agentVersion(view.UpdatedNS)}, err
 	}
 	return plan, nil
+}
+
+// changesModelTarget reports whether changed names a field that decides
+// where model requests are sent.
+func changesModelTarget(changed []string) bool {
+	for _, field := range sessionanalysis.ModelTargetFields {
+		if contains(changed, field) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- config.remove ----

@@ -306,6 +306,7 @@ var dynamicSamples = map[string]string{
 	"stored.ID":    "pln_example",
 	"strings.Join(agentTestModelBodyFields, \", \")": "set, api_key",
 	"nearest.Format(orgreport.WeekLayout)":           "2026-11-02",
+	"keyTarget.Field":                                "llm.base_url",
 }
 
 // serverCommandTexts returns every string the server code of internal/web
