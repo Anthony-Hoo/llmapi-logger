@@ -378,14 +378,14 @@ func TestTestPatchKeepsTheKeyInUseAtTheAddressInEffect(t *testing.T) {
 		probed = append(probed, candidate)
 		return ProbeResult{OK: true}
 	}
-	moved := SettingsPatch{LLM: LLMPatch{BaseURL: ptr("http://10.9.9.9:8000/v1")}}
+	moved := SettingsPatch{LLM: LLMPatch{BaseURL: ptr("http://127.0.0.2:8000/v1")}}
 	_, err := service.TestPatch(ctx, moved, nil)
 	var target *KeyTargetError
 	if !errors.As(err, &target) || target.Field != "llm.base_url" || len(probed) != 0 {
 		t.Fatalf("file key to another address = %v, %d probes", err, len(probed))
 	}
 	typed := "typed-key-0003"
-	if _, err := service.TestPatch(ctx, moved, &typed); err != nil || len(probed) != 1 || probed[0].LLM.APIKey != typed || probed[0].LLM.BaseURL != "http://10.9.9.9:8000/v1" {
+	if _, err := service.TestPatch(ctx, moved, &typed); err != nil || len(probed) != 1 || probed[0].LLM.APIKey != typed || probed[0].LLM.BaseURL != "http://127.0.0.2:8000/v1" {
 		t.Fatalf("typed key = %v %+v", err, probed)
 	}
 	view, _ := service.Get(ctx)
