@@ -39,7 +39,8 @@ const (
 // it would let an anonymous client grow the audit table without bound.
 func (handler *managementHandler) serveAgentDownload(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	if _, err := agentCallParams(request, call); err != nil {
-		writeAgentError(writer, agentapi.CodeInvalidArgument, map[string]any{"field": err.(agentArgError).field})
+		argument := err.(agentArgError)
+		writeAgentFailure(writer, agentapi.CodeInvalidArgument, argument.message, "", argument.details())
 		return
 	}
 	if handler.agentDist == nil {

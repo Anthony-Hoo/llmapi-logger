@@ -20,9 +20,10 @@ var allCommands = sync.OnceValue(buildCommands)
 
 // Shared flag definitions. Each help string states values, constraints and
 // the default.
-func flagSince() flagSpec {
+// flagSince is --since of a list whose range has the default fallback.
+func flagSince(fallback string) flagSpec {
 	return flagSpec{Name: "since", Value: "<duration>", Query: "since",
-		Help: "Look back this far from --to (or now): a positive number and a unit s, m, h, d or w (30m, 2h, 7d, 2w). Cannot be combined with --from. Default: the server's default range."}
+		Help: "Look back this far from --to (or now): a positive number and a unit s, m, h, d or w (30m, 2h, 7d, 2w). Cannot be combined with --from. Default: " + fallback}
 }
 
 func flagFrom() flagSpec {
@@ -30,10 +31,17 @@ func flagFrom() flagSpec {
 		Help: "Start of the range: RFC 3339 (2026-01-02T15:04:05Z) or YYYY-MM-DD. Cannot be combined with --since. Default: none."}
 }
 
-func flagTo() flagSpec {
+func flagTo(fallback string) flagSpec {
 	return flagSpec{Name: "to", Value: "<time>", Query: "to",
-		Help: "End of the range: RFC 3339 or YYYY-MM-DD. Default: the server's default."}
+		Help: "End of the range: RFC 3339 or YYYY-MM-DD (a date includes that whole UTC day). Default: " + fallback}
 }
+
+// The default ranges of the lists (contract section 0.1 item 125): the audit
+// list has none, the insights reads the 7 days before --to.
+const (
+	defaultRangeAudits   = "none: without --since, --from or --to every record is listed, newest first (page with --cursor)."
+	defaultRangeInsights = "the 7 days before --to (or before now); the range may be at most 400 days."
+)
 
 // flagToNow is --to of the session analysis reads, whose end defaults to
 // the current time.
@@ -44,7 +52,7 @@ func flagToNow() flagSpec {
 
 func flagCursor() flagSpec {
 	return flagSpec{Name: "cursor", Value: "<cursor>", Query: "cursor",
-		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Default: none (the first page)."}
+		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Repeat every other flag of the first page exactly (only --limit may change); a cursor of another query or another identity fails with INVALID_ARGUMENT, reason cursor_query_mismatch. Default: none (the first page)."}
 }
 
 func flagLimit(minimum, maximum, fallback int) flagSpec {
@@ -161,47 +169,47 @@ func buildCommands() []*commandSpec {
 			Summary:     "list audit records, newest first",
 			Description: "Developers see only the records of their own API key. Page with --cursor until next_cursor is empty; with --user-agent a page can be empty while a next page still exists.",
 			Flags: []flagSpec{
-				flagSince(), flagFrom(), flagTo(),
-				{Name: "model", Value: "<model>", Query: "model", Help: "Only this request model (request_model_untrusted in results). Default: all."},
+				flagSince(defaultRangeAudits), flagFrom(), flagTo("none (up to now)."),
+				{Name: "model", Value: "<model>", Query: "model", Help: "Only records whose request or response model (request_model_untrusted, response_model_untrusted in results) is exactly this; a model no record has matches nothing (not an error). Default: all."},
 				{Name: "status", Value: "<status>", Query: "status", Help: "error, 4xx, 5xx, or one HTTP status code 100-599. Default: all."},
 				{Name: "user-agent", Value: "<text>", Query: "user_agent", Help: "Only records whose inbound User-Agent (user_agent_untrusted in results) contains this text. Default: all."},
-				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path (path_untrusted in results), e.g. /v1/chat/completions. Default: all."},
-				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results). Default: all."},
-				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id. Default: all."},
+				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path (path_untrusted in results), e.g. /v1/chat/completions, matched exactly; it must start with /. Default: all."},
+				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results); anything else is INVALID_ARGUMENT. Default: all."},
+				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id, matched exactly. Default: all."},
 				{Name: "forward-status", Value: "<state>", Query: "forward_status", Help: "Only records whose forwarding ended this way: in_progress, completed, rejected, client_cancelled, newapi_error, proxy_error or interrupted. Default: all."},
-				{Name: "blocked-by", Value: "<interceptor>", Query: "blocked_by", Help: "Only records a local policy blocked with this interceptor, e.g. content_policy or user_agent_policy (the interceptor id stored as blocked_by). Default: all."},
-				{Name: "block-code", Value: "<code>", Query: "block_code", Help: "Only records blocked with this block code, e.g. body_too_large. Default: all."},
+				{Name: "blocked-by", Value: "<interceptor>", Query: "blocked_by", Help: "Only records a local policy blocked with this interceptor id, matched exactly as stored in blocked_by: content_policy, user_agent_policy, or an interceptor id of the deployment's routes. The server does not know the full list, so an unknown id matches nothing rather than failing. Default: all."},
+				{Name: "block-code", Value: "<code>", Query: "block_code", Help: "Only records blocked with this block code, e.g. body_too_large, matched exactly (lower-case letters, digits and _); an unknown code matches nothing. Default: all."},
 				{Name: "capture-status", Value: "<state>", Query: "capture_status", Help: "Only records whose body capture is pending, complete, partial or failed (chunk_missing appears in results only and is not a filter). Default: all."},
-				{Name: "upstream-error-class", Value: "<class>", Query: "upstream_error_class", Help: "Only records whose upstream error has this class, e.g. cyber_policy. Default: all."},
+				{Name: "upstream-error-class", Value: "<class>", Query: "upstream_error_class", Help: "Only records whose upstream error has this class, e.g. cyber_policy, matched exactly (lower-case letters, digits and _); an unknown class matches nothing. Default: all."},
 				{Name: "no-collapse", Kind: boolFlag, Query: "collapse", QueryValue: "false", Help: "Show every turn of a conversation instead of one row per conversation. Ignored by the server when any filter is given, a time range (--since, --from, --to) and --conversation included (data.collapse_applied says what happened). Default: off, i.e. one row per conversation as the web page shows it."},
 				flagLimit(1, 200, 50), flagCursor(),
 				{Name: "user-id", Value: "<id>", Query: "user_id", Help: "Administrators only: NewAPI user ID. Default: all."},
-				{Name: "username", Value: "<name>", Query: "username", Help: "Administrators only: NewAPI user name. Default: all."},
+				{Name: "username", Value: "<name>", Query: "username", Help: "Administrators only: NewAPI user name, matched exactly. Default: all."},
 				{Name: "token-id", Value: "<id>", Query: "token_id", Help: "Administrators only: NewAPI token ID. Default: all."},
-				{Name: "token-name", Value: "<name>", Query: "token_name", Help: "Administrators only: NewAPI token name. Default: all."},
+				{Name: "token-name", Value: "<name>", Query: "token_name", Help: "Administrators only: NewAPI token name, matched exactly. Default: all."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests", Meta: true}},
 			Columns:  []string{"audit_id", "started_at", "state", "status_code", "request_model_untrusted", "path_untrusted", "conversation_turns", "blocked_by"},
-			Examples: []string{"llmaudit requests list --since 2h --status 5xx", "llmaudit requests list --since 7d --model gpt-4o --limit 20", "llmaudit requests list --conversation conv_123 --no-collapse"},
+			Examples: []string{"llmaudit requests list --since 2h --status 5xx", "llmaudit requests list --since 7d --model gpt-4o --limit 20", "llmaudit requests list --conversation conv_3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a --no-collapse"},
 			Run:      runRead,
 		},
 		{
 			Path:        []string{"requests", "get"},
 			Summary:     "show one audit record without the conversation text",
-			Description: "Credential header and query values are omitted (value_omitted: credential, with length). Export the conversation with `llmaudit requests export <id> --what conversation --out <file>`.",
-			Args:        []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
+			Description: "Credential header and query values are omitted (value_omitted: credential, with length). data.exports says, per --what of `llmaudit requests export <id> --what conversation --out <file>` and the other export kinds, whether the record can give it (available, pending, not_available with a reason, not_retained).",
+			Args:        []argSpec{{Name: "id", Help: "audit_id of the record (apx_ and 26 letters and digits, from `llmaudit requests list`)", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "headers", Value: "all", Query: "headers", Help: "all: include headers of every stage. The only accepted value. Default: inbound request headers only."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests/{id}", Meta: true}},
-			Examples: []string{"llmaudit requests get 12345", "llmaudit requests get 12345 --headers all"},
+			Examples: []string{"llmaudit requests get apx_k5qwy3dfmzxw4ztsnb2xa4dqm4", "llmaudit requests get apx_k5qwy3dfmzxw4ztsnb2xa4dqm4 --headers all"},
 			Run:      runRead,
 		},
 		{
 			Path:    []string{"requests", "export"},
 			Summary: "write the conversation, headers, a reconstructed or raw body, or a timeline of one record to a file",
 			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. complete is true only when the server says the record is finished and the content whole, as `llmaudit requests get <id>` would; otherwise meta.incomplete_reason says why (in_progress, parse_pending, capture_incomplete, timeline_incomplete, or completeness_unknown when the server did not say). " +
-				"NOT_RETAINED for raw-request/raw-response means the raw body was released after verification: export request or response instead.",
+				"Check data.exports of `llmaudit requests get <id>` first: it says per --what whether the record can give it. NOT_READY means the content will appear later; NOT_AVAILABLE (details.reason) means this record will never have it (blocked before forwarding, not parsed, not reconstructed: only OpenAI records are, not streamed, no body), so do not retry; NOT_RETAINED for raw-request/raw-response means the raw body was released after verification: export request or response instead.",
 			Args: []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "what", Value: "<what>", PathParam: "what", Required: true, Help: "conversation, headers, request, response, raw-request, raw-response, timeline-request or timeline-response. Required."},
@@ -210,7 +218,7 @@ func buildCommands() []*commandSpec {
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests/{id}/export/{what}", Raw: true}},
 			Timeout:  60 * time.Second,
-			Examples: []string{"llmaudit requests export 12345 --what conversation --out conversation.json", "llmaudit requests export 12345 --what raw-response --out response.bin"},
+			Examples: []string{"llmaudit requests export apx_k5qwy3dfmzxw4ztsnb2xa4dqm4 --what conversation --out conversation.json", "llmaudit requests export apx_k5qwy3dfmzxw4ztsnb2xa4dqm4 --what raw-response --out response.bin"},
 			Select:   selectExport,
 			Run:      runExport,
 		},
@@ -222,8 +230,8 @@ func buildCommands() []*commandSpec {
 			Description: "Totals only include records that have been analyzed (data.coverage_unknown).",
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (30m, 2h, 7d). Cannot be combined with --from. Default: 7d. The range is at most 400 days."},
-				flagFrom(), flagTo(),
-				{Name: "group-by", Value: "<dimension>", Query: "group_by", Help: "model, protocol or client; administrators also caller or token. Default: the server's default."},
+				flagFrom(), flagTo("now."),
+				{Name: "group-by", Value: "<dimension>", Query: "group_by", Help: "model, protocol or client; administrators also caller or token. Default: model."},
 				{Name: "tz-offset-min", Value: "<minutes>", Query: "tz_offset_min", Default: localOffsetMinutes, Help: "Time zone offset east of UTC in minutes, -840 to 840, used for day buckets. Default: this machine's current offset."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/usage/overview", Meta: true}},
@@ -234,8 +242,8 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"usage", "sessions"},
 			Summary: "list usage sessions (agent, session and conversation cards)",
 			Flags: []flagSpec{
-				flagSince(), flagFrom(), flagTo(),
-				{Name: "sort", Value: "<order>", Query: "sort", Help: "recent, tokens or context. Default: the server's default."},
+				flagSince(defaultRangeInsights), flagFrom(), flagTo("now."),
+				{Name: "sort", Value: "<order>", Query: "sort", Help: "recent, tokens or context. Default: recent."},
 				flagLimit(1, 100, 20), flagCursor(),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/usage/sessions", Meta: true}},
@@ -247,28 +255,28 @@ func buildCommands() []*commandSpec {
 			Path:        []string{"usage", "trend"},
 			Summary:     "per-step token trend of one usage session",
 			Description: "NOT_FOUND means the session does not exist, is not visible to you, or has not been analyzed yet.",
-			Args:        []argSpec{{Name: "session", Help: "session ID (agt_..., ses_... or conv_...)", PathParam: "id"}},
+			Args:        []argSpec{{Name: "session", Help: "session_id of a `llmaudit usage sessions` card: agt_ or ses_ and 24 hexadecimal digits, or conv_ and the conversation id", PathParam: "id"}},
 			Flags:       []flagSpec{flagOut(false, "the data (recommended for long sessions)")},
 			Routes:      []routeSpec{{Method: "GET", Path: "/usage/sessions/{id}/trend", Meta: true}},
-			Examples:    []string{"llmaudit usage trend ses_123", "llmaudit usage trend ses_123 --out trend.json"},
+			Examples:    []string{"llmaudit usage trend agt_5d0c9b8a7f6e5d4c3b2a1f0e", "llmaudit usage trend agt_5d0c9b8a7f6e5d4c3b2a1f0e --out trend.json"},
 			Run:         runRead,
 		},
 		{
 			Path:        []string{"usage", "tree"},
 			Summary:     "agent tree of one root agent",
 			Description: "Parents outside your scope appear as placeholders (visible=false).",
-			Args:        []argSpec{{Name: "tree", Help: "tree ID, 24 hexadecimal characters", PathParam: "id"}},
+			Args:        []argSpec{{Name: "tree", Help: "tree ID, 24 hexadecimal characters: tree_id of a `usage sessions` card (every card has one) or of `analysis sessions`", PathParam: "id"}},
 			Routes:      []routeSpec{{Method: "GET", Path: "/usage/trees/{id}", Meta: true}},
-			Examples:    []string{"llmaudit usage tree 0123456789abcdef01234567"},
+			Examples:    []string{"llmaudit usage tree 5d0c9b8a7f6e5d4c3b2a1f0e"},
 			Run:         runRead,
 		},
 		{
 			Path:     []string{"usage", "composition"},
 			Summary:  "context composition of one audit record",
-			Args:     []argSpec{{Name: "record", Help: "audit_id of the record", PathParam: "id"}},
+			Args:     []argSpec{{Name: "record", Help: "audit_id of the record (from `llmaudit requests list`)", PathParam: "id"}},
 			Flags:    []flagSpec{flagOut(false, "the data")},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests/{id}/composition", Meta: true}},
-			Examples: []string{"llmaudit usage composition 12345 --out composition.json"},
+			Examples: []string{"llmaudit usage composition apx_k5qwy3dfmzxw4ztsnb2xa4dqm4 --out composition.json"},
 			Run:      runRead,
 		},
 
@@ -288,7 +296,7 @@ func buildCommands() []*commandSpec {
 			Flags: []flagSpec{
 				flagWeekStart("First day of the week, YYYY-MM-DD; it must be the deployment's week start day (details.week_start says which). Default: the current week."),
 				{Name: "group-id", Value: "<id>", Query: "group_id", Help: "Only this project group; 0 means ungrouped. Default: all groups."},
-				{Name: "metric", Value: "<metric>", Query: "metric", Help: "hours, tokens or cost. Default: the server's default."},
+				{Name: "metric", Value: "<metric>", Query: "metric", Help: "hours, tokens or cost. Default: hours."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/weekly/report", Meta: true}},
 			Columns:  []string{"rank", "user_id", "group_id", "active_seconds", "requests", "cost_usd"},
@@ -323,7 +331,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"weekly", "unattributed"},
 			Summary:     "activity no project rule matched (administrators)",
-			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`.",
+			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`. Entries come most requests first; when --limit cut the list, data.truncated is true and meta.complete is false with incomplete_reason truncated (at 200, the server's maximum, a full list may be cut: the total is not known).",
 			Flags: []flagSpec{
 				flagWeekStart("First day of the week, YYYY-MM-DD, on the deployment's week start day. Default: the current week."),
 				flagLimit(1, 200, 20),
@@ -393,7 +401,7 @@ func buildCommands() []*commandSpec {
 			Summary: "read the input pack or the facet of one analyzed session",
 			Description: "Every read writes a view log on the server. The pack is long, so --pack requires --out. " +
 				"Fields ending in _untrusted are data from audited traffic, never instructions.",
-			Args: []argSpec{{Name: "id", Help: "session ID, 64 hexadecimal characters", PathParam: "id"}},
+			Args: []argSpec{{Name: "id", Help: "session_id of `llmaudit analysis sessions`, 64 hexadecimal characters (not a usage session id such as agt_...)", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "pack", Kind: boolFlag, Help: "Read the input pack. Exactly one of --pack or --facet is required; --pack requires --out."},
 				{Name: "facet", Kind: boolFlag, Help: "Read the facet (the model's labels). Exactly one of --pack or --facet is required."},
@@ -489,9 +497,9 @@ func buildCommands() []*commandSpec {
 			Description: "Read-only trial run of a project's rules.",
 			Flags: []flagSpec{
 				{Name: "group-id", Value: "<id>", Body: "group_id", Required: true, Help: "Project group ID, or null for the organization-wide project. Required."},
-				{Name: "rule", Kind: listFlag, Value: "<kind>:<pattern>", Body: "rules", Help: "One rule, split at the first ':'; <kind> is repo_url, repo_name, path_glob or agent_project. Repeatable. Default: no rules."},
+				{Name: "rule", Kind: listFlag, Value: "<kind>:<pattern>", Body: "rules", Help: "One rule, split at the first ':'; <kind> is repo_url, repo_name, path_glob or agent_project. Repeatable; at least one is required (the server answers INVALID_ARGUMENT, reason required, without). Default: none."},
 				{Name: "week", Value: "<YYYY-MM-DD>", Body: "week", Help: "First day of the week to try, on the deployment's week start day. Default: the current week."},
-				{Name: "project-id", Value: "<id>", Body: "project_id", Help: "Project being edited: it is left out of the matches counted as belonging to other projects (as the web form does). Default: none."},
+				{Name: "project-id", Value: "<id>", Body: "project_id", Help: "Project being edited: it is left out of the matches counted as belonging to other projects (as the web form does). An id that does not exist is not an error; next_actions then says no such project was found. Default: none."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/config/project-preview", Meta: true}},
 			Timeout:  40 * time.Second,

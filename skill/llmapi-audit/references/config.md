@@ -32,7 +32,7 @@ llmaudit config preview-project --group-id 2 --rule repo_name:example-repo
 llmaudit config preview-project --group-id null --rule 'path_glob:/work/example/**' --week 2026-01-05 --project-id 7
 ```
 
-Read-only: shows what the rules would match in a week without saving anything. Rule kinds are `repo_url`, `repo_name`, `path_glob` and `agent_project`. `--group-id null` means the organisation-wide project; `--project-id` names the project being edited so its own matches are not counted as another project's.
+Read-only: shows what the rules would match in a week without saving anything. Rule kinds are `repo_url`, `repo_name`, `path_glob` and `agent_project`. `--group-id null` means the organisation-wide project; `--project-id` names the project being edited so its own matches are not counted as another project's. At least one `--rule` is required. A `--group-id` or `--project-id` that does not exist is not an error (the web form behaves the same), but `next_actions` then says that no such group or project was found: the zeros are not a measurement.
 
 ## Changing: plan, show, apply
 
@@ -47,7 +47,7 @@ llmaudit apply pln_0123456789abcdef
 ```
 
 - A plan is valid for 10 minutes, belongs to your token and runs once, successful or not. `PLAN_EXPIRED` or `PLAN_NOT_FOUND`: create a new plan and show it again.
-- `VERSION_CONFLICT`: someone changed the object after the plan was made. Read it again with `config show`, tell the user what changed, and plan again.
+- `VERSION_CONFLICT`: the object is not at the version expected. When `apply` answers it, someone changed the object after the plan was made; when a write command answers it, the `--if-version` you gave is older than the object, so it changed after you read it. Either way, read it again with `config show`, tell the user what changed, and plan again.
 - After success, `data` is `{op, target, applied: true}` (with the new `id` when something was created); run the read command in `next_actions` to confirm.
 - After `TIMEOUT` or `NETWORK_ERROR` the change may or may not have happened. Do not apply again. Read the object with `config show` first and tell the user what you found.
 - Write limits (`RATE_LIMITED`, wait `details.retry_after_seconds`): per token, 60 created plans, applies and `config set-key` together in 10 minutes, and at most 32 plans that are not applied or expired at the same time (a plan you do not apply holds its place until it expires 10 minutes after it was made, so do not create plans you will not show). A plan request the server refuses (validation, not found, conflict) counts toward neither. `analysis test-model`: 12 per hour per token. For the whole server: `analysis run` once in 10 minutes and `weekly regenerate` 6 times an hour; an apply refused because the operation could not start gives its place back.

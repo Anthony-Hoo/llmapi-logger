@@ -31,7 +31,7 @@ func TestErrorTableMatchesTheContract(t *testing.T) {
 		CodeModuleDisabled: {404, 1}, CodeInvalidArgument: {400, 2}, CodeNotFound: {404, 1},
 		CodeAlreadyExists: {409, 1}, CodeConflict: {409, 1}, CodeVersionConflict: {409, 1},
 		CodePlanNotFound: {404, 1}, CodePlanExpired: {410, 1}, CodeLinkExpired: {410, 1}, CodeRunInProgress: {409, 1},
-		CodeNotReady: {409, 1}, CodeNotRetained: {410, 1}, CodeEvidenceUnavailable: {500, 1},
+		CodeNotReady: {409, 1}, CodeNotAvailable: {404, 1}, CodeNotRetained: {410, 1}, CodeEvidenceUnavailable: {500, 1},
 		CodeRateLimited: {429, 1}, CodeUpstreamUnavailable: {502, 1}, CodeTimeout: {503, 1},
 		CodeInvalidGrant: {400, 4}, CodeInternal: {500, 1},
 	}
@@ -244,6 +244,24 @@ func TestMaskingKeepsAgentAndOrdinaryHeaders(t *testing.T) {
 		masked := MaskValue(test[0], test[1])
 		if masked.ValueUntrusted == nil || *masked.ValueUntrusted != test[1] || masked.ValueOmitted != "" || masked.Length != len(test[1]) {
 			t.Errorf("%s = %+v", test[0], masked)
+		}
+	}
+}
+
+// Everything addressed to the agent is English: the notice and every default
+// message and hint of the error table carry no CJK text.
+func TestAgentFacingTextIsEnglish(t *testing.T) {
+	texts := map[string]string{"notice": UntrustedNotice}
+	for _, spec := range Codes() {
+		texts[string(spec.Code)+" message"] = spec.Message
+		texts[string(spec.Code)+" hint"] = spec.Hint
+	}
+	for name, text := range texts {
+		for _, char := range text {
+			if char >= 0x2E80 && char <= 0x9FFF || char >= 0xFF00 && char <= 0xFFEF {
+				t.Errorf("%s is not English: %q", name, text)
+				break
+			}
 		}
 	}
 }

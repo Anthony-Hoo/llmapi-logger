@@ -26,7 +26,7 @@ llmaudit weekly unattributed --limit 50
 - `--week` is the first day of a week, `YYYY-MM-DD`, and it must be the deployment's week start day (Monday or Sunday). A wrong day answers `INVALID_ARGUMENT` with `details.week_start` and a hint naming the right date; use that date. Omitted, it means the current week.
 - `--group-id` limits to one project group; `0` means ungrouped. `--metric` is `hours`, `tokens` or `cost`.
 - `weekly project <id>` takes a project ID, or `-1` for unattributed activity and `-2` for activity without any project context.
-- `weekly unattributed` lists activity that no project rule matched, each with the server's `draft_rule`. To turn one into a rule, see `config.md` (a plan with `--add rules=<kind>:<pattern>`).
+- `weekly unattributed` lists activity that no project rule matched, each with the server's `draft_rule`, the most requests first, at most `--limit` entries (default 20, at most 200). When the limit cut the list, `data.truncated` is true and `meta.complete` is false with `incomplete_reason: truncated`; run it again with a larger `--limit`. At 200 a full list may be cut: the server does not report the total. To turn an entry into a rule, see `config.md` (a plan with `--add rules=<kind>:<pattern>`).
 
 ### Reading a report
 

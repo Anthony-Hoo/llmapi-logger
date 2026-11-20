@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -173,7 +174,8 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	filter, cursor, limit, err := handler.agentAuditFilter(values, call.Principal)
+	binding := handler.agentCursorBinding(agentCursorAudits, values, call.Principal)
+	filter, cursor, limit, err := handler.agentAuditFilter(values, call.Principal, binding)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -192,7 +194,7 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 		list.Items = append(list.Items, agentAuditItemOf(item))
 	}
 	if page.NextCursor != nil {
-		list.NextCursor = wrapAgentCursor(agentCursorAudits, strconv.FormatInt(page.NextCursor.BeforeStartedAtNS, 10)+":"+page.NextCursor.BeforeID)
+		list.NextCursor = wrapAgentCursor(agentCursorAudits, binding, strconv.FormatInt(page.NextCursor.BeforeStartedAtNS, 10)+":"+page.NextCursor.BeforeID)
 	}
 	var actions []string
 	if len(list.Items) == 0 && list.NextCursor != "" {
@@ -201,13 +203,49 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 	writeAgentRead(writer, list, agentMetaOK(), true, actions...)
 }
 
-func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal) (query.Filter, query.Cursor, int, error) {
+// Closed value sets of the audit list filters (contract section 0.1 item
+// 119). The protocol is the prefix of the route's parser name, and only the
+// three parser families exist; forward and capture states are the service's
+// own (capture_chunk_missing appears in results only, contract section 0
+// row 6).
+var (
+	agentProtocols      = []string{"openai", "anthropic", "gemini"}
+	agentForwardStates  = []string{storage.ForwardInProgress, storage.ForwardCompleted, storage.ForwardRejected, storage.ForwardClientCancelled, storage.ForwardNewAPIError, storage.ForwardProxyError, storage.ForwardInterrupted}
+	agentCaptureFilters = []string{storage.CapturePending, storage.CaptureComplete, storage.CapturePartial, storage.CaptureFailed}
+	agentStableCode     = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+)
+
+// agentFreeText checks an open-set text filter by the service's rule: at
+// most 512 bytes, no NUL, no surrounding whitespace. It is matched exactly
+// (user_agent: as a substring), so an unknown value matches nothing.
+func agentFreeText(values url.Values, name string) (string, error) {
+	value := values.Get(name)
+	if len(value) > 512 || strings.ContainsRune(value, '\x00') || strings.TrimSpace(value) != value {
+		return "", argFormat(name, "at most 512 bytes without NUL and without leading or trailing spaces")
+	}
+	return value, nil
+}
+
+func agentClosedValue(values url.Values, name string, allowed []string) (string, error) {
+	value := values.Get(name)
+	if !values.Has(name) {
+		return "", nil
+	}
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value, nil
+		}
+	}
+	return "", argNotAllowed(name, allowed)
+}
+
+func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal, binding string) (query.Filter, query.Cursor, int, error) {
 	var filter query.Filter
 	var cursor query.Cursor
 	if !callerMayFilterByCaller(caller) {
 		for _, key := range agentCallerFilterKeys {
 			if values.Has(key) {
-				return filter, cursor, 0, argError(key)
+				return filter, cursor, 0, argAdministratorOnly(key)
 			}
 		}
 	}
@@ -232,58 +270,66 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 		default:
 			code, ok := parseAgentID(status, false)
 			if !ok || code < 100 || code > 599 {
-				return filter, cursor, 0, argError("status")
+				return filter, cursor, 0, argFormat("status", "error, 4xx, 5xx or one HTTP status code from 100 to 599")
 			}
 			value := int(code)
 			filter.StatusCode = &value
 		}
 	}
-	for _, numeric := range []struct {
-		name   string
-		target **int64
-	}{{"user_id", &filter.NewAPIUserID}, {"token_id", &filter.NewAPITokenID}} {
-		if !values.Has(numeric.name) {
-			continue
-		}
-		id, ok := parseAgentID(values.Get(numeric.name), false)
-		if !ok {
-			return filter, cursor, 0, argError(numeric.name)
-		}
-		*numeric.target = &id
+	if filter.NewAPIUserID, err = parseAgentPositiveID(values, "user_id", 1); err != nil {
+		return filter, cursor, 0, err
 	}
-	if values.Has("capture_status") && values.Get("capture_status") == "chunk_missing" {
-		// The service accepts only the four states it filters on (contract
-		// section 0, row 6); chunk_missing appears in results only.
-		return filter, cursor, 0, argError("capture_status")
+	if filter.NewAPITokenID, err = parseAgentPositiveID(values, "token_id", 0); err != nil {
+		return filter, cursor, 0, err
 	}
 	collapse, err := parseAgentBool(values, "collapse", true)
 	if err != nil {
 		return filter, cursor, 0, err
 	}
-	inner, err := unwrapAgentCursor(agentCursorAudits, values.Get("cursor"))
+	inner, err := unwrapAgentCursor(agentCursorAudits, binding, values.Get("cursor"))
 	if err != nil {
 		return filter, cursor, 0, err
 	}
 	if inner != "" {
 		timeText, id, ok := strings.Cut(inner, ":")
 		at, parsed := parseAgentID(timeText, false)
-		if !ok || !parsed || at <= 0 || id == "" {
-			return filter, cursor, 0, argError("cursor")
+		if !ok || !parsed || at <= 0 || id == "" || len(id) > 128 || strings.ContainsAny(id, "/\\\x00\r\n\t ") {
+			return filter, cursor, 0, errInvalidCursor
 		}
 		cursor = query.Cursor{BeforeStartedAtNS: at, BeforeID: id}
 	}
-	filter.Protocol = values.Get("protocol")
+	if filter.Protocol, err = agentClosedValue(values, "protocol", agentProtocols); err != nil {
+		return filter, cursor, 0, err
+	}
+	if filter.ForwardStatus, err = agentClosedValue(values, "forward_status", agentForwardStates); err != nil {
+		return filter, cursor, 0, err
+	}
+	if filter.CaptureStatus, err = agentClosedValue(values, "capture_status", agentCaptureFilters); err != nil {
+		return filter, cursor, 0, err
+	}
+	if path := values.Get("path"); values.Has("path") && (!strings.HasPrefix(path, "/") || len(path) > 2048) {
+		return filter, cursor, 0, argFormat("path", "a request path starting with /, at most 2048 bytes")
+	}
 	filter.Path = values.Get("path")
-	filter.Model = values.Get("model")
-	filter.UserAgent = values.Get("user_agent")
-	filter.ForwardStatus = values.Get("forward_status")
-	filter.BlockedBy = values.Get("blocked_by")
-	filter.BlockCode = values.Get("block_code")
-	filter.CaptureStatus = values.Get("capture_status")
-	filter.UpstreamErrorClass = values.Get("upstream_error_class")
-	filter.Conversation = values.Get("conversation")
-	filter.Username = values.Get("username")
-	filter.TokenName = values.Get("token_name")
+	for _, code := range []struct {
+		name   string
+		target *string
+	}{{"block_code", &filter.BlockCode}, {"upstream_error_class", &filter.UpstreamErrorClass}} {
+		value := values.Get(code.name)
+		if values.Has(code.name) && !agentStableCode.MatchString(value) {
+			return filter, cursor, 0, argFormat(code.name, "a code of lower-case letters, digits and _ starting with a letter, at most 64 characters")
+		}
+		*code.target = value
+	}
+	for _, text := range []struct {
+		name   string
+		target *string
+	}{{"model", &filter.Model}, {"user_agent", &filter.UserAgent}, {"blocked_by", &filter.BlockedBy}, {"conversation", &filter.Conversation},
+		{"username", &filter.Username}, {"token_name", &filter.TokenName}} {
+		if *text.target, err = agentFreeText(values, text.name); err != nil {
+			return filter, cursor, 0, err
+		}
+	}
 	filter.CollapseConversations = collapse
 	return filter, cursor, limit, nil
 }
@@ -294,6 +340,11 @@ func (handler *managementHandler) authorizeAgentAudit(ctx context.Context, call 
 		return "", errAgentUnavailable
 	}
 	auditID := call.Params["id"]
+	if len(auditID) > 128 || strings.ContainsAny(auditID, "/\\\x00\r\n\t ") {
+		// The service's own shape rule (query.validateAuditID); no record has
+		// such an id, so saying so tells nobody anything.
+		return "", argFormat("id", "an audit_id from `requests list`: at most 128 characters without spaces, slashes or control characters")
+	}
 	if err := authorizeAuditRead(ctx, handler.query, call.Principal, auditID); err != nil {
 		return "", err
 	}
@@ -478,17 +529,32 @@ type agentAuditDetail struct {
 	Turn                *agentTurn                `json:"turn"`
 	Billing             *agentBilling             `json:"billing"`
 	ConversationSummary *agentConversationSummary `json:"conversation_summary"`
+	// Exports says, per export kind, whether `requests export` can give it
+	// (agentExportStates).
+	Exports map[string]agentExportState `json:"exports"`
+}
+
+// agentBillingFinal reports whether a record's billing is settled: it has no
+// token link, or its link is billed or unbilled (not unchecked). The usage
+// overview's billing_complete counts the records for which this is false
+// (storage.InsightsUsageRow.PendingBilling), so the two cannot disagree
+// (contract section 0.1 item 120). A record whose caller lookup is still
+// running has no link yet and counts as settled here, as it always has;
+// caller_final says that the lookup is still running.
+func agentBillingFinal(detail query.Detail) bool {
+	return detail.TokenLink == nil || detail.TokenLink.BillingState != storage.BillingUnchecked
 }
 
 func agentAuditDetailOf(detail query.Detail, allHeaders bool) agentAuditDetail {
 	out := agentAuditDetail{
 		agentAuditItem: agentAuditItemOf(detail.Audit),
-		BillingFinal:   detail.TokenLink == nil || detail.TokenLink.BillingState != storage.BillingUnchecked,
+		BillingFinal:   agentBillingFinal(detail),
 		RequestURI:     agentRequestURIOf(detail.RequestURI),
 		Stages:         make([]agentStage, 0, len(detail.Stages)),
 		Headers:        agentHeadersOf(detail.Headers, allHeaders),
 		HeadersScope:   "inbound",
 		Bodies:         make([]agentBody, 0, len(detail.Bodies)),
+		Exports:        agentExportStates(detail),
 	}
 	if allHeaders {
 		out.HeadersScope = "all"
@@ -567,7 +633,7 @@ func (handler *managementHandler) serveAgentRequest(writer http.ResponseWriter, 
 	allHeaders := false
 	if values.Has("headers") {
 		if values.Get("headers") != "all" {
-			handler.writeAgentServiceFailure(writer, argError("headers"), "")
+			handler.writeAgentServiceFailure(writer, argNotAllowed("headers", []string{"all"}), "")
 			return
 		}
 		allHeaders = true
@@ -613,6 +679,154 @@ func inboundUserAgent(headers []query.Header) *string {
 	return nil
 }
 
+// What one export kind of a record can give (contract section 0.1 item
+// 118): available; pending (NOT_READY: it will appear); not_available
+// (NOT_AVAILABLE: this record has no such content and never will);
+// not_retained (NOT_RETAINED: a raw body released after verification).
+// requests get carries the map as data.exports and the export answers by it,
+// so an agent can tell before exporting.
+type agentExportState struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
+const (
+	exportAvailable    = "available"
+	exportPending      = "pending"
+	exportNotAvailable = "not_available"
+	exportNotRetained  = "not_retained"
+)
+
+// Reasons of a pending or unavailable export.
+const (
+	exportReasonInProgress       = "in_progress"
+	exportReasonParsePending     = "parse_pending"
+	exportReasonCapturing        = "capture_in_progress"
+	exportReasonRetentionPending = "retention_pending"
+	exportReasonBlocked          = "blocked_before_forwarding"
+	exportReasonNotParsed        = "not_parsed"
+	exportReasonParseFailed      = "parse_failed"
+	exportReasonNoConversation   = "no_conversation"
+	exportReasonNotReconstructed = "not_reconstructed"
+	exportReasonNotStreamed      = "not_streamed"
+	exportReasonNoBody           = "no_body"
+	exportReasonReleased         = "released_after_verification"
+)
+
+// agentSideStages are the body stages a side reads, in the service's order
+// (query.rawStagesForSide): the raw body and the timeline come from the
+// first one that exists.
+var agentSideStages = map[string][]string{
+	"request":  {storage.StageRequestSent, storage.StageRequestReceived},
+	"response": {storage.StageResponseReceived, storage.StageResponseSent},
+}
+
+func agentSideBody(bodies []query.Body, side string) *query.Body {
+	for _, stage := range agentSideStages[side] {
+		for index := range bodies {
+			if bodies[index].Stage == stage {
+				return &bodies[index]
+			}
+		}
+	}
+	return nil
+}
+
+// agentExportStates derives, from the record's detail alone, what each export
+// kind gives. Content that exists is available whatever the record's state.
+// Content that does not exist is pending while the record is still being
+// forwarded, captured, parsed or verified, and unavailable for good once that
+// is over: a blocked record was never forwarded; a record whose parse was
+// skipped or failed has no conversation; only the OpenAI parser rebuilds a
+// request and response (and only from complete bodies), so other records
+// never have a reconstruction; a body without stream events has no timeline.
+func agentExportStates(detail query.Detail) map[string]agentExportState {
+	audit := detail.Audit
+	running := audit.ForwardStatus == storage.ForwardInProgress
+	blocked := audit.ForwardStatus == storage.ForwardRejected
+	available := agentExportState{State: exportAvailable}
+	pending := func(reason string) agentExportState { return agentExportState{State: exportPending, Reason: reason} }
+	never := func(reason string) agentExportState {
+		return agentExportState{State: exportNotAvailable, Reason: reason}
+	}
+	// parsed is the state of content the parser writes, when it is missing.
+	parsed := func(missing string) agentExportState {
+		switch {
+		case running:
+			return pending(exportReasonInProgress)
+		case auditParse(audit.ParseStatus) == "pending":
+			return pending(exportReasonParsePending)
+		case blocked:
+			return never(exportReasonBlocked)
+		case audit.ParseStatus == storage.ParseSkipped:
+			return never(exportReasonNotParsed)
+		case audit.ParseStatus == storage.ParseError:
+			return never(exportReasonParseFailed)
+		default:
+			return never(missing)
+		}
+	}
+	states := map[string]agentExportState{"headers": available}
+	states["conversation"] = available
+	if detail.Conversation == nil {
+		states["conversation"] = parsed(exportReasonNoConversation)
+	}
+	reconstruction := available
+	if detail.Turn == nil {
+		reconstruction = parsed(exportReasonNotReconstructed)
+	}
+	states["request"], states["response"] = reconstruction, reconstruction
+	for _, side := range []string{"request", "response"} {
+		body := agentSideBody(detail.Bodies, side)
+		var timeline, raw agentExportState
+		switch {
+		case body == nil && running:
+			timeline, raw = pending(exportReasonInProgress), pending(exportReasonInProgress)
+		case body == nil && blocked && side == "response":
+			timeline, raw = never(exportReasonBlocked), never(exportReasonBlocked)
+		case body == nil:
+			timeline, raw = never(exportReasonNoBody), never(exportReasonNoBody)
+		default:
+			capturing := body.State == storage.StageStateStreaming
+			switch {
+			case body.StreamEventCount > 0:
+				timeline = available
+			case capturing:
+				timeline = pending(exportReasonCapturing)
+			case running:
+				timeline = pending(exportReasonInProgress)
+			default:
+				timeline = never(exportReasonNotStreamed)
+			}
+			switch {
+			case capturing:
+				raw = pending(exportReasonCapturing)
+			case body.RetentionState == storage.RetentionPending:
+				raw = pending(exportReasonRetentionPending)
+			case body.RetentionState == storage.RetentionMetadata:
+				raw = agentExportState{State: exportNotRetained, Reason: exportReasonReleased}
+			default:
+				raw = available
+			}
+		}
+		states["timeline-"+side], states["raw-"+side] = timeline, raw
+	}
+	return states
+}
+
+// writeAgentExportUnavailable answers an export kind that is not available.
+func writeAgentExportUnavailable(writer http.ResponseWriter, what string, state agentExportState) {
+	details := map[string]any{"what": what, "reason": state.Reason}
+	switch state.State {
+	case exportPending:
+		writeAgentFailure(writer, agentapi.CodeNotReady, "the "+what+" export of this record is not there yet, and will be", "", details)
+	case exportNotRetained:
+		writeAgentFailure(writer, agentapi.CodeNotRetained, "", "", details)
+	default:
+		writeAgentFailure(writer, agentapi.CodeNotAvailable, "this record has no "+what+" export and never will", "", details)
+	}
+}
+
 // Export kinds of GET /requests/{id}/export/{what}.
 var agentExportKinds = map[string]bool{
 	"conversation": true, "headers": true, "request": true, "response": true,
@@ -643,7 +857,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		return
 	}
 	if !agentExportKinds[what] {
-		handler.writeAgentServiceFailure(writer, argError("what"), "")
+		handler.writeAgentServiceFailure(writer, argNotAllowed("what", agentapi.ExportKinds), "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
@@ -662,16 +876,15 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		return
 	}
 	record := auditDetailMeta(detail.Audit)
+	if state := agentExportStates(detail)[what]; state.State != exportAvailable {
+		writeAgentExportUnavailable(writer, what, state)
+		return
+	}
 	switch what {
 	case "conversation", "headers":
 		if what == "headers" {
 			setExportCompleteness(writer.Header(), record, true, "")
 			writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
-			return
-		}
-		if detail.Conversation == nil {
-			writeAgentFailure(writer, agentapi.CodeNotFound, "the record has no parsed conversation",
-				"The record has not been parsed yet or carries no conversation. Check `parse` with `llmaudit requests get <id>`.", nil)
 			return
 		}
 		setExportCompleteness(writer.Header(), record, true, "")

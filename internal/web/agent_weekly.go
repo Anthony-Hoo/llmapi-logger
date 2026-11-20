@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -179,7 +180,8 @@ func (handler *managementHandler) agentWeek(writer http.ResponseWriter, values u
 func (handler *managementHandler) agentWeekFailure(week, field string) *agentFailure {
 	day, err := time.Parse(orgreport.WeekLayout, week)
 	if err != nil {
-		return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "week must be a YYYY-MM-DD date", Details: map[string]any{"field": field}}
+		return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "`" + field + "` must be a YYYY-MM-DD date",
+			Details: map[string]any{"field": field, "reason": reasonInvalidFormat}}
 	}
 	settings := handler.org.Settings()
 	first := time.Monday
@@ -188,23 +190,55 @@ func (handler *managementHandler) agentWeekFailure(week, field string) *agentFai
 	}
 	if day.Weekday() != first {
 		nearest := day.AddDate(0, 0, -((int(day.Weekday()) - int(first) + 7) % 7))
-		return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "week must be the first day of a report week",
+		return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "`" + field + "` must be the first day of a report week (a " + settings.WeekStart + "; " + nearest.Format(orgreport.WeekLayout) + " starts the week containing that date)",
 			Hint:    "Use --week " + nearest.Format(orgreport.WeekLayout) + ", the start of the week containing that date.",
-			Details: map[string]any{"field": field, "week_start": settings.WeekStart}}
+			Details: map[string]any{"field": field, "reason": reasonNotWeekStart, "week_start": settings.WeekStart}}
 	}
 	return nil
 }
 
 func agentGroupID(values url.Values) (*int64, error) {
-	if !values.Has("group_id") {
-		return nil, nil
-	}
-	id, ok := parseAgentID(values.Get("group_id"), false)
-	if !ok {
-		return nil, argError("group_id")
-	}
-	return &id, nil
+	return parseAgentPositiveID(values, "group_id", 0)
 }
+
+// agentUnknownOrgObjects explains an empty result read for a project group
+// or project the organization catalog does not have (contract section 0.1
+// item 119). The web routes answer such a read with an empty result rather
+// than an error, so the facade does too, but says that nothing was found
+// instead of letting zeros pass for data. Group 0 (ungrouped) always exists.
+func (handler *managementHandler) agentUnknownOrgObjects(groupID, projectID *int64) []string {
+	if handler.org == nil || (groupID == nil || *groupID == 0) && (projectID == nil || *projectID <= 0) {
+		return nil
+	}
+	catalog := handler.org.Catalog()
+	var actions []string
+	if groupID != nil && *groupID != 0 {
+		found := false
+		for _, group := range catalog.Groups {
+			found = found || group.ID == *groupID
+		}
+		if !found {
+			actions = append(actions, fmt.Sprintf("No project group with id %d exists, so the result is empty, not a measurement of zero activity; `llmaudit config show --kind org` lists the groups.", *groupID))
+		}
+	}
+	if projectID != nil && *projectID > 0 {
+		found := false
+		for _, project := range catalog.Projects {
+			found = found || project.ID == *projectID
+		}
+		if !found {
+			actions = append(actions, fmt.Sprintf("No project with id %d exists, so the result is empty, not a measurement of zero activity; `llmaudit config show --kind org` lists the projects.", *projectID))
+		}
+	}
+	return actions
+}
+
+// errAgentWeekRefused is a week the service refused after the facade's own
+// check passed.
+var errAgentWeekRefused = argFormat("week", "the first day of a report week, YYYY-MM-DD")
+
+// agentWeeklyMetrics are the metric values of the weekly report.
+var agentWeeklyMetrics = []string{orgreport.MetricHours, orgreport.MetricTokens, orgreport.MetricCost}
 
 type agentServiceRow struct {
 	UserID        int64       `json:"user_id"`
@@ -295,10 +329,16 @@ func (handler *managementHandler) serveAgentWeeklyReport(writer http.ResponseWri
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	metric, err := agentClosedValue(values, "metric", agentWeeklyMetrics)
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
 	defer cancel()
-	report, err := handler.org.Weekly(ctx, orgreport.WeeklyQuery{Week: week, GroupID: groupID, Metric: values.Get("metric")})
+	report, err := handler.org.Weekly(ctx, orgreport.WeeklyQuery{Week: week, GroupID: groupID, Metric: metric})
 	if err != nil {
+		err = asArgument(err, errAgentWeekRefused)
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -395,7 +435,7 @@ func (handler *managementHandler) serveAgentWeeklyTrend(writer http.ResponseWrit
 	if values.Has("weeks") {
 		parsed, ok := parseAgentID(values.Get("weeks"), false)
 		if !ok || parsed < 1 || parsed > orgreport.MaxTrendWeeks {
-			handler.writeAgentServiceFailure(writer, argError("weeks"), "")
+			handler.writeAgentServiceFailure(writer, argRange("weeks", 1, orgreport.MaxTrendWeeks), "")
 			return
 		}
 		weeks = parsed
@@ -452,7 +492,7 @@ func (handler *managementHandler) serveAgentWeeklyProject(writer http.ResponseWr
 	}
 	id, ok := parseAgentID(call.Params["id"], true)
 	if !ok {
-		handler.writeAgentServiceFailure(writer, argError("id"), "")
+		handler.writeAgentServiceFailure(writer, argFormat("id", "a project id (ASCII digits), -1 for unattributed or -2 for no project context"), "")
 		return
 	}
 	week, ok := handler.agentWeek(writer, values)
@@ -463,6 +503,7 @@ func (handler *managementHandler) serveAgentWeeklyProject(writer http.ResponseWr
 	defer cancel()
 	report, err := handler.org.ProjectWeekly(ctx, id, week)
 	if err != nil {
+		err = asArgument(err, errAgentWeekRefused)
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
@@ -503,17 +544,26 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 	if !ok {
 		return
 	}
-	limit, err := parseAgentLimit(values, 20, 200)
+	limit, err := parseAgentLimit(values, 20, agentMaxUnattributed)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
-	entries, err := handler.org.Unattributed(ctx, week, limit)
+	// Ask for one entry more than the limit to learn whether the limit cut
+	// the list (contract section 0.1 item 121). The service returns at most
+	// agentMaxUnattributed entries and no total, so at that limit a full
+	// page can only be called possibly cut.
+	entries, err := handler.org.Unattributed(ctx, week, min(limit+1, agentMaxUnattributed))
 	if err != nil {
+		err = asArgument(err, errAgentWeekRefused)
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
+	}
+	truncated := len(entries) > limit || len(entries) == agentMaxUnattributed
+	if len(entries) > limit {
+		entries = entries[:limit]
 	}
 	items := make([]agentUnattributedEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -521,6 +571,20 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 			Users: entry.Users, DraftRule: agentDraftRule{Kind: entry.DraftRule.Kind, PatternUntrusted: entry.DraftRule.Pattern}})
 	}
 	// The entries are always computed live; they are final once the week is
-	// frozen.
-	writeAgentRead(writer, map[string]any{"items": items}, weeklyFinalMeta(handler.weekFrozen(ctx, week)), true)
+	// frozen. A list the limit cut is incomplete first of all.
+	meta := weeklyFinalMeta(handler.weekFrozen(ctx, week))
+	var actions []string
+	if truncated {
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteTruncated
+		if limit < agentMaxUnattributed {
+			actions = append(actions, fmt.Sprintf("The list was cut at %d entries and more exist; run it again with a larger --limit (at most %d).", limit, agentMaxUnattributed))
+		} else {
+			actions = append(actions, fmt.Sprintf("The list reached the server's maximum of %d entries, so more may exist; the server does not report the total.", agentMaxUnattributed))
+		}
+	}
+	writeAgentRead(writer, map[string]any{"items": items, "truncated": truncated}, meta, true, actions...)
 }
+
+// agentMaxUnattributed is the most entries orgreport.Service.Unattributed
+// returns.
+const agentMaxUnattributed = 200

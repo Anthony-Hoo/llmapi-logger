@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
+
+	"llmapi-logger/internal/orgreport"
 )
 
 // TestWeeklyReadsAreCompleteOnlyWhenFinal: the weekly reads whose services
@@ -69,4 +72,45 @@ func TestWeeklyReadsAreCompleteOnlyWhenFinal(t *testing.T) {
 	// no row, so nothing can change.
 	expect("/weekly/me", fixture.developer, false)
 	expect("/weekly/me", fixture.adminRead, true)
+}
+
+// manyUnattributed answers Unattributed with count entries, at most the
+// limit asked for, as the service does.
+type manyUnattributed struct {
+	OrgReports
+	count int
+}
+
+func (org manyUnattributed) Unattributed(_ context.Context, _ string, limit int) ([]orgreport.UnattributedEntry, error) {
+	entries := []orgreport.UnattributedEntry{}
+	for index := 0; index < org.count && index < limit; index++ {
+		entries = append(entries, orgreport.UnattributedEntry{Kind: "repo_name", Value: "repo-" + strconv.Itoa(index), Requests: 1, Users: 1})
+	}
+	return entries, nil
+}
+
+// weekly unattributed says when --limit cut the list: meta.complete false
+// with truncated, data.truncated, and a next action; a list that fits is not
+// called truncated, and a full page at the server's maximum is called
+// possibly cut.
+func TestAgentWeeklyUnattributedSaysWhenTheLimitCutIt(t *testing.T) {
+	fixture := newReadFixture(t)
+	original := fixture.handler.org
+	defer func() { fixture.handler.org = original }()
+	for _, test := range []struct {
+		count, limit, items int
+		truncated           bool
+	}{
+		{5, 3, 3, true}, {3, 3, 3, false}, {2, 20, 2, false}, {250, 200, 200, true}, {199, 200, 199, false},
+	} {
+		fixture.handler.org = manyUnattributed{OrgReports: original, count: test.count}
+		response := fixture.facade(http.MethodGet, "/weekly/unattributed?limit="+strconv.Itoa(test.limit), "", fixture.adminRead)
+		body := decodeAgent(t, response)
+		data := readData(t, response)
+		items, _ := data["items"].([]any)
+		if len(items) != test.items || data["truncated"] != test.truncated || body.Meta == nil ||
+			(body.Meta.IncompleteReason == agentIncompleteTruncated) != test.truncated || (len(body.NextActions) > 0) != test.truncated {
+			t.Errorf("%d entries, limit %d: %s", test.count, test.limit, response.Body.String())
+		}
+	}
 }

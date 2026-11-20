@@ -211,6 +211,10 @@ func (values corpus) containsSubstring(text string) bool {
 var derivedKeys = map[string]bool{
 	"state": true, "parse": true, "capture": true, "value_omitted": true, "headers_scope": true,
 	"next_cursor": true, "incomplete_reason": true, "version": true,
+	// The root prefix of a lone agent's card, which the web's agent-tree
+	// route accepts but the web page does not link
+	// (TestAgentEverySessionCardHasAUsableTreeID).
+	"tree_id": true,
 }
 
 // derivable reports whether one facade value can be read off the web corpus.
@@ -238,6 +242,12 @@ func derivable(web corpus, path []string, key string, value any) bool {
 		return false
 	case string:
 		if typed == "" || web[typed] || derivedKeys[key] {
+			return true
+		}
+		// data.exports of a detail says what each export kind gives,
+		// derived from the same detail (agentExportStates); only its state
+		// and reason are exempt, nowhere else.
+		if key == "reason" && len(path) > 0 && path[0] == "exports" {
 			return true
 		}
 		if strings.HasSuffix(key, "_at") {
@@ -392,9 +402,18 @@ func TestAgentReadParity(t *testing.T) {
 		for what, path := range exports {
 			web := corpus{}
 			web.add(fixture.web(http.MethodGet, path, "", identity.cookie).Body.Bytes())
+			webResponse := fixture.web(http.MethodGet, path, "", identity.cookie)
 			response := fixture.facade(http.MethodGet, "/requests/own-1/export/"+what, "", identity.token)
+			if (response.Code == http.StatusOK) != (webResponse.Code == http.StatusOK) {
+				t.Fatalf("%s export %s = %d, web %d", identity.name, what, response.Code, webResponse.Code)
+			}
 			if response.Code != http.StatusOK {
-				t.Fatalf("%s export %s = %d", identity.name, what, response.Code)
+				// The record has no such content: the web route answers 404,
+				// the facade says so for good (NOT_AVAILABLE).
+				if code := facadeOutcome(t, response); code != agentapi.CodeNotAvailable || webResponse.Code != http.StatusNotFound {
+					t.Fatalf("%s export %s = %s, web %d", identity.name, what, code, webResponse.Code)
+				}
+				continue
 			}
 			assertDerivable(t, identity.name+" export "+what, web, response.Body.Bytes())
 		}
@@ -548,13 +567,21 @@ func TestAgentDRules(t *testing.T) {
 	})
 
 	t.Run("D8 selectors, the user listing and user ids are administrator-only", func(t *testing.T) {
-		for _, path := range []string{
-			"/analysis/overview?user_id=8&" + fixtureWindow, "/analysis/sessions?user_id=8&" + fixtureWindow,
-			"/analysis/report?user_id=8", "/analysis/report?project_id=3", "/analysis/report?group_id=1", "/analysis/users?" + fixtureWindow,
+		// A selector is an administrator-only argument: refused as an
+		// argument naming it (contract section 0.1 item 116), like D4 and D5.
+		for path, field := range map[string]string{
+			"/analysis/overview?user_id=8&" + fixtureWindow: "user_id", "/analysis/sessions?user_id=8&" + fixtureWindow: "user_id",
+			"/analysis/report?user_id=8": "user_id", "/analysis/report?project_id=3": "project_id", "/analysis/report?group_id=1": "group_id",
 		} {
-			if code := facadeOutcome(t, fixture.facade(http.MethodGet, path, "", fixture.developer)); code != agentapi.CodeForbiddenRole {
-				t.Fatalf("developer %s = %s", path, code)
+			body := decodeAgent(t, fixture.facade(http.MethodGet, path, "", fixture.developer))
+			if body.Error == nil || body.Error.Code != agentapi.CodeInvalidArgument || body.Error.Details["field"] != field ||
+				body.Error.Details["reason"] != reasonAdministratorOnly || body.Error.Hint != agentAdministratorOnlyHint {
+				t.Fatalf("developer %s = %+v", path, body.Error)
 			}
+		}
+		// The user listing is an administrator-only endpoint, not an argument.
+		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/analysis/users?"+fixtureWindow, "", fixture.developer)); code != agentapi.CodeForbiddenRole {
+			t.Fatalf("developer /analysis/users = %s", code)
 		}
 		// The value is validated before the role, as on the web.
 		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/analysis/report?user_id=x", "", fixture.developer)); code != agentapi.CodeInvalidArgument {
@@ -657,8 +684,10 @@ func TestAgentDeveloperCannotReadAnotherKeysRecordAnywhere(t *testing.T) {
 				t.Errorf("%s%s = %d %s (missing: %s)", id, suffix, foreign.Code, foreign.Body.String(), missing.Body.String())
 			}
 		}
+		// The foreign record has no request timeline (its request was not
+		// streamed): NOT_AVAILABLE for the administrator too.
 		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/requests/foreign"+suffix, "", fixture.adminRead)); code != "" &&
-			!(suffix == "/composition" && code == agentapi.CodeNotFound) {
+			!(suffix == "/composition" && code == agentapi.CodeNotFound) && !(suffix == "/export/timeline-request" && code == agentapi.CodeNotAvailable) {
 			t.Errorf("admin foreign%s = %s", suffix, code)
 		}
 	}
@@ -926,16 +955,24 @@ func TestAgentReadCompletenessRows(t *testing.T) {
 		}
 	}
 
-	// Usage overview: coverage is unknown, billing completeness is explicit.
-	if got, decoded := meta("/usage/overview?" + fixtureWindow); !got.Complete || !strings.Contains(string(decoded.Data), `"coverage_unknown":true`) ||
+	// Usage overview: coverage is unknown, so the overview is not complete
+	// (contract section 0.1 item 120); billing completeness is explicit.
+	if got, decoded := meta("/usage/overview?" + fixtureWindow); got.Complete || got.IncompleteReason != agentIncompleteCoverage ||
+		!strings.Contains(string(decoded.Data), `"coverage_unknown":true`) ||
 		len(decoded.NextActions) == 0 {
 		t.Fatalf("overview = %+v %v", got, decoded.NextActions)
 	}
 	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 2}}); !overview.BillingComplete || !overview.CoverageUnknown {
 		t.Fatalf("billed overview = %+v", overview)
 	}
-	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 1, UnbilledRequests: 1}}); overview.BillingComplete {
-		t.Fatalf("unbilled overview = %+v", overview)
+	// A settled unbilled request (failed, never billed) does not hold billing
+	// open; a request whose billing is pending does (contract section 0.1
+	// item 120).
+	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 1, UnbilledRequests: 1}}); !overview.BillingComplete {
+		t.Fatalf("settled unbilled overview = %+v", overview)
+	}
+	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 1, UnbilledRequests: 1, PendingBillingRequests: 1}}); overview.BillingComplete {
+		t.Fatalf("pending overview = %+v", overview)
 	}
 
 	// My week explains an empty row by its cause.
@@ -1063,13 +1100,14 @@ func TestAgentReadParameters(t *testing.T) {
 			t.Errorf("%s was accepted", bad)
 		}
 	}
-	// Cursors are opaque and bound to their list.
-	wrapped := wrapAgentCursor(agentCursorAudits, "1:a")
-	if inner, err := unwrapAgentCursor(agentCursorAudits, wrapped); err != nil || inner != "1:a" {
+	// Cursors are opaque and bound to their list (and to their query, see
+	// TestAgentCursorsAreBoundToTheirQuery).
+	wrapped := wrapAgentCursor(agentCursorAudits, "b", "1:a")
+	if inner, err := unwrapAgentCursor(agentCursorAudits, "b", wrapped); err != nil || inner != "1:a" {
 		t.Errorf("cursor round trip = %q %v", inner, err)
 	}
-	for _, bad := range []string{wrapAgentCursor(agentCursorUsageSessions, "x"), "not-base64!", base64.RawURLEncoding.EncodeToString([]byte("c0|audits|1:a"))} {
-		if _, err := unwrapAgentCursor(agentCursorAudits, bad); err == nil {
+	for _, bad := range []string{wrapAgentCursor(agentCursorUsageSessions, "b", "x"), "not-base64!", base64.RawURLEncoding.EncodeToString([]byte("c1|audits|1:a"))} {
+		if _, err := unwrapAgentCursor(agentCursorAudits, "b", bad); err == nil {
 			t.Errorf("cursor %q accepted", bad)
 		}
 	}
@@ -1097,7 +1135,7 @@ func TestAgentReadParameters(t *testing.T) {
 		t.Fatalf("paged ids = %v", seen)
 	}
 	for _, path := range []string{"/requests?bogus=1", "/requests?limit=0", "/requests?limit=201", "/requests?status=600", "/requests?status=abc",
-		"/requests?cursor=" + wrapAgentCursor(agentCursorUsageSessions, "x"), "/requests?collapse=maybe", "/requests?limit=1&limit=2",
+		"/requests?cursor=" + wrapAgentCursor(agentCursorUsageSessions, "b", "x"), "/requests?collapse=maybe", "/requests?limit=1&limit=2",
 		"/requests?capture_status=chunk_missing", "/requests/own-1?headers=some", "/requests/own-1/export/everything",
 		"/usage/overview?tz_offset_min=900", "/analysis/overview", "/analysis/report?week=next", "/weekly/report?week=2026-11-03",
 		"/config/everything", "/weekly/trend?weeks=13"} {

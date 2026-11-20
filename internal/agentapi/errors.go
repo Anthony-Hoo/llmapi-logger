@@ -31,6 +31,7 @@ const (
 	CodeRunInProgress       Code = "RUN_IN_PROGRESS"
 	CodeNotReady            Code = "NOT_READY"
 	CodeNotRetained         Code = "NOT_RETAINED"
+	CodeNotAvailable        Code = "NOT_AVAILABLE"
 	CodeEvidenceUnavailable Code = "EVIDENCE_UNAVAILABLE"
 	CodeRateLimited         Code = "RATE_LIMITED"
 	CodeUpstreamUnavailable Code = "UPSTREAM_UNAVAILABLE"
@@ -110,7 +111,7 @@ var codeTable = map[Code]CodeSpec{
 		Hint:    "Tell the user the feature is not enabled."},
 	CodeInvalidArgument: {HTTPStatus: http.StatusBadRequest, ExitCode: ExitInvalidUsage,
 		Message: "invalid argument",
-		Hint:    "Fix the argument named in details.field and retry."},
+		Hint:    "Fix the argument named in details.field as the message and details.reason say, then retry."},
 	CodeNotFound: {HTTPStatus: http.StatusNotFound, ExitCode: ExitError,
 		Message: "not found",
 		Hint:    "The object does not exist, is not visible to this identity, or is not ready yet. Do not switch identity or path to retry."},
@@ -120,7 +121,7 @@ var codeTable = map[Code]CodeSpec{
 	CodeConflict: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
 		Message: "the change conflicts with existing data"},
 	CodeVersionConflict: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
-		Message: "the object changed after the plan was created",
+		Message: "the object's version is not the expected one: it changed after it was read (--if-version) or after the plan was created",
 		Hint:    "Read the object again and create a new plan."},
 	CodePlanNotFound: {HTTPStatus: http.StatusNotFound, ExitCode: ExitError,
 		Message: "the plan does not exist, was already applied or belongs to another token",
@@ -136,7 +137,10 @@ var codeTable = map[Code]CodeSpec{
 		Hint:    "Do not trigger another run; check progress with `llmaudit analysis overview --since 1d`."},
 	CodeNotReady: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
 		Message: "the evidence is not ready yet",
-		Hint:    "Read it again later."},
+		Hint:    "It is still being captured, parsed or verified and will appear: read it again later (details.reason says what it waits for)."},
+	CodeNotAvailable: {HTTPStatus: http.StatusNotFound, ExitCode: ExitError,
+		Message: "the record has no such content and never will",
+		Hint:    "Do not retry; details.reason says why. data.exports of `llmaudit requests get <id>` lists what this record can export."},
 	CodeNotRetained: {HTTPStatus: http.StatusGone, ExitCode: ExitError,
 		Message: "the raw body was released after verification",
 		Hint:    "Export the reconstructed request or response instead; this is not data loss."},
@@ -175,7 +179,8 @@ var codeTable = map[Code]CodeSpec{
 		Message: "this command must run in an interactive terminal",
 		Hint:    "Ask the user to run this command themselves in a terminal."},
 	CodeLocalFileError: {ExitCode: ExitError, Local: true,
-		Message: "could not read or write a local file"},
+		Message: "could not read or write a local file",
+		Hint:    "Check the path in details.path (details.field names the flag): a file to write needs an existing directory that accepts a new file, a file to read must exist and be readable. Fix the path and run the command again; for the state directory, ask the user."},
 }
 
 // Lookup returns the table row of code. An unknown code reports false and

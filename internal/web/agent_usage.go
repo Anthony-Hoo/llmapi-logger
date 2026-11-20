@@ -3,10 +3,13 @@ package web
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"regexp"
 
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/storage"
 )
 
 // Usage insights on the facade (contract section 4.3.3). Scope comes from the
@@ -130,8 +133,15 @@ func agentUsageOverviewOf(response insights.OverviewResponse) agentUsageOverview
 		Daily: make([]agentDailyUsage, 0, len(response.Daily)), Heatmap: make([]agentHeatmapDay, 0, len(response.Heatmap)),
 		GroupBy: response.GroupBy, Groups: make([]agentGroupUsage, 0, len(response.Groups)),
 		Composition: agentCategoryValuesOf(response.Mix), BillingEnabled: response.BillingEnabled,
-		ClientLabels:    copyLabels(response.ClientLabels),
-		BillingComplete: response.Totals.UnbilledRequests == 0, CoverageUnknown: true,
+		ClientLabels: copyLabels(response.ClientLabels),
+		// billing_complete: no request in the range still waits for its
+		// billing, by the rule of billing_final in `requests get`
+		// (agentBillingFinal). A failed request that will never be billed is
+		// final and does not count.
+		BillingComplete: response.Totals.PendingBillingRequests == 0,
+		// The insights service cannot say how many records are not analysed
+		// yet, so coverage is always unknown.
+		CoverageUnknown: true,
 	}
 	for _, day := range response.Daily {
 		out.Daily = append(out.Daily, agentDailyUsage{Day: day.Day, Usage: agentUsageTotalsOf(day.Usage)})
@@ -143,6 +153,47 @@ func agentUsageOverviewOf(response insights.OverviewResponse) agentUsageOverview
 		out.Groups = append(out.Groups, agentGroupUsage{KeyUntrusted: group.Key, LabelUntrusted: group.Label, Usage: agentUsageTotalsOf(group.Usage)})
 	}
 	return out
+}
+
+// agentUsageGroupings are the group_by values of the overview; caller and
+// token are for administrators only (D5).
+var agentUsageGroupings = []string{storage.InsightsDimModel, storage.InsightsDimProtocol, storage.InsightsDimClient, storage.InsightsDimCaller, storage.InsightsDimToken}
+
+// agentUsageSorts are the sort values of the session list.
+var agentUsageSorts = []string{storage.InsightsSortRecent, storage.InsightsSortTokens, storage.InsightsSortContext}
+
+// Session and tree id shapes of the insights service (its patterns are
+// unexported; query.Insights refuses anything else as invalid).
+var (
+	agentUsageSessionID = regexp.MustCompile(`^(?:agt_[0-9a-f]{24}|ses_[0-9a-f]{24}|conv_[0-9A-Za-z._-]{1,200})$`)
+	agentUsageTreeID    = regexp.MustCompile(`^[0-9a-f]{24}$`)
+)
+
+var (
+	errAgentUsageSessionID = argFormat("id", "a usage session_id: agt_ or ses_ followed by 24 lower-case hexadecimal digits, or conv_ followed by the conversation id (take it from `usage sessions`)")
+	errAgentUsageTreeID    = argFormat("id", "a tree_id of 24 lower-case hexadecimal digits (take it from `usage sessions` or `analysis sessions`)")
+)
+
+// agentUsageRange reads the time range of an insights read and checks its
+// length the way the service resolves it: to defaults to now and from to
+// seven days before to.
+func (handler *managementHandler) agentUsageRange(values url.Values) (agentRange, error) {
+	timeRange, err := parseAgentRange(values, handler.agent.Now())
+	if err != nil {
+		return timeRange, err
+	}
+	to := handler.agent.Now().UnixNano()
+	if timeRange.ToNS != nil {
+		to = *timeRange.ToNS
+	}
+	from := to - int64(query.DefaultInsightsRange)
+	if timeRange.FromNS != nil {
+		from = *timeRange.FromNS
+	}
+	if from >= to {
+		return timeRange, argInvalid("from", reasonEmptyRange, "the range is empty: `from` must be before now when `to` is left out").with("conflicts_with", "to")
+	}
+	return timeRange, checkRangeLength(values, from, to, agentMaxServiceRange)
 }
 
 const agentCoverageAction = "Totals count analysed records only; the server cannot say how many records are not analysed yet (coverage_unknown)."
@@ -165,16 +216,25 @@ func (handler *managementHandler) serveAgentUsageOverview(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	timeRange, err := parseAgentRange(values, handler.agent.Now())
+	timeRange, err := handler.agentUsageRange(values)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	overview := query.OverviewQuery{FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, GroupBy: values.Get("group_by"), Scope: callerReadScope(call.Principal)}
+	overview := query.OverviewQuery{FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, Scope: callerReadScope(call.Principal)}
+	if overview.GroupBy, err = agentClosedValue(values, "group_by", agentUsageGroupings); err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	if (overview.GroupBy == storage.InsightsDimCaller || overview.GroupBy == storage.InsightsDimToken) && overview.Scope != nil {
+		// D5: the value is valid, the identity may not use it.
+		handler.writeAgentServiceFailure(writer, argAdministratorOnly("group_by"), "")
+		return
+	}
 	if values.Has("tz_offset_min") {
 		offset, ok := parseAgentID(values.Get("tz_offset_min"), true)
 		if !ok || offset < -840 || offset > 840 {
-			handler.writeAgentServiceFailure(writer, argError("tz_offset_min"), "")
+			handler.writeAgentServiceFailure(writer, argRange("tz_offset_min", -840, 840), "")
 			return
 		}
 		overview.TZOffsetMin = int(offset)
@@ -186,7 +246,27 @@ func (handler *managementHandler) serveAgentUsageOverview(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	writeAgentRead(writer, agentUsageOverviewOf(response), agentMetaOK(), true, agentCoverageAction)
+	data := agentUsageOverviewOf(response)
+	writeAgentRead(writer, data, usageOverviewMeta(data), true, agentCoverageAction)
+}
+
+// Incomplete reasons of the usage overview (contract section 0.1 item 120).
+const (
+	agentIncompleteCoverage = "coverage_unknown"
+	agentIncompleteBilling  = "billing_pending"
+)
+
+// usageOverviewMeta is complete only when the totals are known to cover
+// every record (never, while coverage_unknown) and no billing is pending.
+func usageOverviewMeta(data agentUsageOverview) agentapi.Meta {
+	meta := agentMetaOK()
+	switch {
+	case data.CoverageUnknown:
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteCoverage
+	case !data.BillingComplete:
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteBilling
+	}
+	return meta
 }
 
 type agentSessionCaller struct {
@@ -221,13 +301,25 @@ type agentUsageSessions struct {
 	ClientLabels   map[string]string  `json:"client_labels,omitempty"`
 }
 
-func agentUsageSessionsOf(response insights.SessionsResponse) agentUsageSessions {
+// agentTreeID is the tree_id of a session card or trend (contract section 0.1
+// item 122): the web page links a tree only for an agent with sub-agents or
+// a parent, but `usage tree` answers the root of every session, a lone agent
+// included (a tree of one node), so the facade gives every card the id that
+// `usage tree` accepts.
+func agentTreeID(tree, root string) string {
+	if tree != "" {
+		return tree
+	}
+	return root
+}
+
+func agentUsageSessionsOf(response insights.SessionsResponse, binding string) agentUsageSessions {
 	out := agentUsageSessions{Items: make([]agentSessionCard, 0, len(response.Items)),
-		NextCursor:     wrapAgentCursor(agentCursorUsageSessions, response.NextCursor),
+		NextCursor:     wrapAgentCursor(agentCursorUsageSessions, binding, response.NextCursor),
 		BillingEnabled: response.BillingEnabled, ClientLabels: copyLabels(response.ClientLabels)}
 	for _, card := range response.Items {
 		item := agentSessionCard{
-			SessionID: card.SessionID, SessionLink: card.SessionLink, TreeID: card.TreeID, Protocol: card.Protocol,
+			SessionID: card.SessionID, SessionLink: card.SessionLink, TreeID: agentTreeID(card.TreeID, card.RootTreeID), Protocol: card.Protocol,
 			Client: card.Client, Role: card.Role, FirstAt: agentTime(card.FirstNS), LastAt: agentTime(card.LastNS),
 			Steps: card.Steps, Turns: card.Turns, ModelsUntrusted: append([]string{}, card.Models...),
 			Usage: agentUsageTotalsOf(card.Usage), LastComposition: agentCategoryValuesOf(card.LastEstimate),
@@ -251,7 +343,7 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	timeRange, err := parseAgentRange(values, handler.agent.Now())
+	timeRange, err := handler.agentUsageRange(values)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -261,7 +353,13 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	cursor, err := unwrapAgentCursor(agentCursorUsageSessions, values.Get("cursor"))
+	sortKey, err := agentClosedValue(values, "sort", agentUsageSorts)
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	binding := handler.agentCursorBinding(agentCursorUsageSessions, values, call.Principal)
+	cursor, err := unwrapAgentCursor(agentCursorUsageSessions, binding, values.Get("cursor"))
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -269,14 +367,16 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	response, err := handler.insights.Sessions(ctx, query.SessionsQuery{
-		FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, Sort: values.Get("sort"), Cursor: cursor, Limit: limit,
+		FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, Sort: sortKey, Cursor: cursor, Limit: limit,
 		Scope: callerReadScope(call.Principal),
 	})
 	if err != nil {
-		handler.writeAgentServiceFailure(writer, err, "")
+		// The facade checked every other argument; an inner cursor the
+		// service cannot decode is the only argument left.
+		handler.writeAgentServiceFailure(writer, asArgument(err, errInvalidCursor), "")
 		return
 	}
-	writeAgentRead(writer, agentUsageSessionsOf(response), agentMetaOK(), true)
+	writeAgentRead(writer, agentUsageSessionsOf(response, binding), agentMetaOK(), true)
 }
 
 type agentTrendStep struct {
@@ -309,7 +409,7 @@ type agentTrend struct {
 }
 
 func agentTrendOf(response insights.TrendResponse) agentTrend {
-	out := agentTrend{SessionID: response.SessionID, TreeID: response.TreeID, ContextWindow: response.ContextWindow,
+	out := agentTrend{SessionID: response.SessionID, TreeID: agentTreeID(response.TreeID, response.RootTreeID), ContextWindow: response.ContextWindow,
 		Truncated: response.Truncated, Steps: make([]agentTrendStep, 0, len(response.Steps))}
 	for _, step := range response.Steps {
 		out.Steps = append(out.Steps, agentTrendStep{
@@ -341,10 +441,15 @@ func (handler *managementHandler) serveAgentUsageTrend(writer http.ResponseWrite
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	if !agentUsageSessionID.MatchString(call.Params["id"]) {
+		handler.writeAgentServiceFailure(writer, errAgentUsageSessionID, "")
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	response, err := handler.insights.Trend(ctx, call.Params["id"], callerReadScope(call.Principal))
 	if err != nil {
+		err = asArgument(err, errAgentUsageSessionID)
 		handler.writeAgentServiceFailure(writer, err, agentUsageNotFoundHint)
 		return
 	}
@@ -403,10 +508,15 @@ func (handler *managementHandler) serveAgentUsageTree(writer http.ResponseWriter
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	if !agentUsageTreeID.MatchString(call.Params["id"]) {
+		handler.writeAgentServiceFailure(writer, errAgentUsageTreeID, "")
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	response, err := handler.insights.Tree(ctx, call.Params["id"], callerReadScope(call.Principal))
 	if err != nil {
+		err = asArgument(err, errAgentUsageTreeID)
 		handler.writeAgentServiceFailure(writer, err, agentUsageNotFoundHint)
 		return
 	}

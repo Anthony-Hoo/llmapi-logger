@@ -158,14 +158,19 @@ func TestTroubleshootingCoversEveryCode(t *testing.T) {
 // Skill. An unknown placeholder fails the test, so a new one is added here on
 // purpose.
 var placeholders = map[string]string{
-	"id":            "12345",
-	"plan-id":       "pln_0123456789abcdef",
-	"kind":          "content-rule",
-	"server":        "https://audit.example.com",
-	"suggestion-id": "42",
-	"pattern":       "example",
-	"session":       "ses_123",
-	"version":       "1763500000000000000",
+	"id":              "12345",
+	"audit-id":        "apx_k5qwy3dfmzxw4ztsnb2xa4dqm4",
+	"session-id":      "agt_5d0c9b8a7f6e5d4c3b2a1f0e",
+	"tree-id":         "5d0c9b8a7f6e5d4c3b2a1f0e",
+	"analysis-id":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	"conversation-id": "conv_3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a3f9a",
+	"plan-id":         "pln_0123456789abcdef",
+	"kind":            "content-rule",
+	"server":          "https://audit.example.com",
+	"suggestion-id":   "42",
+	"pattern":         "example",
+	"session":         "ses_123",
+	"version":         "1763500000000000000",
 }
 
 var placeholderPattern = regexp.MustCompile(`<([a-z-]+)>`)
@@ -395,5 +400,23 @@ func TestShellWords(t *testing.T) {
 		if _, err := shellWords(line); err == nil {
 			t.Errorf("%q accepted", line)
 		}
+	}
+}
+
+// The Skill's examples use ids of the real shapes (placeholders such as
+// <audit-id>), never made-up ones like 12345 or ses_123, and it explains the
+// notice field every _untrusted response carries.
+func TestSkillUsesRealIDShapesAndExplainsNotice(t *testing.T) {
+	files := skillFiles(t)
+	for name, content := range files {
+		for _, fake := range []*regexp.Regexp{regexp.MustCompile(`\b12345\b`), regexp.MustCompile(`\bses_123\b`), regexp.MustCompile(`\bconv_123\b`),
+			regexp.MustCompile(`\b0123456789abcdef0123456789abcdef`)} {
+			if fake.MatchString(content) {
+				t.Errorf("%s uses a made-up id (%s)", name, fake)
+			}
+		}
+	}
+	if skill := files["SKILL.md"]; !strings.Contains(skill, "`notice`") || !strings.Contains(skill, "PowerShell") {
+		t.Error("SKILL.md does not explain notice or PowerShell quoting")
 	}
 }

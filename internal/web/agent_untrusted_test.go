@@ -330,7 +330,7 @@ func TestFacadeReadsMarkTrafficTextUntrusted(t *testing.T) {
 	calls := map[string][]string{
 		"requests.list":       {"/requests?collapse=false", "/requests"},
 		"requests.get":        {"/requests/" + sweepAuditID, "/requests/" + sweepAuditID + "?headers=all"},
-		"requests.export":     {"/requests/" + sweepAuditID + "/export/headers", "/requests/" + sweepAuditID + "/export/timeline-request", "/requests/" + sweepAuditID + "/export/timeline-response"},
+		"requests.export":     {"/requests/" + sweepAuditID + "/export/headers", "/requests/" + sweepAuditID + "/export/timeline-response"},
 		"usage.composition":   {"/requests/" + sweepAuditID + "/composition"},
 		"usage.overview":      {"/usage/overview?group_by=model&" + window, "/usage/overview?group_by=client&" + window, "/usage/overview?group_by=caller&" + window, "/usage/overview?group_by=token&" + window},
 		"usage.sessions":      {"/usage/sessions?" + window},
