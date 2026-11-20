@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -9,10 +10,13 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentaccess/agentaccesstest"
+	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/agentdist"
 	"llmapi-logger/internal/web"
 )
@@ -77,6 +81,105 @@ func TestEnabledAgentAccessRefusesAStoreWithoutAgentSupport(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "agent access") {
 		t.Fatalf("New with the legacy test store = %v, want an agent access error", err)
+	}
+}
+
+// closeProbeStore is the audit store of an App built by hand: only Close is
+// ever called on it (closeComponents), and onClose runs inside it.
+type closeProbeStore struct {
+	runtimeStore
+	closes  int
+	onClose func()
+}
+
+func (store *closeProbeStore) Close() error {
+	store.closes++
+	if store.onClose != nil {
+		store.onClose()
+	}
+	return nil
+}
+
+// syncLog is a log destination the agent service's background goroutine and
+// the test read and write at once.
+type syncLog struct {
+	mu   sync.Mutex
+	text bytes.Buffer
+}
+
+func (log *syncLog) Write(data []byte) (int, error) {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	return log.text.Write(data)
+}
+
+func (log *syncLog) String() string {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	return log.text.String()
+}
+
+// Contract section 0.1 items 127 and 156: closing the application stops the
+// agent service's background revocation retry before the store closes, and
+// no revocation is attempted afterwards; closing twice, or an application
+// without agent access, is safe.
+func TestClosingTheAppStopsTheAgentRevocationRetryBeforeTheStore(t *testing.T) {
+	ctx := context.Background()
+	logs := &syncLog{}
+	tokens := agentaccesstest.NewStore()
+	service, err := agentaccess.New(agentaccess.Options{AdminToken: "app-test-admin-token", Store: tokens, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	authorization, err := service.Approve(ctx, agentaccess.Grantor{Role: agentapi.RoleAdmin}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.90")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.90", agentaccess.RequestMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	// A replay whose revocation keeps failing hands it to the background.
+	tokens.SetFailRevokeTimes(1 << 30)
+	if _, err := service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{}); err == nil {
+		t.Fatal("a replayed code was exchanged")
+	}
+	if !strings.Contains(logs.String(), "retrying in the background") {
+		t.Fatalf("no background retry started: %s", logs.String())
+	}
+
+	stopped := -1
+	store := &closeProbeStore{onClose: func() {
+		// The retry has already ended when the store closes.
+		if !strings.Contains(logs.String(), "outcome=service_stopped") {
+			t.Errorf("the store closed while the revocation retry was running: %s", logs.String())
+		}
+		stopped = tokens.RevokeAttemptCount()
+	}}
+	application := &App{agentAccess: service, auditStore: store}
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.Close(); err != nil || store.closes != 1 {
+		t.Fatalf("second Close = %v, store closed %d times", err, store.closes)
+	}
+	// Longer than the retry's first wait (400 ms): nothing more is tried.
+	time.Sleep(time.Second)
+	if stopped < 0 || tokens.RevokeAttemptCount() != stopped {
+		t.Fatalf("revocation attempts: %d when the store closed, %d now", stopped, tokens.RevokeAttemptCount())
+	}
+
+	// Without agent access (not enabled, or no database) Close works too.
+	bare := &closeProbeStore{}
+	unassembled := &App{auditStore: bare}
+	if err := unassembled.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := unassembled.Close(); err != nil || bare.closes != 1 {
+		t.Fatalf("unassembled second Close = %v, store closed %d times", err, bare.closes)
+	}
+	if err := (&App{}).Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

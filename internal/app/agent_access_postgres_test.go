@@ -63,6 +63,11 @@ func TestPostgresAgentAccessFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The assembled application holds the agent service, so Close stops its
+	// background work before the store closes (contract section 0.1 item 156).
+	if application.agentAccess == nil {
+		t.Fatal("the application does not hold the agent service it assembled")
+	}
 	serve := func(application *App, method, path, body, bearer string) (int, []byte) {
 		t.Helper()
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
