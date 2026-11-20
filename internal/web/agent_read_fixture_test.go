@@ -441,11 +441,13 @@ func (store *memoryAnalysisStore) viewCount() int {
 	return len(store.views)
 }
 
-func (store *memoryAnalysisStore) addSession(t *testing.T, id string, fingerprint []byte, userID, tokenID int64) {
+// addSession adds an agent session of root (the 32-byte agent_root_fpr every
+// stored session has: session_signals requires it).
+func (store *memoryAnalysisStore) addSession(t *testing.T, id string, fingerprint, root []byte, userID, tokenID int64) {
 	t.Helper()
 	key, _ := hex.DecodeString(id)
 	last := fixtureBase.UnixNano()
-	store.signals = append(store.signals, storage.SessionSignals{SessionKey: key, Kind: sessionanalysis.KindAgent, APIKeyFPR: fingerprint,
+	store.signals = append(store.signals, storage.SessionSignals{SessionKey: key, AgentRootFPR: root, Kind: sessionanalysis.KindAgent, APIKeyFPR: fingerprint,
 		NewAPIUserID: &userID, NewAPITokenID: &tokenID, FirstNS: last - int64(time.Hour), LastNS: last, LastAuditID: "own-1",
 		Client: "codex", ProjectID: int64Pointer(3)})
 	packAAD, err := sessionanalysis.PackAAD(key)
@@ -561,8 +563,10 @@ func newReadFixtureWrites(t *testing.T, allowWrite bool) *readFixture {
 	}
 
 	analysis := &memoryAnalysisStore{cipher: cipher, packs: map[string]storage.SessionPack{}, facets: map[string]storage.SessionFacet{}}
-	analysis.addSession(t, analysisOwnID, own, 7, 42)
-	analysis.addSession(t, analysisForeignID, other, 8, 99)
+	// The roots of the usage steps seeded above: the own session's tree is
+	// the one "own-1" belongs to, the foreign one "other-only"'s.
+	analysis.addSession(t, analysisOwnID, own, repeated(0xa0), 7, 42)
+	analysis.addSession(t, analysisForeignID, other, repeated(0xb0), 8, 99)
 	analysisService, err := sessionanalysis.NewQueryService(analysis, nil, cipher, "local-model")
 	if err != nil {
 		t.Fatal(err)

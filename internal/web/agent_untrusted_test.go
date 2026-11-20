@@ -231,7 +231,7 @@ func (reports sweepReports) Report(ctx context.Context, week string, scope *quer
 func plantSweepAnalysis(t *testing.T, fixture *readFixture) {
 	t.Helper()
 	store := fixture.analysis
-	store.addSession(t, sweepAnalysisID, fixture.ownFingerprint, 7, 42)
+	store.addSession(t, sweepAnalysisID, fixture.ownFingerprint, repeated(0xa0), 7, 42)
 	last := len(store.signals) - 1
 	store.signals[last].MainModel = sweepMarker
 	key, _ := hex.DecodeString(sweepAnalysisID)

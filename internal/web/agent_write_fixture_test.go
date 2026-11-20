@@ -280,7 +280,7 @@ func newWriteFixtureWith(t *testing.T, options writeFixtureOptions) *writeFixtur
 		handlerOptions.Org = orgService
 
 		fixture.analysis = &memoryAnalysisStore{cipher: cipher, packs: map[string]storage.SessionPack{}, facets: map[string]storage.SessionFacet{}}
-		fixture.analysis.addSession(t, analysisOwnID, testFingerprinter(t).Fingerprint(testDeveloperKey), 7, 42)
+		fixture.analysis.addSession(t, analysisOwnID, testFingerprinter(t).Fingerprint(testDeveloperKey), repeated(0xa0), 7, 42)
 		fixture.suggestions = &suggestionMemory{memoryAnalysisStore: fixture.analysis, open: map[int64]string{42: storage.ScopeAll, 43: storage.ScopeAll}}
 		query, err := sessionanalysis.NewQueryService(fixture.suggestions, fixture.trigger, cipher, "local-model")
 		if err != nil {

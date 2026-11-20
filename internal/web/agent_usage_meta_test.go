@@ -130,6 +130,33 @@ func TestAgentEverySessionCardHasAUsableTreeID(t *testing.T) {
 	}
 }
 
+// Contract section 0.1 item 157: every agent row of `analysis sessions` has
+// a tree_id (a stored session always has its 32-byte root), and `usage tree`
+// answers it for the same identity.
+func TestAgentEveryAnalysisAgentRowHasAUsableTreeID(t *testing.T) {
+	fixture := newReadFixture(t)
+	for name, token := range map[string]string{"admin": fixture.adminRead, "developer": fixture.developer} {
+		items, _ := readData(t, fixture.facade(http.MethodGet, "/analysis/sessions?"+fixtureWindow, "", token))["items"].([]any)
+		if len(items) == 0 {
+			t.Fatalf("%s: no analysis sessions", name)
+		}
+		for _, item := range items {
+			row := item.(map[string]any)
+			if row["kind"] != "agent" {
+				continue
+			}
+			tree, _ := row["tree_id"].(string)
+			if tree == "" {
+				t.Errorf("%s: agent row %v has no tree_id", name, row["session_id"])
+				continue
+			}
+			if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/usage/trees/"+tree, "", token)); code != "" {
+				t.Errorf("%s: usage tree %s of analysis row %v = %s", name, tree, row["session_id"], code)
+			}
+		}
+	}
+}
+
 // pendingBilling is the real insights service whose overview reports one
 // request more whose billing is pending.
 type pendingBilling struct {

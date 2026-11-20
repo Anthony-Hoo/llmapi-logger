@@ -504,6 +504,19 @@ func TestRunnerSplitsOneRootByAPIKey(t *testing.T) {
 	}
 }
 
+// A stored session always has its 32-byte root (session_signals requires
+// it), so every agent row gets the tree_id `usage tree` takes and no chat
+// row gets one (contract section 0.1 item 157).
+func TestMapSessionGivesEveryAgentRowATreeID(t *testing.T) {
+	root := bytes.Repeat([]byte{0xc4}, 32)
+	if item := mapSession(storage.SessionSignals{SessionKey: bytes.Repeat([]byte{1}, 32), AgentRootFPR: root, Kind: KindAgent}); item.TreeID != hex.EncodeToString(root[:12]) {
+		t.Fatalf("agent row tree id = %q", item.TreeID)
+	}
+	if item := mapSession(storage.SessionSignals{SessionKey: bytes.Repeat([]byte{2}, 32), AgentRootFPR: root, Kind: KindChat}); item.TreeID != "" {
+		t.Fatalf("chat row tree id = %q", item.TreeID)
+	}
+}
+
 // A failed write stores neither signals nor pack, so the session stays due
 // and the next run stores both.
 func TestRunnerKeepsSessionDueUntilSignalsAndPackAreStored(t *testing.T) {
