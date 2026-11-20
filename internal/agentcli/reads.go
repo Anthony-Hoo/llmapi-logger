@@ -245,8 +245,13 @@ func exportCompleteness(header http.Header) (bool, string) {
 
 var reasonPattern = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
 
+// versionLocalStateUnusable is the incomplete reason of version when the
+// local state cannot be used as it is (contract section 0.1 item 144).
+const versionLocalStateUnusable = "local_state_unusable"
+
 // runVersion reports the client version and, when it can reach the server,
-// the two version headers. Failing to reach the server is not an error.
+// the two version headers. Failing to reach the server is not an error, and
+// neither is local state it may not use.
 func runVersion(inv *invocation) (*result, error) {
 	type serverVersions struct {
 		Latest          string `json:"api_latest"`
@@ -260,12 +265,20 @@ func runVersion(inv *invocation) (*result, error) {
 	}{Client: Version}
 	meta := agentapi.Meta{State: "ok", Complete: true}
 	// version only reads the credentials to reach the server: it checks the
-	// credential store like every other command but never changes it.
+	// credential store like every other command but never changes it, and a
+	// store it may not use (a link, another user's or a shared directory,
+	// one others can access) or an unreadable config.json is not an error
+	// here either: the client version is still reported, the server part is
+	// not, and the token is not used.
 	c, err := inv.clientWith(false)
 	var cliErr *cliError
+	var actions []string
 	switch {
 	case errors.As(err, &cliErr) && cliErr.Code == agentapi.CodeNotLoggedIn:
 		meta = agentapi.Meta{State: "ok", IncompleteReason: "not_logged_in"}
+	case errors.As(err, &cliErr) && cliErr.Code == agentapi.CodeLocalFileError:
+		meta = agentapi.Meta{State: "ok", IncompleteReason: versionLocalStateUnusable}
+		actions = append(actions, "The local state directory or its files cannot be used as they are, so the server was not asked; `llmaudit whoami` reports what is wrong as LOCAL_FILE_ERROR.")
 	case err != nil:
 		return nil, err
 	default:
@@ -299,7 +312,7 @@ func runVersion(inv *invocation) (*result, error) {
 	encodedData, _ := json.Marshal(data)
 	encodedMeta, _ := json.Marshal(meta)
 	ok := true
-	envelope := &serverEnvelope{OK: &ok, Data: encodedData, Meta: encodedMeta}
+	envelope := &serverEnvelope{OK: &ok, Data: encodedData, Meta: encodedMeta, NextActions: actions}
 	if data.Server != nil && !data.Server.Compatible {
 		envelope.NextActions = []string{"This llmaudit is older than the server accepts: ask the user to reinstall the llmapi-audit skill from the Agent access page."}
 	} else if data.Server != nil && data.Server.UpdateAvailable {

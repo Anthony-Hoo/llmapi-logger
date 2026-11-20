@@ -157,9 +157,10 @@ func entryKindProblem(info fs.FileInfo, dir bool) string {
 	return ""
 }
 
-// storeError is the LOCAL_FILE_ERROR for an entry of the credential store.
+// storeError is the LOCAL_FILE_ERROR for an entry of the credential store;
+// details.required_mode is the mode the entry needs, whatever is wrong.
 func storeError(path, problem string, mode os.FileMode) *cliError {
-	details := map[string]any{"path": path, "reason": problem}
+	details := map[string]any{"path": path, "reason": problem, "required_mode": fmt.Sprintf("%04o", mode)}
 	switch problem {
 	case problemSymlink, problemNotDir, problemNotFile:
 		return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is a link or not of the expected type, so it is not used",
@@ -170,7 +171,6 @@ func storeError(path, problem string, mode os.FileMode) *cliError {
 			Hint:    "Point LLMAUDIT_HOME at a directory of your own that others cannot write to, such as the default ~/.llmaudit (unset LLMAUDIT_HOME). Ask the user to fix it.",
 			Details: details}
 	}
-	details["required_mode"] = fmt.Sprintf("%04o", mode)
 	return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is accessible to other users and could not be made private",
 		Hint:    "Make it private and run the command again: the state directory needs mode 0700 and credentials.json mode 0600 (chmod 700 <dir>; chmod 600 <dir>/credentials.json), both owned by you.",
 		Details: details}
@@ -196,6 +196,33 @@ func securePrivateState(dir string, fix bool) error {
 		if _, problem := inspectPrivate(item.path, item.dir, item.mode, fix); problem != "" {
 			return storeError(item.path, problem, item.mode)
 		}
+	}
+	return nil
+}
+
+// checkStoreBeforeLogin refuses, before a login starts, a credential store
+// saveCredentials would refuse after the user approved, so no token is
+// issued that cannot be saved. It changes nothing: a loose mode of the
+// user's own store is left for saveCredentials to tighten.
+func checkStoreBeforeLogin(env *Env) error {
+	dir, err := env.stateDir()
+	if err != nil {
+		return err
+	}
+	exists, problem := inspectPrivate(dir, true, 0o700, false)
+	if !exists {
+		if info, err := os.Stat(filepath.Dir(dir)); err != nil || !info.IsDir() {
+			return localFileError("the directory that should hold the state directory does not exist; it is not created",
+				map[string]any{"path": dir, "reason": "parent_missing"})
+		}
+		return nil
+	}
+	if problem != "" && problem != problemMode {
+		return storeError(dir, problem, 0o700)
+	}
+	file := filepath.Join(dir, credentialsFile)
+	if _, problem := inspectPrivate(file, false, 0o600, false); problem != "" && problem != problemMode {
+		return storeError(file, problem, 0o600)
 	}
 	return nil
 }

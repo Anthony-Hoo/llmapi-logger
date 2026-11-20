@@ -3,6 +3,7 @@
 package agentcli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,7 +117,8 @@ func TestCredentialStoreLinksAreRefused(t *testing.T) {
 	if err := os.Symlink(shared, h.home); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"whoami"}, {"version"}, {"login", "--no-browser"}} {
+	assertVersionDegrades(t, h)
+	for _, args := range [][]string{{"whoami"}, {"login", "--no-browser"}, {"login", "--server", server.URL, "--no-browser"}} {
 		body := h.expectFailure(h.run(args...), "LOCAL_FILE_ERROR", 1)
 		if body.Details["reason"] != problemSymlink || body.Details["path"] != h.home || !strings.Contains(body.Hint, "LLMAUDIT_HOME") {
 			t.Fatalf("%v: %+v", args, body)
@@ -223,9 +225,9 @@ func TestOnlyCredentialCommandsTighten(t *testing.T) {
 		}
 	}
 	// version reports the loose store instead of using it.
-	body := h.expectFailure(h.run("version"), "LOCAL_FILE_ERROR", 1)
-	if body.Details["reason"] != problemMode || body.Details["path"] != h.home {
-		t.Fatalf("%+v", body)
+	assertVersionDegrades(t, h)
+	if modeOf(t, h.home) != 0o755 || modeOf(t, path) != 0o644 || len(server.recorded()) != 0 {
+		t.Fatalf("version changed the store or asked the server: %v %v", modeOf(t, h.home), modeOf(t, path))
 	}
 	if exit := h.run("whoami"); exit != 0 {
 		t.Fatalf("whoami exit %d: %s", exit, h.stderr.String())
@@ -245,5 +247,30 @@ func TestOnlyCredentialCommandsTighten(t *testing.T) {
 	}
 	if _, err := os.Lstat(parent); err == nil {
 		t.Fatal("the parent of the state directory was created")
+	}
+}
+
+// assertVersionDegrades: version with a credential store it may not use
+// still exits 0 with the client version, does not ask the server, and says
+// why in meta.
+func assertVersionDegrades(t *testing.T, h *harness) {
+	t.Helper()
+	if exit := h.run("version"); exit != 0 {
+		t.Fatalf("version: exit %d %s", exit, h.stderr.String())
+	}
+	envelope := h.success()
+	var data struct {
+		Client string           `json:"cli_version"`
+		Server *json.RawMessage `json:"server"`
+	}
+	var meta struct {
+		Complete bool   `json:"complete"`
+		Reason   string `json:"incomplete_reason"`
+	}
+	_ = json.Unmarshal(envelope["data"], &data)
+	_ = json.Unmarshal(envelope["meta"], &meta)
+	if data.Client != Version || data.Server != nil || meta.Complete || meta.Reason != versionLocalStateUnusable ||
+		!strings.Contains(string(envelope["next_actions"]), "llmaudit whoami") {
+		t.Fatalf("version: %s", h.stdout.String())
 	}
 }

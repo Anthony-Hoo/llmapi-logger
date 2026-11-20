@@ -99,6 +99,11 @@ func runLogin(inv *invocation) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A store the token could not be saved into is refused before the user
+	// is asked to approve anything (contract section 0.1 item 144).
+	if err := checkStoreBeforeLogin(env); err != nil {
+		return nil, err
+	}
 	device := inv.value("device")
 	if !inv.has("device") && env.Hostname != nil {
 		device, _ = env.Hostname()

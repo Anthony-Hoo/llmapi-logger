@@ -157,7 +157,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"version"},
 			Summary:     "show the client version and the API versions the server reports",
-			Description: "Asks the server (whoami) for its newest and minimum supported client versions. A failure to reach the server is not an error: meta.complete is then false.",
+			Description: "Asks the server (whoami) for its newest and minimum supported client versions. A failure to reach the server is not an error: meta.complete is then false. Neither is a state directory or credentials.json it may not use (a link, another user's or a shared directory, files others can access): nothing is changed or sent, data.server is null and meta.incomplete_reason is local_state_unusable; `llmaudit whoami` says what is wrong.",
 			Routes:      []routeSpec{{Method: "GET", Path: "/whoami", Meta: true}},
 			Examples:    []string{"llmaudit version"},
 			Run:         runVersion,
