@@ -144,12 +144,13 @@ func concurrentPeak(t *testing.T, fixture *writeFixture, body string) (int64, ma
 }
 
 // peakAnswersDidTheWork reports whether the 30 answers of concurrentPeak are
-// the ones a measurement of the peak needs: every request either had its body
+// the ones a measurement of the peak needs, for bodies that pass the value
+// limit and so take a decoding slot: every request either had its body
 // decoded and was refused for it (INVALID_ARGUMENT), or waited agentBodyWait
-// for a decoding slot and was refused with TIMEOUT. How many wait that long
-// depends on the machine: none on a fast one, some under the race detector.
-// None is turned away for a rate, which would do no work, and at least as
-// many as there are slots were decoded, so the slots were all in use at once.
+// for a slot and was refused with TIMEOUT. How many wait that long depends on
+// the machine: none on a fast one, some under the race detector. None is
+// turned away for a rate, which would do no work, and at least as many as
+// there are slots were decoded.
 func peakAnswersDidTheWork(codes map[agentapi.Code]int) bool {
 	decoded, waited := codes[agentapi.CodeInvalidArgument], codes[agentapi.CodeTimeout]
 	return decoded+waited == 30 && decoded >= maxAgentBodyDecoders
@@ -157,17 +158,18 @@ func peakAnswersDidTheWork(codes map[agentapi.Code]int) bool {
 
 // TestAgentBodyConcurrentPeakIsBoundedAtTheByteLimit: 30 plan requests at
 // once, each the costliest body at the plan's size limit, raise the heap in
-// use by less than 150 MiB, and every one of them is refused for its body or
-// for the wait for a decoding slot (none is turned away for a rate, which
-// would do no work).
+// use by less than 150 MiB, and every one of them is refused for its body
+// (none is turned away for a rate or a wait, which would do no work). A body
+// of this size is over the value limit, so it is refused by the scan and
+// never waits for a decoding slot: no machine is slow enough for a TIMEOUT.
 func TestAgentBodyConcurrentPeakIsBoundedAtTheByteLimit(t *testing.T) {
 	const maxPeakMiB = 150
 	fixture := newWriteFixture(t)
 	body := repeatedElements(`{"op":"analysis.calibrate","args":{"labels":[`, `{}`, `]}}`, int(maxAgentPlanBodyBytes))
 	above, codes := concurrentPeak(t, fixture, body)
 	t.Logf("30 x %d bytes of empty labels at once: the heap in use rose %d MiB; answers %v", len(body), above>>20, codes)
-	if !peakAnswersDidTheWork(codes) {
-		t.Errorf("answers %v, want 30 of INVALID_ARGUMENT or TIMEOUT, at least %d INVALID_ARGUMENT", codes, maxAgentBodyDecoders)
+	if codes[agentapi.CodeInvalidArgument] != 30 {
+		t.Errorf("answers %v, want 30 INVALID_ARGUMENT", codes)
 	}
 	if above > maxPeakMiB<<20 {
 		t.Errorf("the heap in use rose %d MiB, more than %d MiB", above>>20, maxPeakMiB)
