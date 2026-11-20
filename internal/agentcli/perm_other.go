@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"syscall"
 )
 
 // createPrivateFile creates path (which must not exist) with mode 0600.
@@ -21,26 +22,53 @@ func createPrivateDir(path string) error {
 	return nil
 }
 
-// tightenPrivate makes an existing path accessible to its owner only: mode
-// (0700 for the state directory, 0600 for credentials.json) when group or
-// others have any access. A missing path is fine. It reports the path it
-// could not tighten.
-func tightenPrivate(path string, mode os.FileMode) error {
-	info, err := os.Stat(path)
+// inspectPrivate checks one entry of the credential store (the state
+// directory when dir is true, credentials.json otherwise) without following
+// a symbolic link, and reports whether it exists and what is wrong with it.
+// An entry that is a link, of the wrong type, owned by another user, or (a
+// directory) sticky, as shared directories such as /tmp are, is never
+// changed. One the current user owns that group or others can access is
+// made private (mode) when fix is true, through a descriptor opened without
+// following links, and reported with problemMode otherwise or when that
+// fails.
+func inspectPrivate(path string, dir bool, mode os.FileMode, fix bool) (bool, string) {
+	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return false, ""
 	}
 	if err != nil {
-		return err
+		return true, problemUnreadable
+	}
+	if problem := entryKindProblem(info, dir); problem != "" {
+		return true, problem
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return true, problemNotOwned
+	}
+	if dir && info.Mode()&os.ModeSticky != 0 {
+		return true, problemShared
 	}
 	if info.Mode().Perm()&0o077 == 0 {
-		return nil
+		return true, ""
 	}
-	if err := os.Chmod(path, mode); err != nil {
-		return err
+	if !fix {
+		return true, problemMode
 	}
-	if info, err = os.Stat(path); err != nil || info.Mode().Perm()&0o077 != 0 {
-		return errors.New("still accessible to others")
+	handle, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return true, problemMode
 	}
-	return nil
+	defer handle.Close()
+	opened, err := handle.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return true, problemMode
+	}
+	if err := handle.Chmod(mode); err != nil {
+		return true, problemMode
+	}
+	if opened, err = handle.Stat(); err != nil || opened.Mode().Perm()&0o077 != 0 {
+		return true, problemMode
+	}
+	return true, ""
 }

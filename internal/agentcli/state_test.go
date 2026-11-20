@@ -19,7 +19,7 @@ func TestCredentialsReplacedAtomically(t *testing.T) {
 	if err := saveCredentials(h.env, &second); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := loadCredentials(h.env)
+	loaded, err := loadCredentials(h.env, true)
 	if err != nil || loaded.Server != "https://other.example.com" || loaded.Token != testToken {
 		t.Fatalf("loaded %+v %v", loaded, err)
 	}

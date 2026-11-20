@@ -120,7 +120,18 @@ func createPrivateDir(path string) error {
 	return nil
 }
 
-// tightenPrivate does nothing on Windows: the state directory and the
-// credentials file get an owner-only DACL when they are created, and mode
-// bits do not describe Windows access.
-func tightenPrivate(string, os.FileMode) error { return nil }
+// inspectPrivate checks one entry of the credential store without following
+// a link. On Windows only a link (any reparse point) and the wrong type are
+// refused: the state directory and the credentials file get an owner-only
+// DACL when they are created, mode bits do not describe Windows access, and
+// nothing is ever changed here.
+func inspectPrivate(path string, dir bool, _ os.FileMode, _ bool) (bool, string) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, ""
+	}
+	if err != nil {
+		return true, problemUnreadable
+	}
+	return true, entryKindProblem(info, dir)
+}

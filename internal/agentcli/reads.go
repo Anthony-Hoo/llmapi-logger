@@ -237,7 +237,9 @@ func runVersion(inv *invocation) (*result, error) {
 		Server *serverVersions `json:"server"`
 	}{Client: Version}
 	meta := agentapi.Meta{State: "ok", Complete: true}
-	c, err := inv.client()
+	// version only reads the credentials to reach the server: it checks the
+	// credential store like every other command but never changes it.
+	c, err := inv.clientWith(false)
 	var cliErr *cliError
 	switch {
 	case errors.As(err, &cliErr) && cliErr.Code == agentapi.CodeNotLoggedIn:

@@ -84,9 +84,14 @@ func runLogin(inv *invocation) (*result, error) {
 	env := inv.env
 	server := inv.value("server")
 	if server == "" {
-		if creds, err := loadCredentials(env); err == nil {
+		creds, err := loadCredentials(env, true)
+		var cliErr *cliError
+		switch {
+		case err == nil:
 			server = creds.Server
-		} else {
+		case errors.As(err, &cliErr) && cliErr.Code == agentapi.CodeLocalFileError:
+			return nil, err
+		default:
 			return nil, usageError("--server", "--server is required on the first login")
 		}
 	}

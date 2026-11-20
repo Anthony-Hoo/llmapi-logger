@@ -58,8 +58,15 @@ func newClient(env *Env, server, token, command string) (*client, error) {
 }
 
 // client loads the saved credentials and builds a client for the command.
+// A loose mode of the user's own credential store is tightened first.
 func (inv *invocation) client() (*client, error) {
-	creds, err := loadCredentials(inv.env)
+	return inv.clientWith(true)
+}
+
+// clientWith is client; fix false only checks the credential store and
+// changes nothing (version).
+func (inv *invocation) clientWith(fix bool) (*client, error) {
+	creds, err := loadCredentials(inv.env, fix)
 	if err != nil {
 		return nil, err
 	}
