@@ -312,6 +312,7 @@ var dynamicSamples = map[string]string{
 	"nearest.Format(orgreport.WeekLayout)":           "2026-11-02",
 	"keyTarget.Field":                                "llm.base_url",
 	"diff.KeySource":                                 "saved",
+	"formatAgentID(id)":                              "42",
 }
 
 // serverCommandTexts returns every string the server code of internal/web
@@ -470,6 +471,13 @@ func TestPlanAndApplyTextsParseWithTheCLI(t *testing.T) {
 		{"op": "analysis.run"},
 		{"op": "weekly.regenerate", "args": map[string]any{"week": "2026-11-02"}},
 		{"op": "analysis.dismiss", "args": map[string]any{"suggestion_id": 9}},
+		{"op": "analysis.dismiss", "args": map[string]any{"suggestion_id": 42}},
+		{"op": "config.set", "kind": "member", "id": "4242", "set": map[string]any{"group_id": json.Number(ids.group)}},
+		{"op": "config.set", "kind": "principal", "id": "token:15", "set": map[string]any{"class": "service"}},
+		{"op": "config.remove", "kind": "group", "id": ids.group},
+		{"op": "config.set", "kind": "group", "set": map[string]any{"name": "group seed", "enabled": true}},
+		{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{map[string]any{"session_id": analysisOwnID}}}},
+		{"op": "config.clear-key", "kind": "analysis-settings"},
 	} {
 		response := fixture.facade(http.MethodPost, "/plans", body, fixture.adminWrite)
 		check(response)

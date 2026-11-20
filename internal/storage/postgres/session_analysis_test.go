@@ -705,11 +705,29 @@ func TestSessionReportsStorage(t *testing.T) {
 	if err != nil || len(listed) != 1 {
 		t.Fatalf("suggestions = %+v, %v", listed, err)
 	}
+	// SuggestionExists answers what DismissSuggestion's WHERE clause finds.
+	for _, check := range []struct {
+		id     int64
+		scopes []string
+		want   bool
+	}{
+		{listed[0].ID, []string{storage.ScopeAll, storage.ScopeProject}, true},
+		{listed[0].ID, []string{storage.ScopePerson}, false},
+		{listed[0].ID + 1000, []string{storage.ScopeAll, storage.ScopeProject}, false},
+	} {
+		if exists, err := store.SuggestionExists(ctx, check.id, check.scopes); err != nil || exists != check.want {
+			t.Fatalf("SuggestionExists(%d, %v) = %v, %v", check.id, check.scopes, exists, err)
+		}
+	}
 	if err := store.DismissSuggestion(ctx, listed[0].ID, storage.ScopePerson, 2); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("dismiss in the wrong scope: %v", err)
 	}
 	if err := store.DismissSuggestion(ctx, listed[0].ID, storage.ScopeAll, 2); err != nil {
 		t.Fatal(err)
+	}
+	// A dismissed suggestion still exists: dismissing it again succeeds.
+	if exists, err := store.SuggestionExists(ctx, listed[0].ID, []string{storage.ScopeAll, storage.ScopeProject}); err != nil || !exists {
+		t.Fatalf("dismissed suggestion exists = %v, %v", exists, err)
 	}
 	suggestion.Support = 4
 	if err := store.UpsertSuggestion(ctx, suggestion); err != nil {

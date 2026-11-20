@@ -92,11 +92,32 @@ func (memory *suggestionMemory) DismissSuggestion(_ context.Context, id int64, s
 	memory.mu.Lock()
 	defer memory.mu.Unlock()
 	if memory.open[id] != scope {
+		// Like the PostgreSQL store, a dismissed suggestion is still found
+		// and dismissing it again succeeds.
+		for _, dismissed := range memory.dismissed {
+			if dismissed == id && scope == storage.ScopeAll {
+				return nil
+			}
+		}
 		return sql.ErrNoRows
 	}
 	delete(memory.open, id)
 	memory.dismissed = append(memory.dismissed, id)
 	return nil
+}
+
+func (memory *suggestionMemory) SuggestionExists(_ context.Context, id int64, scopes []string) (bool, error) {
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	if scope, ok := memory.open[id]; ok {
+		return contains(scopes, scope), nil
+	}
+	for _, dismissed := range memory.dismissed {
+		if dismissed == id {
+			return contains(scopes, storage.ScopeAll), nil
+		}
+	}
+	return false, nil
 }
 
 // nopApplier takes settings changes without a runner.

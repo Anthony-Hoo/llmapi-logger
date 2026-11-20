@@ -88,4 +88,6 @@ type AgentAnalysisSettingsWriter interface {
 type AgentAnalysisRunner interface {
 	RunState(context.Context) (sessionanalysis.RunState, error)
 	CalibrationAvailable() bool
+	CheckCalibrate(context.Context, []sessionanalysis.CalibrationLabel) (sessionanalysis.CalibrationPreview, error)
+	CheckDismissSuggestion(context.Context, int64) error
 }

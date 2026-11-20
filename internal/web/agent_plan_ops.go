@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"llmapi-logger/internal/agentaccess"
@@ -60,7 +61,7 @@ func (handler *managementHandler) planAnalysisRun(ctx context.Context) (*agentPl
 	return plan, nil
 }
 
-func (handler *managementHandler) planAnalysisCalibrate(request agentPlanRequest) (*agentPlan, error) {
+func (handler *managementHandler) planAnalysisCalibrate(ctx context.Context, request agentPlanRequest) (*agentPlan, error) {
 	runner, err := handler.agentAnalysisRunner()
 	if err != nil {
 		return nil, err
@@ -83,9 +84,34 @@ func (handler *managementHandler) planAnalysisCalibrate(request agentPlanRequest
 	if !runner.CalibrationAvailable() {
 		return nil, calibrationUnavailable("")
 	}
+	// The comparison apply will make, made now without saving: what the user
+	// agrees to is the calibration these labels produce.
+	preview, err := runner.CheckCalibrate(ctx, labels)
+	if err != nil {
+		if errors.Is(err, query.ErrInvalidQuery) && !runner.CalibrationAvailable() {
+			return nil, calibrationUnavailable("")
+		}
+		return nil, err
+	}
 	plan := newAgentPlan(agentapi.OpAnalysisCalibrate, agentPlanTarget{Kind: "analysis-calibration"})
 	plan.view.Extras["labels"] = len(labels)
-	plan.effect("Compares these labels with the stored facets of the current model and saves the agreement per field; fields below the agreement bar are hidden from reports.")
+	plan.view.Extras["samples"] = preview.Samples
+	plan.view.Extras["unmatched"] = preview.Unmatched
+	plan.view.Extras["empty"] = preview.Empty
+	plan.view.Extras["compared"] = preview.Compared
+	plan.view.Extras["hidden_fields"] = preview.HiddenFields
+	plan.effect("Compares these labels with the stored facets of the current model and saves the agreement per field as the calibration in use, replacing the current one; fields below the agreement bar (with enough samples) are hidden from reports.")
+	plan.effect(calibrationMatchEffect(preview))
+	if len(preview.Empty) > 0 {
+		plan.effect(strconv.Itoa(len(preview.Empty)) + " label(s) match a stored facet but name no field to compare (only session_id): " + labelIndexes(preview.Empty) + "; they count as samples and compare nothing.")
+	}
+	if preview.Samples == 0 {
+		plan.effect("No label matches a stored facet of the current model: applying saves a calibration of 0 samples that replaces the one in use, so no field is hidden afterwards. The web page does the same with these labels.")
+	} else if len(preview.HiddenFields) > 0 {
+		plan.effect("With these labels the following fields would be hidden from reports: " + strings.Join(preview.HiddenFields, ", ") + ".")
+	} else {
+		plan.effect("With these labels no field would be hidden from reports.")
+	}
 	plan.verify = "llmaudit analysis overview --since 1d"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
 		// The model stage may have been switched off since the plan was made:
@@ -108,6 +134,30 @@ func (handler *managementHandler) planAnalysisCalibrate(request agentPlanRequest
 	return plan, nil
 }
 
+// calibrationMatchEffect says how many labels the calibration compares and
+// which it skips because their session has no stored facet of the current
+// model.
+func calibrationMatchEffect(preview sessionanalysis.CalibrationPreview) string {
+	text := strconv.FormatInt(preview.Samples, 10) + " of " + strconv.Itoa(preview.Labels) + " label(s) have a stored facet of the current model and are compared"
+	if len(preview.Unmatched) == 0 {
+		return text + "."
+	}
+	return text + "; " + strconv.Itoa(len(preview.Unmatched)) + " name a session without one and are skipped: " + labelIndexes(preview.Unmatched) + "."
+}
+
+// labelIndexes names labels by position, the first ten of them.
+func labelIndexes(indexes []int) string {
+	names := make([]string, 0, min(len(indexes), 10))
+	for _, index := range indexes[:min(len(indexes), 10)] {
+		names = append(names, "args.labels["+strconv.Itoa(index)+"]")
+	}
+	text := strings.Join(names, ", ")
+	if len(indexes) > 10 {
+		text += " and " + strconv.Itoa(len(indexes)-10) + " more"
+	}
+	return text
+}
+
 // calibrationUnavailable is the refusal of a calibration while the model
 // stage is off, at plan time and, with hint, at apply time.
 func calibrationUnavailable(hint string) *agentFailure {
@@ -115,8 +165,16 @@ func calibrationUnavailable(hint string) *agentFailure {
 		Details: map[string]any{"field": "llm.enabled", "reason": "model_stage_disabled"}}
 }
 
-func (handler *managementHandler) planAnalysisDismiss(request agentPlanRequest) (*agentPlan, error) {
-	if _, err := handler.agentAnalysisRunner(); err != nil {
+// dismissNotFound is the refusal of a dismissal whose suggestion does not
+// exist (or is a personal one), at plan time and at apply time.
+func dismissNotFound() *agentFailure {
+	return &agentFailure{Code: agentapi.CodeNotFound, Message: "no suggestion with this id can be dismissed",
+		Hint: "List the open suggestions with `llmaudit analysis report`; only all-keys and project suggestions can be dismissed."}
+}
+
+func (handler *managementHandler) planAnalysisDismiss(ctx context.Context, request agentPlanRequest) (*agentPlan, error) {
+	runner, err := handler.agentAnalysisRunner()
+	if err != nil {
 		return nil, err
 	}
 	// A JSON number only: json.Number would also take a numeric string.
@@ -129,14 +187,24 @@ func (handler *managementHandler) planAnalysisDismiss(request agentPlanRequest) 
 	if !ok || id <= 0 {
 		return nil, fieldFailure("args.suggestion_id", "args.suggestion_id must be a positive integer, written as a JSON number")
 	}
+	// The check apply's dismissal makes, made now: a suggestion that does not
+	// exist (or is a personal one) gets no plan.
+	switch err := runner.CheckDismissSuggestion(ctx, id); {
+	case err == nil:
+	case agentErrorCodeOf(err) == agentapi.CodeNotFound:
+		return nil, dismissNotFound()
+	case errors.Is(err, sessionanalysis.ErrCannotCheck):
+		return nil, &agentFailure{Code: agentapi.CodeUpstreamUnavailable, Message: "this deployment cannot check a suggestion before dismissing it"}
+	default:
+		return nil, err
+	}
 	plan := newAgentPlan(agentapi.OpAnalysisDismiss, agentPlanTarget{Kind: "analysis-suggestion", ID: formatAgentID(id)})
-	plan.effect("Marks the suggestion dismissed in the weekly review. Only all-keys and project suggestions can be dismissed; the service decides when the plan is applied.")
+	plan.effect("Marks suggestion " + formatAgentID(id) + " dismissed in the weekly review of all keys or of its project; it is no longer shown as open. A suggestion that is already dismissed stays dismissed.")
 	plan.verify = "llmaudit analysis report"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
 		err := handler.sessionAnalysis.DismissSuggestion(ctx, id)
 		if err != nil && agentErrorCodeOf(err) == agentapi.CodeNotFound {
-			return agentApplied{}, &agentFailure{Code: agentapi.CodeNotFound, Message: "no suggestion with this id can be dismissed",
-				Hint: "List the open suggestions with `llmaudit analysis report`; only all-keys and project suggestions can be dismissed."}
+			return agentApplied{}, dismissNotFound()
 		}
 		return agentApplied{}, err
 	}

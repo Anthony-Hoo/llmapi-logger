@@ -679,9 +679,19 @@ func TestAgentOperationPlans(t *testing.T) {
 	if !jsonEqual(fixture.suggestions.dismissed, []int64{42}) {
 		t.Fatalf("dismissed = %v", fixture.suggestions.dismissed)
 	}
-	unknown := fixture.plan(t, `{"op":"analysis.dismiss","args":{"suggestion_id":99}}`)
-	if body := failure(t, fixture.facade(http.MethodPost, "/plans/"+unknown.PlanID+"/apply", nil, fixture.adminWrite)); body.Code != agentapi.CodeNotFound || !strings.Contains(body.Hint, "llmaudit analysis report") {
+	// Contract section 0.1 item 105: a suggestion that does not exist gets no
+	// plan; the refusal is the one apply would give.
+	if body := failure(t, fixture.facade(http.MethodPost, "/plans", `{"op":"analysis.dismiss","args":{"suggestion_id":99}}`, fixture.adminWrite)); body.Code != agentapi.CodeNotFound || !strings.Contains(body.Hint, "llmaudit analysis report") {
 		t.Fatalf("dismiss unknown = %s %s", body.Code, body.Hint)
+	}
+	// A dismissed suggestion still exists: dismissing it again is planned and
+	// succeeds, as on the web route.
+	redismiss := fixture.plan(t, `{"op":"analysis.dismiss","args":{"suggestion_id":42}}`)
+	fixture.apply(t, redismiss.PlanID)
+	for _, effect := range append(dismiss.Effects, redismiss.Effects...) {
+		if strings.Contains(effect, "decides") {
+			t.Fatalf("effect defers to the service: %q", effect)
+		}
 	}
 }
 

@@ -164,47 +164,13 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 	if len(labels) == 0 || len(labels) > maxCalibrationLabels {
 		return CalibrationResult{}, invalid("between 1 and 1000 labels are required")
 	}
-	compared := map[string]int64{}
-	agreed := map[string]int64{}
 	result := CalibrationResult{PromptVersion: PromptVersion, Model: service.modelName(), Labels: len(labels)}
-	for _, label := range labels {
-		key, _, err := checkCalibrationLabel(label)
-		if err != nil {
-			return CalibrationResult{}, err
-		}
-		facet, err := service.facets.LoadSessionFacet(ctx, key)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return CalibrationResult{}, err
-		}
-		if facet.Status != FacetOK || facet.Kind != storage.PackKindSession || facet.PromptVersion != PromptVersion || facet.Model != service.modelName() {
-			continue
-		}
-		result.Samples++
-		compare := func(field, want, got string) {
-			if want == "" {
-				return
-			}
-			compared[field]++
-			if want == got {
-				agreed[field]++
-			}
-		}
-		compare("task_type", label.TaskType, facet.TaskType)
-		compare("outcome", label.Outcome, facet.Outcome)
-		compare("collaboration", label.Collaboration, facet.Collaboration)
-		compare("work_relevance", label.WorkRelevance, facet.WorkRelevance)
-		if label.Friction != nil {
-			var got []string
-			_ = json.Unmarshal([]byte(facet.Friction), &got)
-			compared["friction"]++
-			if sameSet(label.Friction, got) {
-				agreed["friction"]++
-			}
-		}
+	comparison, err := service.compareLabels(ctx, labels)
+	if err != nil {
+		return CalibrationResult{}, err
 	}
+	compared, agreed := comparison.compared, comparison.agreed
+	result.Samples = comparison.samples
 	result.Compared = compared
 	result.Agreement = map[string]float64{}
 	for field, count := range compared {
@@ -225,6 +191,109 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 		return CalibrationResult{}, err
 	}
 	return result, nil
+}
+
+// labelComparison is what comparing labels with the stored facets found.
+type labelComparison struct {
+	samples  int64
+	compared map[string]int64
+	agreed   map[string]int64
+	// unmatched are the indexes of labels without a stored facet of the
+	// current prompt version and model (not counted as samples).
+	unmatched []int
+	// empty are the indexes of matched labels that name no field to compare.
+	empty []int
+}
+
+// compareLabels compares labels with the stored facets of the current prompt
+// version and model; Calibrate and CheckCalibrate share it. It writes
+// nothing.
+func (service *QueryService) compareLabels(ctx context.Context, labels []CalibrationLabel) (labelComparison, error) {
+	comparison := labelComparison{compared: map[string]int64{}, agreed: map[string]int64{}}
+	for index, label := range labels {
+		key, _, err := checkCalibrationLabel(label)
+		if err != nil {
+			return labelComparison{}, err
+		}
+		facet, err := service.facets.LoadSessionFacet(ctx, key)
+		if errors.Is(err, sql.ErrNoRows) {
+			comparison.unmatched = append(comparison.unmatched, index)
+			continue
+		}
+		if err != nil {
+			return labelComparison{}, err
+		}
+		if facet.Status != FacetOK || facet.Kind != storage.PackKindSession || facet.PromptVersion != PromptVersion || facet.Model != service.modelName() {
+			comparison.unmatched = append(comparison.unmatched, index)
+			continue
+		}
+		comparison.samples++
+		fields := 0
+		compare := func(field, want, got string) {
+			if want == "" {
+				return
+			}
+			fields++
+			comparison.compared[field]++
+			if want == got {
+				comparison.agreed[field]++
+			}
+		}
+		compare("task_type", label.TaskType, facet.TaskType)
+		compare("outcome", label.Outcome, facet.Outcome)
+		compare("collaboration", label.Collaboration, facet.Collaboration)
+		compare("work_relevance", label.WorkRelevance, facet.WorkRelevance)
+		if label.Friction != nil {
+			var got []string
+			_ = json.Unmarshal([]byte(facet.Friction), &got)
+			fields++
+			comparison.compared["friction"]++
+			if sameSet(label.Friction, got) {
+				comparison.agreed["friction"]++
+			}
+		}
+		if fields == 0 {
+			comparison.empty = append(comparison.empty, index)
+		}
+	}
+	return comparison, nil
+}
+
+// CalibrationPreview is what Calibrate would compare, read without saving:
+// Samples labels have a stored facet of the current prompt version and model;
+// Unmatched (indexes) have none and are skipped; Empty (indexes) matched but
+// name no field to compare; Compared counts the comparisons per field, and
+// HiddenFields are the fields the saved calibration would hide.
+type CalibrationPreview struct {
+	Labels       int              `json:"labels"`
+	Samples      int64            `json:"samples"`
+	Unmatched    []int            `json:"unmatched"`
+	Empty        []int            `json:"empty"`
+	Compared     map[string]int64 `json:"compared"`
+	HiddenFields []string         `json:"hidden_fields"`
+}
+
+// CheckCalibrate runs every check Calibrate runs and compares the labels
+// with the stored facets exactly as it would, without saving anything. A
+// label whose session has no stored facet is not an error, as in Calibrate:
+// it is reported in Unmatched.
+func (service *QueryService) CheckCalibrate(ctx context.Context, labels []CalibrationLabel) (CalibrationPreview, error) {
+	if !service.CalibrationAvailable() {
+		return CalibrationPreview{}, invalid("the local model is not enabled")
+	}
+	if err := ValidateCalibrationLabels(labels); err != nil {
+		return CalibrationPreview{}, err
+	}
+	comparison, err := service.compareLabels(ctx, labels)
+	if err != nil {
+		return CalibrationPreview{}, err
+	}
+	agreement := map[string]float64{}
+	for field, count := range comparison.compared {
+		agreement[field] = float64(comparison.agreed[field]) / float64(count)
+	}
+	return CalibrationPreview{Labels: len(labels), Samples: comparison.samples, Unmatched: append([]int{}, comparison.unmatched...),
+		Empty: append([]int{}, comparison.empty...), Compared: comparison.compared, HiddenFields: hiddenFrom(agreement, comparison.compared)}, nil
 }
 
 // checkCalibrationLabel is Calibrate's check of one label: the session id,

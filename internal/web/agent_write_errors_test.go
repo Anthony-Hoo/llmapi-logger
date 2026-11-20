@@ -80,7 +80,12 @@ func TestEveryApplyRefusalNamesNoBody(t *testing.T) {
 	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "ua-rule", "id": created.ID, "set": map[string]any{"name": "renamed"}})
 	fixture.trigger.running = true
 	run := fixture.plan(t, `{"op":"analysis.run"}`)
-	dismiss := fixture.plan(t, `{"op":"analysis.dismiss","args":{"suggestion_id":99}}`)
+	// Suggestion 43 exists when the plan is made and is gone when it is
+	// applied.
+	dismiss := fixture.plan(t, `{"op":"analysis.dismiss","args":{"suggestion_id":43}}`)
+	fixture.suggestions.mu.Lock()
+	delete(fixture.suggestions.open, 43)
+	fixture.suggestions.mu.Unlock()
 	settings := fixture.plan(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"run_at": "04:00"}})
 	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"run_at": "05:00"}})
 	for name, test := range map[string]struct {

@@ -9,6 +9,7 @@ import (
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/orgreport"
+	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/sessionanalysis"
 	"llmapi-logger/internal/uaguard"
 )
@@ -78,9 +79,9 @@ func (handler *managementHandler) planConfigSet(ctx context.Context, request age
 	case "project":
 		return handler.planProjectSet(ctx, request, creating)
 	case "member":
-		return handler.planMemberSet(request)
+		return handler.planMemberSet(ctx, request)
 	case "principal":
-		return handler.planPrincipalSet(request)
+		return handler.planPrincipalSet(ctx, request)
 	case "weekly-settings":
 		return handler.planWeeklySettingsSet(ctx, request)
 	default:
@@ -483,7 +484,61 @@ type agentPrincipalPatch struct {
 	Class *string `json:"class"`
 }
 
-func (handler *managementHandler) planMemberSet(request agentPlanRequest) (*agentPlan, error) {
+// callerSeen reports whether this system has seen a NewAPI user or token: a
+// user in the NewAPI user directory, or a user or token named by any audit
+// record. checked is false when neither source could answer. The web routes
+// for members and principals accept any positive id (org_admin_api.go); the
+// plan says so when the id is not a caller seen here.
+func (handler *managementHandler) callerSeen(ctx context.Context, kind string, id int64) (seen, checked bool) {
+	if kind == orgreport.PrincipalUser && handler.users != nil {
+		snapshot := handler.users.Snapshot()
+		if !snapshot.RefreshedAt.IsZero() || len(snapshot.Users) > 0 {
+			checked = true
+		}
+		for _, user := range snapshot.Users {
+			if user.ID == id {
+				return true, true
+			}
+		}
+	}
+	if handler.query == nil {
+		return false, checked
+	}
+	filter := query.Filter{}
+	if kind == orgreport.PrincipalUser {
+		filter.NewAPIUserID = &id
+	} else {
+		filter.NewAPITokenID = &id
+	}
+	page, err := handler.query.List(ctx, filter, query.Cursor{}, 1)
+	if err != nil {
+		return false, checked
+	}
+	return len(page.Items) > 0, true
+}
+
+// unseenCallerEffect is the effect line of a member or principal plan whose
+// id is not a caller this system has seen, "" when it is one.
+func (handler *managementHandler) unseenCallerEffect(ctx context.Context, kind string, id int64) string {
+	seen, checked := handler.callerSeen(ctx, kind, id)
+	noun, list := "User "+formatAgentID(id), "`llmaudit callers list` or `llmaudit requests list --user-id "+formatAgentID(id)+"`"
+	if kind == orgreport.PrincipalToken {
+		noun, list = "Token "+formatAgentID(id), "`llmaudit requests list --token-id "+formatAgentID(id)+"`"
+	}
+	switch {
+	case seen:
+		return ""
+	case !checked:
+		return "Whether " + strings.ToLower(noun[:1]) + noun[1:] + " exists could not be checked here (no user directory or audit records are available). The web page accepts any id as well; make sure it is the intended one."
+	}
+	where := "no audit record names it"
+	if kind == orgreport.PrincipalUser {
+		where = "not in the NewAPI user directory, and no audit record names it"
+	}
+	return noun + " is not among the callers this system has seen (" + where + "). The web page accepts any id as well, so the plan is valid, but check the id with " + list + " before applying."
+}
+
+func (handler *managementHandler) planMemberSet(ctx context.Context, request agentPlanRequest) (*agentPlan, error) {
 	org, err := handler.agentOrgWriter()
 	if err != nil {
 		return nil, err
@@ -524,6 +579,10 @@ func (handler *managementHandler) planMemberSet(request agentPlanRequest) (*agen
 	plan.view.Target.Version = agentVersion(version)
 	plan.view.After = agentOrgMemberOf(diff.After)
 	changedOrNothing(plan, changed)
+	if effect := handler.unseenCallerEffect(ctx, orgreport.PrincipalUser, userID); effect != "" {
+		plan.view.Extras["caller_seen"] = false
+		plan.effect(effect)
+	}
 	plan.effect(effectCatalog)
 	plan.verify = "llmaudit config show --kind org"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
@@ -533,7 +592,7 @@ func (handler *managementHandler) planMemberSet(request agentPlanRequest) (*agen
 	return plan, nil
 }
 
-func (handler *managementHandler) planPrincipalSet(request agentPlanRequest) (*agentPlan, error) {
+func (handler *managementHandler) planPrincipalSet(ctx context.Context, request agentPlanRequest) (*agentPlan, error) {
 	org, err := handler.agentOrgWriter()
 	if err != nil {
 		return nil, err
@@ -574,6 +633,10 @@ func (handler *managementHandler) planPrincipalSet(request agentPlanRequest) (*a
 	plan.view.Target.Version = agentVersion(version)
 	plan.view.After = agentOrgPrincipalOf(diff.After)
 	changedOrNothing(plan, changed)
+	if effect := handler.unseenCallerEffect(ctx, kind, id); effect != "" {
+		plan.view.Extras["caller_seen"] = false
+		plan.effect(effect)
+	}
 	plan.effect(effectCatalog)
 	plan.verify = "llmaudit config show --kind org"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {

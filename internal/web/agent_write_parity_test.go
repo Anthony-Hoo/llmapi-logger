@@ -6,6 +6,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/query"
 )
 
 // Parity of the writes (plan section 12, contract section 4.6): every write
@@ -215,5 +218,105 @@ func TestAgentWritesMatchTheWebRoutes(t *testing.T) {
 	}
 	if after := facade.configState(t); !reflect.DeepEqual(after, before) {
 		t.Fatal("test-model saved something")
+	}
+}
+
+// Contract section 0.1 item 105: the web route calibrates with labels whose
+// session has no stored facet, and with labels that name no field (it skips
+// the first and compares nothing for the second), so the agent plans them
+// too; the plan states exactly what the calibration will compare.
+func TestCalibratePlanStatesWhatTheLabelsMatch(t *testing.T) {
+	fixture := newWriteFixture(t)
+	zero := strings.Repeat("0", 64)
+	labels := []any{map[string]any{"session_id": zero, "task_type": "bug_fix"}, map[string]any{"session_id": analysisOwnID}}
+	plan := fixture.plan(t, map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": labels}})
+	unmatched, _ := plan.Extras["unmatched"].([]any)
+	if len(unmatched) == 0 || unmatched[0] != float64(0) {
+		t.Fatalf("unmatched = %v", plan.Extras)
+	}
+	effects := strings.Join(plan.Effects, "\n")
+	if !strings.Contains(effects, "args.labels[0]") || !strings.Contains(effects, "of 2 label(s)") {
+		t.Fatalf("effects do not name the skipped label: %v", plan.Effects)
+	}
+	if plan.Extras["samples"] == float64(0) && !strings.Contains(effects, "0 samples") {
+		t.Fatalf("a calibration of no sample is not stated: %v", plan.Effects)
+	}
+	encoded, _ := json.Marshal(labels)
+	if web := fixture.web(http.MethodPost, "/api/v1/session-analysis/calibration", `{"labels":`+string(encoded)+`}`); web.Code != http.StatusOK {
+		t.Fatalf("web calibration with the same labels = %d %s", web.Code, web.Body.String())
+	}
+	applied := fixture.apply(t, plan.PlanID)
+	var result struct {
+		Samples int64 `json:"samples"`
+	}
+	_ = json.Unmarshal(applied.Result, &result)
+	if float64(result.Samples) != plan.Extras["samples"] {
+		t.Fatalf("applied samples %d, plan said %v", result.Samples, plan.Extras["samples"])
+	}
+}
+
+// Contract section 0.1 item 105: the web routes put any positive user id in
+// a group and classify any user or token id (org_admin_api.go), so the agent
+// plans them too, and the plan says when the id is not among the callers the
+// system has seen.
+func TestMemberAndPrincipalPlansSayWhenTheCallerIsUnknown(t *testing.T) {
+	fixture := newWriteFixture(t)
+	ids := fixture.seed(t)
+	for _, test := range []struct {
+		kind, id, web, body, text string
+	}{
+		{"member", "4242", "/api/v1/org/members/4243", `{"group_id":` + ids.group + `}`, "User 4242 is not among the callers"},
+		{"principal", "user:999", "/api/v1/org/principals/user/998", `{"class":"service"}`, "User 999 is not among the callers"},
+		{"principal", "token:15", "/api/v1/org/principals/token/16", `{"class":"service"}`, "Token 15 is not among the callers"},
+	} {
+		set := map[string]any{"class": "service"}
+		if test.kind == "member" {
+			set = map[string]any{"group_id": json.Number(ids.group)}
+		}
+		plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": test.kind, "id": test.id, "set": set})
+		if !strings.Contains(strings.Join(plan.Effects, "\n"), test.text) || plan.Extras["caller_seen"] != false {
+			t.Fatalf("%s %s plan = %v %v", test.kind, test.id, plan.Effects, plan.Extras)
+		}
+		if web := fixture.web(http.MethodPut, test.web, test.body); web.Code != http.StatusOK {
+			t.Fatalf("web %s = %d %s", test.web, web.Code, web.Body.String())
+		}
+	}
+	// A user the directory or the audit records know gets no such line.
+	fixture.handler.query.(*fakeQuery).page = query.Page{Items: []query.AuditSummary{{AuditID: "a1"}}}
+	plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "member", "id": "4242", "set": map[string]any{"group_id": json.Number(ids.group)}})
+	if strings.Contains(strings.Join(plan.Effects, "\n"), "not among the callers") || plan.Extras["caller_seen"] != nil {
+		t.Fatalf("seen user plan = %v", plan.Effects)
+	}
+	if got := fixture.handler.query.(*fakeQuery).gotFilter.NewAPIUserID; got == nil || *got != 4242 {
+		t.Fatalf("lookup filter = %+v", fixture.handler.query.(*fakeQuery).gotFilter)
+	}
+}
+
+// Contract section 0.1 item 112: a content rule name with a newline and
+// quotes is accepted by the web route (only an empty, too long or NUL name is
+// refused), so the agent accepts it too; a NUL is refused by both.
+func TestContentRuleNameCharactersMatchTheWeb(t *testing.T) {
+	fixture := newWriteFixture(t)
+	odd := "line one\nline \"two\""
+	encoded, _ := json.Marshal(odd)
+	if web := fixture.web(http.MethodPost, "/api/v1/content-policy-rules",
+		`{"name":`+string(encoded)+`,"enabled":true,"action":"block","model_pattern":"","scan_scopes":["system"],"keywords":["alpha"]}`); web.Code != http.StatusCreated && web.Code != http.StatusOK {
+		t.Fatalf("web create = %d %s", web.Code, web.Body.String())
+	}
+	plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "content-rule",
+		"set": map[string]any{"name": odd, "enabled": true, "action": "block", "keywords": []string{"alpha"}}})
+	var after map[string]any
+	_ = json.Unmarshal(plan.After, &after)
+	if after["name_untrusted"] != odd {
+		t.Fatalf("name in the plan = %q", after["name_untrusted"])
+	}
+	if web := fixture.web(http.MethodPost, "/api/v1/content-policy-rules",
+		`{"name":"a\u0000b","enabled":true,"action":"block","model_pattern":"","scan_scopes":["system"],"keywords":["alpha"]}`); web.Code != http.StatusBadRequest {
+		t.Fatalf("web NUL name = %d", web.Code)
+	}
+	body := failure(t, fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": "content-rule",
+		"set": map[string]any{"name": "a\x00b", "enabled": true, "action": "block", "keywords": []string{"alpha"}}}, fixture.adminWrite))
+	if body.Code != agentapi.CodeInvalidArgument || body.Details["field"] != "name" {
+		t.Fatalf("NUL name = %s %v", body.Code, body.Details)
 	}
 }

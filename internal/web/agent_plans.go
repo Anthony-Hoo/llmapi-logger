@@ -142,9 +142,9 @@ func (handler *managementHandler) agentPlanFor(ctx context.Context, request agen
 	case agentapi.OpAnalysisRun:
 		return handler.planAnalysisRun(ctx)
 	case agentapi.OpAnalysisCalibrate:
-		return handler.planAnalysisCalibrate(request)
+		return handler.planAnalysisCalibrate(ctx, request)
 	case agentapi.OpAnalysisDismiss:
-		return handler.planAnalysisDismiss(request)
+		return handler.planAnalysisDismiss(ctx, request)
 	case agentapi.OpWeeklyRegenerate:
 		return handler.planWeeklyRegenerate(ctx, request)
 	}
