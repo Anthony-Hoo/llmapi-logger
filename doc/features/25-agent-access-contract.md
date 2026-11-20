@@ -58,14 +58,14 @@
 18. **时间参数**（阶段 2）：`from`、`to` 接受 RFC 3339 或 `YYYY-MM-DD`，日期按 UTC 解释，`from=D` 是当天零点，`to=D` 是次日零点（`to` 一律不含端点）；审计列表内部换算成含端点的 `to_ns = to − 1ns`。`since` 是正整数加 `s`、`m`、`h`、`d`、`w`，最长 3660 天，从 `to`（省略时为当前时间）往前推；与 `from` 同时给出是 `INVALID_ARGUMENT`。洞察省略时间时沿用服务的默认 7 天；会话分析必须给 `from` 或 `since`，`to` 省略为当前时间。输出时间用 RFC 3339 的 UTC 全精度（`RFC3339Nano`），未设置是 `null`。
 19. **游标**（阶段 2，第 117 条修改）：`base64url("c2|<列表>|<绑定>|<服务自己的游标>")`，列表名为 `audits`、`usage-sessions`、`analysis-sessions`；拿别的列表的游标或改坏的游标是 `INVALID_ARGUMENT`（`field: cursor`、`reason: invalid_cursor`），属于另一次查询或另一个身份的是 `reason: cursor_query_mismatch`（第 117 条）。审计列表的内层游标是 `<started_at_ns>:<audit_id>`。
 20. **参数校验**（阶段 2）：每个读接口只接受它列出的参数；未知参数或重复出现的参数是 `INVALID_ARGUMENT`，`details.field` 是参数名（网页接口同样拒绝未知参数，门面不静默忽略）。数字 ID 只接受 ASCII 数字（最多 19 位）。开发者带调用者筛选按参数是否出现判定（`username=` 空值也拒绝），与网页一致，且在调用服务之前拒绝。D8 的选择器先校验取值再判身份，与网页顺序一致：取值不合法是 `INVALID_ARGUMENT`，合法而身份不对原为 `FORBIDDEN_ROLE`，第 116 条改为 `INVALID_ARGUMENT`（`reason: administrator_only`）；同时给两个以上选择器是 `INVALID_ARGUMENT`，`field` 与 `conflicts_with` 是实际给出的两个（第 115 条，原为一律 `field: user_id`）。
-21. **审计列表与详情的字段比 §4.3.1 多**（阶段 2，能力对齐）：网页列表可见而原列表遗漏的 `route_id`、`parser_name`、`mode`、`forward_status`（原值，`state` 是它的归并）、`caller_status`、`newapi_request_id`、`parsed_error_type`、`parsed_error_code` 都输出；列表项也给 `caller_final`。`billing_final` 只在详情里有，因为列表行不带计费状态。详情的 `billing` 另带 `newapi_request_id`、`user_id`、`username_untrusted`、`token_id`、`token_name_untrusted`、`linked_at`；`headers_scope` 写明 `inbound` 或 `all`。`ttft_ms` 是毫秒浮点数。`collapse` 默认为真（命令行有 `--no-collapse`）；网页默认不折叠，所以与网页比对时要显式 `collapse=false`。`capture_status=chunk_missing` 是 `INVALID_ARGUMENT`（§0 第 6 行）。
+21. **审计列表与详情的字段比 §4.3.1 多**（阶段 2，能力对齐；第 118 条另加详情的 `exports`）：网页列表可见而原列表遗漏的 `route_id`、`parser_name`、`mode`、`forward_status`（原值，`state` 是它的归并）、`caller_status`、`newapi_request_id`、`parsed_error_type`、`parsed_error_code` 都输出；列表项也给 `caller_final`。`billing_final` 只在详情里有，因为列表行不带计费状态。详情的 `billing` 另带 `newapi_request_id`、`user_id`、`username_untrusted`、`token_id`、`token_name_untrusted`、`linked_at`；`headers_scope` 写明 `inbound` 或 `all`。`ttft_ms` 是毫秒浮点数。`collapse` 默认为真（命令行有 `--no-collapse`）；网页默认不折叠，所以与网页比对时要显式 `collapse=false`。`capture_status=chunk_missing` 是 `INVALID_ARGUMENT`（§0 第 6 行）。
 22. **Request-URI 的拆分**（阶段 2）：路径原样输出；查询串按 `&` 与第一个 `=` 拆分并解码后逐个屏蔽，原始查询串不输出。某个参数解码失败时不猜，它的值给 `value_omitted: "unparsed"`（新增的取值）与原始长度，并置 `query_unparsed: true`。
-23. **`meta.state` 的取值**（阶段 2）：审计记录用 §4.1 的统一状态，会话分析汇总用运行状态，`status` 用就绪状态（`healthy`、`degraded`、`not_ready`），其余读结果固定为 `ok`。`complete=false` 的原因另有：输入包、趋势、Agent 树、构成在服务报 `truncated` 时为 `truncated`；周报 `complete` 为假时为 `evidence_pending`。`weekly me`、`weekly trend`、`weekly project`、`weekly unattributed` 的服务不给完整性，门面按数据是否已定稿给出（第 95 条修正了原来的“固定 `complete=true`”）。
+23. **`meta.state` 的取值**（阶段 2；第 120 条另有用量总览的 `coverage_unknown`、`billing_pending`，第 121 条另有 `weekly unattributed` 的 `truncated`）：审计记录用 §4.1 的统一状态，会话分析汇总用运行状态，`status` 用就绪状态（`healthy`、`degraded`、`not_ready`），其余读结果固定为 `ok`。`complete=false` 的原因另有：输入包、趋势、Agent 树、构成在服务报 `truncated` 时为 `truncated`；周报 `complete` 为假时为 `evidence_pending`。`weekly me`、`weekly trend`、`weekly project`、`weekly unattributed` 的服务不给完整性，门面按数据是否已定稿给出（第 95 条修正了原来的“固定 `complete=true`”）。
 24. **`_untrusted` 的范围比 §4.3.3–4.3.6 列的宽**（阶段 2）：凡是来自被审计流量或他人输入的文本都加：分组的 `label`、工具名、文件操作的工具名与路径、Agent 身份里的 `root_id`/`node_id`/`parent_id`/`name`、分面证据的 `label`、未归属条目的 `value` 与草稿规则的 `pattern`、报告的 `scope_name` 与可选范围的名称、两类规则的正则与关键词、项目规则的 `pattern`。两段设置里的模型地址与模型名不加（只有管理员能改，且不属于审计流量）。`notice` 只在含 `_untrusted` 字段的响应上出现。
 25. **配置读取的补充**（阶段 2）：`config/org` 另带 `settings`（`GET /api/v1/org/settings` 的 `idle_gap_seconds`、`ranked_clients`、`max_concurrent_roots`、`max_single_request_roots`），成员与主体分类也带 `version`。两段设置的 `version` 取 `updated_ns`，从未保存过时为 `"0"`。UA 规则或关键词规则的服务不可用时是 `UPSTREAM_UNAVAILABLE`（网页是 503）；组织周报、会话分析未开启时是 `MODULE_DISABLED`。
-26. **错误的拆分**（阶段 2）：`UPSTREAM_UNAVAILABLE` 指存储类错误 `closed`、`queue_full`、连接、忙、只读、磁盘满、I/O，PostgreSQL 会自行消失的状况（语句超时或取消、连接数已满、关闭中与暂不接受连接，见第 85 条），以及各服务的 `ErrUnavailable` 与缺失的依赖；`context.DeadlineExceeded` 是 `TIMEOUT`；`query.ErrNoTurnGraph`（重建不可用）与 `ErrNotReady` 都是 `NOT_READY`；其余是 `INTERNAL`，只记错误类别不记文本。调用方取消请求时不写响应，与网页相同。可选功能的开关在参数校验之前检查。
+26. **错误的拆分**（阶段 2，第 118 条修改：记录永远不会有的导出内容是 `NOT_AVAILABLE`，`NOT_READY` 只留给会出现的内容）：`UPSTREAM_UNAVAILABLE` 指存储类错误 `closed`、`queue_full`、连接、忙、只读、磁盘满、I/O，PostgreSQL 会自行消失的状况（语句超时或取消、连接数已满、关闭中与暂不接受连接，见第 85 条），以及各服务的 `ErrUnavailable` 与缺失的依赖；`context.DeadlineExceeded` 是 `TIMEOUT`；`query.ErrNoTurnGraph`（重建不可用）与 `ErrNotReady` 都是 `NOT_READY`；其余是 `INTERNAL`，只记错误类别不记文本。调用方取消请求时不写响应，与网页相同。可选功能的开关在参数校验之前检查。
 27. **导出的细节**（阶段 2）：`headers` 导出 `{audit_id, headers}`，全部阶段、按 §4.3.2 屏蔽，Header 名为 `name_untrusted`（第 98 条）；时间线把 `points[].at_ns` 改成 `observed_at`；没有解析出对话的记录导出 `conversation` 原为 `NOT_FOUND`，第 118 条改为按记录判定的 `NOT_READY` 或 `NOT_AVAILABLE`。原始 Body 的 `X-Audit-*` 头与网页逐字相同，`X-Audit-Complete` 除外：未完成的记录上它是 `false`（第 96 条）。
-28. **`sensitive_read` 审计**（阶段 2）：`object_kind` 是 `analysis-pack` 或 `analysis-facet`，`object_id` 是会话 ID；读取失败也写一条，`outcome=failed`、`error_code` 为门面错误码。查看日志写不进时服务不返回内容，门面返回 `UPSTREAM_UNAVAILABLE` 且响应不含正文（D11）。
+28. **`sensitive_read` 审计**（阶段 2；会话 ID 形状不对、门面在调用服务之前拒绝的读取同样写一条，`error_code` 为 `INVALID_ARGUMENT`，第 115 条）：`object_kind` 是 `analysis-pack` 或 `analysis-facet`，`object_id` 是会话 ID；读取失败也写一条，`outcome=failed`、`error_code` 为门面错误码。查看日志写不进时服务不返回内容，门面返回 `UPSTREAM_UNAVAILABLE` 且响应不含正文（D11）。
 29. **周起始日的提示**（阶段 2）：`week` 不是部署配置的周起始日时，门面按日期本身的星期几判断，`details.week_start` 是 `monday` 或 `sunday`，`hint` 给出该日期所在周的起始日。之后服务仍做自己的校验。
 30. **路由对照表在 `internal/agentapi/routes.go`**（阶段 2）：写路由所在行标为待实现（`Pending`），指向预留的门面接口 ID `plans.create`、`plans.apply`、`config.api-key.set`、`config.api-key.clear`（第 75 条撤下）、`analysis.test-model`；这些 ID 注册之后测试要求去掉标记。`/metrics` 经 `protectedPath` 鉴权却没有处理函数（一律 404），在测试里列为“不是路由”。
 31. **§7 的读接口限速未实现**（阶段 2）：每分钟 120 次读、每分钟 20 次输入包与分面读取都还没有做，留到写入与限频一起实现的阶段 4。（阶段 4 已实现，见第 45 条。）
@@ -132,7 +132,7 @@
 92. **生成安装链接的限速**（补 §7）：`POST /api/v1/agent-access/install-links` 每个网页会话身份 10 分钟最多 20 次，从第一次请求起算的固定窗口，进程内存计数；超限答 429，`{"error": {"code": "too_many_requests", "message"}}` 加 `Retry-After`（窗口剩余秒数，向上取整），与第 8 条网页侧的超限格式相同，且不写 `link_issued` 行（此前登录的人可以按请求速率往审计表里加行）。会话本身不在服务端存状态，所以“身份”是会话代表的人：管理员（全部管理员会话与管理令牌共用一份），或一个开发者的 Key 指纹加 NewAPI Token ID。计数放在分发服务里（`agentdist.Service.AllowInstallLink`，用分发服务的时钟）：`internal/agentaccess` 的窗口限流器不导出，按约定不改它，所以照它的口径（固定窗口、被拒绝的不计）另写了一份。
 93. **不回显输入的测试**：每个平台都用真实的终端包装测试非终端的标准输入（管道、普通文件）：不算交互终端，读 Key 失败，`analysis test-model --prompt-key` 在发出请求之前报 `NO_TTY`。Linux 上另用 `/dev/ptmx` 开一个伪终端（只用标准库的 ioctl，不加依赖）：`disableEcho` 清掉 `ECHO`、保留 `ICANON` 与 `ISIG`，恢复后模式与原来逐字段相同；`ReadLineNoEcho` 读到键入的一行，主端收不到回显（同一测试先在回显打开时确认主端能收到回显，所以“没有回显”的断言不是空的），读完回显恢复。macOS 的同一路径（`TIOCGETA`/`TIOCSETA`）没有自动测试：本机与容器都不是 macOS。Windows 的控制台测试仍然只在有控制台时运行，没有控制台的测试进程里它跳过，这一路径没有自动测试。
 94. **安装提示词的两处边界**：(a) 用户给的 `skills_dir` 最后一段不分大小写地等于 `llmapi-audit`（如 `C:\Tools\skills\LLMAPI-AUDIT`、`/Users/example/skills/LlmApi-Audit`）时当作 Skill 目录本身，取它的上一级为技能目录，不再套一层；Windows 与默认的 macOS 文件系统不分大小写，Linux 为稳妥也同样处理。最终安装目录仍写成小写的 `…/llmapi-audit`，在不分大小写的文件系统上就是那个已有目录，照“已有的安装 / 别的东西”的检查处理。(b) POSIX 提示词的工作目录原来是共享临时目录下以包摘要命名的固定路径，先 `rm -rf` 再 `mkdir -p`，本机其他用户可以抢先建好它并在摘要校验之后换掉压缩包。现在第 1 步是 `mktemp -d "${TMPDIR:-/tmp}/llmapi-audit-install.XXXXXXXX"`（私有、名字随机，`XXXXXXXX` 的写法 GNU 与 BSD 都认），Agent 把打印出的路径写进后面每条命令里的 `LLMAPI_WORK_DIR`（命令之间仍不靠 shell 变量传值）；路径里出现字母、数字和 `/ . _ -` 以外的字符就停下。最后只删这个目录，删除命令自带检查：路径的最后一段不是 `llmapi-audit-install.` 加 8 个字符时拒绝执行，所以 Agent 写错替换值也删不到别处。Windows 的工作目录在 `$env:TEMP` 下，那是当前用户自己的目录，别的用户进不去，所以保留以包摘要命名的固定路径。提示词里的删除命令只有两类目标：安装目录（仅当它是此前的安装）与工作目录，测试逐条核对，三份黄金文件已重新生成并逐条读过。
-95. **周报类读取的完整性**（修正第 23 条）：`weekly project`、`weekly unattributed`、`weekly trend` 原来固定 `complete=true`，本周的数据也这样标。现在按数据是否已定稿（`final`，即该周已冻结）给出：`weekly/projects/{id}` 取响应自己的 `final`；`weekly/unattributed` 的条目总是现算的，该周有冻结快照（`orgreport.Service.WeekState` 报 `frozen`）时才算定稿，没有快照存储时任何一周都不算；`weekly/trend` 只有其中每一周都冻结了才完整，所以包含本周的趋势总是不完整；`weekly/me` 对开发者是正在进行的本周，`complete=false`，管理员令牌或身份未知时没有行可言，仍是 `complete=true`。不完整的原因与 `weekly report` 用同一个词 `evidence_pending`。`weekly report` 不变：它的 `complete` 取服务的“该周已结束”，所以一个已结束但尚未冻结的周在 `weekly report` 里完整、在 `weekly project` 等里不完整——前者说证据已经到齐，后者说快照还没定下来，两者的 `final` 都是 `false`。
+95. **周报类读取的完整性**（修正第 23 条；`weekly unattributed` 的截断见第 121 条）：`weekly project`、`weekly unattributed`、`weekly trend` 原来固定 `complete=true`，本周的数据也这样标。现在按数据是否已定稿（`final`，即该周已冻结）给出：`weekly/projects/{id}` 取响应自己的 `final`；`weekly/unattributed` 的条目总是现算的，该周有冻结快照（`orgreport.Service.WeekState` 报 `frozen`）时才算定稿，没有快照存储时任何一周都不算；`weekly/trend` 只有其中每一周都冻结了才完整，所以包含本周的趋势总是不完整；`weekly/me` 对开发者是正在进行的本周，`complete=false`，管理员令牌或身份未知时没有行可言，仍是 `complete=true`。不完整的原因与 `weekly report` 用同一个词 `evidence_pending`。`weekly report` 不变：它的 `complete` 取服务的“该周已结束”，所以一个已结束但尚未冻结的周在 `weekly report` 里完整、在 `weekly project` 等里不完整——前者说证据已经到齐，后者说快照还没定下来，两者的 `final` 都是 `false`。
 96. **导出的完整性**（修正第 27 条与第 49 条 (e)）：此前只有原始 Body 带 `X-Audit-Complete`，命令行又把缺少这个头当成完整，于是未完成记录的对话、Header、重建结果与时间线导出都报 `complete=true`。现在服务端对每种导出都送 `X-Audit-Complete: true|false`，为假时另送 `X-Audit-Incomplete-Reason`：先按记录本身，规则与 `requests get` 的 `meta` 完全相同（`in_progress`、`parse_pending`、`capture_incomplete`），记录完整时再看内容自身——时间线的 `complete` 为假是 `timeline_incomplete`，原始 Body 的 `Complete` 为假是 `capture_incomplete`。为此每次导出都多读一次记录（`query.Get`，同一作用域）。原始 Body 的 `X-Audit-Complete` 因此只在已完成的记录上与网页逐字相同；失败信封之前清掉这两个头。命令行只把明确的 `X-Audit-Complete: true` 当作完整：缺少这个头是 `complete=false`、原因 `completeness_unknown`；为假而没有可用的原因时是 `capture_incomplete`；`meta`、`data.complete` 一致。导出的文件仍只有内容本身（第 47 条），带 `meta` 的 `--out` 文件照旧写服务端的 `meta`。
 97. **详情与列表的共有字段一致**：`requests get` 的 `user_agent_untrusted` 原来总是 `null`，而 `requests list` 对同一条记录给出 User-Agent：`query.Service.Get` 不像列表那样读 User-Agent。门面现在在详情里按列表的规则（入站请求阶段第一个 `User-Agent` 的值）从详情已经解密的 Header 取它。测试逐条比对同一记录在列表与详情里的全部共有字段（模型、状态码、`state`、调用者、对话 ID 与轮次、`blocked_by`/`block_code` 等），并要求有值的字段在详情里不是 `null`。
 98. **`_untrusted` 的落实与扫描**（补第 24 条，修正 §4.3.1、§4.3.3、§4.3.5 的字段表）：第 24 条已定的规则此前在若干字段上没有做到。改名的字段：`/requests` 与 `/requests/{id}` 的 `path`、`request_model`、`response_model`、`parsed_error_type`、`parsed_error_code`；`/requests/{id}` 的 `request_uri.path`、`request_uri.query[].name`、`stages[].host`、`headers[].name`、`parsed.request_model`、`parsed.response_model`、`parsed.response_id`、`parsed.error_type`、`parsed.error_code`、`turn.response_id`、`turn.previous_response_id`；`headers` 导出的 `headers[].name`；`/usage/overview` 的 `groups[].key`（按模型分组时是客户端写的模型名，一律改名 `key_untrusted`）；`/usage/sessions` 的 `models`；`/usage/sessions/{id}/trend` 的 `steps[].model`；`/requests/{id}/composition` 的 `model`、`items[].role`、`tools[].source`（`mcp:<服务名>` 来自工具名）；`/analysis/sessions` 与周评 `optimizations` 的 `model`；`/callers` 的 `group`（NewAPI 的用户分组，由别人填写）。分面的 `evidence` 是以字段名为键的对象，而模型可以写任意键：门面只输出分面自身字段名（`goal`、`task_type`、`outcome`、`collaboration`、`work_relevance`、`friction`、`instructions`、`skill_candidate`、`items`）下的证据，别的键丢掉，这样模型写的文字不会成为对象的键。改名的字段全部加 `_untrusted` 后缀，趋势接口因此也带 `notice`。服务端自己定的取值（枚举、状态、它生成的 ID、数字）不改名；NewAPI 的 `newapi_request_id` 由网关生成，不改；分面与概览的 `model` 是分析设置（第 24 条已排除）；时间线没有文本。命令行的参数名（`--model`、`--path` 等）不变，帮助里写明它们对应的结果字段。对话、重建结果与原始 Body 的导出是被审计的内容本身，按原样写进文件，其中的键（`text`、`model`、`messages` 等）不改名，整份文件都按不可信数据对待；这是有意的例外。测试 `TestFacadeReadsMarkTrafficTextUntrusted` 在固件允许的每个客户端可控输入里埋同一个标记（模型名、错误类型与代码、Header 名与值、查询参数名与值、User-Agent、路径、Host、会话与对话文本、工具名、文件路径、规则、项目、组的名字与模式、调用者名字），对每个读接口（含 `headers` 与时间线导出和嵌套对象）以管理员与开发者两种身份调用，要求标记只出现在以 `_untrusted` 结尾的键下（数组元素归其所在的键，对象的键本身不得含标记，不分大小写），含 `_untrusted` 键的信封必须带 `notice`；登记表里的每个读接口都必须在扫描里。改名改变了输出的字段名，命令行与服务端的版本号没有因此变动。
@@ -364,7 +364,7 @@
 
 - 路径前缀 `/api/agent/v1`，下表省略。全部是 JSON；时间一律输出 RFC 3339 的 UTC 字符串，字段名以 `_at` 结尾。既有接口里的纳秒字段不出现在门面响应里。
 - 时间范围参数统一为 `from`、`to`（RFC 3339 或 `YYYY-MM-DD`）与 `since`（如 `2h`、`7d`）。`since` 与 `from` 不能同时给。门面换算成既有接口各自的口径（审计列表的 `to` 含端点，洞察与会话分析不含）。
-- 分页参数统一为 `cursor`、`limit`；响应里是 `next_cursor`（没有下一页时为空串）。游标是不透明字符串，由门面把既有接口各自的游标包起来。既有接口都不给总数，门面也不给。
+- 分页参数统一为 `cursor`、`limit`；响应里是 `next_cursor`（没有下一页时为空串）。游标是不透明字符串，由门面把既有接口各自的游标包起来，并绑定它所属的查询与身份（§0.1 第 117 条）。既有接口都不给总数，门面也不给。
 - 对象标识：审计记录 `audit_id`；洞察会话 `agt_…`、`ses_…`、`conv_…`；Agent 树 24 位十六进制；分析会话 64 位十六进制。门面按既有服务的规则校验，不合法是 `INVALID_ARGUMENT`。数字 ID 只接受 ASCII 数字。
 
 ### 4.1 统一状态
@@ -429,6 +429,7 @@
 - `turn`：既有 `Turn` 的全部字段；`response_id`、`previous_response_id` 加 `_untrusted`。
 - `billing`：既有 `TokenLink` 的 `billing_state`、`newapi_quota`、`cost_usd`、`billed_prompt_tokens`、`billed_completion_tokens`。
 - `conversation_summary`：`message_count`、各角色的条数、`tool_call_count`。**对话正文不在这里**，用导出。
+- `exports`：每种导出 `{state, reason?}`，`state` 为 `available`、`pending`、`not_available`、`not_retained`，与导出的回答一致（§0.1 第 118 条）。
 
 `GET /requests/{id}/export/{what}`，`what` 的取值与等价路由：
 
@@ -439,6 +440,8 @@
 | `request`、`response` | `GET …/reconstructed/{side}` | JSON |
 | `raw-request`、`raw-response` | `GET …/raw/{side}` | 二进制流；元数据在 `X-Audit-*` 响应头里，原样透传 |
 | `timeline-request`、`timeline-response` | `GET …/timeline/{side}` | JSON |
+
+记录没有、也不会有某种内容时，导出答 `NOT_AVAILABLE`；内容还会出现时答 `NOT_READY`；原始 Body 已释放答 `NOT_RETAINED`（§0.1 第 118 条）。
 
 导出接口返回内容本身，不包信封（错误时仍是失败信封）。命令行把它写入 `--out` 指定的文件，然后在标准输出打印成功信封，`data` 为 `{path, bytes, sha256, complete, missing_chunks?}`。每种导出都带 `X-Audit-Complete`（不完整时另带 `X-Audit-Incomplete-Reason`），取值与 `requests get` 对同一记录给出的 `meta.complete`/`incomplete_reason` 相同，时间线与原始 Body 再与内容自身的完整性相与；`complete` 取 `X-Audit-Complete`（§0.1 第 96 条）。
 
@@ -477,7 +480,7 @@
 
 `meta`：
 
-- `overview`：`complete` 为真；另给 `data.billing_complete`（`unbilled_requests == 0`）。既有服务不提供“还有多少记录没分析”，门面如实写 `data.coverage_unknown: true`，并在 `next_actions` 里说明总数只含已分析的记录。
+- `overview`：既有服务不提供“还有多少记录没分析”，门面如实写 `data.coverage_unknown: true`，`meta.complete=false`、原因 `coverage_unknown`，并在 `next_actions` 里说明总数只含已分析的记录；另给 `data.billing_complete`：范围内没有计费仍在回填的请求（Token 关联为 `unchecked`），与 `billing_final` 同一条规则（§0.1 第 120 条，原为 `unbilled_requests == 0`）。
 - `trend`、`tree`、`composition`：既有响应里 `truncated` 为真时 `complete=false`，原因 `truncated`。
 - 这三个接口对“不存在”“无权”“尚未分析”都返回 `NOT_FOUND`（D3），`hint` 固定列出这三种可能。
 
@@ -495,7 +498,7 @@
 
 响应取自既有的 `SelfReport`、`WeeklyReport`、`TrendReport`、`ProjectReport`、`UnattributedEntry`，全部保留。变换：时间改为 `_at`；以纳秒计的时长字段（`active_ns` 等）改为秒，字段名以 `_seconds` 结尾；项目名、未归属条目的 `value` 加 `_untrusted`；`frozen` 另以 `final` 给出。
 
-`weekly/me`：管理员令牌或身份未知时 `row` 为空，`meta.complete=true`，`next_actions` 说明原因（D7）；开发者的本周还没结束，`complete=false`，原因 `evidence_pending`。`weekly/projects/{id}`、`weekly/unattributed`：所属的周冻结（`final`）之前 `complete=false`，原因 `evidence_pending`；`weekly/trend`：其中每一周都冻结了才完整（§0.1 第 95 条）。
+`weekly/me`：管理员令牌或身份未知时 `row` 为空，`meta.complete=true`，`next_actions` 说明原因（D7）；开发者的本周还没结束，`complete=false`，原因 `evidence_pending`。`weekly/projects/{id}`、`weekly/unattributed`：所属的周冻结（`final`）之前 `complete=false`，原因 `evidence_pending`；`weekly/trend`：其中每一周都冻结了才完整（§0.1 第 95 条）。`weekly/unattributed` 被 `limit` 截断时 `complete=false`、原因 `truncated`，`data.truncated: true`（§0.1 第 121 条）。
 
 `week` 不是周起始日时是 `INVALID_ARGUMENT`，`details.week_start` 给出部署配置的周起始日（周一或周日），`hint` 给出最近的合法日期。
 
@@ -788,7 +791,8 @@
 
 - 调用：`<Skill 目录>/scripts/llmaudit <命令组> <命令> [参数]`（Windows 上是 `llmaudit.exe`）。
 - 成功：标准输出一个信封，退出码 0。失败：标准错误一个失败信封，退出码按 §2.3。
-- `--pretty` 输出给人读的简表；默认是紧凑 JSON。列表最多八列，先列命令定的常用列，其余按字母序（§0.1 第 99 条）。
+- `--pretty` 输出给人读的简表；默认是紧凑 JSON。列表最多八列，先列命令定的常用列，其余按字母序（§0.1 第 99 条）。它是全局参数，放在命令之前或之后都可以（§0.1 第 123 条）。
+- 只给命令组、不给子命令时是 `INVALID_ARGUMENT`，`details.available` 列出子命令；纯文本帮助只在 `--help` 时给（§0.1 第 123 条）。
 - `--help` 对每个参数写明取值、约束、默认值。帮助文本是 Agent 的说明书。
 - 本地状态目录默认 `~/.llmaudit/`，可用环境变量 `LLMAUDIT_HOME` 改位置。里面有 `credentials.json`（服务器地址、令牌、到期时间；仅本人可读，原子替换；POSIX 上权限过宽时先收紧，见 §0.1 第 90 条）与 `config.json`（可选的 CA 文件路径）。
 - 网络：默认校验证书，不跟随跳转。服务器地址是明文 HTTP 且主机不是回环地址时，`login` 成功后在标准错误打印一次警告。
