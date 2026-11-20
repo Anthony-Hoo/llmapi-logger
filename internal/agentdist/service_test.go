@@ -521,6 +521,10 @@ func TestCheckInstallLinkMatchesInstallLink(t *testing.T) {
 		{"https://audit.example.com", InstallLinkRequest{Agent: AgentOther, Platform: "linux-amd64", SkillsDir: "relative"}},
 		{"https://audit.example.com", InstallLinkRequest{Agent: AgentOther, Platform: "windows-amd64", SkillsDir: `C:\Tools\skills`}},
 		{"https://audit.example.com/$(x)", InstallLinkRequest{Agent: AgentCodex, Platform: "linux-amd64"}},
+		// A server address within the 2048 characters of cleanServerURL that
+		// leaves no room for the signed link in the prompt (contract section
+		// 0.1 item 143).
+		{"http://" + strings.Repeat("a", 1990) + ".example", InstallLinkRequest{Agent: AgentCodex, Platform: "linux-amd64"}},
 	}
 	// The order of the checks is InstallLink's: without packages a bad
 	// skills_dir is still answered as no packages, as before.

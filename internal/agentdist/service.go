@@ -278,7 +278,15 @@ func (service *Service) InstallLink(serverURL string, request InstallLinkRequest
 		return InstallLinkResponse{}, err
 	}
 	signature, expires := service.signer.Mint()
-	prompt, err := InstallPrompt(PromptInput{
+	prompt, err := service.installPrompt(server, signature, expires, pkg, request)
+	if err != nil {
+		return InstallLinkResponse{}, err
+	}
+	return InstallLinkResponse{Prompt: prompt, ExpiresAt: expires.Format(time.RFC3339), File: pkg.File}, nil
+}
+
+func (service *Service) installPrompt(server, signature string, expires time.Time, pkg Package, request InstallLinkRequest) (string, error) {
+	return InstallPrompt(PromptInput{
 		ServerURL:  server,
 		LinkPrefix: LinkPrefix(server, signature),
 		Package:    pkg,
@@ -287,18 +295,22 @@ func (service *Service) InstallLink(serverURL string, request InstallLinkRequest
 		SkillsDir:  request.SkillsDir,
 		ExpiresAt:  expires,
 	})
-	if err != nil {
-		return InstallLinkResponse{}, err
-	}
-	return InstallLinkResponse{Prompt: prompt, ExpiresAt: expires.Format(time.RFC3339), File: pkg.File}, nil
 }
 
 // CheckInstallLink answers what InstallLink would answer for this input,
 // with the same errors, but mints nothing. The web layer calls it before it
 // counts the request, so that only a request that issues a link uses the
-// install-link budget.
+// install-link budget. It runs every check of InstallLink, those of the
+// prompt builder included (contract section 0.1 item 143): the prompt is
+// built with a placeholder signature of a real signature's length and
+// alphabet, so a server URL that leaves no room for the link is refused here
+// as InstallLink would refuse it.
 func (service *Service) CheckInstallLink(serverURL string, request InstallLinkRequest) error {
-	_, _, err := service.checkInstallLink(serverURL, request)
+	pkg, server, err := service.checkInstallLink(serverURL, request)
+	if err != nil {
+		return err
+	}
+	_, err = service.installPrompt(server, strings.Repeat("A", SignatureLength), service.now().Add(LinkLifetime), pkg, request)
 	return err
 }
 

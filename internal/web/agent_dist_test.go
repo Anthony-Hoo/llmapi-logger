@@ -374,6 +374,40 @@ func TestInstallLinkRefusalsDoNotUseTheBudget(t *testing.T) {
 	}
 }
 
+// TestInstallLinkLongHostDoesNotUseTheBudget (contract section 0.1 item
+// 143): a browsing address short enough for the server URL check but too
+// long for the signed link in the prompt is refused before the request is
+// counted, so five of them leave the full 20 links.
+func TestInstallLinkLongHostDoesNotUseTheBudget(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	dir, _ := packTestPackages(t)
+	withDist(t, env, dir, &distClock{now: time.Now()})
+	body := `{"agent":"claude-code","platform":"linux-amd64"}`
+	withHost := func(host string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, agentInstallLinksPath, strings.NewReader(body))
+		request.Host = host
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+testAdminToken)
+		response := httptest.NewRecorder()
+		env.handler.ServeHTTP(response, request)
+		return response
+	}
+	long := strings.Repeat("a", 1990) + ".example"
+	for index := 0; index < 5; index++ {
+		if response := withHost(long); response.Code != http.StatusBadRequest {
+			t.Fatalf("long host %d = %d %s", index, response.Code, response.Body.String())
+		}
+	}
+	for index := 0; index < agentdist.InstallLinksPerWindow; index++ {
+		if response := withHost("audit.example.org"); response.Code != http.StatusOK {
+			t.Fatalf("link %d after five long hosts = %d %s", index+1, response.Code, response.Body.String())
+		}
+	}
+	if response := withHost("audit.example.org"); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("link 21 = %d", response.Code)
+	}
+}
+
 // TestDownloadRespellingsShareOneBudget: through a real server (so the
 // router decodes the raw path as it would in production), every spelling
 // of one link either is refused as not found or is the same link with the
