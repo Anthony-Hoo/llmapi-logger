@@ -179,7 +179,7 @@ func runLogin(inv *invocation) (*result, error) {
 		return nil, invalidResponse(http.StatusOK, "the token response has no valid token")
 	}
 	if err := saveCredentials(env, &credentials{Server: server, Token: token, ExpiresAt: expiresAt, Role: role, Tier: tier}); err != nil {
-		return nil, err
+		return nil, revokeUnsaved(inv, exchange, token, device, err)
 	}
 	// The token itself never reaches the output.
 	delete(issued, "token")
@@ -200,6 +200,40 @@ func runLogin(inv *invocation) (*result, error) {
 		fmt.Fprintln(env.Stderr, "warning: the server address uses plain HTTP and is not this machine; the agent token and all data travel unencrypted.")
 	}
 	return &result{envelope: envelope, server: server}, nil
+}
+
+// revokeUnsaved answers a login whose token was issued but could not be
+// saved (contract section 0.1 item 167): nobody holds that token, so it is
+// revoked with the facade's logout before the error is reported, best
+// effort and within the command's normal timeout. When the revocation fails
+// too, the error asks for the device to be removed on the web page and names
+// it. The token is never part of the error.
+func revokeUnsaved(inv *invocation, exchange *client, token, device string, saveErr error) error {
+	failure, ok := saveErr.(*cliError)
+	if !ok {
+		failure = localFileError("cannot write the local credentials", nil)
+	}
+	revoked := *failure
+	revoked.Details = map[string]any{}
+	for key, value := range failure.Details {
+		revoked.Details[key] = value
+	}
+	holder := *exchange
+	holder.token = token
+	ctx, cancel := inv.context()
+	defer cancel()
+	logout := &routeSpec{Method: http.MethodPost, Path: "/logout"}
+	if _, err := holder.callRaw(ctx, logout, logout.Path, nil, nil); err == nil {
+		revoked.Details["token_revoked"] = true
+		revoked.Hint = "The approved token could not be saved, so it was revoked on the server. Fix the local problem above, then ask the user to run `llmaudit login --server <url>` again."
+		return &revoked
+	}
+	revoked.Details["token_revoked"] = false
+	revoked.Details["device_name_untrusted"] = device
+	revoked.Message = failure.Message + "; the approved token could not be revoked either"
+	revoked.Hint = "Ask the user to remove the device " + strconv.Quote(device) + " on the Agent access page of the web UI (its token is valid but saved nowhere), " +
+		"fix the local problem, and run `llmaudit login --server <url>` again."
+	return &revoked
 }
 
 // markIdentityNames renames identity.username and identity.token_name of the

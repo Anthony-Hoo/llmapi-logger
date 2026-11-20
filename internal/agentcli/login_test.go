@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -387,4 +388,72 @@ func TestStateDirectory(t *testing.T) {
 	h.expectFailure(h.run("whoami"), agentapi.CodeLocalFileError, 1)
 	writeFile(t, filepath.Join(h.home, configFile), `{"unknown":1}`)
 	h.expectFailure(h.run("whoami"), agentapi.CodeLocalFileError, 1)
+}
+
+// breakingReader returns the pasted code, but first puts a regular file where
+// the state directory should be, so the login passes its checks before the
+// approval and then cannot save the token.
+type breakingReader struct {
+	home string
+	code io.Reader
+	done bool
+}
+
+func (reader *breakingReader) Read(buffer []byte) (int, error) {
+	if !reader.done {
+		reader.done = true
+		if err := os.WriteFile(reader.home, []byte("not a directory"), 0o600); err != nil {
+			return 0, err
+		}
+	}
+	return reader.code.Read(buffer)
+}
+
+// TestLoginRevokesATokenItCannotSave (contract section 0.1 item 167): when
+// the credentials cannot be saved after a successful exchange, the client
+// calls the facade's logout once with that token before it reports the
+// error; when the logout fails too, the error asks for the device to be
+// removed on the web page and names it. The token is never printed.
+func TestLoginRevokesATokenItCannotSave(t *testing.T) {
+	for _, logoutWorks := range []bool{true, false} {
+		var mu sync.Mutex
+		var logouts []string
+		server := newFakeServer(t, func(writer http.ResponseWriter, request *http.Request, body []byte) {
+			switch request.URL.Path {
+			case agentapi.PathPrefix + "/token":
+				respondJSON(200, `{"ok":true,"data":{"token":"`+testToken+`","role":"admin","tier":"read","expires_at":"2030-01-01T00:00:00Z"}}`)(writer, request, body)
+			case agentapi.PathPrefix + "/logout":
+				mu.Lock()
+				logouts = append(logouts, request.Method+" "+request.Header.Get("Authorization"))
+				mu.Unlock()
+				if logoutWorks {
+					respondJSON(200, `{"ok":true,"data":{"revoked":true}}`)(writer, request, body)
+				} else {
+					failWith(agentapi.CodeInternal)(writer, request, body)
+				}
+			default:
+				failWith(agentapi.CodeNotFound)(writer, request, body)
+			}
+		})
+		h := newHarness(t)
+		h.env.Stdin = &breakingReader{home: h.home, code: strings.NewReader("the-code\n")}
+		body := h.expectFailure(h.run("login", "--server", server.URL, "--no-browser", "--device", "laptop-7"), agentapi.CodeLocalFileError, 1)
+		assertTokenNotPrinted(t, h)
+		mu.Lock()
+		calls := append([]string(nil), logouts...)
+		mu.Unlock()
+		if len(calls) != 1 || calls[0] != "POST Bearer "+testToken {
+			t.Fatalf("logout works %v: logout calls %q", logoutWorks, calls)
+		}
+		if logoutWorks {
+			if body.Details["token_revoked"] != true || !strings.Contains(body.Hint, "revoked") {
+				t.Fatalf("revoked: %+v", body)
+			}
+			continue
+		}
+		if body.Details["token_revoked"] != false || body.Details["device_name_untrusted"] != "laptop-7" ||
+			!strings.Contains(body.Hint, `"laptop-7"`) || !strings.Contains(body.Hint, "Agent access page") {
+			t.Fatalf("not revoked: %+v", body)
+		}
+	}
 }
