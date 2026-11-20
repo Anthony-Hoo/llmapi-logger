@@ -70,7 +70,7 @@
 30. **路由对照表在 `internal/agentapi/routes.go`**（阶段 2）：写路由所在行标为待实现（`Pending`），指向预留的门面接口 ID `plans.create`、`plans.apply`、`config.api-key.set`、`config.api-key.clear`（第 75 条撤下）、`analysis.test-model`；这些 ID 注册之后测试要求去掉标记。`/metrics` 经 `protectedPath` 鉴权却没有处理函数（一律 404），在测试里列为“不是路由”。
 31. **§7 的读接口限速未实现**（阶段 2）：每分钟 120 次读、每分钟 20 次输入包与分面读取都还没有做，留到写入与限频一起实现的阶段 4。（阶段 4 已实现，见第 45 条。）
 32. **写接口的登记与复查**（阶段 4）：`plans.create`（`POST /plans`）、`plans.apply`（`POST /plans/{plan_id}/apply`）、`config.api-key.set`（`PUT /config/analysis-settings/api-key`）、`config.api-key.clear`（`DELETE` 同一路径；第 75 条撤下，清除 Key 改为计划）、`analysis.test-model`（`POST /analysis/test-model`）都登记为 `admin` / `write`。“执行时重新检查令牌、档位、`allow_write`”就是分发器对执行请求本身再走一遍第 4 条的顺序：令牌在建计划与执行之间被撤销、过期，或部署重启后 `allow_write` 关闭，执行请求分别得到 `TOKEN_REVOKED`、`TOKEN_EXPIRED`、`WRITE_DISABLED`，计划不被消耗。`internal/agentapi/routes.go` 不再有待实现的行。
-33. **计划的存放**（阶段 4）：类型 `agentaccess.PlanStore`，实例归网页处理器所有（与令牌服务分开，部署开关的变化不清空它；进程重启清空）。计划编号 `pln_` 加 16 字节随机数的 base64url。别的令牌拿着编号执行：`PLAN_NOT_FOUND`，且不消耗这份计划（主人仍可执行）。过期的计划第一次被执行时答 `PLAN_EXPIRED` 并删除，此后是 `PLAN_NOT_FOUND`；过期计划最多再留 10 分钟供识别。同时存在的计划最多 1024 份，满了是 `RATE_LIMITED`（`Retry-After` 为最早到期的那份的剩余时间）；每枚令牌同时存在的有效计划最多 32 份（第 76 条）。计划在执行前就从存放处取出：通过了分发器、且查询参数与请求体合法的执行请求都会用掉它，包括执行失败（版本冲突、校验失败、`RUN_IN_PROGRESS`）以及被全局的触发分析、重新生成周报限速拒绝的情形；服务拒绝启动的执行不占这两项全局配额（第 69 条）。执行请求不接受请求体（空或 `{}` 以外是 `INVALID_ARGUMENT`，`field: body`）。
+33. **计划的存放**（阶段 4）：类型 `agentaccess.PlanStore`，实例归网页处理器所有（与令牌服务分开，部署开关的变化不清空它；进程重启清空）。计划编号 `pln_` 加 16 字节随机数的 base64url。别的令牌拿着编号执行：`PLAN_NOT_FOUND`，且不消耗这份计划（主人仍可执行）。过期的计划第一次被执行时答 `PLAN_EXPIRED` 并删除，此后是 `PLAN_NOT_FOUND`；过期计划最多再留 10 分钟供识别。同时存在的计划最多 1024 份，满了是 `RATE_LIMITED`（`Retry-After` 为最早到期的那份的剩余时间）；每枚令牌同时存在的有效计划最多 32 份（第 76 条）。计划在执行前就从存放处取出：通过了分发器、且查询参数与请求体合法的执行请求都会用掉它，包括执行失败（版本冲突、校验失败、`RUN_IN_PROGRESS`）；被全局的触发分析、重新生成周报限速拒绝的执行例外，它在取出之前就被拒绝，计划留在原处（第 131 条修改）；服务拒绝启动的执行不占这两项全局配额（第 69 条）。执行请求不接受请求体（空或 `{}` 以外是 `INVALID_ARGUMENT`，`field: body`）。
 34. **`POST /plans` 的线上格式**（阶段 4，与命令行对齐）：顶层字段只有 `op`、`kind`、`id`、`set`、`add`、`remove`、`expected_version`、`args`；未知字段、以及当前 `op` 用不到的字段（见下表）都是 `INVALID_ARGUMENT`，`details.field` 是该字段名。`id`、`expected_version` 必须是 JSON 字符串（`id` 为十进制数字、`user:<id>` 或 `token:<id>`；`expected_version` 为十进制数字串，可以是 `"0"`，表示“尚不存在”或“来自配置文件”）。`set` 的键是扁平的字段名，分析设置用带点的写法（`{"llm.model": …}`）；`add`、`remove` 是 `{字段: [元素…]}`；项目规则的元素是 `{kind, pattern}`。`args.suggestion_id` 必须是 JSON 数字（字符串 `"42"` 被拒绝），`args.week` 是字符串，`args.labels` 是标注数组。`set` 里的 `null` 只在项目的 `group_id` 上有意义（统一项目），其他字段给 `null` 是 `INVALID_ARGUMENT`——指针字段的 `null` 在服务里等于“不改”，接受它会让一次修改静默地什么都不做；要把字符串置空用 `--set-json <字段>='""'`。请求体上限 512 KiB，必须恰好是一个 JSON 值。各 `op` 用到的字段：`config.set` 用 `kind`、`id`、`set`、`add`、`remove`、`expected_version`；`config.remove` 用 `kind`、`id`、`expected_version`；`config.reset` 与 `config.clear-key`（第 75 条）只用 `kind`；`analysis.run` 不用任何字段；另外三个只用 `args`，其中的键分别必须恰为 `labels`、`suggestion_id`、`week`。
 35. **写入的错误细节**（阶段 4）：`details.field` 用可设置字段的名字（`name`、`llm.model`、`rules[2].pattern`、`args.labels[0].task_type`），不加 `set.` 前缀；`details.reason` 是服务给出的稳定原因码（如 `required`、`not_present`、`set_and_edited`、`added_and_removed`、`unknown_client`、`invalid_regexp`、`week_not_ended`、`model_stage_disabled`、`saved_key_not_sent_to_unsaved_address`、`refused_at_apply`；`past_retention` 已撤销，第 72 条；全表与取值集合见第 133 条）；`message` 是服务原有的安全文案（不含提交的值）。组织目录的冲突类原因（组下还有项目或成员、重名）是 `CONFLICT`，同样带 `field`（有的话）与 `reason`，另带下一步的 `hint`（第 108 条）。门面不再返回 `ALREADY_EXISTS`（第 73 条），任何错误都不带别的对象的 ID。四个服务的版本冲突都是 `VERSION_CONFLICT`。执行时由服务报出的同一种拒绝与建计划时的码、`field`、`reason` 相同；执行请求不带请求体，所以执行时的拒绝从不以 `field: body` 回答（第 70 条）。同一字段同时出现在 `set` 和 `add`/`remove` 里由门面在调用服务之前拒绝，`field` 是该字段。
 36. **规范化都在服务里**（阶段 4）：§4.7 列出的网页前端处理（去首尾空白、关键词规则空扫描范围的替换、`ranked_clients` 的去重排序与丢弃词表外的键、项目规则 `pattern` 去空白）由各服务的入口完成，门面不另做一份。门面只把服务报告的结果转给调用方：关键词规则发生了扫描范围替换时 `effects` 里说明；`ranked_clients` 被丢掉的键放在 `extras.dropped_clients` 并在 `effects` 里列出。
@@ -269,7 +269,7 @@
 | `READ_ONLY_TOKEN` | 403 | 令牌是只读档 | 5 | 停下；需要写入时请用户用读写档重新授权 |
 | `WRITE_DISABLED` | 403 | 本部署关闭了经 Agent 的写入 | 5 | 停下并告诉用户去网页上做，附 `web_path` |
 | `MODULE_DISABLED` | 404 | 对应的可选功能（洞察、组织周报、会话分析）没有开启 | 1 | 告诉用户该功能未开启 |
-| `INVALID_ARGUMENT` | 400 | 参数不合法；`details.field` 指出是哪个，`details.reason` 指出原因，`message` 写明允许的取值、范围或冲突的参数（§0.1 第 115 条） | 2 | 修正后重试 |
+| `INVALID_ARGUMENT` | 400 | 参数不合法；`details.field` 指出是哪个，`details.reason` 指出原因，`message` 写明允许的取值、范围或冲突的参数；字段取封闭集合时 `details.allowed` 列出可选值（§0.1 第 115、133 条） | 2 | 修正后重试 |
 | `NOT_FOUND` | 404 | 对象不存在，或当前身份无权读取，或尚未生成 | 1 | 读 `hint`；不要换身份或换路径去试 |
 | `ALREADY_EXISTS` | 409 | 新建的对象与一个必须唯一的已有对象冲突。门面目前不返回它：同名规则照网页允许（§0.1 第 73 条） | 1 | 改用修改，或换名字 |
 | `CONFLICT` | 409 | 与现有数据冲突（如项目组下还有成员） | 1 | 读 `hint` |
@@ -282,7 +282,7 @@
 | `NOT_AVAILABLE` | 404 | 这条记录没有、也永远不会有这项导出内容（`details.reason`：本地策略拦截、未解析、解析失败、没有对话、不重建、没有流式、没有 Body；§0.1 第 118 条） | 1 | 不重试、不轮询；告诉用户原因 |
 | `NOT_RETAINED` | 410 | 原始 Body 已在校验后释放 | 1 | 改导出重建结果；这不是数据丢失 |
 | `EVIDENCE_UNAVAILABLE` | 500 | 证据未通过完整性校验 | 1 | 告诉用户，不重试 |
-| `RATE_LIMITED` | 429 | 超过限速；带 `Retry-After` | 1 | 等到 `Retry-After` 之后再试一次 |
+| `RATE_LIMITED` | 429 | 超过限速；带 `Retry-After`。被触发分析、重新生成周报的全局限额拒绝的执行不用掉计划（§0.1 第 131 条） | 1 | 等到 `Retry-After` 之后再试一次 |
 | `UPSTREAM_UNAVAILABLE` | 502 | 依赖不可用（存储、NewAPI） | 1 | 稍后再试一次 |
 | `TIMEOUT` | 503 | 处理超时 | 1 | 缩小范围后重试；写操作先读取确认是否已生效 |
 | `INVALID_GRANT` | 400 | 授权码无效、过期、已用过，或校验串不符 | 4 | 请用户重新运行 `llmaudit login --server <server>` |
@@ -600,7 +600,7 @@
 }
 ```
 
-- 建计划做完整校验，不通过就是 `INVALID_ARGUMENT`，`details.field` 与 `message` 取自既有的安全文案。校验由各服务新增的“只校验、不保存”入口完成（开发计划 §8.2），门面不自己写校验。各操作在计划阶段校验的内容：
+- 建计划做完整校验，不通过就是 `INVALID_ARGUMENT`，`details.field` 与 `message` 取自既有的安全文案，另带 `details.reason`，封闭集合带 `details.allowed`（§0.1 第 133 条）。已到每枚令牌 32 份上限的令牌在任何校验之前就被拒绝（第 130 条）；输入的键区分大小写、同一对象里不能重复（第 132 条）。校验由各服务新增的“只校验、不保存”入口完成（开发计划 §8.2），门面不自己写校验。各操作在计划阶段校验的内容：
 
 | 操作 | 计划阶段校验什么 |
 |---|---|
@@ -611,7 +611,7 @@
 | `weekly.regenerate` | `week` 是合法的周起始日；该周已结束；快照存储可用。早于保留期不拒绝，`effects` 写明会丢什么（§0.1 第 72 条）；计划的版本是该周快照的 `generated_at`，执行时比对（第 74 条） |
 - `effects` 是给人读的后果说明，由服务端按操作类型生成，例如“启用后立即对线上请求生效”“未冻结的周将按新规则重新归属”“换模型后全部输入包将重新标注”。
 - `extras`：项目的新建与修改带 `preview`（既有预览的结果）；删除带 `deleted_object`（被删对象的完整内容）；重新生成周报带 `week`（`ended`、`frozen`、`frozen_at`）；触发分析带当前的 `running` 与 `last_run`；两类规则的新建在已有同名规则时带 `same_name`（第 73 条）；清除 Key 带 `api_key`（来源的前后，第 75 条）。
-- 计划存在进程内存里，10 分钟有效，绑定令牌，每枚令牌同时最多 32 份（§0.1 第 76 条）。执行时重新检查：令牌仍有效且是读写档；`allow_write` 仍为真；对象版本仍等于 `target.version`（否则 `VERSION_CONFLICT`；重新生成周报的版本是该周快照的状态，§0.1 第 74 条）。执行时的拒绝与建计划时同口径，从不回答 `field: body`（§0.1 第 70 条）。
+- 计划存在进程内存里，10 分钟有效，绑定令牌，每枚令牌同时最多 32 份（§0.1 第 76 条）。被触发分析、重新生成周报的全局限额拒绝的执行不用掉计划（第 131 条）。执行时重新检查：令牌仍有效且是读写档；`allow_write` 仍为真；对象版本仍等于 `target.version`（否则 `VERSION_CONFLICT`；重新生成周报的版本是该周快照的状态，§0.1 第 74 条）。执行时的拒绝与建计划时同口径，从不回答 `field: body`（§0.1 第 70 条）。
 - 一份计划只能执行一次。执行成功或失败后计划都作废。
 - 建计划不产生任何副作用，不写审计。
 
@@ -649,7 +649,7 @@
 - `set` 里的键替换对应字段；没出现的字段保持原值。列表字段出现在 `set` 里时整体替换。
 - `add`、`remove` 只用于列表字段，按元素增删：`keywords` 按既有规则比较（去首尾空白、不分大小写）；`scan_scopes`、`ranked_clients` 按字面值；`rules` 按 `kind` 加规范化后的 `pattern`。同一个字段不能同时出现在 `set` 和 `add`/`remove` 里。
 - 新建不允许 `add`、`remove`。
-- 字段名不在上表里的是 `INVALID_ARGUMENT`。`api_key` 不在表里：它只能经 §4.5.3 的接口设置。
+- 字段名不在上表里的是 `INVALID_ARGUMENT`（`reason: unknown_field`，`details.allowed` 是该类别的字段；字段名区分大小写，§0.1 第 132、133 条）。`api_key` 不在表里：它只能经 §4.5.3 的接口设置。
 - 取值范围与长度限制沿用既有服务，不在门面另写一份。
 - 两类规则的新建：同名（去首尾空白后逐字相同）规则已存在时照网页允许；计划的 `effects` 写明已有的同名规则及其 ID，`extras.same_name` 列出这些 ID（§0.1 第 73 条）。计划只能执行一次，超时后的重试不会建出第二条。
 
