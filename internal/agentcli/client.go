@@ -78,9 +78,14 @@ func (inv *invocation) clientWith(fix bool) (*client, error) {
 func newHTTPClient(env *Env, config localConfig) (*http.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if config.CAFile != "" {
-		pemData, err := os.ReadFile(config.CAFile)
-		if err != nil {
-			return nil, localFileError("cannot read the CA file named in config.json", nil)
+		// A CA file in the state directory was read by loadConfig through the
+		// handle it checked; only one elsewhere is read here.
+		pemData := config.caData
+		if !config.caInState {
+			var err error
+			if pemData, err = os.ReadFile(config.CAFile); err != nil {
+				return nil, localFileError("cannot read the CA file named in config.json", nil)
+			}
 		}
 		pool, err := x509.SystemCertPool()
 		if err != nil || pool == nil {

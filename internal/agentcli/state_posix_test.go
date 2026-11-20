@@ -3,16 +3,26 @@
 package agentcli
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestLooseCredentialStoreIsTightened: a state directory or credentials.json
@@ -353,6 +363,174 @@ func TestConfigFileOfAnotherUserIsNotTrusted(t *testing.T) {
 	}
 	if asked() != 0 {
 		t.Fatalf("the server trusted through the planted CA file was asked %d times", asked())
+	}
+}
+
+// testCAPEM is a self-signed CA certificate named name, in PEM, and its DER
+// subject.
+func testCAPEM(t *testing.T, name string) (string, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), certificate.RawSubject
+}
+
+// swapWhileRunning replaces target, over and over until run returns, by a
+// hard link to own and then to foreign (rename is atomic), as another user
+// who can write to the directory could; it returns when the swapping has
+// stopped.
+func swapWhileRunning(t *testing.T, target, own, foreign string, run func()) {
+	t.Helper()
+	if err := os.Link(own, target); err != nil {
+		t.Fatal(err)
+	}
+	var stop atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		temporary := filepath.Join(filepath.Dir(target), "swap.tmp")
+		for !stop.Load() {
+			_ = os.Link(foreign, temporary)
+			_ = os.Rename(temporary, target)
+			_ = os.Link(own, temporary)
+			_ = os.Rename(temporary, target)
+		}
+	}()
+	run()
+	stop.Store(true)
+	<-done
+}
+
+// TestStateFilesAreReadThroughTheCheckedHandle (contract section 0.1 item
+// 169): config.json and a CA file in the state directory are swapped, again
+// and again, between the user's own file and one of another user while the
+// client loads them. Checking by path and reading by path again let the
+// other user's file through in about one load in two hundred; reading
+// through the handle that was checked never does. Needs root to give a file
+// to another user (the Linux test container).
+func TestStateFilesAreReadThroughTheCheckedHandle(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to give a file to another user")
+	}
+	const rounds = 20000
+	side := t.TempDir()
+	foreignFile := func(name, content string) string {
+		path := writeFile(t, filepath.Join(side, name), content)
+		if err := os.Chown(path, 4242, 4242); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("config.json", func(t *testing.T) {
+		h := newHarness(t)
+		if err := os.Mkdir(h.home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		foreignCA := filepath.Join(side, "foreign-ca.pem")
+		own := writeFile(t, filepath.Join(side, "own.json"), `{}`)
+		foreign := foreignFile("foreign.json", `{"ca_file":"`+foreignCA+`"}`)
+		var trusted, refused, clean int
+		swapWhileRunning(t, filepath.Join(h.home, configFile), own, foreign, func() {
+			for round := 0; round < rounds; round++ {
+				config, err := loadConfig(h.env, false)
+				switch {
+				case err != nil:
+					refused++
+				case config.CAFile == foreignCA:
+					trusted++
+				default:
+					clean++
+				}
+			}
+		})
+		t.Logf("%d loads: another user's config.json trusted %d, refused %d, own read %d", rounds, trusted, refused, clean)
+		if trusted != 0 {
+			t.Fatalf("another user's config.json was read and trusted %d times in %d loads", trusted, rounds)
+		}
+	})
+
+	t.Run("CA file", func(t *testing.T) {
+		h := newHarness(t)
+		if err := os.Mkdir(h.home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ownPEM, _ := testCAPEM(t, "own test CA")
+		foreignPEM, foreignSubject := testCAPEM(t, "foreign test CA")
+		ca := filepath.Join(h.home, "ca.pem")
+		writeFile(t, filepath.Join(h.home, configFile), `{"ca_file":"`+ca+`"}`)
+		own := writeFile(t, filepath.Join(side, "own-ca.pem"), ownPEM)
+		foreign := foreignFile("foreign-ca.pem", foreignPEM)
+		var trusted, refused, clean int
+		swapWhileRunning(t, ca, own, foreign, func() {
+			for round := 0; round < rounds/4; round++ {
+				c, err := newClient(h.env, "https://audit.example.com", "", "test", false)
+				if err != nil {
+					refused++
+					continue
+				}
+				roots := c.http.Transport.(*http.Transport).TLSClientConfig.RootCAs
+				// Subjects lists the certificates added from the CA file.
+				if slices.ContainsFunc(roots.Subjects(), func(subject []byte) bool { return bytes.Equal(subject, foreignSubject) }) {
+					trusted++
+				} else {
+					clean++
+				}
+			}
+		})
+		t.Logf("%d clients: another user's CA trusted %d, refused %d, own CA %d", rounds/4, trusted, refused, clean)
+		if trusted != 0 {
+			t.Fatalf("another user's CA file was trusted %d times in %d clients", trusted, rounds/4)
+		}
+	})
+}
+
+// TestLoginTightensALooseStateDirectoryBeforeAnyRequest (contract section
+// 0.1 item 169): on the first `login --server`, the user's own state
+// directory that others can access is made private before config.json is
+// read, so it is private by the time any request leaves.
+func TestLoginTightensALooseStateDirectoryBeforeAnyRequest(t *testing.T) {
+	h := newHarness(t)
+	if err := os.Mkdir(h.home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(h.home, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var modes []os.FileMode
+	server := newFakeServer(t, func(writer http.ResponseWriter, request *http.Request, body []byte) {
+		mu.Lock()
+		modes = append(modes, modeOf(t, h.home))
+		mu.Unlock()
+		respondJSON(http.StatusOK, `{"ok":true,"data":{"token":"`+testToken+`","role":"admin","tier":"read","expires_at":"2030-01-01T00:00:00Z"}}`)(writer, request, body)
+	})
+	h.env.Stdin = strings.NewReader("the-code\n")
+	if exit := h.run("login", "--server", server.URL, "--no-browser", "--device", "test-device"); exit != 0 {
+		t.Fatalf("login: exit %d %s", exit, h.stderr.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(modes) == 0 {
+		t.Fatal("login sent no request")
+	}
+	for index, mode := range modes {
+		if mode != 0o700 {
+			t.Fatalf("request %d left with the state directory at mode %v", index, mode)
+		}
 	}
 }
 

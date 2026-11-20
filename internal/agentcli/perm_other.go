@@ -72,3 +72,56 @@ func inspectPrivate(path string, dir bool, mode os.FileMode, fix bool) (bool, st
 	}
 	return true, ""
 }
+
+// openStateFile opens a file of the state directory for reading, once,
+// without following a symbolic link (O_NOFOLLOW) and without blocking on a
+// FIFO (O_NONBLOCK). exists is false when there is no such entry; when it
+// cannot be opened, problem says why (a link, not a regular file, owned by
+// another user, or unreadable). The caller checks the handle with
+// checkStateFile and reads from it.
+func openStateFile(path string) (*os.File, bool, string) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err == nil {
+		return file, true, ""
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, ""
+	}
+	// Only to name what is wrong; nothing is opened by this path again.
+	if info, err := os.Lstat(path); err == nil {
+		if problem := entryKindProblem(info, false); problem != "" {
+			return nil, true, problem
+		}
+		if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != os.Geteuid() {
+			return nil, true, problemNotOwned
+		}
+	}
+	return nil, true, problemUnreadable
+}
+
+// checkStateFile checks an opened file of the state directory with fstat on
+// its handle: a regular file owned by the current user that group and
+// others cannot access. A loose mode is made mode through the same handle
+// (fchmod) when fix is true and reported with problemMode otherwise.
+func checkStateFile(file *os.File, mode os.FileMode, fix bool) string {
+	info, err := file.Stat()
+	if err != nil {
+		return problemUnreadable
+	}
+	if problem := entryKindProblem(info, false); problem != "" {
+		return problem
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != os.Geteuid() {
+		return problemNotOwned
+	}
+	if info.Mode().Perm()&0o077 == 0 {
+		return ""
+	}
+	if !fix || file.Chmod(mode) != nil {
+		return problemMode
+	}
+	if info, err = file.Stat(); err != nil || info.Mode().Perm()&0o077 != 0 {
+		return problemMode
+	}
+	return ""
+}

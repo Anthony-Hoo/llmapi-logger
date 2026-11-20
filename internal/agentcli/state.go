@@ -38,6 +38,11 @@ type credentials struct {
 // localConfig is the optional config.json.
 type localConfig struct {
 	CAFile string `json:"ca_file,omitempty"`
+	// caData holds the CA file when it lies in the state directory: the bytes
+	// read through the handle that was checked (checkCAFileInState), which
+	// newHTTPClient uses instead of opening the file again.
+	caData    []byte
+	caInState bool
 }
 
 func localFileError(message string, details map[string]any) *cliError {
@@ -59,18 +64,25 @@ func loadCredentials(env *Env, fix bool) (*credentials, error) {
 	} else if problem == problemSymlink || problem == problemNotDir {
 		return nil, storeError(dir, problem, 0o700)
 	}
-	if exists, _ := inspectPrivate(filepath.Join(dir, credentialsFile), false, 0o600, false); !exists {
+	path := filepath.Join(dir, credentialsFile)
+	file, exists, problem := openStateFile(path)
+	if !exists {
 		return nil, &cliError{Code: agentapi.CodeNotLoggedIn}
 	}
-	if err := securePrivateState(dir, fix); err != nil {
-		return nil, err
+	if file != nil {
+		defer file.Close()
 	}
-	data, err := os.ReadFile(filepath.Join(dir, credentialsFile))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, &cliError{Code: agentapi.CodeNotLoggedIn}
+	// The directory is checked (and tightened) before the file, so its
+	// problem is the one reported when both have one.
+	if _, dirProblem := inspectPrivate(dir, true, 0o700, fix); dirProblem != "" {
+		return nil, storeError(dir, dirProblem, 0o700)
 	}
-	if err != nil {
+	data, problem := readStateFile(file, problem, 0o600, fix)
+	if problem == problemUnreadable {
 		return nil, localFileError("cannot read the local credentials", nil)
+	}
+	if problem != "" {
+		return nil, storeError(path, problem, 0o600)
 	}
 	var creds credentials
 	if err := json.Unmarshal(data, &creds); err != nil || creds.Server == "" || creds.Token == "" {
@@ -116,40 +128,50 @@ func removeCredentials(env *Env) error {
 
 // loadConfig reads config.json. It names the CA the client trusts with the
 // token, so it is checked like credentials.json before it is read (contract
-// section 0.1 item 164): a link, an entry that is not a regular file, or a
-// file owned by another user is refused with LOCAL_FILE_ERROR and never
-// read; a loose mode of the user's own file is tightened through a handle
-// opened without following links when fix is true, and refused otherwise.
-// Besides credentials.json, these are the only files the client reads from
-// the state directory: config.json and, when it lies there, the CA file it
-// names (checkCAFileInState).
+// section 0.1 items 164 and 169). First the state directory itself must pass
+// the store's rules (not a link, not of the wrong type, owned by the user,
+// not sticky); a loose mode of the user's own directory is tightened when
+// fix is true and refused otherwise, so no other user can replace a file in
+// it from here on. config.json is then opened once without following links
+// (openStateFile), checked on that handle (a regular file owned by the user;
+// a loose mode is tightened through it when fix is true, refused otherwise)
+// and read from that handle; a link, an entry that is not a regular file, or
+// a file owned by another user is refused with LOCAL_FILE_ERROR and never
+// read. Besides credentials.json, these are the only files the client reads
+// from the state directory: config.json and, when it lies there, the CA file
+// it names (checkCAFileInState).
 func loadConfig(env *Env, fix bool) (localConfig, error) {
 	var config localConfig
 	dir, err := env.stateDir()
 	if err != nil {
 		return config, err
 	}
+	if exists, problem := inspectPrivate(dir, true, 0o700, fix); !exists {
+		return config, nil
+	} else if problem != "" {
+		return config, storeError(dir, problem, 0o700)
+	}
 	path := filepath.Join(dir, configFile)
-	exists, problem := inspectPrivate(path, false, 0o600, fix)
+	file, exists, problem := openStateFile(path)
 	if !exists {
 		return config, nil
 	}
+	if file != nil {
+		defer file.Close()
+	}
+	data, problem := readStateFile(file, problem, 0o600, fix)
+	if problem == problemUnreadable {
+		return config, localFileError("cannot read config.json", nil)
+	}
 	if problem != "" {
 		return config, configFileError(path, problem)
-	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return config, nil
-	}
-	if err != nil {
-		return config, localFileError("cannot read config.json", nil)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&config); err != nil {
 		return config, localFileError("config.json is not valid: it accepts only {\"ca_file\": \"<path>\"}", nil)
 	}
-	if err := checkCAFileInState(dir, config.CAFile, fix); err != nil {
+	if config.caData, config.caInState, err = checkCAFileInState(dir, config.CAFile, fix); err != nil {
 		return config, err
 	}
 	return config, nil
@@ -158,41 +180,76 @@ func loadConfig(env *Env, fix bool) (localConfig, error) {
 // checkCAFileInState applies the same checks to the CA file config.json
 // names when it lies inside the state directory, and to every directory
 // between: a CA file planted there would decide which server gets the token
-// just as config.json does. A CA file elsewhere is the user's choice and is
-// read as it is.
-func checkCAFileInState(dir, caFile string, fix bool) error {
+// just as config.json does. The directories are checked (and tightened) by
+// path, and they lie in the state directory loadConfig has just made
+// private; the file itself is opened once without following links, checked
+// on that handle and read from it, and those bytes are what the TLS
+// configuration trusts (inState true). A CA file elsewhere is the user's
+// choice and is read by newHTTPClient as it is (inState false).
+func checkCAFileInState(dir, caFile string, fix bool) ([]byte, bool, error) {
 	if caFile == "" {
-		return nil
+		return nil, false, nil
 	}
 	path, err := filepath.Abs(caFile)
 	if err != nil {
-		return nil // newHTTPClient reports the unreadable file
+		return nil, false, nil // newHTTPClient reports the unreadable file
 	}
 	relative, err := filepath.Rel(dir, path)
 	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return nil
+		return nil, false, nil
 	}
+	refused := func(at, problem string, mode os.FileMode) error {
+		return &cliError{Code: agentapi.CodeLocalFileError,
+			Message: "the CA file config.json names lies in the state directory and is a link, of the wrong type, owned by another user, or accessible to others, so it is not read",
+			Hint:    "Ask the user to check it: a CA file in the state directory must be a regular file owned by them with mode 0600, or config.json must name one elsewhere.",
+			Details: map[string]any{"path": at, "reason": problem, "required_mode": fmt.Sprintf("%04o", mode)}}
+	}
+	unreadable := localFileError("cannot read the CA file named in config.json", nil)
 	parts := strings.Split(relative, string(filepath.Separator))
 	at := dir
-	for index, part := range parts {
+	for _, part := range parts[:len(parts)-1] {
 		at = filepath.Join(at, part)
-		last := index == len(parts)-1
-		mode := os.FileMode(0o700)
-		if last {
-			mode = 0o600
-		}
-		exists, problem := inspectPrivate(at, !last, mode, fix)
+		exists, problem := inspectPrivate(at, true, 0o700, fix)
 		if !exists {
-			return nil // newHTTPClient reports the missing file
+			return nil, true, unreadable
 		}
 		if problem != "" {
-			return &cliError{Code: agentapi.CodeLocalFileError,
-				Message: "the CA file config.json names lies in the state directory and is a link, of the wrong type, owned by another user, or accessible to others, so it is not read",
-				Hint:    "Ask the user to check it: a CA file in the state directory must be a regular file owned by them with mode 0600, or config.json must name one elsewhere.",
-				Details: map[string]any{"path": at, "reason": problem, "required_mode": fmt.Sprintf("%04o", mode)}}
+			return nil, true, refused(at, problem, 0o700)
 		}
 	}
-	return nil
+	at = filepath.Join(at, parts[len(parts)-1])
+	file, exists, problem := openStateFile(at)
+	if !exists {
+		return nil, true, unreadable
+	}
+	if file != nil {
+		defer file.Close()
+	}
+	data, problem := readStateFile(file, problem, 0o600, fix)
+	if problem == problemUnreadable {
+		return nil, true, unreadable
+	}
+	if problem != "" {
+		return nil, true, refused(at, problem, 0o600)
+	}
+	return data, true, nil
+}
+
+// readStateFile checks a file openStateFile opened (checkStateFile, on that
+// handle) and reads it from the same handle; problem is openStateFile's, and
+// when it or the check names one nothing is read.
+func readStateFile(file *os.File, problem string, mode os.FileMode, fix bool) ([]byte, string) {
+	if problem != "" {
+		return nil, problem
+	}
+	if problem := checkStateFile(file, mode, fix); problem != "" {
+		return nil, problem
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, problemUnreadable
+	}
+	return data, ""
 }
 
 // What can be wrong with an entry of the credential store (details.reason
