@@ -920,3 +920,35 @@ func TestResetAndClearKeyPlansSayOneTrueThing(t *testing.T) {
 		t.Fatalf("reset of changed values = %+v", plan)
 	}
 }
+
+// Contract section 0.1 item 107: every plan of an operation that cannot be
+// undone through this interface says so; a removal says that an object made
+// again from the copy gets a new id.
+func TestIrreversiblePlansSaySo(t *testing.T) {
+	fixture := newWriteFixture(t)
+	ids := fixture.seed(t)
+	for name, body := range map[string]any{
+		"analysis.run":         `{"op":"analysis.run"}`,
+		"analysis.calibrate":   map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{map[string]any{"session_id": analysisOwnID, "task_type": "bug_fix"}}}},
+		"analysis.dismiss":     `{"op":"analysis.dismiss","args":{"suggestion_id":42}}`,
+		"weekly.regenerate":    map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": orgTestWeek.Format("2006-01-02")}},
+		"config.remove rule":   map[string]any{"op": "config.remove", "kind": "ua-rule", "id": ids.uaRule},
+		"config.remove group":  map[string]any{"op": "config.remove", "kind": "group", "id": ids.otherGroup},
+		"config.remove member": map[string]any{"op": "config.remove", "kind": "member", "id": "7"},
+		"config.clear-key":     map[string]any{"op": "config.clear-key", "kind": "analysis-settings"},
+	} {
+		plan := fixture.plan(t, body)
+		effects := strings.Join(plan.Effects, "\n")
+		if !strings.Contains(effects, effectIrreversible) {
+			t.Errorf("%s plan does not say it cannot be undone: %v", name, plan.Effects)
+		}
+		if strings.HasPrefix(name, "config.remove") && name != "config.remove member" && !strings.Contains(effects, "new id") {
+			t.Errorf("%s plan does not say a restored object gets a new id: %v", name, plan.Effects)
+		}
+	}
+	// A change that can be undone with another change does not claim it.
+	plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "ua-rule", "id": ids.uaRule, "set": map[string]any{"enabled": false}})
+	if strings.Contains(strings.Join(plan.Effects, "\n"), effectIrreversible) {
+		t.Fatalf("a reversible change claims it cannot be undone: %v", plan.Effects)
+	}
+}

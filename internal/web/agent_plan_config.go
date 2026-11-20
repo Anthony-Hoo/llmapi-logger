@@ -29,6 +29,9 @@ const (
 	effectAnalysis   = "The next session analysis run uses these settings; a run in progress keeps the settings it started with."
 	effectModelMoved = "The model or its address changes: the next run labels every input pack with it."
 	effectDeleteOnly = "There is no recycle bin: extras.deleted_object is the only copy of the object after the plan is applied."
+	// effectIrreversible begins the line every plan of an operation that
+	// cannot be undone carries (contract section 0.1 item 107).
+	effectIrreversible = "This cannot be undone through this interface"
 )
 
 func (handler *managementHandler) planConfigSet(ctx context.Context, request agentPlanRequest) (*agentPlan, error) {
@@ -870,6 +873,12 @@ func (handler *managementHandler) planConfigRemove(_ context.Context, request ag
 		plan.verify = "llmaudit config show --kind org"
 	}
 	plan.effect(effectDeleteOnly)
+	switch request.Kind {
+	case "member", "principal":
+		plan.effect(effectIrreversible + ": the entry can be set again with config set (extras.deleted_object has its old value), as a new entry with a new version.")
+	default:
+		plan.effect(effectIrreversible + ": an object created again from extras.deleted_object is a new object, with a new id assigned by the server; anything that referred to the old id does not follow.")
+	}
 	return plan, nil
 }
 
@@ -1010,6 +1019,7 @@ func (handler *managementHandler) planConfigClearKey(ctx context.Context, reques
 	plan.effect("Removes the API key in use (" + diff.KeySource + " key): the model is called without a key from then on. " +
 		"Only the user can set a key again, by typing it at a terminal with `llmaudit config set-key --kind analysis-settings`; " +
 		"the configuration file's key comes back only with `llmaudit config reset --kind analysis-settings`.")
+	plan.effect(effectIrreversible + ": the key's value is not kept anywhere the agent can reach.")
 	if version == 0 {
 		plan.effect("Nothing is saved yet: applying saves the settings in effect (the configuration file's values) without a key, so the source becomes saved with a new version; no other setting value changes.")
 	}

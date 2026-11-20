@@ -53,6 +53,7 @@ func (handler *managementHandler) planAnalysisRun(ctx context.Context) (*agentPl
 	if state.Running {
 		plan.effect("A run is in progress now: applying this plan fails with RUN_IN_PROGRESS unless that run has finished.")
 	}
+	plan.effect(effectIrreversible + ": what the run writes (session analyses, reports, suggestions) stays; no command removes it.")
 	plan.quota = quota(agentaccess.QuotaAnalysisRun)
 	plan.verify = "llmaudit analysis overview --since 1d"
 	plan.apply = func(context.Context) (agentApplied, error) {
@@ -112,6 +113,7 @@ func (handler *managementHandler) planAnalysisCalibrate(ctx context.Context, req
 	} else {
 		plan.effect("With these labels no field would be hidden from reports.")
 	}
+	plan.effect(effectIrreversible + ": the calibration it replaces is not kept.")
 	plan.verify = "llmaudit analysis overview --since 1d"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
 		// The model stage may have been switched off since the plan was made:
@@ -200,6 +202,7 @@ func (handler *managementHandler) planAnalysisDismiss(ctx context.Context, reque
 	}
 	plan := newAgentPlan(agentapi.OpAnalysisDismiss, agentPlanTarget{Kind: "analysis-suggestion", ID: formatAgentID(id)})
 	plan.effect("Marks suggestion " + formatAgentID(id) + " dismissed in the weekly review of all keys or of its project; it is no longer shown as open. A suggestion that is already dismissed stays dismissed.")
+	plan.effect(effectIrreversible + ": no command reopens a dismissed suggestion.")
 	plan.verify = "llmaudit analysis report"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
 		err := handler.sessionAnalysis.DismissSuggestion(ctx, id)
@@ -286,6 +289,11 @@ func (handler *managementHandler) planWeeklyRegenerate(ctx context.Context, requ
 	}
 	if effect := handler.retentionEffect(state); effect != "" {
 		plan.effect(effect)
+	}
+	if state.Frozen {
+		plan.effect(effectIrreversible + ": the frozen snapshot it replaces is not kept.")
+	} else {
+		plan.effect(effectIrreversible + ": once frozen, the week can only be replaced by another regeneration, never unfrozen.")
 	}
 	plan.quota = quota(agentaccess.QuotaRegenerate)
 	plan.timeout = orgRegenerateTimeout
