@@ -948,16 +948,24 @@ func TestAgentReadCompletenessRows(t *testing.T) {
 		}
 	}
 
-	// Usage overview: coverage is unknown, billing completeness is explicit.
-	if got, decoded := meta("/usage/overview?" + fixtureWindow); !got.Complete || !strings.Contains(string(decoded.Data), `"coverage_unknown":true`) ||
+	// Usage overview: coverage is unknown, so the overview is not complete
+	// (contract section 0.1 item 120); billing completeness is explicit.
+	if got, decoded := meta("/usage/overview?" + fixtureWindow); got.Complete || got.IncompleteReason != agentIncompleteCoverage ||
+		!strings.Contains(string(decoded.Data), `"coverage_unknown":true`) ||
 		len(decoded.NextActions) == 0 {
 		t.Fatalf("overview = %+v %v", got, decoded.NextActions)
 	}
 	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 2}}); !overview.BillingComplete || !overview.CoverageUnknown {
 		t.Fatalf("billed overview = %+v", overview)
 	}
-	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 1, UnbilledRequests: 1}}); overview.BillingComplete {
-		t.Fatalf("unbilled overview = %+v", overview)
+	// A settled unbilled request (failed, never billed) does not hold billing
+	// open; a request whose billing is pending does (contract section 0.1
+	// item 120).
+	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 1, UnbilledRequests: 1}}); !overview.BillingComplete {
+		t.Fatalf("settled unbilled overview = %+v", overview)
+	}
+	if overview := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 2, BilledRequests: 1, UnbilledRequests: 1, PendingBillingRequests: 1}}); overview.BillingComplete {
+		t.Fatalf("pending overview = %+v", overview)
 	}
 
 	// My week explains an empty row by its cause.

@@ -185,6 +185,7 @@ func (service *Insights) fold(rows []storage.InsightsUsageRow) usageFold {
 		accumulator.mix.ToolResult += row.Mix.ToolResult
 		accumulator.mix.Media += row.Mix.Media
 		accumulator.totals.BilledRequests += row.BilledRequests
+		accumulator.totals.PendingBillingRequests += row.PendingBilling
 		if row.CostUSD != nil {
 			accumulator.cost += *row.CostUSD
 		}

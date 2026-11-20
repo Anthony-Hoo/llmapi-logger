@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,9 @@ type stepSeed struct {
 	billing      string
 	quota        int64
 	quotaPerUnit float64
+	// callerPending records a NewAPI request id without a token link: the
+	// caller lookup, and so the billing, is still pending.
+	callerPending bool
 }
 
 func i64(value int64) *int64 { return &value }
@@ -114,7 +118,7 @@ func (fixture *insightsFixture) seed(seed stepSeed) {
 		ForwardStatus: sqlite.ForwardCompleted, CaptureStatus: sqlite.CaptureComplete, ParseStatus: sqlite.ParseOK,
 	}
 	requestID := "req-" + seed.id
-	if seed.billing != "" {
+	if seed.billing != "" || seed.callerPending {
 		finish.NewAPIRequestID = &requestID
 	}
 	if err := fixture.store.FinishAudit(ctx, finish); err != nil {
@@ -1054,5 +1058,34 @@ func TestInsightsTrendContextWindowIgnoresAuxiliaryModel(t *testing.T) {
 	trend, err = fixture.service.Trend(ctx, "agt_bbbbbbbbbbbbbbbbbbbbbbbb", scopeFor(keyOwn))
 	if err != nil || trend.ContextWindow == nil || *trend.ContextWindow != *want {
 		t.Fatalf("aux-only window = %v %v", trend.ContextWindow, err)
+	}
+}
+
+// Pending billing counts only requests whose billing can still change: a
+// request whose caller lookup is pending. A request checked and found
+// unbilled, or one that never gets a token link, is final.
+func TestInsightsPendingBillingCountsOnlyUnsettledRequests(t *testing.T) {
+	t.Parallel()
+	fixture := newInsightsFixture(t, nil)
+	root, node := fingerprint(0xc0), fingerprint(0x21)
+	fixture.seed(stepSeed{id: "billed", offset: 0, key: keyOwn, session: testSessionShared, root: root, node: node,
+		turnStart: true, billing: sqlite.BillingBilled, quota: 1000, quotaPerUnit: 500000})
+	fixture.seed(stepSeed{id: "no-link", offset: 10 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node, prev: "billed"})
+	fixture.seed(stepSeed{id: "unbilled", offset: 20 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node, prev: "no-link",
+		billing: sqlite.BillingUnbilled})
+	ctx := context.Background()
+	from, to := fixture.rangeNS()
+	overview, err := fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOwn)})
+	if err != nil || overview.Totals.Requests != 3 || overview.Totals.UnbilledRequests != 2 || overview.Totals.PendingBillingRequests != 0 {
+		t.Fatalf("settled totals = %+v %v", overview.Totals, err)
+	}
+	fixture.seed(stepSeed{id: "waiting", offset: 30 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node, prev: "unbilled",
+		callerPending: true})
+	overview, err = fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOwn)})
+	if err != nil || overview.Totals.Requests != 4 || overview.Totals.PendingBillingRequests != 1 {
+		t.Fatalf("totals with a pending caller = %+v %v", overview.Totals, err)
+	}
+	if encoded, _ := json.Marshal(overview.Totals); strings.Contains(string(encoded), "pending") {
+		t.Fatalf("the web response gained a field: %s", encoded)
 	}
 }

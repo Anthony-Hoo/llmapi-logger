@@ -133,8 +133,15 @@ func agentUsageOverviewOf(response insights.OverviewResponse) agentUsageOverview
 		Daily: make([]agentDailyUsage, 0, len(response.Daily)), Heatmap: make([]agentHeatmapDay, 0, len(response.Heatmap)),
 		GroupBy: response.GroupBy, Groups: make([]agentGroupUsage, 0, len(response.Groups)),
 		Composition: agentCategoryValuesOf(response.Mix), BillingEnabled: response.BillingEnabled,
-		ClientLabels:    copyLabels(response.ClientLabels),
-		BillingComplete: response.Totals.UnbilledRequests == 0, CoverageUnknown: true,
+		ClientLabels: copyLabels(response.ClientLabels),
+		// billing_complete: no request in the range still waits for its
+		// billing, by the rule of billing_final in `requests get`
+		// (agentBillingFinal). A failed request that will never be billed is
+		// final and does not count.
+		BillingComplete: response.Totals.PendingBillingRequests == 0,
+		// The insights service cannot say how many records are not analysed
+		// yet, so coverage is always unknown.
+		CoverageUnknown: true,
 	}
 	for _, day := range response.Daily {
 		out.Daily = append(out.Daily, agentDailyUsage{Day: day.Day, Usage: agentUsageTotalsOf(day.Usage)})
@@ -239,7 +246,27 @@ func (handler *managementHandler) serveAgentUsageOverview(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	writeAgentRead(writer, agentUsageOverviewOf(response), agentMetaOK(), true, agentCoverageAction)
+	data := agentUsageOverviewOf(response)
+	writeAgentRead(writer, data, usageOverviewMeta(data), true, agentCoverageAction)
+}
+
+// Incomplete reasons of the usage overview (contract section 0.1 item 120).
+const (
+	agentIncompleteCoverage = "coverage_unknown"
+	agentIncompleteBilling  = "billing_pending"
+)
+
+// usageOverviewMeta is complete only when the totals are known to cover
+// every record (never, while coverage_unknown) and no billing is pending.
+func usageOverviewMeta(data agentUsageOverview) agentapi.Meta {
+	meta := agentMetaOK()
+	switch {
+	case data.CoverageUnknown:
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteCoverage
+	case !data.BillingComplete:
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteBilling
+	}
+	return meta
 }
 
 type agentSessionCaller struct {

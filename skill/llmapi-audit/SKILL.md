@@ -56,7 +56,7 @@ Administrator-only commands and administrator-only arguments are refused differe
 Every read result carries `meta` with three fields:
 
 - `state`: the unified state of what you read, for example `running`, `succeeded`, `failed`, `blocked` or `cancelled` for an audit record, `never_run`, `running`, `failed` or `succeeded` for an analysis run, `ok` for most other reads.
-- `complete`: whether the result is final and whole. When it is false, `incomplete_reason` says why (`parse_pending`, `capture_incomplete`, `truncated`, `evidence_pending`, `facets_incomplete`, `not_computed`, `below_contributor_minimum`, `not_ready`, …).
+- `complete`: whether the result is final and whole. When it is false, `incomplete_reason` says why (`parse_pending`, `capture_incomplete`, `truncated`, `evidence_pending`, `facets_incomplete`, `not_computed`, `below_contributor_minimum`, `not_ready`, `coverage_unknown`, `billing_pending`, …).
 - `incomplete_reason`: empty when `complete` is true.
 
 Lists page with `--cursor`: pass the `next_cursor` of the previous page until it is empty, and repeat every other argument of the first page exactly (only `--limit` may change). A cursor belongs to its query and identity; using it with other filters fails with `INVALID_ARGUMENT`, `details.reason: cursor_query_mismatch`: start that query again without `--cursor`.
