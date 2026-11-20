@@ -240,3 +240,61 @@ func TestCLIPrettyRequestsListShowsState(t *testing.T) {
 		}
 	}
 }
+
+// The walkthrough's refused arguments, through the real client: every
+// INVALID_ARGUMENT names the flag or argument the user typed, a reason and,
+// in the message, what is accepted or which other argument it conflicts
+// with; the server's own name stays in details.parameter.
+func TestCLIInvalidArgumentsNameWhatTheUserTyped(t *testing.T) {
+	fixture := newReadFixture(t)
+	admin := newReadCLI(t, fixture, fixture.adminRead)
+	developer := newReadCLI(t, fixture, fixture.developer)
+	for _, test := range []struct {
+		cli            *readCLI
+		args           []string
+		field, reason  string
+		conflictsWith  string
+		messageMention string
+	}{
+		{admin, []string{"requests", "list", "--forward-status", "bogus"}, "--forward-status", reasonNotAllowedValue, "", "completed"},
+		{admin, []string{"requests", "list", "--protocol", "foo"}, "--protocol", reasonNotAllowedValue, "", "anthropic"},
+		{admin, []string{"requests", "list", "--since", "30m", "--from", "2026-01-01"}, "--since", reasonConflict, "--from", "`--from`"},
+		{admin, []string{"requests", "list", "--limit", "201"}, "--limit", reasonOutOfRange, "", "200"},
+		{admin, []string{"requests", "list", "--no-collapse", "--cursor", "bogus"}, "--cursor", reasonInvalidCursor, "", "next_cursor"},
+		{admin, []string{"usage", "overview", "--group-by", "bogus"}, "--group-by", reasonNotAllowedValue, "", "protocol"},
+		{admin, []string{"usage", "overview", "--since", "500d"}, "--since", reasonRangeTooLong, "", "400"},
+		{admin, []string{"usage", "tree", "xyz"}, "<tree>", reasonInvalidFormat, "", "24"},
+		{admin, []string{"usage", "trend", "ses_123"}, "<session>", reasonInvalidFormat, "", "agt_"},
+		{admin, []string{"weekly", "report", "--metric", "bogus"}, "--metric", reasonNotAllowedValue, "", "tokens"},
+		{admin, []string{"analysis", "sessions", "--since", "7d", "--flags", "bogus"}, "--flags", reasonNotAllowedValue, "", "loop"},
+		{admin, []string{"analysis", "sessions", "--since", "7d", "--kind", "foo"}, "--kind", reasonNotAllowedValue, "", "chat"},
+		{admin, []string{"analysis", "session", "abc", "--facet"}, "<id>", reasonInvalidFormat, "", "64"},
+		{admin, []string{"analysis", "overview", "--since", "500d"}, "--since", reasonRangeTooLong, "", "400"},
+		{admin, []string{"analysis", "overview"}, "--since", reasonRequired, "", "`--from`"},
+		{admin, []string{"analysis", "report", "--project-id", "1", "--group-id", "1"}, "--group-id", reasonConflict, "--project-id", "`--project-id`"},
+		{admin, []string{"config", "preview-project", "--group-id", "null"}, "--rule", reasonRequired, "", "repo_name"},
+		{admin, []string{"config", "preview-project", "--group-id", "null", "--rule", "repo_name: "}, "--rule", "empty", "", ""},
+		{developer, []string{"usage", "overview", "--group-by", "caller"}, "--group-by", reasonAdministratorOnly, "", "administrators"},
+		{developer, []string{"requests", "list", "--user-id", "8"}, "--user-id", reasonAdministratorOnly, "", "administrators"},
+	} {
+		label := strings.Join(test.args, " ")
+		if exit := test.cli.run(test.args...); exit != agentapi.ExitInvalidUsage {
+			t.Errorf("%s: exit %d %s", label, exit, test.cli.stderr.String())
+			continue
+		}
+		var envelope struct {
+			Error agentapi.ErrorBody `json:"error"`
+		}
+		if err := json.Unmarshal(test.cli.stderr.Bytes(), &envelope); err != nil {
+			t.Fatalf("%s: %s", label, test.cli.stderr.String())
+		}
+		details := envelope.Error.Details
+		if envelope.Error.Code != agentapi.CodeInvalidArgument || details["field"] != test.field || details["reason"] != test.reason ||
+			details["parameter"] == nil || !strings.Contains(envelope.Error.Message, test.messageMention) {
+			t.Errorf("%s: %s", label, test.cli.stderr.String())
+		}
+		if test.conflictsWith != "" && details["conflicts_with"] != test.conflictsWith {
+			t.Errorf("%s: conflicts_with %v", label, details["conflicts_with"])
+		}
+	}
+}

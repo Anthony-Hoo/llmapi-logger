@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,14 +26,105 @@ import (
 // mapping and the time converters. Every facade read handler goes through
 // these, so the conventions cannot drift between endpoint groups.
 
-// agentArgError is a parameter problem; field names the offending parameter.
+// Reasons of an INVALID_ARGUMENT answer (contract section 0.1 item 115).
+// Every refused argument of the read facade carries details.field, the
+// parameter's wire name (query parameter, path segment or body field), and
+// details.reason, one of these stable codes; the message says what is
+// allowed. The command-line client rewrites field into the flag or argument
+// the user typed.
+const (
+	reasonUnknownParameter  = "unknown_parameter"
+	reasonRepeatedParameter = "repeated_parameter"
+	reasonInvalidFormat     = "invalid_format"
+	reasonOutOfRange        = "out_of_range"
+	reasonNotAllowedValue   = "not_allowed_value"
+	reasonConflict          = "conflicts_with_other_argument"
+	reasonRequired          = "required"
+	reasonRangeTooLong      = "range_too_long"
+	reasonEmptyRange        = "empty_range"
+	reasonAdministratorOnly = "administrator_only"
+	reasonInvalidCursor     = "invalid_cursor"
+	reasonCursorMismatch    = "cursor_query_mismatch"
+	reasonNotWeekStart      = "not_week_start"
+	reasonRejectedByService = "rejected_by_service"
+)
+
+// agentArgError is a parameter problem: field names the offending parameter
+// by its wire name, reason is one of the reason codes above and message
+// tells the reader what is accepted. Parameter names inside message are
+// written in backticks, so a client can rewrite them into its own names.
 type agentArgError struct {
-	field string
+	field   string
+	reason  string
+	message string
+	extra   map[string]any
 }
 
 func (err agentArgError) Error() string { return "invalid argument " + err.field }
 
-func argError(field string) error { return agentArgError{field: field} }
+// details is the details object of the failure envelope.
+func (err agentArgError) details() map[string]any {
+	details := map[string]any{"field": err.field, "reason": err.reason}
+	for key, value := range err.extra {
+		details[key] = value
+	}
+	return details
+}
+
+// with adds one more detail.
+func (err agentArgError) with(key string, value any) agentArgError {
+	extra := make(map[string]any, len(err.extra)+1)
+	for name, existing := range err.extra {
+		extra[name] = existing
+	}
+	extra[key] = value
+	err.extra = extra
+	return err
+}
+
+// argInvalid is a refused argument with an explicit reason and message.
+func argInvalid(field, reason, message string) agentArgError {
+	return agentArgError{field: field, reason: reason, message: message}
+}
+
+// argError is a value of field that does not have the expected form.
+func argError(field string) error {
+	return argInvalid(field, reasonInvalidFormat, "`"+field+"` does not have the expected form")
+}
+
+// argFormat is a value of field that does not have the form described.
+func argFormat(field, expected string) error {
+	return argInvalid(field, reasonInvalidFormat, "`"+field+"` must be "+expected)
+}
+
+// argNotAllowed is a value outside the closed set allowed.
+func argNotAllowed(field string, allowed []string) error {
+	return argInvalid(field, reasonNotAllowedValue, "`"+field+"` must be one of: "+strings.Join(allowed, ", ")).
+		with("allowed", append([]string{}, allowed...))
+}
+
+// argRange is an integer outside [minimum, maximum].
+func argRange(field string, minimum, maximum int64) error {
+	return argInvalid(field, reasonOutOfRange, fmt.Sprintf("`%s` must be an integer from %d to %d", field, minimum, maximum)).
+		with("minimum", minimum).with("maximum", maximum)
+}
+
+// argConflict names two arguments that cannot be given together.
+func argConflict(field, other string) error {
+	return argInvalid(field, reasonConflict, "`"+field+"` cannot be combined with `"+other+"`; give only one of them").
+		with("conflicts_with", other)
+}
+
+// argAdministratorOnly is an administrator-only argument a developer token
+// gave (contract D4, D5, D8 and section 0.1 item 116): the value is not the
+// problem, the argument is, so it is INVALID_ARGUMENT and dropping it fixes
+// the call.
+func argAdministratorOnly(field string) error {
+	return argInvalid(field, reasonAdministratorOnly,
+		"`"+field+"` is available to administrators only; a developer token already reads only the data of its own API key")
+}
+
+const agentAdministratorOnlyHint = "Leave this argument out and run the command again; do not try another identity or another way to read other people's data."
 
 // agentParams checks the query string of one facade call: every key must be
 // in allowed and appear once. Unknown keys are refused rather than ignored,
@@ -42,9 +135,23 @@ func agentParams(request *http.Request, allowed ...string) (url.Values, error) {
 	for _, key := range allowed {
 		permitted[key] = true
 	}
-	for key, entries := range values {
-		if !permitted[key] || len(entries) != 1 {
-			return nil, argError(key)
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		switch {
+		case !permitted[key]:
+			message := "`" + key + "` is not a parameter of this endpoint"
+			if len(allowed) > 0 {
+				message += "; it takes " + strings.Join(allowed, ", ")
+			} else {
+				message += "; it takes none"
+			}
+			return nil, argInvalid(key, reasonUnknownParameter, message).with("allowed", append([]string{}, allowed...))
+		case len(values[key]) != 1:
+			return nil, argInvalid(key, reasonRepeatedParameter, "`"+key+"` may be given only once")
 		}
 	}
 	return values, nil
@@ -67,12 +174,12 @@ const maxSinceDays = 3660
 func parseAgentRange(values url.Values, now time.Time) (agentRange, error) {
 	var result agentRange
 	if values.Has("since") && values.Has("from") {
-		return result, argError("since")
+		return result, argConflict("since", "from")
 	}
 	if values.Has("to") {
 		to, err := parseAgentInstant(values.Get("to"), true)
 		if err != nil {
-			return result, argError("to")
+			return result, argFormat("to", agentInstantForm)
 		}
 		ns := to.UnixNano()
 		result.ToNS = &ns
@@ -80,7 +187,7 @@ func parseAgentRange(values url.Values, now time.Time) (agentRange, error) {
 	if values.Has("from") {
 		from, err := parseAgentInstant(values.Get("from"), false)
 		if err != nil {
-			return result, argError("from")
+			return result, argFormat("from", agentInstantForm)
 		}
 		ns := from.UnixNano()
 		result.FromNS = &ns
@@ -88,7 +195,7 @@ func parseAgentRange(values url.Values, now time.Time) (agentRange, error) {
 	if values.Has("since") {
 		duration, err := parseSince(values.Get("since"))
 		if err != nil {
-			return result, argError("since")
+			return result, argFormat("since", fmt.Sprintf("a positive whole number followed by s, m, h, d or w (30m, 2h, 7d, 2w), at most %d days", maxSinceDays))
 		}
 		end := now
 		if result.ToNS != nil {
@@ -98,10 +205,37 @@ func parseAgentRange(values url.Values, now time.Time) (agentRange, error) {
 		result.FromNS = &ns
 	}
 	if result.FromNS != nil && result.ToNS != nil && *result.FromNS >= *result.ToNS {
-		return result, argError("from")
+		field := "from"
+		if values.Has("since") {
+			field = "since"
+		}
+		return result, argInvalid(field, reasonEmptyRange, "the range is empty: `"+field+"` must start before `to`").with("conflicts_with", "to")
 	}
 	return result, nil
 }
+
+const agentInstantForm = "an RFC 3339 time (2026-01-02T15:04:05Z) or a YYYY-MM-DD date"
+
+// checkRangeLength refuses a range longer than maximum (the insights and
+// session analysis services refuse more than 400 days). from and to are the
+// resolved ends; the field named is the argument that set the start.
+func checkRangeLength(values url.Values, fromNS, toNS int64, maximum time.Duration) error {
+	if toNS-fromNS <= int64(maximum) {
+		return nil
+	}
+	field := "from"
+	if values.Has("since") {
+		field = "since"
+	}
+	days := int64(maximum / (24 * time.Hour))
+	return argInvalid(field, reasonRangeTooLong, fmt.Sprintf("the range may be at most %d days long; shorten `%s` or move `to`", days, field)).
+		with("max_days", days)
+}
+
+// agentMaxServiceRange is the longest range the insights and session
+// analysis services accept (query.MaxInsightsRange; sessionanalysis keeps
+// the same 400 days unexported).
+const agentMaxServiceRange = query.MaxInsightsRange
 
 func parseAgentInstant(value string, endOfDay bool) (time.Time, error) {
 	if day, err := time.Parse(time.DateOnly, value); err == nil {
@@ -180,7 +314,7 @@ func parseAgentLimit(values url.Values, fallback, maximum int) (int, error) {
 	}
 	limit, ok := parseAgentID(values.Get("limit"), false)
 	if !ok || limit < 1 || limit > int64(maximum) {
-		return 0, argError("limit")
+		return 0, argRange("limit", 1, int64(maximum))
 	}
 	return int(limit), nil
 }
@@ -196,8 +330,31 @@ func parseAgentBool(values url.Values, name string, fallback bool) (bool, error)
 	case "false", "0":
 		return false, nil
 	default:
-		return false, argError(name)
+		return false, argNotAllowed(name, []string{"true", "false", "1", "0"})
 	}
+}
+
+// parseAgentPositiveID reads an optional ID parameter of ASCII digits that
+// must be at least minimum (0 or 1).
+func parseAgentPositiveID(values url.Values, name string, minimum int64) (*int64, error) {
+	if !values.Has(name) {
+		return nil, nil
+	}
+	id, ok := parseAgentID(values.Get(name), false)
+	if !ok || id < minimum {
+		return nil, argFormat(name, fmt.Sprintf("an integer of ASCII digits, at least %d", minimum))
+	}
+	return &id, nil
+}
+
+// asArgument turns a service's bare "invalid" refusal into refused, for
+// calls where only that argument can be the cause (the facade checked
+// everything else first). Other errors pass unchanged.
+func asArgument(err error, refused error) error {
+	if errors.Is(err, query.ErrInvalidQuery) || errors.Is(err, orgreport.ErrInvalid) {
+		return refused
+	}
+	return err
 }
 
 // Opaque cursors. The facade wraps each service's own cursor with a version
@@ -218,14 +375,18 @@ func unwrapAgentCursor(kind, cursor string) (string, error) {
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", argError("cursor")
+		return "", errInvalidCursor
 	}
 	parts := strings.SplitN(string(decoded), "|", 3)
 	if len(parts) != 3 || parts[0] != agentCursorVersion || parts[1] != kind || parts[2] == "" {
-		return "", argError("cursor")
+		return "", errInvalidCursor
 	}
 	return parts[2], nil
 }
+
+// errInvalidCursor refuses a cursor that is not a next_cursor of this list.
+var errInvalidCursor = argInvalid("cursor", reasonInvalidCursor,
+	"`cursor` is not a next_cursor of this list; pass next_cursor exactly as the previous page returned it, or leave it out for the first page")
 
 // agentTime formats a Unix nanosecond time as RFC 3339 UTC with the full
 // precision; zero means unset and becomes null.
@@ -359,11 +520,28 @@ func (handler *managementHandler) writeAgentServiceFailure(writer http.ResponseW
 	if errors.Is(err, context.Canceled) {
 		return
 	}
+	var failure *agentFailure
+	if errors.As(err, &failure) {
+		failure.write(writer)
+		return
+	}
 	code := agentErrorCodeOf(err)
 	var details map[string]any
+	message := ""
 	var argument agentArgError
-	if errors.As(err, &argument) {
-		details = map[string]any{"field": argument.field}
+	switch {
+	case errors.As(err, &argument):
+		details, message = argument.details(), argument.message
+		if argument.reason == reasonAdministratorOnly {
+			writeAgentFailure(writer, code, message, agentAdministratorOnlyHint, details)
+			return
+		}
+	case code == agentapi.CodeInvalidArgument:
+		// A service refused an argument the facade did not name. The read
+		// facade checks every parameter first, so this is not expected; it
+		// still says that the refusal came from the service.
+		details = map[string]any{"reason": reasonRejectedByService}
+		message = "the service refused one of the arguments"
 	}
 	if code == agentapi.CodeInternal || code == agentapi.CodeUpstreamUnavailable {
 		handler.logger.Warn("agent facade read failed", "error_code", string(code), "error_class", storage.ErrorClass(err))
@@ -371,7 +549,7 @@ func (handler *managementHandler) writeAgentServiceFailure(writer http.ResponseW
 	if code != agentapi.CodeNotFound {
 		hint = ""
 	}
-	writeAgentFailure(writer, code, "", hint, details)
+	writeAgentFailure(writer, code, message, hint, details)
 }
 
 // agentModuleDisabled answers MODULE_DISABLED for an optional feature that

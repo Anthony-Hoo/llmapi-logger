@@ -110,7 +110,7 @@ var codeTable = map[Code]CodeSpec{
 		Hint:    "Tell the user the feature is not enabled."},
 	CodeInvalidArgument: {HTTPStatus: http.StatusBadRequest, ExitCode: ExitInvalidUsage,
 		Message: "invalid argument",
-		Hint:    "Fix the argument named in details.field and retry."},
+		Hint:    "Fix the argument named in details.field as the message and details.reason say, then retry."},
 	CodeNotFound: {HTTPStatus: http.StatusNotFound, ExitCode: ExitError,
 		Message: "not found",
 		Hint:    "The object does not exist, is not visible to this identity, or is not ready yet. Do not switch identity or path to retry."},

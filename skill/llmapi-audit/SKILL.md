@@ -34,7 +34,7 @@ The user authorizes this machine in the browser. Nobody types a password, an API
 |---|---|---|
 | 0 | Success | Read `meta` before using `data` (see below). |
 | 1 | Other error | Read `error.code` and follow [troubleshooting](references/troubleshooting.md). Do not retry blindly. |
-| 2 | Invalid argument, or the command needs an interactive terminal (`NO_TTY`) | Fix the argument named in `error.details.field` (check `--help`) and run it again. `NO_TTY` means the user has to run that command. |
+| 2 | Invalid argument, or the command needs an interactive terminal (`NO_TTY`) | Fix the argument named in `error.details.field` (the flag or argument as you typed it) as `error.message` and `error.details.reason` say, and run it again. `NO_TTY` means the user has to run that command. |
 | 4 | Not logged in, or the authorization is no longer valid | Stop and ask the user to log in (above). Never ask for a credential. |
 | 5 | Not permitted for this identity, tier or deployment | Stop and tell the user. Do not look for another way to do the same thing. |
 | 6 | The operation ran but its result is a failure (only `analysis test-model`) | Report `data` to the user; it says why the model could not be reached. |

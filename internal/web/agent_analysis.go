@@ -45,11 +45,17 @@ func (handler *managementHandler) agentAnalysisRange(values url.Values) (int64, 
 		return 0, 0, err
 	}
 	if timeRange.FromNS == nil {
-		return 0, 0, argError("since")
+		return 0, 0, argInvalid("since", reasonRequired, "one of `since` or `from` is required (for example `since` 7d)").with("alternatives", []string{"since", "from"})
 	}
 	to := handler.agent.Now().UnixNano()
 	if timeRange.ToNS != nil {
 		to = *timeRange.ToNS
+	}
+	if *timeRange.FromNS <= 0 || *timeRange.FromNS >= to {
+		return 0, 0, argInvalid("from", reasonEmptyRange, "the range is empty: `from` must be before now when `to` is left out").with("conflicts_with", "to")
+	}
+	if err := checkRangeLength(values, *timeRange.FromNS, to, agentMaxServiceRange); err != nil {
+		return 0, 0, err
 	}
 	return *timeRange.FromNS, to, nil
 }
@@ -57,18 +63,27 @@ func (handler *managementHandler) agentAnalysisRange(values url.Values) (int64, 
 // agentAnalysisUser reads the administrator-only user_id selector: its value
 // first, then the shared role rule (D8).
 func agentAnalysisUser(values url.Values, caller principal) (*int64, error) {
-	if !values.Has("user_id") {
-		return nil, nil
-	}
-	id, ok := parseAgentID(values.Get("user_id"), false)
-	if !ok || id <= 0 {
-		return nil, argError("user_id")
+	id, err := parseAgentPositiveID(values, "user_id", 1)
+	if err != nil || id == nil {
+		return nil, err
 	}
 	if err := requireAdministratorSelector(caller, true); err != nil {
 		return nil, err
 	}
-	return &id, nil
+	return id, nil
 }
+
+// Closed value sets of the session analysis list. The flag names are the
+// service's validFlags, which it does not export; a test checks every one
+// against the service.
+var (
+	agentAnalysisKinds = []string{sessionanalysis.KindAgent, sessionanalysis.KindChat}
+	agentAnalysisFlags = []string{"loop", "thrash", "unverified", "failures", "corrections", "error_paste", "interrupt", "heavy_model", "danger", "secret", "compaction"}
+)
+
+// errAgentAnalysisSessionID is a session id that is not 64 hexadecimal
+// digits (sessionanalysis.ParseSessionID).
+var errAgentAnalysisSessionID = argFormat("id", "a session_id of 64 hexadecimal digits from `analysis sessions` (not a usage session id such as agt_…)")
 
 type agentSignalTotals struct {
 	Sessions           int64    `json:"sessions"`
@@ -368,16 +383,29 @@ func (handler *managementHandler) serveAgentAnalysisSessions(writer http.Respons
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	sessionsQuery := sessionanalysis.SessionsQuery{FromNS: from, ToNS: to, Kind: values.Get("kind"), Cursor: cursor, Limit: limit,
+	kind, err := agentClosedValue(values, "kind", agentAnalysisKinds)
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	sessionsQuery := sessionanalysis.SessionsQuery{FromNS: from, ToNS: to, Kind: kind, Cursor: cursor, Limit: limit,
 		Scope: callerReadScope(call.Principal), UserID: userID}
-	if flags := values.Get("flags"); flags != "" {
-		sessionsQuery.Flags = strings.Split(flags, ",")
+	if values.Has("flags") {
+		for _, flag := range strings.Split(values.Get("flags"), ",") {
+			if !contains(agentAnalysisFlags, flag) {
+				handler.writeAgentServiceFailure(writer, argInvalid("flags", reasonNotAllowedValue,
+					"each comma-separated value of `flags` must be one of: "+strings.Join(agentAnalysisFlags, ", ")).with("allowed", agentAnalysisFlags), "")
+				return
+			}
+			sessionsQuery.Flags = append(sessionsQuery.Flags, flag)
+		}
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	response, err := handler.sessionAnalysis.Sessions(ctx, sessionsQuery)
 	if err != nil {
-		handler.writeAgentServiceFailure(writer, err, "")
+		// Every other argument was checked; the inner cursor is what is left.
+		handler.writeAgentServiceFailure(writer, asArgument(err, errInvalidCursor), "")
 		return
 	}
 	writeAgentRead(writer, map[string]any{
@@ -423,6 +451,10 @@ func (handler *managementHandler) serveAgentAnalysisPack(writer http.ResponseWri
 	}
 	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	if _, err := sessionanalysis.ParseSessionID(call.Params["id"]); err != nil {
+		handler.writeAgentServiceFailure(writer, errAgentAnalysisSessionID, "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
@@ -521,6 +553,10 @@ func (handler *managementHandler) serveAgentAnalysisFacet(writer http.ResponseWr
 	}
 	if _, err := agentCallParams(request, call); err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	if _, err := sessionanalysis.ParseSessionID(call.Params["id"]); err != nil {
+		handler.writeAgentServiceFailure(writer, errAgentAnalysisSessionID, "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
@@ -631,30 +667,32 @@ func (handler *managementHandler) serveAgentAnalysisReport(writer http.ResponseW
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	week := values.Get("week")
-	if values.Has("week") && week != "current" && week != "previous" {
-		handler.writeAgentServiceFailure(writer, argError("week"), "")
+	week, err := agentClosedValue(values, "week", []string{"current", "previous"})
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
 	var target sessionanalysis.ReportTarget
-	selectors := 0
+	var selected []string
 	for _, selector := range []struct {
 		name  string
 		field *int64
 	}{{"user_id", &target.UserID}, {"project_id", &target.ProjectID}, {"group_id", &target.GroupID}} {
-		if !values.Has(selector.name) {
-			continue
-		}
-		id, ok := parseAgentID(values.Get(selector.name), false)
-		if !ok || id <= 0 {
-			handler.writeAgentServiceFailure(writer, argError(selector.name), "")
+		id, err := parseAgentPositiveID(values, selector.name, 1)
+		if err != nil {
+			handler.writeAgentServiceFailure(writer, err, "")
 			return
 		}
-		*selector.field = id
-		selectors++
+		if id == nil {
+			continue
+		}
+		*selector.field = *id
+		selected = append(selected, selector.name)
 	}
+	selectors := len(selected)
 	if selectors > 1 {
-		handler.writeAgentServiceFailure(writer, argError("user_id"), "")
+		// Name two selectors that were actually given, the later one as field.
+		handler.writeAgentServiceFailure(writer, argConflict(selected[1], selected[0]), "")
 		return
 	}
 	if err := requireAdministratorSelector(call.Principal, selectors == 1); err != nil {

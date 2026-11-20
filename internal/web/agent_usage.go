@@ -3,10 +3,13 @@ package web
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"regexp"
 
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/storage"
 )
 
 // Usage insights on the facade (contract section 4.3.3). Scope comes from the
@@ -145,6 +148,47 @@ func agentUsageOverviewOf(response insights.OverviewResponse) agentUsageOverview
 	return out
 }
 
+// agentUsageGroupings are the group_by values of the overview; caller and
+// token are for administrators only (D5).
+var agentUsageGroupings = []string{storage.InsightsDimModel, storage.InsightsDimProtocol, storage.InsightsDimClient, storage.InsightsDimCaller, storage.InsightsDimToken}
+
+// agentUsageSorts are the sort values of the session list.
+var agentUsageSorts = []string{storage.InsightsSortRecent, storage.InsightsSortTokens, storage.InsightsSortContext}
+
+// Session and tree id shapes of the insights service (its patterns are
+// unexported; query.Insights refuses anything else as invalid).
+var (
+	agentUsageSessionID = regexp.MustCompile(`^(?:agt_[0-9a-f]{24}|ses_[0-9a-f]{24}|conv_[0-9A-Za-z._-]{1,200})$`)
+	agentUsageTreeID    = regexp.MustCompile(`^[0-9a-f]{24}$`)
+)
+
+var (
+	errAgentUsageSessionID = argFormat("id", "a usage session_id: agt_ or ses_ followed by 24 lower-case hexadecimal digits, or conv_ followed by the conversation id (take it from `usage sessions`)")
+	errAgentUsageTreeID    = argFormat("id", "a tree_id of 24 lower-case hexadecimal digits (take it from `usage sessions` or `analysis sessions`)")
+)
+
+// agentUsageRange reads the time range of an insights read and checks its
+// length the way the service resolves it: to defaults to now and from to
+// seven days before to.
+func (handler *managementHandler) agentUsageRange(values url.Values) (agentRange, error) {
+	timeRange, err := parseAgentRange(values, handler.agent.Now())
+	if err != nil {
+		return timeRange, err
+	}
+	to := handler.agent.Now().UnixNano()
+	if timeRange.ToNS != nil {
+		to = *timeRange.ToNS
+	}
+	from := to - int64(query.DefaultInsightsRange)
+	if timeRange.FromNS != nil {
+		from = *timeRange.FromNS
+	}
+	if from >= to {
+		return timeRange, argInvalid("from", reasonEmptyRange, "the range is empty: `from` must be before now when `to` is left out").with("conflicts_with", "to")
+	}
+	return timeRange, checkRangeLength(values, from, to, agentMaxServiceRange)
+}
+
 const agentCoverageAction = "Totals count analysed records only; the server cannot say how many records are not analysed yet (coverage_unknown)."
 
 func (handler *managementHandler) agentInsightsReady(writer http.ResponseWriter) bool {
@@ -165,16 +209,25 @@ func (handler *managementHandler) serveAgentUsageOverview(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	timeRange, err := parseAgentRange(values, handler.agent.Now())
+	timeRange, err := handler.agentUsageRange(values)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	overview := query.OverviewQuery{FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, GroupBy: values.Get("group_by"), Scope: callerReadScope(call.Principal)}
+	overview := query.OverviewQuery{FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, Scope: callerReadScope(call.Principal)}
+	if overview.GroupBy, err = agentClosedValue(values, "group_by", agentUsageGroupings); err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	if (overview.GroupBy == storage.InsightsDimCaller || overview.GroupBy == storage.InsightsDimToken) && overview.Scope != nil {
+		// D5: the value is valid, the identity may not use it.
+		handler.writeAgentServiceFailure(writer, argAdministratorOnly("group_by"), "")
+		return
+	}
 	if values.Has("tz_offset_min") {
 		offset, ok := parseAgentID(values.Get("tz_offset_min"), true)
 		if !ok || offset < -840 || offset > 840 {
-			handler.writeAgentServiceFailure(writer, argError("tz_offset_min"), "")
+			handler.writeAgentServiceFailure(writer, argRange("tz_offset_min", -840, 840), "")
 			return
 		}
 		overview.TZOffsetMin = int(offset)
@@ -251,12 +304,17 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	timeRange, err := parseAgentRange(values, handler.agent.Now())
+	timeRange, err := handler.agentUsageRange(values)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
 	limit, err := parseAgentLimit(values, query.DefaultSessionLimit, query.MaxSessionLimit)
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
+		return
+	}
+	sortKey, err := agentClosedValue(values, "sort", agentUsageSorts)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -269,11 +327,13 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	response, err := handler.insights.Sessions(ctx, query.SessionsQuery{
-		FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, Sort: values.Get("sort"), Cursor: cursor, Limit: limit,
+		FromNS: timeRange.FromNS, ToNS: timeRange.ToNS, Sort: sortKey, Cursor: cursor, Limit: limit,
 		Scope: callerReadScope(call.Principal),
 	})
 	if err != nil {
-		handler.writeAgentServiceFailure(writer, err, "")
+		// The facade checked every other argument; an inner cursor the
+		// service cannot decode is the only argument left.
+		handler.writeAgentServiceFailure(writer, asArgument(err, errInvalidCursor), "")
 		return
 	}
 	writeAgentRead(writer, agentUsageSessionsOf(response), agentMetaOK(), true)
@@ -341,10 +401,15 @@ func (handler *managementHandler) serveAgentUsageTrend(writer http.ResponseWrite
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	if !agentUsageSessionID.MatchString(call.Params["id"]) {
+		handler.writeAgentServiceFailure(writer, errAgentUsageSessionID, "")
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	response, err := handler.insights.Trend(ctx, call.Params["id"], callerReadScope(call.Principal))
 	if err != nil {
+		err = asArgument(err, errAgentUsageSessionID)
 		handler.writeAgentServiceFailure(writer, err, agentUsageNotFoundHint)
 		return
 	}
@@ -403,10 +468,15 @@ func (handler *managementHandler) serveAgentUsageTree(writer http.ResponseWriter
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	if !agentUsageTreeID.MatchString(call.Params["id"]) {
+		handler.writeAgentServiceFailure(writer, errAgentUsageTreeID, "")
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	response, err := handler.insights.Tree(ctx, call.Params["id"], callerReadScope(call.Principal))
 	if err != nil {
+		err = asArgument(err, errAgentUsageTreeID)
 		handler.writeAgentServiceFailure(writer, err, agentUsageNotFoundHint)
 		return
 	}

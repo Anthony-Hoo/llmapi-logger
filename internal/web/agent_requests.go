@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -201,13 +202,49 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 	writeAgentRead(writer, list, agentMetaOK(), true, actions...)
 }
 
+// Closed value sets of the audit list filters (contract section 0.1 item
+// 119). The protocol is the prefix of the route's parser name, and only the
+// three parser families exist; forward and capture states are the service's
+// own (capture_chunk_missing appears in results only, contract section 0
+// row 6).
+var (
+	agentProtocols      = []string{"openai", "anthropic", "gemini"}
+	agentForwardStates  = []string{storage.ForwardInProgress, storage.ForwardCompleted, storage.ForwardRejected, storage.ForwardClientCancelled, storage.ForwardNewAPIError, storage.ForwardProxyError, storage.ForwardInterrupted}
+	agentCaptureFilters = []string{storage.CapturePending, storage.CaptureComplete, storage.CapturePartial, storage.CaptureFailed}
+	agentStableCode     = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+)
+
+// agentFreeText checks an open-set text filter by the service's rule: at
+// most 512 bytes, no NUL, no surrounding whitespace. It is matched exactly
+// (user_agent: as a substring), so an unknown value matches nothing.
+func agentFreeText(values url.Values, name string) (string, error) {
+	value := values.Get(name)
+	if len(value) > 512 || strings.ContainsRune(value, '\x00') || strings.TrimSpace(value) != value {
+		return "", argFormat(name, "at most 512 bytes without NUL and without leading or trailing spaces")
+	}
+	return value, nil
+}
+
+func agentClosedValue(values url.Values, name string, allowed []string) (string, error) {
+	value := values.Get(name)
+	if !values.Has(name) {
+		return "", nil
+	}
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value, nil
+		}
+	}
+	return "", argNotAllowed(name, allowed)
+}
+
 func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal) (query.Filter, query.Cursor, int, error) {
 	var filter query.Filter
 	var cursor query.Cursor
 	if !callerMayFilterByCaller(caller) {
 		for _, key := range agentCallerFilterKeys {
 			if values.Has(key) {
-				return filter, cursor, 0, argError(key)
+				return filter, cursor, 0, argAdministratorOnly(key)
 			}
 		}
 	}
@@ -232,29 +269,17 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 		default:
 			code, ok := parseAgentID(status, false)
 			if !ok || code < 100 || code > 599 {
-				return filter, cursor, 0, argError("status")
+				return filter, cursor, 0, argFormat("status", "error, 4xx, 5xx or one HTTP status code from 100 to 599")
 			}
 			value := int(code)
 			filter.StatusCode = &value
 		}
 	}
-	for _, numeric := range []struct {
-		name   string
-		target **int64
-	}{{"user_id", &filter.NewAPIUserID}, {"token_id", &filter.NewAPITokenID}} {
-		if !values.Has(numeric.name) {
-			continue
-		}
-		id, ok := parseAgentID(values.Get(numeric.name), false)
-		if !ok {
-			return filter, cursor, 0, argError(numeric.name)
-		}
-		*numeric.target = &id
+	if filter.NewAPIUserID, err = parseAgentPositiveID(values, "user_id", 1); err != nil {
+		return filter, cursor, 0, err
 	}
-	if values.Has("capture_status") && values.Get("capture_status") == "chunk_missing" {
-		// The service accepts only the four states it filters on (contract
-		// section 0, row 6); chunk_missing appears in results only.
-		return filter, cursor, 0, argError("capture_status")
+	if filter.NewAPITokenID, err = parseAgentPositiveID(values, "token_id", 0); err != nil {
+		return filter, cursor, 0, err
 	}
 	collapse, err := parseAgentBool(values, "collapse", true)
 	if err != nil {
@@ -267,23 +292,43 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 	if inner != "" {
 		timeText, id, ok := strings.Cut(inner, ":")
 		at, parsed := parseAgentID(timeText, false)
-		if !ok || !parsed || at <= 0 || id == "" {
-			return filter, cursor, 0, argError("cursor")
+		if !ok || !parsed || at <= 0 || id == "" || len(id) > 128 || strings.ContainsAny(id, "/\\\x00\r\n\t ") {
+			return filter, cursor, 0, errInvalidCursor
 		}
 		cursor = query.Cursor{BeforeStartedAtNS: at, BeforeID: id}
 	}
-	filter.Protocol = values.Get("protocol")
+	if filter.Protocol, err = agentClosedValue(values, "protocol", agentProtocols); err != nil {
+		return filter, cursor, 0, err
+	}
+	if filter.ForwardStatus, err = agentClosedValue(values, "forward_status", agentForwardStates); err != nil {
+		return filter, cursor, 0, err
+	}
+	if filter.CaptureStatus, err = agentClosedValue(values, "capture_status", agentCaptureFilters); err != nil {
+		return filter, cursor, 0, err
+	}
+	if path := values.Get("path"); values.Has("path") && (!strings.HasPrefix(path, "/") || len(path) > 2048) {
+		return filter, cursor, 0, argFormat("path", "a request path starting with /, at most 2048 bytes")
+	}
 	filter.Path = values.Get("path")
-	filter.Model = values.Get("model")
-	filter.UserAgent = values.Get("user_agent")
-	filter.ForwardStatus = values.Get("forward_status")
-	filter.BlockedBy = values.Get("blocked_by")
-	filter.BlockCode = values.Get("block_code")
-	filter.CaptureStatus = values.Get("capture_status")
-	filter.UpstreamErrorClass = values.Get("upstream_error_class")
-	filter.Conversation = values.Get("conversation")
-	filter.Username = values.Get("username")
-	filter.TokenName = values.Get("token_name")
+	for _, code := range []struct {
+		name   string
+		target *string
+	}{{"block_code", &filter.BlockCode}, {"upstream_error_class", &filter.UpstreamErrorClass}} {
+		value := values.Get(code.name)
+		if values.Has(code.name) && !agentStableCode.MatchString(value) {
+			return filter, cursor, 0, argFormat(code.name, "a code of lower-case letters, digits and _ starting with a letter, at most 64 characters")
+		}
+		*code.target = value
+	}
+	for _, text := range []struct {
+		name   string
+		target *string
+	}{{"model", &filter.Model}, {"user_agent", &filter.UserAgent}, {"blocked_by", &filter.BlockedBy}, {"conversation", &filter.Conversation},
+		{"username", &filter.Username}, {"token_name", &filter.TokenName}} {
+		if *text.target, err = agentFreeText(values, text.name); err != nil {
+			return filter, cursor, 0, err
+		}
+	}
 	filter.CollapseConversations = collapse
 	return filter, cursor, limit, nil
 }
@@ -294,6 +339,11 @@ func (handler *managementHandler) authorizeAgentAudit(ctx context.Context, call 
 		return "", errAgentUnavailable
 	}
 	auditID := call.Params["id"]
+	if len(auditID) > 128 || strings.ContainsAny(auditID, "/\\\x00\r\n\t ") {
+		// The service's own shape rule (query.validateAuditID); no record has
+		// such an id, so saying so tells nobody anything.
+		return "", argFormat("id", "an audit_id from `requests list`: at most 128 characters without spaces, slashes or control characters")
+	}
 	if err := authorizeAuditRead(ctx, handler.query, call.Principal, auditID); err != nil {
 		return "", err
 	}
@@ -567,7 +617,7 @@ func (handler *managementHandler) serveAgentRequest(writer http.ResponseWriter, 
 	allHeaders := false
 	if values.Has("headers") {
 		if values.Get("headers") != "all" {
-			handler.writeAgentServiceFailure(writer, argError("headers"), "")
+			handler.writeAgentServiceFailure(writer, argNotAllowed("headers", []string{"all"}), "")
 			return
 		}
 		allHeaders = true
@@ -643,7 +693,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		return
 	}
 	if !agentExportKinds[what] {
-		handler.writeAgentServiceFailure(writer, argError("what"), "")
+		handler.writeAgentServiceFailure(writer, argNotAllowed("what", agentapi.ExportKinds), "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)

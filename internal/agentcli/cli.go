@@ -174,7 +174,9 @@ func Run(args []string, env *Env) int {
 	}
 	outcome, err := inv.spec.Run(inv)
 	if err != nil {
-		return writeFailure(env, inv.pretty, asCLIError(err))
+		failure := asCLIError(err)
+		renameArgument(inv.spec, failure)
+		return writeFailure(env, inv.pretty, failure)
 	}
 	if err := writeSuccess(env, inv.pretty, outcome, inv.spec.Columns); err != nil {
 		return writeFailure(env, inv.pretty, asCLIError(err))

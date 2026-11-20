@@ -1,12 +1,15 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/contentpolicy"
@@ -331,7 +334,7 @@ func (handler *managementHandler) serveAgentConfigShow(writer http.ResponseWrite
 		}
 		writeAgentRead(writer, agentAnalysisSettingsOf(view), agentMetaOK(), false)
 	default:
-		handler.writeAgentServiceFailure(writer, argError("kind"), "")
+		handler.writeAgentServiceFailure(writer, argNotAllowed("kind", agentapi.ConfigKinds), "")
 	}
 }
 
@@ -398,6 +401,71 @@ type agentPreview struct {
 	FromOtherProjects int `json:"from_other_projects"`
 }
 
+// errAgentPreviewWeek is a week the service refused after the facade's check.
+var errAgentPreviewWeek = argFormat("week", "the first day of a report week, YYYY-MM-DD")
+
+// agentPreviewInput decodes the body of the project preview field by field,
+// so a refusal names the field: an unknown key, a value of the wrong JSON
+// type, no rule at all, or a week that is not a week start. The rules
+// themselves are checked by the service.
+func (handler *managementHandler) agentPreviewInput(writer http.ResponseWriter, request *http.Request) (orgreport.PreviewInput, error) {
+	var input orgreport.PreviewInput
+	request.Body = http.MaxBytesReader(writer, request.Body, maxOrgBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil || fields == nil {
+		return input, argInvalid("body", reasonInvalidFormat, "the body must be one JSON object with week, group_id, rules and project_id")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return input, argInvalid("body", reasonInvalidFormat, "the body must be exactly one JSON object")
+	}
+	allowed := agentBodyFields()["config.project-preview"]
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !contains(allowed, key) {
+			return input, argInvalid(key, reasonUnknownParameter, "`"+key+"` is not a field of the preview; it takes "+strings.Join(allowed, ", ")).
+				with("allowed", allowed)
+		}
+	}
+	if raw, ok := fields["week"]; ok && string(raw) != "null" {
+		if json.Unmarshal(raw, &input.Week) != nil {
+			return input, argFormat("week", "a YYYY-MM-DD string")
+		}
+		if failure := handler.agentWeekFailure(input.Week, "week"); failure != nil {
+			return input, failure
+		}
+	}
+	if raw, ok := fields["group_id"]; ok && string(raw) != "null" {
+		var id int64
+		if json.Unmarshal(raw, &id) != nil || id < 0 {
+			return input, argFormat("group_id", "a project group id (a JSON number, at least 0) or null for the organization-wide project")
+		}
+		input.GroupID = &id
+	}
+	if raw, ok := fields["project_id"]; ok && string(raw) != "null" {
+		if json.Unmarshal(raw, &input.ProjectID) != nil || input.ProjectID < 0 {
+			return input, argFormat("project_id", "a project id (a JSON number, at least 0)")
+		}
+	}
+	if raw, ok := fields["rules"]; ok && string(raw) != "null" {
+		rules := json.NewDecoder(bytes.NewReader(raw))
+		rules.DisallowUnknownFields()
+		if rules.Decode(&input.Rules) != nil {
+			return input, argFormat("rules", "a list of {kind, pattern} objects")
+		}
+	}
+	if len(input.Rules) == 0 {
+		return input, argInvalid("rules", reasonRequired, "at least one rule is required: `rules` is a list of {kind, pattern} with kind "+
+			strings.Join([]string{orgreport.RuleRepoURL, orgreport.RuleRepoName, orgreport.RulePathGlob, orgreport.RuleAgentProject}, ", "))
+	}
+	return input, nil
+}
+
 // serveAgentProjectPreview is POST /config/project-preview (administrators,
 // read tier: it persists nothing). The body is the web route's.
 func (handler *managementHandler) serveAgentProjectPreview(writer http.ResponseWriter, request *http.Request, call agentCall) {
@@ -408,24 +476,23 @@ func (handler *managementHandler) serveAgentProjectPreview(writer http.ResponseW
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	request.Body = http.MaxBytesReader(writer, request.Body, maxOrgBodyBytes)
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	var input orgreport.PreviewInput
-	if err := decoder.Decode(&input); err != nil {
-		handler.writeAgentServiceFailure(writer, argError("body"), "")
-		return
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		handler.writeAgentServiceFailure(writer, argError("body"), "")
+	input, err := handler.agentPreviewInput(writer, request)
+	if err != nil {
+		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	result, err := handler.org.Preview(ctx, input)
 	if err != nil {
-		handler.writeAgentServiceFailure(writer, err, "")
+		var invalid *orgreport.ValidationError
+		if errors.As(err, &invalid) {
+			// A rule the service refused: the same field and reason as
+			// `config set --kind project` reports for it.
+			handler.writeAgentWriteFailure(writer, err)
+			return
+		}
+		handler.writeAgentServiceFailure(writer, asArgument(err, errAgentPreviewWeek), "")
 		return
 	}
 	writeAgentRead(writer, agentPreview{Requests: result.Requests, Identities: result.Identities, Users: result.Users,
