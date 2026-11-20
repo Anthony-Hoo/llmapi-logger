@@ -30,8 +30,9 @@ const PackageDirName = "agent-packages"
 const DownloadsPerLink = 30
 
 // maxTrackedLinks bounds the download counter. Only links that verify are
-// counted, and only authenticated users can mint them, so this is a guard
-// against a runaway client rather than against forgery.
+// counted, keyed by their nonce, and only authenticated users can mint them,
+// so this is a guard against a runaway client rather than against forgery;
+// a full counter makes room by dropping the entry that expires first.
 const maxTrackedLinks = 4096
 
 // ErrNoPackages means the package directory holds no usable packages: they
@@ -334,7 +335,8 @@ type DownloadResult struct {
 // can never leave it even if the checks above had a gap. The caller has
 // already answered FEATURE_DISABLED when agent access is off.
 func (service *Service) ServeDownload(writer http.ResponseWriter, request *http.Request, signature, file string) DownloadResult {
-	expires, err := service.signer.Verify(signature)
+	link, err := service.signer.VerifyLink(signature)
+	expires := link.Expires
 	switch {
 	case errors.Is(err, ErrLinkExpired):
 		return writeDownloadFailure(writer, agentapi.HTTPStatus(agentapi.CodeLinkExpired), agentapi.CodeLinkExpired,
@@ -347,7 +349,7 @@ func (service *Service) ServeDownload(writer http.ResponseWriter, request *http.
 	if !ValidFileName(file) || service.manifest == nil || !service.manifest.Lists(file) {
 		return notFound(writer)
 	}
-	if !service.allowDownload(signature, expires) {
+	if !service.allowDownload(link.Nonce, expires) {
 		retry := int(expires.Sub(service.now()).Seconds()) + 1
 		if retry < 1 {
 			retry = 1
@@ -403,9 +405,16 @@ func writeDownloadFailure(writer http.ResponseWriter, status int, code agentapi.
 	return DownloadResult{Status: status, Code: code, File: file}
 }
 
-// allowDownload counts one download for a verified signature. Entries of
-// expired links are dropped on the way.
-func (service *Service) allowDownload(signature string, expires time.Time) bool {
+// allowDownload counts one download for a verified link, keyed by its nonce
+// (the decoded, verified payload), so that no re-spelling of the request can
+// open a second budget. Entries of expired links are dropped on the way.
+// When the tracker is still full, the entry of the link that expires first
+// is dropped to make room: a fresh link is never refused because the
+// tracker is full. That needs more than maxTrackedLinks links issued within
+// one link lifetime, and only signed-in users can issue them (20 per 10
+// minutes per identity); the dropped link at worst gets a new budget for
+// what is left of its life.
+func (service *Service) allowDownload(nonce string, expires time.Time) bool {
 	now := service.now()
 	service.mu.Lock()
 	defer service.mu.Unlock()
@@ -414,17 +423,30 @@ func (service *Service) allowDownload(signature string, expires time.Time) bool 
 			delete(service.downloads, key)
 		}
 	}
-	use := service.downloads[signature]
+	use := service.downloads[nonce]
 	if use == nil {
-		if len(service.downloads) >= maxTrackedLinks {
-			return false
+		for len(service.downloads) >= maxTrackedLinks {
+			service.dropSoonestDownload()
 		}
 		use = &linkUse{expires: expires}
-		service.downloads[signature] = use
+		service.downloads[nonce] = use
 	}
 	if use.count >= DownloadsPerLink {
 		return false
 	}
 	use.count++
 	return true
+}
+
+// dropSoonestDownload removes the tracked link that expires first. The
+// caller holds service.mu and the map is not empty.
+func (service *Service) dropSoonestDownload() {
+	var soonestKey string
+	var soonest time.Time
+	for key, use := range service.downloads {
+		if soonest.IsZero() || use.expires.Before(soonest) {
+			soonestKey, soonest = key, use.expires
+		}
+	}
+	delete(service.downloads, soonestKey)
 }

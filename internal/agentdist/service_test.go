@@ -3,6 +3,7 @@ package agentdist
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -355,6 +356,83 @@ func TestLinksMintedInOneSecondHaveSeparateBudgets(t *testing.T) {
 	}
 	if result := service.ServeDownload(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), two, second.File); result.Status != http.StatusOK {
 		t.Fatalf("first download of the second link after the first's 30 = %d %s", result.Status, result.Code)
+	}
+}
+
+// TestDownloadBudgetIsKeptPerNonce: the counter is keyed by the verified
+// nonce, not by the request's spelling, and re-spellings of a link are
+// refused without creating an entry.
+func TestDownloadBudgetIsKeptPerNonce(t *testing.T) {
+	service, _, _, manifest := newTestService(t)
+	file := manifest.Packages[0].File
+	signature, _ := service.signer.Mint()
+	link, err := service.signer.VerifyLink(signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, variant := range []string{signature[:9] + "\n" + signature[9:], signature + "\r\n", "\r" + signature, signature + "="} {
+		if recorder, _ := download(service, variant, file); recorder.Code != http.StatusNotFound {
+			t.Fatalf("re-spelling %q: status %d", variant, recorder.Code)
+		}
+	}
+	if recorder, _ := download(service, signature, file); recorder.Code != http.StatusOK {
+		t.Fatalf("canonical: status %d", recorder.Code)
+	}
+	service.mu.Lock()
+	use, tracked := service.downloads[link.Nonce], len(service.downloads)
+	service.mu.Unlock()
+	if tracked != 1 || use == nil || use.count != 1 {
+		t.Fatalf("tracker has %d entries, nonce entry %+v", tracked, use)
+	}
+}
+
+// TestFullDownloadTrackerDoesNotRefuseFreshLinks: with the counter full of
+// live links, a fresh link is still served; entries of expired links go
+// first, then the entry that expires first.
+func TestFullDownloadTrackerDoesNotRefuseFreshLinks(t *testing.T) {
+	service, clk, _, manifest := newTestService(t)
+	file := manifest.Packages[0].File
+	fill := func(expires time.Time) {
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		for index := len(service.downloads); index < maxTrackedLinks; index++ {
+			service.downloads[fmt.Sprintf("filler-%d", index)] = &linkUse{count: 1, expires: expires}
+		}
+	}
+	// Full of live entries that all outlive the fresh link's minting.
+	fill(clk.now.Add(LinkLifetime))
+	fresh, _ := service.signer.Mint()
+	if recorder, _ := download(service, fresh, file); recorder.Code != http.StatusOK {
+		t.Fatalf("fresh link with a full tracker: status %d %s", recorder.Code, recorder.Body.String())
+	}
+	service.mu.Lock()
+	if len(service.downloads) > maxTrackedLinks {
+		t.Fatalf("tracker grew to %d", len(service.downloads))
+	}
+	service.mu.Unlock()
+	// The fresh link keeps its own budget while others are added.
+	for attempt := 2; attempt <= DownloadsPerLink; attempt++ {
+		if recorder, _ := download(service, fresh, file); recorder.Code != http.StatusOK {
+			t.Fatalf("download %d of the fresh link: status %d", attempt, recorder.Code)
+		}
+	}
+	if recorder, _ := download(service, fresh, file); recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("download %d of the fresh link: status %d", DownloadsPerLink+1, recorder.Code)
+	}
+	// Entries of links that have expired make room before any live one.
+	clk.advance(LinkLifetime + time.Second)
+	service.mu.Lock()
+	service.downloads = map[string]*linkUse{}
+	service.mu.Unlock()
+	fill(clk.now.Add(-time.Second))
+	live, _ := service.signer.Mint()
+	if recorder, _ := download(service, live, file); recorder.Code != http.StatusOK {
+		t.Fatalf("live link with a tracker full of expired entries: status %d", recorder.Code)
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if len(service.downloads) != 1 {
+		t.Fatalf("expired entries were kept: %d tracked", len(service.downloads))
 	}
 }
 

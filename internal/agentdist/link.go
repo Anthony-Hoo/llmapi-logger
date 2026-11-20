@@ -22,9 +22,17 @@ const downloadKeyLabel = "llmapi-logger/agent-download/v1\x00"
 // the same second differ and each has its own download budget.
 const nonceSize = 16
 
-// maxSignatureLength bounds the decoded signature: at most 20 digits, the dot,
-// the nonce and a 32-byte MAC. Anything longer is rejected before decoding.
-const maxSignatureLength = 20 + 1 + nonceSize + sha256.Size
+// expiryDigits is the length of expires_unix in decimal: ten digits cover
+// every second from 2001-09-09 to 2286-11-20, so every link Mint makes has
+// exactly this many.
+const expiryDigits = 10
+
+// SignatureLength is the exact length of every signature: the unpadded
+// base64url encoding of the ten digits, the dot, the nonce and the 32-byte
+// MAC. A signature of any other length, or with any character outside
+// [A-Za-z0-9_-], is refused before it is decoded, so one link has exactly
+// one spelling (the decoder would otherwise skip CR and LF).
+var SignatureLength = base64.RawURLEncoding.EncodedLen(expiryDigits + 1 + nonceSize + sha256.Size)
 
 var (
 	// ErrBadSignature means the signature does not verify: malformed,
@@ -91,44 +99,67 @@ func (signer *Signer) Mint() (string, time.Time) {
 // verifies, so an expired answer never confirms a guess. The MAC comparison
 // is constant time.
 func (signer *Signer) Verify(signature string) (time.Time, error) {
-	if signature == "" || len(signature) > base64.RawURLEncoding.EncodedLen(maxSignatureLength) {
-		return time.Time{}, ErrBadSignature
+	link, err := signer.VerifyLink(signature)
+	return link.Expires, err
+}
+
+// VerifiedLink is what a signature that verifies stands for. Nonce is the
+// link's identity: the download budget is kept per nonce, never per request
+// spelling.
+type VerifiedLink struct {
+	Expires time.Time
+	Nonce   string
+}
+
+// VerifyLink is Verify that also returns the nonce. Expires is set for
+// ErrLinkExpired too; Nonce only when err is nil.
+func (signer *Signer) VerifyLink(signature string) (VerifiedLink, error) {
+	if len(signature) != SignatureLength {
+		return VerifiedLink{}, ErrBadSignature
 	}
+	for index := 0; index < len(signature); index++ {
+		char := signature[index]
+		if !(char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '-' || char == '_') {
+			return VerifiedLink{}, ErrBadSignature
+		}
+	}
+	// Strict also refuses non-zero padding bits in the last character, so
+	// with the checks above the encoding is the only one of its payload.
 	payload, err := base64.RawURLEncoding.Strict().DecodeString(signature)
-	if err != nil {
-		return time.Time{}, ErrBadSignature
+	if err != nil || base64.RawURLEncoding.EncodeToString(payload) != signature {
+		return VerifiedLink{}, ErrBadSignature
 	}
 	dot := bytes.IndexByte(payload, '.')
-	if dot <= 0 || dot > 20 || len(payload)-dot-1 != nonceSize+sha256.Size {
-		return time.Time{}, ErrBadSignature
+	if dot != expiryDigits || len(payload)-dot-1 != nonceSize+sha256.Size {
+		return VerifiedLink{}, ErrBadSignature
 	}
 	unix := string(payload[:dot])
 	for index := 0; index < len(unix); index++ {
 		if unix[index] < '0' || unix[index] > '9' {
-			return time.Time{}, ErrBadSignature
+			return VerifiedLink{}, ErrBadSignature
 		}
 	}
-	if len(unix) > 1 && unix[0] == '0' {
-		return time.Time{}, ErrBadSignature
+	if unix[0] == '0' {
+		return VerifiedLink{}, ErrBadSignature
 	}
 	nonce := payload[dot+1 : dot+1+nonceSize]
 	if !hmac.Equal(payload[dot+1+nonceSize:], signer.mac(unix, nonce)) {
-		return time.Time{}, ErrBadSignature
+		return VerifiedLink{}, ErrBadSignature
 	}
 	seconds, err := strconv.ParseInt(unix, 10, 64)
 	if err != nil {
-		return time.Time{}, ErrBadSignature
+		return VerifiedLink{}, ErrBadSignature
 	}
 	expires := time.Unix(seconds, 0).UTC()
 	now := signer.now()
 	if !now.Before(expires) {
-		return expires, ErrLinkExpired
+		return VerifiedLink{Expires: expires}, ErrLinkExpired
 	}
 	// A signature that expires later than a freshly minted one cannot come
 	// from Mint under a sane clock; refusing it bounds the damage of a clock
 	// that once jumped forward.
 	if expires.Sub(now) > LinkLifetime+time.Minute {
-		return time.Time{}, ErrBadSignature
+		return VerifiedLink{}, ErrBadSignature
 	}
-	return expires, nil
+	return VerifiedLink{Expires: expires, Nonce: string(nonce)}, nil
 }
