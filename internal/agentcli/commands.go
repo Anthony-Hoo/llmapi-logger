@@ -497,9 +497,9 @@ func buildCommands() []*commandSpec {
 			Description: "Read-only trial run of a project's rules.",
 			Flags: []flagSpec{
 				{Name: "group-id", Value: "<id>", Body: "group_id", Required: true, Help: "Project group ID, or null for the organization-wide project. Required."},
-				{Name: "rule", Kind: listFlag, Value: "<kind>:<pattern>", Body: "rules", Help: "One rule, split at the first ':'; <kind> is repo_url, repo_name, path_glob or agent_project. Repeatable. Default: no rules."},
+				{Name: "rule", Kind: listFlag, Value: "<kind>:<pattern>", Body: "rules", Help: "One rule, split at the first ':'; <kind> is repo_url, repo_name, path_glob or agent_project. Repeatable; at least one is required (the server answers INVALID_ARGUMENT, reason required, without). Default: none."},
 				{Name: "week", Value: "<YYYY-MM-DD>", Body: "week", Help: "First day of the week to try, on the deployment's week start day. Default: the current week."},
-				{Name: "project-id", Value: "<id>", Body: "project_id", Help: "Project being edited: it is left out of the matches counted as belonging to other projects (as the web form does). Default: none."},
+				{Name: "project-id", Value: "<id>", Body: "project_id", Help: "Project being edited: it is left out of the matches counted as belonging to other projects (as the web form does). An id that does not exist is not an error; next_actions then says no such project was found. Default: none."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/config/project-preview", Meta: true}},
 			Timeout:  40 * time.Second,
