@@ -311,3 +311,148 @@ func TestAgentRemove(t *testing.T) {
 		}
 	}
 }
+
+// Contract section 0.1 item 103: changed_keys of a create plan lists every
+// field the caller supplied, a field set to its zero value included, in the
+// kind's field order; a field the caller left out and that takes a default
+// is shown only in after.
+func TestCreatePlanChangedKeysListEverySuppliedField(t *testing.T) {
+	fixture := newWriteFixture(t)
+	ua := fixture.plan(t, map[string]any{"op": "config.set", "kind": "ua-rule", "set": map[string]any{
+		"name": "off rule", "enabled": false, "model_pattern": ".*", "user_agent_pattern": "^curl/"}})
+	if want := []string{"name", "enabled", "model_pattern", "user_agent_pattern"}; !reflect.DeepEqual(ua.ChangedKeys, want) {
+		t.Fatalf("ua-rule create changed_keys = %v, want %v", ua.ChangedKeys, want)
+	}
+	content := fixture.plan(t, map[string]any{"op": "config.set", "kind": "content-rule", "set": map[string]any{
+		"name": "off policy", "enabled": false, "action": "dry_run", "keywords": []string{"alpha"}}})
+	if want := []string{"name", "enabled", "action", "keywords"}; !reflect.DeepEqual(content.ChangedKeys, want) {
+		t.Fatalf("content-rule create changed_keys = %v, want %v", content.ChangedKeys, want)
+	}
+	var after map[string]any
+	_ = json.Unmarshal(content.After, &after)
+	if scopes, _ := after["scan_scopes"].([]any); len(scopes) != 7 || after["enabled"] != false {
+		t.Fatalf("content-rule create after = %v", after)
+	}
+	group := fixture.plan(t, map[string]any{"op": "config.set", "kind": "group", "set": map[string]any{"name": "off group", "enabled": false}})
+	if want := []string{"name", "enabled"}; !reflect.DeepEqual(group.ChangedKeys, want) {
+		t.Fatalf("group create changed_keys = %v", group.ChangedKeys)
+	}
+	project := fixture.plan(t, map[string]any{"op": "config.set", "kind": "project", "set": map[string]any{
+		"name": "off project", "group_id": nil, "enabled": false, "rules": []any{}}})
+	if want := []string{"name", "group_id", "enabled", "rules"}; !reflect.DeepEqual(project.ChangedKeys, want) {
+		t.Fatalf("project create changed_keys = %v", project.ChangedKeys)
+	}
+}
+
+// Contract section 0.1 item 104: for every removable kind, the object a
+// removal plan shows in extras.deleted_object can be given back as input once
+// the server-assigned fields are deleted (the _untrusted names are accepted
+// as aliases), and the object it creates has every caller-settable field of
+// the original. Given as it is, the copy is refused with every read-only
+// field named.
+func TestRemovedObjectsCanBeRecreatedFromTheirDeletedCopy(t *testing.T) {
+	fixture := newWriteFixture(t)
+	ids := fixture.seed(t)
+	for _, test := range []struct{ kind, id string }{
+		{"ua-rule", ids.uaRule}, {"content-rule", ids.contentRule}, {"group", ids.otherGroup},
+		{"project", ids.project}, {"member", "7"}, {"principal", "user:7"},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			original := fixture.objectOf(t, test.kind, test.id)
+			removal := fixture.plan(t, map[string]any{"op": "config.remove", "kind": test.kind, "id": test.id})
+			fixture.apply(t, removal.PlanID)
+			deleted, _ := removal.Extras["deleted_object"].(map[string]any)
+			if deleted == nil {
+				t.Fatalf("no deleted_object: %+v", removal.Extras)
+			}
+
+			request := map[string]any{"op": "config.set", "kind": test.kind}
+			switch test.kind {
+			case "member":
+				request["id"] = formatJSONID(deleted["user_id"])
+			case "principal":
+				request["id"] = deleted["kind"].(string) + ":" + formatJSONID(deleted["id"])
+			}
+			request["set"] = deleted
+			refused := failure(t, fixture.facade(http.MethodPost, "/plans", request, fixture.adminWrite))
+			var readOnly []any
+			for _, field := range readOnlyFields {
+				if _, ok := deleted[field]; ok && !contains(agentapi.SettableFields[test.kind], field) {
+					readOnly = append(readOnly, field)
+				}
+			}
+			if refused.Code != agentapi.CodeInvalidArgument || refused.Details["reason"] != "read_only" || len(readOnly) == 0 {
+				t.Fatalf("copy given as it is = %s %v", refused.Code, refused.Details)
+			}
+			named, _ := refused.Details["fields"].([]any)
+			if len(named) != len(readOnly) {
+				t.Fatalf("read-only fields named = %v, want all of %v", named, readOnly)
+			}
+			for _, field := range readOnly {
+				if !strings.Contains(refused.Message, field.(string)) {
+					t.Fatalf("message %q does not name %s", refused.Message, field)
+				}
+			}
+
+			set := map[string]any{}
+			for key, value := range deleted {
+				if !contains(readOnlyFields, key) || contains(agentapi.SettableFields[test.kind], key) {
+					set[key] = value
+				}
+			}
+			request["set"] = set
+			applied := fixture.planAndApply(t, request)
+			newID := test.id
+			switch test.kind {
+			case "member", "principal":
+			default:
+				// The server assigns the id of the new object; PostgreSQL never
+				// reuses one, the SQLite test store may reuse the highest.
+				if applied.ID == "" {
+					t.Fatalf("restored %s has no id", test.kind)
+				}
+				newID = applied.ID
+			}
+			restored := fixture.objectOf(t, test.kind, newID)
+			if restored == nil {
+				t.Fatalf("restored %s %s not found", test.kind, newID)
+			}
+			for _, field := range agentapi.SettableFields[test.kind] {
+				name := field
+				if _, ok := original[field+untrustedSuffix]; ok {
+					name = field + untrustedSuffix
+				}
+				if _, ok := original[name]; !ok {
+					t.Fatalf("%s has no field %s in the read shape: %v", test.kind, field, original)
+				}
+				if !reflect.DeepEqual(original[name], restored[name]) {
+					t.Fatalf("%s.%s = %v, restored %v", test.kind, name, original[name], restored[name])
+				}
+			}
+		})
+	}
+}
+
+// Contract section 0.1 item 104: a field and its _untrusted alias at once
+// is refused, in set and inside a project rule.
+func TestUntrustedAliasesCannotDuplicateAField(t *testing.T) {
+	fixture := newWriteFixture(t)
+	body := failure(t, fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": "group",
+		"set": map[string]any{"name": "a", "name_untrusted": "b", "enabled": true}}, fixture.adminWrite))
+	if body.Code != agentapi.CodeInvalidArgument || body.Details["field"] != "name" {
+		t.Fatalf("name twice = %s %v", body.Code, body.Details)
+	}
+	body = failure(t, fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.set", "kind": "project",
+		"set": map[string]any{"name": "p", "group_id": nil, "enabled": true,
+			"rules": []any{map[string]any{"kind": "repo_name", "pattern": "a", "pattern_untrusted": "b"}}}}, fixture.adminWrite))
+	if body.Code != agentapi.CodeInvalidArgument || body.Details["field"] != "rules[0].pattern" {
+		t.Fatalf("pattern twice = %s %v", body.Code, body.Details)
+	}
+	// The alias works in --add as well.
+	ids := fixture.seed(t)
+	plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "content-rule", "id": ids.contentRule,
+		"add": map[string]any{"keywords_untrusted": []string{"gamma"}}})
+	if !reflect.DeepEqual(plan.ChangedKeys, []string{"keywords"}) {
+		t.Fatalf("alias in add changed_keys = %v", plan.ChangedKeys)
+	}
+}

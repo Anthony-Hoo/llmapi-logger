@@ -65,7 +65,13 @@ llmaudit config remove --kind ua-rule --id 3
 llmaudit config reset --kind weekly-settings
 ```
 
-Without `--id`, `config set` creates an object; with it, it changes only the fields you give and keeps every other field as it is. `config remove` deletes (the plan's `extras.deleted_object` is the only copy to restore from: there is no recycle bin). `config reset` restores one of the two settings kinds to the configuration file's values.
+Without `--id`, `config set` creates an object; with it, it changes only the fields you give and keeps every other field as it is. `config remove` deletes (the plan's `extras.deleted_object` is the only copy to restore from: there is no recycle bin, so keep the plan output). `config reset` restores one of the two settings kinds to the configuration file's values.
+
+To restore a removed object, create a new one from the saved copy:
+
+1. Save `extras.deleted_object` of the removal plan to a file and delete the fields the server assigns: `id`, `version`, `created_at`, `updated_at`, and for a member `user_id`, for a principal `kind` and `id`. Input given with them is refused with `INVALID_ARGUMENT`, `details.reason: read_only`, and `details.fields` lists every one. The `_untrusted` names (`name_untrusted`, `keywords_untrusted`, a project rule's `pattern_untrusted`, …) are accepted as the field without the suffix, so leave them as they are.
+2. A rule, group or project: `llmaudit config set --kind <kind> --patch-file <file>` (no `--id`). It is a new object: the server assigns its id, which you must not assume to be the old one; tell the user, since anything that referred to the old id does not follow. A member: `llmaudit config set --kind member --id <user_id> --patch-file <file>`. A principal: `llmaudit config set --kind principal --id <kind>:<id> --patch-file <file>`.
+3. Show the plan and apply it as usual; its `after` should match the saved copy apart from the fields of step 1.
 
 ### Settable fields
 

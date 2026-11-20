@@ -34,6 +34,9 @@ func (handler *managementHandler) planConfigSet(ctx context.Context, request age
 	if err := checkWriteKind(request.Kind, agentapi.WriteKinds); err != nil {
 		return nil, err
 	}
+	if err := canonicalPlanFields(&request); err != nil {
+		return nil, err
+	}
 	if len(request.Set) == 0 && len(request.Add) == 0 && len(request.Remove) == 0 {
 		return nil, fieldFailure("set", "nothing to change: give set, add or remove")
 	}
@@ -212,7 +215,7 @@ func (handler *managementHandler) planUARuleSet(request agentPlanRequest, creati
 		plan := newAgentPlan(agentapi.OpConfigSet, agentPlanTarget{Kind: "ua-rule"})
 		plan.view.Creates, plan.untrusted = true, true
 		plan.view.After = agentUARuleView(diff.After)
-		changedOrNothing(plan, diff.Changed)
+		plan.view.ChangedKeys = suppliedFields(request.Kind, request.Set)
 		sameNameEffect(plan, "user agent rule", diff.SameName)
 		plan.effect(effectLiveRule)
 		plan.verify = "llmaudit config show --kind ua-rule"
@@ -283,7 +286,7 @@ func (handler *managementHandler) planContentRuleSet(request agentPlanRequest, c
 		plan := newAgentPlan(agentapi.OpConfigSet, agentPlanTarget{Kind: "content-rule"})
 		plan.view.Creates, plan.untrusted = true, true
 		plan.view.After = agentContentRuleView(diff.After)
-		changedOrNothing(plan, diff.Changed)
+		plan.view.ChangedKeys = suppliedFields(request.Kind, request.Set)
 		sameNameEffect(plan, "content rule", diff.SameName)
 		if patch.ScanScopes == nil {
 			plan.effect("scan_scopes was not given: all seven scopes are scanned, as the web form preselects.")
@@ -356,7 +359,7 @@ func (handler *managementHandler) planGroupSet(request agentPlanRequest, creatin
 		plan := newAgentPlan(agentapi.OpConfigSet, agentPlanTarget{Kind: "group"})
 		plan.view.Creates, plan.untrusted = true, true
 		plan.view.After = agentOrgGroupOf(diff.After)
-		changedOrNothing(plan, diff.Changed)
+		plan.view.ChangedKeys = suppliedFields(request.Kind, request.Set)
 		plan.effect(effectCatalog)
 		plan.verify = "llmaudit config show --kind org"
 		plan.apply = func(ctx context.Context) (agentApplied, error) {
@@ -414,7 +417,7 @@ func (handler *managementHandler) planProjectSet(ctx context.Context, request ag
 		plan = newAgentPlan(agentapi.OpConfigSet, agentPlanTarget{Kind: "project"})
 		plan.view.Creates = true
 		plan.view.After = agentOrgProjectOf(diff.After)
-		changedOrNothing(plan, diff.Changed)
+		plan.view.ChangedKeys = suppliedFields(request.Kind, request.Set)
 		plan.apply = func(ctx context.Context) (agentApplied, error) {
 			project, err := org.CreateProjectFromPatch(ctx, patch)
 			return agentApplied{ID: formatAgentID(project.ID), Version: agentVersion(project.UpdatedAtNS)}, err

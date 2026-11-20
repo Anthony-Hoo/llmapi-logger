@@ -306,6 +306,140 @@ func strictDecode(value any, target any) error {
 	return decoder.Decode(target)
 }
 
+// readOnlyFields are the fields of the read shape (config show, a plan's
+// before/after and extras.deleted_object) that the server assigns: an input
+// carrying one is refused with every such field named, so that a copy of a
+// read object can be turned into input by deleting them.
+var readOnlyFields = []string{"id", "version", "created_at", "updated_at", "user_id", "kind"}
+
+// untrustedSuffix marks text fields in the read shape (contract section 0.1
+// item 24). Input accepts "<field>_untrusted" as an alias of "<field>", so a
+// read object (extras.deleted_object of a removal) can be given back as
+// input.
+const untrustedSuffix = "_untrusted"
+
+// canonicalFields turns the keys of a set, add or remove object into the
+// kind's field names: a "<field>_untrusted" alias becomes "<field>" (both at
+// once is refused), project rule elements' "pattern_untrusted" becomes
+// "pattern", and server-assigned read-only fields are refused, all of them
+// named in one error. fields are the names the object may use.
+func canonicalFields(kind, name string, members map[string]json.RawMessage, fields []string) (map[string]json.RawMessage, error) {
+	if members == nil {
+		return nil, nil
+	}
+	var readOnly []string
+	for _, key := range sortedMemberKeys(members) {
+		if contains(readOnlyFields, key) && !contains(fields, key) {
+			readOnly = append(readOnly, key)
+		}
+	}
+	if len(readOnly) > 0 {
+		failure := fieldFailure(readOnly[0], strings.Join(readOnly, ", ")+" "+pluralIs(len(readOnly))+" assigned by the server and cannot be "+
+			"given; remove "+pluralIt(len(readOnly))+" from the input (a copy of a removed object is restored as a new object with a new id)")
+		failure.Details["reason"] = "read_only"
+		failure.Details["fields"] = readOnly
+		return nil, failure
+	}
+	out := make(map[string]json.RawMessage, len(members))
+	for _, key := range sortedMemberKeys(members) {
+		canonical := key
+		if base, ok := strings.CutSuffix(key, untrustedSuffix); ok && contains(fields, base) {
+			canonical = base
+			if _, both := members[base]; both {
+				return nil, fieldFailure(base, base+" and "+key+" name the same field; give it once")
+			}
+		}
+		value := members[key]
+		if kind == "project" && canonical == "rules" {
+			renamed, err := canonicalProjectRules(name, value)
+			if err != nil {
+				return nil, err
+			}
+			value = renamed
+		}
+		out[canonical] = value
+	}
+	return out, nil
+}
+
+// canonicalProjectRules renames pattern_untrusted to pattern in the elements
+// of a project's rules list; any other shape is left for the strict decoder.
+func canonicalProjectRules(name string, raw json.RawMessage) (json.RawMessage, error) {
+	var elements []json.RawMessage
+	if json.Unmarshal(raw, &elements) != nil || elements == nil {
+		return raw, nil
+	}
+	changed := false
+	for index, element := range elements {
+		var rule map[string]json.RawMessage
+		if json.Unmarshal(element, &rule) != nil || rule == nil {
+			continue
+		}
+		pattern, ok := rule["pattern"+untrustedSuffix]
+		if !ok {
+			continue
+		}
+		if _, both := rule["pattern"]; both {
+			return nil, fieldFailure("rules["+strconv.Itoa(index)+"].pattern", "pattern and pattern_untrusted name the same field; give it once")
+		}
+		delete(rule, "pattern"+untrustedSuffix)
+		rule["pattern"] = pattern
+		encoded, err := json.Marshal(rule)
+		if err != nil {
+			return nil, fieldFailure(name, name+".rules cannot be decoded")
+		}
+		elements[index], changed = encoded, true
+	}
+	if !changed {
+		return raw, nil
+	}
+	encoded, err := json.Marshal(elements)
+	if err != nil {
+		return nil, fieldFailure(name, name+".rules cannot be decoded")
+	}
+	return encoded, nil
+}
+
+func pluralIs(count int) string {
+	if count == 1 {
+		return "is"
+	}
+	return "are"
+}
+
+func pluralIt(count int) string {
+	if count == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// canonicalPlanFields applies canonicalFields to set, add and remove of a
+// config.set request.
+func canonicalPlanFields(request *agentPlanRequest) error {
+	var err error
+	if request.Set, err = canonicalFields(request.Kind, "set", request.Set, agentapi.SettableFields[request.Kind]); err != nil {
+		return err
+	}
+	if request.Add, err = canonicalFields(request.Kind, "add", request.Add, agentapi.ListFields[request.Kind]); err != nil {
+		return err
+	}
+	request.Remove, err = canonicalFields(request.Kind, "remove", request.Remove, agentapi.ListFields[request.Kind])
+	return err
+}
+
+// suppliedFields lists the fields set names, in the kind's field order: the
+// changed keys of a create, which include a field set to its zero value.
+func suppliedFields(kind string, set map[string]json.RawMessage) []string {
+	supplied := []string{}
+	for _, field := range agentapi.SettableFields[kind] {
+		if _, ok := set[field]; ok {
+			supplied = append(supplied, field)
+		}
+	}
+	return supplied
+}
+
 // checkListConflicts refuses a field named both in set and in add or remove.
 func checkListConflicts(request agentPlanRequest) error {
 	for _, edit := range []map[string]json.RawMessage{request.Add, request.Remove} {

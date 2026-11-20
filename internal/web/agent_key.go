@@ -144,6 +144,11 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 			return
 		}
 	}
+	set, err = canonicalFields("analysis-settings", "set", set, agentapi.SettableFields["analysis-settings"])
+	if err != nil {
+		handler.failKeyWrite(writer, request, call, keys, err)
+		return
+	}
 	patch, err := analysisSettingsPatch(set)
 	if err != nil {
 		handler.failKeyWrite(writer, request, call, keys, err)
