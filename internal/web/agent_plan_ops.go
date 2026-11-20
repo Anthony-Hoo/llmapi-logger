@@ -69,6 +69,13 @@ func (handler *managementHandler) planAnalysisCalibrate(ctx context.Context, req
 		return nil, err
 	}
 	var labels []sessionanalysis.CalibrationLabel
+	// The service's limit on the number of labels is checked on the raw
+	// array, before any label is decoded (contract section 0.1 item 170).
+	if count, isArray := jsonArrayLength(request.Args["labels"]); isArray {
+		if err := sessionanalysis.ValidateCalibrationLabelCount(count); err != nil {
+			return nil, err
+		}
+	}
 	var elements []json.RawMessage
 	if err := json.Unmarshal(request.Args["labels"], &elements); err != nil || elements == nil {
 		return nil, fieldFailure("args.labels", reasonWrongType, "args.labels must be a JSON array of labels")

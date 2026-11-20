@@ -418,9 +418,16 @@ func (handler *managementHandler) agentPreviewInput(writer http.ResponseWriter, 
 	if err != nil {
 		return input, argInvalid("body", reasonInvalidFormat, "the body must be one JSON object with week, group_id, rules and project_id")
 	}
-	if err := checkAgentBodyDepth(body); err != nil {
+	if err := checkAgentBodyShape(body, maxAgentPreviewBodyValues); err != nil {
 		return input, err
 	}
+	// Decoding takes one of the facade's few decoding slots (contract
+	// section 0.1 item 170); the preview itself runs after it is given back.
+	release, err := handler.acquireAgentBodySlot(request.Context())
+	if err != nil {
+		return input, err
+	}
+	defer release()
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	var fields map[string]json.RawMessage
 	if err := decoder.Decode(&fields); err != nil || fields == nil {
@@ -466,6 +473,9 @@ func (handler *managementHandler) agentPreviewInput(writer http.ResponseWriter, 
 		}
 	}
 	if raw, ok := fields["rules"]; ok && string(raw) != "null" {
+		if err := checkListLength("project", "rules", raw); err != nil {
+			return input, err
+		}
 		canonical, err := canonicalProjectRules("rules", raw)
 		if err != nil {
 			return input, err

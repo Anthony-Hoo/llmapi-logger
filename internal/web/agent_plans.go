@@ -104,8 +104,20 @@ func (handler *managementHandler) serveAgentPlanCreate(writer http.ResponseWrite
 		refuse(err)
 		return
 	}
-	body, err := readAgentBody(writer, request, maxAgentPlanBodyBytes)
+	body, err := readAgentBodyBytes(writer, request, maxAgentPlanBodyBytes, maxAgentPlanBodyValues)
 	if err != nil {
+		refuse(err)
+		return
+	}
+	// Decoding and checking the body, up to the built plan, takes one of the
+	// facade's few decoding slots (contract section 0.1 item 170).
+	release, err := handler.acquireAgentBodySlot(request.Context())
+	if err != nil {
+		refuse(err)
+		return
+	}
+	defer release()
+	if err := checkAgentBodyJSON(body); err != nil {
 		refuse(err)
 		return
 	}
@@ -117,6 +129,7 @@ func (handler *managementHandler) serveAgentPlanCreate(writer http.ResponseWrite
 	ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
 	defer cancel()
 	plan, err := handler.agentPlanFor(ctx, planRequest)
+	release()
 	if err != nil {
 		refuse(err)
 		return
@@ -258,7 +271,7 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 func emptyAgentBody(writer http.ResponseWriter, request *http.Request) error {
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxAgentApplyBodyBytes))
 	if err == nil {
-		if err := checkAgentBodyDepth(body); err != nil {
+		if err := checkAgentBodyShape(body, maxAgentSmallBodyValues); err != nil {
 			return err
 		}
 	}

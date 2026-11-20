@@ -166,6 +166,7 @@ func NewHandler(options Options) (http.Handler, error) {
 		agentDist:      options.AgentDist,
 		agentPublicURL: options.AgentPublicURL,
 		agentRegistry:  agentapi.NewRegistry(agentapi.Endpoints),
+		agentBodySlots: make(chan struct{}, maxAgentBodyDecoders),
 		retentionDays:  options.RetentionDays,
 	}
 	if handler.agent != nil {
@@ -205,9 +206,11 @@ type managementHandler struct {
 	agentRegistry     *agentapi.Registry
 	agentHandlerTable map[string]agentHandler
 	agentPlans        *agentaccess.PlanStore
-	agentDist         *agentdist.Service
-	agentPublicURL    string
-	retentionDays     int
+	// agentBodySlots bounds the bodies decoded at once (acquireAgentBodySlot).
+	agentBodySlots chan struct{}
+	agentDist      *agentdist.Service
+	agentPublicURL string
+	retentionDays  int
 	// regenerateTimeout replaces orgRegenerateTimeout for an agent's weekly
 	// regeneration when positive; only tests set it.
 	regenerateTimeout time.Duration

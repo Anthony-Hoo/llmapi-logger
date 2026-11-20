@@ -152,7 +152,8 @@ type CalibrationResult struct {
 const (
 	calibrationBar        = 0.8
 	minCalibrationSamples = 20
-	maxCalibrationLabels  = 1000
+	// MaxCalibrationLabels is the most labels one calibration accepts.
+	MaxCalibrationLabels = 1000
 )
 
 // Calibrate compares human labels with the stored facets of the current
@@ -161,7 +162,7 @@ func (service *QueryService) Calibrate(ctx context.Context, labels []Calibration
 	if service.facets == nil || service.modelName() == "" {
 		return CalibrationResult{}, invalid("the local model is not enabled")
 	}
-	if len(labels) == 0 || len(labels) > maxCalibrationLabels {
+	if len(labels) == 0 || len(labels) > MaxCalibrationLabels {
 		return CalibrationResult{}, invalid("between 1 and 1000 labels are required")
 	}
 	result := CalibrationResult{PromptVersion: PromptVersion, Model: service.modelName(), Labels: len(labels)}

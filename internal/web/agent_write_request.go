@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,8 +10,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/contentpolicy"
+	"llmapi-logger/internal/orgreport"
+	"llmapi-logger/internal/sessionanalysis"
 )
 
 // The wire format of POST /plans (contract section 4.5.1, as the CLI sends
@@ -57,6 +64,79 @@ var agentBodyLimits = map[string]int64{
 	"config.project-preview":    maxAgentPreviewBodyBytes,
 }
 
+// The most JSON values a facade request body may hold, counting every
+// object, array, string, number and literal and every object member (its
+// key), all of them stated here (contract section 0.1 item 170). Each is
+// about twice the largest legitimate body of the endpoint, worked out from
+// the services' own limits; a body with more is refused before anything
+// decodes it, so what the decoders below allocate is bounded by these
+// numbers and not only by the size in bytes.
+var (
+	// A calibration label at its largest: the object, its six members (key
+	// and value each) and every friction kind once.
+	agentLabelValues = 1 + 2*6 + len(sessionanalysis.FrictionKinds)
+	// POST /plans: the largest plan is a calibration of the most labels the
+	// service accepts, inside {"op": …, "args": {"labels": […]}}.
+	maxAgentPlanBodyValues = 2 * (7 + sessionanalysis.MaxCalibrationLabels*agentLabelValues)
+	// POST /config/project-preview: the most rules of a project, each
+	// {"kind": …, "pattern": …}, and week, group_id and project_id.
+	maxAgentPreviewBodyValues = 2 * (10 + orgreport.MaxRulesPerProject*5)
+	// POST /analysis/test-model: every settable field of the analysis
+	// settings in set, and api_key.
+	maxAgentTestModelBodyValues = 2 * (6 + 2*len(agentapi.SettableFields["analysis-settings"]))
+	// POST /token ({"code", "code_verifier"}), PUT
+	// /config/analysis-settings/api-key ({"api_key"}) and POST
+	// /plans/{plan_id}/apply ({} or nothing) hold at most five values; 16
+	// leaves room for a refusal that names the wrong key.
+	maxAgentSmallBodyValues = 16
+)
+
+// agentBodyValueLimits maps every facade endpoint that reads its body to the
+// most values it may hold, as agentBodyLimits does for bytes.
+var agentBodyValueLimits = map[string]int{
+	"token.exchange":            maxAgentSmallBodyValues,
+	agentapi.EndpointPlanCreate: maxAgentPlanBodyValues,
+	agentapi.EndpointPlanApply:  maxAgentSmallBodyValues,
+	agentapi.EndpointAPIKeySet:  maxAgentSmallBodyValues,
+	agentapi.EndpointTestModel:  maxAgentTestModelBodyValues,
+	"config.project-preview":    maxAgentPreviewBodyValues,
+}
+
+// maxAgentBodyDecoders is how many bodies of plan creation, the project
+// preview and the connection test the process decodes and checks at the
+// same time (contract section 0.1 item 170); a request waits for a slot for
+// at most agentBodyWait, and within its own context. Reads without a body
+// do not take one.
+const (
+	maxAgentBodyDecoders = 4
+	agentBodyWait        = 10 * time.Second
+)
+
+// acquireAgentBodySlot waits for one of the decoding slots. release gives
+// it back and may be called more than once. A request that cannot start in
+// time, or whose context ends while it waits, gets context.DeadlineExceeded:
+// the facade's TIMEOUT.
+func (handler *managementHandler) acquireAgentBodySlot(ctx context.Context) (func(), error) {
+	slots := handler.agentBodySlots
+	acquired := func() func() {
+		var once sync.Once
+		return func() { once.Do(func() { <-slots }) }
+	}
+	select {
+	case slots <- struct{}{}:
+		return acquired(), nil
+	default:
+	}
+	ctx, cancel := context.WithTimeout(ctx, agentBodyWait)
+	defer cancel()
+	select {
+	case slots <- struct{}{}:
+		return acquired(), nil
+	case <-ctx.Done():
+		return func() {}, context.DeadlineExceeded
+	}
+}
+
 // maxAgentBodyDepth is the deepest nesting of objects and arrays a facade
 // request body may have. The deepest legitimate input (a project rule in a
 // plan's set, add or remove, a calibration label) has four levels; a deeper
@@ -64,14 +144,26 @@ var agentBodyLimits = map[string]int64{
 // never see more than this many levels.
 const maxAgentBodyDepth = 32
 
-const reasonTooDeeplyNested = "too_deeply_nested"
+const (
+	reasonTooDeeplyNested = "too_deeply_nested"
+	reasonTooManyValues   = "too_many_values"
+	reasonTooMany         = "too_many"
+)
 
-// jsonDepth is the deepest nesting of objects and arrays in data, counted in
-// one pass without allocating; brackets inside strings do not count. It does
-// not check that data is JSON.
+// jsonDepth is the deepest nesting of objects and arrays in data (jsonShape).
 func jsonDepth(data []byte) int {
-	depth, deepest := 0, 0
-	inString, escaped := false, false
+	depth, _ := jsonShape(data)
+	return depth
+}
+
+// jsonShape is the deepest nesting of objects and arrays in data and the
+// number of JSON values in it, each object member's key counted as one
+// more, counted in one pass without allocating; brackets and other
+// characters inside strings do not count. It does not check that data is
+// JSON.
+func jsonShape(data []byte) (int, int) {
+	depth, deepest, values := 0, 0, 0
+	inString, escaped, inScalar := false, false, false
 	for _, character := range data {
 		if inString {
 			switch {
@@ -86,26 +178,123 @@ func jsonDepth(data []byte) int {
 		}
 		switch character {
 		case '"':
-			inString = true
+			inString, inScalar = true, false
+			values++
 		case '{', '[':
+			inScalar = false
+			values++
 			depth++
 			if depth > deepest {
 				deepest = depth
 			}
 		case '}', ']':
+			inScalar = false
 			depth--
+		case ',', ':', ' ', '\t', '\n', '\r':
+			inScalar = false
+		default:
+			// The first character of a number or a literal.
+			if !inScalar {
+				inScalar = true
+				values++
+			}
 		}
 	}
-	return deepest
+	return deepest, values
 }
 
-// checkAgentBodyDepth refuses a body nested deeper than maxAgentBodyDepth.
-func checkAgentBodyDepth(body []byte) error {
-	if jsonDepth(body) > maxAgentBodyDepth {
+// checkAgentBodyShape refuses a body nested deeper than maxAgentBodyDepth
+// and then one that holds more than maxValues values (jsonShape).
+func checkAgentBodyShape(body []byte, maxValues int) error {
+	depth, values := jsonShape(body)
+	if depth > maxAgentBodyDepth {
 		return fieldFailure("body", reasonTooDeeplyNested,
 			"the request body nests objects and arrays more than "+strconv.Itoa(maxAgentBodyDepth)+" levels deep")
 	}
+	if values > maxValues {
+		return fieldFailure("body", reasonTooManyValues,
+			"the request body holds more than "+strconv.Itoa(maxValues)+" JSON values (object keys included) for this endpoint")
+	}
 	return nil
+}
+
+// The services' own limits on the length of each list field a plan or the
+// project preview takes (contract section 0.1 item 170), checked on the raw
+// array before any element is decoded: a longer list is refused, with the
+// service's reason, without building anything per element. They apply to
+// set, add and remove alike.
+var agentListLimits = map[string]map[string]int{
+	"project":         {"rules": orgreport.MaxRulesPerProject},
+	"content-rule":    {"keywords": contentpolicy.MaxKeywords, "scan_scopes": len(contentpolicy.AllScanScopes)},
+	"weekly-settings": {"ranked_clients": config.MaxOrgRankedClients},
+}
+
+// agentListNouns name a list's elements in the refusal.
+var agentListNouns = map[string]string{"rules": "rules per project", "keywords": "keywords", "scan_scopes": "scan scopes", "ranked_clients": "ranked clients"}
+
+// checkListLength refuses raw, the value of the list field key of kind, when
+// it is an array of more elements than the service accepts. A value that is
+// not an array is left to the decoder.
+func checkListLength(kind, key string, raw json.RawMessage) error {
+	limit, ok := agentListLimits[kind][key]
+	if !ok {
+		return nil
+	}
+	if length, isArray := jsonArrayLength(raw); isArray && length > limit {
+		message := "at most " + strconv.Itoa(limit) + " " + agentListNouns[key] + " are allowed"
+		if key == "rules" {
+			message = "at most " + strconv.Itoa(limit) + " rules per project"
+		}
+		return fieldFailure(key, reasonTooMany, message)
+	}
+	return nil
+}
+
+// jsonArrayLength is the number of elements of the JSON array raw, counted
+// in one pass without allocating; isArray is false when raw is not an
+// array. raw must be valid JSON (the body has been checked).
+func jsonArrayLength(raw []byte) (int, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) < 2 || raw[0] != '[' {
+		return 0, false
+	}
+	count, depth, empty := 0, 0, true
+	inString, escaped := false, false
+	for _, character := range raw[1:] {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case character == '\\':
+				escaped = true
+			case character == '"':
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth == 0 {
+				if !empty {
+					count++
+				}
+				return count, true
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+		empty = false
+	}
+	return 0, false
 }
 
 // agentPlanRequest is a decoded POST /plans body.
@@ -141,9 +330,19 @@ var planArgs = map[string][]string{
 }
 
 // readAgentBody reads a JSON body of at most limit bytes and checks that it
-// nests at most maxAgentBodyDepth levels and is exactly one JSON value in
-// which no object repeats a key.
-func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int64) ([]byte, error) {
+// nests at most maxAgentBodyDepth levels, holds at most maxValues values and
+// is exactly one JSON value in which no object repeats a key.
+func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int64, maxValues int) ([]byte, error) {
+	body, err := readAgentBodyBytes(writer, request, limit, maxValues)
+	if err != nil {
+		return nil, err
+	}
+	return body, checkAgentBodyJSON(body)
+}
+
+// readAgentBodyBytes reads a body of at most limit bytes and checks its
+// shape (checkAgentBodyShape) without decoding it.
+func readAgentBodyBytes(writer http.ResponseWriter, request *http.Request, limit int64, maxValues int) ([]byte, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, limit))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -152,23 +351,26 @@ func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int6
 		}
 		return nil, err
 	}
-	if err := checkAgentBodyDepth(body); err != nil {
-		return nil, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	var value json.RawMessage
-	if err := decoder.Decode(&value); err != nil {
-		return nil, fieldFailure("body", reasonInvalidJSON, "the request body is not valid JSON")
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return nil, fieldFailure("body", reasonInvalidJSON, "the request body has data after the JSON value")
-	}
-	// Every object of the input, at any depth, names each key once: the
-	// maps the input is read into would keep only the last.
-	if err := checkDuplicateKeys(body); err != nil {
+	if err := checkAgentBodyShape(body, maxValues); err != nil {
 		return nil, err
 	}
 	return body, nil
+}
+
+// checkAgentBodyJSON checks that body is exactly one JSON value in which no
+// object repeats a key.
+func checkAgentBodyJSON(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var value json.RawMessage
+	if err := decoder.Decode(&value); err != nil {
+		return fieldFailure("body", reasonInvalidJSON, "the request body is not valid JSON")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return fieldFailure("body", reasonInvalidJSON, "the request body has data after the JSON value")
+	}
+	// Every object of the input, at any depth, names each key once: the
+	// maps the input is read into would keep only the last.
+	return checkDuplicateKeys(body)
 }
 
 // decodeObject decodes one JSON object into raw members; field names it in
@@ -446,6 +648,9 @@ func canonicalFields(kind, name string, members map[string]json.RawMessage, fiel
 			}
 		}
 		value := members[key]
+		if err := checkListLength(kind, canonical, value); err != nil {
+			return nil, err
+		}
 		if kind == "project" && canonical == "rules" {
 			renamed, err := canonicalProjectRules(name, value)
 			if err != nil {

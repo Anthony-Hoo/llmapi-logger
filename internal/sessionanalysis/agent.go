@@ -482,8 +482,8 @@ func (err *LabelError) Unwrap() error { return err.Err }
 // 64-hex session id and enum values from the vocabulary. It reads nothing
 // and writes nothing; whether a facet exists is decided by Calibrate.
 func ValidateCalibrationLabels(labels []CalibrationLabel) error {
-	if len(labels) == 0 || len(labels) > maxCalibrationLabels {
-		return &LabelError{Index: -1, Field: "labels", Err: invalid(fmt.Sprintf("between 1 and %d labels are required", maxCalibrationLabels)), Reason: ReasonOutOfRange}
+	if err := ValidateCalibrationLabelCount(len(labels)); err != nil {
+		return err
 	}
 	for index, label := range labels {
 		if _, field, err := checkCalibrationLabel(label); err != nil {
@@ -493,6 +493,16 @@ func ValidateCalibrationLabels(labels []CalibrationLabel) error {
 			}
 			return failure
 		}
+	}
+	return nil
+}
+
+// ValidateCalibrationLabelCount is ValidateCalibrationLabels' check of the
+// number of labels alone, so a caller can refuse an over-long list before
+// decoding its elements.
+func ValidateCalibrationLabelCount(count int) error {
+	if count == 0 || count > MaxCalibrationLabels {
+		return &LabelError{Index: -1, Field: "labels", Err: invalid(fmt.Sprintf("between 1 and %d labels are required", MaxCalibrationLabels)), Reason: ReasonOutOfRange}
 	}
 	return nil
 }

@@ -371,7 +371,7 @@ func (handler *managementHandler) serveAgentToken(writer http.ResponseWriter, re
 		fieldFailure("body", reasonInvalidJSON, "the body must be exactly {\"code\": \"…\", \"code_verifier\": \"…\"}").write(writer)
 		return
 	}
-	if err := checkAgentBodyDepth(raw); err != nil {
+	if err := checkAgentBodyShape(raw, maxAgentSmallBodyValues); err != nil {
 		agentWriteFailure(err).write(writer)
 		return
 	}

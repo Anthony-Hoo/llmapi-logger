@@ -13,9 +13,10 @@ import (
 
 const (
 	maxOrgIdleGapSeconds = 3600
-	maxOrgRankedClients  = 64
-	maxOrgClientNameLen  = 64
-	maxOrgAnomalyLimit   = 1_000_000
+	// MaxOrgRankedClients is the most ranked clients the settings accept.
+	MaxOrgRankedClients = 64
+	maxOrgClientNameLen = 64
+	maxOrgAnomalyLimit  = 1_000_000
 )
 
 // validateOrgReports checks the org_reports section. A disabled section is
@@ -54,8 +55,8 @@ func ValidateOrgReportsRuntime(org OrgReportsConfig) error {
 	if org.IdleGapSeconds < 1 || org.IdleGapSeconds > maxOrgIdleGapSeconds {
 		return fmt.Errorf("org_reports.idle_gap_seconds must be between 1 and %d, got %d", maxOrgIdleGapSeconds, org.IdleGapSeconds)
 	}
-	if len(org.RankedClients) == 0 || len(org.RankedClients) > maxOrgRankedClients {
-		return fmt.Errorf("org_reports.ranked_clients must list between 1 and %d clients", maxOrgRankedClients)
+	if len(org.RankedClients) == 0 || len(org.RankedClients) > MaxOrgRankedClients {
+		return fmt.Errorf("org_reports.ranked_clients must list between 1 and %d clients", MaxOrgRankedClients)
 	}
 	seen := make(map[string]struct{}, len(org.RankedClients))
 	for _, client := range org.RankedClients {

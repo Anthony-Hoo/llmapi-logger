@@ -57,7 +57,7 @@ func (handler *managementHandler) serveAgentAPIKeySet(writer http.ResponseWriter
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
 	}
-	body, err := readAgentBody(writer, request, maxAgentKeyBodyBytes)
+	body, err := readAgentBody(writer, request, maxAgentKeyBodyBytes, maxAgentSmallBodyValues)
 	if err != nil {
 		handler.failKeyWrite(writer, request, call, keys, err)
 		return
@@ -125,8 +125,21 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		refuse(err)
 		return
 	}
-	body, err := readAgentBody(writer, request, maxAgentKeyBodyBytes)
+	body, err := readAgentBodyBytes(writer, request, maxAgentKeyBodyBytes, maxAgentTestModelBodyValues)
 	if err != nil {
+		refuse(err)
+		return
+	}
+	// Decoding the body takes one of the facade's few decoding slots
+	// (contract section 0.1 item 170); it is given back before the check of
+	// the settings and the probe of the model.
+	release, err := handler.acquireAgentBodySlot(request.Context())
+	if err != nil {
+		refuse(err)
+		return
+	}
+	defer release()
+	if err := checkAgentBodyJSON(body); err != nil {
 		refuse(err)
 		return
 	}
@@ -162,6 +175,7 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		return
 	}
 	patch, err := analysisSettingsPatch(set)
+	release()
 	if err != nil {
 		refuse(err)
 		return
