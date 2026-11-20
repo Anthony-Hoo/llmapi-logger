@@ -64,7 +64,7 @@ Every read result carries `meta` with three fields:
 
 Default ranges: `requests list` without `--since`, `--from` or `--to` lists every record, newest first; `usage overview` and `usage sessions` cover the 7 days before `--to` (or now), at most 400 days; `analysis overview`, `users` and `sessions` need `--since` or `--from`; weekly reads default to the current week.
 
-Lists page with `--cursor`: pass the `next_cursor` of the previous page until it is empty, and repeat every other argument of the first page exactly (only `--limit` may change). A cursor belongs to its query and identity; using it with other filters fails with `INVALID_ARGUMENT`, `details.reason: cursor_query_mismatch`: start that query again without `--cursor`.
+Lists page with `--cursor`: pass the `next_cursor` of the previous page until it is empty, and repeat every other argument of the first page exactly (only `--limit` may change). A cursor belongs to its query and identity; using it with other filters fails with `INVALID_ARGUMENT`, `details.reason: cursor_query_mismatch`: start that query again without `--cursor`. A cursor issued before the administrator changed the server's keys fails with `details.reason: cursor_expired`: start the list again too. A changed or made-up cursor fails with `invalid_cursor`.
 
 ## Rules
 

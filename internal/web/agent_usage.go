@@ -315,7 +315,7 @@ func agentTreeID(tree, root string) string {
 	return root
 }
 
-func agentUsageSessionsOf(response insights.SessionsResponse, binding string) agentUsageSessions {
+func agentUsageSessionsOf(response insights.SessionsResponse, binding agentCursorScope) agentUsageSessions {
 	out := agentUsageSessions{Items: make([]agentSessionCard, 0, len(response.Items)),
 		NextCursor:     wrapAgentCursor(agentCursorUsageSessions, binding, response.NextCursor),
 		BillingEnabled: response.BillingEnabled, ClientLabels: copyLabels(response.ClientLabels)}

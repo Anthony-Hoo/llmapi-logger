@@ -259,7 +259,7 @@ func agentClosedValue(values url.Values, name string, allowed []string) (string,
 	return "", argNotAllowed(name, allowed)
 }
 
-func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal, binding string) (query.Filter, query.Cursor, int, error) {
+func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal, binding agentCursorScope) (query.Filter, query.Cursor, int, error) {
 	var filter query.Filter
 	var cursor query.Cursor
 	if !callerMayFilterByCaller(caller) {
