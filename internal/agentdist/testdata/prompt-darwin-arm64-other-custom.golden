@@ -46,7 +46,7 @@ The archive's top level is the directory llmapi-audit/ itself: it contains llmap
    Check: the command exits with status 0.
 
 7. Remove the work directory (the command refuses a path that is not the one step 1 created):
-   case "LLMAPI_WORK_DIR" in */llmapi-audit-install.????????) rm -rf -- "LLMAPI_WORK_DIR" ;; *) echo "refused: not the work directory from step 1" >&2; false ;; esac
+   d="LLMAPI_WORK_DIR"; b=; case "$d" in */./*|*/../*|*/.|*/..|*//*) ;; /*) b="${d##*/}" ;; esac; case "$b" in llmapi-audit-install.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) rm -rf -- "$d" ;; *) echo "refused: not the work directory from step 1" >&2; false ;; esac
    Check: the command exits with status 0.
 
 8. Check that the client runs on this machine:

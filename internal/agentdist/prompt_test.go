@@ -197,16 +197,22 @@ func TestInstallPromptRequirements(t *testing.T) {
 				if !strings.Contains(prompt, `mktemp -d "${TMPDIR:-/tmp}/llmapi-audit-install.XXXXXXXX"`) || strings.Contains(prompt, "mkdir -p -- \"${TMPDIR") {
 					t.Error("the POSIX work directory is not created with mktemp -d")
 				}
-				// Its removal refuses anything but a path of mktemp's shape (the
-				// eight X of the template are eight characters).
-				if !strings.Contains(prompt, `case "LLMAPI_WORK_DIR" in */llmapi-audit-install.????????) rm -rf -- "LLMAPI_WORK_DIR" ;; *)`) ||
-					strings.Count(prompt, `rm -rf -- "LLMAPI_WORK_DIR"`) != 1 {
+				// Its removal refuses anything but a path of mktemp's shape: the
+				// base name is llmapi-audit-install. and eight letters or digits
+				// (TestPosixWorkRemovalInShell runs it).
+				guard := `d="LLMAPI_WORK_DIR"; b=; case "$d" in */./*|*/../*|*/.|*/..|*//*) ;; /*) b="${d##*/}" ;; esac; case "$b" in llmapi-audit-install.` +
+					strings.Repeat("[A-Za-z0-9]", 8) + `) rm -rf -- "$d" ;; *)`
+				if !strings.Contains(prompt, guard) || strings.Count(prompt, `rm -rf -- "$d"`) != 1 || strings.Contains(prompt, "????????") {
 					t.Error("the POSIX work directory is removed without the guard")
 				}
 			}
 			for _, line := range commandLines(prompt) {
 				for _, deletion := range regexp.MustCompile(`(?:rm -rf -- |Remove-Item -LiteralPath )("[^"]*")`).FindAllStringSubmatch(line, -1) {
 					target := strings.Trim(deletion[1], `"`)
+					// "$d" is the guarded work directory of the POSIX removal.
+					if target == "$d" && !platform.Windows() && strings.HasPrefix(line, `d="`+work+`"; `) {
+						continue
+					}
 					if target != install && target != work {
 						t.Errorf("deletes %q, which is neither the install directory nor the work directory", target)
 					}
