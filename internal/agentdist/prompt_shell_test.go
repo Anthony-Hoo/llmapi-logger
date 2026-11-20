@@ -44,6 +44,21 @@ func TestPosixWorkRemovalInShell(t *testing.T) {
 	if !run(work) || exists(work) {
 		t.Fatalf("the work directory was not removed")
 	}
+	// Step 1's own command, with TMPDIR ending in a slash as macOS's default
+	// does: mktemp prints a path with //, and the removal accepts it.
+	for _, tmpdir := range []string{sandbox, sandbox + "/"} {
+		create := exec.Command("/bin/sh", "-c", `mktemp -d "${TMPDIR:-/tmp}/llmapi-audit-install.XXXXXXXX"`)
+		create.Env = []string{"TMPDIR=" + tmpdir, "PATH=/usr/bin:/bin"}
+		output, err := create.Output()
+		if err != nil {
+			t.Fatalf("mktemp with TMPDIR=%q: %v", tmpdir, err)
+		}
+		printed := strings.TrimSpace(string(output))
+		mustDir(filepath.Join(printed, "extract"))
+		if !run(printed) || exists(printed) {
+			t.Fatalf("the work directory %q that step 1 printed was not removed", printed)
+		}
+	}
 
 	keep := filepath.Join(sandbox, "x", "keep")
 	mustDir(filepath.Join(keep, "data"))
@@ -59,7 +74,6 @@ func TestPosixWorkRemovalInShell(t *testing.T) {
 		filepath.Join(sandbox, "x") + "/llmapi-audit-install.Ab12Cd3",
 		filepath.Join(sandbox, "x") + "/llmapi-audit-install.Ab12Cd345",
 		filepath.Join(sandbox, "x") + "/llmapi-audit-install.Ab12-d34",
-		filepath.Join(sandbox, "x") + "//llmapi-audit-install.Ab12Cd34",
 		"x/llmapi-audit-install.Ab12Cd34",
 		"llmapi-audit-install.Ab12Cd34",
 		"/tmp/llmapi-audit-install.XXXXXXX?",

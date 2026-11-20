@@ -452,6 +452,15 @@ func TestCheckInstallLinkMatchesInstallLink(t *testing.T) {
 		{"https://audit.example.com", InstallLinkRequest{Agent: AgentOther, Platform: "windows-amd64", SkillsDir: `C:\Tools\skills`}},
 		{"https://audit.example.com/$(x)", InstallLinkRequest{Agent: AgentCodex, Platform: "linux-amd64"}},
 	}
+	// The order of the checks is InstallLink's: without packages a bad
+	// skills_dir is still answered as no packages, as before.
+	empty, err := New(Options{PackageDir: filepath.Join(t.TempDir(), "missing"), AdminToken: testAdminToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.CheckInstallLink("https://audit.example.com", InstallLinkRequest{Agent: AgentOther, Platform: "linux-amd64", SkillsDir: "relative"}); !errors.Is(err, ErrNoPackages) {
+		t.Fatalf("no packages and a bad skills_dir: %v, want ErrNoPackages", err)
+	}
 	for _, tc := range cases {
 		checked := service.CheckInstallLink(tc.server, tc.request)
 		_, issued := service.InstallLink(tc.server, tc.request)

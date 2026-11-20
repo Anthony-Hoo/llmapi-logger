@@ -310,14 +310,6 @@ func (service *Service) checkInstallLink(serverURL string, request InstallLinkRe
 	if !ok {
 		return Package{}, "", &InputError{Field: "platform", Message: "platform must be one of " + platformList()}
 	}
-	switch {
-	case request.SkillsDir != "":
-		if _, err := cleanSkillsDir(request.SkillsDir, platform); err != nil {
-			return Package{}, "", err
-		}
-	case info.SkillsDir == "":
-		return Package{}, "", &InputError{Field: "skills_dir", Message: "skills_dir is required for agent other: give the absolute path of the directory your agent loads skills from"}
-	}
 	if service.manifest == nil {
 		return Package{}, "", service.loadErr
 	}
@@ -328,6 +320,16 @@ func (service *Service) checkInstallLink(serverURL string, request InstallLinkRe
 	server, err := cleanServerURL(serverURL)
 	if err != nil {
 		return Package{}, "", err
+	}
+	// skills_dir last, where InstallPrompt checked it before, so every
+	// request is answered as it was.
+	switch {
+	case request.SkillsDir != "":
+		if _, err := cleanSkillsDir(request.SkillsDir, platform); err != nil {
+			return Package{}, "", err
+		}
+	case info.SkillsDir == "":
+		return Package{}, "", &InputError{Field: "skills_dir", Message: "skills_dir is required for agent other: give the absolute path of the directory your agent loads skills from"}
 	}
 	return pkg, server, nil
 }

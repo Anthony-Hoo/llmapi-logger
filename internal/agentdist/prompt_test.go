@@ -200,7 +200,7 @@ func TestInstallPromptRequirements(t *testing.T) {
 				// Its removal refuses anything but a path of mktemp's shape: the
 				// base name is llmapi-audit-install. and eight letters or digits
 				// (TestPosixWorkRemovalInShell runs it).
-				guard := `d="LLMAPI_WORK_DIR"; b=; case "$d" in */./*|*/../*|*/.|*/..|*//*) ;; /*) b="${d##*/}" ;; esac; case "$b" in llmapi-audit-install.` +
+				guard := `d="LLMAPI_WORK_DIR"; b=; case "$d" in */./*|*/../*|*/.|*/..) ;; /*) b="${d##*/}" ;; esac; case "$b" in llmapi-audit-install.` +
 					strings.Repeat("[A-Za-z0-9]", 8) + `) rm -rf -- "$d" ;; *)`
 				if !strings.Contains(prompt, guard) || strings.Count(prompt, `rm -rf -- "$d"`) != 1 || strings.Contains(prompt, "????????") {
 					t.Error("the POSIX work directory is removed without the guard")

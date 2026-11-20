@@ -405,13 +405,14 @@ func posixPrompt(input PromptInput, info agentInfo, server string, p paths) stri
 const mktempChar = "[A-Za-z0-9]"
 
 // posixWorkRemoval is the guarded removal of the work directory: it removes
-// work only when it is absolute, has no . or .. segment and no empty
-// segment, and its base name (everything after the last slash, so it holds
-// no slash) is llmapi-audit-install. followed by exactly eight mktemp
-// characters. A wildcard such as ? would also match a slash, so the base
-// name is cut off first and matched on its own.
+// work only when it is absolute, has no . or .. segment, and its base name
+// (everything after the last slash, so it holds no slash) is
+// llmapi-audit-install. followed by exactly eight mktemp characters. A
+// wildcard such as ? would also match a slash, so the base name is cut off
+// first and matched on its own. An empty segment is accepted: macOS's
+// default TMPDIR ends in a slash, so mktemp prints .../T//llmapi-audit-...
 func posixWorkRemoval(work string) string {
-	return "d=" + work + "; b=; case \"$d\" in */./*|*/../*|*/.|*/..|*//*) ;; /*) b=\"${d##*/}\" ;; esac; " +
+	return "d=" + work + "; b=; case \"$d\" in */./*|*/../*|*/.|*/..) ;; /*) b=\"${d##*/}\" ;; esac; " +
 		"case \"$b\" in llmapi-audit-install." + strings.Repeat(mktempChar, 8) + ") rm -rf -- \"$d\" ;; " +
 		"*) echo \"refused: not the work directory from step 1\" >&2; false ;; esac"
 }
