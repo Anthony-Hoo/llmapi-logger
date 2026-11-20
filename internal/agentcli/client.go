@@ -45,8 +45,9 @@ type client struct {
 }
 
 // newClient builds a client for server; token may be empty (code exchange).
-func newClient(env *Env, server, token, command string) (*client, error) {
-	config, err := loadConfig(env)
+// fix is loadConfig's.
+func newClient(env *Env, server, token, command string, fix bool) (*client, error) {
+	config, err := loadConfig(env, fix)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +72,7 @@ func (inv *invocation) clientWith(fix bool) (*client, error) {
 		return nil, err
 	}
 	inv.creds = creds
-	return newClient(inv.env, creds.Server, creds.Token, inv.spec.header())
+	return newClient(inv.env, creds.Server, creds.Token, inv.spec.header(), fix)
 }
 
 func newHTTPClient(env *Env, config localConfig) (*http.Client, error) {

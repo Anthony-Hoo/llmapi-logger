@@ -4,9 +4,13 @@ package agentcli
 
 import (
 	"encoding/json"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 )
@@ -205,6 +209,113 @@ func TestStateDirectoryOfAnotherUserIsRefused(t *testing.T) {
 	body := h.expectFailure(h.run("whoami"), "LOCAL_FILE_ERROR", 1)
 	if body.Details["reason"] != problemNotOwned || modeOf(t, h.home) != 0o755 || len(server.recorded()) != 0 {
 		t.Fatalf("%+v, mode %v", body, modeOf(t, h.home))
+	}
+}
+
+// TestConfigFileIsCheckedLikeCredentials (contract section 0.1 item 164):
+// config.json names the CA the client trusts with the token, so a link, an
+// entry that is not a regular file, or a file of another user is refused
+// with LOCAL_FILE_ERROR naming the path and reason, is never read, and no
+// request is sent; a loose mode of the user's own file is tightened by a
+// command that uses the token and only reported by version.
+func TestConfigFileIsCheckedLikeCredentials(t *testing.T) {
+	server := newFakeServer(t, nil)
+	config := `{"ca_file":"/nonexistent-test-ca.pem"}`
+	refused := func(h *harness, reason string, args ...string) {
+		t.Helper()
+		body := h.expectFailure(h.run(args...), "LOCAL_FILE_ERROR", 1)
+		if body.Details["reason"] != reason || body.Details["path"] != filepath.Join(h.home, configFile) ||
+			strings.Contains(body.Message, "CA file") || len(server.recorded()) != 0 {
+			t.Fatalf("%v: %+v, %d requests", args, body, len(server.recorded()))
+		}
+	}
+
+	// A link to a file elsewhere.
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	elsewhere := writeFile(t, filepath.Join(t.TempDir(), "elsewhere.json"), config)
+	_ = os.Chmod(elsewhere, 0o644)
+	if err := os.Symlink(elsewhere, filepath.Join(h.home, configFile)); err != nil {
+		t.Fatal(err)
+	}
+	refused(h, problemSymlink, "whoami")
+	refused(h, problemSymlink, "login", "--server", server.URL, "--no-browser")
+	if modeOf(t, elsewhere) != 0o644 {
+		t.Fatalf("the link's target changed to %v", modeOf(t, elsewhere))
+	}
+
+	// A directory.
+	h = newHarness(t)
+	h.saveLogin(server.URL)
+	if err := os.Mkdir(filepath.Join(h.home, configFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	refused(h, problemNotFile, "whoami")
+
+	// The user's own file others can write: tightened by whoami, reported
+	// (not changed) by version.
+	h = newHarness(t)
+	h.saveLogin(server.URL)
+	own := writeFile(t, filepath.Join(h.home, configFile), `{}`)
+	_ = os.Chmod(own, 0o666)
+	assertVersionDegrades(t, h)
+	if modeOf(t, own) != 0o666 || len(server.recorded()) != 0 {
+		t.Fatalf("version changed config.json (%v) or asked the server", modeOf(t, own))
+	}
+	if exit := h.run("whoami"); exit != 0 {
+		t.Fatalf("whoami with the user's own loose config.json: exit %d %s", exit, h.stderr.String())
+	}
+	assertPrivate(t, own)
+}
+
+// TestConfigFileOfAnotherUserIsNotTrusted is the end-to-end case: another
+// user who can write to a loose state directory plants config.json naming
+// their own CA. whoami tightens the directory, refuses config.json
+// (not_owned) and never sends the token to the server that CA vouches for;
+// login refuses it before anyone is asked to approve. Needs root to give a
+// file to another user (the Linux test container).
+func TestConfigFileOfAnotherUserIsNotTrusted(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to give a file to another user")
+	}
+	var mu sync.Mutex
+	var authorizations []string
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		authorizations = append(authorizations, request.Header.Get("Authorization"))
+		mu.Unlock()
+		defaultResponder(writer, request, nil)
+	}))
+	t.Cleanup(tlsServer.Close)
+	caFile := writeFile(t, filepath.Join(t.TempDir(), "other-ca.pem"), string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsServer.Certificate().Raw})))
+
+	h := newHarness(t)
+	h.saveLogin(tlsServer.URL)
+	_ = os.Chmod(h.home, 0o777)
+	planted := writeFile(t, filepath.Join(h.home, configFile), `{"ca_file":"`+caFile+`"}`)
+	if err := os.Chown(planted, 4242, 4242); err != nil {
+		t.Fatal(err)
+	}
+	for run := 0; run < 2; run++ {
+		body := h.expectFailure(h.run("whoami"), "LOCAL_FILE_ERROR", 1)
+		if body.Details["reason"] != problemNotOwned || body.Details["path"] != planted {
+			t.Fatalf("whoami %d: %+v", run, body)
+		}
+	}
+	assertPrivateDir(t, h.home)
+	opened := false
+	h.env.OpenBrowser = func(string) error { opened = true; return nil }
+	body := h.expectFailure(h.run("login", "--server", tlsServer.URL), "LOCAL_FILE_ERROR", 1)
+	if body.Details["reason"] != problemNotOwned || opened {
+		t.Fatalf("login: %+v, browser opened %v", body, opened)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(authorizations) != 0 {
+		t.Fatalf("the server trusted through the planted CA was asked %d times", len(authorizations))
+	}
+	if info, err := os.Lstat(planted); err != nil || info.Mode().Perm() != 0o600 || info.Sys().(*syscall.Stat_t).Uid != 4242 {
+		t.Fatalf("the planted file changed: %v %v", info, err)
 	}
 }
 

@@ -111,13 +111,28 @@ func removeCredentials(env *Env) error {
 	return nil
 }
 
-func loadConfig(env *Env) (localConfig, error) {
+// loadConfig reads config.json. It names the CA the client trusts with the
+// token, so it is checked like credentials.json before it is read (contract
+// section 0.1 item 164): a link, an entry that is not a regular file, or a
+// file owned by another user is refused with LOCAL_FILE_ERROR and never
+// read; a loose mode of the user's own file is tightened through a handle
+// opened without following links when fix is true, and refused otherwise.
+// These are the only two files the client reads from the state directory.
+func loadConfig(env *Env, fix bool) (localConfig, error) {
 	var config localConfig
 	dir, err := env.stateDir()
 	if err != nil {
 		return config, err
 	}
-	data, err := os.ReadFile(filepath.Join(dir, configFile))
+	path := filepath.Join(dir, configFile)
+	exists, problem := inspectPrivate(path, false, 0o600, fix)
+	if !exists {
+		return config, nil
+	}
+	if problem != "" {
+		return config, configFileError(path, problem)
+	}
+	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return config, nil
 	}
@@ -174,6 +189,16 @@ func storeError(path, problem string, mode os.FileMode) *cliError {
 	return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is accessible to other users and could not be made private",
 		Hint:    "Make it private and run the command again: the state directory needs mode 0700 and credentials.json mode 0600 (chmod 700 <dir>; chmod 600 <dir>/credentials.json), both owned by you.",
 		Details: details}
+}
+
+// configFileError is the LOCAL_FILE_ERROR for a config.json that is not
+// read.
+func configFileError(path, problem string) *cliError {
+	return &cliError{Code: agentapi.CodeLocalFileError,
+		Message: "config.json in the state directory is a link, not a regular file, owned by another user, or accessible to others, so it is not read",
+		Hint: "config.json names the CA the client trusts with the token. Ask the user to check it: it must be a regular file owned by them with mode 0600 " +
+			"(chmod 600 <dir>/config.json), or be removed.",
+		Details: map[string]any{"path": path, "reason": problem, "required_mode": "0600"}}
 }
 
 // securePrivateState checks the state directory and credentials.json before

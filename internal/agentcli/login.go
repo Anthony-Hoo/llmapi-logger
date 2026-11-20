@@ -109,7 +109,7 @@ func runLogin(inv *invocation) (*result, error) {
 		device, _ = env.Hostname()
 	}
 	device = cleanDeviceName(device)
-	exchange, err := newClient(env, server, "", inv.spec.header())
+	exchange, err := newClient(env, server, "", inv.spec.header(), true)
 	if err != nil {
 		return nil, err
 	}
