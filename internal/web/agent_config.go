@@ -407,11 +407,18 @@ var errAgentPreviewWeek = argFormat("week", "the first day of a report week, YYY
 // agentPreviewInput decodes the body of the project preview field by field,
 // so a refusal names the field: an unknown key, a value of the wrong JSON
 // type, no rule at all, or a week that is not a week start. The rules
-// themselves are checked by the service.
+// themselves are checked by the service. The body is read as strictly as
+// plan input (contract section 0.1 items 132 and 154): a key given twice in
+// any object is refused, a rule's keys must name its fields exactly, with
+// their case, and a rule may spell pattern as pattern_untrusted, so one rule
+// list gets the same answer here and in a plan.
 func (handler *managementHandler) agentPreviewInput(writer http.ResponseWriter, request *http.Request) (orgreport.PreviewInput, error) {
 	var input orgreport.PreviewInput
-	request.Body = http.MaxBytesReader(writer, request.Body, maxOrgBodyBytes)
-	decoder := json.NewDecoder(request.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxOrgBodyBytes))
+	if err != nil {
+		return input, argInvalid("body", reasonInvalidFormat, "the body must be one JSON object with week, group_id, rules and project_id")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	var fields map[string]json.RawMessage
 	if err := decoder.Decode(&fields); err != nil || fields == nil {
 		return input, argInvalid("body", reasonInvalidFormat, "the body must be one JSON object with week, group_id, rules and project_id")
@@ -419,6 +426,9 @@ func (handler *managementHandler) agentPreviewInput(writer http.ResponseWriter, 
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return input, argInvalid("body", reasonInvalidFormat, "the body must be exactly one JSON object")
+	}
+	if err := checkDuplicateKeys(body); err != nil {
+		return input, err
 	}
 	allowed := agentBodyFields()["config.project-preview"]
 	keys := make([]string, 0, len(fields))
@@ -453,9 +463,15 @@ func (handler *managementHandler) agentPreviewInput(writer http.ResponseWriter, 
 		}
 	}
 	if raw, ok := fields["rules"]; ok && string(raw) != "null" {
-		rules := json.NewDecoder(bytes.NewReader(raw))
-		rules.DisallowUnknownFields()
-		if rules.Decode(&input.Rules) != nil {
+		canonical, err := canonicalProjectRules("rules", raw)
+		if err != nil {
+			return input, err
+		}
+		if err := readStrictJSON(canonical, &input.Rules, "rules"); err != nil {
+			var failure *agentFailure
+			if errors.As(err, &failure) {
+				return input, failure
+			}
 			return input, argFormat("rules", "a list of {kind, pattern} objects")
 		}
 	}

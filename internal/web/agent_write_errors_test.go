@@ -217,6 +217,51 @@ func TestPlanInputIsDecodedExactly(t *testing.T) {
 	fixture.plan(t, project(`{"kind":"repo_name","pattern_untrusted":"exact"}`))
 }
 
+// Contract section 0.1 item 154: the project preview reads its body as
+// strictly as plan input, so one rule list gets the same answer from
+// `config preview-project` and from a plan that sets a project's rules
+// (the plan names a duplicate under "set.").
+func TestProjectPreviewInputIsDecodedLikeAPlan(t *testing.T) {
+	fixture := newWriteFixture(t)
+	ids := fixture.seed(t)
+	for _, test := range []struct {
+		name, rule, field, reason string
+	}{
+		{"rule field in another case", `{"kind":"repo_name","pattern_untrusted":"a","Pattern":"b"}`, "rules[0].Pattern", "unknown_field"},
+		{"rule kind in another case", `{"Kind":"repo_name","pattern":"a"}`, "rules[0].Kind", "unknown_field"},
+		{"rule pattern in capitals", `{"kind":"repo_name","PATTERN":"x"}`, "rules[0].PATTERN", "unknown_field"},
+		{"unknown rule field", `{"kind":"repo_name","pattern":"a","note":"b"}`, "rules[0].note", "unknown_field"},
+		{"duplicate rule key", `{"kind":"repo_name","pattern":"a","pattern":"b"}`, "rules[0].pattern", "duplicate_key"},
+		{"both spellings", `{"kind":"repo_name","pattern":"a","pattern_untrusted":"b"}`, "rules[0].pattern", reasonBothSpellings},
+	} {
+		preview := failure(t, fixture.facade(http.MethodPost, "/config/project-preview", `{"group_id":null,"rules":[`+test.rule+`]}`, fixture.adminRead))
+		plan := failure(t, fixture.facade(http.MethodPost, "/plans", `{"op":"config.set","kind":"project","id":"`+ids.project+`","set":{"rules":[`+test.rule+`]}}`, fixture.adminWrite))
+		if preview.Code != agentapi.CodeInvalidArgument || preview.Details["field"] != test.field || preview.Details["reason"] != test.reason {
+			t.Errorf("%s: preview = %s %v", test.name, preview.Code, preview.Details)
+		}
+		planField, _ := plan.Details["field"].(string)
+		if plan.Code != preview.Code || strings.TrimPrefix(planField, "set.") != test.field || plan.Details["reason"] != test.reason {
+			t.Errorf("%s: plan = %s %v, preview %v", test.name, plan.Code, plan.Details, preview.Details)
+		}
+	}
+	for _, test := range []struct{ name, body, field string }{
+		{"duplicate top-level key", `{"group_id":null,"group_id":1,"rules":[{"kind":"repo_name","pattern":"a"}]}`, "group_id"},
+		{"duplicate rules key", `{"rules":[{"kind":"repo_name","pattern":"a"}],"rules":[{"kind":"repo_name","pattern":"b"}]}`, "rules"},
+	} {
+		body := failure(t, fixture.facade(http.MethodPost, "/config/project-preview", test.body, fixture.adminRead))
+		if body.Code != agentapi.CodeInvalidArgument || body.Details["field"] != test.field || body.Details["reason"] != "duplicate_key" {
+			t.Errorf("%s: preview = %s %v", test.name, body.Code, body.Details)
+		}
+	}
+	// The exact spellings, pattern_untrusted included, are accepted by both.
+	for _, rule := range []string{`{"kind":"repo_name","pattern":"exact"}`, `{"kind":"repo_name","pattern_untrusted":"exact"}`} {
+		if response := fixture.facade(http.MethodPost, "/config/project-preview", `{"group_id":null,"rules":[`+rule+`]}`, fixture.adminRead); response.Code != http.StatusOK {
+			t.Errorf("preview of %s = %d %s", rule, response.Code, response.Body.String())
+		}
+		fixture.plan(t, `{"op":"config.set","kind":"project","id":"`+ids.project+`","set":{"rules":[`+rule+`]}}`)
+	}
+}
+
 // writeArgumentCase is one refused write input and what the refusal names.
 type writeArgumentCase struct {
 	name, method, path string
