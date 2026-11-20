@@ -132,7 +132,9 @@ func TestEveryCommandInHelpParses(t *testing.T) {
 
 func TestHelpOutput(t *testing.T) {
 	h := newHarness(t)
-	for _, args := range [][]string{{}, {"--help"}, {"help"}, {"requests"}, {"requests", "--help"}, {"requests", "list", "--help"}, {"apply", "-h"}, {"config", "set-key", "--help"}} {
+	// A group alone is an INVALID_ARGUMENT envelope (TestGroupWithoutASubcommandIsAnEnvelope);
+	// with --help it prints the group's help.
+	for _, args := range [][]string{{}, {"--help"}, {"help"}, {"requests", "--help"}, {"requests", "list", "--help"}, {"apply", "-h"}, {"config", "set-key", "--help"}} {
 		if exit := h.run(args...); exit != 0 || h.stdout.Len() == 0 || h.stderr.Len() != 0 {
 			t.Errorf("%v: exit %d", args, exit)
 		}
@@ -263,5 +265,49 @@ func TestLoginHintsWorkWithoutSavedCredentials(t *testing.T) {
 	}
 	if CheckCommand([]string{"login"}) == nil || CheckCommand([]string{"login", "--write"}) == nil {
 		t.Fatal("CheckCommand accepts a login that fails on a first login")
+	}
+}
+
+// A group without a subcommand prints one JSON envelope, as every command
+// does: INVALID_ARGUMENT naming the missing subcommand and the available
+// ones, exit 2. Plain help is only for an explicit --help.
+func TestGroupWithoutASubcommandIsAnEnvelope(t *testing.T) {
+	h := newHarness(t)
+	for _, group := range groupOrder {
+		body := h.expectFailure(h.run(group.Name), agentapi.CodeInvalidArgument, agentapi.ExitInvalidUsage)
+		available, _ := body.Details["available"].([]any)
+		if body.Details["field"] != "command" || body.Details["reason"] != "missing_subcommand" || len(available) == 0 || h.stdout.Len() != 0 {
+			t.Errorf("llmaudit %s: %+v", group.Name, body)
+		}
+		for _, name := range available {
+			if !strings.Contains(body.Message, name.(string)) {
+				t.Errorf("llmaudit %s: message %q does not list %v", group.Name, body.Message, name)
+			}
+		}
+	}
+	body := h.expectFailure(h.run("requests", "lst"), agentapi.CodeInvalidArgument, agentapi.ExitInvalidUsage)
+	if body.Details["reason"] != "unknown_command" || !strings.Contains(body.Message, "list") {
+		t.Errorf("llmaudit requests lst: %+v", body)
+	}
+	if exit := h.run("callers", "--help"); exit != 0 || !strings.Contains(h.stdout.String(), "callers list") {
+		t.Errorf("callers --help: exit %d %s", exit, h.stdout.String())
+	}
+}
+
+// Global flags are accepted before the command as well as after it.
+func TestGlobalFlagsBeforeTheCommand(t *testing.T) {
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	for _, args := range [][]string{{"--pretty", "whoami"}, {"whoami", "--pretty"}, {"-pretty", "whoami"}, {"--pretty=true", "whoami"}} {
+		if exit := h.run(args...); exit != 0 || strings.HasPrefix(strings.TrimSpace(h.stdout.String()), "{") {
+			t.Errorf("%v: exit %d, output %q (want the pretty form)", args, exit, h.stdout.String())
+		}
+	}
+	if exit := h.run("--pretty=false", "whoami"); exit != 0 || !strings.HasPrefix(h.stdout.String(), "{") {
+		t.Errorf("--pretty=false whoami: exit %d %q", exit, h.stdout.String())
+	}
+	if exit := h.run("--pretty=maybe", "whoami"); exit != agentapi.ExitInvalidUsage {
+		t.Errorf("--pretty=maybe whoami: exit %d", exit)
 	}
 }

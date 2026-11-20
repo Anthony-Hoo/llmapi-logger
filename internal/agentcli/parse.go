@@ -22,6 +22,9 @@ type invocation struct {
 	given  []occurrence
 	args   []string
 	pretty bool
+	// hasPrettyFlag is set when --pretty was given after the command; it
+	// then wins over one given before.
+	hasPrettyFlag bool
 
 	// filled while running
 	creds *credentials
@@ -72,21 +75,68 @@ func findCommand(commands []*commandSpec, args []string) (*commandSpec, []string
 		}
 	}
 	if isGroup(args[0]) {
-		if len(args) == 1 || isHelpFlag(args[1]) {
+		if len(args) > 1 && isHelpFlag(args[1]) {
 			return nil, nil, &errHelp{group: args[0]}
 		}
-		return nil, nil, usageError("", fmt.Sprintf("unknown command %q", args[0]+" "+args[1]))
+		// A group alone is not a command (contract section 0.1 item 123): one
+		// JSON envelope naming the missing subcommand and the available ones;
+		// plain help only for an explicit --help.
+		available := groupCommands(commands, args[0])
+		failure := usageError("command", fmt.Sprintf("`llmaudit %s` needs a subcommand: %s", args[0], strings.Join(available, ", ")))
+		failure.Details["reason"] = "missing_subcommand"
+		if len(args) > 1 {
+			failure = usageError("command", fmt.Sprintf("unknown command %q; `llmaudit %s` has: %s", args[0]+" "+args[1], args[0], strings.Join(available, ", ")))
+			failure.Details["reason"] = "unknown_command"
+		}
+		failure.Details["available"] = available
+		return nil, nil, failure
 	}
 	return nil, nil, usageError("", fmt.Sprintf("unknown command %q", args[0]))
 }
 
-// parse parses a full command line (without the program name).
+// groupCommands lists the subcommands of group in table order.
+func groupCommands(commands []*commandSpec, group string) []string {
+	var names []string
+	for _, spec := range commands {
+		if len(spec.Path) == 2 && spec.Path[0] == group {
+			names = append(names, spec.Path[1])
+		}
+	}
+	return names
+}
+
+// parse parses a full command line (without the program name). Global flags
+// (--pretty) are accepted before the command as well as after it.
 func parse(env *Env, args []string) (*invocation, error) {
+	leadingPretty := false
+	for len(args) > 0 && isPrettyFlag(args[0]) {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(args[0], "-"), "=")
+		set, err := boolValue("--"+name, value, hasValue)
+		if err != nil {
+			return nil, err
+		}
+		leadingPretty = set
+		args = args[1:]
+	}
 	spec, rest, err := findCommand(allCommands(), args)
 	if err != nil {
 		return nil, err
 	}
-	return parseFlags(env, spec, rest)
+	inv, err := parseFlags(env, spec, rest)
+	if err != nil {
+		return nil, err
+	}
+	if leadingPretty && !inv.hasPrettyFlag {
+		inv.pretty = true
+	}
+	return inv, nil
+}
+
+// isPrettyFlag reports whether arg is the global --pretty flag in any of
+// its forms (--pretty, -pretty, --pretty=true|false).
+func isPrettyFlag(arg string) bool {
+	name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+	return strings.HasPrefix(arg, "-") && name == "pretty"
 }
 
 func isNegativeNumber(arg string) bool {
@@ -130,7 +180,7 @@ func parseFlags(env *Env, spec *commandSpec, args []string) (*invocation, error)
 			if err != nil {
 				return nil, err
 			}
-			inv.pretty = pretty
+			inv.pretty, inv.hasPrettyFlag = pretty, true
 			continue
 		}
 		flag := spec.flag(name)
