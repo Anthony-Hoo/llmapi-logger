@@ -139,15 +139,27 @@ func TestSessionAnalysisSettingsRoutes(t *testing.T) {
 	}
 }
 
-// settingsRows is an in-memory store of saved settings.
+// settingsRows is an in-memory store of saved settings. While failLoad is
+// set every read fails with it (the reader pool failing, the writer working).
 type settingsRows struct {
-	mu   sync.Mutex
-	rows map[string]storage.RuntimeSettings
+	mu       sync.Mutex
+	rows     map[string]storage.RuntimeSettings
+	failLoad error
+}
+
+// setFailLoad sets failLoad under the lock.
+func (store *settingsRows) setFailLoad(err error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.failLoad = err
 }
 
 func (store *settingsRows) LoadRuntimeSettings(_ context.Context, section string) (storage.RuntimeSettings, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.failLoad != nil {
+		return storage.RuntimeSettings{}, store.failLoad
+	}
 	row, ok := store.rows[section]
 	if !ok {
 		return storage.RuntimeSettings{}, sql.ErrNoRows

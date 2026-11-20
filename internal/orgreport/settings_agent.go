@@ -146,7 +146,7 @@ func (service *Service) CheckPatchSettings(ctx context.Context, expectedVersion 
 	}
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
-	diff, _, _, err := service.prepareSettings(ctx, expectedVersion, change)
+	diff, _, _, err := service.prepareSettings(ctx, expectedVersion, change, false)
 	return diff, err
 }
 
@@ -160,7 +160,7 @@ func (service *Service) PatchSettings(ctx context.Context, expectedVersion int64
 	}
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
-	diff, candidate, next, err := service.prepareSettings(ctx, exact(expectedVersion), change)
+	diff, candidate, next, err := service.prepareSettings(ctx, exact(expectedVersion), change, true)
 	if err != nil {
 		return SettingsView{}, err
 	}
@@ -203,16 +203,24 @@ func (service *Service) ResetSettingsIfVersion(ctx context.Context, expectedVers
 	}
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
-	if _, version := service.currentSettings(ctx); version != exact(expectedVersion) {
+	_, version, err := service.currentSettingsFor(ctx, true)
+	if err != nil {
+		return SettingsView{}, err
+	}
+	if version != exact(expectedVersion) {
 		return SettingsView{}, ErrVersionConflict
 	}
 	return service.resetSettings(ctx)
 }
 
 // prepareSettings merges and validates a change against the section in use.
-// The caller holds settingsMu.
-func (service *Service) prepareSettings(ctx context.Context, expectedVersion int64, change SettingsChange) (SettingsDiff, config.OrgReportsConfig, Settings, error) {
-	effective, version := service.currentSettings(ctx)
+// For a write (forWrite) a store read failure is ErrSettingsUnavailable
+// rather than the file's values. The caller holds settingsMu.
+func (service *Service) prepareSettings(ctx context.Context, expectedVersion int64, change SettingsChange, forWrite bool) (SettingsDiff, config.OrgReportsConfig, Settings, error) {
+	effective, version, err := service.currentSettingsFor(ctx, forWrite)
+	if err != nil {
+		return SettingsDiff{}, config.OrgReportsConfig{}, Settings{}, err
+	}
 	if !versionMatches(version, expectedVersion) {
 		return SettingsDiff{}, config.OrgReportsConfig{}, Settings{}, ErrVersionConflict
 	}

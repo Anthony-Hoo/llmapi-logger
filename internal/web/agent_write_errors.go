@@ -112,7 +112,7 @@ func agentWriteFailure(err error) *agentFailure {
 				"`llmaudit apply <plan-id>` (the plan shows the new address to the user), or ask the user to run " +
 				"`llmaudit analysis test-model --set " + keyTarget.Field + "=<value> --prompt-key` in their own terminal and type a key for this test.",
 			Details: map[string]any{"field": keyTarget.Field, "reason": "saved_key_not_sent_to_unsaved_address"}}
-	case errors.Is(err, sessionanalysis.ErrSettingsUnavailable):
+	case errors.Is(err, sessionanalysis.ErrSettingsUnavailable), errors.Is(err, orgreport.ErrSettingsUnavailable):
 		// The saved section could not be read; nothing was written.
 		return &agentFailure{Code: agentapi.CodeUpstreamUnavailable}
 	}

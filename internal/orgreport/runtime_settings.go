@@ -61,6 +61,13 @@ type SettingsView struct {
 // limits.
 var ErrInvalidSettings = errors.New("orgreport: invalid settings")
 
+// ErrSettingsUnavailable wraps a failure to read the saved section from the
+// store (not a missing row, nor a row that no longer decodes or validates).
+// Reads then run on the configuration file; every write refuses with it and
+// saves nothing, because a write that started from the file's values would
+// save them over the administrator's saved section.
+var ErrSettingsUnavailable = errors.New("orgreport: saved settings could not be read")
+
 // SettingsMessage returns the field message of an ErrInvalidSettings error,
 // and "" for any other error.
 func SettingsMessage(err error) string {
@@ -128,7 +135,7 @@ func (service *Service) readSaved(ctx context.Context) (config.OrgReportsConfig,
 		return service.file, 0, nil
 	}
 	if err != nil {
-		return service.file, 0, err
+		return service.file, 0, fmt.Errorf("%w: %w", ErrSettingsUnavailable, err)
 	}
 	var edited EditableSettings
 	decoder := json.NewDecoder(strings.NewReader(row.Settings))
@@ -208,7 +215,20 @@ func (service *Service) EditableSettings(ctx context.Context) (SettingsView, err
 // currentSettings returns the section in use and its version (the saved
 // row's time, 0 when the file applies). The caller holds settingsMu.
 func (service *Service) currentSettings(ctx context.Context) (config.OrgReportsConfig, int64) {
+	effective, updatedNS, _ := service.currentSettingsFor(ctx, false)
+	return effective, updatedNS
+}
+
+// currentSettingsFor is currentSettings for a read (write false: a store
+// read failure falls back to the file) or a write (write true: it fails with
+// ErrSettingsUnavailable instead). A row that was read but cannot be used is
+// the file-applies state for both and stays writable. The caller holds
+// settingsMu.
+func (service *Service) currentSettingsFor(ctx context.Context, write bool) (config.OrgReportsConfig, int64, error) {
 	effective, updatedNS, err := service.readSaved(ctx)
+	if write && errors.Is(err, ErrSettingsUnavailable) {
+		return config.OrgReportsConfig{}, 0, err
+	}
 	if err == nil && updatedNS != 0 {
 		_, err = service.settingsFor(effective)
 	}
@@ -216,7 +236,16 @@ func (service *Service) currentSettings(ctx context.Context) (config.OrgReportsC
 		// The saved section is unusable; the service runs on the file.
 		effective, updatedNS = service.file, 0
 	}
-	return effective, updatedNS
+	return effective, updatedNS, nil
+}
+
+// checkSavedReadable refuses a write while the saved section cannot be read
+// from the store. The web routes replace or drop the whole section without
+// starting from it, but they refuse the same way as every other write, so
+// that no write lands while the stored state is unknown.
+func (service *Service) checkSavedReadable(ctx context.Context) error {
+	_, _, err := service.currentSettingsFor(ctx, true)
+	return err
 }
 
 // UpdateSettings validates, saves and applies a change. Weeks that are not
@@ -228,6 +257,9 @@ func (service *Service) UpdateSettings(ctx context.Context, edited EditableSetti
 	}
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
+	if err := service.checkSavedReadable(ctx); err != nil {
+		return SettingsView{}, err
+	}
 	candidate := overlaySettings(service.file, edited)
 	next, err := service.settingsFor(candidate)
 	if err != nil {
@@ -277,6 +309,9 @@ func (service *Service) ResetSettings(ctx context.Context) (SettingsView, error)
 	}
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
+	if err := service.checkSavedReadable(ctx); err != nil {
+		return SettingsView{}, err
+	}
 	return service.resetSettings(ctx)
 }
 

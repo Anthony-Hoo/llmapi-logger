@@ -208,11 +208,13 @@ type writeFixture struct {
 	trigger     *fakeRunTrigger
 	settings    *sessionanalysis.SettingsService
 	settingRows *settingsRows
-	model       *modelServer
-	adminRead   string
-	adminWrite  string
-	developer   string
-	adminWeb    *http.Cookie
+	// orgRows holds the saved weekly-report settings.
+	orgRows    *settingsRows
+	model      *modelServer
+	adminRead  string
+	adminWrite string
+	developer  string
+	adminWeb   *http.Cookie
 }
 
 // writeFixtureOptions adjust newWriteFixture.
@@ -252,11 +254,11 @@ func newWriteFixtureWith(t *testing.T, options writeFixtureOptions) *writeFixtur
 		t.Fatal(err)
 	}
 
-	fixture := &writeFixture{clock: clock, sqlite: store, snapshots: &snapshotMemory{}, trigger: &fakeRunTrigger{}, settingRows: &settingsRows{}}
+	fixture := &writeFixture{clock: clock, sqlite: store, snapshots: &snapshotMemory{}, trigger: &fakeRunTrigger{}, settingRows: &settingsRows{}, orgRows: &settingsRows{}}
 	handlerOptions := Options{AdminToken: testAdminToken, Developer: developerOptions(t, agentTestIdentity, nil), Query: &fakeQuery{healthy: true},
 		Rules: rules, Policies: policies, Logger: logger, RetentionDays: 30}
 	if !options.noModules {
-		orgService, _ := newOrgWriteService(t, clock, fixture.snapshots)
+		orgService, _ := newOrgWriteService(t, clock, fixture.snapshots, fixture.orgRows)
 		fixture.org = orgService
 		handlerOptions.Org = orgService
 
@@ -319,7 +321,7 @@ func analysisFileSection(url string) config.SessionAnalysisConfig {
 
 // newOrgWriteService is newOrgTestService with saved settings, snapshots, a
 // client vocabulary and a clock past the test week.
-func newOrgWriteService(t *testing.T, clock *writeClock, snapshots *snapshotMemory) (*orgreport.Service, *orgMemory) {
+func newOrgWriteService(t *testing.T, clock *writeClock, snapshots *snapshotMemory, rows *settingsRows) (*orgreport.Service, *orgMemory) {
 	t.Helper()
 	_, memory := newOrgTestService(t)
 	// The identities newOrgTestService sealed use this key.
@@ -335,7 +337,7 @@ func newOrgWriteService(t *testing.T, clock *writeClock, snapshots *snapshotMemo
 	}
 	service, err := orgreport.NewService(context.Background(), orgreport.Options{
 		Settings: settings, Repository: memory, Data: memory, Snapshots: snapshots, Cipher: cipher, Now: clock.Now,
-		File: file, SavedSettings: &settingsRows{},
+		File: file, SavedSettings: rows,
 		Clients: []orgreport.ClientOption{{Key: "claude-code", Label: "Claude Code"}, {Key: "codex", Label: "Codex"}, {Key: "opencode", Label: "OpenCode"}},
 	})
 	if err != nil {

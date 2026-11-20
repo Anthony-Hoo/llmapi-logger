@@ -166,6 +166,8 @@
 
 127. **重放后的撤销在后台一直试到成功**（修正第 82 条）：评审的探针显示存储故障超过第 82 条三次重试的约 350 毫秒时，被重放授权码签发的令牌在存储恢复后仍然有效，直到再有一次重放。现在请求自己的四次尝试都失败后转入后台，按第 82 条重写后的口径一直试到成功、服务关闭或 10 分钟。为此 `agentaccess.Service` 有了生命周期：`New` 建一个服务级的上下文，`Close` 取消它并等后台协程结束；`internal/app` 的 `closeComponents` 在关闭审计存储之前调用 `Close`。
 
+128. **周报设置的写入同样不从配置文件的取值出发**（补第 68 条）：第 68 条只改了分析设置。周报设置的 `currentSettings` 在读已保存设置遇到存储错误时同样回退到配置文件、版本 0：此时建的计划把配置文件的值当作 `before`，执行时版本 0 对得上，就把配置文件的值加上改动整段存下，盖掉管理员保存的设置。现在 `orgreport` 有 `ErrSettingsUnavailable`，读存储失败（不是没有保存行，也不是读到了却解不开或校验不过的行）时，每一条写入路径都拒绝、什么都不保存：门面的 `PatchSettings`、`ResetSettingsIfVersion`，以及网页 `PUT /api/v1/settings/org-reports`（`UpdateSettings`）与 `DELETE`（`ResetSettings`）——后两者本来不读已保存设置，现在先读一次，读不到就拒绝，与其他写入一致。门面答可重试的 `UPSTREAM_UNAVAILABLE`；网页经既有映射答 503 `org_unavailable`。读路径（`EditableSettings`、计划阶段的 `CheckPatchSettings`/`CheckResetSettings`、启动时载入）照旧回退到配置文件。读到了却不能用的保存行仍是“按配置文件生效”，可以照常写入。逐一检查过的、门面能写的其余“设置类”对象：分析设置（第 68 条已改；网页 `DELETE /api/v1/settings/session-analysis` 经由的 `Reset` 不读已保存设置、只删除，不会把配置文件的值写回，网页行为不变）；UA 规则与关键词规则（启动时从库载入内存，写入在内存规则集上做、再写库，读库失败时启动就失败，没有回退到配置文件的路径）；组织目录的组、项目、成员、主体（同样以载入内存的目录为准，读库失败是错误，不回退）；校准、忽略建议、触发分析、重新生成周报（不从“当前设置”出发）。测试：`orgreport.TestSettingsWritesRefuseWhenTheSavedSectionCannotBeRead`、`web.TestWeeklySettingsWritesRefuseWhenTheSavedRowCannotBeRead`。
+
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |

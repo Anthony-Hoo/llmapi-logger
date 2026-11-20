@@ -135,3 +135,38 @@ func TestConflictsSayWhatToDo(t *testing.T) {
 		t.Errorf("store conflict = %+v", stored)
 	}
 }
+
+// Contract section 0.1 item 128: while the saved weekly-report settings
+// cannot be read (the reader failing, the writer working), the plan still
+// shows the file's values (a read), but applying it is a retryable
+// UPSTREAM_UNAVAILABLE that saves nothing, and the web page's PUT and DELETE
+// answer 503 and save nothing. Before, the apply saved the configuration
+// file's values over the administrator's settings.
+func TestWeeklySettingsWritesRefuseWhenTheSavedRowCannotBeRead(t *testing.T) {
+	fixture := newWriteFixture(t)
+	saved := `{"idle_gap_seconds":45,"ranked_clients":["codex","opencode"],"max_concurrent_roots":4,"max_single_request_roots":50}`
+	if put := fixture.web(http.MethodPut, orgReportsSettingsPath, saved); put.Code != http.StatusOK {
+		t.Fatalf("web put = %d %s", put.Code, put.Body.String())
+	}
+	before := fixture.web(http.MethodGet, orgReportsSettingsPath, "").Body.String()
+	fixture.orgRows.setFailLoad(errors.New("transient: reader pool exhausted"))
+	plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "weekly-settings", "set": map[string]any{"idle_gap_seconds": 90}})
+	applied := failure(t, fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite))
+	if applied.Code != agentapi.CodeUpstreamUnavailable {
+		t.Fatalf("apply during the read error = %+v", applied)
+	}
+	reset := fixture.plan(t, map[string]any{"op": "config.reset", "kind": "weekly-settings"})
+	if body := failure(t, fixture.facade(http.MethodPost, "/plans/"+reset.PlanID+"/apply", nil, fixture.adminWrite)); body.Code != agentapi.CodeUpstreamUnavailable {
+		t.Fatalf("reset apply during the read error = %+v", body)
+	}
+	for _, request := range [][2]string{{http.MethodPut, `{"idle_gap_seconds":90,"ranked_clients":["codex"],"max_concurrent_roots":4,"max_single_request_roots":50}`}, {http.MethodDelete, ""}} {
+		response := fixture.web(request[0], orgReportsSettingsPath, request[1])
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "org_unavailable") {
+			t.Fatalf("web %s during the read error = %d %s", request[0], response.Code, response.Body.String())
+		}
+	}
+	fixture.orgRows.setFailLoad(nil)
+	if after := fixture.web(http.MethodGet, orgReportsSettingsPath, "").Body.String(); after != before {
+		t.Fatalf("saved settings changed by refused writes:\nbefore %s\nafter  %s", before, after)
+	}
+}
