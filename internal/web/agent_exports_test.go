@@ -133,8 +133,11 @@ func exportCompletenessOf(t *testing.T, response *httptest.ResponseRecorder) (st
 // A record whose parse is partial (a stream cut before its end, with the
 // capture complete) is not complete: requests get says parse_partial, and so
 // does every export built from the parse (the conversation; a request or
-// response reconstruction when one exists). Exports of captured content
-// (headers, raw bodies, timelines) follow the capture, which is complete.
+// response reconstruction when one exists) and the response timeline (the
+// timing of a response the parser found cut short; the capture keeps a
+// complete timeline of what arrived, as internal/audit seals it whenever no
+// event is left open). The other exports of captured content (headers, raw
+// bodies, the request timeline) follow the capture, which is complete.
 // data.exports keeps predicting exactly what the export answers.
 func TestPartialParseIsNotComplete(t *testing.T) {
 	fixture := newReadFixture(t)
@@ -176,7 +179,7 @@ func TestPartialParseIsNotComplete(t *testing.T) {
 				}
 				complete, reason := exportCompletenessOf(t, response)
 				switch what {
-				case "conversation", "request", "response":
+				case "conversation", "request", "response", "timeline-response":
 					if complete != "false" || reason != auditIncompleteParsePartial {
 						t.Errorf("%s %s: complete=%q reason=%q, want false parse_partial", id, what, complete, reason)
 					}

@@ -78,7 +78,8 @@ const (
 )
 
 // auditDetailMeta is the meta of one audit record, and of every export built
-// from its parse (conversation, request, response): incomplete while it is
+// from its parse (conversation, request, response) and of the response
+// timeline: incomplete while it is
 // forwarded or parsed, when the capture is not complete, and when the parse
 // is partial.
 func auditDetailMeta(summary query.AuditSummary) agentapi.Meta {
@@ -90,7 +91,7 @@ func auditDetailMeta(summary query.AuditSummary) agentapi.Meta {
 }
 
 // auditCaptureMeta is the record state the exports of captured content
-// (headers, raw bodies, timelines) follow: the same as auditDetailMeta except
+// (headers, raw bodies, the request timeline) follow: the same as auditDetailMeta except
 // that a partial parse does not make captured bytes incomplete.
 func auditCaptureMeta(summary query.AuditSummary) agentapi.Meta {
 	meta := agentapi.Meta{State: auditState(summary.ForwardStatus, summary.StatusCode), Complete: true}
@@ -893,8 +894,9 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	// Exports built from the parse follow the record's meta, a partial parse
-	// included; exports of captured content follow the capture.
+	// Exports built from the parse, and the response timeline, follow the
+	// record's meta, a partial parse included; the other exports of captured
+	// content follow the capture.
 	parsed, captured := auditDetailMeta(detail.Audit), auditCaptureMeta(detail.Audit)
 	if state := agentExportStates(detail)[what]; state.State != exportAvailable {
 		writeAgentExportUnavailable(writer, what, state)
@@ -933,7 +935,15 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		for _, point := range timeline.Points {
 			out.Points = append(out.Points, agentTimelinePoint{Offset: point.Offset, ObservedAt: agentTime(point.AtNS)})
 		}
-		setExportCompleteness(writer.Header(), captured, timeline.Complete, exportIncompleteTimeline)
+		// The response timeline is the timing of the response stream: when the
+		// parser found that stream cut short (parse partial), the timeline is
+		// the timing of part of a response, so it follows the parse. The
+		// request timeline follows the capture.
+		record := captured
+		if what == "timeline-response" {
+			record = parsed
+		}
+		setExportCompleteness(writer.Header(), record, timeline.Complete, exportIncompleteTimeline)
 		writeJSON(writer, http.StatusOK, out)
 	default:
 		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")), captured)
