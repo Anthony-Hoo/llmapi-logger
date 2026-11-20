@@ -328,7 +328,7 @@ func TestEveryWriteArgumentRefusalNamesFieldAndReason(t *testing.T) {
 		plan("unknown args field", map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week, "group": 1}}, "args.group", "unknown_field"),
 		plan("labels not a list", map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": "x"}}, "args.labels", "wrong_type"),
 		plan("labels empty", map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{}}}, "args.labels", "out_of_range"),
-		plan("label session_id", map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{map[string]any{"session_id": "abc"}}}}, "args.labels[0].session_id", "invalid_format"),
+		plan("label session_id", map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{map[string]any{"session_id": "submitted-value-0009"}}}}, "args.labels[0].session_id", "invalid_format"),
 		plan("label task_type", label(map[string]any{"task_type": "bugfix"}), "args.labels[0].task_type", "not_allowed_value", sessionanalysis.TaskTypes...),
 		plan("label outcome", label(map[string]any{"outcome": "done"}), "args.labels[0].outcome", "not_allowed_value", sessionanalysis.Outcomes...),
 		plan("label collaboration", label(map[string]any{"collaboration": "pair"}), "args.labels[0].collaboration", "not_allowed_value", sessionanalysis.Collaborations...),
@@ -351,6 +351,10 @@ func TestEveryWriteArgumentRefusalNamesFieldAndReason(t *testing.T) {
 	for _, test := range cases {
 		response := fixture.facade(test.method, test.path, test.body, fixture.adminWrite)
 		body := failure(t, response)
+		// No refusal repeats a submitted value or a service's internal text.
+		if text := response.Body.String(); strings.Contains(text, "submitted-value-0009") || strings.Contains(text, "invalid request") {
+			t.Errorf("%s repeats input or internal text: %s", test.name, text)
+		}
 		if body.Code != agentapi.CodeInvalidArgument || body.Details["field"] != test.field || body.Details["reason"] != test.reason {
 			t.Errorf("%s = %s %v %q", test.name, body.Code, body.Details, body.Message)
 			continue

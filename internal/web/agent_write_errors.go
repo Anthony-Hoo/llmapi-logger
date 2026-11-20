@@ -188,9 +188,17 @@ func agentWriteFailure(err error) *agentFailure {
 		if calibrationBad.Index >= 0 {
 			field = fmt.Sprintf("args.labels[%d].%s", calibrationBad.Index, calibrationBad.Field)
 		}
-		message := "invalid calibration label: " + calibrationBad.Error()
-		if len(calibrationBad.Allowed) > 0 {
-			message += "; " + calibrationBad.Field + " accepts " + strings.Join(calibrationBad.Allowed, ", ")
+		// The message is built here from the field and its values: the
+		// service's error text is not passed on, and no submitted value is
+		// repeated.
+		message := "invalid calibration label: " + calibrationBad.Field + " has a value that is not accepted"
+		switch {
+		case calibrationBad.Index < 0:
+			message = "invalid calibration labels: between 1 and 1000 labels are required"
+		case calibrationBad.Field == "session_id":
+			message = "invalid calibration label: session_id must be the 64 hexadecimal characters of a session id"
+		case len(calibrationBad.Allowed) > 0:
+			message = "invalid calibration label: " + calibrationBad.Field + " accepts " + strings.Join(calibrationBad.Allowed, ", ")
 		}
 		return validationFailure(agentapi.CodeInvalidArgument, field, calibrationBad.Reason, message).allow(calibrationBad.Allowed)
 	case errors.Is(err, sessionanalysis.ErrRunInProgress):
