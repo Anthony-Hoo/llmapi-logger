@@ -210,8 +210,10 @@ func TestAgentBodyCostIsBoundedAtTheValueLimits(t *testing.T) {
 }
 
 // TestAgentLargestLegitimateBodiesAreAccepted: the largest input of each
-// plan kind the web page can save, and of the preview and the connection
-// test, passes every body check and is accepted.
+// plan kind the web page can save that needs no stored object, and of the
+// preview and the connection test, passes every body check and is accepted.
+// The kinds that change an existing object (member, principal, removals,
+// resets, clearing the key) take only scalars, far inside every limit.
 func TestAgentLargestLegitimateBodiesAreAccepted(t *testing.T) {
 	fixture := newWriteFixture(t)
 	var labels []string
@@ -239,6 +241,11 @@ func TestAgentLargestLegitimateBodiesAreAccepted(t *testing.T) {
 		"content rule of the most keywords and every scope": `{"op":"config.set","kind":"content-rule","set":{"name":"largest","enabled":true,"action":"dry_run","model_pattern":"^gpt-.*$",` +
 			`"scan_scopes":` + scopes + `,"keywords":[` + strings.Join(keywords, ",") + `]}}`,
 		"weekly settings of the most ranked clients": `{"op":"config.set","kind":"weekly-settings","set":{"ranked_clients":[` + strings.Join(clients, ",") + `]}}`,
+		"ua rule of every field":                     `{"op":"config.set","kind":"ua-rule","set":{"name":"largest","enabled":true,"model_pattern":"^m","user_agent_pattern":"^ua"}}`,
+		"group of every field":                       `{"op":"config.set","kind":"group","set":{"name":"largest","enabled":true}}`,
+		"analysis run":                               `{"op":"analysis.run"}`,
+		"dismissal":                                  `{"op":"analysis.dismiss","args":{"suggestion_id":42}}`,
+		"regeneration":                               `{"op":"weekly.regenerate","args":{"week":"2026-11-02"}}`,
 		"analysis settings of every field": `{"op":"config.set","kind":"analysis-settings","set":{"run_at":"03:00","l1_settle_hours":12,"llm.enabled":true,` +
 			`"llm.base_url":"` + fixture.model.URL + `/v1","llm.model":"m","llm.structured_output":"json_schema","llm.context_tokens":16384,"llm.disable_thinking":true,` +
 			`"llm.max_output_tokens":1500,"llm.max_concurrency":2,"llm.timeout_seconds":30,"llm.max_sessions_per_run":300}}`,
