@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"unicode/utf16"
 
 	"llmapi-logger/internal/agentapi"
@@ -376,12 +377,16 @@ func sameLengthName(name string) (string, error) {
 
 // createSameLength creates, exclusively, a file in dir with a fresh random
 // name as long as name (sameLengthName). It never creates or opens anything
-// at name itself.
+// at name itself: a random name equal to it, also without regard to case
+// (Windows and macOS compare names so), is skipped.
 func createSameLength(dir, name string) (*os.File, string, error) {
 	for attempt := 0; attempt < 10; attempt++ {
 		random, err := sameLengthName(name)
 		if err != nil {
 			return nil, "", err
+		}
+		if strings.EqualFold(random, name) {
+			continue
 		}
 		path := filepath.Join(dir, random)
 		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)

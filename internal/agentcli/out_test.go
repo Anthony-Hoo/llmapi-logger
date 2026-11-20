@@ -406,6 +406,59 @@ func TestOutPreCheckNeverTouchesTheTarget(t *testing.T) {
 	}
 }
 
+// TestOutPreCheckNeverCreatesTheTarget watches the target while the check
+// runs again and again: it never exists, not even for an instant, also for a
+// one-character name, where a random name of the same length could be the
+// target's own (in any letter case).
+func TestOutPreCheckNeverCreatesTheTarget(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	for _, name := range []string{"out.json", "a", "A"} {
+		target := filepath.Join(dir, name)
+		inv, err := parse(h.env, []string{"usage", "trend", "ses_1", "--out", target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stop := make(chan struct{})
+		seen := make(chan bool, 1)
+		go func() {
+			appeared := false
+			for {
+				select {
+				case <-stop:
+					seen <- appeared
+					return
+				default:
+				}
+				if _, err := os.Lstat(target); err == nil {
+					appeared = true
+				}
+			}
+		}()
+		for round := 0; round < 500; round++ {
+			if _, err := outPath(inv); err != nil {
+				t.Fatalf("%s round %d: %v", name, round, err)
+			}
+		}
+		close(stop)
+		if <-seen {
+			t.Fatalf("the target %s existed while the check ran", name)
+		}
+	}
+	// The random name of a one-character target is never the target itself.
+	for round := 0; round < 500; round++ {
+		file, path, err := createSameLength(dir, "a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = file.Close()
+		_ = os.Remove(path)
+		if base := filepath.Base(path); strings.EqualFold(base, "a") || len(base) != 1 {
+			t.Fatalf("round %d: random name %q for target a", round, base)
+		}
+	}
+}
+
 // TestSameLengthNamesMatchTheTarget: the probe and the temporary file of an
 // --out write have a fresh name exactly as long as the target's in the file
 // system's unit (bytes; UTF-16 units on Windows), made of ASCII letters and
