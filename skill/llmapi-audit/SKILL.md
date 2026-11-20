@@ -59,7 +59,7 @@ Administrator-only commands and administrator-only arguments are refused differe
 Every read result carries `meta` with three fields:
 
 - `state`: the unified state of what you read, for example `running`, `succeeded`, `failed`, `blocked` or `cancelled` for an audit record, `never_run`, `running`, `failed` or `succeeded` for an analysis run, `ok` for most other reads.
-- `complete`: whether the result is final and whole. When it is false, `incomplete_reason` says why (`parse_pending`, `capture_incomplete`, `truncated`, `evidence_pending`, `facets_incomplete`, `not_computed`, `below_contributor_minimum`, `not_ready`, `coverage_unknown`, `billing_pending`, …).
+- `complete`: whether the result is final and whole. When it is false, `incomplete_reason` says why (`parse_pending`, `capture_incomplete`, `parse_partial`, `truncated`, `evidence_pending`, `facets_incomplete`, `not_computed`, `below_contributor_minimum`, `not_ready`, `coverage_unknown`, `billing_pending`, …).
 - `incomplete_reason`: empty when `complete` is true.
 
 Default ranges: `requests list` without `--since`, `--from` or `--to` lists every record, newest first; `usage overview` and `usage sessions` cover the 7 days before `--to` (or now), at most 400 days; `analysis overview`, `users` and `sessions` need `--since` or `--from`; weekly reads default to the current week.

@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
@@ -117,5 +118,117 @@ func TestAgentExportStatesPredictTheExport(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// exportCompleteness reads the completeness headers of one export answer.
+func exportCompletenessOf(t *testing.T, response *httptest.ResponseRecorder) (string, string) {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("export = %d %s", response.Code, response.Body.String())
+	}
+	return response.Header().Get(headerExportComplete), response.Header().Get(headerExportIncomplete)
+}
+
+// A record whose parse is partial (a stream cut before its end, with the
+// capture complete) is not complete: requests get says parse_partial, and so
+// does every export built from the parse (the conversation; a request or
+// response reconstruction when one exists). Exports of captured content
+// (headers, raw bodies, timelines) follow the capture, which is complete.
+// data.exports keeps predicting exactly what the export answers.
+func TestPartialParseIsNotComplete(t *testing.T) {
+	fixture := newReadFixture(t)
+	add := func(id string, offset time.Duration, change func(*query.Detail)) {
+		record := fixtureAudit(id, offset, fixture.ownFingerprint, 42, storage.ForwardCompleted, nil)
+		change(&record.detail)
+		record.row.ForwardStatus = record.detail.Audit.ForwardStatus
+		fixture.audits.records = append([]auditRecord{record}, fixture.audits.records...)
+	}
+	// What the worker stores for an Anthropic stream cut before
+	// message_stop: capture complete, parse partial, a conversation and no
+	// turn graph.
+	add("cut-stream", 30*time.Second, func(detail *query.Detail) {
+		detail.Audit.Protocol, detail.Audit.ParserName = "anthropic", "anthropic.messages"
+		detail.Audit.ParseStatus, detail.ParsedResult.Status, detail.Turn = storage.ParsePartial, storage.ParsePartial, nil
+	})
+	// The same with a turn graph, so the reconstruction exports exist too.
+	add("partial-with-turn", 31*time.Second, func(detail *query.Detail) {
+		detail.Audit.ParseStatus, detail.ParsedResult.Status = storage.ParsePartial, storage.ParsePartial
+	})
+	for _, id := range []string{"cut-stream", "partial-with-turn"} {
+		for _, token := range []string{fixture.adminRead, fixture.developer} {
+			detail := decodeAgent(t, fixture.facade(http.MethodGet, "/requests/"+id, "", token))
+			if detail.Meta == nil || detail.Meta.Complete || detail.Meta.IncompleteReason != auditIncompleteParsePartial {
+				t.Fatalf("%s: requests get meta %+v, want complete=false parse_partial", id, detail.Meta)
+			}
+			var data struct {
+				Exports map[string]agentExportState `json:"exports"`
+			}
+			_ = json.Unmarshal(detail.Data, &data)
+			for _, what := range agentapi.ExportKinds {
+				response := fixture.facade(http.MethodGet, "/requests/"+id+"/export/"+what, "", token)
+				if (data.Exports[what].State == exportAvailable) != (response.Code == http.StatusOK) {
+					t.Errorf("%s %s: exports says %+v, export answered %d", id, what, data.Exports[what], response.Code)
+					continue
+				}
+				if response.Code != http.StatusOK {
+					continue
+				}
+				complete, reason := exportCompletenessOf(t, response)
+				switch what {
+				case "conversation", "request", "response":
+					if complete != "false" || reason != auditIncompleteParsePartial {
+						t.Errorf("%s %s: complete=%q reason=%q, want false parse_partial", id, what, complete, reason)
+					}
+				default:
+					if complete != "true" || reason != "" {
+						t.Errorf("%s %s: complete=%q reason=%q, want true (captured content follows the capture)", id, what, complete, reason)
+					}
+				}
+			}
+		}
+	}
+	// The cut stream's conversation is served (it is what the parser kept),
+	// just not called complete.
+	if response := fixture.facade(http.MethodGet, "/requests/cut-stream/export/conversation", "", fixture.developer); response.Code != http.StatusOK {
+		t.Fatalf("conversation of a cut stream = %d", response.Code)
+	}
+	// parse=ok, error and skipped records are not affected.
+	for _, id := range []string{"own-1", "blocked-own"} {
+		if meta := decodeAgent(t, fixture.facade(http.MethodGet, "/requests/"+id, "", fixture.adminRead)).Meta; meta == nil || !meta.Complete {
+			t.Errorf("%s: meta %+v", id, meta)
+		}
+	}
+}
+
+// The fixture's timeline and raw metadata follow the body's own columns, as
+// query.Service does, so the content-incomplete paths of the exports are
+// exercised: a stream whose timeline is not complete gives a timeline export
+// complete=false timeline_incomplete, and a truncated stored body gives a raw
+// export complete=false capture_incomplete, while the record itself is
+// complete.
+func TestCapturedContentIncompleteExports(t *testing.T) {
+	fixture := newReadFixture(t)
+	record := fixtureAudit("short-content", 30*time.Second, fixture.ownFingerprint, 42, storage.ForwardCompleted, nil)
+	record.detail.Bodies[1].StreamTimelineComplete = false
+	record.detail.Bodies[0].StoredLength, record.detail.Bodies[0].HashComplete = 4, false
+	fixture.audits.records = append([]auditRecord{record}, fixture.audits.records...)
+	if meta := decodeAgent(t, fixture.facade(http.MethodGet, "/requests/short-content", "", fixture.developer)).Meta; meta == nil || !meta.Complete {
+		t.Fatalf("precondition: the record is complete, meta %+v", meta)
+	}
+	for what, want := range map[string][2]string{
+		"timeline-response": {"false", exportIncompleteTimeline},
+		"raw-request":       {"false", exportIncompleteRawCapture},
+		"raw-response":      {"true", ""},
+		"conversation":      {"true", ""},
+	} {
+		complete, reason := exportCompletenessOf(t, fixture.facade(http.MethodGet, "/requests/short-content/export/"+what, "", fixture.developer))
+		if complete != want[0] || reason != want[1] {
+			t.Errorf("%s: complete=%q reason=%q, want %v", what, complete, reason, want)
+		}
+	}
+	raw := fixture.facade(http.MethodGet, "/requests/short-content/export/raw-request", "", fixture.developer)
+	if raw.Header().Get("X-Audit-Stored-Length") != "4" || raw.Body.Len() != 4 {
+		t.Fatalf("raw body: stored length %q, %d bytes", raw.Header().Get("X-Audit-Stored-Length"), raw.Body.Len())
 	}
 }

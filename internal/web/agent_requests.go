@@ -71,10 +71,28 @@ const (
 	auditIncompleteInProgress = "in_progress"
 	auditIncompleteParse      = "parse_pending"
 	auditIncompleteCapture    = "capture_incomplete"
+	// auditIncompleteParsePartial: the parser saw an incomplete exchange (a
+	// stream cut before its end, a truncated body) and kept what it could,
+	// even when the capture itself is complete.
+	auditIncompleteParsePartial = "parse_partial"
 )
 
-// auditDetailMeta is the meta of one audit record.
+// auditDetailMeta is the meta of one audit record, and of every export built
+// from its parse (conversation, request, response): incomplete while it is
+// forwarded or parsed, when the capture is not complete, and when the parse
+// is partial.
 func auditDetailMeta(summary query.AuditSummary) agentapi.Meta {
+	meta := auditCaptureMeta(summary)
+	if meta.Complete && summary.ParseStatus == storage.ParsePartial {
+		meta.Complete, meta.IncompleteReason = false, auditIncompleteParsePartial
+	}
+	return meta
+}
+
+// auditCaptureMeta is the record state the exports of captured content
+// (headers, raw bodies, timelines) follow: the same as auditDetailMeta except
+// that a partial parse does not make captured bytes incomplete.
+func auditCaptureMeta(summary query.AuditSummary) agentapi.Meta {
 	meta := agentapi.Meta{State: auditState(summary.ForwardStatus, summary.StatusCode), Complete: true}
 	switch {
 	case summary.ForwardStatus == storage.ForwardInProgress:
@@ -875,19 +893,19 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	record := auditDetailMeta(detail.Audit)
+	// Exports built from the parse follow the record's meta, a partial parse
+	// included; exports of captured content follow the capture.
+	parsed, captured := auditDetailMeta(detail.Audit), auditCaptureMeta(detail.Audit)
 	if state := agentExportStates(detail)[what]; state.State != exportAvailable {
 		writeAgentExportUnavailable(writer, what, state)
 		return
 	}
 	switch what {
-	case "conversation", "headers":
-		if what == "headers" {
-			setExportCompleteness(writer.Header(), record, true, "")
-			writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
-			return
-		}
-		setExportCompleteness(writer.Header(), record, true, "")
+	case "headers":
+		setExportCompleteness(writer.Header(), captured, true, "")
+		writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
+	case "conversation":
+		setExportCompleteness(writer.Header(), parsed, true, "")
 		writeJSON(writer, http.StatusOK, detail.Conversation)
 	case "request", "response":
 		reconstructed, err := handler.query.ReconstructTurn(ctx, auditID)
@@ -899,7 +917,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		if what == "response" {
 			body = reconstructed.Response
 		}
-		setExportCompleteness(writer.Header(), record, true, "")
+		setExportCompleteness(writer.Header(), parsed, true, "")
 		writeJSON(writer, http.StatusOK, body)
 	case "timeline-request", "timeline-response":
 		timeline, err := handler.query.Timeline(ctx, auditID, query.Side(strings.TrimPrefix(what, "timeline-")))
@@ -915,10 +933,10 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		for _, point := range timeline.Points {
 			out.Points = append(out.Points, agentTimelinePoint{Offset: point.Offset, ObservedAt: agentTime(point.AtNS)})
 		}
-		setExportCompleteness(writer.Header(), record, timeline.Complete, exportIncompleteTimeline)
+		setExportCompleteness(writer.Header(), captured, timeline.Complete, exportIncompleteTimeline)
 		writeJSON(writer, http.StatusOK, out)
 	default:
-		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")), record)
+		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")), captured)
 	}
 }
 
@@ -935,8 +953,9 @@ const (
 )
 
 // setExportCompleteness writes the completeness of an export: the record's
-// own meta first (in_progress, parse_pending, capture_incomplete, as
-// `requests get` reports it), then the content's flag with contentReason.
+// own meta first (in_progress, parse_pending, capture_incomplete, and for
+// exports built from the parse parse_partial, as `requests get` reports
+// it), then the content's flag with contentReason.
 func setExportCompleteness(header http.Header, record agentapi.Meta, contentComplete bool, contentReason string) {
 	complete, reason := record.Complete, record.IncompleteReason
 	if complete && !contentComplete {
