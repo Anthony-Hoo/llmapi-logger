@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,11 @@ import (
 // tokenServer answers the code exchange: it checks the verifier against the
 // challenge the browser saw and returns testToken.
 func tokenServer(t *testing.T, wantCode string, challenge *string) *fakeServer {
+	return tokenServerAnswering(t, wantCode, challenge, `{"ok":true,"data":{"token":"`+testToken+`","role":"admin","tier":"write","expires_at":"2030-01-01T00:00:00Z"}}`)
+}
+
+// tokenServerAnswering is tokenServer with the exchange's answer given.
+func tokenServerAnswering(t *testing.T, wantCode string, challenge *string, answer string) *fakeServer {
 	return newFakeServer(t, func(writer http.ResponseWriter, request *http.Request, body []byte) {
 		var exchange map[string]string
 		decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -29,8 +35,77 @@ func tokenServer(t *testing.T, wantCode string, challenge *string) *fakeServer {
 			failWith(agentapi.CodeInvalidGrant)(writer, request, body)
 			return
 		}
-		respondJSON(200, `{"ok":true,"data":{"token":"`+testToken+`","role":"admin","tier":"write","expires_at":"2030-01-01T00:00:00Z"}}`)(writer, request, body)
+		respondJSON(200, answer)(writer, request, body)
 	})
+}
+
+// Contract section 0.1 item 155: the login output marks the names other
+// people wrote as whoami does (device_name_untrusted, and a developer's
+// identity.username_untrusted and identity.token_name_untrusted) and carries
+// the notice, in JSON and with --pretty, whether the server sends the
+// identity marked (current) or with plain keys (before item 155).
+func TestLoginMarksThirdPartyNames(t *testing.T) {
+	plain := `"identity":{"user_id":7,"username":"user-name","token_id":42,"token_name":"token-name"}`
+	marked := `"identity":{"user_id":7,"username_untrusted":"user-name","token_id":42,"token_name_untrusted":"token-name"}`
+	for name, answer := range map[string]string{
+		"plain identity":  `{"ok":true,"data":{"token":"` + testToken + `","role":"developer","tier":"read","expires_at":"2030-01-01T00:00:00Z",` + plain + `}}`,
+		"marked identity": `{"ok":true,"data":{"token":"` + testToken + `","role":"developer","tier":"read","expires_at":"2030-01-01T00:00:00Z",` + marked + `},"notice":"` + agentapi.UntrustedNotice + `"}`,
+		"administrator":   `{"ok":true,"data":{"token":"` + testToken + `","role":"admin","tier":"read","expires_at":"2030-01-01T00:00:00Z"}}`,
+	} {
+		for _, pretty := range []bool{false, true} {
+			var challenge string
+			server := tokenServerAnswering(t, "the-code", &challenge, answer)
+			h := newHarness(t)
+			visit := &browserVisit{}
+			h.env.OpenBrowser = browser(t, server.URL, visit, func(port, state string) {
+				challenge = visit.params.Get("challenge")
+				callback(t, port, "/callback", "code=the-code&state="+url.QueryEscape(state))
+			})
+			args := []string{"login", "--server", server.URL, "--device", "laptop-name"}
+			if pretty {
+				args = append([]string{"--pretty"}, args...)
+			}
+			if exit := h.run(args...); exit != 0 {
+				t.Fatalf("%s: exit %d stderr %q", name, exit, h.stderr.String())
+			}
+			assertTokenNotPrinted(t, h)
+			out := h.stdout.String()
+			for _, plainKey := range []string{`"device_name"`, `"username"`, `"token_name"`, "device_name:", " username:", " token_name:"} {
+				if strings.Contains(out, plainKey) {
+					t.Errorf("%s (pretty %v): plain key %s in %s", name, pretty, plainKey, out)
+				}
+			}
+			if pretty {
+				want := []string{"device_name_untrusted: laptop-name", "notice: " + agentapi.UntrustedNotice}
+				if name != "administrator" {
+					want = append(want, "username_untrusted: user-name", "token_name_untrusted: token-name")
+				}
+				for _, line := range want {
+					if !strings.Contains(out, line) {
+						t.Errorf("%s pretty output lacks %q: %s", name, line, out)
+					}
+				}
+				continue
+			}
+			envelope := h.success()
+			var data struct {
+				Device   string         `json:"device_name_untrusted"`
+				Identity map[string]any `json:"identity"`
+			}
+			var notice string
+			if json.Unmarshal(envelope["data"], &data) != nil || json.Unmarshal(envelope["notice"], &notice) != nil ||
+				data.Device != "laptop-name" || notice != agentapi.UntrustedNotice {
+				t.Fatalf("%s: login output %s", name, out)
+			}
+			wantIdentity := map[string]any(nil)
+			if name != "administrator" {
+				wantIdentity = map[string]any{"user_id": float64(7), "username_untrusted": "user-name", "token_id": float64(42), "token_name_untrusted": "token-name"}
+			}
+			if !reflect.DeepEqual(data.Identity, wantIdentity) {
+				t.Errorf("%s: identity %v", name, data.Identity)
+			}
+		}
+	}
 }
 
 type browserVisit struct {

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -997,11 +998,37 @@ func TestWhoamiMarksThirdPartyNames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		issued, err := env.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.40", agentaccess.RequestMeta{})
-		if err != nil {
-			t.Fatal(err)
+		// The exchange answer (contract section 0.1 item 155): a developer's
+		// names under the same marked keys, with the notice; an
+		// administrator's answer has no identity and no notice.
+		exchange := env.exchange(authorization.Code, agentaccesstest.Verifier)
+		var exchanged struct {
+			Data struct {
+				Token    string         `json:"token"`
+				Identity map[string]any `json:"identity"`
+			} `json:"data"`
+			Notice string `json:"notice"`
 		}
-		response := env.do(http.MethodGet, agentapi.PathPrefix+"/whoami", "", agentCaller{bearer: issued.Token}, agentapi.HeaderCLIVersion, agentapi.LatestVersion)
+		if exchange.Code != http.StatusOK || json.Unmarshal(exchange.Body.Bytes(), &exchanged) != nil {
+			t.Fatalf("%s exchange = %d %s", name, exchange.Code, exchange.Body.String())
+		}
+		var exchangedAll map[string]any
+		_ = json.Unmarshal(exchange.Body.Bytes(), &exchangedAll)
+		var exchangeLeaks []string
+		untrustedLeaks(exchangedAll, "", "", &exchangeLeaks)
+		if len(exchangeLeaks) != 0 {
+			t.Errorf("%s exchange: names under plain keys at %v", name, exchangeLeaks)
+		}
+		wantIdentity := map[string]any(nil)
+		wantNotice := ""
+		if name == "developer" {
+			wantIdentity = map[string]any{"user_id": float64(scope.UserID), "username_untrusted": scope.Username, "token_id": float64(*scope.TokenID), "token_name_untrusted": scope.TokenName}
+			wantNotice = agentapi.UntrustedNotice
+		}
+		if !reflect.DeepEqual(exchanged.Data.Identity, wantIdentity) || exchanged.Notice != wantNotice {
+			t.Errorf("%s exchange identity %v notice %q", name, exchanged.Data.Identity, exchanged.Notice)
+		}
+		response := env.do(http.MethodGet, agentapi.PathPrefix+"/whoami", "", agentCaller{bearer: exchanged.Data.Token}, agentapi.HeaderCLIVersion, agentapi.LatestVersion)
 		var decoded map[string]any
 		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &decoded) != nil {
 			t.Fatalf("%s whoami = %d %s", name, response.Code, response.Body.String())

@@ -328,13 +328,15 @@ func retryAfterSeconds(wait time.Duration) string {
 	return strconv.Itoa(seconds)
 }
 
-// agentIdentityView is the developer identity of contract section 3.2: the
-// same fields as the session response, never the key fingerprint.
-func agentIdentityView(identity agentaccess.Identity) *developerIdentity {
+// agentWhoamiIdentityOf is the developer identity of contract section 3.2
+// as whoami and the token exchange give it: the fields of the session
+// response with the gateway's names marked, never the key fingerprint. It is
+// nil for an administrator.
+func agentWhoamiIdentityOf(identity agentaccess.Identity) *agentWhoamiIdentity {
 	if identity.Role != agentapi.RoleDeveloper || identity.Scope == nil {
 		return nil
 	}
-	view := developerIdentity{UserID: identity.Scope.UserID, Username: identity.Scope.Username, TokenName: identity.Scope.TokenName}
+	view := agentWhoamiIdentity{UserID: identity.Scope.UserID, Username: identity.Scope.Username, TokenName: identity.Scope.TokenName}
 	if identity.Scope.TokenID != nil {
 		value := *identity.Scope.TokenID
 		view.TokenID = &value
@@ -342,12 +344,16 @@ func agentIdentityView(identity agentaccess.Identity) *developerIdentity {
 	return &view
 }
 
+// agentTokenResponse is the exchange answer. Only llmaudit login reads it;
+// a developer's identity carries the gateway's names, so it has whoami's
+// marked keys and the answer then carries the notice (contract section 0.1
+// item 155).
 type agentTokenResponse struct {
-	Token     string             `json:"token"`
-	Role      agentapi.Role      `json:"role"`
-	Tier      agentapi.Tier      `json:"tier"`
-	ExpiresAt string             `json:"expires_at"`
-	Identity  *developerIdentity `json:"identity,omitempty"`
+	Token     string               `json:"token"`
+	Role      agentapi.Role        `json:"role"`
+	Tier      agentapi.Tier        `json:"tier"`
+	ExpiresAt string               `json:"expires_at"`
+	Identity  *agentWhoamiIdentity `json:"identity,omitempty"`
 }
 
 // serveAgentToken exchanges an authorization code (anonymous). The plaintext
@@ -384,11 +390,16 @@ func (handler *managementHandler) serveAgentToken(writer http.ResponseWriter, re
 		writeAgentServiceError(writer, err)
 		return
 	}
-	writeAgentOK(writer, agentapi.Success(agentTokenResponse{
+	identity := agentWhoamiIdentityOf(issued.Identity)
+	envelope := agentapi.Success(agentTokenResponse{
 		Token: issued.Token, Role: issued.Identity.Role, Tier: issued.Identity.Tier,
 		ExpiresAt: issued.Identity.ExpiresAt.UTC().Format(time.RFC3339),
-		Identity:  agentIdentityView(issued.Identity),
-	}))
+		Identity:  identity,
+	})
+	if identity != nil {
+		envelope.Notice = agentapi.UntrustedNotice
+	}
+	writeAgentOK(writer, envelope)
 }
 
 type agentFeatures struct {
@@ -413,8 +424,8 @@ type agentWhoamiResponse struct {
 	ServerTime string               `json:"server_time"`
 }
 
-// agentWhoamiIdentity is the developer identity of whoami: the fields of
-// developerIdentity (which the web session and the token exchange keep
+// agentWhoamiIdentity is the developer identity of whoami and of the token
+// exchange: the fields of developerIdentity (which the web session keeps
 // answering unchanged), with the names marked.
 type agentWhoamiIdentity struct {
 	UserID    int64  `json:"user_id,omitempty"`
@@ -431,15 +442,11 @@ func (handler *managementHandler) serveAgentWhoami(writer http.ResponseWriter, r
 		return
 	}
 	identity := call.Identity
-	var who *agentWhoamiIdentity
-	if view := agentIdentityView(identity); view != nil {
-		who = &agentWhoamiIdentity{UserID: view.UserID, Username: view.Username, TokenID: view.TokenID, TokenName: view.TokenName}
-	}
 	envelope := agentapi.ReadSuccess(agentWhoamiResponse{
 		Role: identity.Role, Tier: identity.Tier,
 		ExpiresAt:  identity.ExpiresAt.UTC().Format(time.RFC3339),
 		DeviceName: identity.DeviceName,
-		Identity:   who,
+		Identity:   agentWhoamiIdentityOf(identity),
 		Features: agentFeatures{
 			Insights: handler.insights != nil, OrgReports: handler.org != nil,
 			SessionAnalysis: handler.sessionAnalysis != nil,

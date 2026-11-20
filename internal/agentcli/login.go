@@ -184,7 +184,13 @@ func runLogin(inv *invocation) (*result, error) {
 	// The token itself never reaches the output.
 	delete(issued, "token")
 	issued["server"], _ = json.Marshal(server)
-	issued["device_name"], _ = json.Marshal(device)
+	// Names other people wrote, the device name and a developer's user and
+	// token names from the gateway, use whoami's keys, and the output
+	// carries the notice (contract section 0.1 items 134 and 155). A server
+	// from before item 155 sends identity.username and identity.token_name.
+	issued["device_name_untrusted"], _ = json.Marshal(device)
+	markIdentityNames(issued)
+	envelope.Notice = agentapi.UntrustedNotice
 	issued["credentials_saved"] = json.RawMessage("true")
 	if inv.has("write") {
 		issued["requested_tier"] = json.RawMessage(`"write"`)
@@ -194,6 +200,25 @@ func runLogin(inv *invocation) (*result, error) {
 		fmt.Fprintln(env.Stderr, "warning: the server address uses plain HTTP and is not this machine; the agent token and all data travel unencrypted.")
 	}
 	return &result{envelope: envelope, server: server}, nil
+}
+
+// markIdentityNames renames identity.username and identity.token_name of the
+// exchange answer to their _untrusted keys; an identity already marked, or
+// none, is left as it is.
+func markIdentityNames(issued map[string]json.RawMessage) {
+	var identity map[string]json.RawMessage
+	if json.Unmarshal(issued["identity"], &identity) != nil || identity == nil {
+		return
+	}
+	for _, key := range []string{"username", "token_name"} {
+		if value, plain := identity[key]; plain {
+			delete(identity, key)
+			if _, marked := identity[key+"_untrusted"]; !marked {
+				identity[key+"_untrusted"] = value
+			}
+		}
+	}
+	issued["identity"], _ = json.Marshal(identity)
 }
 
 // listenLoopback listens on a random port of 127.0.0.1 (never another
