@@ -83,6 +83,27 @@ func (store *PlanStore) Put(tokenID int64, payload any) (Plan, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	now := store.now()
+	if err := store.roomLocked(tokenID, now); err != nil {
+		return Plan{}, err
+	}
+	plan := &Plan{ID: planIDPrefix + base64.RawURLEncoding.EncodeToString(random), TokenID: tokenID,
+		ExpiresAt: now.Add(PlanLifetime), Payload: payload}
+	store.plans[plan.ID] = plan
+	return *plan, nil
+}
+
+// CheckRoom reports whether tokenID could store one more plan now: the
+// checks of Put, without storing anything. A caller runs it before the work
+// of making a plan, so that a token at its cap is refused at once; Put checks
+// again, and stays the authority when requests race.
+func (store *PlanStore) CheckRoom(tokenID int64) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.roomLocked(tokenID, store.now())
+}
+
+// roomLocked is the capacity check of Put with mu held.
+func (store *PlanStore) roomLocked(tokenID int64, now time.Time) error {
 	store.sweepLocked(now)
 	own, ownSoonest := 0, now.Add(PlanLifetime)
 	for _, plan := range store.plans {
@@ -94,7 +115,7 @@ func (store *PlanStore) Put(tokenID int64, payload any) (Plan, error) {
 		}
 	}
 	if own >= MaxPlansPerToken {
-		return Plan{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: ownSoonest.Sub(now)}
+		return &Error{Code: agentapi.CodeRateLimited, RetryAfter: ownSoonest.Sub(now)}
 	}
 	if len(store.plans) >= MaxPlans {
 		soonest := now.Add(PlanLifetime)
@@ -103,12 +124,9 @@ func (store *PlanStore) Put(tokenID int64, payload any) (Plan, error) {
 				soonest = plan.ExpiresAt
 			}
 		}
-		return Plan{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: soonest.Sub(now)}
+		return &Error{Code: agentapi.CodeRateLimited, RetryAfter: soonest.Sub(now)}
 	}
-	plan := &Plan{ID: planIDPrefix + base64.RawURLEncoding.EncodeToString(random), TokenID: tokenID,
-		ExpiresAt: now.Add(PlanLifetime), Payload: payload}
-	store.plans[plan.ID] = plan
-	return *plan, nil
+	return nil
 }
 
 // Take removes and returns plan id of tokenID. A plan of another token is

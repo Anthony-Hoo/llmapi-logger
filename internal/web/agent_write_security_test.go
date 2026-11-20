@@ -1063,3 +1063,44 @@ func TestTestModelResultCarriesMeta(t *testing.T) {
 		t.Fatalf("read token = %s", code)
 	}
 }
+
+// Contract section 0.1 item 130: a token at its plan cap is refused before
+// any check of the request runs. A calibration of 1000 labels would load 1000
+// facets to be checked; at the cap it loads none, answers RATE_LIMITED with
+// the wait until the token's first plan expires, and (as every refused plan
+// request) leaves the write quota as it was. A malformed request at the cap
+// is refused by the cap too: the cap is checked first.
+func TestPlanCapIsCheckedBeforeThePlanIsChecked(t *testing.T) {
+	fixture := newWriteFixture(t)
+	var first planResponse
+	for index := 0; index < agentaccess.MaxPlansPerToken; index++ {
+		plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "group", "set": map[string]any{"name": "g" + strconv.Itoa(index), "enabled": true}})
+		if index == 0 {
+			first = plan
+		}
+	}
+	labels := make([]map[string]any, 1000)
+	for index := range labels {
+		labels[index] = map[string]any{"session_id": analysisOwnID, "task_type": "bug_fix"}
+	}
+	loads := fixture.suggestions.facetLoadCount()
+	for index := 0; index < 100; index++ {
+		response := fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": labels}}, fixture.adminWrite)
+		if body := failure(t, response); body.Code != agentapi.CodeRateLimited || response.Header().Get("Retry-After") == "" {
+			t.Fatalf("calibration at the cap = %+v", body)
+		}
+	}
+	if fixture.suggestions.facetLoadCount() != loads {
+		t.Fatalf("refused requests loaded %d facets", fixture.suggestions.facetLoadCount()-loads)
+	}
+	if body := failure(t, fixture.facade(http.MethodPost, "/plans", `{"op":"config.set","kind":"group","set":{"name":`, fixture.adminWrite)); body.Code != agentapi.CodeRateLimited {
+		t.Fatalf("malformed request at the cap = %+v", body)
+	}
+	// An applied plan frees its place, and the 101 refusals did not use the
+	// write quota (32 plans + 1 apply + 1 plan of 60).
+	fixture.apply(t, first.PlanID)
+	after := fixture.plan(t, map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": labels[:10]}})
+	if after.PlanID == "" || fixture.suggestions.facetLoadCount() == loads {
+		t.Fatal("the calibration plan after a place was freed ran no check")
+	}
+}

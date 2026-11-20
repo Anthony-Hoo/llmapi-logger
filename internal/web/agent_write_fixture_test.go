@@ -86,6 +86,21 @@ type suggestionMemory struct {
 	mu        sync.Mutex
 	open      map[int64]string
 	dismissed []int64
+	// facetLoads counts the facet reads, i.e. the work of a calibration check.
+	facetLoads int
+}
+
+func (memory *suggestionMemory) LoadSessionFacet(ctx context.Context, key []byte) (storage.SessionFacet, error) {
+	memory.mu.Lock()
+	memory.facetLoads++
+	memory.mu.Unlock()
+	return memory.memoryAnalysisStore.LoadSessionFacet(ctx, key)
+}
+
+func (memory *suggestionMemory) facetLoadCount() int {
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	return memory.facetLoads
 }
 
 func (memory *suggestionMemory) DismissSuggestion(_ context.Context, id int64, scope string, _ int64) error {

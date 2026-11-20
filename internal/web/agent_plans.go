@@ -87,10 +87,18 @@ type agentApplyResult struct {
 // audit row (contract section 3.4). Only a created plan counts against the
 // write quota: a request refused for any reason (validation, not found,
 // conflict, the per-token plan cap) gives back the slot the dispatcher took.
+// A token already at its plan cap is refused first, before the body is read
+// or any check or preview runs (contract section 0.1 item 130), so refused
+// requests are cheap as well as free.
 func (handler *managementHandler) serveAgentPlanCreate(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	refuse := func(err error) {
 		handler.agent.Refund(call.WriteSlot)
 		handler.writeAgentWriteFailure(writer, err)
+	}
+	if err := handler.agentPlans.CheckRoom(call.Identity.TokenID); err != nil {
+		handler.agent.Refund(call.WriteSlot)
+		writeAgentServiceError(writer, err)
+		return
 	}
 	if _, err := agentCallParams(request, call); err != nil {
 		refuse(err)
