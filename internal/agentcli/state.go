@@ -333,7 +333,9 @@ func securePrivateState(dir string, fix bool) error {
 // checkStoreBeforeLogin refuses, before a login starts, a credential store
 // saveCredentials would refuse after the user approved, so no token is
 // issued that cannot be saved. It changes nothing: a loose mode of the
-// user's own store is left for saveCredentials to tighten.
+// user's own state directory is tightened by loadConfig, before config.json
+// is read and before any request, and that of credentials.json by
+// saveCredentials.
 func checkStoreBeforeLogin(env *Env) error {
 	dir, err := env.stateDir()
 	if err != nil {
