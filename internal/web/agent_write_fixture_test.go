@@ -106,13 +106,21 @@ func (nopApplier) Apply(config.SessionAnalysisConfig, sessionanalysis.Completer)
 func (nopApplier) Running() bool                                                       { return false }
 
 // snapshotMemory is an in-memory orgreport.SnapshotStore.
+// When hold is set, a save signals entered and waits for hold to be closed
+// before it stores anything, so a test can keep the snapshot lock busy.
 type snapshotMemory struct {
 	mu        sync.Mutex
 	snapshots map[string]orgreport.WeeklySnapshot
 	saves     int
+	hold      chan struct{}
+	entered   chan struct{}
 }
 
 func (memory *snapshotMemory) SaveWeeklySnapshot(_ context.Context, snapshot orgreport.WeeklySnapshot) error {
+	if memory.hold != nil {
+		memory.entered <- struct{}{}
+		<-memory.hold
+	}
 	memory.mu.Lock()
 	defer memory.mu.Unlock()
 	if memory.snapshots == nil {

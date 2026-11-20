@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 	"unicode"
 
 	"llmapi-logger/internal/agentaccess"
@@ -207,6 +208,9 @@ type managementHandler struct {
 	agentDist         *agentdist.Service
 	agentPublicURL    string
 	retentionDays     int
+	// regenerateTimeout replaces orgRegenerateTimeout for an agent's weekly
+	// regeneration when positive; only tests set it.
+	regenerateTimeout time.Duration
 }
 
 func (handler *managementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

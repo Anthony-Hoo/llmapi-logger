@@ -221,6 +221,13 @@ func (handler *managementHandler) planWeeklyRegenerate(ctx context.Context, requ
 	}
 	plan.quota = quota(agentaccess.QuotaRegenerate)
 	plan.timeout = orgRegenerateTimeout
+	if handler.regenerateTimeout > 0 {
+		plan.timeout = handler.regenerateTimeout
+	}
+	// A regeneration that timed out waiting for the snapshot lock (a long
+	// background freeze, another regeneration) never started: its quota slot
+	// is given back.
+	plan.notStarted = func(err error) bool { return errors.Is(err, orgreport.ErrNotStarted) }
 	plan.verify = "llmaudit weekly report --week " + state.Week
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
 		if err := org.RegenerateIfVersion(ctx, week, version); err != nil {

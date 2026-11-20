@@ -58,6 +58,10 @@ type agentPlan struct {
 	quota   *agentaccess.Quota
 	timeout time.Duration
 	apply   func(context.Context) (agentApplied, error)
+	// notStarted, when set, reports an error of apply raised before the
+	// operation began (for instance a timeout while waiting for a lock): the
+	// quota slot is given back for it even when it is a timeout.
+	notStarted func(error) bool
 	// verify is the read command that shows the result.
 	verify string
 }
@@ -178,8 +182,9 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 	// A long operation's quota counts operations that were started. The slot
 	// is taken before the operation runs, so two concurrent applies cannot
 	// both pass a limit of one, and given back when the service refused to
-	// start it (RUN_IN_PROGRESS, VERSION_CONFLICT, …). A timeout keeps it:
-	// the operation may be running.
+	// start it (RUN_IN_PROGRESS, VERSION_CONFLICT, …) or gave up before it
+	// started (plan.notStarted). A timeout after the start keeps it: the
+	// operation may be running.
 	var slot agentaccess.QuotaSlot
 	if plan.quota != nil {
 		if slot, err = handler.agent.TakeSlot(*plan.quota, call.Identity); err != nil {
@@ -197,7 +202,7 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 		if errors.Is(err, context.Canceled) {
 			err = context.DeadlineExceeded
 		}
-		if !errors.Is(err, context.DeadlineExceeded) {
+		if !errors.Is(err, context.DeadlineExceeded) || (plan.notStarted != nil && plan.notStarted(err)) {
 			handler.agent.Refund(slot)
 		}
 		record(handler.writeAgentApplyFailure(writer, err))

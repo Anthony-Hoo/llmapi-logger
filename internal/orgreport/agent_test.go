@@ -813,6 +813,36 @@ func TestRegenerateIfVersion(t *testing.T) {
 	}
 }
 
+// Contract section 0.1 item 101: a regeneration blocked behind a long freeze
+// gives up when its context ends, reports that it never started, and writes
+// nothing; once the lock is free it runs.
+func TestRegenerateIfVersionGivesUpWaitingForTheSnapshotLock(t *testing.T) {
+	fixture := newReportFixture(t)
+	service := fixture.service
+	// A long freeze holds the lock.
+	if err := service.job.freezeLock.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	saves := fixture.snapshots.saves
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err := service.RegenerateIfVersion(ctx, "2026-11-02", 0)
+	if !errors.Is(err, ErrNotStarted) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked regeneration = %v", err)
+	}
+	if fixture.snapshots.saves != saves {
+		t.Fatalf("a snapshot was written: saves %d -> %d", saves, fixture.snapshots.saves)
+	}
+	// The web route's Regenerate gives up the same way.
+	if err := service.Regenerate(ctx, "2026-11-02"); !errors.Is(err, ErrNotStarted) {
+		t.Fatalf("blocked web regeneration = %v", err)
+	}
+	service.job.freezeLock.unlock()
+	if err := service.RegenerateIfVersion(context.Background(), "2026-11-02", 0); err != nil || fixture.snapshots.saves != saves+1 {
+		t.Fatalf("after the freeze = %v, saves %d", err, fixture.snapshots.saves)
+	}
+}
+
 func TestOrgSuccessfulDeletesPrincipalsAndGroupCreate(t *testing.T) {
 	ctx := context.Background()
 	service, repository := agentFixture(t)

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentaccess/agentaccesstest"
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/storage"
@@ -524,6 +525,51 @@ func TestAgentRateLimits(t *testing.T) {
 			t.Fatalf("snapshots saved %d", fixture.snapshots.saves)
 		}
 	})
+}
+
+// Contract section 0.1 item 101: an apply of a weekly regeneration that is
+// blocked behind a long snapshot write (here the web route's regeneration of
+// another week) gives up at its own deadline with TIMEOUT, writes nothing and
+// gives its slot of the global regeneration quota back.
+func TestAgentRegenerateBlockedBehindAFreezeTimesOutAndRefunds(t *testing.T) {
+	fixture := newWriteFixture(t)
+	fixture.snapshots.hold, fixture.snapshots.entered = make(chan struct{}), make(chan struct{}, 1)
+	other := orgTestWeek.AddDate(0, 0, -7).Format("2006-01-02")
+	webDone := make(chan int, 1)
+	go func() {
+		webDone <- fixture.web(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+other, "").Code
+	}()
+	<-fixture.snapshots.entered
+
+	fixture.handler.regenerateTimeout = 50 * time.Millisecond
+	week := orgTestWeek.Format("2006-01-02")
+	plan := fixture.plan(t, map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week}})
+	if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeTimeout {
+		t.Fatalf("blocked apply = %s", code)
+	}
+	fixture.snapshots.mu.Lock()
+	_, written := fixture.snapshots.snapshots[week]
+	fixture.snapshots.mu.Unlock()
+	if written {
+		t.Fatal("the timed-out regeneration wrote a snapshot")
+	}
+	// The slot came back: the whole quota of six is still free.
+	for index := 0; index < 6; index++ {
+		if _, err := fixture.service.TakeSlot(agentaccess.QuotaRegenerate, agentaccess.Identity{}); err != nil {
+			t.Fatalf("regeneration slot %d after the timed-out apply = %v", index+1, err)
+		}
+	}
+	if _, err := fixture.service.TakeSlot(agentaccess.QuotaRegenerate, agentaccess.Identity{}); agentaccess.CodeOf(err) != agentapi.CodeRateLimited {
+		t.Fatalf("seventh slot = %v", err)
+	}
+	close(fixture.snapshots.hold)
+	if code := <-webDone; code != http.StatusNoContent {
+		t.Fatalf("web regeneration = %d", code)
+	}
+	rows := fixture.writeAudits()
+	if last := rows[len(rows)-1]; last.Event != agentaccess.EventWriteFailed || last.ErrorCode != string(agentapi.CodeTimeout) {
+		t.Fatalf("audit row = %+v", last)
+	}
 }
 
 // Contract section 4.5.1, the four operations without a check-only twin.

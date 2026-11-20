@@ -2,6 +2,8 @@ package orgreport
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,15 +75,48 @@ type snapshotJob struct {
 	cacheMu sync.Mutex
 	cache   map[string]cachedWeek
 
-	// freezeMu serialises every snapshot write (the background freeze, the
+	// freezeLock serialises every snapshot write (the background freeze, the
 	// web's Regenerate and the agent's RegenerateIfVersion), so a check of
-	// the stored snapshot and the write that replaces it are one step.
-	freezeMu sync.Mutex
-	// lastStampNS is the last snapshot time written, guarded by freezeMu: a
+	// the stored snapshot and the write that replaces it are one step. Waiting
+	// for it gives up when the caller's context ends.
+	freezeLock snapshotLock
+	// lastStampNS is the last snapshot time written, guarded by freezeLock: a
 	// new snapshot is stamped above it, so two writes never leave the same
 	// generated_at even when the clock repeats a reading.
 	lastStampNS int64
 }
+
+// snapshotLock is a mutex whose acquisition honours a context: a background
+// freeze may hold it for minutes, and a caller with a deadline must not wait
+// past it. The zero value is unlocked.
+type snapshotLock struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+// lock acquires the lock or returns ctx's error once ctx ends first.
+func (lock *snapshotLock) lock(ctx context.Context) error {
+	lock.once.Do(func() { lock.slot = make(chan struct{}, 1) })
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case lock.slot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (lock *snapshotLock) unlock() { <-lock.slot }
+
+// ErrNotStarted marks a regeneration that gave up before it began: it waited
+// for the snapshot lock until its context ended, and nothing was computed or
+// written. The error also matches the context's error.
+var ErrNotStarted = errors.New("orgreport: regeneration did not start")
+
+// notStarted wraps the context error of a lock wait that gave up.
+func notStarted(err error) error { return fmt.Errorf("%w: %w", ErrNotStarted, err) }
 
 type cachedWeek struct {
 	compiled *Compiled
@@ -183,12 +218,14 @@ func (service *Service) freezePending(ctx context.Context, now time.Time) {
 
 // freeze computes and stores one week.
 func (service *Service) freeze(ctx context.Context, week Week) error {
-	service.job.freezeMu.Lock()
-	defer service.job.freezeMu.Unlock()
+	if err := service.job.freezeLock.lock(ctx); err != nil {
+		return notStarted(err)
+	}
+	defer service.job.freezeLock.unlock()
 	return service.freezeLocked(ctx, week)
 }
 
-// freezeLocked is freeze with job.freezeMu held.
+// freezeLocked is freeze with job.freezeLock held.
 func (service *Service) freezeLocked(ctx context.Context, week Week) error {
 	result, compiled, err := service.compute(ctx, week, service.settings.Load())
 	if err != nil {
