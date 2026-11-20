@@ -218,6 +218,13 @@ func revokeUnsaved(inv *invocation, exchange *client, token, device string, save
 	for key, value := range failure.Details {
 		revoked.Details[key] = value
 	}
+	// The local problem's own hint (or the code's default) stays first; the
+	// revocation's outcome is added to it.
+	hint := failure.Hint
+	if hint == "" {
+		spec, _ := agentapi.Lookup(failure.Code)
+		hint = spec.Hint
+	}
 	holder := *exchange
 	holder.token = token
 	ctx, cancel := inv.context()
@@ -225,14 +232,14 @@ func revokeUnsaved(inv *invocation, exchange *client, token, device string, save
 	logout := &routeSpec{Method: http.MethodPost, Path: "/logout"}
 	if _, err := holder.callRaw(ctx, logout, logout.Path, nil, nil); err == nil {
 		revoked.Details["token_revoked"] = true
-		revoked.Hint = "The approved token could not be saved, so it was revoked on the server. Fix the local problem above, then ask the user to run `llmaudit login --server <url>` again."
+		revoked.Hint = strings.TrimSpace(hint + " The approved token could not be saved, so it was revoked on the server; after the fix, ask the user to run `llmaudit login --server <url>` again.")
 		return &revoked
 	}
 	revoked.Details["token_revoked"] = false
 	revoked.Details["device_name_untrusted"] = device
 	revoked.Message = failure.Message + "; the approved token could not be revoked either"
-	revoked.Hint = "Ask the user to remove the device " + strconv.Quote(device) + " on the Agent access page of the web UI (its token is valid but saved nowhere), " +
-		"fix the local problem, and run `llmaudit login --server <url>` again."
+	revoked.Hint = strings.TrimSpace(hint + " The approved token is valid but saved nowhere and could not be revoked: ask the user to remove the device " + strconv.Quote(device) +
+		" on the Agent access page of the web UI, and after the fix to run `llmaudit login --server <url>` again.")
 	return &revoked
 }
 

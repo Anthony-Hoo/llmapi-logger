@@ -446,7 +446,7 @@ func TestLoginRevokesATokenItCannotSave(t *testing.T) {
 			t.Fatalf("logout works %v: logout calls %q", logoutWorks, calls)
 		}
 		if logoutWorks {
-			if body.Details["token_revoked"] != true || !strings.Contains(body.Hint, "revoked") {
+			if body.Details["token_revoked"] != true || !strings.Contains(body.Hint, "revoked") || !strings.Contains(body.Hint, "LLMAUDIT_HOME") {
 				t.Fatalf("revoked: %+v", body)
 			}
 			continue
