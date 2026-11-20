@@ -201,7 +201,7 @@ func (store *Store) InsightsUsage(ctx context.Context, filter InsightsFilter, sp
 	statement := `
 SELECT ` + key + ` AS grp_key, ` + label + ` AS grp_label,
        COUNT(*), COALESCE(SUM(CASE WHEN t.billing_state = 'billed' THEN 1 ELSE 0 END), 0),
-       COALESCE(SUM(CASE WHEN t.billing_state = 'unchecked' OR (t.audit_id IS NULL AND a.caller_status = 'pending') THEN 1 ELSE 0 END), 0), SUM(` + insightsCostSQL + `),
+       COALESCE(SUM(CASE WHEN t.billing_state = 'unchecked' THEN 1 ELSE 0 END), 0), SUM(` + insightsCostSQL + `),
        COALESCE(SUM(x.u_uncached_input), 0), COALESCE(SUM(x.u_cache_read), 0), COALESCE(SUM(x.u_cache_write), 0),
        COALESCE(SUM(x.u_output), 0), COALESCE(SUM(x.u_reasoning), 0),
        SUM(x.est_system * ` + insightsAnchorSQL + `), SUM(x.est_tools * ` + insightsAnchorSQL + `),

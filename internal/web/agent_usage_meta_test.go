@@ -43,9 +43,9 @@ func TestAgentUsageOverviewCompleteness(t *testing.T) {
 	}
 }
 
-// billing_final of a record follows the same rule as billing_complete: a
-// record without a token link is final only once its caller lookup is over.
-func TestAgentBillingFinalWaitsForTheCallerLookup(t *testing.T) {
+// billing_final of a record follows the same rule as billing_complete: only
+// an unchecked token link is unsettled.
+func TestAgentBillingFinalFollowsTheTokenLink(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		detail query.Detail
@@ -55,7 +55,7 @@ func TestAgentBillingFinalWaitsForTheCallerLookup(t *testing.T) {
 		{"unbilled", query.Detail{TokenLink: &query.TokenLink{BillingState: storage.BillingUnbilled}}, true},
 		{"unchecked", query.Detail{TokenLink: &query.TokenLink{BillingState: storage.BillingUnchecked}}, false},
 		{"no request id", query.Detail{Audit: query.AuditSummary{CallerStatus: storage.CallerNone}}, true},
-		{"caller pending", query.Detail{Audit: query.AuditSummary{CallerStatus: storage.CallerPending}}, false},
+		{"caller pending", query.Detail{Audit: query.AuditSummary{CallerStatus: storage.CallerPending}}, true},
 		{"caller unresolved", query.Detail{Audit: query.AuditSummary{CallerStatus: storage.CallerUnresolved}}, true},
 	} {
 		if got := agentBillingFinal(test.detail); got != test.final {

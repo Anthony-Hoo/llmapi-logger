@@ -534,16 +534,15 @@ type agentAuditDetail struct {
 	Exports map[string]agentExportState `json:"exports"`
 }
 
-// agentBillingFinal reports whether a record's billing can no longer change
-// (contract section 0.1 item 120): its token link is billed or unbilled, or
-// it has none and never will (the caller lookup is over). The usage
+// agentBillingFinal reports whether a record's billing is settled: it has no
+// token link, or its link is billed or unbilled (not unchecked). The usage
 // overview's billing_complete counts the records for which this is false
-// (storage.InsightsUsageRow.PendingBilling), so the two cannot disagree.
+// (storage.InsightsUsageRow.PendingBilling), so the two cannot disagree
+// (contract section 0.1 item 120). A record whose caller lookup is still
+// running has no link yet and counts as settled here, as it always has;
+// caller_final says that the lookup is still running.
 func agentBillingFinal(detail query.Detail) bool {
-	if detail.TokenLink != nil {
-		return detail.TokenLink.BillingState != storage.BillingUnchecked
-	}
-	return detail.Audit.CallerStatus != storage.CallerPending
+	return detail.TokenLink == nil || detail.TokenLink.BillingState != storage.BillingUnchecked
 }
 
 func agentAuditDetailOf(detail query.Detail, allHeaders bool) agentAuditDetail {

@@ -20,10 +20,9 @@ type UsageTotals struct {
 	CostUSD          *float64 `json:"cost_usd"`       // nil when no request is billed
 	BilledRequests   int64    `json:"billed_requests"`
 	UnbilledRequests int64    `json:"unbilled_requests"` // requests - billed_requests
-	// PendingBillingRequests counts the requests whose billing is not settled
-	// yet (token link unchecked, or no link while the caller lookup is
-	// pending). It is not part of the web response; the agent facade derives
-	// billing_complete from it.
+	// PendingBillingRequests counts the requests whose token link still waits
+	// for its billing (unchecked). It is not part of the web response; the
+	// agent facade derives billing_complete from it.
 	PendingBillingRequests int64 `json:"-"`
 }
 

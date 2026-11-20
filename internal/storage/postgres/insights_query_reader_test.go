@@ -235,6 +235,10 @@ func TestInsightsUsageSumsActualBillingWithinScope(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	before, err := store.InsightsUsage(ctx, windowFilter(day, nil), InsightsUsageSpec{Dimension: InsightsDimTotal})
+	if err != nil || len(before) != 1 || before[0].PendingBilling < 4 {
+		t.Fatalf("unchecked links before billing = %+v %v", before, err)
+	}
 	bill("a1", 250000, 500000) // 0.5 USD
 	bill("a2", 100000, 400000) // 0.25 USD, a different conversion snapshot
 	bill("b1", 500000, 500000) // 1 USD, key B
@@ -245,6 +249,11 @@ func TestInsightsUsageSumsActualBillingWithinScope(t *testing.T) {
 	rows, err := store.InsightsUsage(ctx, windowFilter(day, nil), InsightsUsageSpec{Dimension: InsightsDimTotal})
 	if err != nil || len(rows) != 1 || rows[0].BilledRequests != 3 || rows[0].CostUSD == nil || *rows[0].CostUSD != 1.75 {
 		t.Fatalf("unscoped billing = %+v %v", rows, err)
+	}
+	// Settling four links, three billed and one unbilled, leaves four fewer
+	// pending: an unbilled link is settled too.
+	if rows[0].PendingBilling != before[0].PendingBilling-4 {
+		t.Fatalf("pending billing %d -> %d, want 4 fewer", before[0].PendingBilling, rows[0].PendingBilling)
 	}
 	rows, err = store.InsightsUsage(ctx, windowFilter(day, &AuditScope{Fingerprint: keyA}), InsightsUsageSpec{Dimension: InsightsDimTotal})
 	if err != nil || len(rows) != 1 || rows[0].Requests != 5 || rows[0].BilledRequests != 2 || rows[0].CostUSD == nil || *rows[0].CostUSD != 0.75 {

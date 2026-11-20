@@ -1061,9 +1061,10 @@ func TestInsightsTrendContextWindowIgnoresAuxiliaryModel(t *testing.T) {
 	}
 }
 
-// Pending billing counts only requests whose billing can still change: a
-// request whose caller lookup is pending. A request checked and found
-// unbilled, or one that never gets a token link, is final.
+// Pending billing counts only unchecked token links. A request checked and
+// found unbilled, one that never gets a token link and one whose caller
+// lookup is still running (no link yet) are not counted: the rule of
+// billing_final.
 func TestInsightsPendingBillingCountsOnlyUnsettledRequests(t *testing.T) {
 	t.Parallel()
 	fixture := newInsightsFixture(t, nil)
@@ -1082,7 +1083,7 @@ func TestInsightsPendingBillingCountsOnlyUnsettledRequests(t *testing.T) {
 	fixture.seed(stepSeed{id: "waiting", offset: 30 * time.Second, key: keyOwn, session: testSessionShared, root: root, node: node, prev: "unbilled",
 		callerPending: true})
 	overview, err = fixture.service.Overview(ctx, OverviewQuery{FromNS: from, ToNS: to, Scope: scopeFor(keyOwn)})
-	if err != nil || overview.Totals.Requests != 4 || overview.Totals.PendingBillingRequests != 1 {
+	if err != nil || overview.Totals.Requests != 4 || overview.Totals.PendingBillingRequests != 0 {
 		t.Fatalf("totals with a pending caller = %+v %v", overview.Totals, err)
 	}
 	if encoded, _ := json.Marshal(overview.Totals); strings.Contains(string(encoded), "pending") {
