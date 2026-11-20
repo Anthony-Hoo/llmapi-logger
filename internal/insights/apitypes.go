@@ -76,9 +76,13 @@ type GroupUsage struct {
 
 // SessionCard is one item of GET /api/v1/insights/sessions.
 type SessionCard struct {
-	SessionID     string         `json:"session_id"`
-	SessionLink   string         `json:"session_link"`
-	TreeID        string         `json:"tree_id,omitempty"` // hex root fingerprint prefix, when part of an agent tree
+	SessionID   string `json:"session_id"`
+	SessionLink string `json:"session_link"`
+	TreeID      string `json:"tree_id,omitempty"` // hex root fingerprint prefix, when part of an agent tree
+	// RootTreeID is the root fingerprint prefix of every card, also of a
+	// lone agent the page does not show as a tree; the agent tree read
+	// answers it. Not part of the web response (the agent facade uses it).
+	RootTreeID    string         `json:"-"`
 	Protocol      string         `json:"protocol"`
 	Client        string         `json:"client"`
 	Role          string         `json:"role"`
@@ -133,8 +137,11 @@ type TrendStep struct {
 
 // TrendResponse is GET /api/v1/insights/sessions/{session_id}/trend.
 type TrendResponse struct {
-	SessionID     string      `json:"session_id"`
-	TreeID        string      `json:"tree_id,omitempty"`
+	SessionID string `json:"session_id"`
+	TreeID    string `json:"tree_id,omitempty"`
+	// RootTreeID is the root fingerprint prefix of the latest step, as
+	// SessionCard.RootTreeID; not part of the web response.
+	RootTreeID    string      `json:"-"`
 	ContextWindow *int64      `json:"context_window"`
 	Truncated     bool        `json:"truncated"` // more than 2000 steps; the most recent ones are returned
 	Steps         []TrendStep `json:"steps"`

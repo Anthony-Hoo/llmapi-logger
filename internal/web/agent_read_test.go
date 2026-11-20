@@ -214,6 +214,10 @@ var derivedKeys = map[string]bool{
 	// data.exports of a detail: what each export kind gives, derived from
 	// the same detail (agentExportStates).
 	"reason": true,
+	// The root prefix of a lone agent's card, which the web's agent-tree
+	// route accepts but the web page does not link
+	// (TestAgentEverySessionCardHasAUsableTreeID).
+	"tree_id": true,
 }
 
 // derivable reports whether one facade value can be read off the web corpus.

@@ -63,3 +63,38 @@ func TestAgentBillingFinalWaitsForTheCallerLookup(t *testing.T) {
 		}
 	}
 }
+
+// Every usage session card and trend carries the tree_id that `usage tree`
+// accepts, a lone agent without sub-agents included, and every emitted id
+// resolves for the same identity.
+func TestAgentEverySessionCardHasAUsableTreeID(t *testing.T) {
+	fixture := newReadFixture(t)
+	for name, token := range map[string]string{"admin": fixture.adminRead, "developer": fixture.developer} {
+		items, _ := readData(t, fixture.facade(http.MethodGet, "/usage/sessions?"+fixtureWindow, "", token))["items"].([]any)
+		if len(items) == 0 {
+			t.Fatalf("%s: no session cards", name)
+		}
+		lone := 0
+		for _, item := range items {
+			card := item.(map[string]any)
+			tree, _ := card["tree_id"].(string)
+			if tree == "" {
+				t.Errorf("%s: card %v has no tree_id", name, card["session_id"])
+				continue
+			}
+			if card["subagents"] == float64(0) {
+				lone++
+			}
+			if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/usage/trees/"+tree, "", token)); code != "" {
+				t.Errorf("%s: usage tree %s of card %v = %s", name, tree, card["session_id"], code)
+			}
+			trend := readData(t, fixture.facade(http.MethodGet, "/usage/sessions/"+card["session_id"].(string)+"/trend", "", token))
+			if trend["tree_id"] != tree {
+				t.Errorf("%s: trend of %v has tree_id %v, the card %s", name, card["session_id"], trend["tree_id"], tree)
+			}
+		}
+		if lone == 0 {
+			t.Errorf("%s: the fixture has no card without sub-agents, so the rule is not exercised", name)
+		}
+	}
+}

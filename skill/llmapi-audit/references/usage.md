@@ -26,7 +26,7 @@ llmaudit usage composition 12345 --out composition.json
 
 - `usage sessions` lists session cards, sorted by `recent`, `tokens` or `context`. The range is `--since`, or `--from`/`--to` (RFC 3339 or `YYYY-MM-DD`, whole UTC days), as for `requests list`. Page with `--cursor`.
 - `usage trend <session>` shows the context size step by step; use `--out` for long sessions. With `--out` (here and for `usage composition`) the file holds `{"meta": …, "data": …}`, so it still says whether it is complete when you read it later, and stdout carries `{path, bytes, sha256}` with the same `meta`.
-- `usage tree <tree>` shows an agent tree (the tree ID is 24 hexadecimal characters, from a session card).
+- `usage tree <tree-id>` shows an agent tree. The tree ID is 24 hexadecimal characters: `tree_id` of any `usage sessions` card or `usage trend`, or of an agent session in `analysis sessions`. Every card has one; for an agent without sub-agents or parent the tree is that one node (the web page shows no tree for it). `subagents` on the card says how many children the tree has.
 - `usage composition <record>` shows what one request's context was made of (system prompt, tools, history, …).
 - When the server truncated a trend, tree or composition, `meta.complete` is false with `incomplete_reason: truncated`. Say that the picture is partial.
 

@@ -301,13 +301,25 @@ type agentUsageSessions struct {
 	ClientLabels   map[string]string  `json:"client_labels,omitempty"`
 }
 
+// agentTreeID is the tree_id of a session card or trend (contract section 0.1
+// item 122): the web page links a tree only for an agent with sub-agents or
+// a parent, but `usage tree` answers the root of every session, a lone agent
+// included (a tree of one node), so the facade gives every card the id that
+// `usage tree` accepts.
+func agentTreeID(tree, root string) string {
+	if tree != "" {
+		return tree
+	}
+	return root
+}
+
 func agentUsageSessionsOf(response insights.SessionsResponse, binding string) agentUsageSessions {
 	out := agentUsageSessions{Items: make([]agentSessionCard, 0, len(response.Items)),
 		NextCursor:     wrapAgentCursor(agentCursorUsageSessions, binding, response.NextCursor),
 		BillingEnabled: response.BillingEnabled, ClientLabels: copyLabels(response.ClientLabels)}
 	for _, card := range response.Items {
 		item := agentSessionCard{
-			SessionID: card.SessionID, SessionLink: card.SessionLink, TreeID: card.TreeID, Protocol: card.Protocol,
+			SessionID: card.SessionID, SessionLink: card.SessionLink, TreeID: agentTreeID(card.TreeID, card.RootTreeID), Protocol: card.Protocol,
 			Client: card.Client, Role: card.Role, FirstAt: agentTime(card.FirstNS), LastAt: agentTime(card.LastNS),
 			Steps: card.Steps, Turns: card.Turns, ModelsUntrusted: append([]string{}, card.Models...),
 			Usage: agentUsageTotalsOf(card.Usage), LastComposition: agentCategoryValuesOf(card.LastEstimate),
@@ -397,7 +409,7 @@ type agentTrend struct {
 }
 
 func agentTrendOf(response insights.TrendResponse) agentTrend {
-	out := agentTrend{SessionID: response.SessionID, TreeID: response.TreeID, ContextWindow: response.ContextWindow,
+	out := agentTrend{SessionID: response.SessionID, TreeID: agentTreeID(response.TreeID, response.RootTreeID), ContextWindow: response.ContextWindow,
 		Truncated: response.Truncated, Steps: make([]agentTrendStep, 0, len(response.Steps))}
 	for _, step := range response.Steps {
 		out.Steps = append(out.Steps, agentTrendStep{
