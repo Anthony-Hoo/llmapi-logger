@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"llmapi-logger/internal/agentapi"
@@ -176,13 +177,13 @@ func agentWriteFailure(err error) *agentFailure {
 		failure.Hint = orgConflictHint("", "constraint")
 		return failure
 	case errors.As(err, &orgSettings):
-		return validationFailure(agentapi.CodeInvalidArgument, settingsField(orgSettings.Field), orgSettings.Reason, orgSettings.Message).allow(orgSettings.Allowed)
+		return validationFailure(agentapi.CodeInvalidArgument, settingsField(orgSettings.Field), orgSettings.Reason, messageWithoutValues(orgSettings.Message)).allow(orgSettings.Allowed)
 	case errors.Is(err, orgreport.ErrInvalidSettings):
-		return validationFailure(agentapi.CodeInvalidArgument, "set", reasonInvalidValue, orgreport.SettingsMessage(err))
+		return validationFailure(agentapi.CodeInvalidArgument, "set", reasonInvalidValue, messageWithoutValues(orgreport.SettingsMessage(err)))
 	case errors.As(err, &analysisSet):
-		return validationFailure(agentapi.CodeInvalidArgument, settingsField(analysisSet.Field), analysisSet.Reason, analysisSet.Message).allow(analysisSet.Allowed)
+		return validationFailure(agentapi.CodeInvalidArgument, settingsField(analysisSet.Field), analysisSet.Reason, messageWithoutValues(analysisSet.Message)).allow(analysisSet.Allowed)
 	case errors.Is(err, sessionanalysis.ErrInvalidSettings):
-		return validationFailure(agentapi.CodeInvalidArgument, "set", reasonInvalidValue, sessionanalysis.SettingsMessage(err))
+		return validationFailure(agentapi.CodeInvalidArgument, "set", reasonInvalidValue, messageWithoutValues(sessionanalysis.SettingsMessage(err)))
 	case errors.As(err, &calibrationBad):
 		field := "args.labels"
 		if calibrationBad.Index >= 0 {
@@ -219,6 +220,29 @@ func agentWriteFailure(err error) *agentFailure {
 		return &agentFailure{Code: code, Details: map[string]any{"field": "body", "reason": reasonRejectedByService}}
 	}
 	return &agentFailure{Code: code}
+}
+
+// Values the configuration validators write into a settings message:
+// ", got <value>" at the end, and quoted values ("entry %q", "lists %q
+// twice", "timezone %q").
+var (
+	quotedEntry = regexp.MustCompile(`entry "(?:[^"\\]|\\.)*"`)
+	quotedValue = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+)
+
+// messageWithoutValues is a settings validator's message without the values
+// it repeats (contract section 0.1 item 168). A settings section is checked
+// after the change is merged into what is saved, and what is saved may have
+// been written through the web page by another administrator, so a value in
+// the message may be text someone else wrote. The message keeps the field
+// and the rule; details.field, details.reason and details.allowed say what
+// is wrong, and the caller knows what it submitted.
+func messageWithoutValues(message string) string {
+	if index := strings.Index(message, ", got "); index >= 0 {
+		message = message[:index]
+	}
+	message = quotedEntry.ReplaceAllString(message, "has an entry that")
+	return quotedValue.ReplaceAllString(message, "a value")
 }
 
 // settingsField is the field of a settings refusal; one that names no

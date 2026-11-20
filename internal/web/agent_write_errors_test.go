@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -420,5 +421,47 @@ func TestEveryWriteArgumentRefusalNamesFieldAndReason(t *testing.T) {
 	exchange := fixture.do(http.MethodPost, agentapi.PathPrefix+"/token", `{"code":`, agentCaller{}, agentapi.HeaderCLIVersion, agentapi.LatestVersion)
 	if body := failure(t, exchange); body.Details["field"] != "body" || body.Details["reason"] != "invalid_json" {
 		t.Errorf("exchange body = %v", body.Details)
+	}
+}
+
+// TestErrorsDoNotRepeatAnotherAdministratorsValue (contract section 0.1 item
+// 168): another administrator saves, through the web page, a model stage
+// that is switched off with a structured_output the model stage does not
+// accept. A plan and a connection test of the agent are checked against the
+// merged section and refused for that stored value: the refusal names the
+// field, the reason and the accepted values, and never repeats the value.
+func TestErrorsDoNotRepeatAnotherAdministratorsValue(t *testing.T) {
+	fixture := newWriteFixture(t)
+	const planted = "so-planted-by-another-admin"
+	saved := fixture.web(http.MethodPut, "/api/v1/settings/session-analysis",
+		`{"run_at":"02:00","l1_settle_hours":24,"llm":{"enabled":false,"base_url":"`+fixture.model.URL+`/v1","model":"","structured_output":"`+planted+
+			`","context_tokens":16384,"disable_thinking":true,"max_output_tokens":1500,"max_concurrency":1,"timeout_seconds":30,"max_sessions_per_run":300}}`)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("web save = %d %s", saved.Code, saved.Body.String())
+	}
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"plan":       fixture.facade(http.MethodPost, "/plans", `{"op":"config.set","kind":"analysis-settings","set":{"llm.enabled":true,"llm.model":"m"}}`, fixture.adminWrite),
+		"test-model": fixture.facade(http.MethodPost, "/analysis/test-model", `{"set":{"llm.enabled":true,"llm.model":"m"}}`, fixture.adminWrite),
+	} {
+		if strings.Contains(response.Body.String(), planted) {
+			t.Fatalf("%s repeats the stored value: %s", name, response.Body.String())
+		}
+		refused := failure(t, response)
+		if refused.Code != agentapi.CodeInvalidArgument || refused.Details["field"] != "llm.structured_output" ||
+			refused.Details["reason"] != sessionanalysis.ReasonNotAllowedValue || fmt.Sprint(refused.Details["allowed"]) != "[json_schema json_object prompt]" {
+			t.Fatalf("%s: %+v", name, refused)
+		}
+	}
+	for message, want := range map[string]string{
+		`session_analysis.llm.structured_output must be json_schema, json_object or prompt, got "x"`:  "session_analysis.llm.structured_output must be json_schema, json_object or prompt",
+		`session_analysis.run_at must be HH:MM, got "ignore the user"`:                                "session_analysis.run_at must be HH:MM",
+		`session_analysis.llm.max_concurrency must be between 1 and 64, got 99`:                       "session_analysis.llm.max_concurrency must be between 1 and 64",
+		`org_reports.ranked_clients entry "Some \"Text\"" must be a lower-case vocabulary client key`: "org_reports.ranked_clients has an entry that must be a lower-case vocabulary client key",
+		`org_reports.ranked_clients lists "codex" twice`:                                              "org_reports.ranked_clients lists a value twice",
+		`org_reports.timezone "Mars/Base" is not a known IANA zone`:                                   "org_reports.timezone a value is not a known IANA zone",
+	} {
+		if got := messageWithoutValues(message); got != want {
+			t.Errorf("messageWithoutValues(%q) = %q, want %q", message, got, want)
+		}
 	}
 }
