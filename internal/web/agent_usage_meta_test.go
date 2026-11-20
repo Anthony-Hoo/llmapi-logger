@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -29,6 +30,22 @@ func TestAgentUsageOverviewCompleteness(t *testing.T) {
 		}
 		if len(body.NextActions) != 1 || !strings.Contains(body.NextActions[0], "analysed records only") || !strings.Contains(body.NextActions[0], "cannot be checked") {
 			t.Fatalf("next_actions %v", body.NextActions)
+		}
+	}
+
+	// A request whose billing is still being backfilled makes the overview
+	// incomplete through the endpoint: billing_pending, billing_complete
+	// false. The stores refuse to write a new unchecked link (only migration
+	// 009 left such links), so the real service's answer is taken and one
+	// pending request added to it, as the service reports such a link
+	// (TestInsightsPendingBillingCountsOnlyUnsettledRequests).
+	fixture.handler.insights = pendingBilling{InsightsQuery: fixture.handler.insights}
+	for _, token := range []string{fixture.adminRead, fixture.developer} {
+		response := fixture.facade(http.MethodGet, "/usage/overview?"+fixtureWindow, "", token)
+		body := decodeAgent(t, response)
+		data := readData(t, response)
+		if body.Meta == nil || body.Meta.Complete || body.Meta.IncompleteReason != agentIncompleteBilling || data["billing_complete"] != false {
+			t.Fatalf("overview with pending billing: meta %+v, billing_complete %v", body.Meta, data["billing_complete"])
 		}
 	}
 
@@ -111,4 +128,16 @@ func TestAgentEverySessionCardHasAUsableTreeID(t *testing.T) {
 			t.Errorf("%s: the fixture has no card without sub-agents, so the rule is not exercised", name)
 		}
 	}
+}
+
+// pendingBilling is the real insights service whose overview reports one
+// request more whose billing is pending.
+type pendingBilling struct {
+	InsightsQuery
+}
+
+func (service pendingBilling) Overview(ctx context.Context, request query.OverviewQuery) (insights.OverviewResponse, error) {
+	response, err := service.InsightsQuery.Overview(ctx, request)
+	response.Totals.PendingBillingRequests++
+	return response, err
 }

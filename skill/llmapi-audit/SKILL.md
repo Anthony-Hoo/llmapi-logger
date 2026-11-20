@@ -59,7 +59,7 @@ Administrator-only commands and administrator-only arguments are refused differe
 Every read result carries `meta` with three fields:
 
 - `state`: the unified state of what you read, for example `running`, `succeeded`, `failed`, `blocked` or `cancelled` for an audit record, `never_run`, `running`, `failed` or `succeeded` for an analysis run, `ok` for most other reads.
-- `complete`: whether the result is final and whole. When it is false, `incomplete_reason` says why (`parse_pending`, `capture_incomplete`, `parse_partial`, `truncated`, `evidence_pending`, `facets_incomplete`, `not_computed`, `below_contributor_minimum`, `not_ready`, `billing_pending`, …).
+- `complete`: whether the result is final and whole, as far as the server can know. Two reads say less: on `usage overview` it covers only billing (whether every record was analysed cannot be checked; `data.coverage_unknown` says so), and on `weekly unattributed` it means the week has ended and the list was not cut, not that the list is final (it is computed with the current rules; see the references). When it is false, `incomplete_reason` says why (`parse_pending`, `capture_incomplete`, `parse_partial`, `truncated`, `evidence_pending`, `facets_incomplete`, `not_computed`, `below_contributor_minimum`, `not_ready`, `billing_pending`, …).
 - `incomplete_reason`: empty when `complete` is true.
 
 Default ranges: `requests list` without `--since`, `--from` or `--to` lists every record, newest first; `usage overview` and `usage sessions` cover the 7 days before `--to` (or now), at most 400 days; `analysis overview`, `users` and `sessions` need `--since` or `--from`; weekly reads default to the current week.
