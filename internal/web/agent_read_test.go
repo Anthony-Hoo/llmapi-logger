@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/sessionanalysis"
 	"llmapi-logger/internal/storage"
+	"llmapi-logger/internal/storage/sqlite"
 	"llmapi-logger/internal/uaguard"
 )
 
@@ -458,6 +460,45 @@ func listedAuditIDs(t *testing.T, response *httptest.ResponseRecorder) []string 
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// The read fixture's locally blocked records hold only what a real store
+// accepts for one: each is written through the SQLite store (the same
+// validation and CHECKs as PostgreSQL) and read back with the same scope
+// row, and none carries a caller, a model, a token link or a parse.
+func TestReadFixtureBlockedRecordsAreStorable(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	own := testFingerprinter(t).Fingerprint(testDeveloperKey)
+	policy, tooLarge := contentpolicy.BlockCode, "body_too_large"
+	for _, code := range []*string{&policy, &tooLarge} {
+		record := fixtureAudit("blocked-"+*code, 0, own, 42, storage.ForwardRejected, code)
+		summary := record.detail.Audit
+		if summary.CallerStatus != storage.CallerNone || summary.NewAPIRequestID != nil || summary.NewAPIUserID != nil || summary.Username != nil ||
+			summary.NewAPITokenID != nil || summary.TokenName != nil || summary.RequestModel != nil || summary.ResponseModel != nil || summary.TTFTNS != nil ||
+			record.detail.TokenLink != nil || record.detail.ParsedResult != nil || record.detail.Turn != nil || record.row.NewAPITokenID != nil {
+			t.Fatalf("%s: a blocked record with a caller, model, parse or link: %+v", *code, summary)
+		}
+		if err := store.BeginAudit(ctx, storage.AuditRecord{AuditID: summary.AuditID, StartedAtNS: summary.StartedAtNS, RouteID: summary.RouteID,
+			Protocol: summary.Protocol, ParserName: summary.ParserName, Method: summary.Method, Path: summary.Path, RequestURIEnc: []byte{1},
+			Mode: summary.Mode, ForwardStatus: storage.ForwardInProgress, CaptureStatus: storage.CapturePending, ParseStatus: storage.ParsePending,
+			CallerStatus: storage.CallerNone, APIKeyFPR: own}); err != nil {
+			t.Fatalf("%s: begin = %v", *code, err)
+		}
+		if err := store.FinishAudit(ctx, storage.AuditFinish{AuditID: summary.AuditID, EndedAtNS: *summary.EndedAtNS, StatusCode: summary.StatusCode,
+			TTFTNS: summary.TTFTNS, ForwardStatus: summary.ForwardStatus, CaptureStatus: summary.CaptureStatus, ParseStatus: summary.ParseStatus,
+			BlockedBy: summary.BlockedBy, BlockCode: summary.BlockCode, NewAPIRequestID: summary.NewAPIRequestID}); err != nil {
+			t.Fatalf("%s: the store refuses the fixture's blocked record: %v", *code, err)
+		}
+		row, err := store.QueryAuditScope(ctx, summary.AuditID)
+		if err != nil || !reflect.DeepEqual(row, record.row) {
+			t.Fatalf("%s: stored scope row %+v %v, fixture %+v", *code, row, err, record.row)
+		}
+	}
 }
 
 func TestAgentDRules(t *testing.T) {

@@ -277,18 +277,34 @@ func fixtureAudit(id string, offset time.Duration, fingerprint []byte, tokenID i
 		TokenLink: &query.TokenLink{NewAPIRequestID: requestID, NewAPIUserID: userID, Username: username, NewAPITokenID: tokenID,
 			TokenName: tokenName, LinkedAtNS: parsedAt, BillingState: storage.BillingBilled, NewAPIQuota: &quota, CostUSD: &cost},
 	}
+	scopeTokenID := &tokenID
 	if forward == storage.ForwardRejected {
-		// A locally blocked record was never forwarded: no parse, no
-		// reconstruction, no response (what the proxy stores for it).
+		// A locally blocked record was never forwarded, and holds only what
+		// the stores accept for one (the CHECK of audit_records and
+		// validateAuditFinish): blocked_by and block_code set, a 4xx status,
+		// parse skipped. With no upstream answer there is no NewAPI request
+		// id, so no caller (caller_status none), no user or token, no token
+		// link and no cost; with no parse there is no model, reconstruction
+		// or response. The key fingerprint is tagged before the interceptors
+		// run (audit.Manager), so it stays.
+		blockedBy, rejectStatus := contentpolicy.InterceptorID, contentpolicy.RejectStatusCode
+		if blockCode != nil && *blockCode == "body_too_large" {
+			rejectStatus = http.StatusRequestEntityTooLarge
+		}
+		detail.Audit.BlockedBy, detail.Audit.StatusCode = &blockedBy, &rejectStatus
 		detail.Audit.ParseStatus = storage.ParseSkipped
-		detail.ParsedResult, detail.Turn, detail.Conversation = nil, nil, nil
+		detail.Audit.TTFTNS, detail.Audit.RequestModel, detail.Audit.ResponseModel, detail.Audit.NewAPIRequestID = nil, nil, nil, nil
+		detail.Audit.CallerStatus = storage.CallerNone
+		detail.Audit.NewAPIUserID, detail.Audit.Username, detail.Audit.NewAPITokenID, detail.Audit.TokenName = nil, nil, nil, nil
+		detail.ParsedResult, detail.Turn, detail.Conversation, detail.TokenLink = nil, nil, nil, nil
+		scopeTokenID = nil
 	} else {
 		// The streamed response the proxy received, with its timeline.
 		detail.Bodies = append(detail.Bodies, query.Body{Stage: storage.StageResponseReceived, SourceStage: storage.StageResponseReceived,
 			ObservedLength: 4, StoredLength: 4, HashComplete: true, EOFSeen: true, State: storage.StageStateComplete,
 			RetentionState: storage.RetentionFull, FirstObservedAtNS: &started, StreamEventCount: 1, StreamTimelineComplete: true})
 	}
-	return auditRecord{detail: detail, row: storage.AuditScopeRow{APIKeyFPR: fingerprint, NewAPITokenID: &tokenID, ForwardStatus: forward, BlockCode: blockCode}}
+	return auditRecord{detail: detail, row: storage.AuditScopeRow{APIKeyFPR: fingerprint, NewAPITokenID: scopeTokenID, ForwardStatus: forward, BlockCode: blockCode}}
 }
 
 func fixtureHeaders() []query.Header {
@@ -509,7 +525,7 @@ func newReadFixtureWrites(t *testing.T, allowWrite bool) *readFixture {
 	t.Helper()
 	own := testFingerprinter(t).Fingerprint(testDeveloperKey)
 	other := bytes.Repeat([]byte{0x77}, len(own))
-	blocked, tooLarge := "content_policy", "body_too_large"
+	blocked, tooLarge := contentpolicy.BlockCode, "body_too_large"
 	audits := &scopedAudits{records: []auditRecord{
 		fixtureAudit("own-1", 0, own, 42, storage.ForwardCompleted, nil),
 		fixtureAudit("token-only", time.Second, other, 42, storage.ForwardCompleted, nil),
