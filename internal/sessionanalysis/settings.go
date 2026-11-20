@@ -485,6 +485,10 @@ type ProbeResult struct {
 
 const maxProbeTimeout = 60 * time.Second
 
+// ProbeInvalidAddress is ProbeResult.Error when the model client refused the
+// address: the probe sent nothing.
+const ProbeInvalidAddress = "invalid_address"
+
 // probeModel sends one fixed, synthetic request to the candidate endpoint.
 // Nothing from any session is sent.
 func probeModel(ctx context.Context, candidate config.SessionAnalysisConfig) ProbeResult {
@@ -492,7 +496,7 @@ func probeModel(ctx context.Context, candidate config.SessionAnalysisConfig) Pro
 	llm.Enabled = true
 	client, err := NewLLMClient(llm, nil)
 	if err != nil {
-		return ProbeResult{Error: "invalid_address"}
+		return ProbeResult{Error: ProbeInvalidAddress}
 	}
 	timeout := time.Duration(llm.TimeoutSeconds) * time.Second
 	if timeout <= 0 || timeout > maxProbeTimeout {

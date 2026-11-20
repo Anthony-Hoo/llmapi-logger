@@ -461,8 +461,20 @@ func TestAgentRateLimits(t *testing.T) {
 	})
 	t.Run("test-model", func(t *testing.T) {
 		fixture := newWriteFixture(t)
+		// Tests refused before anything was sent take no slot (item 131):
+		// a malformed body, a value the validation refuses, and the saved
+		// key kept from an address not in effect.
+		for index := 0; index < 20; index++ {
+			for _, body := range []string{`{"bogus":1}`, `{"set":{"llm.timeout_seconds":0}}`, `{"set":{"llm.base_url":"http://127.0.0.1:9/v1"}}`} {
+				if code := failure(t, fixture.facade(http.MethodPost, "/analysis/test-model", body, fixture.adminWrite)).Code; code != agentapi.CodeInvalidArgument {
+					t.Fatalf("refused test %s = %s", body, code)
+				}
+			}
+		}
 		for index := 0; index < 12; index++ {
-			fixture.facade(http.MethodPost, "/analysis/test-model", `{"bogus":1}`, fixture.adminWrite)
+			if response := fixture.facade(http.MethodPost, "/analysis/test-model", `{}`, fixture.adminWrite); response.Code != http.StatusOK {
+				t.Fatalf("test %d = %d %s", index, response.Code, response.Body.String())
+			}
 		}
 		limited := fixture.facade(http.MethodPost, "/analysis/test-model", `{}`, fixture.adminWrite)
 		if failure(t, limited).Code != agentapi.CodeRateLimited || limited.Header().Get("Retry-After") != "3600" {
@@ -538,7 +550,7 @@ func TestAgentRateLimits(t *testing.T) {
 
 // Contract section 0.1 item 101: an apply of a weekly regeneration that is
 // blocked behind a long snapshot write (here the web route's regeneration of
-// another week) gives up at its own deadline with TIMEOUT, writes nothing and
+// the same week) gives up at its own deadline with TIMEOUT, writes nothing and
 // gives its slot of the global regeneration quota back.
 func TestAgentRegenerateBlockedBehindAFreezeTimesOutAndRefunds(t *testing.T) {
 	fixture := newWriteFixture(t)
@@ -1103,4 +1115,89 @@ func TestPlanCapIsCheckedBeforeThePlanIsChecked(t *testing.T) {
 	if after.PlanID == "" || fixture.suggestions.facetLoadCount() == loads {
 		t.Fatal("the calibration plan after a place was freed ran no check")
 	}
+}
+
+// Contract section 0.1 item 131: an apply refused by a quota leaves the plan
+// usable. The user approved it; after the wait it applies without a new plan.
+// A plan is still executed at most once: of concurrent applies against a
+// limit of one exactly one runs, the refused plans stay, and of concurrent
+// applies of one plan exactly one gets it.
+func TestQuotaRefusedApplyKeepsThePlan(t *testing.T) {
+	fixture := newWriteFixture(t)
+	fixture.planAndApply(t, `{"op":"analysis.run"}`)
+	fixture.clock.Advance(5 * time.Minute)
+	waiting := fixture.plan(t, `{"op":"analysis.run"}`)
+	limited := fixture.facade(http.MethodPost, "/plans/"+waiting.PlanID+"/apply", nil, fixture.adminWrite)
+	if failure(t, limited).Code != agentapi.CodeRateLimited || limited.Header().Get("Retry-After") != "300" {
+		t.Fatalf("apply inside the run window = %s %s", limited.Body.String(), limited.Header().Get("Retry-After"))
+	}
+	rows := fixture.writeAudits()
+	if last := rows[len(rows)-1]; last.ErrorCode != string(agentapi.CodeRateLimited) || last.ObjectKind != "analysis-run" {
+		t.Fatalf("rate-limited row = %+v", last)
+	}
+	fixture.clock.Advance(5 * time.Minute)
+	fixture.apply(t, waiting.PlanID)
+	if fixture.trigger.triggered != 2 {
+		t.Fatalf("triggered %d", fixture.trigger.triggered)
+	}
+	if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+waiting.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodePlanNotFound {
+		t.Fatalf("second apply of an applied plan = %s", code)
+	}
+
+	// Four plans, a limit of one, applied at once: one runs, three stay.
+	fixture.clock.Advance(10 * time.Minute)
+	var plans []planResponse
+	for range 4 {
+		plans = append(plans, fixture.plan(t, `{"op":"analysis.run"}`))
+	}
+	before := fixture.trigger.triggered
+	var wait sync.WaitGroup
+	codes := make([]int, len(plans))
+	for index, plan := range plans {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			codes[index] = fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite).Code
+		}()
+	}
+	wait.Wait()
+	if fixture.trigger.triggered != before+1 {
+		t.Fatalf("concurrent applies = %v, runs = %d", codes, fixture.trigger.triggered-before)
+	}
+	// The refused plans are still there: applying one again is refused by
+	// the quota, not PLAN_NOT_FOUND.
+	for index, plan := range plans {
+		if codes[index] == http.StatusOK {
+			continue
+		}
+		if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeRateLimited {
+			t.Fatalf("refused plan applied again = %s", code)
+		}
+	}
+
+	// One plan applied four times at once: exactly one apply gets it.
+	fixture.clock.Advance(10 * time.Minute)
+	plan := fixture.plan(t, `{"op":"analysis.run"}`)
+	triggered := fixture.trigger.triggered
+	for index := range codes {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			codes[index] = fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite).Code
+		}()
+	}
+	wait.Wait()
+	ok := 0
+	for _, code := range codes {
+		if code == http.StatusOK {
+			ok++
+		}
+	}
+	if ok != 1 || fixture.trigger.triggered != triggered+1 {
+		t.Fatalf("one plan applied concurrently = %v, runs = %d", codes, fixture.trigger.triggered-triggered)
+	}
+	// The run quota is not left taken by the applies that lost the plan: a
+	// window later a new plan runs.
+	fixture.clock.Advance(10 * time.Minute)
+	fixture.planAndApply(t, `{"op":"analysis.run"}`)
 }

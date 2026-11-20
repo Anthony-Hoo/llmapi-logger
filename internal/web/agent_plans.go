@@ -161,8 +161,8 @@ func (handler *managementHandler) agentPlanFor(ctx context.Context, request agen
 
 // serveAgentPlanApply is POST /plans/{plan_id}/apply. The dispatcher has
 // already re-checked the token, its tier and allow_write for this request;
-// the plan is taken (and so spent) before it runs, and the service checks the
-// version inside its own lock.
+// the plan's quota is taken first, then the plan (and so spent) before it
+// runs, and the service checks the version inside its own lock.
 func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	planID := call.Params["plan_id"]
 	audit := agentaccess.WriteAudit{Event: agentaccess.EventWriteFailed, ObjectKind: "plan", ObjectID: auditPlanID(planID), Outcome: agentaccess.OutcomeFailed}
@@ -183,7 +183,10 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 		record(handler.writeAgentWriteFailure(writer, err))
 		return
 	}
-	stored, err := handler.agentPlans.Take(call.Identity.TokenID, planID)
+	// The plan is read first and taken only once its quota is held: a plan
+	// refused by a quota (RATE_LIMITED) stays in the store, so the user who
+	// approved it can apply it again after the wait without planning again.
+	stored, err := handler.agentPlans.Peek(call.Identity.TokenID, planID)
 	if err != nil {
 		writeAgentServiceError(writer, err)
 		record(agentaccess.CodeOf(err))
@@ -195,11 +198,12 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 	audit.ObjectKind, audit.ObjectID = plan.view.Target.Kind, plan.view.Target.ID
 	audit.ChangedKeys = plan.view.ChangedKeys
 	// A long operation's quota counts operations that were started. The slot
-	// is taken before the operation runs, so two concurrent applies cannot
-	// both pass a limit of one, and given back when the service refused to
-	// start it (RUN_IN_PROGRESS, VERSION_CONFLICT, …) or gave up before it
-	// started (plan.notStarted). A timeout after the start keeps it: the
-	// operation may be running.
+	// is taken before the plan, so two concurrent applies cannot both pass a
+	// limit of one, and given back when the plan was taken by a concurrent
+	// apply in between, when the service refused to start the operation
+	// (RUN_IN_PROGRESS, VERSION_CONFLICT, …) or gave up before it started
+	// (plan.notStarted). A timeout after the start keeps it: the operation
+	// may be running.
 	var slot agentaccess.QuotaSlot
 	if plan.quota != nil {
 		if slot, err = handler.agent.TakeSlot(*plan.quota, call.Identity); err != nil {
@@ -207,6 +211,14 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 			record(agentaccess.CodeOf(err))
 			return
 		}
+	}
+	// Taking is the single use: of concurrent applies of one plan only one
+	// gets it.
+	if _, err := handler.agentPlans.Take(call.Identity.TokenID, planID); err != nil {
+		handler.agent.Refund(slot)
+		writeAgentServiceError(writer, err)
+		record(agentaccess.CodeOf(err))
+		return
 	}
 	// The write must not be cut short by the client going away after the
 	// service accepted it; the timeout still bounds it.

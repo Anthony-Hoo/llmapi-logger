@@ -104,23 +104,29 @@ func (handler *managementHandler) serveAgentAPIKeySet(writer http.ResponseWriter
 // without it, the key in use. It is the web form's "test connection".
 func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	var keys []string
+	// Every refusal below happens before any request leaves for the model:
+	// it gives back the test quota's slot (contract section 0.1 item 131).
+	refuse := func(err error) {
+		handler.agent.Refund(call.WriteSlot)
+		handler.failKeyWrite(writer, request, call, keys, err)
+	}
 	settings, err := handler.agentAnalysisSettingsWriter()
 	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
 	}
 	if _, err := agentCallParams(request, call); err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
 	}
 	body, err := readAgentBody(writer, request, maxAgentKeyBodyBytes)
 	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
 	}
 	members, err := decodeObject(body, "body")
 	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
 	}
 	var set map[string]json.RawMessage
@@ -129,29 +135,29 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		switch name {
 		case "set":
 			if set, err = decodeObject(members[name], "set"); err != nil {
-				handler.failKeyWrite(writer, request, call, keys, err)
+				refuse(err)
 				return
 			}
 		case "api_key":
 			var value string
 			if json.Unmarshal(members[name], &value) != nil || value == "" {
-				handler.failKeyWrite(writer, request, call, keys, fieldFailure("api_key", "api_key must be a non-empty JSON string"))
+				refuse(fieldFailure("api_key", "api_key must be a non-empty JSON string"))
 				return
 			}
 			key = &value
 		default:
-			handler.failKeyWrite(writer, request, call, keys, fieldFailure(name, "unknown field "+name+"; the fields are "+strings.Join(agentTestModelBodyFields, ", ")))
+			refuse(fieldFailure(name, "unknown field "+name+"; the fields are "+strings.Join(agentTestModelBodyFields, ", ")))
 			return
 		}
 	}
 	set, err = canonicalFields("analysis-settings", "set", set, agentapi.SettableFields["analysis-settings"])
 	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
 	}
 	patch, err := analysisSettingsPatch(set)
 	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
 	}
 	keys = sortedMemberKeys(set)
@@ -162,7 +168,7 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 	_, err = settings.CheckPatch(checkCtx, sessionanalysis.AnyVersion, patch)
 	cancel()
 	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
 	}
 	// The probe has its own timeout, as on the web route. Without a key typed
@@ -171,8 +177,12 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 	result, err := settings.TestPatch(request.Context(), patch, key)
 	key = nil
 	if err != nil {
-		handler.failKeyWrite(writer, request, call, keys, err)
+		refuse(err)
 		return
+	}
+	if result.Error == sessionanalysis.ProbeInvalidAddress {
+		// The model client refused the address: nothing was sent.
+		handler.agent.Refund(call.WriteSlot)
 	}
 	audit := agentaccess.WriteAudit{Event: agentaccess.EventWriteApplied, ObjectKind: agentKeyObject, ObjectID: "test-model", ChangedKeys: keys, Outcome: agentaccess.OutcomeOK}
 	if !result.OK {

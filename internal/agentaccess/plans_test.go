@@ -231,3 +231,50 @@ func TestRecordWriteKeepsKeyNamesOnly(t *testing.T) {
 		t.Fatalf("failed row = %+v", failed)
 	}
 }
+
+// Peek reads a plan without spending it (contract section 0.1 item 131); only
+// Take hands it out. CheckRoom answers what Put would about the caps
+// without storing (item 130).
+func TestPlanStorePeekAndCheckRoom(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)}
+	store := NewPlanStore(clock.Now, nil)
+	plan, err := store.Put(7, "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if peeked, err := store.Peek(7, plan.ID); err != nil || peeked.Payload != "payload" {
+			t.Fatalf("peek = %+v, %v", peeked, err)
+		}
+	}
+	if _, err := store.Peek(8, plan.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("peek by another token = %v", err)
+	}
+	if _, err := store.Take(7, plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Peek(7, plan.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("peek after take = %v", err)
+	}
+	expiring, _ := store.Put(7, "old")
+	clock.Advance(PlanLifetime)
+	if _, err := store.Peek(7, expiring.ID); codeOf(t, err) != agentapi.CodePlanExpired {
+		t.Fatalf("peek of an expired plan = %v", err)
+	}
+	for range MaxPlansPerToken {
+		if err := store.CheckRoom(7); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Put(7, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held := store.Len()
+	var coded *Error
+	if err := store.CheckRoom(7); !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited || coded.RetryAfter != PlanLifetime {
+		t.Fatalf("check at the cap = %v", err)
+	}
+	if store.Len() != held || store.CheckRoom(8) != nil {
+		t.Fatal("CheckRoom stored something or refused another token")
+	}
+}

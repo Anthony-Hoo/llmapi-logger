@@ -36,8 +36,10 @@ type agentCall struct {
 	Identity  agentaccess.Identity
 	Principal principal
 	Meta      agentaccess.RequestMeta
-	// WriteSlot is the write quota's slot the request took, for a handler
-	// that gives it back when the request is refused (plan creation).
+	// WriteSlot is the slot the request took of the write quota (or, for
+	// the connection test, of the test quota), for a handler that gives it
+	// back when the request is refused before doing what it counts (plan
+	// creation, a connection test refused before any request was sent).
 	WriteSlot agentaccess.QuotaSlot
 }
 
@@ -194,7 +196,9 @@ func (handler *managementHandler) serveAgent(writer http.ResponseWriter, request
 // the others as they were: a pack read refused by the sensitive-read quota
 // gives back the general read slot it took. The write quota's slot is
 // returned to the caller: a plan request that is refused gives it back
-// (serveAgentPlanCreate), so only created plans count.
+// (serveAgentPlanCreate), so only created plans count. So is the test
+// quota's: a connection test refused before it sent anything gives it back
+// (serveAgentTestModel).
 func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, identity agentaccess.Identity) (agentaccess.QuotaSlot, error) {
 	switch {
 	case endpoint.ID == "logout":
@@ -212,7 +216,7 @@ func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, id
 		}
 		return agentaccess.QuotaSlot{}, nil
 	case endpoint.ID == agentapi.EndpointTestModel:
-		return agentaccess.QuotaSlot{}, handler.agent.Take(agentaccess.QuotaTestModel, identity)
+		return handler.agent.TakeSlot(agentaccess.QuotaTestModel, identity)
 	default:
 		return handler.agent.TakeSlot(agentaccess.QuotaWrite, identity)
 	}

@@ -135,15 +135,30 @@ func (store *PlanStore) roomLocked(tokenID int64, now time.Time) error {
 // plan is gone before the caller executes it, so two concurrent applies
 // cannot both run it.
 func (store *PlanStore) Take(tokenID int64, id string) (Plan, error) {
+	return store.find(tokenID, id, true)
+}
+
+// Peek returns plan id of tokenID like Take, without removing a live plan:
+// a caller reads what the plan needs (a quota) before it commits to running
+// it, and then takes it. An expired plan is removed and PLAN_EXPIRED, as in
+// Take. Peek never makes a plan runnable twice; only Take hands it out.
+func (store *PlanStore) Peek(tokenID int64, id string) (Plan, error) {
+	return store.find(tokenID, id, false)
+}
+
+func (store *PlanStore) find(tokenID int64, id string, take bool) (Plan, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	plan, ok := store.plans[id]
 	if !ok || plan.TokenID != tokenID {
 		return Plan{}, fail(agentapi.CodePlanNotFound)
 	}
-	delete(store.plans, id)
 	if !store.now().Before(plan.ExpiresAt) {
+		delete(store.plans, id)
 		return Plan{}, fail(agentapi.CodePlanExpired)
+	}
+	if take {
+		delete(store.plans, id)
 	}
 	return *plan, nil
 }
