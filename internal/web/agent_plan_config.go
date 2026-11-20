@@ -889,11 +889,16 @@ func (handler *managementHandler) planConfigReset(ctx context.Context, request a
 			return nil, err
 		}
 		version := diff.Version
+		if version == 0 {
+			return nil, nothingSaved("weekly-settings")
+		}
 		plan := newAgentPlan(agentapi.OpConfigReset, agentPlanTarget{Kind: "weekly-settings", Version: agentVersion(version)})
 		plan.view.Before, plan.view.After = agentWeeklySettingsValuesOf(diff.Before), agentWeeklySettingsValuesOf(diff.After)
-		changedOrNothing(plan, diff.Changed)
-		plan.effect("Drops the settings saved from the web page or an agent; the configuration file values apply again.")
-		plan.effect(effectWeekly)
+		plan.view.ChangedKeys = append([]string{}, diff.Changed...)
+		plan.effect(resetEffect(len(diff.Changed) > 0, ""))
+		if len(diff.Changed) > 0 {
+			plan.effect(effectWeekly)
+		}
 		plan.verify = "llmaudit config show --kind weekly-settings"
 		plan.apply = func(ctx context.Context) (agentApplied, error) {
 			view, err := org.ResetSettingsIfVersion(ctx, version)
@@ -910,18 +915,63 @@ func (handler *managementHandler) planConfigReset(ctx context.Context, request a
 		return nil, err
 	}
 	version := diff.Version
+	if version == 0 {
+		return nil, nothingSaved("analysis-settings")
+	}
 	plan := newAgentPlan(agentapi.OpConfigReset, agentPlanTarget{Kind: "analysis-settings", Version: agentVersion(version)})
 	plan.view.Before, plan.view.After = agentAnalysisSettingsValuesOf(diff.Before), agentAnalysisSettingsValuesOf(diff.After)
-	plan.view.Extras["api_key"] = diff.KeySource
-	changedOrNothing(plan, diff.Changed)
-	plan.effect("Drops the settings and the API key saved from the web page or an agent; the configuration file values, and its key if it has one, apply again.")
-	plan.effect(effectAnalysis)
+	plan.view.Extras["api_key"] = map[string]string{"before": diff.BeforeKeySource, "after": diff.KeySource}
+	changed := append([]string{}, diff.Changed...)
+	// The saved key is dropped with the section: the key in use changes unless
+	// none is in use before or after.
+	keyChanges := diff.BeforeKeySource == sessionanalysis.KeySaved || diff.BeforeKeySource != diff.KeySource
+	if keyChanges {
+		changed = append(changed, "api_key")
+	}
+	plan.view.ChangedKeys = changed
+	keyEffect := "No API key is in use before or after."
+	switch {
+	case keyChanges && diff.KeySource == sessionanalysis.KeyNone:
+		keyEffect = "The API key in use (" + diff.BeforeKeySource + " key) is dropped; the configuration file has none, so the model is called without a key afterwards."
+	case keyChanges:
+		keyEffect = "The API key in use changes from the " + diff.BeforeKeySource + " key to the configuration file's key."
+	case diff.KeySource != sessionanalysis.KeyNone:
+		keyEffect = "The configuration file's API key stays in use."
+	}
+	plan.effect(resetEffect(len(diff.Changed) > 0, keyEffect))
+	if len(diff.Changed) > 0 || keyChanges {
+		plan.effect(effectAnalysis)
+	}
 	plan.verify = "llmaudit config show --kind analysis-settings"
 	plan.apply = func(ctx context.Context) (agentApplied, error) {
 		view, err := settings.ResetIfVersion(ctx, version)
 		return agentApplied{Version: agentVersion(view.UpdatedNS)}, err
 	}
 	return plan, nil
+}
+
+// nothingSaved refuses a reset of a section that has nothing saved: the
+// configuration file's values already apply, and applying would change
+// nothing.
+func nothingSaved(kind string) *agentFailure {
+	return &agentFailure{Code: agentapi.CodeInvalidArgument,
+		Message: "nothing is saved for " + kind + ": the configuration file values already apply, so there is nothing to reset",
+		Hint:    "Nothing to do. `llmaudit config show --kind " + kind + "` shows the values in effect (version \"0\" means they come from the configuration file).",
+		Details: map[string]any{"field": "kind", "reason": "nothing_saved"}}
+}
+
+// resetEffect is the one sentence of a reset plan: what dropping the saved
+// section does, for the state the plan shows. keyEffect is appended when
+// given.
+func resetEffect(valuesChange bool, keyEffect string) string {
+	text := "Drops the saved settings: the configuration file values apply again (the source becomes the file, version \"0\")."
+	if !valuesChange {
+		text = "Drops the saved settings: their values equal the configuration file's, so no setting value changes; only the source becomes the file (version \"0\")."
+	}
+	if keyEffect != "" {
+		text += " " + keyEffect
+	}
+	return text
 }
 
 // ---- config.clear-key ----
@@ -945,18 +995,23 @@ func (handler *managementHandler) planConfigClearKey(ctx context.Context, reques
 		return nil, err
 	}
 	version := diff.Version
+	if diff.KeySource == sessionanalysis.KeyNone {
+		// Applying would save the section with no key: from the file's values
+		// to saved ones, a new version and nothing else. There is nothing to
+		// clear, so there is no plan.
+		return nil, &agentFailure{Code: agentapi.CodeInvalidArgument, Message: "no API key is in use: there is nothing to clear",
+			Hint:    "Nothing to do. `llmaudit config show --kind analysis-settings` shows where the key comes from (api_key: none).",
+			Details: map[string]any{"field": "api_key", "reason": "nothing_to_clear"}}
+	}
 	plan := newAgentPlan(agentapi.OpConfigClearKey, agentPlanTarget{Kind: "analysis-settings", Version: agentVersion(version)})
 	plan.view.Before, plan.view.After = agentAnalysisSettingsValuesOf(diff.Before), agentAnalysisSettingsValuesOf(diff.After)
 	plan.view.Extras["api_key"] = map[string]string{"before": diff.KeySource, "after": sessionanalysis.KeyNone}
-	changed := []string{"api_key"}
-	if diff.KeySource == sessionanalysis.KeyNone {
-		changed = []string{}
-	}
-	changedOrNothing(plan, changed)
-	if diff.KeySource != sessionanalysis.KeyNone {
-		plan.effect("Removes the API key in use (" + diff.KeySource + " key): the model is called without a key from then on. " +
-			"Only the user can set a key again, by typing it at a terminal with `llmaudit config set-key --kind analysis-settings`; " +
-			"the configuration file's key comes back only with `llmaudit config reset --kind analysis-settings`.")
+	plan.view.ChangedKeys = []string{"api_key"}
+	plan.effect("Removes the API key in use (" + diff.KeySource + " key): the model is called without a key from then on. " +
+		"Only the user can set a key again, by typing it at a terminal with `llmaudit config set-key --kind analysis-settings`; " +
+		"the configuration file's key comes back only with `llmaudit config reset --kind analysis-settings`.")
+	if version == 0 {
+		plan.effect("Nothing is saved yet: applying saves the settings in effect (the configuration file's values) without a key, so the source becomes saved with a new version; no other setting value changes.")
 	}
 	plan.effect(effectAnalysis)
 	plan.verify = "llmaudit config show --kind analysis-settings"

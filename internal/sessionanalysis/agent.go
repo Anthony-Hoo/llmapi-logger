@@ -110,6 +110,9 @@ type SettingsDiff struct {
 	After     EditableSettings `json:"after"`
 	Changed   []string         `json:"changed"`
 	KeySource string           `json:"api_key"`
+	// BeforeKeySource is where the key in use comes from before the change;
+	// set by CheckReset, whose KeySource is the key after it.
+	BeforeKeySource string `json:"api_key_before,omitempty"`
 }
 
 // CheckPatch runs every check Patch runs (the candidate validation and the
@@ -156,7 +159,7 @@ func (service *SettingsService) Patch(ctx context.Context, expectedVersion int64
 func (service *SettingsService) CheckReset(ctx context.Context, expectedVersion int64) (SettingsDiff, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	current, _, version := service.current(ctx)
+	current, beforeKey, version := service.current(ctx)
 	if expectedVersion != AnyVersion && version != expectedVersion {
 		return SettingsDiff{}, ErrVersionConflict
 	}
@@ -171,7 +174,7 @@ func (service *SettingsService) CheckReset(ctx context.Context, expectedVersion 
 		fileKey = KeyFile
 	}
 	before, after := editableOf(current), editableOf(service.file)
-	return SettingsDiff{Version: version, Before: before, After: after, Changed: changedSettings(before, after), KeySource: fileKey}, nil
+	return SettingsDiff{Version: version, Before: before, After: after, Changed: changedSettings(before, after), KeySource: fileKey, BeforeKeySource: beforeKey}, nil
 }
 
 // ResetIfVersion drops the saved section only when its version still equals

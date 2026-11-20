@@ -313,6 +313,7 @@ var dynamicSamples = map[string]string{
 	"keyTarget.Field":                                "llm.base_url",
 	"diff.KeySource":                                 "saved",
 	"formatAgentID(id)":                              "42",
+	"kind":                                           "weekly-settings",
 }
 
 // serverCommandTexts returns every string the server code of internal/web

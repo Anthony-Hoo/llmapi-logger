@@ -307,11 +307,18 @@ func TestAgentClearingTheKeyIsAPlan(t *testing.T) {
 	if last := rows[len(rows)-1]; last.Event != "write_applied" || last.ObjectKind != "analysis-settings" || last.ChangedKeys != `["api_key"]` {
 		t.Fatalf("audit row = %+v", last)
 	}
-	// A change in between is a conflict; with no key in use nothing changes.
-	stale := fixture.plan(t, body)
-	if !jsonEqual(stale.ChangedKeys, []string{}) {
-		t.Fatalf("clear without a key = %+v", stale)
+	// With no key in use there is nothing to clear: no plan (contract
+	// section 0.1 item 106; it used to be a plan that changed nothing but the
+	// version).
+	nothing := failure(t, fixture.facade(http.MethodPost, "/plans", body, fixture.adminWrite))
+	if nothing.Code != agentapi.CodeInvalidArgument || nothing.Details["reason"] != "nothing_to_clear" || nothing.Details["field"] != "api_key" {
+		t.Fatalf("clear without a key = %s %v", nothing.Code, nothing.Details)
 	}
+	// A change in between is a conflict.
+	if response := fixture.facade(http.MethodPut, "/config/analysis-settings/api-key", map[string]any{"api_key": plantedModelKey}, fixture.adminWrite); response.Code != http.StatusOK {
+		t.Fatalf("set key again = %d", response.Code)
+	}
+	stale := fixture.plan(t, body)
 	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"run_at": "04:00"}})
 	if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+stale.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeVersionConflict {
 		t.Fatalf("stale clear = %s", code)
@@ -867,4 +874,49 @@ func TestAgentWritesOfDisabledModules(t *testing.T) {
 	}
 	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "ua-rule",
 		"set": map[string]any{"name": "still", "enabled": true, "model_pattern": "^a", "user_agent_pattern": "^b"}})
+}
+
+// Contract section 0.1 item 106: a reset or clear-key plan says one true
+// thing for the state it shows. A section with nothing saved has nothing to
+// reset and no plan; a saved section whose values equal the file's is reset
+// with a single sentence that says only the source (and the key) change; a
+// clear of a key that comes from the file says the section becomes saved.
+func TestResetAndClearKeyPlansSayOneTrueThing(t *testing.T) {
+	fixture := newWriteFixture(t)
+	for _, kind := range []string{"weekly-settings", "analysis-settings"} {
+		body := failure(t, fixture.facade(http.MethodPost, "/plans", map[string]any{"op": "config.reset", "kind": kind}, fixture.adminWrite))
+		if body.Code != agentapi.CodeInvalidArgument || body.Details["reason"] != "nothing_saved" || body.Details["field"] != "kind" {
+			t.Fatalf("reset of %s with nothing saved = %s %v", kind, body.Code, body.Details)
+		}
+	}
+
+	// The file has a key: clearing it is a real change that saves the section.
+	clear := fixture.plan(t, map[string]any{"op": "config.clear-key", "kind": "analysis-settings"})
+	if !jsonEqual(clear.Extras["api_key"], map[string]string{"before": "file", "after": "none"}) ||
+		!strings.Contains(strings.Join(clear.Effects, "\n"), "the source becomes saved") {
+		t.Fatalf("clear of the file key = %+v", clear)
+	}
+
+	// Save the file's own values: the saved section equals the file.
+	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "analysis-settings", "set": map[string]any{"run_at": "02:00"}})
+	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "weekly-settings", "set": map[string]any{"idle_gap_seconds": 180}})
+	for _, kind := range []string{"weekly-settings", "analysis-settings"} {
+		plan := fixture.plan(t, map[string]any{"op": "config.reset", "kind": kind})
+		effects := strings.Join(plan.Effects, "\n")
+		if strings.Contains(effects, effectNoChange) || !strings.Contains(effects, "no setting value changes") || strings.Count(effects, "Drops the saved settings") != 1 {
+			t.Fatalf("%s reset of values equal to the file = %v", kind, plan.Effects)
+		}
+		fixture.apply(t, plan.PlanID)
+		if shown := fixture.show(t, kind); shown["version"] != "0" {
+			t.Fatalf("%s after reset = %v", kind, shown)
+		}
+	}
+
+	// Saved values that differ: the reset says they change back.
+	fixture.planAndApply(t, map[string]any{"op": "config.set", "kind": "weekly-settings", "set": map[string]any{"idle_gap_seconds": 60}})
+	plan := fixture.plan(t, map[string]any{"op": "config.reset", "kind": "weekly-settings"})
+	effects := strings.Join(plan.Effects, "\n")
+	if !jsonEqual(plan.ChangedKeys, []string{"idle_gap_seconds"}) || strings.Contains(effects, "no setting value changes") || strings.Contains(effects, effectNoChange) {
+		t.Fatalf("reset of changed values = %+v", plan)
+	}
 }
