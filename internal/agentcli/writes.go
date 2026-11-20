@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"llmapi-logger/internal/agentapi"
@@ -54,7 +55,10 @@ func refuseKeyField(field string) error {
 	return nil
 }
 
-// strictJSON decodes exactly one JSON value.
+// strictJSON decodes exactly one JSON value in which no object names a key
+// twice. A repeated key is refused rather than left to "the last one wins":
+// a --patch-file object is read into a map, which would keep only the last,
+// and the server refuses one anyway (contract section 0.1 item 132).
 func strictJSON(data []byte) (json.RawMessage, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -65,7 +69,65 @@ func strictJSON(data []byte) (json.RawMessage, error) {
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("trailing data")
 	}
+	if key := repeatedKey(json.NewDecoder(bytes.NewReader(value))); key != "" {
+		return nil, &repeatedKeyError{key: key}
+	}
 	return value, nil
+}
+
+// repeatedKeyError names a key an object of the input repeats.
+type repeatedKeyError struct{ key string }
+
+func (err *repeatedKeyError) Error() string {
+	return "the key " + err.key + " appears twice in one object"
+}
+
+// repeatedKey reads one JSON value and returns the first key repeated inside
+// one of its objects, "" when there is none.
+func repeatedKey(decoder *json.Decoder) string {
+	token, err := decoder.Token()
+	if err != nil {
+		return ""
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return ""
+	}
+	if delimiter == '{' {
+		seen := map[string]bool{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return ""
+			}
+			key, _ := keyToken.(string)
+			if seen[key] {
+				return key
+			}
+			seen[key] = true
+			if found := repeatedKey(decoder); found != "" {
+				return found
+			}
+		}
+	} else {
+		for decoder.More() {
+			if found := repeatedKey(decoder); found != "" {
+				return found
+			}
+		}
+	}
+	_, _ = decoder.Token()
+	return ""
+}
+
+// duplicateUsage is the usage error of a value with a repeated key, or ""
+// when err is another failure.
+func duplicateUsage(flag string, err error) error {
+	var repeated *repeatedKeyError
+	if errors.As(err, &repeated) {
+		return usageErrorWith(flag, "duplicate_key", flag+": the key "+strconv.Quote(repeated.key)+" appears more than once in one JSON object; give each field once")
+	}
+	return nil
 }
 
 func parseRule(flag, value string) (map[string]any, error) {
@@ -94,6 +156,9 @@ func setValues(inv *invocation) (map[string]any, error) {
 				return nil, err
 			}
 			value, err := strictJSON([]byte(raw))
+			if usage := duplicateUsage("--set-json", err); usage != nil {
+				return nil, usage
+			}
 			if err != nil {
 				return nil, usageError("--set-json", fmt.Sprintf("--set-json %s: the value is not one valid JSON value", field))
 			}
@@ -104,6 +169,9 @@ func setValues(inv *invocation) (map[string]any, error) {
 				return nil, localFileError("cannot read the --patch-file file", map[string]any{"field": "--patch-file", "path": given.value})
 			}
 			value, err := strictJSON(data)
+			if usage := duplicateUsage("--patch-file", err); usage != nil {
+				return nil, usage
+			}
 			var fields map[string]json.RawMessage
 			if err != nil || json.Unmarshal(value, &fields) != nil || fields == nil {
 				return nil, usageError("--patch-file", "--patch-file must hold one JSON object whose keys are field names")
@@ -214,6 +282,9 @@ func readLabels(path string) (json.RawMessage, error) {
 		return nil, localFileError("cannot read the --file file", map[string]any{"field": "--file", "path": path})
 	}
 	value, err := strictJSON(data)
+	if usage := duplicateUsage("--file", err); usage != nil {
+		return nil, usage
+	}
 	if err != nil {
 		return nil, usageError("--file", "--file must hold one JSON value: {\"labels\": [...]} or an array")
 	}

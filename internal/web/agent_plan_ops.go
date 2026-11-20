@@ -75,8 +75,9 @@ func (handler *managementHandler) planAnalysisCalibrate(ctx context.Context, req
 	}
 	for index, element := range elements {
 		var label sessionanalysis.CalibrationLabel
-		if err := strictDecode(element, &label); err != nil {
-			return nil, fieldFailure("args.labels["+formatAgentID(int64(index))+"]", "a label has an unknown field or a value of the wrong type")
+		at := "args.labels[" + formatAgentID(int64(index)) + "]"
+		if err := strictDecode(element, &label, at); err != nil {
+			return nil, strictFailure(err, fieldFailure(at, "a label has an unknown field or a value of the wrong type"))
 		}
 		labels = append(labels, label)
 	}

@@ -170,3 +170,47 @@ func TestWeeklySettingsWritesRefuseWhenTheSavedRowCannotBeRead(t *testing.T) {
 		t.Fatalf("saved settings changed by refused writes:\nbefore %s\nafter  %s", before, after)
 	}
 }
+
+// Contract section 0.1 item 132: plan input has one spelling per field at
+// any depth. Keys are matched with their case, so a key that names a field
+// only without regard to case is an unknown field naming the key, and no
+// JSON object of the input may repeat a key (the last one used to win).
+func TestPlanInputIsDecodedExactly(t *testing.T) {
+	fixture := newWriteFixture(t)
+	ids := fixture.seed(t)
+	project := func(rule string) string {
+		return `{"op":"config.set","kind":"project","id":"` + ids.project + `","set":{"rules":[` + rule + `]}}`
+	}
+	label := func(body string) string { return `{"op":"analysis.calibrate","args":{"labels":[` + body + `]}}` }
+	for _, test := range []struct {
+		name, path, body, field, reason string
+	}{
+		{"rule field in another case", "/plans", project(`{"kind":"repo_name","pattern_untrusted":"a","Pattern":"b"}`), "rules[0].Pattern", "unknown_field"},
+		{"rule kind in another case", "/plans", project(`{"Kind":"repo_name","pattern":"a"}`), "rules[0].Kind", "unknown_field"},
+		{"label field in another case", "/plans", label(`{"session_id":"` + analysisOwnID + `","Task_type":"bug_fix"}`), "args.labels[0].Task_type", "unknown_field"},
+		{"added rule in another case", "/plans", `{"op":"config.set","kind":"project","id":"` + ids.project + `","add":{"rules":[{"kind":"repo_name","PATTERN":"x"}]}}`, "rules[0].PATTERN", "unknown_field"},
+		{"settings field in another case", "/plans", `{"op":"config.set","kind":"group","set":{"name":"a","Name":"b","enabled":true}}`, "Name", ""},
+		{"duplicate set key", "/plans", `{"op":"config.set","kind":"group","set":{"name":"x","name":"y","enabled":true}}`, "set.name", "duplicate_key"},
+		{"duplicate top-level key", "/plans", `{"op":"analysis.run","op":"analysis.run"}`, "op", "duplicate_key"},
+		{"duplicate rule key", "/plans", project(`{"kind":"repo_name","pattern":"a","pattern":"b"}`), "set.rules[0].pattern", "duplicate_key"},
+		{"duplicate label key", "/plans", label(`{"session_id":"` + analysisOwnID + `","task_type":"bug_fix","task_type":"feature"}`), "args.labels[0].task_type", "duplicate_key"},
+		{"duplicate args key", "/plans", `{"op":"weekly.regenerate","args":{"week":"2026-11-02","week":"2026-10-26"}}`, "args.week", "duplicate_key"},
+		{"duplicate test-model key", "/analysis/test-model", `{"set":{"llm.model":"a","llm.model":"b"}}`, "set.llm.model", "duplicate_key"},
+		{"duplicate key-set key", "/config/analysis-settings/api-key", `{"api_key":"first-0007","api_key":"second-0008"}`, "api_key", "duplicate_key"},
+	} {
+		method := http.MethodPost
+		if strings.HasSuffix(test.path, "api-key") {
+			method = http.MethodPut
+		}
+		response := fixture.facade(method, test.path, test.body, fixture.adminWrite)
+		body := failure(t, response)
+		if body.Code != agentapi.CodeInvalidArgument || body.Details["field"] != test.field || (test.reason != "" && body.Details["reason"] != test.reason) {
+			t.Errorf("%s = %s %v", test.name, body.Code, body.Details)
+		}
+		if strings.Contains(response.Body.String(), "second-0008") || strings.Contains(response.Body.String(), "first-0007") {
+			t.Errorf("%s echoed a key value", test.name)
+		}
+	}
+	// The exact spellings are accepted.
+	fixture.plan(t, project(`{"kind":"repo_name","pattern_untrusted":"exact"}`))
+}

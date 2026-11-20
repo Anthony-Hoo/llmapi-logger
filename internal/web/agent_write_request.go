@@ -65,7 +65,7 @@ var planArgs = map[string][]string{
 }
 
 // readAgentBody reads a JSON body of at most limit bytes and checks that it
-// is exactly one JSON value.
+// is exactly one JSON value in which no object repeats a key.
 func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int64) ([]byte, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, limit))
 	if err != nil {
@@ -82,6 +82,11 @@ func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int6
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, fieldFailure("body", "the request body has data after the JSON value")
+	}
+	// Every object of the input, at any depth, names each key once: the
+	// maps the input is read into would keep only the last.
+	if err := checkDuplicateKeys(body); err != nil {
+		return nil, err
 	}
 	return body, nil
 }
@@ -237,12 +242,12 @@ func decodeAgentSet[T any](kind string, set map[string]json.RawMessage, allowNul
 			return patch, fieldFailure(key, key+" cannot be null")
 		}
 		var single T
-		if err := strictDecode(nest(map[string]json.RawMessage{key: set[key]}), &single); err != nil {
-			return patch, fieldFailure(key, key+" has a value of the wrong type")
+		if err := strictDecode(nest(map[string]json.RawMessage{key: set[key]}), &single, ""); err != nil {
+			return patch, strictFailure(err, fieldFailure(key, key+" has a value of the wrong type"))
 		}
 	}
-	if err := strictDecode(nest(set), &patch); err != nil {
-		return patch, fieldFailure("set", "set cannot be decoded")
+	if err := strictDecode(nest(set), &patch, ""); err != nil {
+		return patch, strictFailure(err, fieldFailure("set", "set cannot be decoded"))
 	}
 	return patch, nil
 }
@@ -267,12 +272,12 @@ func decodeAgentListEdit[T any](kind, name string, edit map[string]json.RawMessa
 			return out, fieldFailure(key, name+"."+key+" must be a JSON array")
 		}
 		var single T
-		if err := strictDecode(map[string]any{key: edit[key]}, &single); err != nil {
-			return out, fieldFailure(key, name+"."+key+" has an element of the wrong shape")
+		if err := strictDecode(map[string]any{key: edit[key]}, &single, ""); err != nil {
+			return out, strictFailure(err, fieldFailure(key, name+"."+key+" has an element of the wrong shape"))
 		}
 	}
-	if err := strictDecode(edit, &out); err != nil {
-		return out, fieldFailure(name, name+" cannot be decoded")
+	if err := strictDecode(edit, &out, ""); err != nil {
+		return out, strictFailure(err, fieldFailure(name, name+" cannot be decoded"))
 	}
 	return out, nil
 }
@@ -296,14 +301,26 @@ func nest(flat map[string]json.RawMessage) map[string]any {
 	return out
 }
 
-func strictDecode(value any, target any) error {
+// strictDecode encodes value and decodes it into target: unknown fields,
+// and keys that name a field only without regard to case, are refused. The
+// latter is an *agentFailure naming the key under prefix; any other failure
+// is the decoder's error, which the caller describes (strictFailure).
+func strictDecode(value any, target any, prefix string) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	return readStrictJSON(encoded, target, prefix)
+}
+
+// strictFailure is the refusal of a strictDecode error: its own when it
+// names a key, otherwise fallback.
+func strictFailure(err error, fallback *agentFailure) *agentFailure {
+	var failure *agentFailure
+	if errors.As(err, &failure) {
+		return failure
+	}
+	return fallback
 }
 
 // readOnlyFields are the fields of the read shape (config show, a plan's
