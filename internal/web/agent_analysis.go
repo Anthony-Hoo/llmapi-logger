@@ -373,7 +373,8 @@ func (handler *managementHandler) serveAgentAnalysisSessions(writer http.Respons
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	cursor, err := unwrapAgentCursor(agentCursorAnalysisSessions, values.Get("cursor"))
+	binding := handler.agentCursorBinding(agentCursorAnalysisSessions, values, call.Principal)
+	cursor, err := unwrapAgentCursor(agentCursorAnalysisSessions, binding, values.Get("cursor"))
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -410,7 +411,7 @@ func (handler *managementHandler) serveAgentAnalysisSessions(writer http.Respons
 	}
 	writeAgentRead(writer, map[string]any{
 		"items":       agentAnalysisSessions(response.Items),
-		"next_cursor": wrapAgentCursor(agentCursorAnalysisSessions, response.NextCursor),
+		"next_cursor": wrapAgentCursor(agentCursorAnalysisSessions, binding, response.NextCursor),
 	}, agentMetaOK(), true)
 }
 

@@ -269,3 +269,60 @@ func TestAgentExclusiveArgumentsNameBoth(t *testing.T) {
 		}
 	}
 }
+
+// A cursor belongs to the query and the identity of the page that returned
+// it: the next page of the same query (a relative range included, and a
+// different page size) is accepted; another filter, another identity or
+// another list is refused with cursor_query_mismatch, so pages of two
+// queries are never mixed.
+func TestAgentCursorsAreBoundToTheirQuery(t *testing.T) {
+	fixture := newReadFixture(t)
+	nextCursor := func(path, token string) string {
+		t.Helper()
+		cursor, _ := readData(t, fixture.facade(http.MethodGet, path, "", token))["next_cursor"].(string)
+		if cursor == "" {
+			t.Fatalf("%s returned no next_cursor", path)
+		}
+		return cursor
+	}
+	reason := func(path, token string) string {
+		t.Helper()
+		response := fixture.facade(http.MethodGet, path, "", token)
+		if response.Code == http.StatusOK {
+			return ""
+		}
+		body := decodeAgent(t, response)
+		if body.Error == nil || body.Error.Details["field"] != "cursor" {
+			t.Fatalf("%s = %s", path, response.Body.String())
+		}
+		reason, _ := body.Error.Details["reason"].(string)
+		return reason
+	}
+	for _, list := range []struct {
+		first, same, other string
+		token, otherToken  string
+	}{
+		{"/requests?since=3650d&collapse=false&limit=2", "/requests?since=3650d&collapse=false&limit=3", "/requests?since=3650d&collapse=false&limit=2&status=error",
+			fixture.adminRead, fixture.developer},
+		{"/usage/sessions?" + fixtureWindow + "&limit=1", "/usage/sessions?" + fixtureWindow + "&limit=2", "/usage/sessions?" + fixtureWindow + "&limit=1&sort=tokens",
+			fixture.adminRead, fixture.developer},
+		{"/analysis/sessions?" + fixtureWindow + "&limit=1", "/analysis/sessions?" + fixtureWindow + "&limit=1", "/analysis/sessions?" + fixtureWindow + "&limit=1&kind=chat",
+			fixture.adminRead, fixture.developer},
+	} {
+		cursor := nextCursor(list.first, list.token)
+		if got := reason(list.same+"&cursor="+cursor, list.token); got != "" {
+			t.Errorf("%s: the next page of the same query = %s", list.first, got)
+		}
+		if got := reason(list.other+"&cursor="+cursor, list.token); got != reasonCursorMismatch {
+			t.Errorf("%s: another filter = %q", list.other, got)
+		}
+		if got := reason(list.first+"&cursor="+cursor, list.otherToken); got != reasonCursorMismatch {
+			t.Errorf("%s: another identity = %q", list.first, got)
+		}
+	}
+	// A cursor of another list is not a cursor of this one at all.
+	cursor := nextCursor("/usage/sessions?"+fixtureWindow+"&limit=1", fixture.adminRead)
+	if got := reason("/requests?cursor="+cursor, fixture.adminRead); got != reasonInvalidCursor {
+		t.Errorf("a usage cursor on the audit list = %q", got)
+	}
+}

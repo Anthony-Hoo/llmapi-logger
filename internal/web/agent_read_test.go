@@ -1071,13 +1071,14 @@ func TestAgentReadParameters(t *testing.T) {
 			t.Errorf("%s was accepted", bad)
 		}
 	}
-	// Cursors are opaque and bound to their list.
-	wrapped := wrapAgentCursor(agentCursorAudits, "1:a")
-	if inner, err := unwrapAgentCursor(agentCursorAudits, wrapped); err != nil || inner != "1:a" {
+	// Cursors are opaque and bound to their list (and to their query, see
+	// TestAgentCursorsAreBoundToTheirQuery).
+	wrapped := wrapAgentCursor(agentCursorAudits, "b", "1:a")
+	if inner, err := unwrapAgentCursor(agentCursorAudits, "b", wrapped); err != nil || inner != "1:a" {
 		t.Errorf("cursor round trip = %q %v", inner, err)
 	}
-	for _, bad := range []string{wrapAgentCursor(agentCursorUsageSessions, "x"), "not-base64!", base64.RawURLEncoding.EncodeToString([]byte("c0|audits|1:a"))} {
-		if _, err := unwrapAgentCursor(agentCursorAudits, bad); err == nil {
+	for _, bad := range []string{wrapAgentCursor(agentCursorUsageSessions, "b", "x"), "not-base64!", base64.RawURLEncoding.EncodeToString([]byte("c1|audits|1:a"))} {
+		if _, err := unwrapAgentCursor(agentCursorAudits, "b", bad); err == nil {
 			t.Errorf("cursor %q accepted", bad)
 		}
 	}
@@ -1105,7 +1106,7 @@ func TestAgentReadParameters(t *testing.T) {
 		t.Fatalf("paged ids = %v", seen)
 	}
 	for _, path := range []string{"/requests?bogus=1", "/requests?limit=0", "/requests?limit=201", "/requests?status=600", "/requests?status=abc",
-		"/requests?cursor=" + wrapAgentCursor(agentCursorUsageSessions, "x"), "/requests?collapse=maybe", "/requests?limit=1&limit=2",
+		"/requests?cursor=" + wrapAgentCursor(agentCursorUsageSessions, "b", "x"), "/requests?collapse=maybe", "/requests?limit=1&limit=2",
 		"/requests?capture_status=chunk_missing", "/requests/own-1?headers=some", "/requests/own-1/export/everything",
 		"/usage/overview?tz_offset_min=900", "/analysis/overview", "/analysis/report?week=next", "/weekly/report?week=2026-11-03",
 		"/config/everything", "/weekly/trend?weeks=13"} {

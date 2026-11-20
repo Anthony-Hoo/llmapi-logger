@@ -44,7 +44,7 @@ func flagToNow() flagSpec {
 
 func flagCursor() flagSpec {
 	return flagSpec{Name: "cursor", Value: "<cursor>", Query: "cursor",
-		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Default: none (the first page)."}
+		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Repeat every other flag of the first page exactly (only --limit may change); a cursor of another query or another identity fails with INVALID_ARGUMENT, reason cursor_query_mismatch. Default: none (the first page)."}
 }
 
 func flagLimit(minimum, maximum, fallback int) flagSpec {

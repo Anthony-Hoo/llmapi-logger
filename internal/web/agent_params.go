@@ -2,7 +2,10 @@ package web
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -357,19 +360,65 @@ func asArgument(err error, refused error) error {
 	return err
 }
 
-// Opaque cursors. The facade wraps each service's own cursor with a version
-// and the kind of list it belongs to, so a cursor of one list is refused by
-// another instead of being misread.
-const agentCursorVersion = "c1"
+// Opaque cursors (contract section 0.1 items 19 and 117). The facade wraps
+// each service's own cursor with a version, the kind of list it belongs to
+// and a binding: a short keyed digest of the query the page answered and of
+// the caller's scope. A cursor of one list is refused by another, and a
+// cursor is refused with cursor_query_mismatch when the next page asks a
+// different query or comes from another identity, so pages of two queries
+// are never mixed.
+const agentCursorVersion = "c2"
 
-func wrapAgentCursor(kind, inner string) string {
+// agentCursorBinding is the digest of the query parameters (every one but
+// cursor and limit, as given: since=2h stays "2h", so the next page of a
+// relative range still matches) and of the caller's role and scope.
+func (handler *managementHandler) agentCursorBinding(kind string, values url.Values, caller principal) string {
+	var key [32]byte
+	if handler.authenticator != nil {
+		key = handler.authenticator.sessionKey
+	}
+	derived := hmac.New(sha256.New, key[:])
+	derived.Write([]byte("llmapi-logger/agent-cursor/v1"))
+	mac := hmac.New(sha256.New, derived.Sum(nil))
+	names := make([]string, 0, len(values))
+	for name := range values {
+		if name != "cursor" && name != "limit" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	write := func(part string) {
+		mac.Write([]byte(strconv.Itoa(len(part))))
+		mac.Write([]byte{':'})
+		mac.Write([]byte(part))
+	}
+	write(kind)
+	write(string(caller.Role))
+	if scope := callerReadScope(caller); scope != nil {
+		write(hex.EncodeToString(scope.Fingerprint))
+		if scope.TokenID != nil {
+			write(strconv.FormatInt(*scope.TokenID, 10))
+		} else {
+			write("-")
+		}
+	} else {
+		write("all")
+	}
+	for _, name := range names {
+		write(name)
+		write(values.Get(name))
+	}
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:12])
+}
+
+func wrapAgentCursor(kind, binding, inner string) string {
 	if inner == "" {
 		return ""
 	}
-	return base64.RawURLEncoding.EncodeToString([]byte(agentCursorVersion + "|" + kind + "|" + inner))
+	return base64.RawURLEncoding.EncodeToString([]byte(agentCursorVersion + "|" + kind + "|" + binding + "|" + inner))
 }
 
-func unwrapAgentCursor(kind, cursor string) (string, error) {
+func unwrapAgentCursor(kind, binding, cursor string) (string, error) {
 	if cursor == "" {
 		return "", nil
 	}
@@ -377,12 +426,20 @@ func unwrapAgentCursor(kind, cursor string) (string, error) {
 	if err != nil {
 		return "", errInvalidCursor
 	}
-	parts := strings.SplitN(string(decoded), "|", 3)
-	if len(parts) != 3 || parts[0] != agentCursorVersion || parts[1] != kind || parts[2] == "" {
+	parts := strings.SplitN(string(decoded), "|", 4)
+	if len(parts) != 4 || parts[0] != agentCursorVersion || parts[1] != kind || parts[3] == "" {
 		return "", errInvalidCursor
 	}
-	return parts[2], nil
+	if !hmac.Equal([]byte(parts[2]), []byte(binding)) {
+		return "", errCursorMismatch
+	}
+	return parts[3], nil
 }
+
+// errCursorMismatch refuses a cursor of this list that belongs to another
+// query or another identity.
+var errCursorMismatch = argInvalid("cursor", reasonCursorMismatch,
+	"`cursor` belongs to a different query: the next page must repeat every argument of the first page exactly (only `limit` may change) and come from the same identity; start again without `cursor` to read this query")
 
 // errInvalidCursor refuses a cursor that is not a next_cursor of this list.
 var errInvalidCursor = argInvalid("cursor", reasonInvalidCursor,

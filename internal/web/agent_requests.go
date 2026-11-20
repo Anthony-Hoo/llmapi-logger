@@ -174,7 +174,8 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	filter, cursor, limit, err := handler.agentAuditFilter(values, call.Principal)
+	binding := handler.agentCursorBinding(agentCursorAudits, values, call.Principal)
+	filter, cursor, limit, err := handler.agentAuditFilter(values, call.Principal, binding)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -193,7 +194,7 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 		list.Items = append(list.Items, agentAuditItemOf(item))
 	}
 	if page.NextCursor != nil {
-		list.NextCursor = wrapAgentCursor(agentCursorAudits, strconv.FormatInt(page.NextCursor.BeforeStartedAtNS, 10)+":"+page.NextCursor.BeforeID)
+		list.NextCursor = wrapAgentCursor(agentCursorAudits, binding, strconv.FormatInt(page.NextCursor.BeforeStartedAtNS, 10)+":"+page.NextCursor.BeforeID)
 	}
 	var actions []string
 	if len(list.Items) == 0 && list.NextCursor != "" {
@@ -238,7 +239,7 @@ func agentClosedValue(values url.Values, name string, allowed []string) (string,
 	return "", argNotAllowed(name, allowed)
 }
 
-func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal) (query.Filter, query.Cursor, int, error) {
+func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal, binding string) (query.Filter, query.Cursor, int, error) {
 	var filter query.Filter
 	var cursor query.Cursor
 	if !callerMayFilterByCaller(caller) {
@@ -285,7 +286,7 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 	if err != nil {
 		return filter, cursor, 0, err
 	}
-	inner, err := unwrapAgentCursor(agentCursorAudits, values.Get("cursor"))
+	inner, err := unwrapAgentCursor(agentCursorAudits, binding, values.Get("cursor"))
 	if err != nil {
 		return filter, cursor, 0, err
 	}

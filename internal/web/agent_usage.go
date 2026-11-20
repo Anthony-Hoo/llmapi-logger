@@ -274,9 +274,9 @@ type agentUsageSessions struct {
 	ClientLabels   map[string]string  `json:"client_labels,omitempty"`
 }
 
-func agentUsageSessionsOf(response insights.SessionsResponse) agentUsageSessions {
+func agentUsageSessionsOf(response insights.SessionsResponse, binding string) agentUsageSessions {
 	out := agentUsageSessions{Items: make([]agentSessionCard, 0, len(response.Items)),
-		NextCursor:     wrapAgentCursor(agentCursorUsageSessions, response.NextCursor),
+		NextCursor:     wrapAgentCursor(agentCursorUsageSessions, binding, response.NextCursor),
 		BillingEnabled: response.BillingEnabled, ClientLabels: copyLabels(response.ClientLabels)}
 	for _, card := range response.Items {
 		item := agentSessionCard{
@@ -319,7 +319,8 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	cursor, err := unwrapAgentCursor(agentCursorUsageSessions, values.Get("cursor"))
+	binding := handler.agentCursorBinding(agentCursorUsageSessions, values, call.Principal)
+	cursor, err := unwrapAgentCursor(agentCursorUsageSessions, binding, values.Get("cursor"))
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
@@ -336,7 +337,7 @@ func (handler *managementHandler) serveAgentUsageSessions(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, asArgument(err, errInvalidCursor), "")
 		return
 	}
-	writeAgentRead(writer, agentUsageSessionsOf(response), agentMetaOK(), true)
+	writeAgentRead(writer, agentUsageSessionsOf(response, binding), agentMetaOK(), true)
 }
 
 type agentTrendStep struct {
