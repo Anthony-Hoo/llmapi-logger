@@ -498,6 +498,39 @@ func TestStateFilesAreReadThroughTheCheckedHandle(t *testing.T) {
 	})
 }
 
+// TestStateFIFOIsRefusedWithoutWaiting (contract section 0.1 item 169): the
+// state files are opened before their type is checked, so a FIFO in place
+// of config.json or credentials.json must neither block the open nor be
+// read; it is refused as not a regular file and nothing is sent.
+func TestStateFIFOIsRefusedWithoutWaiting(t *testing.T) {
+	server := newFakeServer(t, nil)
+	for _, name := range []string{configFile, credentialsFile} {
+		h := newHarness(t)
+		h.saveLogin(server.URL)
+		path := filepath.Join(h.home, name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		exit := make(chan int, 1)
+		go func() { exit <- h.run("whoami") }()
+		select {
+		case code := <-exit:
+			body := h.failure()
+			if code != 1 || body.Code != "LOCAL_FILE_ERROR" || body.Details["reason"] != problemNotFile || body.Details["path"] != path {
+				t.Fatalf("%s as a FIFO: exit %d %+v", name, code, body)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("whoami waited on a FIFO in place of %s", name)
+		}
+	}
+	if requests := len(server.recorded()); requests != 0 {
+		t.Fatalf("%d requests sent", requests)
+	}
+}
+
 // TestLoginTightensALooseStateDirectoryBeforeAnyRequest (contract section
 // 0.1 item 169): on the first `login --server`, the user's own state
 // directory that others can access is made private before config.json is
