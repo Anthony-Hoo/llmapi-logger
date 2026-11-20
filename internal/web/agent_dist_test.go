@@ -330,6 +330,49 @@ func TestInstallLinksAreLimitedPerSession(t *testing.T) {
 	}
 }
 
+// TestInstallLinkRefusalsDoNotUseTheBudget: requests refused for their
+// arguments (unknown agent or platform, missing or invalid skills_dir) write
+// no row and do not count; after 100 of them the identity still has its
+// full 20 links.
+func TestInstallLinkRefusalsDoNotUseTheBudget(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	dir, _ := packTestPackages(t)
+	withDist(t, env, dir, &distClock{now: time.Now()})
+	admin := agentCaller{bearer: testAdminToken}
+	bad := []string{
+		`{"agent":"robot","platform":"linux-amd64"}`,
+		`{"agent":"codex","platform":"plan9-amd64"}`,
+		`{"agent":"other","platform":"linux-amd64"}`,
+		`{"agent":"other","platform":"linux-amd64","skills_dir":"relative/dir"}`,
+	}
+	for index := 0; index < 100; index++ {
+		if response := env.do(http.MethodPost, agentInstallLinksPath, bad[index%len(bad)], admin); response.Code != http.StatusBadRequest {
+			t.Fatalf("bad request %d = %d %s", index, response.Code, response.Body.String())
+		}
+	}
+	for index := 0; index < agentdist.InstallLinksPerWindow; index++ {
+		if response := env.do(http.MethodPost, agentInstallLinksPath, `{"agent":"codex","platform":"linux-amd64"}`, admin); response.Code != http.StatusOK {
+			t.Fatalf("link %d after 100 refused requests = %d %s", index+1, response.Code, response.Body.String())
+		}
+	}
+	if response := env.do(http.MethodPost, agentInstallLinksPath, `{"agent":"codex","platform":"linux-amd64"}`, admin); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("link 21 = %d", response.Code)
+	}
+	// Over the limit, a bad request is still answered for its arguments.
+	if response := env.do(http.MethodPost, agentInstallLinksPath, bad[0], admin); response.Code != http.StatusBadRequest {
+		t.Fatalf("bad request over the limit = %d", response.Code)
+	}
+	rows := 0
+	for _, entry := range env.store.Audit() {
+		if entry.Event == agentaccess.EventLinkIssued {
+			rows++
+		}
+	}
+	if rows != agentdist.InstallLinksPerWindow {
+		t.Fatalf("link_issued rows = %d", rows)
+	}
+}
+
 // TestDownloadRespellingsShareOneBudget: through a real server (so the
 // router decodes the raw path as it would in production), every spelling
 // of one link either is refused as not found or is the same link with the

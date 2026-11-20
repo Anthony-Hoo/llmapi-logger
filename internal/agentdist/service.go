@@ -83,7 +83,8 @@ type Service struct {
 }
 
 // Install links one web session identity may request per window (contract
-// section 7). Every request counts, and a refused one is not counted.
+// section 7). Only a request that issues a link counts: one refused for its
+// arguments (CheckInstallLink) or for the limit itself is not counted.
 const (
 	InstallLinksPerWindow = 20
 	InstallLinkWindow     = 10 * time.Minute
@@ -271,21 +272,7 @@ type InstallLinkResponse struct {
 // when packages are not available, any other error for a server URL that
 // cannot be put into a shell command.
 func (service *Service) InstallLink(serverURL string, request InstallLinkRequest) (InstallLinkResponse, error) {
-	if !ValidAgent(request.Agent) {
-		return InstallLinkResponse{}, &InputError{Field: "agent", Message: "agent must be one of claude-code, codex, cursor, gemini-cli, other"}
-	}
-	platform, ok := ParsePlatform(request.Platform)
-	if !ok {
-		return InstallLinkResponse{}, &InputError{Field: "platform", Message: "platform must be one of " + platformList()}
-	}
-	if service.manifest == nil {
-		return InstallLinkResponse{}, service.loadErr
-	}
-	pkg, ok := service.manifest.Find(platform)
-	if !ok {
-		return InstallLinkResponse{}, fmt.Errorf("%w: no package for %s", ErrNoPackages, platform)
-	}
-	server, err := cleanServerURL(serverURL)
+	pkg, server, err := service.checkInstallLink(serverURL, request)
 	if err != nil {
 		return InstallLinkResponse{}, err
 	}
@@ -303,6 +290,46 @@ func (service *Service) InstallLink(serverURL string, request InstallLinkRequest
 		return InstallLinkResponse{}, err
 	}
 	return InstallLinkResponse{Prompt: prompt, ExpiresAt: expires.Format(time.RFC3339), File: pkg.File}, nil
+}
+
+// CheckInstallLink answers what InstallLink would answer for this input,
+// with the same errors, but mints nothing. The web layer calls it before it
+// counts the request, so that only a request that issues a link uses the
+// install-link budget.
+func (service *Service) CheckInstallLink(serverURL string, request InstallLinkRequest) error {
+	_, _, err := service.checkInstallLink(serverURL, request)
+	return err
+}
+
+func (service *Service) checkInstallLink(serverURL string, request InstallLinkRequest) (Package, string, error) {
+	info, ok := agents[request.Agent]
+	if !ok {
+		return Package{}, "", &InputError{Field: "agent", Message: "agent must be one of claude-code, codex, cursor, gemini-cli, other"}
+	}
+	platform, ok := ParsePlatform(request.Platform)
+	if !ok {
+		return Package{}, "", &InputError{Field: "platform", Message: "platform must be one of " + platformList()}
+	}
+	switch {
+	case request.SkillsDir != "":
+		if _, err := cleanSkillsDir(request.SkillsDir, platform); err != nil {
+			return Package{}, "", err
+		}
+	case info.SkillsDir == "":
+		return Package{}, "", &InputError{Field: "skills_dir", Message: "skills_dir is required for agent other: give the absolute path of the directory your agent loads skills from"}
+	}
+	if service.manifest == nil {
+		return Package{}, "", service.loadErr
+	}
+	pkg, ok := service.manifest.Find(platform)
+	if !ok {
+		return Package{}, "", fmt.Errorf("%w: no package for %s", ErrNoPackages, platform)
+	}
+	server, err := cleanServerURL(serverURL)
+	if err != nil {
+		return Package{}, "", err
+	}
+	return pkg, server, nil
 }
 
 // LinkPrefix is the signed link without the file name.

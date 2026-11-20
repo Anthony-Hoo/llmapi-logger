@@ -436,6 +436,31 @@ func TestFullDownloadTrackerDoesNotRefuseFreshLinks(t *testing.T) {
 	}
 }
 
+// TestCheckInstallLinkMatchesInstallLink: CheckInstallLink refuses exactly
+// what InstallLink refuses, with the same error, and mints nothing.
+func TestCheckInstallLinkMatchesInstallLink(t *testing.T) {
+	service, _, _, _ := newTestService(t)
+	cases := []struct {
+		server  string
+		request InstallLinkRequest
+	}{
+		{"https://audit.example.com", InstallLinkRequest{Agent: AgentCodex, Platform: "linux-amd64"}},
+		{"https://audit.example.com", InstallLinkRequest{Agent: "copilot", Platform: "linux-amd64"}},
+		{"https://audit.example.com", InstallLinkRequest{Agent: AgentCodex, Platform: "linux-386"}},
+		{"https://audit.example.com", InstallLinkRequest{Agent: AgentOther, Platform: "linux-amd64"}},
+		{"https://audit.example.com", InstallLinkRequest{Agent: AgentOther, Platform: "linux-amd64", SkillsDir: "relative"}},
+		{"https://audit.example.com", InstallLinkRequest{Agent: AgentOther, Platform: "windows-amd64", SkillsDir: `C:\Tools\skills`}},
+		{"https://audit.example.com/$(x)", InstallLinkRequest{Agent: AgentCodex, Platform: "linux-amd64"}},
+	}
+	for _, tc := range cases {
+		checked := service.CheckInstallLink(tc.server, tc.request)
+		_, issued := service.InstallLink(tc.server, tc.request)
+		if (checked == nil) != (issued == nil) || (checked != nil && checked.Error() != issued.Error()) {
+			t.Errorf("%+v at %s: CheckInstallLink %v, InstallLink %v", tc.request, tc.server, checked, issued)
+		}
+	}
+}
+
 // TestConcurrentDownloadsRespectCap: 100 concurrent downloads with one link,
 // exactly DownloadsPerLink succeed and the rest are refused.
 func TestConcurrentDownloadsRespectCap(t *testing.T) {

@@ -89,9 +89,20 @@ func (handler *managementHandler) serveAgentInstallLink(writer http.ResponseWrit
 		writePackagesMissing(writer)
 		return
 	}
+	serverURL := handler.agentPublicURL
+	if serverURL == "" {
+		serverURL = browsingBaseURL(request)
+	}
+	linkRequest := agentdist.InstallLinkRequest{Agent: body.Agent, Platform: body.Platform, SkillsDir: body.SkillsDir}
+	// A request that cannot issue a link (bad arguments, no package, an
+	// unusable address) is answered before it is counted.
+	if err := handler.agentDist.CheckInstallLink(serverURL, linkRequest); err != nil {
+		writeInstallLinkError(writer, err)
+		return
+	}
 	// At most 20 links per web session identity in 10 minutes (contract
-	// section 7): each link writes a link_issued row, and a refused request
-	// writes none.
+	// section 7): each link writes a link_issued row, and only an issued
+	// link counts.
 	if allowed, wait := handler.agentDist.AllowInstallLink(installLinkKey(caller)); !allowed {
 		seconds := int(math.Ceil(wait.Seconds()))
 		if seconds < 1 {
@@ -101,33 +112,9 @@ func (handler *managementHandler) serveAgentInstallLink(writer http.ResponseWrit
 		writeError(writer, http.StatusTooManyRequests, "too_many_requests", "安装链接生成得太频繁，请稍后再试")
 		return
 	}
-	serverURL := handler.agentPublicURL
-	if serverURL == "" {
-		serverURL = browsingBaseURL(request)
-	}
-	link, err := handler.agentDist.InstallLink(serverURL, agentdist.InstallLinkRequest{
-		Agent: body.Agent, Platform: body.Platform, SkillsDir: body.SkillsDir,
-	})
-	var input *agentdist.InputError
-	switch {
-	case errors.As(err, &input):
-		writeJSON(writer, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"code": "invalid_argument", "message": input.Message, "field": input.Field},
-		})
-		return
-	case errors.Is(err, agentdist.ErrNoPackages):
-		writePackagesMissing(writer)
-		return
-	case err != nil:
-		// The only other failure is a server address that cannot be put into
-		// a shell command. public_url is validated at startup with the same
-		// rule, so this is the browser's address.
-		writeJSON(writer, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{
-				"code":    "server_url_unusable",
-				"message": "无法用当前访问地址生成安装链接，请管理员在配置里设置 agent_access.public_url",
-			},
-		})
+	link, err := handler.agentDist.InstallLink(serverURL, linkRequest)
+	if err != nil {
+		writeInstallLinkError(writer, err)
 		return
 	}
 	handler.agent.RecordAudit(request.Context(), storage.AgentAuditEntry{
@@ -150,6 +137,29 @@ func installLinkKey(caller principal) string {
 		key += ":" + strconv.FormatInt(*caller.Scope.TokenID, 10)
 	}
 	return key
+}
+
+// writeInstallLinkError answers an error of CheckInstallLink or InstallLink.
+func writeInstallLinkError(writer http.ResponseWriter, err error) {
+	var input *agentdist.InputError
+	switch {
+	case errors.As(err, &input):
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"error": map[string]string{"code": "invalid_argument", "message": input.Message, "field": input.Field},
+		})
+	case errors.Is(err, agentdist.ErrNoPackages):
+		writePackagesMissing(writer)
+	default:
+		// The only other failure is a server address that cannot be put into
+		// a shell command. public_url is validated at startup with the same
+		// rule, so this is the browser's address.
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"error": map[string]string{
+				"code":    "server_url_unusable",
+				"message": "无法用当前访问地址生成安装链接，请管理员在配置里设置 agent_access.public_url",
+			},
+		})
+	}
 }
 
 func writePackagesMissing(writer http.ResponseWriter) {
