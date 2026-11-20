@@ -367,8 +367,9 @@ func (state WeekState) Version() int64 { return state.GeneratedAtNS }
 // RegenerateIfVersion is Regenerate only while the week's stored state is
 // still the one the caller saw (WeekState.Version; 0: no snapshot):
 // otherwise ErrVersionConflict and nothing is written. The comparison and
-// the write hold the snapshot lock, so no other freeze or regeneration can
-// land in between. Waiting for the lock gives up when ctx ends: the error then
+// the write hold the week's snapshot lock, so no other freeze or
+// regeneration of that week can land in between; writes to other weeks do
+// not wait. Waiting for the lock gives up when ctx ends: the error then
 // matches ErrNotStarted (and ctx's error), and nothing was computed or
 // written.
 func (service *Service) RegenerateIfVersion(ctx context.Context, label string, expectedVersion int64) error {
@@ -382,10 +383,11 @@ func (service *Service) RegenerateIfVersion(ctx context.Context, label string, e
 	if !service.now().After(week.End) {
 		return ErrInvalid
 	}
-	if err := service.job.freezeLock.lock(ctx); err != nil {
+	unlock, err := service.job.weekLocks.lock(ctx, week.Label())
+	if err != nil {
 		return notStarted(err)
 	}
-	defer service.job.freezeLock.unlock()
+	defer unlock()
 	snapshot, exists, err := service.snapshots.LoadWeeklySnapshot(ctx, week.Label())
 	if err != nil {
 		return err

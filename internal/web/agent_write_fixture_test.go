@@ -128,17 +128,19 @@ func (nopApplier) Running() bool                                                
 
 // snapshotMemory is an in-memory orgreport.SnapshotStore.
 // When hold is set, a save signals entered and waits for hold to be closed
-// before it stores anything, so a test can keep the snapshot lock busy.
+// before it stores anything, so a test can keep a week's snapshot lock busy.
+// holdWeek, when set, limits the hold to the saves of that week.
 type snapshotMemory struct {
 	mu        sync.Mutex
 	snapshots map[string]orgreport.WeeklySnapshot
 	saves     int
 	hold      chan struct{}
 	entered   chan struct{}
+	holdWeek  string
 }
 
 func (memory *snapshotMemory) SaveWeeklySnapshot(_ context.Context, snapshot orgreport.WeeklySnapshot) error {
-	if memory.hold != nil {
+	if memory.hold != nil && (memory.holdWeek == "" || memory.holdWeek == snapshot.Week) {
 		memory.entered <- struct{}{}
 		<-memory.hold
 	}

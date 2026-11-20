@@ -542,24 +542,26 @@ func TestAgentRateLimits(t *testing.T) {
 // gives its slot of the global regeneration quota back.
 func TestAgentRegenerateBlockedBehindAFreezeTimesOutAndRefunds(t *testing.T) {
 	fixture := newWriteFixture(t)
+	week := orgTestWeek.Format("2006-01-02")
+	fixture.handler.regenerateTimeout = 50 * time.Millisecond
+	// The plan is made first: it sees the week without a snapshot.
+	plan := fixture.plan(t, map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week}})
+	// A web regeneration of the same week holds the week's lock inside the
+	// save (the lock is per week, item 129: another week would not block).
 	fixture.snapshots.hold, fixture.snapshots.entered = make(chan struct{}), make(chan struct{}, 1)
-	other := orgTestWeek.AddDate(0, 0, -7).Format("2006-01-02")
 	webDone := make(chan int, 1)
 	go func() {
-		webDone <- fixture.web(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+other, "").Code
+		webDone <- fixture.web(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+week, "").Code
 	}()
 	<-fixture.snapshots.entered
-
-	fixture.handler.regenerateTimeout = 50 * time.Millisecond
-	week := orgTestWeek.Format("2006-01-02")
-	plan := fixture.plan(t, map[string]any{"op": "weekly.regenerate", "args": map[string]any{"week": week}})
 	if code := failure(t, fixture.facade(http.MethodPost, "/plans/"+plan.PlanID+"/apply", nil, fixture.adminWrite)).Code; code != agentapi.CodeTimeout {
 		t.Fatalf("blocked apply = %s", code)
 	}
 	fixture.snapshots.mu.Lock()
 	_, written := fixture.snapshots.snapshots[week]
+	saves := fixture.snapshots.saves
 	fixture.snapshots.mu.Unlock()
-	if written {
+	if written || saves != 0 {
 		t.Fatal("the timed-out regeneration wrote a snapshot")
 	}
 	// The slot came back: the whole quota of six is still free.
@@ -578,6 +580,75 @@ func TestAgentRegenerateBlockedBehindAFreezeTimesOutAndRefunds(t *testing.T) {
 	rows := fixture.writeAudits()
 	if last := rows[len(rows)-1]; last.Event != agentaccess.EventWriteFailed || last.ErrorCode != string(agentapi.CodeTimeout) {
 		t.Fatalf("audit row = %+v", last)
+	}
+}
+
+// webRegenerate posts the web route's regeneration of week with a request
+// deadline, as a browser whose request is given up after deadline.
+func (fixture *writeFixture) webRegenerate(week string, deadline time.Duration) (*httptest.ResponseRecorder, time.Duration) {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+week, nil)
+	request.AddCookie(fixture.adminWeb)
+	ctx, cancel := context.WithTimeout(request.Context(), deadline)
+	defer cancel()
+	response := httptest.NewRecorder()
+	started := time.Now()
+	fixture.handler.ServeHTTP(response, request.WithContext(ctx))
+	return response, time.Since(started)
+}
+
+// Contract section 0.1 item 129: the snapshot lock is per week. The web
+// route POST /api/v1/org/weekly/regenerate for week A is not delayed by a
+// long write of week B (here a regeneration of B held inside its save, as a
+// background freeze can be for minutes), where before the global lock made it
+// wait and answer 503 at its deadline having done nothing. Against a write
+// to the same week it still waits, and answers org_timeout when its deadline
+// passes first.
+func TestWebRegenerateIsNotDelayedByAWriteToAnotherWeek(t *testing.T) {
+	fixture := newWriteFixture(t)
+	weekA := orgTestWeek.Format("2006-01-02")
+	weekB := orgTestWeek.AddDate(0, 0, -7).Format("2006-01-02")
+	hold := func(week string) chan int {
+		fixture.snapshots.hold, fixture.snapshots.entered, fixture.snapshots.holdWeek = make(chan struct{}), make(chan struct{}, 1), week
+		done := make(chan int, 1)
+		go func() { done <- fixture.web(http.MethodPost, "/api/v1/org/weekly/regenerate?week="+week, "").Code }()
+		<-fixture.snapshots.entered
+		return done
+	}
+
+	// Week B is being written; week A regenerates at once.
+	doneB := hold(weekB)
+	response, took := fixture.webRegenerate(weekA, 2*time.Second)
+	if response.Code != http.StatusNoContent || took > time.Second {
+		t.Fatalf("week A behind a write of week B = %d %s after %v", response.Code, strings.TrimSpace(response.Body.String()), took)
+	}
+	close(fixture.snapshots.hold)
+	if code := <-doneB; code != http.StatusNoContent {
+		t.Fatalf("week B = %d", code)
+	}
+
+	// Week A is being written; a second regeneration of A waits for it and
+	// gives up at its deadline with org_timeout, writing nothing.
+	fixture.snapshots.mu.Lock()
+	saves := fixture.snapshots.saves
+	fixture.snapshots.mu.Unlock()
+	doneA := hold(weekA)
+	response, took = fixture.webRegenerate(weekA, 100*time.Millisecond)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "org_timeout") || took < 100*time.Millisecond {
+		t.Fatalf("week A behind a write of week A = %d %s after %v", response.Code, strings.TrimSpace(response.Body.String()), took)
+	}
+	// Meanwhile week B is not held up by A.
+	if response, took := fixture.webRegenerate(weekB, 2*time.Second); response.Code != http.StatusNoContent || took > time.Second {
+		t.Fatalf("week B behind a write of week A = %d after %v", response.Code, took)
+	}
+	close(fixture.snapshots.hold)
+	if code := <-doneA; code != http.StatusNoContent {
+		t.Fatalf("held regeneration of week A = %d", code)
+	}
+	fixture.snapshots.mu.Lock()
+	defer fixture.snapshots.mu.Unlock()
+	// The held write of A and the write of B, nothing from the one that gave up.
+	if fixture.snapshots.saves != saves+2 {
+		t.Fatalf("saves %d -> %d", saves, fixture.snapshots.saves)
 	}
 }
 

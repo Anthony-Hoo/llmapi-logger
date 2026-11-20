@@ -819,14 +819,15 @@ func TestRegenerateIfVersion(t *testing.T) {
 func TestRegenerateIfVersionGivesUpWaitingForTheSnapshotLock(t *testing.T) {
 	fixture := newReportFixture(t)
 	service := fixture.service
-	// A long freeze holds the lock.
-	if err := service.job.freezeLock.lock(context.Background()); err != nil {
+	// A long freeze of the same week holds its lock.
+	unlock, err := service.job.weekLocks.lock(context.Background(), "2026-11-02")
+	if err != nil {
 		t.Fatal(err)
 	}
 	saves := fixture.snapshots.saves
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	err := service.RegenerateIfVersion(ctx, "2026-11-02", 0)
+	err = service.RegenerateIfVersion(ctx, "2026-11-02", 0)
 	if !errors.Is(err, ErrNotStarted) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("blocked regeneration = %v", err)
 	}
@@ -837,9 +838,73 @@ func TestRegenerateIfVersionGivesUpWaitingForTheSnapshotLock(t *testing.T) {
 	if err := service.Regenerate(ctx, "2026-11-02"); !errors.Is(err, ErrNotStarted) {
 		t.Fatalf("blocked web regeneration = %v", err)
 	}
-	service.job.freezeLock.unlock()
+	unlock()
 	if err := service.RegenerateIfVersion(context.Background(), "2026-11-02", 0); err != nil || fixture.snapshots.saves != saves+1 {
 		t.Fatalf("after the freeze = %v, saves %d", err, fixture.snapshots.saves)
+	}
+	// The writers that gave up left no lock entry behind.
+	if size := service.job.weekLocks.size(); size != 0 {
+		t.Fatalf("lock entries left = %d", size)
+	}
+}
+
+// Contract section 0.1 item 129: the snapshot lock is per week. A freeze
+// holding week A's lock does not delay a regeneration of week B; writers of
+// one week still wait for each other, in turn; and no entry outlives its
+// last writer, whether it got the lock or gave up waiting.
+func TestSnapshotLocksArePerWeek(t *testing.T) {
+	fixture := newReportFixture(t)
+	service := fixture.service
+	holdA, err := service.job.weekLocks.lock(context.Background(), "2026-10-26")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := service.Regenerate(ctx, "2026-11-02"); err != nil {
+		t.Fatalf("another week behind a held lock = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("another week waited %v", elapsed)
+	}
+	// A second writer of week A waits until the holder releases.
+	done := make(chan error, 1)
+	go func() { done <- service.Regenerate(context.Background(), "2026-10-26") }()
+	select {
+	case err := <-done:
+		t.Fatalf("a writer of the held week did not wait: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	holdA()
+	holdA() // releasing twice is harmless
+	if err := <-done; err != nil {
+		t.Fatalf("writer after the release = %v", err)
+	}
+	// Many writers that give up while one holds the lock leave nothing.
+	hold, err := service.job.weekLocks.lock(context.Background(), "2026-10-26")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	for range 16 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			short, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer stop()
+			if err := service.Regenerate(short, "2026-10-26"); !errors.Is(err, ErrNotStarted) {
+				t.Errorf("waiter = %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	if size := service.job.weekLocks.size(); size != 1 {
+		t.Fatalf("entries while one writer holds = %d", size)
+	}
+	hold()
+	if size := service.job.weekLocks.size(); size != 0 {
+		t.Fatalf("entries after the last writer = %d", size)
 	}
 }
 

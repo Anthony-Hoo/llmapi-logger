@@ -75,43 +75,85 @@ type snapshotJob struct {
 	cacheMu sync.Mutex
 	cache   map[string]cachedWeek
 
-	// freezeLock serialises every snapshot write (the background freeze, the
-	// web's Regenerate and the agent's RegenerateIfVersion), so a check of
-	// the stored snapshot and the write that replaces it are one step. Waiting
-	// for it gives up when the caller's context ends.
-	freezeLock snapshotLock
-	// lastStampNS is the last snapshot time written, guarded by freezeLock: a
-	// new snapshot is stamped above it, so two writes never leave the same
+	// weekLocks serialise the snapshot writes of one week (the background
+	// freeze, the web's Regenerate and the agent's RegenerateIfVersion), so a
+	// check of the week's stored snapshot and the write that replaces it are
+	// one step. Writes to different weeks do not wait for each other. Waiting
+	// gives up when the caller's context ends.
+	weekLocks weekLocks
+	// stampMu guards lastStampNS, the last snapshot time written: a new
+	// snapshot is stamped above it, so two writes never leave the same
 	// generated_at even when the clock repeats a reading.
+	stampMu     sync.Mutex
 	lastStampNS int64
 }
 
-// snapshotLock is a mutex whose acquisition honours a context: a background
-// freeze may hold it for minutes, and a caller with a deadline must not wait
-// past it. The zero value is unlocked.
-type snapshotLock struct {
-	once sync.Once
-	slot chan struct{}
+// weekLocks is a keyed lock: one lock per week label, created when the first
+// writer of that week arrives and dropped when the last one leaves (it got
+// the lock and released it, or gave up waiting). The zero value is ready.
+type weekLocks struct {
+	mu    sync.Mutex
+	locks map[string]*weekLock
 }
 
-// lock acquires the lock or returns ctx's error once ctx ends first.
-func (lock *snapshotLock) lock(ctx context.Context) error {
-	lock.once.Do(func() { lock.slot = make(chan struct{}, 1) })
+// weekLock is a mutex whose acquisition honours a context, and the count of
+// writers holding or waiting for it.
+type weekLock struct {
+	slot  chan struct{}
+	users int
+}
+
+// lock acquires the week's lock and returns its release, or returns ctx's
+// error once ctx ends first; a caller that gives up leaves no entry behind.
+func (locks *weekLocks) lock(ctx context.Context, week string) (func(), error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
+	locks.mu.Lock()
+	if locks.locks == nil {
+		locks.locks = map[string]*weekLock{}
+	}
+	entry, ok := locks.locks[week]
+	if !ok {
+		entry = &weekLock{slot: make(chan struct{}, 1)}
+		locks.locks[week] = entry
+	}
+	entry.users++
+	locks.mu.Unlock()
 	select {
-	case lock.slot <- struct{}{}:
-		return nil
+	case entry.slot <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-entry.slot
+				locks.leave(week, entry)
+			})
+		}, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		locks.leave(week, entry)
+		return nil, ctx.Err()
 	}
 }
 
-func (lock *snapshotLock) unlock() { <-lock.slot }
+// leave drops one writer of week and the entry with the last one.
+func (locks *weekLocks) leave(week string, entry *weekLock) {
+	locks.mu.Lock()
+	defer locks.mu.Unlock()
+	entry.users--
+	if entry.users == 0 && locks.locks[week] == entry {
+		delete(locks.locks, week)
+	}
+}
+
+// size is the number of weeks with a writer holding or waiting (tests).
+func (locks *weekLocks) size() int {
+	locks.mu.Lock()
+	defer locks.mu.Unlock()
+	return len(locks.locks)
+}
 
 // ErrNotStarted marks a regeneration that gave up before it began: it waited
-// for the snapshot lock until its context ended, and nothing was computed or
+// for its week's snapshot lock until its context ended, and nothing was computed or
 // written. The error also matches the context's error.
 var ErrNotStarted = errors.New("orgreport: regeneration did not start")
 
@@ -218,27 +260,38 @@ func (service *Service) freezePending(ctx context.Context, now time.Time) {
 
 // freeze computes and stores one week.
 func (service *Service) freeze(ctx context.Context, week Week) error {
-	if err := service.job.freezeLock.lock(ctx); err != nil {
+	unlock, err := service.job.weekLocks.lock(ctx, week.Label())
+	if err != nil {
 		return notStarted(err)
 	}
-	defer service.job.freezeLock.unlock()
+	defer unlock()
 	return service.freezeLocked(ctx, week)
 }
 
-// freezeLocked is freeze with job.freezeLock held.
+// freezeLocked is freeze with the week's lock held.
 func (service *Service) freezeLocked(ctx context.Context, week Week) error {
 	result, compiled, err := service.compute(ctx, week, service.settings.Load())
 	if err != nil {
 		return err
 	}
-	now := max(service.now().UnixNano(), service.job.lastStampNS+1)
+	now := service.nextStamp()
 	snapshot := WeeklySnapshot{Week: week.Label(), FrozenAtNS: now, GeneratedAtNS: now, Result: result, ProjectNames: projectNames(result, compiled)}
 	if err := service.snapshots.SaveWeeklySnapshot(ctx, snapshot); err != nil {
 		return err
 	}
-	service.job.lastStampNS = now
 	service.forget(week.Label())
 	return nil
+}
+
+// nextStamp returns a snapshot time above every one handed out before. It
+// is reserved before the save, so a failed save leaves a gap and never a
+// repeat.
+func (service *Service) nextStamp() int64 {
+	service.job.stampMu.Lock()
+	defer service.job.stampMu.Unlock()
+	stamp := max(service.now().UnixNano(), service.job.lastStampNS+1)
+	service.job.lastStampNS = stamp
+	return stamp
 }
 
 // Regenerate recomputes an ended week from the evidence still retained and
