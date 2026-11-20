@@ -280,3 +280,22 @@ func TestPrettyTableColumns(t *testing.T) {
 		t.Fatalf("fallback columns %v", columns)
 	}
 }
+
+// LOCAL_FILE_ERROR carries a hint wherever it is raised, through the shared
+// error table: an unusable --out, an unreadable --file, a missing home.
+func TestLocalFileErrorsCarryAHint(t *testing.T) {
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	missing := filepath.Join(t.TempDir(), "no-such-dir", "out.json")
+	for _, args := range [][]string{
+		{"usage", "composition", "apx_k5qwy3dfmzxw4ztsnb2xa4dqm4", "--out", missing},
+		{"requests", "export", "apx_k5qwy3dfmzxw4ztsnb2xa4dqm4", "--what", "headers", "--out", t.TempDir()},
+		{"analysis", "calibrate", "--file", missing},
+	} {
+		body := h.expectFailure(h.run(args...), agentapi.CodeLocalFileError, agentapi.ExitError)
+		if body.Hint == "" || !strings.Contains(body.Hint, "details.path") {
+			t.Errorf("%v: hint %q", args, body.Hint)
+		}
+	}
+}

@@ -179,7 +179,8 @@ var codeTable = map[Code]CodeSpec{
 		Message: "this command must run in an interactive terminal",
 		Hint:    "Ask the user to run this command themselves in a terminal."},
 	CodeLocalFileError: {ExitCode: ExitError, Local: true,
-		Message: "could not read or write a local file"},
+		Message: "could not read or write a local file",
+		Hint:    "Check the path in details.path (details.field names the flag): a file to write needs an existing directory that accepts a new file, a file to read must exist and be readable. Fix the path and run the command again; for the state directory, ask the user."},
 }
 
 // Lookup returns the table row of code. An unknown code reports false and
