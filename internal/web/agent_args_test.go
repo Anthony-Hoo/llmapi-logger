@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/storage"
 )
 
 // badArgument is one refused value of one parameter of one read endpoint.
@@ -381,5 +383,25 @@ func TestAgentDownloadParameterErrorNamesFieldAndReason(t *testing.T) {
 	if body.Error == nil || body.Error.Code != agentapi.CodeInvalidArgument || body.Error.Details["field"] != "zz" ||
 		body.Error.Details["reason"] != reasonUnknownParameter || body.Error.Message == "invalid argument" {
 		t.Fatalf("download with a parameter = %+v", body.Error)
+	}
+}
+
+// A pack or facet read refused for its id still writes the failed
+// sensitive_read row (contract section 0.1 item 28).
+func TestAgentRefusedSessionIDIsAuditedAsAFailedSensitiveRead(t *testing.T) {
+	fixture := newReadFixture(t)
+	for _, resource := range []string{"pack", "facet"} {
+		before := len(fixture.store.Audit())
+		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/analysis/sessions/abc/"+resource, "", fixture.developer)); code != agentapi.CodeInvalidArgument {
+			t.Fatalf("%s with a bad id = %s", resource, code)
+		}
+		entries := fixture.store.Audit()
+		if len(entries) != before+1 {
+			t.Fatalf("%s: %d audit rows written, want 1", resource, len(entries)-before)
+		}
+		last := entries[len(entries)-1]
+		if last.Event != agentaccess.EventSensitiveRead || last.Outcome != storage.AgentOutcomeFailed || last.ErrorCode != string(agentapi.CodeInvalidArgument) {
+			t.Fatalf("%s audit row = %+v", resource, last)
+		}
 	}
 }

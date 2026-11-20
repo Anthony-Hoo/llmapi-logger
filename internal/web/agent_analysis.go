@@ -455,12 +455,15 @@ func (handler *managementHandler) serveAgentAnalysisPack(writer http.ResponseWri
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
 	if _, err := sessionanalysis.ParseSessionID(call.Params["id"]); err != nil {
+		// A failed read writes its sensitive_read row too (contract section
+		// 0.1 item 28), also when the id is refused before the service.
+		handler.recordSensitiveRead(ctx, call, "analysis-pack", errAgentAnalysisSessionID)
 		handler.writeAgentServiceFailure(writer, errAgentAnalysisSessionID, "")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
-	defer cancel()
 	response, err := handler.sessionAnalysis.Pack(ctx, call.Params["id"], callerReadScope(call.Principal), analysisViewer(call.Principal, true))
 	handler.recordSensitiveRead(ctx, call, "analysis-pack", err)
 	if err != nil {
@@ -557,12 +560,15 @@ func (handler *managementHandler) serveAgentAnalysisFacet(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
+	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
+	defer cancel()
 	if _, err := sessionanalysis.ParseSessionID(call.Params["id"]); err != nil {
+		// A failed read writes its sensitive_read row too (contract section
+		// 0.1 item 28), also when the id is refused before the service.
+		handler.recordSensitiveRead(ctx, call, "analysis-facet", errAgentAnalysisSessionID)
 		handler.writeAgentServiceFailure(writer, errAgentAnalysisSessionID, "")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
-	defer cancel()
 	response, err := handler.sessionAnalysis.Facet(ctx, call.Params["id"], callerReadScope(call.Principal), analysisViewer(call.Principal, true))
 	handler.recordSensitiveRead(ctx, call, "analysis-facet", err)
 	if err != nil {
