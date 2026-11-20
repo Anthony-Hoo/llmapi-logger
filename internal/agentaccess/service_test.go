@@ -361,28 +361,71 @@ func TestFailedLookupLimiter(t *testing.T) {
 }
 
 // gatedStore holds every token lookup until release is closed, and counts the
-// lookups that reached it.
+// lookups that reached it. While passThrough is set lookups are not held.
 type gatedStore struct {
 	*agentaccesstest.Store
-	mu      sync.Mutex
-	lookups int
-	arrived chan struct{}
-	release chan struct{}
+	mu          sync.Mutex
+	lookups     int
+	passThrough bool
+	arrived     chan struct{}
+	release     chan struct{}
 }
 
 func (store *gatedStore) FindAgentTokenByMAC(ctx context.Context, mac []byte) (storage.AgentToken, error) {
 	store.mu.Lock()
-	store.lookups++
+	passThrough := store.passThrough
+	if !passThrough {
+		store.lookups++
+	}
 	store.mu.Unlock()
-	store.arrived <- struct{}{}
-	<-store.release
+	if !passThrough {
+		store.arrived <- struct{}{}
+		<-store.release
+	}
 	return store.Store.FindAgentTokenByMAC(ctx, mac)
 }
 
-// Contract section 7: N concurrent wrong tokens from one address cause at
-// most the limit of lookups. Each attempt holds its place before the lookup
-// runs, so the attempts beyond the limit are refused while the first ten are
-// still in flight.
+// Contract section 7 and section 0.1 item 100: legitimate concurrency is not
+// limited by the failure limit. Twenty valid tokens from one address, all in
+// flight at the same moment (the store holds every lookup until all twenty
+// have arrived), all succeed; under the previous limiter, which held a place
+// of the failure limit for every lookup, ten of them were refused.
+func TestConcurrentValidLookupsFromOneAddressAllSucceed(t *testing.T) {
+	inner := agentaccesstest.NewStore()
+	store := &gatedStore{Store: inner, passThrough: true, arrived: make(chan struct{}, 64), release: make(chan struct{})}
+	service, err := agentaccess.New(agentaccess.Options{AdminToken: testAdminToken, Store: store, AllowWrite: true, DeveloperLogins: true,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := agentaccesstest.IssueAdmin(t, service, agentapi.TierRead)
+	store.mu.Lock()
+	store.passThrough = false
+	store.mu.Unlock()
+	const concurrent = 20
+	results := make(chan error, concurrent)
+	for range concurrent {
+		go func() {
+			_, err := service.Authenticate(context.Background(), bearer(valid.Token), "203.0.113.9")
+			results <- err
+		}()
+	}
+	for range concurrent {
+		<-store.arrived
+	}
+	close(store.release)
+	for range concurrent {
+		if err := <-results; err != nil {
+			t.Fatalf("valid token in flight with %d others = %v", concurrent-1, err)
+		}
+	}
+}
+
+// Contract section 7: concurrent wrong tokens from one address are bounded by
+// the failure limit plus the in-flight cap. The first 32 lookups are in
+// flight together; every attempt beyond them is refused by the cap with a
+// one-second wait, without reaching the store. Once those 32 have failed the
+// address is over the failure limit and is refused for the window.
 func TestFailedLookupLimiterHoldsUnderConcurrency(t *testing.T) {
 	inner := agentaccesstest.NewStore()
 	store := &gatedStore{Store: inner, arrived: make(chan struct{}, 64), release: make(chan struct{})}
@@ -403,15 +446,16 @@ func TestFailedLookupLimiterHoldsUnderConcurrency(t *testing.T) {
 			results <- codeOf(err)
 		}()
 	}
-	// Ten lookups are in flight; every other attempt must already have been
-	// refused without reaching the store.
-	for range 10 {
+	// The cap's worth of lookups are in flight; every other attempt must
+	// already have been refused without reaching the store.
+	const inFlightCap, failureLimit = 32, 10
+	for range inFlightCap {
 		<-store.arrived
 	}
 	limited := 0
-	for range guesses - 10 {
+	for range guesses - inFlightCap {
 		if code := <-results; code != agentapi.CodeRateLimited {
-			t.Fatalf("attempt beyond the limit = %s", code)
+			t.Fatalf("attempt beyond the in-flight cap = %s", code)
 		}
 		limited++
 	}
@@ -423,8 +467,20 @@ func TestFailedLookupLimiterHoldsUnderConcurrency(t *testing.T) {
 			t.Fatalf("looked-up attempt = %s", code)
 		}
 	}
-	if store.lookups != 10 || limited != guesses-10 {
+	if store.lookups != inFlightCap || store.lookups > failureLimit+inFlightCap || limited != guesses-inFlightCap {
 		t.Fatalf("lookups = %d, limited = %d", store.lookups, limited)
+	}
+	// The failures are counted now: the address is refused for the window.
+	_, err = service.Authenticate(context.Background(), bearer(agentapi.TokenPrefix+fmt.Sprintf("%043d", guesses)), "203.0.113.7")
+	var coded *agentaccess.Error
+	if codeOf(err) != agentapi.CodeRateLimited || !asError(err, &coded) || coded.RetryAfter <= time.Second {
+		t.Fatalf("attempt after the failures = %v", err)
+	}
+	store.mu.Lock()
+	lookups := store.lookups
+	store.mu.Unlock()
+	if lookups != inFlightCap {
+		t.Fatalf("the refused attempt reached the store: %d lookups", lookups)
 	}
 
 	// A lookup that finds a token gives its place back: ten valid tokens in

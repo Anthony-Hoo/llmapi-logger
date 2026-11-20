@@ -9,9 +9,8 @@ import (
 // dropped, so one-shot source addresses cannot grow the map without bound.
 const limiterSweepThreshold = 1024
 
-// pendingRetryAfter is the wait answered when a key is full only because of
-// attempts still in flight: they end within a request's time, and most of
-// them are not failures.
+// pendingRetryAfter is the wait answered when a key is refused only because
+// of attempts still in flight: they end within a request's time.
 const pendingRetryAfter = time.Second
 
 // windowLimiter counts events per key in a fixed window that starts at the
@@ -23,9 +22,9 @@ type windowLimiter struct {
 	limit   int
 	window  time.Duration
 	entries map[string]*limiterWindow
-	// pending counts the attempts of a key admitted by reserve and not yet
-	// settled by confirm or release. It is kept apart from the windows: an
-	// attempt in flight belongs to no window until it is known to count.
+	// pending counts the attempts of a key admitted by admit and not yet
+	// ended by finish. It is kept apart from the windows: an attempt in
+	// flight belongs to no window until it is known to have failed.
 	pending map[string]int
 	now     func() time.Time
 }
@@ -127,46 +126,40 @@ func (limiter *windowLimiter) refund(slot limiterSlot) {
 	entry.count--
 }
 
-// reserve admits one attempt whose outcome is not known yet and holds a
-// place for it, in one step: confirmed events and attempts in flight together
-// stay below the limit, so concurrent attempts cannot all pass a check that
-// each of them made before any was counted. Every admitted attempt must be
-// settled with confirm (it counts) or release (it does not).
-func (limiter *windowLimiter) reserve(key string) (bool, time.Duration) {
+// admit starts one attempt whose outcome is not known yet. Two separate
+// mechanisms decide, checked under one lock: the failure count (only finished
+// attempts that failed add to it) refuses the key once it has reached the
+// limit, with the window's remaining time; and a cap on the key's attempts in
+// flight, independent of the failure count, refuses an attempt beyond
+// inFlightCap with pendingRetryAfter. Legitimate concurrency is therefore
+// limited only by the cap, never by the failure limit. Because attempts in
+// flight are not failures yet, at most limit + inFlightCap attempts of one key
+// can fail in one window. Every admitted attempt must be ended with finish.
+func (limiter *windowLimiter) admit(key string, inFlightCap int) (bool, time.Duration) {
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 	now := limiter.now()
-	count, expiresAt := limiter.liveCountLocked(key, now)
-	if count >= limiter.limit {
+	if count, expiresAt := limiter.liveCountLocked(key, now); count >= limiter.limit {
 		return false, expiresAt.Sub(now)
 	}
-	if count+limiter.pending[key] >= limiter.limit {
+	if limiter.pending[key] >= inFlightCap {
 		return false, pendingRetryAfter
 	}
 	limiter.pending[key]++
 	return true, 0
 }
 
-// confirm settles a reserved attempt as an event that counts.
-func (limiter *windowLimiter) confirm(key string) {
+// finish ends an attempt admit admitted; failed counts it as a failure.
+func (limiter *windowLimiter) finish(key string, failed bool) {
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
-	limiter.settleLocked(key)
-	limiter.recordLocked(key, limiter.now())
-}
-
-// release settles a reserved attempt that does not count.
-func (limiter *windowLimiter) release(key string) {
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-	limiter.settleLocked(key)
-}
-
-func (limiter *windowLimiter) settleLocked(key string) {
 	switch pending := limiter.pending[key]; {
 	case pending > 1:
 		limiter.pending[key] = pending - 1
 	default:
 		delete(limiter.pending, key)
+	}
+	if failed {
+		limiter.recordLocked(key, limiter.now())
 	}
 }

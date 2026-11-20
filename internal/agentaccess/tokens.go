@@ -44,24 +44,28 @@ func (service *Service) tokenMAC(token string) []byte {
 // window ends, a valid token included, so guessing cannot continue at full
 // speed behind a working client.
 //
-// The attempt holds its place in the limiter before the lookup runs and gives
-// it back unless the lookup found no row, so concurrent guesses from one
-// address cannot all be looked up before the first failure is counted: at
-// most the limit of lookups are ever in flight or failed per window.
+// Two mechanisms apply per source address: the failure count, which only
+// lookups that found no row add to, and a cap of lookupInFlightCap lookups in
+// flight, independent of it. Valid tokens are therefore never limited by the
+// failure limit however many run at once; an attempt beyond the in-flight cap
+// is refused with RATE_LIMITED and a one-second wait. Concurrent guesses can
+// pass the failure check before the first of them is counted, so at most
+// lookupFailureLimit + lookupInFlightCap lookups from one address fail in one
+// window.
 func (service *Service) Authenticate(ctx context.Context, authorization, source string) (Identity, error) {
 	token, ok := bearerToken(authorization)
 	if !ok || !agentapi.ValidTokenFormat(token) {
 		return Identity{}, fail(agentapi.CodeUnauthenticated)
 	}
-	if allowed, retryAfter := service.lookups.reserve(source); !allowed {
+	if allowed, retryAfter := service.lookups.admit(source, lookupInFlightCap); !allowed {
 		return Identity{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: retryAfter}
 	}
 	row, err := service.store.FindAgentTokenByMAC(ctx, service.tokenMAC(token))
-	if errors.Is(err, storage.ErrAgentTokenNotFound) {
-		service.lookups.confirm(source)
+	notFound := errors.Is(err, storage.ErrAgentTokenNotFound)
+	service.lookups.finish(source, notFound)
+	if notFound {
 		return Identity{}, fail(agentapi.CodeUnauthenticated)
 	}
-	service.lookups.release(source)
 	if err != nil {
 		service.logger.Warn("agent token lookup failed", "error_category", "agent_store_unavailable")
 		return Identity{}, fail(agentapi.CodeUpstreamUnavailable)

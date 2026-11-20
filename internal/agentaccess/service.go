@@ -51,6 +51,7 @@ const (
 const (
 	lookupFailureLimit       = 10
 	lookupFailureWindow      = 5 * time.Minute
+	lookupInFlightCap        = 32
 	exchangeFailureLimit     = 10
 	exchangeFailureWindow    = 5 * time.Minute
 	authorizationLimit       = 20
