@@ -529,6 +529,9 @@ type agentAuditDetail struct {
 	Turn                *agentTurn                `json:"turn"`
 	Billing             *agentBilling             `json:"billing"`
 	ConversationSummary *agentConversationSummary `json:"conversation_summary"`
+	// Exports says, per export kind, whether `requests export` can give it
+	// (agentExportStates).
+	Exports map[string]agentExportState `json:"exports"`
 }
 
 func agentAuditDetailOf(detail query.Detail, allHeaders bool) agentAuditDetail {
@@ -540,6 +543,7 @@ func agentAuditDetailOf(detail query.Detail, allHeaders bool) agentAuditDetail {
 		Headers:        agentHeadersOf(detail.Headers, allHeaders),
 		HeadersScope:   "inbound",
 		Bodies:         make([]agentBody, 0, len(detail.Bodies)),
+		Exports:        agentExportStates(detail),
 	}
 	if allHeaders {
 		out.HeadersScope = "all"
@@ -664,6 +668,154 @@ func inboundUserAgent(headers []query.Header) *string {
 	return nil
 }
 
+// What one export kind of a record can give (contract section 0.1 item
+// 118): available; pending (NOT_READY: it will appear); not_available
+// (NOT_AVAILABLE: this record has no such content and never will);
+// not_retained (NOT_RETAINED: a raw body released after verification).
+// requests get carries the map as data.exports and the export answers by it,
+// so an agent can tell before exporting.
+type agentExportState struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
+const (
+	exportAvailable    = "available"
+	exportPending      = "pending"
+	exportNotAvailable = "not_available"
+	exportNotRetained  = "not_retained"
+)
+
+// Reasons of a pending or unavailable export.
+const (
+	exportReasonInProgress       = "in_progress"
+	exportReasonParsePending     = "parse_pending"
+	exportReasonCapturing        = "capture_in_progress"
+	exportReasonRetentionPending = "retention_pending"
+	exportReasonBlocked          = "blocked_before_forwarding"
+	exportReasonNotParsed        = "not_parsed"
+	exportReasonParseFailed      = "parse_failed"
+	exportReasonNoConversation   = "no_conversation"
+	exportReasonNotReconstructed = "not_reconstructed"
+	exportReasonNotStreamed      = "not_streamed"
+	exportReasonNoBody           = "no_body"
+	exportReasonReleased         = "released_after_verification"
+)
+
+// agentSideStages are the body stages a side reads, in the service's order
+// (query.rawStagesForSide): the raw body and the timeline come from the
+// first one that exists.
+var agentSideStages = map[string][]string{
+	"request":  {storage.StageRequestSent, storage.StageRequestReceived},
+	"response": {storage.StageResponseReceived, storage.StageResponseSent},
+}
+
+func agentSideBody(bodies []query.Body, side string) *query.Body {
+	for _, stage := range agentSideStages[side] {
+		for index := range bodies {
+			if bodies[index].Stage == stage {
+				return &bodies[index]
+			}
+		}
+	}
+	return nil
+}
+
+// agentExportStates derives, from the record's detail alone, what each export
+// kind gives. Content that exists is available whatever the record's state.
+// Content that does not exist is pending while the record is still being
+// forwarded, captured, parsed or verified, and unavailable for good once that
+// is over: a blocked record was never forwarded; a record whose parse was
+// skipped or failed has no conversation; only the OpenAI parser rebuilds a
+// request and response (and only from complete bodies), so other records
+// never have a reconstruction; a body without stream events has no timeline.
+func agentExportStates(detail query.Detail) map[string]agentExportState {
+	audit := detail.Audit
+	running := audit.ForwardStatus == storage.ForwardInProgress
+	blocked := audit.ForwardStatus == storage.ForwardRejected
+	available := agentExportState{State: exportAvailable}
+	pending := func(reason string) agentExportState { return agentExportState{State: exportPending, Reason: reason} }
+	never := func(reason string) agentExportState {
+		return agentExportState{State: exportNotAvailable, Reason: reason}
+	}
+	// parsed is the state of content the parser writes, when it is missing.
+	parsed := func(missing string) agentExportState {
+		switch {
+		case running:
+			return pending(exportReasonInProgress)
+		case auditParse(audit.ParseStatus) == "pending":
+			return pending(exportReasonParsePending)
+		case blocked:
+			return never(exportReasonBlocked)
+		case audit.ParseStatus == storage.ParseSkipped:
+			return never(exportReasonNotParsed)
+		case audit.ParseStatus == storage.ParseError:
+			return never(exportReasonParseFailed)
+		default:
+			return never(missing)
+		}
+	}
+	states := map[string]agentExportState{"headers": available}
+	states["conversation"] = available
+	if detail.Conversation == nil {
+		states["conversation"] = parsed(exportReasonNoConversation)
+	}
+	reconstruction := available
+	if detail.Turn == nil {
+		reconstruction = parsed(exportReasonNotReconstructed)
+	}
+	states["request"], states["response"] = reconstruction, reconstruction
+	for _, side := range []string{"request", "response"} {
+		body := agentSideBody(detail.Bodies, side)
+		var timeline, raw agentExportState
+		switch {
+		case body == nil && running:
+			timeline, raw = pending(exportReasonInProgress), pending(exportReasonInProgress)
+		case body == nil && blocked && side == "response":
+			timeline, raw = never(exportReasonBlocked), never(exportReasonBlocked)
+		case body == nil:
+			timeline, raw = never(exportReasonNoBody), never(exportReasonNoBody)
+		default:
+			capturing := body.State == storage.StageStateStreaming
+			switch {
+			case body.StreamEventCount > 0:
+				timeline = available
+			case capturing:
+				timeline = pending(exportReasonCapturing)
+			case running:
+				timeline = pending(exportReasonInProgress)
+			default:
+				timeline = never(exportReasonNotStreamed)
+			}
+			switch {
+			case capturing:
+				raw = pending(exportReasonCapturing)
+			case body.RetentionState == storage.RetentionPending:
+				raw = pending(exportReasonRetentionPending)
+			case body.RetentionState == storage.RetentionMetadata:
+				raw = agentExportState{State: exportNotRetained, Reason: exportReasonReleased}
+			default:
+				raw = available
+			}
+		}
+		states["timeline-"+side], states["raw-"+side] = timeline, raw
+	}
+	return states
+}
+
+// writeAgentExportUnavailable answers an export kind that is not available.
+func writeAgentExportUnavailable(writer http.ResponseWriter, what string, state agentExportState) {
+	details := map[string]any{"what": what, "reason": state.Reason}
+	switch state.State {
+	case exportPending:
+		writeAgentFailure(writer, agentapi.CodeNotReady, "the "+what+" export of this record is not there yet, and will be", "", details)
+	case exportNotRetained:
+		writeAgentFailure(writer, agentapi.CodeNotRetained, "", "", details)
+	default:
+		writeAgentFailure(writer, agentapi.CodeNotAvailable, "this record has no "+what+" export and never will", "", details)
+	}
+}
+
 // Export kinds of GET /requests/{id}/export/{what}.
 var agentExportKinds = map[string]bool{
 	"conversation": true, "headers": true, "request": true, "response": true,
@@ -713,16 +865,15 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		return
 	}
 	record := auditDetailMeta(detail.Audit)
+	if state := agentExportStates(detail)[what]; state.State != exportAvailable {
+		writeAgentExportUnavailable(writer, what, state)
+		return
+	}
 	switch what {
 	case "conversation", "headers":
 		if what == "headers" {
 			setExportCompleteness(writer.Header(), record, true, "")
 			writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
-			return
-		}
-		if detail.Conversation == nil {
-			writeAgentFailure(writer, agentapi.CodeNotFound, "the record has no parsed conversation",
-				"The record has not been parsed yet or carries no conversation. Check `parse` with `llmaudit requests get <id>`.", nil)
 			return
 		}
 		setExportCompleteness(writer.Header(), record, true, "")

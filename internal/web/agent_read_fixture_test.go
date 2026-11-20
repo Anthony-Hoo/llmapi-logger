@@ -146,17 +146,28 @@ func (audits *scopedAudits) Get(_ context.Context, auditID string, scope *query.
 }
 
 // The services below do not check ownership themselves: the web and the
-// facade must call Authorize first. They answer for any id that exists.
+// facade must call Authorize first. They answer for any id that exists, and
+// only for content the record has, as query.Service does: a reconstruction
+// only with a turn, a timeline only for a body with stream events, a raw
+// body only when there is one.
 func (audits *scopedAudits) ReconstructTurn(_ context.Context, auditID string) (query.ReconstructedTurn, error) {
-	if _, err := audits.find(auditID, nil); err != nil {
+	record, err := audits.find(auditID, nil)
+	if err != nil {
 		return query.ReconstructedTurn{}, err
+	}
+	if record.detail.Turn == nil {
+		return query.ReconstructedTurn{}, query.ErrNoTurnGraph
 	}
 	return query.ReconstructedTurn{Request: map[string]any{"model": "gpt-test", "owner": auditID}, Response: map[string]any{"id": "resp-" + auditID}}, nil
 }
 
 func (audits *scopedAudits) Timeline(_ context.Context, auditID string, side query.Side) (query.StreamTimeline, error) {
-	if _, err := audits.find(auditID, nil); err != nil {
+	record, err := audits.find(auditID, nil)
+	if err != nil {
 		return query.StreamTimeline{}, err
+	}
+	if body := fixtureSideBody(record, side); body == nil || body.StreamEventCount == 0 {
+		return query.StreamTimeline{}, query.ErrNotFound
 	}
 	first := fixtureBase.UnixNano()
 	return query.StreamTimeline{Stage: string(side), ObservedLength: 4, EventCount: 1, FirstEventAtNS: &first, LastEventAtNS: &first,
@@ -167,8 +178,18 @@ func (audits *scopedAudits) RawMeta(_ context.Context, auditID string, side quer
 	if side != query.SideRequest && side != query.SideResponse {
 		return query.RawMetadata{}, query.ErrInvalidQuery
 	}
-	if _, err := audits.find(auditID, nil); err != nil {
+	record, err := audits.find(auditID, nil)
+	if err != nil {
 		return query.RawMetadata{}, err
+	}
+	body := fixtureSideBody(record, side)
+	switch {
+	case body == nil:
+		return query.RawMetadata{}, query.ErrNotFound
+	case body.State == storage.StageStateStreaming, body.RetentionState == storage.RetentionPending:
+		return query.RawMetadata{}, query.ErrNotReady
+	case body.RetentionState == storage.RetentionMetadata:
+		return query.RawMetadata{}, query.ErrNotRetained
 	}
 	return query.RawMetadata{ObservedLength: int64(len(auditID)), StoredLength: int64(len(auditID)), Complete: true, SHA256: "abc"}, nil
 }
@@ -176,6 +197,22 @@ func (audits *scopedAudits) RawMeta(_ context.Context, auditID string, side quer
 func (audits *scopedAudits) StreamRaw(_ context.Context, auditID string, _ query.Side, writer io.Writer) error {
 	_, err := writer.Write([]byte(auditID))
 	return err
+}
+
+// fixtureSideBody is the body the query service reads for side.
+func fixtureSideBody(record auditRecord, side query.Side) *query.Body {
+	stages := []string{storage.StageRequestSent, storage.StageRequestReceived}
+	if side == query.SideResponse {
+		stages = []string{storage.StageResponseReceived, storage.StageResponseSent}
+	}
+	for _, stage := range stages {
+		for index := range record.detail.Bodies {
+			if record.detail.Bodies[index].Stage == stage {
+				return &record.detail.Bodies[index]
+			}
+		}
+	}
+	return nil
 }
 
 var fixtureBase = time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
@@ -219,6 +256,17 @@ func fixtureAudit(id string, offset time.Duration, fingerprint []byte, tokenID i
 		}},
 		TokenLink: &query.TokenLink{NewAPIRequestID: requestID, NewAPIUserID: userID, Username: username, NewAPITokenID: tokenID,
 			TokenName: tokenName, LinkedAtNS: parsedAt, BillingState: storage.BillingBilled, NewAPIQuota: &quota, CostUSD: &cost},
+	}
+	if forward == storage.ForwardRejected {
+		// A locally blocked record was never forwarded: no parse, no
+		// reconstruction, no response (what the proxy stores for it).
+		detail.Audit.ParseStatus = storage.ParseSkipped
+		detail.ParsedResult, detail.Turn, detail.Conversation = nil, nil, nil
+	} else {
+		// The streamed response the proxy received, with its timeline.
+		detail.Bodies = append(detail.Bodies, query.Body{Stage: storage.StageResponseReceived, SourceStage: storage.StageResponseReceived,
+			ObservedLength: 4, StoredLength: 4, HashComplete: true, EOFSeen: true, State: storage.StageStateComplete,
+			RetentionState: storage.RetentionFull, FirstObservedAtNS: &started, StreamEventCount: 1, StreamTimelineComplete: true})
 	}
 	return auditRecord{detail: detail, row: storage.AuditScopeRow{APIKeyFPR: fingerprint, NewAPITokenID: &tokenID, ForwardStatus: forward, BlockCode: blockCode}}
 }

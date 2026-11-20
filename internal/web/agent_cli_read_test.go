@@ -160,7 +160,20 @@ func TestCLIExportCompletenessFollowsTheRecord(t *testing.T) {
 
 	for _, id := range []string{"unfinished-own", "own-1"} {
 		detail := cli.mustRun("requests", "get", id)
+		var states struct {
+			Exports map[string]agentExportState `json:"exports"`
+		}
+		_ = json.Unmarshal(detail.Data, &states)
 		for _, what := range kinds {
+			// A kind the record cannot give is refused as data.exports
+			// predicts (TestAgentExportStatesPredictTheExport); the rest
+			// follow the record's completeness.
+			if states.Exports[what].State != exportAvailable {
+				if exit := cli.run("requests", "export", id, "--what", what, "--out", filepath.Join(dir, id+"-"+what)); exit != 1 {
+					t.Errorf("%s export %s (%+v) = exit %d", id, what, states.Exports[what], exit)
+				}
+				continue
+			}
 			export := cli.mustRun("requests", "export", id, "--what", what, "--out", filepath.Join(dir, id+"-"+what))
 			var data exportData
 			_ = json.Unmarshal(export.Data, &data)
@@ -191,6 +204,10 @@ func TestAgentExportCompletenessHeaders(t *testing.T) {
 	addUnfinishedRecord(fixture, "unfinished-own")
 	for _, what := range agentapi.ExportKinds {
 		for id, want := range map[string]string{"own-1": "true", "unfinished-own": "false"} {
+			record, _ := fixture.audits.find(id, nil)
+			if agentExportStates(record.detail)[what].State != exportAvailable {
+				continue // refused before any content: no completeness headers
+			}
 			response := fixture.facade(http.MethodGet, "/requests/"+id+"/export/"+what, "", fixture.developer)
 			if response.Code != http.StatusOK {
 				t.Fatalf("%s %s = %d %s", id, what, response.Code, response.Body.String())

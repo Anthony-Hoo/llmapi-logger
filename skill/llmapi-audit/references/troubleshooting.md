@@ -27,7 +27,8 @@ General rules: do not retry a command more than once unless the table says so; n
 | `PLAN_EXPIRED` | 1 | The plan is older than 10 minutes. | Create a new plan and show it to the user again. |
 | `LINK_EXPIRED` | 1 | An install download link is past its 30 minutes (only the install prompt's downloads see this). | Stop the install and ask the user to generate a new install prompt on the Agent access page; an old link never works again. |
 | `RUN_IN_PROGRESS` | 1 | A session analysis run is already running. | Do not start another; follow it with `llmaudit analysis overview --since 1d`. |
-| `NOT_READY` | 1 | The evidence is still being captured, or the reconstruction is not available yet. | Read it again later; tell the user it is not ready yet. |
+| `NOT_READY` | 1 | The content will appear but is not there yet: the record is still being forwarded, captured, parsed or verified (`details.reason`). | Read it again later; tell the user it is not ready yet. |
+| `NOT_AVAILABLE` | 1 | The record has no such export and never will; `details.reason` says why (`blocked_before_forwarding`, `not_parsed`, `parse_failed`, `no_conversation`, `not_reconstructed`, `not_streamed`, `no_body`). `data.exports` of `llmaudit requests get <audit-id>` predicts it. | Do not retry or poll. Tell the user why, and export another kind if it helps (for example `conversation` or a raw body instead of a reconstruction). |
 | `NOT_RETAINED` | 1 | The raw body was released after it was verified against the reconstruction. | Export `request` or `response` (the reconstruction) instead. This is not data loss. |
 | `EVIDENCE_UNAVAILABLE` | 1 | The stored evidence failed its integrity check. | Tell the user; do not retry. |
 | `RATE_LIMITED` | 1 | Too many requests; `details.retry_after_seconds` says how long to wait. | Wait until then and try once more. Pack and facet reads have a lower limit: do not poll them. |

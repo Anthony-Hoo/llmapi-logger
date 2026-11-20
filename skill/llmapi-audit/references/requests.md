@@ -39,6 +39,7 @@ llmaudit requests get 12345 --headers all
 - Credentials are never shown. Header and query values that look like credentials (authorization headers, cookies, API key headers and parameters, values starting with `Bearer `, `sk-` and the like) come as `value_omitted: "credential"` with their `length`. `value_omitted: "unparsed"` means a query parameter could not be decoded. Do not try to recover these values elsewhere.
 - `meta.complete` is false while the request is still running (`state: running`), while parsing is pending (`incomplete_reason: parse_pending`) or when the capture is not complete (`capture_incomplete`). Say so when you report the record.
 - `billing_final` is false while the gateway's billing for the request is not settled yet.
+- `exports` says, for every `--what` of `requests export`, what this record can give: `{"state": "available"}`; `{"state": "pending", "reason": …}` while it is still being forwarded, captured, parsed or verified (`in_progress`, `capture_in_progress`, `parse_pending`, `retention_pending`); `{"state": "not_available", "reason": …}` when the record will never have it; `{"state": "not_retained"}` for a raw body released after verification. Check it before exporting.
 
 ## Exports
 
@@ -54,11 +55,17 @@ llmaudit requests export 12345 --what timeline-response --out timeline.json
 
 | `--what` | Content |
 |---|---|
-| `conversation` | The reconstructed conversation (messages, tool calls, results). `NOT_FOUND` with a hint when no conversation was parsed (it may not be parsed yet). |
+| `conversation` | The reconstructed conversation (messages, tool calls, results). |
 | `headers` | Headers of every stage as `{audit_id, headers}`, each with `name_untrusted`; credentials omitted as above. |
-| `request`, `response` | The reconstructed provider JSON. |
+| `request`, `response` | The reconstructed provider JSON. Only OpenAI-protocol records whose bodies were complete are reconstructed; for Anthropic and Gemini records these two are `not_available` (`not_reconstructed`): use `conversation` or the raw body. |
 | `raw-request`, `raw-response` | The raw bytes as received. `NOT_RETAINED` means the raw body was released after it was verified against the reconstruction: export `request`/`response` instead. That is not data loss. |
-| `timeline-request`, `timeline-response` | The streaming timeline (when each chunk arrived). |
+| `timeline-request`, `timeline-response` | The streaming timeline (when each event arrived). Only a streamed body has one: a request is normally not streamed, so `timeline-request` is usually `not_available` (`not_streamed`), and so is the response of a non-streaming request. |
+
+When `exports` says a kind is not available, the export answers the same:
+
+- `NOT_READY` (`reason` as in `exports`): the content will appear; read it again later.
+- `NOT_AVAILABLE`: this record will never have that content; `details.reason` says why: `blocked_before_forwarding` (a local policy stopped the request, so there is no response, no parse and no reconstruction), `not_parsed` (the parse was skipped), `parse_failed`, `no_conversation`, `not_reconstructed`, `not_streamed`, `no_body`. Do not retry and do not poll.
+- `NOT_RETAINED`: the raw body was released after verification (above).
 
 The file holds the content itself, with no envelope around it, so it can be opened as the JSON or bytes it is. stdout then carries `data` = `{path, bytes, sha256, complete, missing_chunks?}` and `meta.state: exported`. `complete` is true only when the server says the record is finished and the content is whole, exactly as `requests get` of the same record would say. `complete: false` comes with the reason in `meta.incomplete_reason`: `in_progress`, `parse_pending` or `capture_incomplete` as for `requests get`, `timeline_incomplete` for a timeline that is not whole, `capture_incomplete` (possibly with `missing_chunks: true`) for a raw body with missing parts, and `completeness_unknown` when the server did not say. Tell the user; an export of an unfinished record is a snapshot that can still change.
 

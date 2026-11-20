@@ -31,7 +31,7 @@ func TestErrorTableMatchesTheContract(t *testing.T) {
 		CodeModuleDisabled: {404, 1}, CodeInvalidArgument: {400, 2}, CodeNotFound: {404, 1},
 		CodeAlreadyExists: {409, 1}, CodeConflict: {409, 1}, CodeVersionConflict: {409, 1},
 		CodePlanNotFound: {404, 1}, CodePlanExpired: {410, 1}, CodeLinkExpired: {410, 1}, CodeRunInProgress: {409, 1},
-		CodeNotReady: {409, 1}, CodeNotRetained: {410, 1}, CodeEvidenceUnavailable: {500, 1},
+		CodeNotReady: {409, 1}, CodeNotAvailable: {404, 1}, CodeNotRetained: {410, 1}, CodeEvidenceUnavailable: {500, 1},
 		CodeRateLimited: {429, 1}, CodeUpstreamUnavailable: {502, 1}, CodeTimeout: {503, 1},
 		CodeInvalidGrant: {400, 4}, CodeInternal: {500, 1},
 	}

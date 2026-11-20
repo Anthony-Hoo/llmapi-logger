@@ -31,6 +31,7 @@ const (
 	CodeRunInProgress       Code = "RUN_IN_PROGRESS"
 	CodeNotReady            Code = "NOT_READY"
 	CodeNotRetained         Code = "NOT_RETAINED"
+	CodeNotAvailable        Code = "NOT_AVAILABLE"
 	CodeEvidenceUnavailable Code = "EVIDENCE_UNAVAILABLE"
 	CodeRateLimited         Code = "RATE_LIMITED"
 	CodeUpstreamUnavailable Code = "UPSTREAM_UNAVAILABLE"
@@ -136,7 +137,10 @@ var codeTable = map[Code]CodeSpec{
 		Hint:    "Do not trigger another run; check progress with `llmaudit analysis overview --since 1d`."},
 	CodeNotReady: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
 		Message: "the evidence is not ready yet",
-		Hint:    "Read it again later."},
+		Hint:    "It is still being captured, parsed or verified and will appear: read it again later (details.reason says what it waits for)."},
+	CodeNotAvailable: {HTTPStatus: http.StatusNotFound, ExitCode: ExitError,
+		Message: "the record has no such content and never will",
+		Hint:    "Do not retry; details.reason says why. data.exports of `llmaudit requests get <id>` lists what this record can export."},
 	CodeNotRetained: {HTTPStatus: http.StatusGone, ExitCode: ExitError,
 		Message: "the raw body was released after verification",
 		Hint:    "Export the reconstructed request or response instead; this is not data loss."},

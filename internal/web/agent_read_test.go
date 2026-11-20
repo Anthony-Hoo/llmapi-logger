@@ -211,6 +211,9 @@ func (values corpus) containsSubstring(text string) bool {
 var derivedKeys = map[string]bool{
 	"state": true, "parse": true, "capture": true, "value_omitted": true, "headers_scope": true,
 	"next_cursor": true, "incomplete_reason": true, "version": true,
+	// data.exports of a detail: what each export kind gives, derived from
+	// the same detail (agentExportStates).
+	"reason": true,
 }
 
 // derivable reports whether one facade value can be read off the web corpus.
@@ -392,9 +395,18 @@ func TestAgentReadParity(t *testing.T) {
 		for what, path := range exports {
 			web := corpus{}
 			web.add(fixture.web(http.MethodGet, path, "", identity.cookie).Body.Bytes())
+			webResponse := fixture.web(http.MethodGet, path, "", identity.cookie)
 			response := fixture.facade(http.MethodGet, "/requests/own-1/export/"+what, "", identity.token)
+			if (response.Code == http.StatusOK) != (webResponse.Code == http.StatusOK) {
+				t.Fatalf("%s export %s = %d, web %d", identity.name, what, response.Code, webResponse.Code)
+			}
 			if response.Code != http.StatusOK {
-				t.Fatalf("%s export %s = %d", identity.name, what, response.Code)
+				// The record has no such content: the web route answers 404,
+				// the facade says so for good (NOT_AVAILABLE).
+				if code := facadeOutcome(t, response); code != agentapi.CodeNotAvailable || webResponse.Code != http.StatusNotFound {
+					t.Fatalf("%s export %s = %s, web %d", identity.name, what, code, webResponse.Code)
+				}
+				continue
 			}
 			assertDerivable(t, identity.name+" export "+what, web, response.Body.Bytes())
 		}
@@ -665,8 +677,10 @@ func TestAgentDeveloperCannotReadAnotherKeysRecordAnywhere(t *testing.T) {
 				t.Errorf("%s%s = %d %s (missing: %s)", id, suffix, foreign.Code, foreign.Body.String(), missing.Body.String())
 			}
 		}
+		// The foreign record has no request timeline (its request was not
+		// streamed): NOT_AVAILABLE for the administrator too.
 		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/requests/foreign"+suffix, "", fixture.adminRead)); code != "" &&
-			!(suffix == "/composition" && code == agentapi.CodeNotFound) {
+			!(suffix == "/composition" && code == agentapi.CodeNotFound) && !(suffix == "/export/timeline-request" && code == agentapi.CodeNotAvailable) {
 			t.Errorf("admin foreign%s = %s", suffix, code)
 		}
 	}

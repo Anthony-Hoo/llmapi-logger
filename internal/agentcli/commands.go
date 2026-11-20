@@ -188,7 +188,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"requests", "get"},
 			Summary:     "show one audit record without the conversation text",
-			Description: "Credential header and query values are omitted (value_omitted: credential, with length). Export the conversation with `llmaudit requests export <id> --what conversation --out <file>`.",
+			Description: "Credential header and query values are omitted (value_omitted: credential, with length). data.exports says, per --what of `llmaudit requests export <id> --what conversation --out <file>` and the other export kinds, whether the record can give it (available, pending, not_available with a reason, not_retained).",
 			Args:        []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "headers", Value: "all", Query: "headers", Help: "all: include headers of every stage. The only accepted value. Default: inbound request headers only."},
@@ -201,7 +201,7 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"requests", "export"},
 			Summary: "write the conversation, headers, a reconstructed or raw body, or a timeline of one record to a file",
 			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. complete is true only when the server says the record is finished and the content whole, as `llmaudit requests get <id>` would; otherwise meta.incomplete_reason says why (in_progress, parse_pending, capture_incomplete, timeline_incomplete, or completeness_unknown when the server did not say). " +
-				"NOT_RETAINED for raw-request/raw-response means the raw body was released after verification: export request or response instead.",
+				"Check data.exports of `llmaudit requests get <id>` first: it says per --what whether the record can give it. NOT_READY means the content will appear later; NOT_AVAILABLE (details.reason) means this record will never have it (blocked before forwarding, not parsed, not reconstructed: only OpenAI records are, not streamed, no body), so do not retry; NOT_RETAINED for raw-request/raw-response means the raw body was released after verification: export request or response instead.",
 			Args: []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "what", Value: "<what>", PathParam: "what", Required: true, Help: "conversation, headers, request, response, raw-request, raw-response, timeline-request or timeline-response. Required."},

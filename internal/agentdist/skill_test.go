@@ -159,6 +159,10 @@ func TestTroubleshootingCoversEveryCode(t *testing.T) {
 // purpose.
 var placeholders = map[string]string{
 	"id":            "12345",
+	"audit-id":      "apx_k5qwy3dfmzxw4ztsnb2xa4dqm4",
+	"session-id":    "agt_0123456789abcdef01234567",
+	"tree-id":       "0123456789abcdef01234567",
+	"analysis-id":   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	"plan-id":       "pln_0123456789abcdef",
 	"kind":          "content-rule",
 	"server":        "https://audit.example.com",
