@@ -37,6 +37,8 @@ The user authorizes this machine in the browser. Nobody types a password, an API
 | 2 | Invalid argument, or the command needs an interactive terminal (`NO_TTY`) | Fix the argument named in `error.details.field` (the flag or argument as you typed it) as `error.message` and `error.details.reason` say, and run it again. `NO_TTY` means the user has to run that command. |
 | 4 | Not logged in, or the authorization is no longer valid | Stop and ask the user to log in (above). Never ask for a credential. |
 | 5 | Not permitted for this identity, tier or deployment | Stop and tell the user. Do not look for another way to do the same thing. |
+
+Administrator-only commands and administrator-only arguments are refused differently. A whole command a developer may not use (`config …`, `callers list`, `weekly report`, `analysis users`) answers `FORBIDDEN_ROLE`, exit 5: stop. An administrator-only argument of a command a developer may use (`--user-id`, `--username`, `--token-id`, `--token-name` of `requests list`; `--group-by caller` or `token` of `usage overview`; `--user-id`, `--project-id`, `--group-id` of `analysis overview`, `sessions` and `report`) answers `INVALID_ARGUMENT`, exit 2, with `details.reason: administrator_only` and the argument in `details.field`: drop that argument, because a developer token already reads only its own key's data.
 | 6 | The operation ran but its result is a failure (only `analysis test-model`) | Report `data` to the user; it says why the model could not be reached. |
 
 ## Command groups

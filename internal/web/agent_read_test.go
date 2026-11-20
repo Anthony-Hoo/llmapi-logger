@@ -548,13 +548,21 @@ func TestAgentDRules(t *testing.T) {
 	})
 
 	t.Run("D8 selectors, the user listing and user ids are administrator-only", func(t *testing.T) {
-		for _, path := range []string{
-			"/analysis/overview?user_id=8&" + fixtureWindow, "/analysis/sessions?user_id=8&" + fixtureWindow,
-			"/analysis/report?user_id=8", "/analysis/report?project_id=3", "/analysis/report?group_id=1", "/analysis/users?" + fixtureWindow,
+		// A selector is an administrator-only argument: refused as an
+		// argument naming it (contract section 0.1 item 116), like D4 and D5.
+		for path, field := range map[string]string{
+			"/analysis/overview?user_id=8&" + fixtureWindow: "user_id", "/analysis/sessions?user_id=8&" + fixtureWindow: "user_id",
+			"/analysis/report?user_id=8": "user_id", "/analysis/report?project_id=3": "project_id", "/analysis/report?group_id=1": "group_id",
 		} {
-			if code := facadeOutcome(t, fixture.facade(http.MethodGet, path, "", fixture.developer)); code != agentapi.CodeForbiddenRole {
-				t.Fatalf("developer %s = %s", path, code)
+			body := decodeAgent(t, fixture.facade(http.MethodGet, path, "", fixture.developer))
+			if body.Error == nil || body.Error.Code != agentapi.CodeInvalidArgument || body.Error.Details["field"] != field ||
+				body.Error.Details["reason"] != reasonAdministratorOnly || body.Error.Hint != agentAdministratorOnlyHint {
+				t.Fatalf("developer %s = %+v", path, body.Error)
 			}
+		}
+		// The user listing is an administrator-only endpoint, not an argument.
+		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/analysis/users?"+fixtureWindow, "", fixture.developer)); code != agentapi.CodeForbiddenRole {
+			t.Fatalf("developer /analysis/users = %s", code)
 		}
 		// The value is validated before the role, as on the web.
 		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/analysis/report?user_id=x", "", fixture.developer)); code != agentapi.CodeInvalidArgument {

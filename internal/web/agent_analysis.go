@@ -67,8 +67,8 @@ func agentAnalysisUser(values url.Values, caller principal) (*int64, error) {
 	if err != nil || id == nil {
 		return nil, err
 	}
-	if err := requireAdministratorSelector(caller, true); err != nil {
-		return nil, err
+	if requireAdministratorSelector(caller, true) != nil {
+		return nil, argAdministratorOnly("user_id")
 	}
 	return id, nil
 }
@@ -695,8 +695,8 @@ func (handler *managementHandler) serveAgentAnalysisReport(writer http.ResponseW
 		handler.writeAgentServiceFailure(writer, argConflict(selected[1], selected[0]), "")
 		return
 	}
-	if err := requireAdministratorSelector(call.Principal, selectors == 1); err != nil {
-		handler.writeAgentServiceFailure(writer, err, "")
+	if requireAdministratorSelector(call.Principal, selectors == 1) != nil {
+		handler.writeAgentServiceFailure(writer, argAdministratorOnly(selected[0]), "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)

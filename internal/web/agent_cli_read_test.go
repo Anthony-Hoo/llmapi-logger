@@ -276,6 +276,9 @@ func TestCLIInvalidArgumentsNameWhatTheUserTyped(t *testing.T) {
 		{admin, []string{"config", "preview-project", "--group-id", "null", "--rule", "repo_name: "}, "--rule", "empty", "", ""},
 		{developer, []string{"usage", "overview", "--group-by", "caller"}, "--group-by", reasonAdministratorOnly, "", "administrators"},
 		{developer, []string{"requests", "list", "--user-id", "8"}, "--user-id", reasonAdministratorOnly, "", "administrators"},
+		{developer, []string{"analysis", "overview", "--since", "7d", "--user-id", "8"}, "--user-id", reasonAdministratorOnly, "", "administrators"},
+		{developer, []string{"analysis", "sessions", "--since", "7d", "--user-id", "8"}, "--user-id", reasonAdministratorOnly, "", "administrators"},
+		{developer, []string{"analysis", "report", "--project-id", "1"}, "--project-id", reasonAdministratorOnly, "", "administrators"},
 	} {
 		label := strings.Join(test.args, " ")
 		if exit := test.cli.run(test.args...); exit != agentapi.ExitInvalidUsage {

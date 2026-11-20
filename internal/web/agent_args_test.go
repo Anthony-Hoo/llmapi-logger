@@ -144,6 +144,8 @@ func badArguments() []badArgument {
 		{"/requests?user_id=8", "user_id"}, {"/requests?username=x", "username"}, {"/requests?token_id=99", "token_id"},
 		{"/requests?token_name=x", "token_name"}, {"/requests?username=", "username"},
 		{"/usage/overview?group_by=caller", "group_by"}, {"/usage/overview?group_by=token", "group_by"},
+		{"/analysis/overview?since=7d&user_id=8", "user_id"}, {"/analysis/sessions?since=7d&user_id=8", "user_id"},
+		{"/analysis/report?user_id=8", "user_id"}, {"/analysis/report?project_id=1", "project_id"}, {"/analysis/report?group_id=1", "group_id"},
 	} {
 		argument := get(endpointOf(test.path), test.path, test.field, reasonAdministratorOnly)
 		argument.developer = true
