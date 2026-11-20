@@ -36,6 +36,9 @@ type SettingsError struct {
 	Field   string
 	Reason  string
 	Message string
+	// Allowed lists the accepted values when the field takes a closed set
+	// (ranked_clients: the vocabulary's client keys).
+	Allowed []string
 }
 
 func (err *SettingsError) Error() string { return ErrInvalidSettings.Error() + ": " + err.Message }

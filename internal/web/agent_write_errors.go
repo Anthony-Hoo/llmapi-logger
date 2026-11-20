@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/contentpolicy"
@@ -33,20 +34,105 @@ func (failure *agentFailure) write(writer http.ResponseWriter) {
 	writeAgentFailure(writer, failure.Code, failure.Message, failure.Hint, failure.Details)
 }
 
-// fieldFailure is an INVALID_ARGUMENT naming field.
-func fieldFailure(field, message string) *agentFailure {
-	return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: message, Details: map[string]any{"field": field}}
+// Reasons of the write facade's INVALID_ARGUMENT answers (contract section
+// 0.1 item 133), beyond those of the read side (agent_params.go) and of the
+// services' typed errors, which pass through unchanged. Every write-side
+// INVALID_ARGUMENT carries details.field and details.reason, and
+// details.allowed when the field takes a closed set of values.
+const (
+	reasonWrongType      = "wrong_type"
+	reasonInvalidJSON    = "invalid_json"
+	reasonTooLarge       = "too_large"
+	reasonNotUsed        = "not_used"
+	reasonNotSettable    = "not_settable"
+	reasonNotAListField  = "not_a_list_field"
+	reasonNullNotAllowed = "null_not_allowed"
+	reasonReadOnly       = "read_only"
+	reasonBothSpellings  = "both_spellings"
+	reasonSetAndEdited   = "set_and_edited"
+	reasonInvalidValue   = "invalid_value"
+)
+
+// fieldFailure is an INVALID_ARGUMENT naming field, with a reason.
+func fieldFailure(field, reason, message string) *agentFailure {
+	return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: message, Details: map[string]any{"field": field, "reason": reason}}
+}
+
+// allow adds details.allowed, the values the field accepts.
+func (failure *agentFailure) allow(values []string) *agentFailure {
+	if len(values) > 0 {
+		if failure.Details == nil {
+			failure.Details = map[string]any{}
+		}
+		failure.Details["allowed"] = append([]string{}, values...)
+	}
+	return failure
+}
+
+// principalClasses are the values of a principal's class.
+var principalClasses = []string{orgreport.ClassHuman, orgreport.ClassService}
+
+// projectRuleKinds are the kinds of a project rule.
+var projectRuleKinds = []string{orgreport.RuleRepoURL, orgreport.RuleRepoName, orgreport.RulePathGlob, orgreport.RuleAgentProject}
+
+// contentRuleActions are the actions of a keyword rule.
+var contentRuleActions = []string{contentpolicy.ActionBlock, contentpolicy.ActionDryRun}
+
+// closedSetOf returns the values a write field accepts when it takes a
+// closed set, nil otherwise. field is the facade's field path; an element
+// path ("rules[2].kind") names its list's element field.
+func closedSetOf(field string) []string {
+	if index := strings.LastIndex(field, "]."); index >= 0 {
+		element := field[index+2:]
+		if strings.HasPrefix(field, "rules[") && element == "kind" {
+			return projectRuleKinds
+		}
+		if strings.HasPrefix(field, "args.labels[") {
+			return sessionanalysis.LabelValues(element)
+		}
+		return nil
+	}
+	switch field {
+	case "action":
+		return contentRuleActions
+	case "scan_scopes":
+		return contentpolicy.AllScanScopes
+	case "class":
+		return principalClasses
+	case "llm.structured_output":
+		return sessionanalysis.StructuredOutputs
+	}
+	return nil
+}
+
+// withClosedSet adds details.allowed to a refused value of a closed-set
+// field that does not list it yet.
+func withClosedSet(failure *agentFailure) *agentFailure {
+	if failure.Code != agentapi.CodeInvalidArgument || failure.Details["allowed"] != nil {
+		return failure
+	}
+	switch failure.Details["reason"] {
+	case reasonInvalidValue, reasonNotAllowedValue, reasonRequired:
+		field, _ := failure.Details["field"].(string)
+		return failure.allow(closedSetOf(field))
+	}
+	return failure
 }
 
 func validationFailure(code agentapi.Code, field, reason, message string) *agentFailure {
 	details := map[string]any{}
+	if field == "" && code == agentapi.CodeInvalidArgument {
+		// A refused value the service names no field for (a rule's
+		// timestamps): the change as a whole.
+		field = "set"
+	}
 	if field != "" {
 		details["field"] = field
 	}
 	if reason != "" {
 		details["reason"] = reason
 	}
-	return &agentFailure{Code: code, Message: message, Details: details}
+	return withClosedSet(&agentFailure{Code: code, Message: message, Details: details})
 }
 
 // agentWriteFailure classifies an error of a write: typed service errors
@@ -68,7 +154,7 @@ func agentWriteFailure(err error) *agentFailure {
 	)
 	switch {
 	case errors.As(err, &argument):
-		return fieldFailure(argument.field, "")
+		return &agentFailure{Code: agentapi.CodeInvalidArgument, Message: argument.message, Details: argument.details()}
 	case errors.Is(err, uaguard.ErrVersionConflict), errors.Is(err, contentpolicy.ErrVersionConflict),
 		errors.Is(err, orgreport.ErrVersionConflict), errors.Is(err, sessionanalysis.ErrVersionConflict):
 		return &agentFailure{Code: agentapi.CodeVersionConflict}
@@ -90,19 +176,23 @@ func agentWriteFailure(err error) *agentFailure {
 		failure.Hint = orgConflictHint("", "constraint")
 		return failure
 	case errors.As(err, &orgSettings):
-		return validationFailure(agentapi.CodeInvalidArgument, orgSettings.Field, orgSettings.Reason, orgSettings.Message)
+		return validationFailure(agentapi.CodeInvalidArgument, settingsField(orgSettings.Field), orgSettings.Reason, orgSettings.Message).allow(orgSettings.Allowed)
 	case errors.Is(err, orgreport.ErrInvalidSettings):
-		return validationFailure(agentapi.CodeInvalidArgument, "", "", orgreport.SettingsMessage(err))
+		return validationFailure(agentapi.CodeInvalidArgument, "set", reasonInvalidValue, orgreport.SettingsMessage(err))
 	case errors.As(err, &analysisSet):
-		return validationFailure(agentapi.CodeInvalidArgument, analysisSet.Field, "", analysisSet.Message)
+		return validationFailure(agentapi.CodeInvalidArgument, settingsField(analysisSet.Field), analysisSet.Reason, analysisSet.Message).allow(analysisSet.Allowed)
 	case errors.Is(err, sessionanalysis.ErrInvalidSettings):
-		return validationFailure(agentapi.CodeInvalidArgument, "", "", sessionanalysis.SettingsMessage(err))
+		return validationFailure(agentapi.CodeInvalidArgument, "set", reasonInvalidValue, sessionanalysis.SettingsMessage(err))
 	case errors.As(err, &calibrationBad):
 		field := "args.labels"
 		if calibrationBad.Index >= 0 {
 			field = fmt.Sprintf("args.labels[%d].%s", calibrationBad.Index, calibrationBad.Field)
 		}
-		return validationFailure(agentapi.CodeInvalidArgument, field, "", "invalid calibration label")
+		message := "invalid calibration label: " + calibrationBad.Error()
+		if len(calibrationBad.Allowed) > 0 {
+			message += "; " + calibrationBad.Field + " accepts " + strings.Join(calibrationBad.Allowed, ", ")
+		}
+		return validationFailure(agentapi.CodeInvalidArgument, field, calibrationBad.Reason, message).allow(calibrationBad.Allowed)
 	case errors.Is(err, sessionanalysis.ErrRunInProgress):
 		return &agentFailure{Code: agentapi.CodeRunInProgress}
 	case errors.As(err, &keyTarget):
@@ -118,9 +208,18 @@ func agentWriteFailure(err error) *agentFailure {
 	}
 	code := agentErrorCodeOf(err)
 	if code == agentapi.CodeInvalidArgument {
-		return &agentFailure{Code: code, Details: map[string]any{"field": "body"}}
+		return &agentFailure{Code: code, Details: map[string]any{"field": "body", "reason": reasonRejectedByService}}
 	}
 	return &agentFailure{Code: code}
+}
+
+// settingsField is the field of a settings refusal; one that names no
+// editable field (a value only the configuration file sets) is "set".
+func settingsField(field string) string {
+	if field == "" {
+		return "set"
+	}
+	return field
 }
 
 // orgConflictHint is the next step for a CONFLICT of the org catalog. It
@@ -152,14 +251,15 @@ func orgConflictHint(object, reason string) string {
 // carries the same code, field and reason at both steps. apply takes no
 // body, so an otherwise unclassified refusal never names field "body": it
 // says the service refused the change when it was applied and asks for a
-// new plan made from the current state.
+// new plan made from the current state; its field is the plan's id, the only
+// input of apply.
 func agentApplyFailure(err error) *agentFailure {
 	failure := agentWriteFailure(err)
 	if failure.Code == agentapi.CodeInvalidArgument && failure.Details["field"] == "body" {
 		return &agentFailure{Code: agentapi.CodeInvalidArgument,
 			Message: "the service refused the change when the plan was applied",
 			Hint:    "Something the plan relied on has changed since it was made. Read the current state and make a new plan.",
-			Details: map[string]any{"reason": "refused_at_apply"}}
+			Details: map[string]any{"field": "plan_id", "reason": "refused_at_apply"}}
 	}
 	return failure
 }

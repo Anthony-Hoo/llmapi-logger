@@ -42,7 +42,7 @@ func (handler *managementHandler) planConfigSet(ctx context.Context, request age
 		return nil, err
 	}
 	if len(request.Set) == 0 && len(request.Add) == 0 && len(request.Remove) == 0 {
-		return nil, fieldFailure("set", "nothing to change: give set, add or remove")
+		return nil, fieldFailure("set", reasonRequired, "nothing to change: give set, add or remove")
 	}
 	if err := checkListConflicts(request); err != nil {
 		return nil, err
@@ -51,12 +51,12 @@ func (handler *managementHandler) planConfigSet(ctx context.Context, request age
 	switch request.Kind {
 	case "weekly-settings", "analysis-settings":
 		if !creating {
-			return nil, fieldFailure("id", request.Kind+" has no id")
+			return nil, fieldFailure("id", reasonNotUsed, request.Kind+" has no id")
 		}
 		creating = false
 	case "member", "principal":
 		if creating {
-			return nil, fieldFailure("id", request.Kind+" needs id: a change of "+request.Kind+" is always to an existing user or token")
+			return nil, fieldFailure("id", reasonRequired, request.Kind+" needs id: a change of "+request.Kind+" is always to an existing user or token")
 		}
 	}
 	if creating {
@@ -65,11 +65,11 @@ func (handler *managementHandler) planConfigSet(ctx context.Context, request age
 			values map[string]json.RawMessage
 		}{{"add", request.Add}, {"remove", request.Remove}} {
 			if len(edit.values) > 0 {
-				return nil, fieldFailure(edit.name, edit.name+" is not allowed when creating; give the whole list with set")
+				return nil, fieldFailure(edit.name, reasonNotUsed, edit.name+" is not allowed when creating; give the whole list with set")
 			}
 		}
 		if request.ExpectedVersion != nil {
-			return nil, fieldFailure("expected_version", "expected_version is not used when creating")
+			return nil, fieldFailure("expected_version", reasonNotUsed, "expected_version is not used when creating")
 		}
 	}
 	switch request.Kind {
@@ -94,10 +94,10 @@ func (handler *managementHandler) planConfigSet(ctx context.Context, request age
 
 func checkWriteKind(kind string, allowed []string) error {
 	if kind == "" {
-		return fieldFailure("kind", "kind is required")
+		return fieldFailure("kind", reasonRequired, "kind is required").allow(allowed)
 	}
 	if !contains(allowed, kind) {
-		return fieldFailure("kind", "kind must be one of "+strings.Join(allowed, ", "))
+		return fieldFailure("kind", reasonNotAllowedValue, "kind must be one of "+strings.Join(allowed, ", ")).allow(allowed)
 	}
 	return nil
 }
@@ -107,9 +107,9 @@ func noListEdits(kind string, request agentPlanRequest) error {
 	for _, edit := range []map[string]json.RawMessage{request.Add, request.Remove} {
 		for _, key := range sortedMemberKeys(edit) {
 			if isKeyField(key) {
-				return fieldFailure(key, keyFieldMessage)
+				return fieldFailure(key, reasonNotSettable, keyFieldMessage)
 			}
-			return fieldFailure(key, kind+" has no list field; use set")
+			return fieldFailure(key, reasonNotAListField, kind+" has no list field; use set")
 		}
 	}
 	return nil
@@ -119,11 +119,11 @@ func noListEdits(kind string, request agentPlanRequest) error {
 // id: a positive decimal string.
 func agentNumericID(request agentPlanRequest) (int64, error) {
 	if request.ID == nil {
-		return 0, fieldFailure("id", "id is required")
+		return 0, fieldFailure("id", reasonRequired, "id is required")
 	}
 	id, ok := parseAgentID(*request.ID, false)
 	if !ok || id <= 0 {
-		return 0, fieldFailure("id", "id must be a positive decimal number, written as a string")
+		return 0, fieldFailure("id", reasonInvalidFormat, "id must be a positive decimal number, written as a string")
 	}
 	return id, nil
 }
@@ -131,12 +131,12 @@ func agentNumericID(request agentPlanRequest) (int64, error) {
 // agentPrincipalID is a principal's id: user:<id> or token:<id>.
 func agentPrincipalID(request agentPlanRequest) (string, int64, error) {
 	if request.ID == nil {
-		return "", 0, fieldFailure("id", "id is required")
+		return "", 0, fieldFailure("id", reasonRequired, "id is required")
 	}
 	kind, raw, ok := strings.Cut(*request.ID, ":")
 	id, valid := parseAgentID(raw, false)
 	if !ok || (kind != orgreport.PrincipalUser && kind != orgreport.PrincipalToken) || !valid || id <= 0 {
-		return "", 0, fieldFailure("id", "id of a principal is user:<id> or token:<id>")
+		return "", 0, fieldFailure("id", reasonInvalidFormat, "id of a principal is user:<id> or token:<id>")
 	}
 	return kind, id, nil
 }
@@ -555,7 +555,7 @@ func (handler *managementHandler) planMemberSet(ctx context.Context, request age
 		return nil, err
 	}
 	if patch.GroupID == nil {
-		return nil, fieldFailure("group_id", "group_id is required: the group to put the user in")
+		return nil, fieldFailure("group_id", reasonRequired, "group_id is required: the group to put the user in")
 	}
 	userID, err := agentNumericID(request)
 	if err != nil {
@@ -609,7 +609,7 @@ func (handler *managementHandler) planPrincipalSet(ctx context.Context, request 
 		return nil, err
 	}
 	if patch.Class == nil {
-		return nil, fieldFailure("class", "class is required: human or service")
+		return nil, fieldFailure("class", reasonRequired, "class is required: human or service").allow(principalClasses)
 	}
 	kind, id, err := agentPrincipalID(request)
 	if err != nil {
@@ -758,7 +758,7 @@ var removableKinds = []string{"ua-rule", "content-rule", "group", "project", "me
 func (handler *managementHandler) planConfigRemove(_ context.Context, request agentPlanRequest) (*agentPlan, error) {
 	if err := checkWriteKind(request.Kind, removableKinds); err != nil {
 		if contains(agentapi.WriteKinds, request.Kind) {
-			return nil, fieldFailure("kind", request.Kind+" cannot be removed; restore the configuration file values with config.reset")
+			return nil, fieldFailure("kind", reasonNotAllowedValue, request.Kind+" cannot be removed; restore the configuration file values with config.reset")
 		}
 		return nil, err
 	}

@@ -73,16 +73,16 @@ func (handler *managementHandler) serveAgentAPIKeySet(writer http.ResponseWriter
 	var key string
 	for name, raw := range members {
 		if name != "api_key" {
-			handler.failKeyWrite(writer, request, call, keys, fieldFailure(name, "the only field is api_key"))
+			handler.failKeyWrite(writer, request, call, keys, fieldFailure(name, reasonUnknownField, "the only field is api_key"))
 			return
 		}
 		if json.Unmarshal(raw, &key) != nil {
-			handler.failKeyWrite(writer, request, call, keys, fieldFailure("api_key", "api_key must be a JSON string"))
+			handler.failKeyWrite(writer, request, call, keys, fieldFailure("api_key", reasonWrongType, "api_key must be a JSON string"))
 			return
 		}
 	}
 	if key == "" {
-		handler.failKeyWrite(writer, request, call, keys, fieldFailure("api_key", "api_key is required and must not be empty; clearing the key is a plan: llmaudit config set-key --kind analysis-settings --clear"))
+		handler.failKeyWrite(writer, request, call, keys, fieldFailure("api_key", reasonRequired, "api_key is required and must not be empty; clearing the key is a plan: llmaudit config set-key --kind analysis-settings --clear"))
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), agentWriteTimeout)
@@ -141,12 +141,12 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		case "api_key":
 			var value string
 			if json.Unmarshal(members[name], &value) != nil || value == "" {
-				refuse(fieldFailure("api_key", "api_key must be a non-empty JSON string"))
+				refuse(fieldFailure("api_key", reasonWrongType, "api_key must be a non-empty JSON string"))
 				return
 			}
 			key = &value
 		default:
-			refuse(fieldFailure(name, "unknown field "+name+"; the fields are "+strings.Join(agentTestModelBodyFields, ", ")))
+			refuse(fieldFailure(name, reasonUnknownField, "unknown field "+name+"; the fields are "+strings.Join(agentTestModelBodyFields, ", ")))
 			return
 		}
 	}

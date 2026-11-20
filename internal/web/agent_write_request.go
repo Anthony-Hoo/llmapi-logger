@@ -71,17 +71,17 @@ func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int6
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return nil, fieldFailure("body", "the request body is too large")
+			return nil, fieldFailure("body", reasonTooLarge, "the request body is too large")
 		}
 		return nil, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	var value json.RawMessage
 	if err := decoder.Decode(&value); err != nil {
-		return nil, fieldFailure("body", "the request body is not valid JSON")
+		return nil, fieldFailure("body", reasonInvalidJSON, "the request body is not valid JSON")
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return nil, fieldFailure("body", "the request body has data after the JSON value")
+		return nil, fieldFailure("body", reasonInvalidJSON, "the request body has data after the JSON value")
 	}
 	// Every object of the input, at any depth, names each key once: the
 	// maps the input is read into would keep only the last.
@@ -96,7 +96,7 @@ func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int6
 func decodeObject(raw []byte, field string) (map[string]json.RawMessage, error) {
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
-		return nil, fieldFailure(field, field+" must be a JSON object")
+		return nil, fieldFailure(field, reasonWrongType, field+" must be a JSON object")
 	}
 	return members, nil
 }
@@ -104,7 +104,7 @@ func decodeObject(raw []byte, field string) (map[string]json.RawMessage, error) 
 func decodeString(raw json.RawMessage, field string) (string, error) {
 	var value string
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", fieldFailure(field, field+" must be a JSON string")
+		return "", fieldFailure(field, reasonWrongType, field+" must be a JSON string")
 	}
 	return value, nil
 }
@@ -153,27 +153,27 @@ func decodeAgentPlanRequest(body []byte) (agentPlanRequest, error) {
 				request.Args = object
 			}
 		default:
-			return request, fieldFailure(key, "unknown field "+strconv.Quote(key))
+			return request, fieldFailure(key, reasonUnknownField, "unknown field "+strconv.Quote(key))
 		}
 	}
 	allowed, ok := planFields[request.Op]
 	if !ok {
-		return request, fieldFailure("op", "op must be one of "+strings.Join(agentapi.PlanOps, ", "))
+		return request, fieldFailure("op", reasonNotAllowedValue, "op must be one of "+strings.Join(agentapi.PlanOps, ", ")).allow(agentapi.PlanOps)
 	}
 	for key := range request.present {
 		if key != "op" && !contains(allowed, key) {
-			return request, fieldFailure(key, key+" is not used by "+request.Op)
+			return request, fieldFailure(key, reasonNotUsed, key+" is not used by "+request.Op)
 		}
 	}
 	if args, needs := planArgs[request.Op]; needs {
 		for key := range request.Args {
 			if !contains(args, key) {
-				return request, fieldFailure("args."+key, "unknown field args."+key)
+				return request, fieldFailure("args."+key, reasonUnknownField, "unknown field args."+key)
 			}
 		}
 		for _, key := range args {
 			if _, ok := request.Args[key]; !ok {
-				return request, fieldFailure("args."+key, "args."+key+" is required")
+				return request, fieldFailure("args."+key, reasonRequired, "args."+key+" is required")
 			}
 		}
 	}
@@ -206,7 +206,7 @@ func agentExpectedVersion(request agentPlanRequest, any int64) (int64, error) {
 	}
 	version, ok := parseAgentID(*request.ExpectedVersion, false)
 	if !ok {
-		return 0, fieldFailure("expected_version", "expected_version must be a decimal version string as config show prints it")
+		return 0, fieldFailure("expected_version", reasonInvalidFormat, "expected_version must be a decimal version string as config show prints it")
 	}
 	return version, nil
 }
@@ -233,21 +233,21 @@ func decodeAgentSet[T any](kind string, set map[string]json.RawMessage, allowNul
 	fields := agentapi.SettableFields[kind]
 	for _, key := range sortedMemberKeys(set) {
 		if isKeyField(key) {
-			return patch, fieldFailure(key, keyFieldMessage)
+			return patch, fieldFailure(key, reasonNotSettable, keyFieldMessage)
 		}
 		if !contains(fields, key) {
-			return patch, fieldFailure(key, "unknown field "+strconv.Quote(key)+" for kind "+kind+"; settable: "+strings.Join(fields, ", "))
+			return patch, fieldFailure(key, reasonUnknownField, "unknown field "+strconv.Quote(key)+" for kind "+kind+"; settable: "+strings.Join(fields, ", ")).allow(fields)
 		}
 		if bytes.Equal(bytes.TrimSpace(set[key]), []byte("null")) && (allowNull == nil || !allowNull(key)) {
-			return patch, fieldFailure(key, key+" cannot be null")
+			return patch, fieldFailure(key, reasonNullNotAllowed, key+" cannot be null")
 		}
 		var single T
 		if err := strictDecode(nest(map[string]json.RawMessage{key: set[key]}), &single, ""); err != nil {
-			return patch, strictFailure(err, fieldFailure(key, key+" has a value of the wrong type"))
+			return patch, strictFailure(err, fieldFailure(key, reasonWrongType, key+" has a value of the wrong type"))
 		}
 	}
 	if err := strictDecode(nest(set), &patch, ""); err != nil {
-		return patch, strictFailure(err, fieldFailure("set", "set cannot be decoded"))
+		return patch, strictFailure(err, fieldFailure("set", reasonWrongType, "set cannot be decoded"))
 	}
 	return patch, nil
 }
@@ -259,25 +259,25 @@ func decodeAgentListEdit[T any](kind, name string, edit map[string]json.RawMessa
 	lists := agentapi.ListFields[kind]
 	for _, key := range sortedMemberKeys(edit) {
 		if isKeyField(key) {
-			return out, fieldFailure(key, keyFieldMessage)
+			return out, fieldFailure(key, reasonNotSettable, keyFieldMessage)
 		}
 		if !contains(lists, key) {
 			if len(lists) == 0 {
-				return out, fieldFailure(key, kind+" has no list field; "+name+" cannot be used")
+				return out, fieldFailure(key, reasonNotAListField, kind+" has no list field; "+name+" cannot be used")
 			}
-			return out, fieldFailure(key, key+" is not a list field of "+kind+"; list fields: "+strings.Join(lists, ", "))
+			return out, fieldFailure(key, reasonNotAListField, key+" is not a list field of "+kind+"; list fields: "+strings.Join(lists, ", ")).allow(lists)
 		}
 		var elements []json.RawMessage
 		if err := json.Unmarshal(edit[key], &elements); err != nil || elements == nil {
-			return out, fieldFailure(key, name+"."+key+" must be a JSON array")
+			return out, fieldFailure(key, reasonWrongType, name+"."+key+" must be a JSON array")
 		}
 		var single T
 		if err := strictDecode(map[string]any{key: edit[key]}, &single, ""); err != nil {
-			return out, strictFailure(err, fieldFailure(key, name+"."+key+" has an element of the wrong shape"))
+			return out, strictFailure(err, fieldFailure(key, reasonWrongType, name+"."+key+" has an element of the wrong shape"))
 		}
 	}
 	if err := strictDecode(edit, &out, ""); err != nil {
-		return out, strictFailure(err, fieldFailure(name, name+" cannot be decoded"))
+		return out, strictFailure(err, fieldFailure(name, reasonWrongType, name+" cannot be decoded"))
 	}
 	return out, nil
 }
@@ -351,9 +351,8 @@ func canonicalFields(kind, name string, members map[string]json.RawMessage, fiel
 		}
 	}
 	if len(readOnly) > 0 {
-		failure := fieldFailure(readOnly[0], strings.Join(readOnly, ", ")+" "+pluralIs(len(readOnly))+" assigned by the server and cannot be "+
+		failure := fieldFailure(readOnly[0], reasonReadOnly, strings.Join(readOnly, ", ")+" "+pluralIs(len(readOnly))+" assigned by the server and cannot be "+
 			"given; remove "+pluralIt(len(readOnly))+" from the input (a copy of a removed object is restored as a new object with a new id)")
-		failure.Details["reason"] = "read_only"
 		failure.Details["fields"] = readOnly
 		return nil, failure
 	}
@@ -363,7 +362,7 @@ func canonicalFields(kind, name string, members map[string]json.RawMessage, fiel
 		if base, ok := strings.CutSuffix(key, untrustedSuffix); ok && contains(fields, base) {
 			canonical = base
 			if _, both := members[base]; both {
-				return nil, fieldFailure(base, base+" and "+key+" name the same field; give it once")
+				return nil, fieldFailure(base, reasonBothSpellings, base+" and "+key+" name the same field; give it once")
 			}
 		}
 		value := members[key]
@@ -397,13 +396,13 @@ func canonicalProjectRules(name string, raw json.RawMessage) (json.RawMessage, e
 			continue
 		}
 		if _, both := rule["pattern"]; both {
-			return nil, fieldFailure("rules["+strconv.Itoa(index)+"].pattern", "pattern and pattern_untrusted name the same field; give it once")
+			return nil, fieldFailure("rules["+strconv.Itoa(index)+"].pattern", reasonBothSpellings, "pattern and pattern_untrusted name the same field; give it once")
 		}
 		delete(rule, "pattern"+untrustedSuffix)
 		rule["pattern"] = pattern
 		encoded, err := json.Marshal(rule)
 		if err != nil {
-			return nil, fieldFailure(name, name+".rules cannot be decoded")
+			return nil, fieldFailure(name, reasonWrongType, name+".rules cannot be decoded")
 		}
 		elements[index], changed = encoded, true
 	}
@@ -412,7 +411,7 @@ func canonicalProjectRules(name string, raw json.RawMessage) (json.RawMessage, e
 	}
 	encoded, err := json.Marshal(elements)
 	if err != nil {
-		return nil, fieldFailure(name, name+".rules cannot be decoded")
+		return nil, fieldFailure(name, reasonWrongType, name+".rules cannot be decoded")
 	}
 	return encoded, nil
 }
@@ -462,7 +461,7 @@ func checkListConflicts(request agentPlanRequest) error {
 	for _, edit := range []map[string]json.RawMessage{request.Add, request.Remove} {
 		for key := range edit {
 			if _, ok := request.Set[key]; ok {
-				return fieldFailure(key, key+" cannot be both set and edited with add or remove")
+				return fieldFailure(key, reasonSetAndEdited, key+" cannot be both set and edited with add or remove")
 			}
 		}
 	}

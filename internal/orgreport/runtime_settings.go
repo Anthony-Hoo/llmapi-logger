@@ -277,6 +277,9 @@ func (service *Service) UpdateSettings(ctx context.Context, edited EditableSetti
 func (service *Service) checkVocabulary(clients []string) error {
 	if unknown := service.unknownClients(clients); len(unknown) != 0 {
 		failure := settingsError(ReasonUnknownClient, fmt.Sprintf("org_reports.ranked_clients entry %q is not a client of the vocabulary", unknown[0]))
+		for _, client := range service.clients {
+			failure.Allowed = append(failure.Allowed, client.Key)
+		}
 		return failure
 	}
 	return nil

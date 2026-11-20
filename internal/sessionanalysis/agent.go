@@ -40,9 +40,15 @@ func (view SettingsView) Version() int64 { return view.UpdatedNS }
 // sentence the error has always carried (it never contains the API key) and
 // Error() is unchanged, so SettingsMessage and the web mapping see no
 // difference.
+//
+// Reason is a stable code of what is wrong (contract section 0.1 item 133):
+// required, invalid_format, out_of_range, not_allowed_value (Allowed then
+// lists the accepted values), not_local_address or invalid_value.
 type SettingsError struct {
 	Field   string
 	Message string
+	Reason  string
+	Allowed []string
 }
 
 func (err *SettingsError) Error() string { return ErrInvalidSettings.Error() + ": " + err.Message }
@@ -60,7 +66,10 @@ var editableFields = map[string]bool{
 // settingsError reads the field from the message: internal/config only
 // returns text, which starts with the configuration path it checked.
 func settingsError(message string) *SettingsError {
-	failure := &SettingsError{Message: message}
+	failure := &SettingsError{Message: message, Reason: settingsReason(message)}
+	if failure.Reason == ReasonNotAllowedValue && strings.HasPrefix(message, "session_analysis.llm.structured_output ") {
+		failure.Allowed = append([]string{}, StructuredOutputs...)
+	}
 	switch {
 	case message == "the model client rejected the address":
 		failure.Field = "llm.base_url"
@@ -75,6 +84,38 @@ func settingsError(message string) *SettingsError {
 		}
 	}
 	return failure
+}
+
+// Reasons of a SettingsError and a LabelError.
+const (
+	ReasonRequired        = "required"
+	ReasonInvalidFormat   = "invalid_format"
+	ReasonOutOfRange      = "out_of_range"
+	ReasonNotAllowedValue = "not_allowed_value"
+	ReasonNotLocalAddress = "not_local_address"
+	ReasonInvalidValue    = "invalid_value"
+)
+
+// StructuredOutputs are the values llm.structured_output accepts.
+var StructuredOutputs = []string{"json_schema", "json_object", "prompt"}
+
+// settingsReason classifies a validation message of internal/config, which
+// only returns text.
+func settingsReason(message string) string {
+	switch {
+	case strings.Contains(message, " is required"), strings.Contains(message, "must not be empty"):
+		return ReasonRequired
+	case strings.Contains(message, "must be between"), strings.Contains(message, "exceeds llm.context_tokens"):
+		return ReasonOutOfRange
+	case strings.Contains(message, "structured_output must be"):
+		return ReasonNotAllowedValue
+	case strings.Contains(message, "must point to localhost"):
+		return ReasonNotLocalAddress
+	case strings.Contains(message, "must be HH:MM"), strings.Contains(message, "must be an http(s) URL"),
+		strings.Contains(message, "must not contain line breaks"), message == "the model client rejected the address":
+		return ReasonInvalidFormat
+	}
+	return ReasonInvalidValue
 }
 
 // LLMPatch names the model-stage fields to change; nil keeps the value.
@@ -216,7 +257,7 @@ func (service *SettingsService) ResetIfVersion(ctx context.Context, expectedVers
 // ClearAPIKey.
 func (service *SettingsService) SetAPIKey(ctx context.Context, key string) (SettingsView, error) {
 	if key == "" {
-		return SettingsView{}, &SettingsError{Field: "llm.api_key", Message: "session_analysis.llm.api_key must not be empty"}
+		return SettingsView{}, &SettingsError{Field: "llm.api_key", Message: "session_analysis.llm.api_key must not be empty", Reason: ReasonRequired}
 	}
 	return service.replaceKey(ctx, key)
 }
@@ -421,11 +462,14 @@ func changedSettings(before, after EditableSettings) []string {
 // Index is the label's position (-1 when the list itself is wrong), Field
 // the JSON name ("session_id", "task_type", …, "friction"; "labels" for the
 // count). It unwraps to the error Calibrate returns for the same input, and
-// its text is that error's.
+// its text is that error's. Reason is out_of_range (the count), invalid_format
+// (the session id) or not_allowed_value, with Allowed the field's values.
 type LabelError struct {
-	Index int
-	Field string
-	Err   error
+	Index   int
+	Field   string
+	Err     error
+	Reason  string
+	Allowed []string
 }
 
 func (err *LabelError) Error() string { return err.Err.Error() }
@@ -439,12 +483,32 @@ func (err *LabelError) Unwrap() error { return err.Err }
 // and writes nothing; whether a facet exists is decided by Calibrate.
 func ValidateCalibrationLabels(labels []CalibrationLabel) error {
 	if len(labels) == 0 || len(labels) > maxCalibrationLabels {
-		return &LabelError{Index: -1, Field: "labels", Err: invalid(fmt.Sprintf("between 1 and %d labels are required", maxCalibrationLabels))}
+		return &LabelError{Index: -1, Field: "labels", Err: invalid(fmt.Sprintf("between 1 and %d labels are required", maxCalibrationLabels)), Reason: ReasonOutOfRange}
 	}
 	for index, label := range labels {
 		if _, field, err := checkCalibrationLabel(label); err != nil {
-			return &LabelError{Index: index, Field: field, Err: err}
+			failure := &LabelError{Index: index, Field: field, Err: err, Reason: ReasonNotAllowedValue, Allowed: LabelValues(field)}
+			if field == "session_id" {
+				failure.Reason, failure.Allowed = ReasonInvalidFormat, nil
+			}
+			return failure
 		}
+	}
+	return nil
+}
+
+// LabelFields are the fields of a calibration label other than session_id,
+// in the order the documentation lists them.
+var LabelFields = []string{"task_type", "outcome", "collaboration", "work_relevance", "friction"}
+
+// LabelValues returns the values a calibration label field accepts (for
+// friction, the values of its list), nil for another field.
+func LabelValues(field string) []string {
+	switch field {
+	case "task_type", "outcome", "collaboration", "work_relevance":
+		return append([]string{}, enumFor(field)...)
+	case "friction":
+		return append([]string{}, FrictionKinds...)
 	}
 	return nil
 }

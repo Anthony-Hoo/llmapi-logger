@@ -156,7 +156,7 @@ func (handler *managementHandler) agentPlanFor(ctx context.Context, request agen
 	case agentapi.OpWeeklyRegenerate:
 		return handler.planWeeklyRegenerate(ctx, request)
 	}
-	return nil, fieldFailure("op", "unknown op")
+	return nil, fieldFailure("op", reasonNotAllowedValue, "unknown op").allow(agentapi.PlanOps)
 }
 
 // serveAgentPlanApply is POST /plans/{plan_id}/apply. The dispatcher has
@@ -259,7 +259,7 @@ func emptyAgentBody(writer http.ResponseWriter, request *http.Request) error {
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1024))
 	trimmed := bytes.TrimSpace(body)
 	if err != nil || (len(trimmed) > 0 && string(trimmed) != "{}") {
-		return fieldFailure("body", "apply takes no request body")
+		return fieldFailure("body", reasonNotUsed, "apply takes no request body")
 	}
 	return nil
 }

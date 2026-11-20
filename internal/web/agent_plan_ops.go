@@ -71,13 +71,13 @@ func (handler *managementHandler) planAnalysisCalibrate(ctx context.Context, req
 	var labels []sessionanalysis.CalibrationLabel
 	var elements []json.RawMessage
 	if err := json.Unmarshal(request.Args["labels"], &elements); err != nil || elements == nil {
-		return nil, fieldFailure("args.labels", "args.labels must be a JSON array of labels")
+		return nil, fieldFailure("args.labels", reasonWrongType, "args.labels must be a JSON array of labels")
 	}
 	for index, element := range elements {
 		var label sessionanalysis.CalibrationLabel
 		at := "args.labels[" + formatAgentID(int64(index)) + "]"
 		if err := strictDecode(element, &label, at); err != nil {
-			return nil, strictFailure(err, fieldFailure(at, "a label has an unknown field or a value of the wrong type"))
+			return nil, strictFailure(err, fieldFailure(at, reasonWrongType, "a label has a value of the wrong type"))
 		}
 		labels = append(labels, label)
 	}
@@ -185,11 +185,11 @@ func (handler *managementHandler) planAnalysisDismiss(ctx context.Context, reque
 	raw := bytes.TrimSpace(request.Args["suggestion_id"])
 	var number json.Number
 	if len(raw) == 0 || raw[0] == '"' || json.Unmarshal(raw, &number) != nil {
-		return nil, fieldFailure("args.suggestion_id", "args.suggestion_id must be a positive integer, written as a JSON number")
+		return nil, fieldFailure("args.suggestion_id", reasonInvalidFormat, "args.suggestion_id must be a positive integer, written as a JSON number")
 	}
 	id, ok := parseAgentID(number.String(), false)
 	if !ok || id <= 0 {
-		return nil, fieldFailure("args.suggestion_id", "args.suggestion_id must be a positive integer, written as a JSON number")
+		return nil, fieldFailure("args.suggestion_id", reasonInvalidFormat, "args.suggestion_id must be a positive integer, written as a JSON number")
 	}
 	// The check apply's dismissal makes, made now: a suggestion that does not
 	// exist (or is a personal one) gets no plan.
@@ -268,7 +268,7 @@ func (handler *managementHandler) planWeeklyRegenerate(ctx context.Context, requ
 	}
 	state, err := org.WeekState(ctx, week)
 	if errors.Is(err, orgreport.ErrInvalid) {
-		return nil, fieldFailure("args.week", "args.week is not a report week")
+		return nil, fieldFailure("args.week", reasonInvalidFormat, "args.week is not a report week")
 	}
 	if err != nil {
 		return nil, err

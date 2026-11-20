@@ -311,7 +311,7 @@ func writeAgentServiceError(writer http.ResponseWriter, err error) {
 	var coded *agentaccess.Error
 	if errors.As(err, &coded) {
 		if coded.Field != "" {
-			details = map[string]any{"field": coded.Field}
+			details = map[string]any{"field": coded.Field, "reason": reasonInvalidValue}
 		}
 		if code == agentapi.CodeRateLimited {
 			writer.Header().Set("Retry-After", retryAfterSeconds(coded.RetryAfter))
@@ -357,7 +357,8 @@ var agentTokenBodyFields = []string{"code", "code_verifier"}
 
 func (handler *managementHandler) serveAgentToken(writer http.ResponseWriter, request *http.Request, call agentCall) {
 	if _, err := agentCallParams(request, call); err != nil {
-		writeAgentError(writer, agentapi.CodeInvalidArgument, map[string]any{"field": err.(agentArgError).field})
+		failure := agentWriteFailure(err)
+		failure.write(writer)
 		return
 	}
 	request.Body = http.MaxBytesReader(writer, request.Body, maxAgentTokenBodyBytes)
@@ -368,12 +369,12 @@ func (handler *managementHandler) serveAgentToken(writer http.ResponseWriter, re
 		CodeVerifier string `json:"code_verifier"`
 	}
 	if err := decoder.Decode(&body); err != nil {
-		writeAgentError(writer, agentapi.CodeInvalidArgument, map[string]any{"field": "body"})
+		fieldFailure("body", reasonInvalidJSON, "the body must be exactly {\"code\": \"…\", \"code_verifier\": \"…\"}").write(writer)
 		return
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		writeAgentError(writer, agentapi.CodeInvalidArgument, map[string]any{"field": "body"})
+		fieldFailure("body", reasonInvalidJSON, "the request body has data after the JSON value").write(writer)
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)

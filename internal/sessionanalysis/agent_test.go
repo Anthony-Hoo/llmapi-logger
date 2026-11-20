@@ -406,3 +406,41 @@ func TestTestPatchKeepsTheKeyInUseAtTheAddressInEffect(t *testing.T) {
 		t.Fatal("TargetChange misses a destination field")
 	}
 }
+
+// Contract section 0.1 item 133: a settings refusal says why (Reason), and
+// for llm.structured_output which values it takes (Allowed). StructuredOutputs
+// is the configuration validator's list: every value of it is accepted and
+// anything else is refused with exactly that list.
+func TestSettingsRefusalsCarryReasonAndAllowedValues(t *testing.T) {
+	ctx := context.Background()
+	service, _, _, _ := settingsFixture(t)
+	for _, value := range StructuredOutputs {
+		if _, err := service.CheckPatch(ctx, AnyVersion, SettingsPatch{LLM: LLMPatch{StructuredOutput: ptr(value)}}); err != nil {
+			t.Fatalf("structured_output %q = %v", value, err)
+		}
+	}
+	for _, test := range []struct {
+		patch   SettingsPatch
+		field   string
+		reason  string
+		allowed []string
+	}{
+		{SettingsPatch{LLM: LLMPatch{StructuredOutput: ptr("xml")}}, "llm.structured_output", ReasonNotAllowedValue, StructuredOutputs},
+		{SettingsPatch{RunAt: ptr("7")}, "run_at", ReasonInvalidFormat, nil},
+		{SettingsPatch{L1SettleHours: intPtr(1000)}, "l1_settle_hours", ReasonOutOfRange, nil},
+		{SettingsPatch{LLM: LLMPatch{BaseURL: ptr("https://llm.example.com/v1")}}, "llm.base_url", ReasonNotLocalAddress, nil},
+		{SettingsPatch{LLM: LLMPatch{Model: ptr(" ")}}, "llm.model", ReasonRequired, nil},
+	} {
+		_, err := service.CheckPatch(ctx, AnyVersion, test.patch)
+		var refused *SettingsError
+		if !errors.As(err, &refused) || refused.Field != test.field || refused.Reason != test.reason || strings.Join(refused.Allowed, ",") != strings.Join(test.allowed, ",") {
+			t.Errorf("%+v = %+v", test.patch, refused)
+		}
+	}
+	// Calibration labels: the reason, and a field's values.
+	err := ValidateCalibrationLabels([]CalibrationLabel{{SessionID: strings.Repeat("a", 64), TaskType: "bugfix"}})
+	var label *LabelError
+	if !errors.As(err, &label) || label.Field != "task_type" || label.Reason != ReasonNotAllowedValue || strings.Join(label.Allowed, ",") != strings.Join(TaskTypes, ",") {
+		t.Fatalf("label = %+v", label)
+	}
+}
