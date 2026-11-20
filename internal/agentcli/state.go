@@ -12,6 +12,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"unicode/utf16"
 
 	"llmapi-logger/internal/agentapi"
 )
@@ -274,10 +276,19 @@ func ensurePrivateDir(dir string) error {
 
 // writeAtomic writes target through a temporary file in the same directory
 // and renames it over target. private makes the file readable by the current
-// user only. It returns the size and SHA-256 of what was written.
+// user only; any other temporary file has a random name as long as the
+// target's, the name outPath proved can be created. It returns the size and
+// SHA-256 of what was written.
 func writeAtomic(target string, private bool, write func(io.Writer) error) (int64, string, error) {
 	dir := filepath.Dir(target)
-	file, tempPath, err := createTemp(dir, private)
+	var file *os.File
+	var tempPath string
+	var err error
+	if private {
+		file, tempPath, err = createPrivateTemp(dir)
+	} else {
+		file, tempPath, err = createSameLength(dir, filepath.Base(target))
+	}
 	if err != nil {
 		return 0, "", err
 	}
@@ -308,14 +319,9 @@ func writeAtomic(target string, private bool, write func(io.Writer) error) (int6
 	return counter.count, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func createTemp(dir string, private bool) (*os.File, string, error) {
-	if !private {
-		file, err := os.CreateTemp(dir, tempPrefix+"*")
-		if err != nil {
-			return nil, "", err
-		}
-		return file, file.Name(), nil
-	}
+// createPrivateTemp creates a private temporary file with a short fixed
+// prefix in dir.
+func createPrivateTemp(dir string) (*os.File, string, error) {
 	for attempt := 0; attempt < 10; attempt++ {
 		var random [6]byte
 		if _, err := rand.Read(random[:]); err != nil {
@@ -323,6 +329,62 @@ func createTemp(dir string, private bool) (*os.File, string, error) {
 		}
 		path := filepath.Join(dir, tempPrefix+hex.EncodeToString(random[:]))
 		file, err := createPrivateFile(path)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return file, path, nil
+	}
+	return nil, "", errors.New("cannot create a temporary file")
+}
+
+// nameLength is the length of a file name in the unit the file system limits
+// it in: UTF-16 code units on Windows (NTFS), bytes elsewhere.
+func nameLength(name string) int {
+	if runtime.GOOS == "windows" {
+		return len(utf16.Encode([]rune(name)))
+	}
+	return len(name)
+}
+
+// sameLengthName is a fresh random name of nameLength(name), made of ASCII
+// letters and digits (so bytes and UTF-16 units agree), starting with
+// tempPrefix when it is long enough to leave eight random characters.
+func sameLengthName(name string) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	length := nameLength(name)
+	prefix := ""
+	switch {
+	case length >= len(tempPrefix)+8:
+		prefix = tempPrefix
+	case length >= 2:
+		prefix = "."
+	case length < 1:
+		length = 1
+	}
+	random := make([]byte, length-len(prefix))
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	for index, value := range random {
+		random[index] = alphabet[int(value)%len(alphabet)]
+	}
+	return prefix + string(random), nil
+}
+
+// createSameLength creates, exclusively, a file in dir with a fresh random
+// name as long as name (sameLengthName). It never creates or opens anything
+// at name itself.
+func createSameLength(dir, name string) (*os.File, string, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		random, err := sameLengthName(name)
+		if err != nil {
+			return nil, "", err
+		}
+		path := filepath.Join(dir, random)
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(err, fs.ErrExist) {
 			continue
 		}

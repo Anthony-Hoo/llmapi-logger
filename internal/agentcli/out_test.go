@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"llmapi-logger/internal/agentapi"
@@ -340,6 +341,114 @@ func TestLocalFileErrorsCarryAHint(t *testing.T) {
 		body := h.expectFailure(h.run(args...), agentapi.CodeLocalFileError, agentapi.ExitError)
 		if body.Hint == "" || !strings.Contains(body.Hint, "details.path") {
 			t.Errorf("%v: hint %q", args, body.Hint)
+		}
+	}
+}
+
+// TestOutPreCheckNeverTouchesTheTarget (contract section 0.1 item 166): the
+// --out pre-check proves the name with a random name of the same length and
+// never creates or removes anything at the target path. A file another
+// writer renames onto the target at any moment of the check survives it; a
+// missing target stays missing and an existing one unchanged, and nothing is
+// left in the directory.
+func TestOutPreCheckNeverTouchesTheTarget(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.json")
+	inv, err := parse(h.env, []string{"usage", "trend", "ses_1", "--out", target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 300; round++ {
+		_ = os.Remove(target)
+		prepared := filepath.Join(dir, "prepared")
+		if err := os.WriteFile(prepared, []byte("other writer"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var wait sync.WaitGroup
+		var renamed bool
+		wait.Add(1)
+		go func(delay int) {
+			defer wait.Done()
+			for spin := 0; spin < delay; spin++ {
+				runtime.Gosched()
+			}
+			renamed = os.Rename(prepared, target) == nil
+		}(round % 13)
+		// On Windows the check opens an existing target for writing (never
+		// creating or truncating it) and may meet the rename half-way; a
+		// refusal is fine, losing the other writer's file is not.
+		_, _ = outPath(inv)
+		wait.Wait()
+		if data, err := os.ReadFile(target); renamed && (err != nil || string(data) != "other writer") {
+			t.Fatalf("round %d: the other writer's file at the target is gone or changed: %v %q", round, err, data)
+		}
+		_ = os.Remove(prepared)
+	}
+	_ = os.Remove(target)
+	if _, err := outPath(inv); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("the check left %v behind or created the target", entries)
+	}
+	writeFile(t, target, "precious")
+	before, _ := os.Lstat(target)
+	if _, err := outPath(inv); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Lstat(target)
+	if data, _ := os.ReadFile(target); string(data) != "precious" || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("the existing target changed: %q", data)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("the check left %v behind", entries)
+	}
+}
+
+// TestSameLengthNamesMatchTheTarget: the probe and the temporary file of an
+// --out write have a fresh name exactly as long as the target's in the file
+// system's unit (bytes; UTF-16 units on Windows), made of ASCII letters and
+// digits, and two of them differ.
+func TestSameLengthNamesMatchTheTarget(t *testing.T) {
+	for _, name := range []string{"a", "ab", "out.json", strings.Repeat("审", 80) + ".json", strings.Repeat("x", 255)} {
+		first, err := sameLengthName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, _ := sameLengthName(name)
+		if nameLength(first) != nameLength(name) || len(first) != nameLength(first) || (len(first) > 4 && first == second) {
+			t.Fatalf("%q: %q and %q", name, first, second)
+		}
+	}
+}
+
+// TestOutAlternateDataStreamIsRefused: on Windows a ':' after the drive
+// letter names an alternate data stream of another file; --out refuses it
+// with LOCAL_FILE_ERROR and reason alternate_data_stream before anything is
+// sent, and the base file is neither created nor changed.
+func TestOutAlternateDataStreamIsRefused(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("alternate data streams are an NTFS feature")
+	}
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	dir := t.TempDir()
+	base := filepath.Join(dir, "out.json")
+	for _, existing := range []bool{false, true} {
+		if existing {
+			writeFile(t, base, "precious")
+		}
+		for _, args := range [][]string{{"usage", "trend", "ses_1"}, {"requests", "export", "77", "--what", "conversation"}} {
+			body := h.expectFailure(h.run(append(append([]string{}, args...), "--out", base+":stream")...), agentapi.CodeLocalFileError, 1)
+			if body.Details["reason"] != "alternate_data_stream" || len(server.recorded()) != 0 {
+				t.Fatalf("%v: %+v", args, body)
+			}
+		}
+		data, err := os.ReadFile(base)
+		if existing && string(data) != "precious" || !existing && err == nil {
+			t.Fatalf("existing %v: the base file is %q, %v", existing, data, err)
 		}
 	}
 }

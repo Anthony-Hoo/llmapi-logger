@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"llmapi-logger/internal/agentapi"
 )
@@ -70,47 +71,41 @@ type outSummary struct {
 }
 
 // outPath resolves --out and checks, before anything is sent, that the file
-// can be written there: the directory exists and takes a new file (the
-// temporary file the atomic replace uses), the target is not a directory,
-// its name can be created there (a missing target is created exclusively
-// and removed), and on Windows an existing file is not read-only (it is
-// opened for writing and not truncated).
+// can be written there: the directory exists, the target is not a directory,
+// the directory takes a new file with a name as long as the target's (the
+// temporary file the atomic replace uses has such a name), and on Windows
+// the name is no alternate data stream and an existing file is not
+// read-only (it is opened for writing and not truncated). Nothing is ever
+// created or removed at the target path itself (contract section 0.1 item
+// 166).
 func outPath(inv *invocation) (string, error) {
 	target, err := filepath.Abs(inv.value("out"))
 	if err != nil {
 		return "", localFileError("the --out path is not usable", map[string]any{"field": "--out"})
 	}
 	details := map[string]any{"field": "--out", "path": target}
+	if runtime.GOOS == "windows" && strings.Contains(target[len(filepath.VolumeName(target)):], ":") {
+		details["reason"] = "alternate_data_stream"
+		return "", localFileError("--out names an alternate data stream (a ':' after the drive letter); give a plain file name", details)
+	}
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		return "", localFileError("--out names a directory; give a file name", details)
 	}
 	if info, err := os.Stat(filepath.Dir(target)); err != nil || !info.IsDir() {
 		return "", localFileError("the directory of --out does not exist", details)
 	}
-	probe, probePath, err := createTemp(filepath.Dir(target), false)
+	// A name the file system cannot hold (too long in bytes on Linux, in
+	// UTF-16 units on NTFS) fails only when a file is created. A file with a
+	// fresh random name of the same length is created exclusively and removed
+	// by its own name: that proves the length, and the directory, without
+	// touching whatever is or appears at the target.
+	probe, probePath, err := createSameLength(filepath.Dir(target), filepath.Base(target))
 	if err != nil {
-		return "", localFileError("the directory of --out does not accept a new file", details)
+		return "", localFileError("the --out file cannot be created in its directory: the directory does not accept a new file, or the name is too long there", details)
 	}
 	_ = probe.Close()
 	_ = os.Remove(probePath)
-	// The longest name the write uses is the target's own (the temporary
-	// file's name is short and fixed). A name the file system cannot hold
-	// (too long in bytes on Linux, in UTF-16 units on NTFS, or not allowed
-	// there) fails only when the file is created, so a target that does not
-	// exist is created exclusively and removed again: that proves the name
-	// and leaves nothing behind. An existing target already proves it and
-	// is not touched.
-	switch _, err := os.Lstat(target); {
-	case errors.Is(err, fs.ErrNotExist):
-		created, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			return "", localFileError("the --out file cannot be created in its directory: the name is too long or not allowed there", details)
-		}
-		_ = created.Close()
-		if err := os.Remove(target); err != nil {
-			return "", localFileError("the --out file cannot be created in its directory", details)
-		}
-	case err != nil:
+	if _, err := os.Lstat(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", localFileError("the --out file name is not usable: it is too long or not allowed there", details)
 	}
 	// Windows cannot rename over a read-only file; POSIX can.
