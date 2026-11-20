@@ -372,3 +372,14 @@ func TestAgentUnknownObjectsAreNamedNotCounted(t *testing.T) {
 		t.Errorf("report of an unknown user: next_actions %v", got)
 	}
 }
+
+// The anonymous download refuses a query parameter with field and reason as
+// well.
+func TestAgentDownloadParameterErrorNamesFieldAndReason(t *testing.T) {
+	fixture := newReadFixture(t)
+	body := decodeAgent(t, fixture.facade(http.MethodGet, "/dl/signature/manifest.json?zz=1", "", ""))
+	if body.Error == nil || body.Error.Code != agentapi.CodeInvalidArgument || body.Error.Details["field"] != "zz" ||
+		body.Error.Details["reason"] != reasonUnknownParameter || body.Error.Message == "invalid argument" {
+		t.Fatalf("download with a parameter = %+v", body.Error)
+	}
+}

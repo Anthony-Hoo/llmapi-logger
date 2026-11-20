@@ -86,3 +86,28 @@ func TestRenameArgumentOnlyForServerReadErrors(t *testing.T) {
 		t.Fatalf("local error renamed: %+v", local)
 	}
 }
+
+// Every local INVALID_ARGUMENT carries details.field and details.reason too.
+func TestLocalUsageErrorsNameFieldAndReason(t *testing.T) {
+	h := newHarness(t)
+	for _, test := range []struct {
+		args          []string
+		field, reason string
+	}{
+		{[]string{"nosuchcommand"}, "command", "unknown_command"},
+		{[]string{"usage", "tree"}, "arguments", "wrong_argument_count"},
+		{[]string{"requests", "list", "--bogus"}, "--bogus", "unknown_flag"},
+		{[]string{"requests", "list", "--since"}, "--since", "missing_value"},
+		{[]string{"requests", "list", "--since", "1d", "--since", "2d"}, "--since", "repeated_parameter"},
+		{[]string{"config", "show"}, "--kind", "required"},
+		{[]string{"config", "show", "--kind", "bogus"}, "--kind", "not_allowed_value"},
+		{[]string{"requests", "list", "--no-collapse=maybe"}, "--no-collapse", "not_allowed_value"},
+		{[]string{"requests", "get", ".."}, "<id>", "invalid_format"},
+		{[]string{"analysis", "session", "0123", "--pack", "--facet"}, "--pack", "required"},
+	} {
+		body := h.expectFailure(h.run(test.args...), agentapi.CodeInvalidArgument, agentapi.ExitInvalidUsage)
+		if body.Details["field"] != test.field || body.Details["reason"] != test.reason {
+			t.Errorf("%v: details %v, want field %q reason %q", test.args, body.Details, test.field, test.reason)
+		}
+	}
+}

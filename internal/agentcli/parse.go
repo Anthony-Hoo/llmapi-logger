@@ -38,8 +38,16 @@ type errHelp struct {
 
 func (err *errHelp) Error() string { return "help requested" }
 
+// usageError is a local INVALID_ARGUMENT: field names the flag or argument
+// as typed, and details.reason is invalid_usage unless a caller sets a more
+// specific one (usageErrorWith), so every exit-2 envelope carries both
+// (contract section 0.1 item 115).
 func usageError(field, message string) *cliError {
-	details := map[string]any{}
+	return usageErrorWith(field, "invalid_usage", message)
+}
+
+func usageErrorWith(field, reason, message string) *cliError {
+	details := map[string]any{"reason": reason}
 	if field != "" {
 		details["field"] = field
 	}
@@ -82,16 +90,25 @@ func findCommand(commands []*commandSpec, args []string) (*commandSpec, []string
 		// JSON envelope naming the missing subcommand and the available ones;
 		// plain help only for an explicit --help.
 		available := groupCommands(commands, args[0])
-		failure := usageError("command", fmt.Sprintf("`llmaudit %s` needs a subcommand: %s", args[0], strings.Join(available, ", ")))
-		failure.Details["reason"] = "missing_subcommand"
+		failure := usageErrorWith("command", "missing_subcommand", fmt.Sprintf("`llmaudit %s` needs a subcommand: %s", args[0], strings.Join(available, ", ")))
 		if len(args) > 1 {
-			failure = usageError("command", fmt.Sprintf("unknown command %q; `llmaudit %s` has: %s", args[0]+" "+args[1], args[0], strings.Join(available, ", ")))
-			failure.Details["reason"] = "unknown_command"
+			failure = usageErrorWith("command", "unknown_command", fmt.Sprintf("unknown command %q; `llmaudit %s` has: %s", args[0]+" "+args[1], args[0], strings.Join(available, ", ")))
 		}
 		failure.Details["available"] = available
 		return nil, nil, failure
 	}
-	return nil, nil, usageError("", fmt.Sprintf("unknown command %q", args[0]))
+	var available []string
+	for _, spec := range commands {
+		if len(spec.Path) == 1 {
+			available = append(available, spec.Path[0])
+		}
+	}
+	for _, group := range groupOrder {
+		available = append(available, group.Name)
+	}
+	failure := usageErrorWith("command", "unknown_command", fmt.Sprintf("unknown command %q; the commands and groups are: %s", args[0], strings.Join(available, ", ")))
+	failure.Details["available"] = available
+	return nil, nil, failure
 }
 
 // groupCommands lists the subcommands of group in table order.
@@ -185,7 +202,7 @@ func parseFlags(env *Env, spec *commandSpec, args []string) (*invocation, error)
 		}
 		flag := spec.flag(name)
 		if flag == nil {
-			return nil, usageError("--"+name, fmt.Sprintf("unknown flag --%s for `llmaudit %s`", name, spec.name()))
+			return nil, usageErrorWith("--"+name, "unknown_flag", fmt.Sprintf("unknown flag --%s for `llmaudit %s`", name, spec.name()))
 		}
 		if flag.Kind == boolFlag {
 			set, err := boolValue("--"+name, value, hasValue)
@@ -199,13 +216,13 @@ func parseFlags(env *Env, spec *commandSpec, args []string) (*invocation, error)
 		}
 		if !hasValue {
 			if index+1 >= len(args) {
-				return nil, usageError("--"+name, fmt.Sprintf("flag --%s needs a value", name))
+				return nil, usageErrorWith("--"+name, "missing_value", fmt.Sprintf("flag --%s needs a value", name))
 			}
 			index++
 			value = args[index]
 		}
 		if flag.Kind == stringFlag && inv.has(name) {
-			return nil, usageError("--"+name, fmt.Sprintf("flag --%s given more than once", name))
+			return nil, usageErrorWith("--"+name, "repeated_parameter", fmt.Sprintf("flag --%s given more than once", name))
 		}
 		inv.given = append(inv.given, occurrence{flag: flag, value: value})
 	}
@@ -218,16 +235,18 @@ func parseFlags(env *Env, spec *commandSpec, args []string) (*invocation, error)
 		if len(names) > 0 {
 			expected = "exactly " + strings.Join(names, " ")
 		}
-		return nil, usageError("", fmt.Sprintf("`llmaudit %s` takes %s; got %d", spec.name(), expected, len(inv.args)))
+		failure := usageErrorWith("arguments", "wrong_argument_count", fmt.Sprintf("`llmaudit %s` takes %s; got %d", spec.name(), expected, len(inv.args)))
+		failure.Details["expected"] = names
+		return nil, failure
 	}
 	for index, arg := range inv.args {
 		if arg == "" || arg == "." || arg == ".." {
-			return nil, usageError(spec.Args[index].Name, fmt.Sprintf("<%s> is not a valid value", spec.Args[index].Name))
+			return nil, usageErrorWith("<"+spec.Args[index].Name+">", "invalid_format", fmt.Sprintf("<%s> is not a valid value", spec.Args[index].Name))
 		}
 	}
 	for _, flag := range spec.Flags {
 		if flag.Required && !inv.has(flag.Name) {
-			return nil, usageError("--"+flag.Name, fmt.Sprintf("flag --%s is required", flag.Name))
+			return nil, usageErrorWith("--"+flag.Name, "required", fmt.Sprintf("flag --%s is required", flag.Name))
 		}
 	}
 	return inv, nil
@@ -243,7 +262,7 @@ func boolValue(name, value string, hasValue bool) (bool, error) {
 	case "false":
 		return false, nil
 	}
-	return false, usageError(name, fmt.Sprintf("flag %s takes true or false", name))
+	return false, usageErrorWith(name, "not_allowed_value", fmt.Sprintf("flag %s takes true or false", name))
 }
 
 func (inv *invocation) has(name string) bool {
@@ -362,7 +381,7 @@ func selectByFlag(inv *invocation, flag string, pathOf func(string) string) (*ro
 			return &inv.spec.Routes[index], nil
 		}
 	}
-	return nil, usageError("--"+flag, fmt.Sprintf("--%s %q is not one of the accepted values; see `llmaudit %s --help`", flag, value, inv.spec.name()))
+	return nil, usageErrorWith("--"+flag, "not_allowed_value", fmt.Sprintf("--%s %q is not one of the accepted values; see `llmaudit %s --help`", flag, value, inv.spec.name()))
 }
 
 func selectConfigShow(inv *invocation) (*routeSpec, error) {
@@ -378,16 +397,16 @@ func selectExport(inv *invocation) (*routeSpec, error) {
 			return &inv.spec.Routes[0], nil
 		}
 	}
-	return nil, usageError("--what", fmt.Sprintf("--what %q is not one of %s", what, strings.Join(exportWhat, ", ")))
+	return nil, usageErrorWith("--what", "not_allowed_value", fmt.Sprintf("--what %q is not one of %s", what, strings.Join(exportWhat, ", ")))
 }
 
 func selectAnalysisSession(inv *invocation) (*routeSpec, error) {
 	pack, facet := inv.has("pack"), inv.has("facet")
 	switch {
 	case pack == facet:
-		return nil, usageError("--pack", "exactly one of --pack or --facet is required")
+		return nil, usageErrorWith("--pack", "required", "exactly one of --pack or --facet is required")
 	case pack && !inv.has("out"):
-		return nil, usageError("--out", "--pack requires --out <file>")
+		return nil, usageErrorWith("--out", "required", "--pack requires --out <file>")
 	case pack:
 		return &inv.spec.Routes[0], nil
 	default:
