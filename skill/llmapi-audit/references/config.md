@@ -31,7 +31,7 @@ llmaudit config preview-project --group-id 2 --rule repo_name:example-repo
 llmaudit config preview-project --group-id null --rule 'path_glob:/work/example/**' --week 2026-01-05 --project-id 7
 ```
 
-Read-only: shows what the rules would match in a week without saving anything. Rule kinds are `repo_url`, `repo_name`, `path_glob` and `agent_project`. `--group-id null` means the organisation-wide project; `--project-id` names the project being edited so its own matches are not counted as another project's.
+Read-only: shows what the rules would match in a week without saving anything. Rule kinds are `repo_url`, `repo_name`, `path_glob` and `agent_project`. `--group-id null` means the organisation-wide project; `--project-id` names the project being edited so its own matches are not counted as another project's. At least one `--rule` is required. A `--group-id` or `--project-id` that does not exist is not an error (the web form behaves the same), but `next_actions` then says that no such group or project was found: the zeros are not a measurement.
 
 ## Changing: plan, show, apply
 

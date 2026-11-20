@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -198,6 +199,38 @@ func (handler *managementHandler) agentWeekFailure(week, field string) *agentFai
 
 func agentGroupID(values url.Values) (*int64, error) {
 	return parseAgentPositiveID(values, "group_id", 0)
+}
+
+// agentUnknownOrgObjects explains an empty result read for a project group
+// or project the organization catalog does not have (contract section 0.1
+// item 119). The web routes answer such a read with an empty result rather
+// than an error, so the facade does too, but says that nothing was found
+// instead of letting zeros pass for data. Group 0 (ungrouped) always exists.
+func (handler *managementHandler) agentUnknownOrgObjects(groupID, projectID *int64) []string {
+	if handler.org == nil || (groupID == nil || *groupID == 0) && (projectID == nil || *projectID <= 0) {
+		return nil
+	}
+	catalog := handler.org.Catalog()
+	var actions []string
+	if groupID != nil && *groupID != 0 {
+		found := false
+		for _, group := range catalog.Groups {
+			found = found || group.ID == *groupID
+		}
+		if !found {
+			actions = append(actions, fmt.Sprintf("No project group with id %d exists, so the result is empty, not a measurement of zero activity; `llmaudit config show --kind org` lists the groups.", *groupID))
+		}
+	}
+	if projectID != nil && *projectID > 0 {
+		found := false
+		for _, project := range catalog.Projects {
+			found = found || project.ID == *projectID
+		}
+		if !found {
+			actions = append(actions, fmt.Sprintf("No project with id %d exists, so the result is empty, not a measurement of zero activity; `llmaudit config show --kind org` lists the projects.", *projectID))
+		}
+	}
+	return actions
 }
 
 // errAgentWeekRefused is a week the service refused after the facade's own

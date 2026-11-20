@@ -495,6 +495,11 @@ func (handler *managementHandler) serveAgentProjectPreview(writer http.ResponseW
 		handler.writeAgentServiceFailure(writer, asArgument(err, errAgentPreviewWeek), "")
 		return
 	}
+	var project *int64
+	if input.ProjectID > 0 {
+		project = &input.ProjectID
+	}
 	writeAgentRead(writer, agentPreview{Requests: result.Requests, Identities: result.Identities, Users: result.Users,
-		FromUnattributed: result.Unattributed, FromOtherProjects: result.OtherProject}, agentMetaOK(), false)
+		FromUnattributed: result.Unattributed, FromOtherProjects: result.OtherProject}, agentMetaOK(), false,
+		handler.agentUnknownOrgObjects(input.GroupID, project)...)
 }

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -714,5 +715,29 @@ func (handler *managementHandler) serveAgentAnalysisReport(writer http.ResponseW
 	case response.Stats.Limited:
 		meta.Complete, meta.IncompleteReason = false, "below_contributor_minimum"
 	}
-	writeAgentRead(writer, agentAnalysisReportOf(response), meta, true)
+	writeAgentRead(writer, agentAnalysisReportOf(response), meta, true, handler.agentReportTargetActions(target, response)...)
+}
+
+// agentReportTargetActions explains a report of a project or user that has
+// nothing (contract section 0.1 item 119): the web route answers it as a
+// report without statistics, so the facade does too, and says why. A
+// project group that does not exist is already NOT_FOUND from the service.
+func (handler *managementHandler) agentReportTargetActions(target sessionanalysis.ReportTarget, response sessionanalysis.ReportResponse) []string {
+	if response.Stats != nil {
+		return nil
+	}
+	var actions []string
+	if target.ProjectID > 0 {
+		actions = append(actions, handler.agentUnknownOrgObjects(nil, &target.ProjectID)...)
+	}
+	if target.UserID > 0 {
+		known := false
+		for _, option := range response.Users {
+			known = known || option.ID == target.UserID
+		}
+		if !known {
+			actions = append(actions, fmt.Sprintf("No session statistics exist for NewAPI user %d in this week: the user may not exist or had no analysed session; `llmaudit analysis report` lists in data.users the users that have a report.", target.UserID))
+		}
+	}
+	return actions
 }

@@ -326,3 +326,49 @@ func TestAgentCursorsAreBoundToTheirQuery(t *testing.T) {
 		t.Errorf("a usage cursor on the audit list = %q", got)
 	}
 }
+
+// An id of a group, project or user that does not exist is answered as the
+// web route answers it (an empty result for the preview and the review, not
+// an error), and next_actions says nothing was found, so zeros are not read
+// as data. A known id has no such line.
+func TestAgentUnknownObjectsAreNamedNotCounted(t *testing.T) {
+	fixture := newReadFixture(t)
+	fixture.reports.stats = nil
+	actions := func(method, path, body string) []string {
+		t.Helper()
+		response := fixture.facade(method, path, body, fixture.adminRead)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s %s = %s", path, body, response.Body.String())
+		}
+		return decodeAgent(t, response).NextActions
+	}
+	mentions := func(actions []string, text string) bool {
+		for _, action := range actions {
+			if strings.Contains(action, text) {
+				return true
+			}
+		}
+		return false
+	}
+	rules := `"rules":[{"kind":"repo_name","pattern":"demo"}]`
+	for _, test := range []struct{ body, text string }{
+		{`{"group_id":99,` + rules + `}`, "No project group with id 99"},
+		{`{"project_id":7,` + rules + `}`, "No project with id 7"},
+	} {
+		if got := actions(http.MethodPost, "/config/project-preview", test.body); !mentions(got, test.text) {
+			t.Errorf("preview %s: next_actions %v", test.body, got)
+		}
+		if web := fixture.web(http.MethodPost, "/api/v1/org/projects/preview", test.body, fixture.adminWeb); web.Code != http.StatusOK {
+			t.Errorf("web preview %s = %d, the facade must answer the same way", test.body, web.Code)
+		}
+	}
+	if got := actions(http.MethodPost, "/config/project-preview", `{"group_id":0,`+rules+`}`); len(got) != 0 {
+		t.Errorf("ungrouped preview: next_actions %v", got)
+	}
+	if got := actions(http.MethodGet, "/analysis/report?project_id=99", ""); !mentions(got, "No project with id 99") {
+		t.Errorf("report of an unknown project: next_actions %v", got)
+	}
+	if got := actions(http.MethodGet, "/analysis/report?user_id=99", ""); !mentions(got, "NewAPI user 99") {
+		t.Errorf("report of an unknown user: next_actions %v", got)
+	}
+}
