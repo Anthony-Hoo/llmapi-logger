@@ -121,7 +121,7 @@ var codeTable = map[Code]CodeSpec{
 	CodeConflict: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
 		Message: "the change conflicts with existing data"},
 	CodeVersionConflict: {HTTPStatus: http.StatusConflict, ExitCode: ExitError,
-		Message: "the object changed after the plan was created",
+		Message: "the object's version is not the expected one: it changed after it was read (--if-version) or after the plan was created",
 		Hint:    "Read the object again and create a new plan."},
 	CodePlanNotFound: {HTTPStatus: http.StatusNotFound, ExitCode: ExitError,
 		Message: "the plan does not exist, was already applied or belongs to another token",

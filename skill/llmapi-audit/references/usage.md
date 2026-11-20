@@ -19,15 +19,16 @@ llmaudit usage overview --from 2026-01-01 --to 2026-01-31 --tz-offset-min 480
 ```
 llmaudit usage sessions --since 24h --sort tokens --limit 10
 llmaudit usage sessions --from 2026-01-05 --to 2026-01-11 --sort context
-llmaudit usage trend ses_123 --out trend.json
-llmaudit usage tree 0123456789abcdef01234567
-llmaudit usage composition 12345 --out composition.json
+llmaudit usage trend <session-id> --out trend.json
+llmaudit usage tree <tree-id>
+llmaudit usage composition <audit-id> --out composition.json
 ```
 
-- `usage sessions` lists session cards, sorted by `recent`, `tokens` or `context`. The range is `--since`, or `--from`/`--to` (RFC 3339 or `YYYY-MM-DD`, whole UTC days), as for `requests list`. Page with `--cursor`.
-- `usage trend <session>` shows the context size step by step; use `--out` for long sessions. With `--out` (here and for `usage composition`) the file holds `{"meta": …, "data": …}`, so it still says whether it is complete when you read it later, and stdout carries `{path, bytes, sha256}` with the same `meta`.
+- `usage sessions` lists session cards, sorted by `recent` (default), `tokens` or `context`. The range is `--since`, or `--from`/`--to` (RFC 3339 or `YYYY-MM-DD`, whole UTC days); without them it is the 7 days before now. Page with `--cursor`. A card's `session_id` is the `<session-id>` of `usage trend`, its `tree_id` the `<tree-id>` of `usage tree`.
+- Token figures add up each request separately. A session's `usage` and the totals sum, request by request, the uncached input, cache reads, cache writes and output that each request reported; `prompt_total` is uncached input plus cache reads plus cache writes. An agent that sends its whole history with every request is therefore counted again for every request: the input figures measure what was sent and billed, not the size of the conversation.
+- `usage trend <session-id>` shows the context size step by step; use `--out` for long sessions. With `--out` (here and for `usage composition`) the file holds `{"meta": …, "data": …}`, so it still says whether it is complete when you read it later, and stdout carries `{path, bytes, sha256}` with the same `meta`.
 - `usage tree <tree-id>` shows an agent tree. The tree ID is 24 hexadecimal characters: `tree_id` of any `usage sessions` card or `usage trend`, or of an agent session in `analysis sessions`. Every card has one; for an agent without sub-agents or parent the tree is that one node (the web page shows no tree for it). `subagents` on the card says how many children the tree has.
-- `usage composition <record>` shows what one request's context was made of (system prompt, tools, history, …).
+- `usage composition <audit-id>` shows what one request's context was made of (system prompt, tools, history, …).
 - When the server truncated a trend, tree or composition, `meta.complete` is false with `incomplete_reason: truncated`. Say that the picture is partial.
 
 ## Not found

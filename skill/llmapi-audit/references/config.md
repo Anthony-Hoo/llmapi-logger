@@ -46,7 +46,7 @@ llmaudit apply pln_0123456789abcdef
 ```
 
 - A plan is valid for 10 minutes, belongs to your token and runs once, successful or not. `PLAN_EXPIRED` or `PLAN_NOT_FOUND`: create a new plan and show it again.
-- `VERSION_CONFLICT`: someone changed the object after the plan was made. Read it again with `config show`, tell the user what changed, and plan again.
+- `VERSION_CONFLICT`: the object is not at the version expected. When `apply` answers it, someone changed the object after the plan was made; when a write command answers it, the `--if-version` you gave is older than the object, so it changed after you read it. Either way, read it again with `config show`, tell the user what changed, and plan again.
 - After success, `data` is `{op, target, applied: true}` (with the new `id` when something was created); run the read command in `next_actions` to confirm.
 - After `TIMEOUT` or `NETWORK_ERROR` the change may or may not have happened. Do not apply again. Read the object with `config show` first and tell the user what you found.
 

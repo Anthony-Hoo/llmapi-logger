@@ -247,3 +247,21 @@ func TestMaskingKeepsAgentAndOrdinaryHeaders(t *testing.T) {
 		}
 	}
 }
+
+// Everything addressed to the agent is English: the notice and every default
+// message and hint of the error table carry no CJK text.
+func TestAgentFacingTextIsEnglish(t *testing.T) {
+	texts := map[string]string{"notice": UntrustedNotice}
+	for _, spec := range Codes() {
+		texts[string(spec.Code)+" message"] = spec.Message
+		texts[string(spec.Code)+" hint"] = spec.Hint
+	}
+	for name, text := range texts {
+		for _, char := range text {
+			if char >= 0x2E80 && char <= 0x9FFF || char >= 0xFF00 && char <= 0xFFEF {
+				t.Errorf("%s is not English: %q", name, text)
+				break
+			}
+		}
+	}
+}
