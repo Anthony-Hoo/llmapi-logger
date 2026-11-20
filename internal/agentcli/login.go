@@ -338,17 +338,20 @@ func waitForCallback(ctx context.Context, listener net.Listener, port int, state
 }
 
 // readPastedCode reads the one-time code the page shows. Empty lines are
-// skipped; end of input without a code is NO_TTY.
+// skipped; end of input without a code is NO_TTY. The goroutine that reads
+// the input never writes: every prompt is written by the caller's goroutine,
+// so nothing is written to env.Stderr after this function has returned.
 func readPastedCode(ctx context.Context, env *Env, server string) (string, error) {
 	lines := make(chan string)
+	blank := make(chan struct{})
 	failed := make(chan struct{})
 	go func() {
 		reader := bufio.NewReader(env.Stdin)
 		for {
 			line, err := reader.ReadString('\n')
-			if strings.TrimSpace(line) != "" {
+			if code := strings.TrimSpace(line); code != "" {
 				select {
-				case lines <- strings.TrimSpace(line):
+				case lines <- code:
 				case <-ctx.Done():
 				}
 				return
@@ -357,23 +360,31 @@ func readPastedCode(ctx context.Context, env *Env, server string) (string, error
 				close(failed)
 				return
 			}
-			fmt.Fprint(env.Stderr, "Authorization code: ")
+			select {
+			case blank <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
-	fmt.Fprint(env.Stderr, "Authorization code: ")
-	select {
-	case code := <-lines:
-		if env.Terminal == nil || !env.Terminal.IsInteractive() {
-			// Piped input is not echoed: end the prompt line ourselves.
+	for {
+		fmt.Fprint(env.Stderr, "Authorization code: ")
+		select {
+		case code := <-lines:
+			if env.Terminal == nil || !env.Terminal.IsInteractive() {
+				// Piped input is not echoed: end the prompt line ourselves.
+				fmt.Fprintln(env.Stderr)
+			}
+			return code, nil
+		case <-blank:
+			// An empty line: ask again.
+		case <-failed:
 			fmt.Fprintln(env.Stderr)
+			return "", &cliError{Code: agentapi.CodeNoTTY, Message: "no authorization code was entered",
+				Hint: "Ask the user to run `llmaudit login --server " + server + " --no-browser` themselves in a terminal and paste the code the page shows."}
+		case <-ctx.Done():
+			return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login --server " + server + " --no-browser` again and paste the code within " + loginWaitText + "."}
 		}
-		return code, nil
-	case <-failed:
-		fmt.Fprintln(env.Stderr)
-		return "", &cliError{Code: agentapi.CodeNoTTY, Message: "no authorization code was entered",
-			Hint: "Ask the user to run `llmaudit login --server " + server + " --no-browser` themselves in a terminal and paste the code the page shows."}
-	case <-ctx.Done():
-		return "", &cliError{Code: agentapi.CodeLoginTimeout, Hint: "Ask the user to run `llmaudit login --server " + server + " --no-browser` again and paste the code within " + loginWaitText + "."}
 	}
 }
 

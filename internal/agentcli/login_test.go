@@ -289,6 +289,11 @@ func TestLoginPasteMode(t *testing.T) {
 	h2 := newHarness(t)
 	h2.env.Stdin = strings.NewReader("\n\n")
 	h2.expectFailure(h2.run("login", "--server", server.URL, "--no-browser"), agentapi.CodeNoTTY, 2)
+	// One prompt, and one more after each empty line. This harness's stderr
+	// is a plain buffer: the command writes it from one goroutine only.
+	if prompts := strings.Count(h2.stderr.String(), "Authorization code: "); prompts != 3 {
+		t.Errorf("two empty lines, then end of input: %d prompts, want 3: %q", prompts, h2.stderr.String())
+	}
 	// A wrong code is INVALID_GRANT from the server.
 	h3 := newHarness(t)
 	h3.env.Stdin = strings.NewReader("wrong\n")

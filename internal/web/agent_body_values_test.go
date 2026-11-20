@@ -204,7 +204,7 @@ func TestAgentBodyCostIsBoundedAtTheValueLimits(t *testing.T) {
 	}
 	above, codes := concurrentPeak(t, fixture, labels)
 	t.Logf("30 x the 1000 labels at once: the heap in use rose %d MiB; answers %v", above>>20, codes)
-	if codes[agentapi.CodeInvalidArgument] != 30 || above > 150<<20 {
+	if !peakAnswersDidTheWork(codes) || above > 150<<20 {
 		t.Errorf("30 at once: answers %v, heap rose %d MiB", codes, above>>20)
 	}
 }
