@@ -60,10 +60,8 @@ func (service *Service) Authenticate(ctx context.Context, authorization, source 
 	if allowed, retryAfter := service.lookups.admit(source, lookupInFlightCap); !allowed {
 		return Identity{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: retryAfter}
 	}
-	row, err := service.store.FindAgentTokenByMAC(ctx, service.tokenMAC(token))
-	notFound := errors.Is(err, storage.ErrAgentTokenNotFound)
-	service.lookups.finish(source, notFound)
-	if notFound {
+	row, err := service.lookupAdmitted(ctx, token, source)
+	if errors.Is(err, storage.ErrAgentTokenNotFound) {
 		return Identity{}, fail(agentapi.CodeUnauthenticated)
 	}
 	if err != nil {
@@ -92,6 +90,20 @@ func (service *Service) Authenticate(ctx context.Context, authorization, source 
 	}
 	service.touch(ctx, identity.TokenID, now)
 	return identity, nil
+}
+
+// lookupAdmitted runs the store lookup of an attempt admit admitted and ends
+// that attempt on every path, a panic of the store included: the in-flight
+// place never expires on its own, so a leaked one would lock the address out
+// for good once inFlightCap of them had leaked. Only a lookup that found no
+// row counts as a failure; the place is given back as soon as the lookup
+// ends, before the rest of Authenticate (the last-use write) runs.
+func (service *Service) lookupAdmitted(ctx context.Context, token, source string) (row storage.AgentToken, err error) {
+	failed := false
+	defer func() { service.lookups.finish(source, failed) }()
+	row, err = service.store.FindAgentTokenByMAC(ctx, service.tokenMAC(token))
+	failed = errors.Is(err, storage.ErrAgentTokenNotFound)
+	return row, err
 }
 
 // RestoreIdentity rebuilds the identity of a stored token. It fails closed:
