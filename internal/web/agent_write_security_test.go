@@ -2,7 +2,9 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -620,7 +622,7 @@ func TestRefusedPlanRequestsDoNotConsumeWriteLimits(t *testing.T) {
 	}
 }
 
-// Contract section 4.5.1, the four operations without a check-only twin.
+// Contract section 4.5.1, the four operations that are not configuration.
 func TestAgentOperationPlans(t *testing.T) {
 	fixture := newWriteFixture(t)
 	run := fixture.plan(t, `{"op":"analysis.run"}`)
@@ -890,6 +892,20 @@ func TestResetAndClearKeyPlansSayOneTrueThing(t *testing.T) {
 		}
 	}
 
+	// A stored section that no longer decodes leaves version "0" (the file
+	// applies), yet the web page's reset deletes it: the agent plans that
+	// reset too and says what it does.
+	if err := fixture.settingRows.SaveRuntimeSettings(context.Background(), storage.RuntimeSettings{Section: storage.SettingsSessionAnalysis, Settings: `{"unknown":1}`, UpdatedAtNS: 5}); err != nil {
+		t.Fatal(err)
+	}
+	unusable := fixture.plan(t, map[string]any{"op": "config.reset", "kind": "analysis-settings"})
+	if unusable.Target.Version != "0" || !strings.Contains(strings.Join(unusable.Effects, "\n"), "applying deletes the stored section") {
+		t.Fatalf("reset of an unusable section = %+v", unusable)
+	}
+	fixture.apply(t, unusable.PlanID)
+	if _, err := fixture.settingRows.LoadRuntimeSettings(context.Background(), storage.SettingsSessionAnalysis); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("the unusable section was not deleted: %v", err)
+	}
 	// The file has a key: clearing it is a real change that saves the section.
 	clear := fixture.plan(t, map[string]any{"op": "config.clear-key", "kind": "analysis-settings"})
 	if !jsonEqual(clear.Extras["api_key"], map[string]string{"before": "file", "after": "none"}) ||

@@ -2,11 +2,13 @@ package orgreport
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sort"
 	"strings"
 
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/storage"
 )
 
 // Entry points that edit the saved report settings one field at a time
@@ -99,6 +101,10 @@ type SettingsDiff struct {
 	After          EditableSettings `json:"after"`
 	Changed        []string         `json:"changed"`
 	DroppedClients []string         `json:"dropped_clients"`
+	// Stored reports, for CheckResetSettings, that a saved section is stored,
+	// even one that cannot be used and so leaves version 0: resetting deletes
+	// it.
+	Stored bool `json:"stored,omitempty"`
 }
 
 // FormRankedClients does to a ranked-clients list what the settings page
@@ -176,7 +182,17 @@ func (service *Service) CheckResetSettings(ctx context.Context, expectedVersion 
 	if _, err := service.settingsFor(service.file); err != nil {
 		return SettingsDiff{}, err
 	}
-	return settingsDiff(version, editableOf(effective), editableOf(service.file), nil), nil
+	diff := settingsDiff(version, editableOf(effective), editableOf(service.file), nil)
+	diff.Stored = version != 0 || service.savedRowStored(ctx)
+	return diff, nil
+}
+
+// savedRowStored reports whether a saved section row exists at all, usable or
+// not. A read failure counts as stored: only a missing row is known to leave
+// nothing to reset.
+func (service *Service) savedRowStored(ctx context.Context) bool {
+	_, err := service.saved.LoadRuntimeSettings(ctx, storage.SettingsOrgReports)
+	return !errors.Is(err, sql.ErrNoRows)
 }
 
 // ResetSettingsIfVersion drops the saved section only when its version

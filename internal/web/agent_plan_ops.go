@@ -17,9 +17,10 @@ import (
 )
 
 // analysis.run, analysis.calibrate, analysis.dismiss and weekly.regenerate
-// (contract section 4.5.1). None of them has a check-only twin in its
-// service; the plan checks what the table of section 4.5.1 lists and the
-// service decides the rest when the plan is applied.
+// (contract section 4.5.1). The plan runs every check the service runs when
+// the plan is applied, through the services' read-only entries (RunState,
+// CheckCalibrate, CheckDismissSuggestion, WeekState; contract section 0.1
+// item 105), so an apply fails only when something changed in between.
 
 func (handler *managementHandler) agentAnalysisRunner() (AgentAnalysisRunner, error) {
 	if handler.sessionAnalysis == nil {

@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -9,6 +10,8 @@ import (
 
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/sessionanalysis"
+	"llmapi-logger/internal/storage"
 )
 
 // Parity of the writes (plan section 12, contract section 4.6): every write
@@ -227,19 +230,33 @@ func TestAgentWritesMatchTheWebRoutes(t *testing.T) {
 // too; the plan states exactly what the calibration will compare.
 func TestCalibratePlanStatesWhatTheLabelsMatch(t *testing.T) {
 	fixture := newWriteFixture(t)
+	// The fixture's session gets a facet of the current prompt and model (the
+	// query service of the fixture is built with model "local-model").
+	model := "local-model"
+	facet := fixture.analysis.facets[analysisOwnID]
+	facet.Kind, facet.PromptVersion, facet.Model = storage.PackKindSession, sessionanalysis.PromptVersion, model
+	fixture.analysis.facets[analysisOwnID] = facet
+
 	zero := strings.Repeat("0", 64)
-	labels := []any{map[string]any{"session_id": zero, "task_type": "bug_fix"}, map[string]any{"session_id": analysisOwnID}}
+	// The walkthrough's case: only a label of an all-zero session id.
+	only := fixture.plan(t, map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{map[string]any{"session_id": zero, "task_type": "bug_fix"}}}})
+	if only.Extras["samples"] != float64(0) || !jsonEqual(only.Extras["unmatched"], []int{0}) ||
+		!strings.Contains(strings.Join(only.Effects, "\n"), "saves a calibration of 0 samples") {
+		t.Fatalf("plan of a label without a facet = %v %v", only.Extras, only.Effects)
+	}
+
+	labels := []any{map[string]any{"session_id": zero, "task_type": "bug_fix"}, map[string]any{"session_id": analysisOwnID},
+		map[string]any{"session_id": analysisOwnID, "task_type": "bug_fix"}}
 	plan := fixture.plan(t, map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": labels}})
-	unmatched, _ := plan.Extras["unmatched"].([]any)
-	if len(unmatched) == 0 || unmatched[0] != float64(0) {
-		t.Fatalf("unmatched = %v", plan.Extras)
+	if plan.Extras["samples"] != float64(2) || !jsonEqual(plan.Extras["unmatched"], []int{0}) || !jsonEqual(plan.Extras["empty"], []int{1}) ||
+		!jsonEqual(plan.Extras["compared"], map[string]int{"task_type": 1}) || !jsonEqual(plan.Extras["hidden_fields"], []string{}) {
+		t.Fatalf("extras = %v", plan.Extras)
 	}
 	effects := strings.Join(plan.Effects, "\n")
-	if !strings.Contains(effects, "args.labels[0]") || !strings.Contains(effects, "of 2 label(s)") {
-		t.Fatalf("effects do not name the skipped label: %v", plan.Effects)
-	}
-	if plan.Extras["samples"] == float64(0) && !strings.Contains(effects, "0 samples") {
-		t.Fatalf("a calibration of no sample is not stated: %v", plan.Effects)
+	for _, want := range []string{"2 of 3 label(s)", "skipped: args.labels[0]", "name no field to compare (only session_id): args.labels[1]", "no field would be hidden"} {
+		if !strings.Contains(effects, want) {
+			t.Fatalf("effects lack %q: %v", want, plan.Effects)
+		}
 	}
 	encoded, _ := json.Marshal(labels)
 	if web := fixture.web(http.MethodPost, "/api/v1/session-analysis/calibration", `{"labels":`+string(encoded)+`}`); web.Code != http.StatusOK {
@@ -247,11 +264,12 @@ func TestCalibratePlanStatesWhatTheLabelsMatch(t *testing.T) {
 	}
 	applied := fixture.apply(t, plan.PlanID)
 	var result struct {
-		Samples int64 `json:"samples"`
+		Samples  int64            `json:"samples"`
+		Compared map[string]int64 `json:"compared"`
 	}
 	_ = json.Unmarshal(applied.Result, &result)
-	if float64(result.Samples) != plan.Extras["samples"] {
-		t.Fatalf("applied samples %d, plan said %v", result.Samples, plan.Extras["samples"])
+	if result.Samples != 2 || result.Compared["task_type"] != 1 {
+		t.Fatalf("applied calibration = %s", applied.Result)
 	}
 }
 
@@ -281,7 +299,19 @@ func TestMemberAndPrincipalPlansSayWhenTheCallerIsUnknown(t *testing.T) {
 			t.Fatalf("web %s = %d %s", test.web, web.Code, web.Body.String())
 		}
 	}
-	// A user the directory or the audit records know gets no such line.
+	// This fixture has no NewAPI user directory: the line names only the
+	// audit records, the source that was consulted.
+	member := fixture.plan(t, map[string]any{"op": "config.set", "kind": "member", "id": "4242", "set": map[string]any{"group_id": json.Number(ids.group)}})
+	if text := strings.Join(member.Effects, "\n"); strings.Contains(text, "user directory") || !strings.Contains(text, "(no audit record names it)") {
+		t.Fatalf("member effects without a directory = %v", member.Effects)
+	}
+	// Neither source answers: the plan says the id could not be checked.
+	fixture.handler.query.(*fakeQuery).listErr = errors.New("unavailable")
+	unchecked := fixture.plan(t, map[string]any{"op": "config.set", "kind": "principal", "id": "token:15", "set": map[string]any{"class": "human"}})
+	if !strings.Contains(strings.Join(unchecked.Effects, "\n"), "could not be checked") {
+		t.Fatalf("unchecked effects = %v", unchecked.Effects)
+	}
+	fixture.handler.query.(*fakeQuery).listErr = nil // A user the directory or the audit records know gets no such line.
 	fixture.handler.query.(*fakeQuery).page = query.Page{Items: []query.AuditSummary{{AuditID: "a1"}}}
 	plan := fixture.plan(t, map[string]any{"op": "config.set", "kind": "member", "id": "4242", "set": map[string]any{"group_id": json.Number(ids.group)}})
 	if strings.Contains(strings.Join(plan.Effects, "\n"), "not among the callers") || plan.Extras["caller_seen"] != nil {

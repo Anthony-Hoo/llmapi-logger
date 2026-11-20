@@ -489,23 +489,21 @@ type agentPrincipalPatch struct {
 
 // callerSeen reports whether this system has seen a NewAPI user or token: a
 // user in the NewAPI user directory, or a user or token named by any audit
-// record. checked is false when neither source could answer. The web routes
-// for members and principals accept any positive id (org_admin_api.go); the
-// plan says so when the id is not a caller seen here.
-func (handler *managementHandler) callerSeen(ctx context.Context, kind string, id int64) (seen, checked bool) {
+// record. directory and audits report which of the two sources answered. The
+// web routes for members and principals accept any positive id
+// (org_admin_api.go); the plan says so when the id is not a caller seen here.
+func (handler *managementHandler) callerSeen(ctx context.Context, kind string, id int64) (seen, directory, audits bool) {
 	if kind == orgreport.PrincipalUser && handler.users != nil {
 		snapshot := handler.users.Snapshot()
-		if !snapshot.RefreshedAt.IsZero() || len(snapshot.Users) > 0 {
-			checked = true
-		}
+		directory = !snapshot.RefreshedAt.IsZero() || len(snapshot.Users) > 0
 		for _, user := range snapshot.Users {
 			if user.ID == id {
-				return true, true
+				return true, true, false
 			}
 		}
 	}
 	if handler.query == nil {
-		return false, checked
+		return false, directory, false
 	}
 	filter := query.Filter{}
 	if kind == orgreport.PrincipalUser {
@@ -515,32 +513,35 @@ func (handler *managementHandler) callerSeen(ctx context.Context, kind string, i
 	}
 	page, err := handler.query.List(ctx, filter, query.Cursor{}, 1)
 	if err != nil {
-		return false, checked
+		return false, directory, false
 	}
-	return len(page.Items) > 0, true
+	return len(page.Items) > 0, directory, true
 }
 
 // unseenCallerEffect is the effect line of a member or principal plan whose
-// id is not a caller this system has seen, "" when it is one.
+// id is not a caller this system has seen, "" when it is one. It names only
+// the sources that were actually consulted.
 func (handler *managementHandler) unseenCallerEffect(ctx context.Context, kind string, id int64) string {
-	seen, checked := handler.callerSeen(ctx, kind, id)
-	noun, list := "User "+formatAgentID(id), "`llmaudit callers list` or `llmaudit requests list --user-id "+formatAgentID(id)+"`"
+	seen, directory, audits := handler.callerSeen(ctx, kind, id)
+	noun, check := "User "+formatAgentID(id), "`llmaudit callers list` or `llmaudit requests list --user-id "+formatAgentID(id)+"`"
 	if kind == orgreport.PrincipalToken {
-		noun, list = "Token "+formatAgentID(id), "`llmaudit requests list --token-id "+formatAgentID(id)+"`"
+		noun, check = "Token "+formatAgentID(id), "`llmaudit requests list --token-id "+formatAgentID(id)+"`"
+	}
+	var where []string
+	if directory {
+		where = append(where, "not in the NewAPI user directory")
+	}
+	if audits {
+		where = append(where, "no audit record names it")
 	}
 	switch {
 	case seen:
 		return ""
-	case !checked:
-		return "Whether " + strings.ToLower(noun[:1]) + noun[1:] + " exists could not be checked here (no user directory or audit records are available). The web page accepts any id as well; make sure it is the intended one."
+	case len(where) == 0:
+		return "Whether " + strings.ToLower(noun[:1]) + noun[1:] + " exists could not be checked here (neither the NewAPI user directory nor the audit records could answer). The web page accepts any id as well; make sure it is the intended one."
 	}
-	where := "no audit record names it"
-	if kind == orgreport.PrincipalUser {
-		where = "not in the NewAPI user directory, and no audit record names it"
-	}
-	return noun + " is not among the callers this system has seen (" + where + "). The web page accepts any id as well, so the plan is valid, but check the id with " + list + " before applying."
+	return noun + " is not among the callers this system has seen (" + strings.Join(where, ", and ") + "). The web page accepts any id as well, so the plan is valid, but check the id with " + check + " before applying."
 }
-
 func (handler *managementHandler) planMemberSet(ctx context.Context, request agentPlanRequest) (*agentPlan, error) {
 	org, err := handler.agentOrgWriter()
 	if err != nil {
@@ -898,13 +899,16 @@ func (handler *managementHandler) planConfigReset(ctx context.Context, request a
 			return nil, err
 		}
 		version := diff.Version
-		if version == 0 {
+		if !diff.Stored {
 			return nil, nothingSaved("weekly-settings")
 		}
 		plan := newAgentPlan(agentapi.OpConfigReset, agentPlanTarget{Kind: "weekly-settings", Version: agentVersion(version)})
 		plan.view.Before, plan.view.After = agentWeeklySettingsValuesOf(diff.Before), agentWeeklySettingsValuesOf(diff.After)
 		plan.view.ChangedKeys = append([]string{}, diff.Changed...)
 		plan.effect(resetEffect(len(diff.Changed) > 0, ""))
+		if version == 0 {
+			plan.effect(effectUnusableSaved)
+		}
 		if len(diff.Changed) > 0 {
 			plan.effect(effectWeekly)
 		}
@@ -924,7 +928,7 @@ func (handler *managementHandler) planConfigReset(ctx context.Context, request a
 		return nil, err
 	}
 	version := diff.Version
-	if version == 0 {
+	if !diff.Stored {
 		return nil, nothingSaved("analysis-settings")
 	}
 	plan := newAgentPlan(agentapi.OpConfigReset, agentPlanTarget{Kind: "analysis-settings", Version: agentVersion(version)})
@@ -948,6 +952,9 @@ func (handler *managementHandler) planConfigReset(ctx context.Context, request a
 		keyEffect = "The configuration file's API key stays in use."
 	}
 	plan.effect(resetEffect(len(diff.Changed) > 0, keyEffect))
+	if version == 0 {
+		plan.effect(effectUnusableSaved)
+	}
 	if len(diff.Changed) > 0 || keyChanges {
 		plan.effect(effectAnalysis)
 	}
@@ -958,6 +965,11 @@ func (handler *managementHandler) planConfigReset(ctx context.Context, request a
 	}
 	return plan, nil
 }
+
+// effectUnusableSaved is said by a reset of a stored section that can no
+// longer be used (the file's values already apply, version "0"): the reset
+// deletes it, as the web page's reset does.
+const effectUnusableSaved = "A saved section is stored but can no longer be used, so the configuration file values already apply; applying deletes the stored section."
 
 // nothingSaved refuses a reset of a section that has nothing saved: the
 // configuration file's values already apply, and applying would change

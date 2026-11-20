@@ -31,6 +31,10 @@ var (
 	_ web.AgentOrgWriter              = (*orgreport.Service)(nil)
 	_ web.AgentAnalysisSettingsWriter = (*sessionanalysis.SettingsService)(nil)
 	_ web.AgentAnalysisRunner         = (*sessionanalysis.QueryService)(nil)
+	// A dismissal plan checks the suggestion through the store the query
+	// service holds; without the read every such plan would be refused.
+	_ sessionanalysis.SuggestionStore   = (*postgres.Store)(nil)
+	_ sessionanalysis.SuggestionChecker = (*postgres.Store)(nil)
 )
 
 // assembleAgentAccess builds the agent token service of an enabled

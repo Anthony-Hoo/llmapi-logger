@@ -2,11 +2,13 @@ package sessionanalysis
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/storage"
 )
 
 // Entry points that edit the saved analysis settings one field at a time
@@ -113,6 +115,9 @@ type SettingsDiff struct {
 	// BeforeKeySource is where the key in use comes from before the change;
 	// set by CheckReset, whose KeySource is the key after it.
 	BeforeKeySource string `json:"api_key_before,omitempty"`
+	// Stored reports, for CheckReset, that a saved section is stored, even one
+	// that no longer decodes and so leaves version 0: resetting deletes it.
+	Stored bool `json:"stored,omitempty"`
 }
 
 // CheckPatch runs every check Patch runs (the candidate validation and the
@@ -174,7 +179,19 @@ func (service *SettingsService) CheckReset(ctx context.Context, expectedVersion 
 		fileKey = KeyFile
 	}
 	before, after := editableOf(current), editableOf(service.file)
-	return SettingsDiff{Version: version, Before: before, After: after, Changed: changedSettings(before, after), KeySource: fileKey, BeforeKeySource: beforeKey}, nil
+	return SettingsDiff{Version: version, Before: before, After: after, Changed: changedSettings(before, after), KeySource: fileKey, BeforeKeySource: beforeKey,
+		Stored: version != 0 || service.savedRowStored(ctx)}, nil
+}
+
+// savedRowStored reports whether a saved section row exists at all, usable or
+// not. A read failure counts as stored: only a missing row is known to leave
+// nothing to reset.
+func (service *SettingsService) savedRowStored(ctx context.Context) bool {
+	if service.store == nil {
+		return false
+	}
+	_, err := service.store.LoadRuntimeSettings(ctx, storage.SettingsSessionAnalysis)
+	return !errors.Is(err, sql.ErrNoRows)
 }
 
 // ResetIfVersion drops the saved section only when its version still equals
