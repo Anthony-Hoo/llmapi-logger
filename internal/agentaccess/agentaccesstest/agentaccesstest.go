@@ -43,6 +43,21 @@ type Store struct {
 
 var _ agentaccess.Store = (*Store)(nil)
 
+// SetFailRevokeTimes sets FailRevokeTimes under the store's lock, for tests
+// whose revocations run in a background goroutine.
+func (store *Store) SetFailRevokeTimes(times int) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.FailRevokeTimes = times
+}
+
+// RevokeAttemptCount reads RevokeAttempts under the store's lock.
+func (store *Store) RevokeAttemptCount() int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.RevokeAttempts
+}
+
 // NewStore returns an empty store.
 func NewStore() *Store { return &Store{} }
 

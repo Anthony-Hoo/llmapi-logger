@@ -949,24 +949,145 @@ func TestReplayRevocationIsRetried(t *testing.T) {
 		t.Fatalf("attempts = %d, logs = %s", h.store.RevokeAttempts, h.logs.String())
 	}
 
-	// Every attempt fails: logged, token live, and the next replay retries.
-	authorization = approve(t, h, agentapi.TierRead, agentaccess.ModeLoopback)
-	issued, err = h.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.90", agentaccess.RequestMeta{})
+	// The request's attempts are the first four; what happens when all of
+	// them fail is TestReplayRevocationKeepsTryingInTheBackground.
+}
+
+// lockedBuffer is a log sink a background goroutine may write while the test
+// reads it.
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *lockedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *lockedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
+}
+
+// replayHarness issues a token through a code and returns the service, the
+// store, the code and the token.
+func replayHarness(t *testing.T, logs io.Writer) (*agentaccess.Service, *agentaccesstest.Store, string, string) {
+	t.Helper()
+	store := agentaccesstest.NewStore()
+	service, err := agentaccess.New(agentaccess.Options{AdminToken: testAdminToken, Store: store, AllowWrite: true, DeveloperLogins: true,
+		Logger: slog.New(slog.NewTextHandler(logs, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.store.FailRevokeTimes = 100
-	_, _ = h.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{})
-	if _, err := h.service.Authenticate(ctx, bearer(issued.Token), "192.0.2.92"); err != nil {
-		t.Fatalf("token after failed revocations = %v", err)
+	t.Cleanup(service.Close)
+	authorization, err := service.Approve(context.Background(), agentaccess.Grantor{Role: agentapi.RoleAdmin}, agentaccesstest.Request(agentapi.TierRead), "192.0.2.90")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if h.store.RevokeAttempts != 3+4 || !strings.Contains(h.logs.String(), "revocation after code replay failed") {
-		t.Fatalf("attempts = %d, logs = %s", h.store.RevokeAttempts, h.logs.String())
+	issued, err := service.Exchange(context.Background(), authorization.Code, agentaccesstest.Verifier, "192.0.2.90", agentaccess.RequestMeta{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	h.store.FailRevokeTimes = 0
-	_, _ = h.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{})
-	if _, err := h.service.Authenticate(ctx, bearer(issued.Token), "192.0.2.92"); codeOf(err) != agentapi.CodeTokenRevoked {
-		t.Fatalf("token after the next replay = %v", err)
+	return service, store, authorization.Code, issued.Token
+}
+
+// Contract section 0.1 item 82: when every attempt of the replaying request
+// fails, the revocation goes on in the background with a growing wait until
+// it succeeds. An outage longer than the request's attempts (the probe's 4
+// failures within about 350 ms) no longer leaves the token live once the
+// store recovers. One warning when it starts, one line when it ends, and a
+// second replay meanwhile starts no second retry.
+func TestReplayRevocationKeepsTryingInTheBackground(t *testing.T) {
+	ctx := context.Background()
+	logs := &lockedBuffer{}
+	service, store, code, token := replayHarness(t, logs)
+	agentaccess.SetReplayRetry(service, time.Millisecond, 4*time.Millisecond, time.Minute)
+	store.SetFailRevokeTimes(1 << 30)
+	for range 2 {
+		if _, err := service.Exchange(ctx, code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{}); codeOf(err) != agentapi.CodeInvalidGrant {
+			t.Fatalf("replay = %v", err)
+		}
+	}
+	if _, err := service.Authenticate(ctx, bearer(token), "192.0.2.92"); err != nil {
+		t.Fatalf("token while the store fails = %v", err)
+	}
+	// The background keeps attempting while the store fails.
+	waitFor(t, func() bool { return store.RevokeAttemptCount() > 8+20 })
+	store.SetFailRevokeTimes(0)
+	waitFor(t, func() bool {
+		_, err := service.Authenticate(ctx, bearer(token), "192.0.2.92")
+		return codeOf(err) == agentapi.CodeTokenRevoked
+	})
+	waitFor(t, func() bool { return strings.Contains(logs.String(), "revoked after code replay on a background retry") })
+	text := logs.String()
+	if strings.Count(text, "retrying in the background") != 1 {
+		t.Fatalf("a second replay started a second retry, or none was logged: %s", text)
+	}
+	if strings.Contains(text, "abandoned") {
+		t.Fatalf("logs = %s", text)
+	}
+	revoked := 0
+	for _, entry := range store.Audit() {
+		if entry.Event == agentaccess.EventTokenRevoked {
+			revoked++
+		}
+	}
+	if revoked != 1 {
+		t.Fatalf("token_revoked rows = %d", revoked)
+	}
+}
+
+// No goroutine outlives the service: Close stops a retry that is still
+// failing, logs that it stopped, and no attempt is made afterwards. A replay
+// after Close tries within the request only.
+func TestCloseStopsTheReplayRevocationRetry(t *testing.T) {
+	ctx := context.Background()
+	logs := &lockedBuffer{}
+	service, store, code, token := replayHarness(t, logs)
+	agentaccess.SetReplayRetry(service, time.Millisecond, 2*time.Millisecond, time.Hour)
+	store.SetFailRevokeTimes(1 << 30)
+	_, _ = service.Exchange(ctx, code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{})
+	waitFor(t, func() bool { return store.RevokeAttemptCount() > 10 })
+	service.Close()
+	stopped := store.RevokeAttemptCount()
+	if !strings.Contains(logs.String(), "outcome=service_stopped") {
+		t.Fatalf("logs = %s", logs.String())
+	}
+	time.Sleep(20 * time.Millisecond)
+	if store.RevokeAttemptCount() != stopped {
+		t.Fatal("a revocation was attempted after Close returned")
+	}
+	_, _ = service.Exchange(ctx, code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{})
+	if store.RevokeAttemptCount() != stopped+4 {
+		t.Fatalf("attempts after Close = %d, want the request's 4", store.RevokeAttemptCount()-stopped)
+	}
+	if _, err := service.Authenticate(ctx, bearer(token), "192.0.2.92"); err != nil {
+		t.Fatalf("token = %v", err)
+	}
+	service.Close()
+}
+
+// A retry that never succeeds gives up after its time and says so.
+func TestReplayRevocationRetryGivesUp(t *testing.T) {
+	logs := &lockedBuffer{}
+	service, store, code, _ := replayHarness(t, logs)
+	agentaccess.SetReplayRetry(service, time.Millisecond, 2*time.Millisecond, 30*time.Millisecond)
+	store.SetFailRevokeTimes(1 << 30)
+	_, _ = service.Exchange(context.Background(), code, agentaccesstest.Verifier, "192.0.2.91", agentaccess.RequestMeta{})
+	waitFor(t, func() bool { return strings.Contains(logs.String(), "outcome=gave_up") })
+}
+
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within 10 seconds")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

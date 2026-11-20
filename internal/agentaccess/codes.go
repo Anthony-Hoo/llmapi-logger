@@ -417,12 +417,29 @@ func (service *Service) Exchange(ctx context.Context, code, verifier, source str
 	return Issued{Token: token, Identity: identity}, nil
 }
 
-// replayRevokeDelays are the waits between the attempts to revoke the token
-// of a replayed code: a short, bounded backoff, so that a passing store
-// error does not leave a token live that may have leaked. After the last
-// attempt the failure is logged; a later replay of the same code, while its
-// record is kept, tries again.
+// replayRevokeDelays are the waits between the attempts the replaying
+// request itself makes to revoke the token of a replayed code: a short,
+// bounded backoff, so that a passing store error is absorbed before the
+// request is answered.
 var replayRevokeDelays = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+
+// Background retries of a replay revocation (contract section 0.1 item 82).
+// When the request's attempts all fail, the revocation goes on in the
+// background with an exponential backoff from replayRetryFirst, doubling up
+// to replayRetryMax, until it succeeds, the service is closed, or
+// replayRetryFor has passed. replayRetryFor is the time the code store keeps
+// a redeemed code: while the record is kept a later replay could start the
+// revocation again, so the background never gives up earlier than that.
+const (
+	replayRetryFirst = 400 * time.Millisecond
+	replayRetryMax   = 5 * time.Second
+	replayRetryFor   = redeemedCodeMemory
+)
+
+// replayRetry is the backoff of the background revocation; tests shorten it.
+type replayRetry struct {
+	first, max, total time.Duration
+}
 
 func (service *Service) revokeReplayed(ctx context.Context, tokenID int64, role agentapi.Role, meta RequestMeta) {
 	// The replaying client controls the request; going away must not stop
@@ -445,11 +462,75 @@ func (service *Service) revokeReplayed(ctx context.Context, tokenID int64, role 
 		}
 	}
 	if err != nil {
-		service.logger.Warn("agent token revocation after code replay failed", "error_category", "agent_store_unavailable")
+		service.retryRevocation(tokenID, role, meta)
 		return
 	}
 	if revoked {
 		service.RecordAudit(ctx, auditFor(Identity{TokenID: tokenID, Role: role}, meta, EventTokenRevoked, storage.AgentOutcomeOK))
+	}
+}
+
+// retryRevocation hands a failed replay revocation to a background goroutine
+// tied to the service's lifetime. One goroutine per token: a later replay of
+// the same code while it runs starts no second one. It logs one warning when
+// it starts and one line when it ends (revoked, given up, or stopped by
+// Close).
+func (service *Service) retryRevocation(tokenID int64, role agentapi.Role, meta RequestMeta) {
+	service.lifeMu.Lock()
+	if service.closed || service.revoking[tokenID] {
+		closed := service.closed
+		service.lifeMu.Unlock()
+		if closed {
+			service.logger.Warn("agent token revocation after code replay failed", "error_category", "agent_store_unavailable", "agent_token_id", tokenID)
+		}
+		return
+	}
+	service.revoking[tokenID] = true
+	service.background.Add(1)
+	service.lifeMu.Unlock()
+	service.logger.Warn("agent token revocation after code replay failed; retrying in the background",
+		"error_category", "agent_store_unavailable", "agent_token_id", tokenID)
+	go func() {
+		defer service.background.Done()
+		defer func() {
+			service.lifeMu.Lock()
+			delete(service.revoking, tokenID)
+			service.lifeMu.Unlock()
+		}()
+		service.revokeInBackground(tokenID, role, meta)
+	}()
+}
+
+func (service *Service) revokeInBackground(tokenID int64, role agentapi.Role, meta RequestMeta) {
+	retry := service.replayRetry
+	ctx, cancel := context.WithTimeout(service.life, retry.total)
+	defer cancel()
+	delay := retry.first
+	for attempt := 1; ; attempt++ {
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			outcome := "gave_up"
+			if service.life.Err() != nil {
+				outcome = "service_stopped"
+			}
+			service.logger.Warn("agent token revocation after code replay abandoned", "error_category", "agent_store_unavailable",
+				"agent_token_id", tokenID, "attempts", attempt-1, "outcome", outcome)
+			return
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, auditWriteTimeout)
+		revoked, err := service.store.RevokeAgentToken(attemptCtx, tokenID, service.now().UnixNano(), nil)
+		cancelAttempt()
+		if err == nil {
+			service.logger.Info("agent token revoked after code replay on a background retry", "agent_token_id", tokenID, "attempts", attempt)
+			if revoked {
+				service.RecordAudit(ctx, auditFor(Identity{TokenID: tokenID, Role: role}, meta, EventTokenRevoked, storage.AgentOutcomeOK))
+			}
+			return
+		}
+		delay = min(delay*2, retry.max)
 	}
 }
 

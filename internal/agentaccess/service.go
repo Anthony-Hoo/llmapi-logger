@@ -177,9 +177,21 @@ type Service struct {
 	codes          *codeStore
 	quotas         map[Quota]*windowLimiter
 	revokeDelays   []time.Duration
+	replayRetry    replayRetry
 
 	touchMu   sync.Mutex
 	touchedAt map[int64]time.Time
+
+	// life ends when Close is called; background work (the retried
+	// revocation of a replayed code's token) runs under it and background
+	// waits for it. lifeMu guards closed and revoking (the tokens with a
+	// revocation retry running).
+	life       context.Context
+	stop       context.CancelFunc
+	background sync.WaitGroup
+	lifeMu     sync.Mutex
+	closed     bool
+	revoking   map[int64]bool
 }
 
 // New builds the service. The admin token must be the one the web handler
@@ -216,7 +228,24 @@ func New(options Options) (*Service, error) {
 	service.codes = newCodeStore()
 	service.quotas = newQuotaLimiters(service.now)
 	service.revokeDelays = replayRevokeDelays
+	service.replayRetry = replayRetry{first: replayRetryFirst, max: replayRetryMax, total: replayRetryFor}
+	service.life, service.stop = context.WithCancel(context.Background())
+	service.revoking = make(map[int64]bool)
 	return service, nil
+}
+
+// Close stops the service's background work and waits for it to end: no
+// goroutine of the service outlives it. Requests still served afterwards
+// work, but start no background work. Close is idempotent.
+func (service *Service) Close() {
+	if service == nil {
+		return
+	}
+	service.lifeMu.Lock()
+	service.closed = true
+	service.lifeMu.Unlock()
+	service.stop()
+	service.background.Wait()
 }
 
 // AllowWrite reports agent_access.allow_write.

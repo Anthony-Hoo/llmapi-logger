@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/contentpolicy"
@@ -50,6 +51,7 @@ type App struct {
 	orgReports      *orgreport.Service
 	retention       *retention.Runner
 	sessionRunner   *sessionanalysis.Runner
+	agentAccess     *agentaccess.Service
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
 	auditStore      runtimeStore
@@ -511,6 +513,9 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		_ = application.closeComponents()
 		return nil, fmt.Errorf("assemble agent access: %w", err)
 	}
+	// Closed with the other components: its background work (a retried
+	// token revocation) ends before the store is closed.
+	application.agentAccess = agentAccess
 	agentDist := assembleAgentDist(configuration, agentAccess, seams.agentPackageDir, logger)
 
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
@@ -759,6 +764,9 @@ func (application *App) closeComponents() error {
 		}
 		if application.orgReports != nil {
 			application.orgReports.WaitSnapshots()
+		}
+		if application.agentAccess != nil {
+			application.agentAccess.Close()
 		}
 		if application.callerWorker != nil {
 			application.callerWorker.Close()
