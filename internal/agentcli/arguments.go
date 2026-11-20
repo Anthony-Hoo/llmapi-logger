@@ -1,6 +1,7 @@
 package agentcli
 
 import (
+	"strconv"
 	"strings"
 
 	"llmapi-logger/internal/agentapi"
@@ -84,6 +85,17 @@ func renameArgument(spec *commandSpec, failure *cliError) {
 	details["field"] = name
 	details["parameter"] = wire
 	message := renameInMessage(failure.Message, wire, name)
+	// An element of a list the user gave with a repeatable flag (rules[0] of
+	// --rule): the position stays, in details.index (counted from 0, as the
+	// server counts) and in the message as "the first --rule".
+	if index, rest, ok := wireIndex(wire); ok {
+		details["index"] = index
+		described := ordinalOf(index, "`"+name+"`")
+		if rest != "" {
+			described += " (its " + rest + ")"
+		}
+		message = strings.ReplaceAll(failure.Message, "`"+wire+"`", described)
+	}
 	if other, ok := details["conflicts_with"].(string); ok {
 		if renamed := argumentName(spec, other); renamed != "" {
 			details["conflicts_with"] = renamed
@@ -105,6 +117,34 @@ func renameArgument(spec *commandSpec, failure *cliError) {
 	}
 	failure.Details = details
 	failure.Message = message
+}
+
+// wireIndex reads the position of a list element out of a wire name such
+// as rules[1].pattern: 1 and "pattern". ok is false without an index.
+func wireIndex(wire string) (int, string, bool) {
+	open := strings.IndexByte(wire, '[')
+	end := strings.IndexByte(wire, ']')
+	if open <= 0 || end <= open+1 || end-open > 5 {
+		return 0, "", false
+	}
+	index := 0
+	for _, char := range wire[open+1 : end] {
+		if char < '0' || char > '9' {
+			return 0, "", false
+		}
+		index = index*10 + int(char-'0')
+	}
+	return index, strings.TrimPrefix(wire[end+1:], "."), true
+}
+
+// ordinalOf names the element at a position counted from 0: "the first
+// x" up to the tenth, "x number 11" beyond.
+func ordinalOf(index int, name string) string {
+	names := []string{"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"}
+	if index >= 0 && index < len(names) {
+		return "the " + names[index] + " " + name
+	}
+	return name + " number " + strconv.Itoa(index+1)
 }
 
 // renameInMessage replaces the backticked wire name in message.
