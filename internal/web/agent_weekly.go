@@ -579,10 +579,10 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 	// incomplete while the week is still open (evidence_pending), or when
 	// the limit cut the list (truncated, first of all); never "final".
 	meta := agentMetaOK()
-	if handler.weekOpen(ctx, week) {
+	open, frozen := handler.weekOpenFrozen(ctx, week)
+	if open {
 		meta.Complete, meta.IncompleteReason = false, agentIncompleteEvidencePending
 	}
-	frozen := handler.weekFrozen(ctx, week)
 	actions := []string{agentUnattributedLiveAction}
 	if frozen {
 		actions = []string{agentUnattributedFrozenAction}
@@ -611,22 +611,30 @@ const (
 	agentUnattributedFrozenAction = "This week is frozen, but this list is computed now with the current project rules, so it can differ from the frozen snapshot's unattributed total (`llmaudit weekly project -1 --week <week>`, the same week), which keeps the rules in force when the week was frozen."
 )
 
-// weekOpen reports whether the week label (empty: the current week) has not
-// ended yet. With a snapshot store the service says so (WeekState.Ended);
-// without one a week is open when it is the current week or later. When
-// neither answers, the week counts as open: nothing is claimed.
-func (handler *managementHandler) weekOpen(ctx context.Context, label string) bool {
+// weekOpenFrozen reports whether the week label (empty: the current week)
+// has not ended yet and whether it has a frozen snapshot. With a snapshot
+// store the service answers both in one read (WeekState); without one no
+// week is frozen and a week is open when it is the current week or later.
+// When nothing answers, the week counts as open and not frozen: nothing is
+// claimed.
+func (handler *managementHandler) weekOpenFrozen(ctx context.Context, label string) (bool, bool) {
+	states, hasStates := handler.org.(agentWeekStates)
+	if label != "" && hasStates {
+		if state, err := states.WeekState(ctx, label); err == nil {
+			return !state.Ended, state.Frozen
+		}
+	}
 	current, err := handler.org.Self(ctx, 0)
 	if err != nil {
-		return true
+		return true, false
 	}
 	if label == "" {
 		label = current.Week
-	}
-	if states, ok := handler.org.(agentWeekStates); ok {
-		if state, err := states.WeekState(ctx, label); err == nil {
-			return !state.Ended
+		if hasStates {
+			if state, err := states.WeekState(ctx, label); err == nil {
+				return !state.Ended, state.Frozen
+			}
 		}
 	}
-	return label >= current.Week
+	return label >= current.Week, false
 }
