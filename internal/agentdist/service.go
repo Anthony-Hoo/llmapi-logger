@@ -496,10 +496,10 @@ func (service *Service) allowDownload(nonce string, expires time.Time) (int, tim
 	return downloadAllowed, 0
 }
 
-// retryAfterSeconds is wait in whole seconds, rounded down so it is never
-// longer than wait, and at least one.
+// retryAfterSeconds is wait in whole seconds, rounded up so a client that
+// waits exactly that long is not refused again, and at least one.
 func retryAfterSeconds(wait time.Duration) string {
-	seconds := int(wait / time.Second)
+	seconds := int((wait + time.Second - 1) / time.Second)
 	if seconds < 1 {
 		seconds = 1
 	}

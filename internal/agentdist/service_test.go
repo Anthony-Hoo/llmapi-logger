@@ -392,6 +392,39 @@ func TestDownloadBudgetIsKeptPerNonce(t *testing.T) {
 // until the soonest entry expires; a link it already tracks keeps its count
 // up to the cap; entries of expired links make room, and as soon as one
 // entry expires a fresh link is served again.
+// TestRetryAfterOfAFullTrackerIsRoundedUp: a client that waits exactly the
+// Retry-After of a full tracker is served, also when the soonest entry
+// expires at a fraction of a second from now (contract section 0.1 item 165).
+func TestRetryAfterOfAFullTrackerIsRoundedUp(t *testing.T) {
+	for wait, want := range map[time.Duration]string{
+		0: "1", time.Nanosecond: "1", time.Second: "1", time.Second + time.Nanosecond: "2",
+		89*time.Second + 600*time.Millisecond: "90", 90 * time.Second: "90",
+	} {
+		if got := retryAfterSeconds(wait); got != want {
+			t.Errorf("retryAfterSeconds(%v) = %s, want %s", wait, got, want)
+		}
+	}
+	service, clk, _, manifest := newTestService(t)
+	file := manifest.Packages[0].File
+	clk.advance(400 * time.Millisecond)
+	soonest := clk.now.Truncate(time.Second).Add(90 * time.Second)
+	service.mu.Lock()
+	for index := 0; index < maxTrackedLinks; index++ {
+		service.downloads[fmt.Sprintf("filler-%d", index)] = &linkUse{count: 1, expires: soonest.Add(time.Duration(index) * time.Second)}
+	}
+	service.mu.Unlock()
+	fresh, _ := service.signer.Mint()
+	recorder, _ := download(service, fresh, file)
+	retry, err := strconv.Atoi(recorder.Header().Get("Retry-After"))
+	if recorder.Code != http.StatusTooManyRequests || err != nil || retry != 90 {
+		t.Fatalf("full tracker, soonest entry in %v: %d, Retry-After %q", soonest.Sub(clk.now), recorder.Code, recorder.Header().Get("Retry-After"))
+	}
+	clk.advance(time.Duration(retry) * time.Second)
+	if again, _ := download(service, fresh, file); again.Code != http.StatusOK {
+		t.Fatalf("after waiting exactly Retry-After: %d %s", again.Code, again.Body.String())
+	}
+}
+
 func TestFullDownloadTrackerNeverDropsALiveLink(t *testing.T) {
 	service, clk, _, manifest := newTestService(t)
 	file := manifest.Packages[0].File
