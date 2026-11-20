@@ -43,6 +43,9 @@ func argumentName(spec *commandSpec, wire string) string {
 }
 
 // readCommand reports whether every route of spec is a read (or an export).
+// A route whose result carries meta is still not a read when its endpoint
+// needs the write tier (the connection test): its refused fields are the
+// settable names of the settings, not flags of the command.
 func readCommand(spec *commandSpec) bool {
 	if len(spec.Routes) == 0 {
 		return false
@@ -51,9 +54,14 @@ func readCommand(spec *commandSpec) bool {
 		if !route.Meta && !route.Raw {
 			return false
 		}
+		if endpoint, _, ok := endpointRegistry.Match(route.Method, agentapi.PathPrefix+route.Path); ok && endpoint.Tier != agentapi.TierRead {
+			return false
+		}
 	}
 	return true
 }
+
+var endpointRegistry = agentapi.NewRegistry(agentapi.Endpoints)
 
 // renameArgument rewrites a server INVALID_ARGUMENT of a read command into
 // the command's own names.
