@@ -471,6 +471,18 @@ func TestAgentRateLimits(t *testing.T) {
 				}
 			}
 		}
+		// Free refusals are still recorded, but capped like write_denied
+		// rows: 60 rows for the 60 refusals, then none.
+		refusedRows := len(fixture.writeAudits())
+		if refusedRows != 60 {
+			t.Fatalf("rows of 60 refused tests = %d", refusedRows)
+		}
+		for index := 0; index < 10; index++ {
+			_ = fixture.facade(http.MethodPost, "/analysis/test-model", `{"bogus":1}`, fixture.adminWrite)
+		}
+		if rows := len(fixture.writeAudits()); rows != refusedRows {
+			t.Fatalf("rows after the cap = %d, want %d", rows, refusedRows)
+		}
 		for index := 0; index < 12; index++ {
 			if response := fixture.facade(http.MethodPost, "/analysis/test-model", `{}`, fixture.adminWrite); response.Code != http.StatusOK {
 				t.Fatalf("test %d = %d %s", index, response.Code, response.Body.String())

@@ -106,9 +106,18 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 	var keys []string
 	// Every refusal below happens before any request leaves for the model:
 	// it gives back the test quota's slot (contract section 0.1 item 131).
+	// Its write_failed row is capped like a write_denied row
+	// (QuotaDeniedAudit): a refusal that costs no test must not let a token
+	// add audit rows at the request rate.
 	refuse := func(err error) {
 		handler.agent.Refund(call.WriteSlot)
-		handler.failKeyWrite(writer, request, call, keys, err)
+		code := handler.writeAgentWriteFailure(writer, err)
+		if code == "" {
+			code = agentapi.CodeTimeout
+		}
+		if handler.agent.Take(agentaccess.QuotaDeniedAudit, call.Identity) == nil {
+			handler.recordKeyWrite(request, call, keys, code)
+		}
 	}
 	settings, err := handler.agentAnalysisSettingsWriter()
 	if err != nil {
@@ -180,9 +189,12 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		refuse(err)
 		return
 	}
+	record := true
 	if result.Error == sessionanalysis.ProbeInvalidAddress {
-		// The model client refused the address: nothing was sent.
+		// The model client refused the address: nothing was sent, so the
+		// test is given back and its row is capped as for a refusal.
 		handler.agent.Refund(call.WriteSlot)
+		record = handler.agent.Take(agentaccess.QuotaDeniedAudit, call.Identity) == nil
 	}
 	audit := agentaccess.WriteAudit{Event: agentaccess.EventWriteApplied, ObjectKind: agentKeyObject, ObjectID: "test-model", ChangedKeys: keys, Outcome: agentaccess.OutcomeOK}
 	if !result.OK {
@@ -191,7 +203,9 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 	if audit.ChangedKeys == nil {
 		audit.ChangedKeys = []string{}
 	}
-	handler.agent.RecordWrite(request.Context(), call.Identity, call.Meta, audit)
+	if record {
+		handler.agent.RecordWrite(request.Context(), call.Identity, call.Meta, audit)
+	}
 	// Like every other command's result, the test's carries meta: the probe
 	// itself is complete either way; state says whether it reached the model.
 	meta := agentapi.Meta{State: "ok", Complete: true}
