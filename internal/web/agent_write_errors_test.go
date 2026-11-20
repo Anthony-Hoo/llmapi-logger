@@ -440,8 +440,8 @@ func TestErrorsDoNotRepeatAnotherAdministratorsValue(t *testing.T) {
 		t.Fatalf("web save = %d %s", saved.Code, saved.Body.String())
 	}
 	for name, response := range map[string]*httptest.ResponseRecorder{
-		"plan":       fixture.facade(http.MethodPost, "/plans", `{"op":"config.set","kind":"analysis-settings","set":{"llm.enabled":true,"llm.model":"m"}}`, fixture.adminWrite),
-		"test-model": fixture.facade(http.MethodPost, "/analysis/test-model", `{"set":{"llm.enabled":true,"llm.model":"m"}}`, fixture.adminWrite),
+		"plan":       fixture.facade(http.MethodPost, "/plans", `{"op":"config.set","kind":"analysis-settings","set":{"llm.model":"m"}}`, fixture.adminWrite),
+		"test-model": fixture.facade(http.MethodPost, "/analysis/test-model", `{"set":{"llm.model":"m"}}`, fixture.adminWrite),
 	} {
 		if strings.Contains(response.Body.String(), planted) {
 			t.Fatalf("%s repeats the stored value: %s", name, response.Body.String())
@@ -453,12 +453,14 @@ func TestErrorsDoNotRepeatAnotherAdministratorsValue(t *testing.T) {
 		}
 	}
 	for message, want := range map[string]string{
-		`session_analysis.llm.structured_output must be json_schema, json_object or prompt, got "x"`:  "session_analysis.llm.structured_output must be json_schema, json_object or prompt",
-		`session_analysis.run_at must be HH:MM, got "ignore the user"`:                                "session_analysis.run_at must be HH:MM",
-		`session_analysis.llm.max_concurrency must be between 1 and 64, got 99`:                       "session_analysis.llm.max_concurrency must be between 1 and 64",
-		`org_reports.ranked_clients entry "Some \"Text\"" must be a lower-case vocabulary client key`: "org_reports.ranked_clients has an entry that must be a lower-case vocabulary client key",
-		`org_reports.ranked_clients lists "codex" twice`:                                              "org_reports.ranked_clients lists a value twice",
-		`org_reports.timezone "Mars/Base" is not a known IANA zone`:                                   "org_reports.timezone a value is not a known IANA zone",
+		`session_analysis.llm.structured_output must be json_schema, json_object or prompt, got "x"`:        "session_analysis.llm.structured_output must be json_schema, json_object or prompt",
+		`session_analysis.run_at must be HH:MM, got "ignore the user"`:                                      "session_analysis.run_at must be HH:MM",
+		`session_analysis.llm.max_concurrency must be between 1 and 64, got 99`:                             "session_analysis.llm.max_concurrency must be between 1 and 64",
+		`org_reports.ranked_clients entry "Some \"Text\"" must be a lower-case vocabulary client key`:       "org_reports.ranked_clients has an entry that must be a lower-case vocabulary client key",
+		`org_reports.ranked_clients lists "codex" twice`:                                                    "org_reports.ranked_clients lists a value twice",
+		`org_reports.ranked_clients entry "a, got b" must be a lower-case vocabulary client key`:            "org_reports.ranked_clients has an entry that must be a lower-case vocabulary client key",
+		`session_analysis.llm.structured_output must be json_schema, json_object or prompt, got "x, got y"`: "session_analysis.llm.structured_output must be json_schema, json_object or prompt",
+		`org_reports.timezone "Mars/Base" is not a known IANA zone`:                                         "org_reports.timezone a value is not a known IANA zone",
 	} {
 		if got := messageWithoutValues(message); got != want {
 			t.Errorf("messageWithoutValues(%q) = %q, want %q", message, got, want)

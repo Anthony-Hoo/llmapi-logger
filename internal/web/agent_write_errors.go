@@ -238,11 +238,14 @@ var (
 // and the rule; details.field, details.reason and details.allowed say what
 // is wrong, and the caller knows what it submitted.
 func messageWithoutValues(message string) string {
+	// Quoted values first, so a value holding ", got " cannot cut a quote
+	// in half and leave its start behind.
+	message = quotedEntry.ReplaceAllString(message, "has an entry that")
+	message = quotedValue.ReplaceAllString(message, "a value")
 	if index := strings.Index(message, ", got "); index >= 0 {
 		message = message[:index]
 	}
-	message = quotedEntry.ReplaceAllString(message, "has an entry that")
-	return quotedValue.ReplaceAllString(message, "a value")
+	return message
 }
 
 // settingsField is the field of a settings refusal; one that names no
