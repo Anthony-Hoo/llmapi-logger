@@ -51,19 +51,41 @@ llmaudit analysis dismiss 42
 ```
 
 - `analysis run` starts a run now. If one is already running, the plan says so (`extras.running`) and applying answers `RUN_IN_PROGRESS`; follow progress with `llmaudit analysis overview --since 1d` instead of starting another.
-- `analysis calibrate --file` saves calibration labels: `{"labels": [{"session_id": "<64 hex>", "task_type": "…", "outcome": "…", "collaboration": "…", "work_relevance": "…", "friction": ["…"]}]}` or a bare array, 1–1000 labels. Labels are the user's judgement of what a session really was, used to measure the model. **Write them only from conclusions the user stated**, never from your own reading of the session.
+- `analysis calibrate --file` saves calibration labels, the user's judgement of what a session really was, used to measure the model. **Write them only from conclusions the user stated**, never from your own reading of the session. The file format is below.
 - `analysis dismiss <suggestion-id>` hides a site-wide or project suggestion for everyone. Read the suggestion with `llmaudit analysis report` first and dismiss it **only when the user has decided to**.
+
+### Calibration label file
+
+The file holds `{"labels": [ … ]}` or a bare array of 1 to 1000 labels. Each label is a JSON object with these fields, spelled exactly as here (keys are case-sensitive, and a key may appear only once):
+
+| Field | Type | Values |
+|---|---|---|
+| `session_id` | string, required | the 64 hexadecimal characters of the session id, as `analysis sessions` prints it |
+| `task_type` | string, optional | `bug_fix`, `feature`, `refactor`, `test`, `docs`, `config_ops`, `data`, `explain_learn`, `review`, `research`, `other` |
+| `outcome` | string, optional | `achieved`, `partial`, `not_achieved`, `abandoned`, `unclear` |
+| `collaboration` | string, optional | `directive`, `feedback_loop`, `task_iteration`, `learning`, `validation` |
+| `work_relevance` | string, optional | `work`, `work_adjacent`, `personal`, `prohibited`, `unclear` |
+| `friction` | list of strings, optional | any of `misunderstood_request`, `wrong_approach`, `buggy_code`, `user_rejected_action`, `excessive_changes`, `tool_failed`, `user_stopped_early`, `wrong_file_or_location`, `slow_or_verbose`, `user_unclear`, `external_issue`, `looping`; `[]` says "no friction" |
+
+A field that is left out (or an empty string) is not compared; give only what the user stated. A label whose session has no facet from the current model is skipped and listed in the plan's `extras` as unmatched. A value outside the list is refused with `INVALID_ARGUMENT`, `details.field` such as `args.labels[0].task_type`, `details.reason: not_allowed_value` and `details.allowed` listing the values.
+
+```json
+{"labels": [
+  {"session_id": "48473eb6258809ee3ce571cc3a5bbfad90883e3efa67cdacc586205670e140b5", "task_type": "bug_fix", "outcome": "achieved"},
+  {"session_id": "ed990b72bb3d98d07b563556eaebe9b9978bed02309d1c96d30b06402981522f", "outcome": "partial", "friction": ["wrong_approach", "looping"]}
+]}
+```
 
 ## Testing the analysis model
 
 ```
 llmaudit analysis test-model
-llmaudit analysis test-model --set llm.model=example-model --set llm.base_url=https://llm.example.com/v1
+llmaudit analysis test-model --set llm.model=example-model --set llm.max_output_tokens=2000
 ```
 
-This probes the model with the saved settings, optionally overridden for this test by `--set` (nothing is saved). Although it changes nothing, it needs an administrator **write** token (a read-only token gets `READ_ONLY_TOKEN`; ask the user before logging in again with `--write`), because it sends the key in use to the model address and is recorded in the agent change log like a change. Its output carries `meta` like every other command: `state` is `ok` or `failed`. The key in use is only sent to the saved address: a `--set llm.base_url=...` that differs from it is refused with `INVALID_ARGUMENT`, `details.reason: saved_key_not_sent_to_unsaved_address`, before anything is sent. Then either plan and apply the address change first (the plan shows the address to the user), or ask the user to run the test with `--prompt-key` in their own terminal. Exit code 6 with `data.ok: false` means the probe ran and failed; report `data` to the user. To test a key that is not saved yet, the user runs `llmaudit analysis test-model --prompt-key` in their own terminal and types the key there; you cannot pass a key.
+This probes the model with the saved settings, optionally overridden for this test by `--set` (nothing is saved). Although it changes nothing, it needs an administrator **write** token (a read-only token gets `READ_ONLY_TOKEN`; ask the user before logging in again with `--write`), because it sends the key in use to the model address and is recorded in the agent change log like a change. Its output carries `meta` like every other command: `state` is `ok` or `failed`. The key in use is only sent to the saved address: a `--set llm.base_url=...` that differs from it is refused with `INVALID_ARGUMENT`, `details.reason: saved_key_not_sent_to_unsaved_address`, before anything is sent (when no key is in use there is nothing to protect and the test runs). Then either plan and apply the address change first (the plan shows the address to the user), or ask the user to run the test with the new address and `--prompt-key` in their own terminal, `llmaudit analysis test-model --set 'llm.base_url=<the new address>' --prompt-key`; the key typed there goes to that address and is not saved. The address must be a local one (`localhost`, a loopback, private or CGNAT address) unless the configuration file allows others: a public address is refused with `details.reason: not_local_address`. A test refused before anything was sent does not count toward the 12 tests per hour. Exit code 6 with `data.ok: false` means the probe ran and failed; report `data` to the user. To test a key that is not saved yet, the user runs `llmaudit analysis test-model --prompt-key` in their own terminal and types the key there; you cannot pass a key.
 
-Be aware that a test with `--set llm.base_url=…` sends the saved key to that address. Only use an address the user gave you.
+Only use an address the user gave you: with `--prompt-key` the user's key goes to it.
 
 Changing the analysis settings themselves is in `config.md`.
 

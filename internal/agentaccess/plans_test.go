@@ -3,6 +3,9 @@ package agentaccess
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -276,5 +279,33 @@ func TestPlanStorePeekAndCheckRoom(t *testing.T) {
 	}
 	if store.Len() != held || store.CheckRoom(8) != nil {
 		t.Fatal("CheckRoom stored something or refused another token")
+	}
+}
+
+// The plan ids written in the Skill and the command-line help as examples
+// have the shape of a real one (the prefix and 22 base64url characters of 16
+// bytes), so an agent copying the shape gets it right.
+func TestExamplePlanIDsHaveThePlanIDShape(t *testing.T) {
+	pattern := regexp.MustCompile(`pln_[A-Za-z0-9_-]+`)
+	files, err := filepath.Glob(filepath.Join("..", "..", "skill", "llmapi-audit", "references", "*.md"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("skill references: %v %v", files, err)
+	}
+	files = append(files, filepath.Join("..", "..", "skill", "llmapi-audit", "SKILL.md"), filepath.Join("..", "agentcli", "commands.go"))
+	seen := 0
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range pattern.FindAllString(string(data), -1) {
+			seen++
+			if !ValidPlanID(id) {
+				t.Errorf("%s: %s is not the shape of a plan id", file, id)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no example plan id found")
 	}
 }

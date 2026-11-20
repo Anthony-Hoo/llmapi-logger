@@ -43,14 +43,15 @@ Every change is two steps.
 3. **Apply.** `llmaudit apply <plan-id>` executes exactly that plan. It takes no other arguments.
 
 ```
-llmaudit apply pln_0123456789abcdef
+llmaudit apply pln_Q2hhbmdlUGxhbklkMDAwAA
 ```
 
 - A plan is valid for 10 minutes, belongs to your token and runs once, successful or not. `PLAN_EXPIRED` or `PLAN_NOT_FOUND`: create a new plan and show it again.
 - `VERSION_CONFLICT`: the object is not at the version expected. When `apply` answers it, someone changed the object after the plan was made; when a write command answers it, the `--if-version` you gave is older than the object, so it changed after you read it. Either way, read it again with `config show`, tell the user what changed, and plan again.
 - After success, `data` is `{op, target, applied: true}` (with the new `id` when something was created); run the read command in `next_actions` to confirm.
 - After `TIMEOUT` or `NETWORK_ERROR` the change may or may not have happened. Do not apply again. Read the object with `config show` first and tell the user what you found.
-- Write limits (`RATE_LIMITED`, wait `details.retry_after_seconds`): per token, 60 created plans, applies and `config set-key` together in 10 minutes, and at most 32 plans that are not applied or expired at the same time (a plan you do not apply holds its place until it expires 10 minutes after it was made, so do not create plans you will not show). A plan request the server refuses (validation, not found, conflict) counts toward neither. `analysis test-model`: 12 per hour per token. For the whole server: `analysis run` once in 10 minutes and `weekly regenerate` 6 times an hour; an apply refused because the operation could not start gives its place back.
+- Write limits (`RATE_LIMITED`, wait `details.retry_after_seconds`): per token, 60 created plans, applies and `config set-key` together in 10 minutes, and at most 32 plans that are not applied or expired at the same time (a plan you do not apply holds its place until it expires 10 minutes after it was made, so do not create plans you will not show). A plan request the server refuses (validation, not found, conflict) counts toward neither. `analysis test-model`: 12 per hour per token; a test refused before anything was sent does not count. For the whole server: `analysis run` once in 10 minutes and `weekly regenerate` 6 times an hour; an apply refused because the operation could not start gives its place back. An apply refused by one of these two limits leaves the plan unused: after the wait you may apply it again without a new plan, as long as it has not expired (a plan made before the limit's window began usually expires first; then plan again).
+- A write command refused with `INVALID_ARGUMENT` names the input it refused in `details.field`, as the server knows it: the settable field (`name`, `llm.base_url`, `rules[0].pattern`, `args.labels[2].outcome`, `args.week`), never the command-line flag that carried it. `details.reason` says why (for example `required`, `out_of_range`, `not_allowed_value`, `unknown_field`, `duplicate_key`), and when the field takes a fixed set of values `details.allowed` lists them. Field names are case-sensitive, and a JSON object you pass (`--set-json`, `--patch-file`, a label file) may name each key only once.
 
 ## Creating and changing objects
 

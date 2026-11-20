@@ -603,7 +603,7 @@ func buildCommands() []*commandSpec {
 			Args:     []argSpec{{Name: "plan-id", Help: "plan_id printed by the write command (pln_...)", PathParam: "plan_id"}},
 			Routes:   []routeSpec{{Method: "POST", Path: "/plans/{plan_id}/apply"}},
 			Timeout:  130 * time.Second,
-			Examples: []string{"llmaudit apply pln_0123456789abcdef"},
+			Examples: []string{"llmaudit apply pln_Q2hhbmdlUGxhbklkMDAwAA"},
 			Run:      runApply,
 		},
 	}
