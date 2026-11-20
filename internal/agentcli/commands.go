@@ -323,7 +323,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"weekly", "unattributed"},
 			Summary:     "activity no project rule matched (administrators)",
-			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`.",
+			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`. Entries come most requests first; when --limit cut the list, data.truncated is true and meta.complete is false with incomplete_reason truncated (at 200, the server's maximum, a full list may be cut: the total is not known).",
 			Flags: []flagSpec{
 				flagWeekStart("First day of the week, YYYY-MM-DD, on the deployment's week start day. Default: the current week."),
 				flagLimit(1, 200, 20),

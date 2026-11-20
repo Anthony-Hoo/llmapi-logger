@@ -544,18 +544,26 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 	if !ok {
 		return
 	}
-	limit, err := parseAgentLimit(values, 20, 200)
+	limit, err := parseAgentLimit(values, 20, agentMaxUnattributed)
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
-	entries, err := handler.org.Unattributed(ctx, week, limit)
+	// Ask for one entry more than the limit to learn whether the limit cut
+	// the list (contract section 0.1 item 121). The service returns at most
+	// agentMaxUnattributed entries and no total, so at that limit a full
+	// page can only be called possibly cut.
+	entries, err := handler.org.Unattributed(ctx, week, min(limit+1, agentMaxUnattributed))
 	if err != nil {
 		err = asArgument(err, errAgentWeekRefused)
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
+	}
+	truncated := len(entries) > limit || len(entries) == agentMaxUnattributed
+	if len(entries) > limit {
+		entries = entries[:limit]
 	}
 	items := make([]agentUnattributedEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -563,6 +571,20 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 			Users: entry.Users, DraftRule: agentDraftRule{Kind: entry.DraftRule.Kind, PatternUntrusted: entry.DraftRule.Pattern}})
 	}
 	// The entries are always computed live; they are final once the week is
-	// frozen.
-	writeAgentRead(writer, map[string]any{"items": items}, weeklyFinalMeta(handler.weekFrozen(ctx, week)), true)
+	// frozen. A list the limit cut is incomplete first of all.
+	meta := weeklyFinalMeta(handler.weekFrozen(ctx, week))
+	var actions []string
+	if truncated {
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteTruncated
+		if limit < agentMaxUnattributed {
+			actions = append(actions, fmt.Sprintf("The list was cut at %d entries and more exist; run it again with a larger --limit (at most %d).", limit, agentMaxUnattributed))
+		} else {
+			actions = append(actions, fmt.Sprintf("The list reached the server's maximum of %d entries, so more may exist; the server does not report the total.", agentMaxUnattributed))
+		}
+	}
+	writeAgentRead(writer, map[string]any{"items": items, "truncated": truncated}, meta, true, actions...)
 }
+
+// agentMaxUnattributed is the most entries orgreport.Service.Unattributed
+// returns.
+const agentMaxUnattributed = 200
