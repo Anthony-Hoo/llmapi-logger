@@ -182,5 +182,11 @@ func (handler *managementHandler) serveAgentTestModel(writer http.ResponseWriter
 		audit.ChangedKeys = []string{}
 	}
 	handler.agent.RecordWrite(request.Context(), call.Identity, call.Meta, audit)
-	writeAgentOK(writer, agentapi.Success(result))
+	// Like every other command's result, the test's carries meta: the probe
+	// itself is complete either way; state says whether it reached the model.
+	meta := agentapi.Meta{State: "ok", Complete: true}
+	if !result.OK {
+		meta.State = "failed"
+	}
+	writeAgentOK(writer, agentapi.ReadSuccess(result, meta))
 }

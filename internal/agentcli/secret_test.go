@@ -155,7 +155,7 @@ func TestSetKeyFromTerminal(t *testing.T) {
 }
 
 func TestTestModelPromptKeyAndExitSix(t *testing.T) {
-	server := newFakeServer(t, respondJSON(200, `{"ok":true,"data":{"ok":false,"stage":"connect","message":"refused"}}`))
+	server := newFakeServer(t, respondJSON(200, `{"ok":true,"data":{"ok":false,"stage":"connect","message":"refused"},"meta":{"state":"failed","complete":true,"incomplete_reason":""}}`))
 	h := newHarness(t)
 	h.saveLogin(server.URL)
 	h.terminal.interactive = true
@@ -171,7 +171,7 @@ func TestTestModelPromptKeyAndExitSix(t *testing.T) {
 	}
 	assertSecretNowhere(t, h)
 
-	server.setResponder(respondJSON(200, `{"ok":true,"data":{"ok":true}}`))
+	server.setResponder(respondJSON(200, `{"ok":true,"data":{"ok":true},"meta":`+okMeta+`}`))
 	if exit := h.run("analysis", "test-model"); exit != 0 {
 		t.Fatalf("exit %d", exit)
 	}

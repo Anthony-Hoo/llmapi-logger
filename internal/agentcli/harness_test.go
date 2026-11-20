@@ -80,8 +80,9 @@ const okMeta = `{"state":"succeeded","complete":true,"incomplete_reason":""}`
 // a plain success.
 func defaultResponder(writer http.ResponseWriter, request *http.Request, _ []byte) {
 	writer.Header().Set("Content-Type", "application/json")
-	// The project preview is a POST but a read result: it carries meta.
-	if request.Method == http.MethodGet || strings.HasSuffix(request.URL.Path, "/config/project-preview") {
+	// The project preview and the connection test are POSTs whose results
+	// carry meta.
+	if request.Method == http.MethodGet || strings.HasSuffix(request.URL.Path, "/config/project-preview") || strings.HasSuffix(request.URL.Path, "/analysis/test-model") {
 		_, _ = io.WriteString(writer, `{"ok":true,"data":{"items":[{"id":1,"name_untrusted":"x"}],"next_cursor":""},"meta":`+okMeta+`}`)
 		return
 	}

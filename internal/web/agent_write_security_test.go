@@ -952,3 +952,27 @@ func TestIrreversiblePlansSaySo(t *testing.T) {
 		t.Fatalf("a reversible change claims it cannot be undone: %v", plan.Effects)
 	}
 }
+
+// Contract section 0.1 item 110: the connection test's result carries meta
+// like every other command's; state says whether the probe reached the model.
+func TestTestModelResultCarriesMeta(t *testing.T) {
+	fixture := newWriteFixture(t)
+	response := fixture.facade(http.MethodPost, "/analysis/test-model", map[string]any{}, fixture.adminWrite)
+	decoded := decodeAgent(t, response)
+	if response.Code != http.StatusOK || decoded.Meta == nil || decoded.Meta.State != "ok" || !decoded.Meta.Complete ||
+		!strings.Contains(response.Body.String(), `"incomplete_reason":""`) {
+		t.Fatalf("test-model = %d %s", response.Code, response.Body.String())
+	}
+	// A probe that runs and fails is still a complete result, state failed.
+	fixture.model.Close()
+	response = fixture.facade(http.MethodPost, "/analysis/test-model", map[string]any{}, fixture.adminWrite)
+	decoded = decodeAgent(t, response)
+	if response.Code != http.StatusOK || decoded.Meta == nil || decoded.Meta.State != "failed" || !decoded.Meta.Complete {
+		t.Fatalf("failed probe = %d %s", response.Code, response.Body.String())
+	}
+	// A read-tier administrator token is refused: the test spends the
+	// model's quota and can send the key in use, so it needs the write tier.
+	if code := failure(t, fixture.facade(http.MethodPost, "/analysis/test-model", map[string]any{}, fixture.adminRead)).Code; code != agentapi.CodeReadOnlyToken {
+		t.Fatalf("read token = %s", code)
+	}
+}

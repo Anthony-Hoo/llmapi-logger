@@ -457,7 +457,7 @@ func buildCommands() []*commandSpec {
 				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is JSON null (refused here: only a project's group_id accepts null), anything else a string. Not api_key. Repeatable. Default: the saved settings."},
 				{Name: "prompt-key", Kind: boolFlag, Help: "Read an API key for this test from the interactive terminal without echo; it is not saved. Fails with NO_TTY when stdin is not a terminal. Default: use the saved key."},
 			},
-			Routes:   []routeSpec{{Method: "POST", Path: "/analysis/test-model", Body: []string{"api_key"}}},
+			Routes:   []routeSpec{{Method: "POST", Path: "/analysis/test-model", Body: []string{"api_key"}, Meta: true}},
 			Timeout:  70 * time.Second,
 			Examples: []string{"llmaudit analysis test-model", "llmaudit analysis test-model --set llm.model=example-model --set llm.base_url=https://llm.example.com/v1"},
 			Run:      runTestModel,
