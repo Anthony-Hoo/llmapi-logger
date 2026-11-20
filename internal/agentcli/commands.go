@@ -123,7 +123,7 @@ func buildCommands() []*commandSpec {
 			Summary: "authorize this machine in the browser and save an agent token",
 			Description: "Opens the authorization page of the server in the browser and waits up to " + loginWaitText + " for the user to approve. " +
 				"The token is saved in credentials.json under the state directory (LLMAUDIT_HOME, default ~/.llmaudit) and never printed. " +
-				"The user, not the agent, should run this command.",
+				"An agent may run it only when it can open the user's browser and keep the command running for the whole wait while the user approves; otherwise the user runs it in their own terminal. Nobody types a password, API key or token: the user approves in the browser.",
 			Flags: []flagSpec{
 				{Name: "server", Value: "<url>", Help: "Server address, http:// or https:// with a host and an optional path; no user info, query or fragment. Default: the server of the saved credentials; required on the first login."},
 				{Name: "no-browser", Kind: boolFlag, Help: "Do not open a browser or listen locally: print the address, and read the one-time code the page shows from the terminal. Default: off."},
@@ -197,7 +197,7 @@ func buildCommands() []*commandSpec {
 			Path:        []string{"requests", "get"},
 			Summary:     "show one audit record without the conversation text",
 			Description: "Credential header and query values are omitted (value_omitted: credential, with length). data.exports says, per --what of `llmaudit requests export <id> --what conversation --out <file>` and the other export kinds, whether the record can give it (available, pending, not_available with a reason, not_retained).",
-			Args:        []argSpec{{Name: "id", Help: "audit_id of the record (apx_ and 26 letters and digits, from `llmaudit requests list`)", PathParam: "id"}},
+			Args:        []argSpec{{Name: "id", Help: "audit_id of the record from `llmaudit requests list`, copied exactly (records the proxy creates have apx_ and 26 lower-case letters and digits)", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "headers", Value: "all", Query: "headers", Help: "all: include headers of every stage. The only accepted value. Default: inbound request headers only."},
 			},
@@ -255,7 +255,7 @@ func buildCommands() []*commandSpec {
 			Path:        []string{"usage", "trend"},
 			Summary:     "per-step token trend of one usage session",
 			Description: "NOT_FOUND means the session does not exist, is not visible to you, or has not been analyzed yet.",
-			Args:        []argSpec{{Name: "session", Help: "session_id of a `llmaudit usage sessions` card: agt_ or ses_ and 24 hexadecimal digits, or conv_ and the conversation id", PathParam: "id"}},
+			Args:        []argSpec{{Name: "session", Help: "session_id of a `llmaudit usage sessions` card, copied exactly: agt_ or ses_ and 24 hexadecimal digits, or a conversation_id (conv_...) itself", PathParam: "id"}},
 			Flags:       []flagSpec{flagOut(false, "the data (recommended for long sessions)")},
 			Routes:      []routeSpec{{Method: "GET", Path: "/usage/sessions/{id}/trend", Meta: true}},
 			Examples:    []string{"llmaudit usage trend agt_5d0c9b8a7f6e5d4c3b2a1f0e", "llmaudit usage trend agt_5d0c9b8a7f6e5d4c3b2a1f0e --out trend.json"},
@@ -362,7 +362,7 @@ func buildCommands() []*commandSpec {
 			Summary: "session analysis summary and the state of the last run",
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
-				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
+				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required. The range from --from to --to is at most 400 days."},
 				flagToNow(), flagUserID(true),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/overview", Meta: true}},
@@ -373,8 +373,8 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "users"},
 			Summary: "session analysis per user (administrators)",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both."},
-				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
+				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required. The range from --from to --to is at most 400 days."},
 				flagToNow(),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/users", Meta: true}},
@@ -386,7 +386,7 @@ func buildCommands() []*commandSpec {
 			Summary: "list analyzed sessions",
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
-				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
+				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required. The range from --from to --to is at most 400 days."},
 				flagToNow(),
 				{Name: "kind", Value: "<kind>", Query: "kind", Help: "agent or chat. Default: both."},
 				{Name: "flags", Value: "<list>", Query: "flags", Help: "Comma-separated session flags to filter by: loop, thrash, unverified, failures, corrections, error_paste, interrupt, heavy_model, danger, secret, compaction. Default: no filter."},

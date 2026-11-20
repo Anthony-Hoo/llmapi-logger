@@ -170,7 +170,7 @@ var (
 )
 
 var (
-	errAgentUsageSessionID = argFormat("id", "a usage session_id: agt_ or ses_ followed by 24 lower-case hexadecimal digits, or conv_ followed by the conversation id (take it from `usage sessions`)")
+	errAgentUsageSessionID = argFormat("id", "a usage session_id: agt_ or ses_ followed by 24 lower-case hexadecimal digits, or a conversation_id (conv_...) itself (take it from `usage sessions`)")
 	errAgentUsageTreeID    = argFormat("id", "a tree_id of 24 lower-case hexadecimal digits (take it from `usage sessions` or `analysis sessions`)")
 )
 
