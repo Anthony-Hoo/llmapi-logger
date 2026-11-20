@@ -30,8 +30,9 @@ const PackageDirName = "agent-packages"
 const DownloadsPerLink = 30
 
 // maxTrackedLinks bounds the download counter. Only links that verify are
-// counted, and only authenticated users can mint them, so this is a guard
-// against a runaway client rather than against forgery.
+// counted, keyed by their nonce, and only authenticated users can mint them,
+// so this is a guard against a runaway client rather than against forgery;
+// a full counter makes room by dropping the entry that expires first.
 const maxTrackedLinks = 4096
 
 // ErrNoPackages means the package directory holds no usable packages: they
@@ -82,7 +83,8 @@ type Service struct {
 }
 
 // Install links one web session identity may request per window (contract
-// section 7). Every request counts, and a refused one is not counted.
+// section 7). Only a request that issues a link counts: one refused for its
+// arguments (CheckInstallLink) or for the limit itself is not counted.
 const (
 	InstallLinksPerWindow = 20
 	InstallLinkWindow     = 10 * time.Minute
@@ -270,21 +272,7 @@ type InstallLinkResponse struct {
 // when packages are not available, any other error for a server URL that
 // cannot be put into a shell command.
 func (service *Service) InstallLink(serverURL string, request InstallLinkRequest) (InstallLinkResponse, error) {
-	if !ValidAgent(request.Agent) {
-		return InstallLinkResponse{}, &InputError{Field: "agent", Message: "agent must be one of claude-code, codex, cursor, gemini-cli, other"}
-	}
-	platform, ok := ParsePlatform(request.Platform)
-	if !ok {
-		return InstallLinkResponse{}, &InputError{Field: "platform", Message: "platform must be one of " + platformList()}
-	}
-	if service.manifest == nil {
-		return InstallLinkResponse{}, service.loadErr
-	}
-	pkg, ok := service.manifest.Find(platform)
-	if !ok {
-		return InstallLinkResponse{}, fmt.Errorf("%w: no package for %s", ErrNoPackages, platform)
-	}
-	server, err := cleanServerURL(serverURL)
+	pkg, server, err := service.checkInstallLink(serverURL, request)
 	if err != nil {
 		return InstallLinkResponse{}, err
 	}
@@ -302,6 +290,48 @@ func (service *Service) InstallLink(serverURL string, request InstallLinkRequest
 		return InstallLinkResponse{}, err
 	}
 	return InstallLinkResponse{Prompt: prompt, ExpiresAt: expires.Format(time.RFC3339), File: pkg.File}, nil
+}
+
+// CheckInstallLink answers what InstallLink would answer for this input,
+// with the same errors, but mints nothing. The web layer calls it before it
+// counts the request, so that only a request that issues a link uses the
+// install-link budget.
+func (service *Service) CheckInstallLink(serverURL string, request InstallLinkRequest) error {
+	_, _, err := service.checkInstallLink(serverURL, request)
+	return err
+}
+
+func (service *Service) checkInstallLink(serverURL string, request InstallLinkRequest) (Package, string, error) {
+	info, ok := agents[request.Agent]
+	if !ok {
+		return Package{}, "", &InputError{Field: "agent", Message: "agent must be one of claude-code, codex, cursor, gemini-cli, other"}
+	}
+	platform, ok := ParsePlatform(request.Platform)
+	if !ok {
+		return Package{}, "", &InputError{Field: "platform", Message: "platform must be one of " + platformList()}
+	}
+	if service.manifest == nil {
+		return Package{}, "", service.loadErr
+	}
+	pkg, ok := service.manifest.Find(platform)
+	if !ok {
+		return Package{}, "", fmt.Errorf("%w: no package for %s", ErrNoPackages, platform)
+	}
+	server, err := cleanServerURL(serverURL)
+	if err != nil {
+		return Package{}, "", err
+	}
+	// skills_dir last, where InstallPrompt checked it before, so every
+	// request is answered as it was.
+	switch {
+	case request.SkillsDir != "":
+		if _, err := cleanSkillsDir(request.SkillsDir, platform); err != nil {
+			return Package{}, "", err
+		}
+	case info.SkillsDir == "":
+		return Package{}, "", &InputError{Field: "skills_dir", Message: "skills_dir is required for agent other: give the absolute path of the directory your agent loads skills from"}
+	}
+	return pkg, server, nil
 }
 
 // LinkPrefix is the signed link without the file name.
@@ -334,7 +364,8 @@ type DownloadResult struct {
 // can never leave it even if the checks above had a gap. The caller has
 // already answered FEATURE_DISABLED when agent access is off.
 func (service *Service) ServeDownload(writer http.ResponseWriter, request *http.Request, signature, file string) DownloadResult {
-	expires, err := service.signer.Verify(signature)
+	link, err := service.signer.VerifyLink(signature)
+	expires := link.Expires
 	switch {
 	case errors.Is(err, ErrLinkExpired):
 		return writeDownloadFailure(writer, agentapi.HTTPStatus(agentapi.CodeLinkExpired), agentapi.CodeLinkExpired,
@@ -347,7 +378,7 @@ func (service *Service) ServeDownload(writer http.ResponseWriter, request *http.
 	if !ValidFileName(file) || service.manifest == nil || !service.manifest.Lists(file) {
 		return notFound(writer)
 	}
-	if !service.allowDownload(signature, expires) {
+	if !service.allowDownload(link.Nonce, expires) {
 		retry := int(expires.Sub(service.now()).Seconds()) + 1
 		if retry < 1 {
 			retry = 1
@@ -403,9 +434,16 @@ func writeDownloadFailure(writer http.ResponseWriter, status int, code agentapi.
 	return DownloadResult{Status: status, Code: code, File: file}
 }
 
-// allowDownload counts one download for a verified signature. Entries of
-// expired links are dropped on the way.
-func (service *Service) allowDownload(signature string, expires time.Time) bool {
+// allowDownload counts one download for a verified link, keyed by its nonce
+// (the decoded, verified payload), so that no re-spelling of the request can
+// open a second budget. Entries of expired links are dropped on the way.
+// When the tracker is still full, the entry of the link that expires first
+// is dropped to make room: a fresh link is never refused because the
+// tracker is full. That needs more than maxTrackedLinks links issued within
+// one link lifetime, and only signed-in users can issue them (20 per 10
+// minutes per identity); the dropped link at worst gets a new budget for
+// what is left of its life.
+func (service *Service) allowDownload(nonce string, expires time.Time) bool {
 	now := service.now()
 	service.mu.Lock()
 	defer service.mu.Unlock()
@@ -414,17 +452,30 @@ func (service *Service) allowDownload(signature string, expires time.Time) bool 
 			delete(service.downloads, key)
 		}
 	}
-	use := service.downloads[signature]
+	use := service.downloads[nonce]
 	if use == nil {
-		if len(service.downloads) >= maxTrackedLinks {
-			return false
+		for len(service.downloads) >= maxTrackedLinks {
+			service.dropSoonestDownload()
 		}
 		use = &linkUse{expires: expires}
-		service.downloads[signature] = use
+		service.downloads[nonce] = use
 	}
 	if use.count >= DownloadsPerLink {
 		return false
 	}
 	use.count++
 	return true
+}
+
+// dropSoonestDownload removes the tracked link that expires first. The
+// caller holds service.mu and the map is not empty.
+func (service *Service) dropSoonestDownload() {
+	var soonestKey string
+	var soonest time.Time
+	for key, use := range service.downloads {
+		if soonest.IsZero() || use.expires.Before(soonest) {
+			soonestKey, soonest = key, use.expires
+		}
+	}
+	delete(service.downloads, soonestKey)
 }

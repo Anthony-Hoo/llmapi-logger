@@ -71,10 +71,29 @@ const (
 	auditIncompleteInProgress = "in_progress"
 	auditIncompleteParse      = "parse_pending"
 	auditIncompleteCapture    = "capture_incomplete"
+	// auditIncompleteParsePartial: the parser saw an incomplete exchange (a
+	// stream cut before its end, a truncated body) and kept what it could,
+	// even when the capture itself is complete.
+	auditIncompleteParsePartial = "parse_partial"
 )
 
-// auditDetailMeta is the meta of one audit record.
+// auditDetailMeta is the meta of one audit record, and of every export built
+// from its parse (conversation, request, response) and of the response
+// timeline: incomplete while it is
+// forwarded or parsed, when the capture is not complete, and when the parse
+// is partial.
 func auditDetailMeta(summary query.AuditSummary) agentapi.Meta {
+	meta := auditCaptureMeta(summary)
+	if meta.Complete && summary.ParseStatus == storage.ParsePartial {
+		meta.Complete, meta.IncompleteReason = false, auditIncompleteParsePartial
+	}
+	return meta
+}
+
+// auditCaptureMeta is the record state the exports of captured content
+// (headers, raw bodies, the request timeline) follow: the same as auditDetailMeta except
+// that a partial parse does not make captured bytes incomplete.
+func auditCaptureMeta(summary query.AuditSummary) agentapi.Meta {
 	meta := agentapi.Meta{State: auditState(summary.ForwardStatus, summary.StatusCode), Complete: true}
 	switch {
 	case summary.ForwardStatus == storage.ForwardInProgress:
@@ -203,13 +222,14 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 	writeAgentRead(writer, list, agentMetaOK(), true, actions...)
 }
 
-// Closed value sets of the audit list filters (contract section 0.1 item
-// 119). The protocol is the prefix of the route's parser name, and only the
-// three parser families exist; forward and capture states are the service's
-// own (capture_chunk_missing appears in results only, contract section 0
-// row 6).
+// Closed value sets of the audit list filters (contract section 0.1 items
+// 119 and 145): only sets the service itself refuses every other value of.
+// Forward and capture states are the service's own (query.validateFilter;
+// capture_chunk_missing appears in results only, contract section 0 row 6).
+// The protocol is not one: it is the prefix of the route's parser name, a
+// route may name any parser (config.validateRoutes), and the service
+// matches any protocol text, so it is an open filter like model.
 var (
-	agentProtocols      = []string{"openai", "anthropic", "gemini"}
 	agentForwardStates  = []string{storage.ForwardInProgress, storage.ForwardCompleted, storage.ForwardRejected, storage.ForwardClientCancelled, storage.ForwardNewAPIError, storage.ForwardProxyError, storage.ForwardInterrupted}
 	agentCaptureFilters = []string{storage.CapturePending, storage.CaptureComplete, storage.CapturePartial, storage.CaptureFailed}
 	agentStableCode     = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -239,7 +259,7 @@ func agentClosedValue(values url.Values, name string, allowed []string) (string,
 	return "", argNotAllowed(name, allowed)
 }
 
-func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal, binding string) (query.Filter, query.Cursor, int, error) {
+func (handler *managementHandler) agentAuditFilter(values url.Values, caller principal, binding agentCursorScope) (query.Filter, query.Cursor, int, error) {
 	var filter query.Filter
 	var cursor query.Cursor
 	if !callerMayFilterByCaller(caller) {
@@ -298,9 +318,6 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 		}
 		cursor = query.Cursor{BeforeStartedAtNS: at, BeforeID: id}
 	}
-	if filter.Protocol, err = agentClosedValue(values, "protocol", agentProtocols); err != nil {
-		return filter, cursor, 0, err
-	}
 	if filter.ForwardStatus, err = agentClosedValue(values, "forward_status", agentForwardStates); err != nil {
 		return filter, cursor, 0, err
 	}
@@ -324,7 +341,7 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 	for _, text := range []struct {
 		name   string
 		target *string
-	}{{"model", &filter.Model}, {"user_agent", &filter.UserAgent}, {"blocked_by", &filter.BlockedBy}, {"conversation", &filter.Conversation},
+	}{{"protocol", &filter.Protocol}, {"model", &filter.Model}, {"user_agent", &filter.UserAgent}, {"blocked_by", &filter.BlockedBy}, {"conversation", &filter.Conversation},
 		{"username", &filter.Username}, {"token_name", &filter.TokenName}} {
 		if *text.target, err = agentFreeText(values, text.name); err != nil {
 			return filter, cursor, 0, err
@@ -875,19 +892,20 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		handler.writeAgentServiceFailure(writer, err, "")
 		return
 	}
-	record := auditDetailMeta(detail.Audit)
+	// Exports built from the parse, and the response timeline, follow the
+	// record's meta, a partial parse included; the other exports of captured
+	// content follow the capture.
+	parsed, captured := auditDetailMeta(detail.Audit), auditCaptureMeta(detail.Audit)
 	if state := agentExportStates(detail)[what]; state.State != exportAvailable {
 		writeAgentExportUnavailable(writer, what, state)
 		return
 	}
 	switch what {
-	case "conversation", "headers":
-		if what == "headers" {
-			setExportCompleteness(writer.Header(), record, true, "")
-			writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
-			return
-		}
-		setExportCompleteness(writer.Header(), record, true, "")
+	case "headers":
+		setExportCompleteness(writer.Header(), captured, true, "")
+		writeJSON(writer, http.StatusOK, map[string]any{"audit_id": auditID, "headers": agentHeadersOf(detail.Headers, true)})
+	case "conversation":
+		setExportCompleteness(writer.Header(), parsed, true, "")
 		writeJSON(writer, http.StatusOK, detail.Conversation)
 	case "request", "response":
 		reconstructed, err := handler.query.ReconstructTurn(ctx, auditID)
@@ -899,7 +917,7 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		if what == "response" {
 			body = reconstructed.Response
 		}
-		setExportCompleteness(writer.Header(), record, true, "")
+		setExportCompleteness(writer.Header(), parsed, true, "")
 		writeJSON(writer, http.StatusOK, body)
 	case "timeline-request", "timeline-response":
 		timeline, err := handler.query.Timeline(ctx, auditID, query.Side(strings.TrimPrefix(what, "timeline-")))
@@ -915,10 +933,18 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 		for _, point := range timeline.Points {
 			out.Points = append(out.Points, agentTimelinePoint{Offset: point.Offset, ObservedAt: agentTime(point.AtNS)})
 		}
+		// The response timeline is the timing of the response stream: when the
+		// parser found that stream cut short (parse partial), the timeline is
+		// the timing of part of a response, so it follows the parse. The
+		// request timeline follows the capture.
+		record := captured
+		if what == "timeline-response" {
+			record = parsed
+		}
 		setExportCompleteness(writer.Header(), record, timeline.Complete, exportIncompleteTimeline)
 		writeJSON(writer, http.StatusOK, out)
 	default:
-		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")), record)
+		handler.serveAgentRaw(writer, ctx, auditID, query.Side(strings.TrimPrefix(what, "raw-")), captured)
 	}
 }
 
@@ -935,8 +961,9 @@ const (
 )
 
 // setExportCompleteness writes the completeness of an export: the record's
-// own meta first (in_progress, parse_pending, capture_incomplete, as
-// `requests get` reports it), then the content's flag with contentReason.
+// own meta first (in_progress, parse_pending, capture_incomplete, and for
+// exports built from the parse parse_partial, as `requests get` reports
+// it), then the content's flag with contentReason.
 func setExportCompleteness(header http.Header, record agentapi.Meta, contentComplete bool, contentReason string) {
 	complete, reason := record.Complete, record.IncompleteReason
 	if complete && !contentComplete {

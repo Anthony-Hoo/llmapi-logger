@@ -184,13 +184,22 @@ func Run(args []string, env *Env) int {
 	return outcome.exit
 }
 
+// pretty is the --pretty a command line that did not parse asked for, so
+// that its failure is rendered as asked: every form (--pretty, -pretty,
+// --pretty=true|false, -pretty=…), the last valid one winning.
 func pretty(args []string) bool {
+	set := false
 	for _, arg := range args {
-		if arg == "--pretty" || arg == "-pretty" || arg == "--pretty=true" {
-			return true
+		if arg == "--" {
+			break
+		}
+		if isPrettyFlag(arg) {
+			if value, err := prettyValue(arg); err == nil {
+				set = value
+			}
 		}
 	}
-	return false
+	return set
 }
 
 func asCLIError(err error) *cliError {

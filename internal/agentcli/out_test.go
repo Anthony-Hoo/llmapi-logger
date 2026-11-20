@@ -214,6 +214,14 @@ func TestUnusableOutFailsBeforeAnyRequest(t *testing.T) {
 		"missing directory":         filepath.Join(dir, "no-such-dir", "out.json"),
 		"a directory":               dir,
 		"parent is not a directory": filepath.Join(aFile, "out.json"),
+		// 300 CJK characters are 905 bytes in UTF-8 and 305 UTF-16 units:
+		// too long for every file system (255 bytes on Linux, 255 units on
+		// NTFS), but only creating the file finds out.
+		"name too long": filepath.Join(dir, strings.Repeat("审", 300)+".json"),
+	}
+	if runtime.GOOS != "windows" {
+		// 200 CJK characters fit NTFS (205 units) but not Linux (605 bytes).
+		unusable["name too long in bytes"] = filepath.Join(dir, strings.Repeat("审", 200)+".json")
 	}
 	if runtime.GOOS == "windows" {
 		// Windows cannot rename over a read-only file (POSIX can, so there
@@ -260,6 +268,42 @@ func TestUnusableOutFailsBeforeAnyRequest(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(readOnly); string(data) != "keep" {
 		t.Fatalf("read-only file changed to %q", data)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Fatalf("the checks left files behind: %v", entries)
+	}
+}
+
+// TestOutNameCheckLeavesNothingBehind: the check that the --out name can be
+// created neither creates nor changes the target: a missing target is still
+// missing after a server failure, an existing one keeps its content, and a
+// long but valid name (80 CJK characters, 245 bytes) works.
+func TestOutNameCheckLeavesNothingBehind(t *testing.T) {
+	server := newFakeServer(t, failWith(agentapi.CodeNotFound))
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	dir := t.TempDir()
+	existing := writeFile(t, filepath.Join(dir, "existing.json"), "precious")
+	missing := filepath.Join(dir, strings.Repeat("审", 80)+".json")
+	for _, args := range [][]string{{"usage", "trend", "ses_1"}, {"requests", "export", "77", "--what", "conversation"}} {
+		for _, target := range []string{existing, missing} {
+			h.expectFailure(h.run(append(append([]string{}, args...), "--out", target)...), agentapi.CodeNotFound, 1)
+		}
+		if data, _ := os.ReadFile(existing); string(data) != "precious" {
+			t.Fatalf("%v: the existing target changed to %q", args, data)
+		}
+		if _, err := os.Lstat(missing); err == nil {
+			t.Fatalf("%v: the missing target was left behind", args)
+		}
+		assertNoTempFiles(t, dir)
+	}
+	server.setResponder(nil)
+	if exit := h.run("usage", "trend", "ses_1", "--out", missing); exit != 0 {
+		t.Fatalf("a long but valid name: exit %d %s", exit, h.stderr.String())
+	}
+	if _, err := os.Stat(missing); err != nil {
+		t.Fatalf("the long name was not written: %v", err)
 	}
 }
 

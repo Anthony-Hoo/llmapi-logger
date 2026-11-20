@@ -215,6 +215,9 @@ var derivedKeys = map[string]bool{
 	// route accepts but the web page does not link
 	// (TestAgentEverySessionCardHasAUsableTreeID).
 	"tree_id": true,
+	// A fixed label of weekly unattributed saying it is computed with the
+	// current rules (contract section 0.1 item 146); it carries no data.
+	"computed_with": true,
 }
 
 // derivable reports whether one facade value can be read off the web corpus.
@@ -955,9 +958,10 @@ func TestAgentReadCompletenessRows(t *testing.T) {
 		}
 	}
 
-	// Usage overview: coverage is unknown, so the overview is not complete
-	// (contract section 0.1 item 120); billing completeness is explicit.
-	if got, decoded := meta("/usage/overview?" + fixtureWindow); got.Complete || got.IncompleteReason != agentIncompleteCoverage ||
+	// Usage overview: coverage cannot be checked, which data and next_actions
+	// say; meta.complete follows billing alone, and the fixture's requests are
+	// all billed (contract section 0.1 item 147).
+	if got, decoded := meta("/usage/overview?" + fixtureWindow); !got.Complete || got.IncompleteReason != "" ||
 		!strings.Contains(string(decoded.Data), `"coverage_unknown":true`) ||
 		len(decoded.NextActions) == 0 {
 		t.Fatalf("overview = %+v %v", got, decoded.NextActions)
@@ -1102,12 +1106,13 @@ func TestAgentReadParameters(t *testing.T) {
 	}
 	// Cursors are opaque and bound to their list (and to their query, see
 	// TestAgentCursorsAreBoundToTheirQuery).
-	wrapped := wrapAgentCursor(agentCursorAudits, "b", "1:a")
-	if inner, err := unwrapAgentCursor(agentCursorAudits, "b", wrapped); err != nil || inner != "1:a" {
+	scope := agentCursorScope{key: []byte("test-cursor-key"), digest: "b"}
+	wrapped := wrapAgentCursor(agentCursorAudits, scope, "1:a")
+	if inner, err := unwrapAgentCursor(agentCursorAudits, scope, wrapped); err != nil || inner != "1:a" {
 		t.Errorf("cursor round trip = %q %v", inner, err)
 	}
-	for _, bad := range []string{wrapAgentCursor(agentCursorUsageSessions, "b", "x"), "not-base64!", base64.RawURLEncoding.EncodeToString([]byte("c1|audits|1:a"))} {
-		if _, err := unwrapAgentCursor(agentCursorAudits, "b", bad); err == nil {
+	for _, bad := range []string{wrapAgentCursor(agentCursorUsageSessions, scope, "x"), "not-base64!", base64.RawURLEncoding.EncodeToString([]byte("c1|audits|1:a"))} {
+		if _, err := unwrapAgentCursor(agentCursorAudits, scope, bad); err == nil {
 			t.Errorf("cursor %q accepted", bad)
 		}
 	}
@@ -1135,7 +1140,7 @@ func TestAgentReadParameters(t *testing.T) {
 		t.Fatalf("paged ids = %v", seen)
 	}
 	for _, path := range []string{"/requests?bogus=1", "/requests?limit=0", "/requests?limit=201", "/requests?status=600", "/requests?status=abc",
-		"/requests?cursor=" + wrapAgentCursor(agentCursorUsageSessions, "b", "x"), "/requests?collapse=maybe", "/requests?limit=1&limit=2",
+		"/requests?cursor=" + wrapAgentCursor(agentCursorUsageSessions, scope, "x"), "/requests?collapse=maybe", "/requests?limit=1&limit=2",
 		"/requests?capture_status=chunk_missing", "/requests/own-1?headers=some", "/requests/own-1/export/everything",
 		"/usage/overview?tz_offset_min=900", "/analysis/overview", "/analysis/report?week=next", "/weekly/report?week=2026-11-03",
 		"/config/everything", "/weekly/trend?weeks=13"} {
@@ -1300,5 +1305,62 @@ func TestAgentFacadeTypesCoverTheServiceTypes(t *testing.T) {
 				t.Errorf("%s.%s has no counterpart in %s", serviceType, name, facadeType)
 			}
 		}
+	}
+}
+
+// The keyed tag covers the whole cursor, the service's position included,
+// and a cursor signed before admin_token changed has its own answer:
+// cursor_expired (start the list again), not cursor_query_mismatch.
+func TestAgentCursorTagCoversTheWholeCursor(t *testing.T) {
+	fixture := newReadFixture(t)
+	reason := func(path string) string {
+		t.Helper()
+		body := decodeAgent(t, fixture.facade(http.MethodGet, path, "", fixture.adminRead))
+		if body.Error == nil {
+			return ""
+		}
+		value, _ := body.Error.Details["reason"].(string)
+		return value
+	}
+	first := readData(t, fixture.facade(http.MethodGet, "/requests?collapse=false&limit=1", "", fixture.adminRead))
+	cursor, _ := first["next_cursor"].(string)
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || cursor == "" {
+		t.Fatalf("cursor %q: %v", cursor, err)
+	}
+	if got := reason("/requests?collapse=false&limit=1&cursor=" + cursor); got != "" {
+		t.Fatalf("the genuine cursor was refused: %s", got)
+	}
+	parts := strings.SplitN(string(decoded), "|", 6)
+	if len(parts) != 6 {
+		t.Fatalf("cursor layout %q", decoded)
+	}
+	respell := func(index int, value string) string {
+		changed := append([]string{}, parts...)
+		changed[index] = value
+		return base64.RawURLEncoding.EncodeToString([]byte(strings.Join(changed, "|")))
+	}
+	for name, forged := range map[string]string{
+		"forged position, real binding": respell(5, "1:zzz-forged-position"),
+		"position moved by one":         respell(5, strings.Replace(parts[5], ":", "0:", 1)),
+		"tag of another cursor":         respell(4, strings.Repeat("A", len(parts[4]))),
+	} {
+		if got := reason("/requests?collapse=false&limit=1&cursor=" + forged); got != reasonInvalidCursor {
+			t.Errorf("%s: reason %q, want %s", name, got, reasonInvalidCursor)
+		}
+	}
+	if got := reason("/requests?collapse=false&status=error&limit=1&cursor=" + cursor); got != reasonCursorMismatch {
+		t.Errorf("other query: reason %q", got)
+	}
+	// A new admin_token derives a new session key, and so a new cursor key.
+	fixture.handler.authenticator.sessionKey[0] ^= 0xff
+	body := decodeAgent(t, fixture.facade(http.MethodGet, "/requests?collapse=false&limit=1&cursor="+cursor, "", fixture.adminRead))
+	if body.Error == nil || body.Error.Details["reason"] != reasonCursorExpired || !strings.Contains(body.Error.Message, "no longer valid") ||
+		!strings.Contains(body.Error.Message, "start the list again") {
+		t.Fatalf("after the key changed: %+v", body.Error)
+	}
+	// The same query without the old cursor works.
+	if got := reason("/requests?collapse=false&limit=1"); got != "" {
+		t.Fatalf("first page after the key changed: %s", got)
 	}
 }

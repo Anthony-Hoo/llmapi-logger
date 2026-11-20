@@ -41,12 +41,25 @@ func localFileError(message string, details map[string]any) *cliError {
 	return &cliError{Code: agentapi.CodeLocalFileError, Message: message, Details: details}
 }
 
-func loadCredentials(env *Env) (*credentials, error) {
+// loadCredentials reads credentials.json after checking the credential
+// store (securePrivateState); fix says whether a loose mode of the user's own
+// store may be tightened (every command that uses the token) or only
+// reported (version, which changes nothing). Nothing is checked or changed
+// when nothing is saved.
+func loadCredentials(env *Env, fix bool) (*credentials, error) {
 	dir, err := env.stateDir()
 	if err != nil {
 		return nil, err
 	}
-	if err := securePrivateState(dir); err != nil {
+	if exists, problem := inspectPrivate(dir, true, 0o700, false); !exists {
+		return nil, &cliError{Code: agentapi.CodeNotLoggedIn}
+	} else if problem == problemSymlink || problem == problemNotDir {
+		return nil, storeError(dir, problem, 0o700)
+	}
+	if exists, _ := inspectPrivate(filepath.Join(dir, credentialsFile), false, 0o600, false); !exists {
+		return nil, &cliError{Code: agentapi.CodeNotLoggedIn}
+	}
+	if err := securePrivateState(dir, fix); err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(filepath.Join(dir, credentialsFile))
@@ -69,9 +82,9 @@ func saveCredentials(env *Env, creds *credentials) error {
 		return err
 	}
 	if err := ensurePrivateDir(dir); err != nil {
-		return localFileError("cannot create the state directory", nil)
+		return err
 	}
-	if err := securePrivateState(dir); err != nil {
+	if err := securePrivateState(dir, true); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(creds, "", "  ")
@@ -119,40 +132,119 @@ func loadConfig(env *Env) (localConfig, error) {
 	return config, nil
 }
 
-// securePrivateState makes the state directory and credentials.json private
-// (on POSIX: 0700 and 0600) when group or others can access them, and stops
-// with LOCAL_FILE_ERROR naming the path and the required modes when that
-// fails. The file's content is never read here or printed.
-func securePrivateState(dir string) error {
+// What can be wrong with an entry of the credential store (details.reason
+// of the LOCAL_FILE_ERROR).
+const (
+	problemSymlink    = "symlink"
+	problemNotDir     = "not_a_directory"
+	problemNotFile    = "not_a_regular_file"
+	problemNotOwned   = "not_owned"
+	problemShared     = "shared_directory"
+	problemMode       = "accessible_to_others"
+	problemUnreadable = "unreadable"
+)
+
+// entryKindProblem refuses a link and an entry of the wrong type.
+func entryKindProblem(info fs.FileInfo, dir bool) string {
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return problemSymlink
+	case dir && !info.IsDir():
+		return problemNotDir
+	case !dir && !info.Mode().IsRegular():
+		return problemNotFile
+	}
+	return ""
+}
+
+// storeError is the LOCAL_FILE_ERROR for an entry of the credential store;
+// details.required_mode is the mode the entry needs, whatever is wrong.
+func storeError(path, problem string, mode os.FileMode) *cliError {
+	details := map[string]any{"path": path, "reason": problem, "required_mode": fmt.Sprintf("%04o", mode)}
+	switch problem {
+	case problemSymlink, problemNotDir, problemNotFile:
+		return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is a link or not of the expected type, so it is not used",
+			Hint:    "Point LLMAUDIT_HOME at a real directory owned by you (or unset it to use ~/.llmaudit); credentials.json there must be a regular file, not a link. Ask the user to fix it.",
+			Details: details}
+	case problemNotOwned, problemShared:
+		return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is not owned by you or is a shared directory, so it is neither used nor changed",
+			Hint:    "Point LLMAUDIT_HOME at a directory of your own that others cannot write to, such as the default ~/.llmaudit (unset LLMAUDIT_HOME). Ask the user to fix it.",
+			Details: details}
+	}
+	return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is accessible to other users and could not be made private",
+		Hint:    "Make it private and run the command again: the state directory needs mode 0700 and credentials.json mode 0600 (chmod 700 <dir>; chmod 600 <dir>/credentials.json), both owned by you.",
+		Details: details}
+}
+
+// securePrivateState checks the state directory and credentials.json before
+// the credentials are read or replaced: neither may be a link, of the wrong
+// type or owned by another user, and the directory may not be sticky (a
+// shared directory such as /tmp itself); those are refused with
+// LOCAL_FILE_ERROR and never changed. When fix is true an entry the user
+// owns that group or others can access is made private (on POSIX 0700 and
+// 0600); when fix is false, or that fails, the command stops with
+// LOCAL_FILE_ERROR naming the path and the required modes. The file's
+// content is never read here or printed, and nothing outside the state
+// directory and the file is touched.
+func securePrivateState(dir string, fix bool) error {
 	file := filepath.Join(dir, credentialsFile)
 	for _, item := range []struct {
 		path string
+		dir  bool
 		mode os.FileMode
-	}{{dir, 0o700}, {file, 0o600}} {
-		if err := tightenPrivate(item.path, item.mode); err != nil {
-			return &cliError{Code: agentapi.CodeLocalFileError, Message: "the local credential store is accessible to other users and could not be made private",
-				Hint:    "Make it private and run the command again: the state directory needs mode 0700 and credentials.json mode 0600 (chmod 700 <dir>; chmod 600 <dir>/credentials.json), both owned by you.",
-				Details: map[string]any{"path": item.path, "required_mode": fmt.Sprintf("%04o", item.mode)}}
+	}{{dir, true, 0o700}, {file, false, 0o600}} {
+		if _, problem := inspectPrivate(item.path, item.dir, item.mode, fix); problem != "" {
+			return storeError(item.path, problem, item.mode)
 		}
 	}
 	return nil
 }
 
-func ensurePrivateDir(dir string) error {
-	info, err := os.Stat(dir)
-	if err == nil {
-		if !info.IsDir() {
-			return errors.New("not a directory")
+// checkStoreBeforeLogin refuses, before a login starts, a credential store
+// saveCredentials would refuse after the user approved, so no token is
+// issued that cannot be saved. It changes nothing: a loose mode of the
+// user's own store is left for saveCredentials to tighten.
+func checkStoreBeforeLogin(env *Env) error {
+	dir, err := env.stateDir()
+	if err != nil {
+		return err
+	}
+	exists, problem := inspectPrivate(dir, true, 0o700, false)
+	if !exists {
+		if info, err := os.Stat(filepath.Dir(dir)); err != nil || !info.IsDir() {
+			return localFileError("the directory that should hold the state directory does not exist; it is not created",
+				map[string]any{"path": dir, "reason": "parent_missing"})
 		}
 		return nil
 	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return err
+	if problem != "" && problem != problemMode {
+		return storeError(dir, problem, 0o700)
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
-		return err
+	file := filepath.Join(dir, credentialsFile)
+	if _, problem := inspectPrivate(file, false, 0o600, false); problem != "" && problem != problemMode {
+		return storeError(file, problem, 0o600)
 	}
-	return createPrivateDir(dir)
+	return nil
+}
+
+// ensurePrivateDir creates the state directory with owner-only access when
+// it does not exist. Its parent must exist: it is never created or changed.
+func ensurePrivateDir(dir string) error {
+	exists, problem := inspectPrivate(dir, true, 0o700, false)
+	if exists {
+		if problem == problemSymlink || problem == problemNotDir {
+			return storeError(dir, problem, 0o700)
+		}
+		return nil
+	}
+	if info, err := os.Stat(filepath.Dir(dir)); err != nil || !info.IsDir() {
+		return localFileError("the directory that should hold the state directory does not exist; it is not created",
+			map[string]any{"path": dir, "reason": "parent_missing"})
+	}
+	if err := createPrivateDir(dir); err != nil {
+		return localFileError("cannot create the state directory", map[string]any{"path": dir})
+	}
+	return nil
 }
 
 // writeAtomic writes target through a temporary file in the same directory

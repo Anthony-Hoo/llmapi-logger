@@ -1,7 +1,9 @@
 package web
 
 import (
+	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"llmapi-logger/internal/insights"
@@ -9,16 +11,42 @@ import (
 	"llmapi-logger/internal/storage"
 )
 
-// The usage overview is never called complete while the server cannot say
-// how many records are not analysed yet (coverage_unknown), and
+// The usage overview's meta.complete carries information: whether every
+// record is analysed cannot be determined through this interface, so it is
+// not a reason of meta (a flag false on every call says nothing); it stays
+// the data field coverage_unknown with its next_actions sentence, and
+// meta.complete is false exactly while billing is pending (billing_pending).
 // billing_complete is false only while some request's billing can still
 // change: requests that failed and will never be billed are final.
 func TestAgentUsageOverviewCompleteness(t *testing.T) {
 	fixture := newReadFixture(t)
-	body := decodeAgent(t, fixture.facade(http.MethodGet, "/usage/overview?"+fixtureWindow, "", fixture.adminRead))
-	data := readData(t, fixture.facade(http.MethodGet, "/usage/overview?"+fixtureWindow, "", fixture.adminRead))
-	if body.Meta == nil || body.Meta.Complete || body.Meta.IncompleteReason != agentIncompleteCoverage || data["coverage_unknown"] != true {
-		t.Fatalf("overview meta %+v, coverage_unknown %v", body.Meta, data["coverage_unknown"])
+	for _, token := range []string{fixture.adminRead, fixture.developer} {
+		response := fixture.facade(http.MethodGet, "/usage/overview?"+fixtureWindow, "", token)
+		body := decodeAgent(t, response)
+		data := readData(t, response)
+		// Every fixture request is billed, so the overview is complete.
+		if body.Meta == nil || !body.Meta.Complete || body.Meta.IncompleteReason != "" || data["coverage_unknown"] != true || data["billing_complete"] != true {
+			t.Fatalf("overview meta %+v, data coverage_unknown %v billing_complete %v", body.Meta, data["coverage_unknown"], data["billing_complete"])
+		}
+		if len(body.NextActions) != 1 || !strings.Contains(body.NextActions[0], "analysed records only") || !strings.Contains(body.NextActions[0], "cannot be checked") {
+			t.Fatalf("next_actions %v", body.NextActions)
+		}
+	}
+
+	// A request whose billing is still being backfilled makes the overview
+	// incomplete through the endpoint: billing_pending, billing_complete
+	// false. The stores refuse to write a new unchecked link (only migration
+	// 009 left such links), so the real service's answer is taken and one
+	// pending request added to it, as the service reports such a link
+	// (TestInsightsPendingBillingCountsOnlyUnsettledRequests).
+	fixture.handler.insights = pendingBilling{InsightsQuery: fixture.handler.insights}
+	for _, token := range []string{fixture.adminRead, fixture.developer} {
+		response := fixture.facade(http.MethodGet, "/usage/overview?"+fixtureWindow, "", token)
+		body := decodeAgent(t, response)
+		data := readData(t, response)
+		if body.Meta == nil || body.Meta.Complete || body.Meta.IncompleteReason != agentIncompleteBilling || data["billing_complete"] != false {
+			t.Fatalf("overview with pending billing: meta %+v, billing_complete %v", body.Meta, data["billing_complete"])
+		}
 	}
 
 	settled := agentUsageOverviewOf(insights.OverviewResponse{Totals: insights.UsageTotals{Requests: 3, BilledRequests: 1, UnbilledRequests: 2}})
@@ -33,9 +61,12 @@ func TestAgentUsageOverviewCompleteness(t *testing.T) {
 		data   agentUsageOverview
 		reason string
 	}{
-		{agentUsageOverview{CoverageUnknown: true, BillingComplete: true}, agentIncompleteCoverage},
+		{agentUsageOverview{CoverageUnknown: true, BillingComplete: true}, ""},
+		{agentUsageOverview{CoverageUnknown: true, BillingComplete: false}, agentIncompleteBilling},
 		{agentUsageOverview{CoverageUnknown: false, BillingComplete: false}, agentIncompleteBilling},
 		{agentUsageOverview{CoverageUnknown: false, BillingComplete: true}, ""},
+		{waiting, agentIncompleteBilling},
+		{settled, ""},
 	} {
 		if meta := usageOverviewMeta(test.data); meta.Complete != (test.reason == "") || meta.IncompleteReason != test.reason {
 			t.Errorf("%+v: meta %+v", test.data, meta)
@@ -97,4 +128,16 @@ func TestAgentEverySessionCardHasAUsableTreeID(t *testing.T) {
 			t.Errorf("%s: the fixture has no card without sub-agents, so the rule is not exercised", name)
 		}
 	}
+}
+
+// pendingBilling is the real insights service whose overview reports one
+// request more whose billing is pending.
+type pendingBilling struct {
+	InsightsQuery
+}
+
+func (service pendingBilling) Overview(ctx context.Context, request query.OverviewQuery) (insights.OverviewResponse, error) {
+	response, err := service.InsightsQuery.Overview(ctx, request)
+	response.Totals.PendingBillingRequests++
+	return response, err
 }

@@ -570,10 +570,23 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 		items = append(items, agentUnattributedEntry{Kind: entry.Kind, ValueUntrusted: entry.Value, Requests: entry.Requests,
 			Users: entry.Users, DraftRule: agentDraftRule{Kind: entry.DraftRule.Kind, PatternUntrusted: entry.DraftRule.Pattern}})
 	}
-	// The entries are always computed live; they are final once the week is
-	// frozen. A list the limit cut is incomplete first of all.
-	meta := weeklyFinalMeta(handler.weekFrozen(ctx, week))
-	var actions []string
+	// The entries are always computed now, with the current project rules
+	// (orgreport.Service.Unattributed attributes the week's requests afresh;
+	// it never reads the frozen snapshot), so they are a live view even of a
+	// frozen week: a rule added later moves entries out of the list, while
+	// the snapshot (weekly project -1) keeps the unattributed total of the
+	// rules it was frozen with. meta therefore says only what is known:
+	// incomplete while the week is still open (evidence_pending), or when
+	// the limit cut the list (truncated, first of all); never "final".
+	meta := agentMetaOK()
+	open, frozen := handler.weekOpenFrozen(ctx, week)
+	if open {
+		meta.Complete, meta.IncompleteReason = false, agentIncompleteEvidencePending
+	}
+	actions := []string{agentUnattributedLiveAction}
+	if frozen {
+		actions = []string{agentUnattributedFrozenAction}
+	}
 	if truncated {
 		meta.Complete, meta.IncompleteReason = false, agentIncompleteTruncated
 		if limit < agentMaxUnattributed {
@@ -582,9 +595,46 @@ func (handler *managementHandler) serveAgentWeeklyUnattributed(writer http.Respo
 			actions = append(actions, fmt.Sprintf("The list reached the server's maximum of %d entries, so more may exist; the server does not report the total.", agentMaxUnattributed))
 		}
 	}
-	writeAgentRead(writer, map[string]any{"items": items, "truncated": truncated}, meta, true, actions...)
+	writeAgentRead(writer, map[string]any{"items": items, "truncated": truncated, "computed_with": agentComputedWithCurrentRules, "week_frozen": frozen},
+		meta, true, actions...)
 }
 
 // agentMaxUnattributed is the most entries orgreport.Service.Unattributed
 // returns.
 const agentMaxUnattributed = 200
+
+// The unattributed list is computed with the rules in force now
+// (data.computed_with) and says so in next_actions.
+const (
+	agentComputedWithCurrentRules = "current_rules"
+	agentUnattributedLiveAction   = "This list is computed now with the current project rules: adding or changing a rule changes it, also for an ended week."
+	agentUnattributedFrozenAction = "This week is frozen, but this list is computed now with the current project rules, so it can differ from the frozen snapshot's unattributed total (`llmaudit weekly project -1 --week <week>`, the same week), which keeps the rules in force when the week was frozen."
+)
+
+// weekOpenFrozen reports whether the week label (empty: the current week)
+// has not ended yet and whether it has a frozen snapshot. With a snapshot
+// store the service answers both in one read (WeekState); without one no
+// week is frozen and a week is open when it is the current week or later.
+// When nothing answers, the week counts as open and not frozen: nothing is
+// claimed.
+func (handler *managementHandler) weekOpenFrozen(ctx context.Context, label string) (bool, bool) {
+	states, hasStates := handler.org.(agentWeekStates)
+	if label != "" && hasStates {
+		if state, err := states.WeekState(ctx, label); err == nil {
+			return !state.Ended, state.Frozen
+		}
+	}
+	current, err := handler.org.Self(ctx, 0)
+	if err != nil {
+		return true, false
+	}
+	if label == "" {
+		label = current.Week
+		if hasStates {
+			if state, err := states.WeekState(ctx, label); err == nil {
+				return !state.Ended, state.Frozen
+			}
+		}
+	}
+	return label >= current.Week, false
+}

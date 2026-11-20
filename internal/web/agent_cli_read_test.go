@@ -274,7 +274,7 @@ func TestCLIInvalidArgumentsNameWhatTheUserTyped(t *testing.T) {
 		messageMention string
 	}{
 		{admin, []string{"requests", "list", "--forward-status", "bogus"}, "--forward-status", reasonNotAllowedValue, "", "completed"},
-		{admin, []string{"requests", "list", "--protocol", "foo"}, "--protocol", reasonNotAllowedValue, "", "anthropic"},
+		{admin, []string{"requests", "list", "--protocol", "openai "}, "--protocol", reasonInvalidFormat, "", "512 bytes"},
 		{admin, []string{"requests", "list", "--since", "30m", "--from", "2026-01-01"}, "--since", reasonConflict, "--from", "`--from`"},
 		{admin, []string{"requests", "list", "--limit", "201"}, "--limit", reasonOutOfRange, "", "200"},
 		{admin, []string{"requests", "list", "--no-collapse", "--cursor", "bogus"}, "--cursor", reasonInvalidCursor, "", "next_cursor"},

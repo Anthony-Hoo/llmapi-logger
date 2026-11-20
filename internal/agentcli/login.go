@@ -84,14 +84,24 @@ func runLogin(inv *invocation) (*result, error) {
 	env := inv.env
 	server := inv.value("server")
 	if server == "" {
-		if creds, err := loadCredentials(env); err == nil {
+		creds, err := loadCredentials(env, true)
+		var cliErr *cliError
+		switch {
+		case err == nil:
 			server = creds.Server
-		} else {
+		case errors.As(err, &cliErr) && cliErr.Code == agentapi.CodeLocalFileError:
+			return nil, err
+		default:
 			return nil, usageError("--server", "--server is required on the first login")
 		}
 	}
 	server, err := normalizeServer(server)
 	if err != nil {
+		return nil, err
+	}
+	// A store the token could not be saved into is refused before the user
+	// is asked to approve anything (contract section 0.1 item 144).
+	if err := checkStoreBeforeLogin(env); err != nil {
 		return nil, err
 	}
 	device := inv.value("device")

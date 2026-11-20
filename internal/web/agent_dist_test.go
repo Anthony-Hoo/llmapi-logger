@@ -329,3 +329,121 @@ func TestInstallLinksAreLimitedPerSession(t *testing.T) {
 		t.Fatalf("after the window = %d", response.Code)
 	}
 }
+
+// TestInstallLinkRefusalsDoNotUseTheBudget: requests refused for their
+// arguments (unknown agent or platform, missing or invalid skills_dir) write
+// no row and do not count; after 100 of them the identity still has its
+// full 20 links.
+func TestInstallLinkRefusalsDoNotUseTheBudget(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	dir, _ := packTestPackages(t)
+	withDist(t, env, dir, &distClock{now: time.Now()})
+	admin := agentCaller{bearer: testAdminToken}
+	bad := []string{
+		`{"agent":"robot","platform":"linux-amd64"}`,
+		`{"agent":"codex","platform":"plan9-amd64"}`,
+		`{"agent":"other","platform":"linux-amd64"}`,
+		`{"agent":"other","platform":"linux-amd64","skills_dir":"relative/dir"}`,
+	}
+	for index := 0; index < 100; index++ {
+		if response := env.do(http.MethodPost, agentInstallLinksPath, bad[index%len(bad)], admin); response.Code != http.StatusBadRequest {
+			t.Fatalf("bad request %d = %d %s", index, response.Code, response.Body.String())
+		}
+	}
+	for index := 0; index < agentdist.InstallLinksPerWindow; index++ {
+		if response := env.do(http.MethodPost, agentInstallLinksPath, `{"agent":"codex","platform":"linux-amd64"}`, admin); response.Code != http.StatusOK {
+			t.Fatalf("link %d after 100 refused requests = %d %s", index+1, response.Code, response.Body.String())
+		}
+	}
+	if response := env.do(http.MethodPost, agentInstallLinksPath, `{"agent":"codex","platform":"linux-amd64"}`, admin); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("link 21 = %d", response.Code)
+	}
+	// Over the limit, a bad request is still answered for its arguments.
+	if response := env.do(http.MethodPost, agentInstallLinksPath, bad[0], admin); response.Code != http.StatusBadRequest {
+		t.Fatalf("bad request over the limit = %d", response.Code)
+	}
+	rows := 0
+	for _, entry := range env.store.Audit() {
+		if entry.Event == agentaccess.EventLinkIssued {
+			rows++
+		}
+	}
+	if rows != agentdist.InstallLinksPerWindow {
+		t.Fatalf("link_issued rows = %d", rows)
+	}
+}
+
+// TestDownloadRespellingsShareOneBudget: through a real server (so the
+// router decodes the raw path as it would in production), every spelling
+// of one link either is refused as not found or is the same link with the
+// same 30 downloads: percent-encoded letters decode to the canonical
+// spelling, CR/LF, padding, the standard alphabet, a case change and
+// trailing data are refused. No refused spelling writes an audit row, and a
+// fresh link is served afterwards.
+func TestDownloadRespellingsShareOneBudget(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	dir, _ := packTestPackages(t)
+	withDist(t, env, dir, &distClock{now: time.Now()})
+	server := httptest.NewServer(env.handler)
+	t.Cleanup(server.Close)
+	get := func(rawPath string) int {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.URL.Opaque = "//" + request.URL.Host + rawPath
+		response, err := server.Client().Do(request)
+		if err != nil {
+			return -1
+		}
+		_ = response.Body.Close()
+		return response.StatusCode
+	}
+	_, _, signature := requestInstallLink(t, env, agentCaller{bearer: testAdminToken}, `{"agent":"claude-code","platform":"linux-amd64"}`)
+	letter := strings.IndexAny(signature, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+	flipped := []byte(signature)
+	flipped[letter] ^= 0x20
+	same := []string{
+		signature,
+		signature[:letter] + "%" + strings.ToUpper(hex.EncodeToString([]byte{signature[letter]})) + signature[letter+1:],
+		signature[:letter] + "%" + hex.EncodeToString([]byte{signature[letter]}) + signature[letter+1:],
+	}
+	refused := []string{
+		signature + "%3D", signature + "=", signature[:10] + "%0A" + signature[10:], signature[:10] + "%0D%0A" + signature[10:],
+		"%0D" + signature, signature + "%0A", signature[:10] + "%0A" + signature[11:], signature + "A", string(flipped),
+		strings.NewReplacer("-", "+", "_", "%2F").Replace(signature), signature[:10] + "%2F" + signature[10:], signature + "%20",
+	}
+	for _, variant := range refused {
+		if variant == signature {
+			continue
+		}
+		if code := get("/api/agent/v1/dl/" + variant + "/" + agentdist.ManifestFile); code == http.StatusOK || code == http.StatusTooManyRequests {
+			t.Errorf("%q answered %d", variant, code)
+		}
+	}
+	served := 0
+	for round := 0; round < 20; round++ {
+		for _, variant := range same {
+			if get("/api/agent/v1/dl/"+variant+"/"+agentdist.ManifestFile) == http.StatusOK {
+				served++
+			}
+		}
+	}
+	if served != agentdist.DownloadsPerLink {
+		t.Fatalf("one link in %d spellings served %d downloads, want %d", len(same), served, agentdist.DownloadsPerLink)
+	}
+	rows := 0
+	for _, entry := range env.store.Audit() {
+		if entry.Event == agentaccess.EventPackageDownloaded {
+			rows++
+		}
+	}
+	if rows != agentdist.DownloadsPerLink {
+		t.Fatalf("package_downloaded rows = %d", rows)
+	}
+	_, _, fresh := requestInstallLink(t, env, agentCaller{bearer: testAdminToken}, `{"agent":"claude-code","platform":"linux-amd64"}`)
+	if code := get("/api/agent/v1/dl/" + fresh + "/" + agentdist.ManifestFile); code != http.StatusOK {
+		t.Fatalf("fresh link = %d", code)
+	}
+}

@@ -107,7 +107,7 @@ func TestLoginLoopback(t *testing.T) {
 	if _, has := data["token"]; has || data["role"] != "admin" || data["server"] != server.URL || data["credentials_saved"] != true {
 		t.Fatalf("login data %v", data)
 	}
-	creds, err := loadCredentials(h.env)
+	creds, err := loadCredentials(h.env, true)
 	if err != nil || creds.Token != testToken || creds.Server != server.URL || creds.ExpiresAt != "2030-01-01T00:00:00Z" {
 		t.Fatalf("credentials %+v %v", creds, err)
 	}
@@ -156,7 +156,7 @@ func TestLoginDenied(t *testing.T) {
 	if len(server.recorded()) != 0 {
 		t.Fatal("a denied login exchanged a code")
 	}
-	if _, err := loadCredentials(h.env); err == nil {
+	if _, err := loadCredentials(h.env, true); err == nil {
 		t.Fatal("credentials saved after denial")
 	}
 }
@@ -205,7 +205,7 @@ func TestLoginPasteMode(t *testing.T) {
 		t.Fatalf("exit %d %s", exit, h.stderr.String())
 	}
 	assertTokenNotPrinted(t, h)
-	if creds, err := loadCredentials(h.env); err != nil || creds.Token != testToken {
+	if creds, err := loadCredentials(h.env, true); err != nil || creds.Token != testToken {
 		t.Fatalf("credentials %v", err)
 	}
 

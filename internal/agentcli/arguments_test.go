@@ -111,3 +111,33 @@ func TestLocalUsageErrorsNameFieldAndReason(t *testing.T) {
 		}
 	}
 }
+
+// A refused element of a repeatable flag keeps its position: rules[1].pattern
+// of config preview-project becomes --rule with details.index 1, the
+// server's name stays in details.parameter, and the message names the
+// second --rule.
+func TestRenameArgumentKeepsTheIndex(t *testing.T) {
+	for _, test := range []struct {
+		wire, message string
+		index         int
+		want          string
+	}{
+		{"rules[0].pattern", "`rules[0].pattern` must not be empty", 0, "the first `--rule` (its pattern) must not be empty"},
+		{"rules[1].pattern", "`rules[1].pattern` is not a valid glob", 1, "the second `--rule` (its pattern) is not a valid glob"},
+		{"rules[11]", "`rules[11]` is not <kind>:<pattern>", 11, "`--rule` number 12 is not <kind>:<pattern>"},
+	} {
+		failure := &cliError{Code: agentapi.CodeInvalidArgument, Status: 400, Message: test.message,
+			Details: map[string]any{"field": test.wire, "reason": "invalid_format"}}
+		renameArgument(commandByName(t, "config preview-project"), failure)
+		if failure.Details["field"] != "--rule" || failure.Details["index"] != test.index || failure.Details["parameter"] != test.wire ||
+			failure.Message != test.want {
+			t.Errorf("%s: %+v %q", test.wire, failure.Details, failure.Message)
+		}
+	}
+	// A field without an index has none.
+	plain := &cliError{Code: agentapi.CodeInvalidArgument, Status: 400, Message: "`group_id` is required", Details: map[string]any{"field": "group_id"}}
+	renameArgument(commandByName(t, "config preview-project"), plain)
+	if _, ok := plain.Details["index"]; ok || plain.Details["field"] != "--group-id" {
+		t.Fatalf("plain field: %+v", plain.Details)
+	}
+}

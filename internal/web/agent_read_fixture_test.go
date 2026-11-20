@@ -125,6 +125,10 @@ func (audits *scopedAudits) List(_ context.Context, filter query.Filter, cursor 
 		if filter.ForwardStatus != "" && summary.ForwardStatus != filter.ForwardStatus {
 			continue
 		}
+		// Exactly as the stores match it (a.protocol = $n).
+		if filter.Protocol != "" && summary.Protocol != filter.Protocol {
+			continue
+		}
 		if len(page.Items) == limit {
 			last := page.Items[len(page.Items)-1]
 			page.NextCursor = &query.Cursor{BeforeStartedAtNS: last.StartedAtNS, BeforeID: last.AuditID}
@@ -166,12 +170,15 @@ func (audits *scopedAudits) Timeline(_ context.Context, auditID string, side que
 	if err != nil {
 		return query.StreamTimeline{}, err
 	}
-	if body := fixtureSideBody(record, side); body == nil || body.StreamEventCount == 0 {
+	body := fixtureSideBody(record, side)
+	if body == nil || body.StreamEventCount == 0 {
 		return query.StreamTimeline{}, query.ErrNotFound
 	}
 	first := fixtureBase.UnixNano()
+	// The stored timeline's completeness is the body's
+	// stream_timeline_complete, as query.Service.Timeline reads it.
 	return query.StreamTimeline{Stage: string(side), ObservedLength: 4, EventCount: 1, FirstEventAtNS: &first, LastEventAtNS: &first,
-		Complete: true, Points: []query.TimelinePoint{{Offset: 0, AtNS: first}}}, nil
+		Complete: body.StreamTimelineComplete, Points: []query.TimelinePoint{{Offset: 0, AtNS: first}}}, nil
 }
 
 func (audits *scopedAudits) RawMeta(_ context.Context, auditID string, side query.Side) (query.RawMetadata, error) {
@@ -191,11 +198,24 @@ func (audits *scopedAudits) RawMeta(_ context.Context, auditID string, side quer
 	case body.RetentionState == storage.RetentionMetadata:
 		return query.RawMetadata{}, query.ErrNotRetained
 	}
-	return query.RawMetadata{ObservedLength: int64(len(auditID)), StoredLength: int64(len(auditID)), Complete: true, SHA256: "abc"}, nil
+	// Complete by query.Service.RawMeta's rule, from the body's own columns.
+	complete := body.State == storage.StageStateComplete && body.HashComplete && body.EOFSeen && body.StoredLength == body.ObservedLength
+	return query.RawMetadata{ObservedLength: body.ObservedLength, StoredLength: body.StoredLength, Complete: complete, SHA256: "abc"}, nil
 }
 
-func (audits *scopedAudits) StreamRaw(_ context.Context, auditID string, _ query.Side, writer io.Writer) error {
-	_, err := writer.Write([]byte(auditID))
+// StreamRaw writes stored_length bytes (the audit id repeated), so the body
+// matches the Content-Length RawMeta announces.
+func (audits *scopedAudits) StreamRaw(_ context.Context, auditID string, side query.Side, writer io.Writer) error {
+	record, err := audits.find(auditID, nil)
+	if err != nil {
+		return err
+	}
+	body := fixtureSideBody(record, side)
+	if body == nil {
+		return query.ErrNotFound
+	}
+	content := bytes.Repeat([]byte(auditID), int(body.StoredLength)/len(auditID)+1)[:body.StoredLength]
+	_, err = writer.Write(content)
 	return err
 }
 

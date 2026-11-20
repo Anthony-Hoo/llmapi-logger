@@ -48,6 +48,7 @@ const (
 	reasonAdministratorOnly = "administrator_only"
 	reasonInvalidCursor     = "invalid_cursor"
 	reasonCursorMismatch    = "cursor_query_mismatch"
+	reasonCursorExpired     = "cursor_expired"
 	reasonNotWeekStart      = "not_week_start"
 	reasonRejectedByService = "rejected_by_service"
 )
@@ -360,26 +361,58 @@ func asArgument(err error, refused error) error {
 	return err
 }
 
-// Opaque cursors (contract section 0.1 items 19 and 117). The facade wraps
-// each service's own cursor with a version, the kind of list it belongs to
-// and a binding: a short keyed digest of the query the page answered and of
-// the caller's scope. A cursor of one list is refused by another, and a
-// cursor is refused with cursor_query_mismatch when the next page asks a
-// different query or comes from another identity, so pages of two queries
-// are never mixed.
-const agentCursorVersion = "c2"
+// Opaque cursors (contract section 0.1 items 19, 117 and 149). The facade
+// wraps each service's own cursor with a version, the kind of list it
+// belongs to, the id of the key that signed it, a binding (a short keyed
+// digest of the query the page answered and of the caller's scope) and a
+// tag: a keyed digest over all of it, the service's cursor included, so
+// no part can be changed. A cursor of one list is refused by another; a
+// cursor signed with a key that has since been replaced (admin_token
+// rotated) is refused with cursor_expired; one of another query or
+// identity with cursor_query_mismatch, so pages of two queries are never
+// mixed; and any other change with invalid_cursor.
+const agentCursorVersion = "c3"
 
-// agentCursorBinding is the digest of the query parameters (every one but
-// cursor and limit, as given: since=2h stays "2h", so the next page of a
-// relative range still matches) and of the caller's role and scope.
-func (handler *managementHandler) agentCursorBinding(kind string, values url.Values, caller principal) string {
+// agentCursorScope is what a cursor is bound to: the cursor key derived
+// from the session key and the binding digest of one query and identity.
+type agentCursorScope struct {
+	key    []byte
+	digest string
+}
+
+// keyID names the cursor key without revealing it, so a cursor of a
+// replaced key can be told from a tampered one.
+func (scope agentCursorScope) keyID() string {
+	mac := hmac.New(sha256.New, scope.key)
+	mac.Write([]byte("key-id"))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:6])
+}
+
+// tag is the keyed digest of every other part of a cursor.
+func (scope agentCursorScope) tag(parts ...string) string {
+	mac := hmac.New(sha256.New, scope.key)
+	mac.Write([]byte("tag"))
+	for _, part := range parts {
+		mac.Write([]byte(strconv.Itoa(len(part))))
+		mac.Write([]byte{':'})
+		mac.Write([]byte(part))
+	}
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// agentCursorBinding is the cursor key and the digest of the query
+// parameters (every one but cursor and limit, as given: since=2h stays
+// "2h", so the next page of a relative range still matches) and of the
+// caller's role and scope.
+func (handler *managementHandler) agentCursorBinding(kind string, values url.Values, caller principal) agentCursorScope {
 	var key [32]byte
 	if handler.authenticator != nil {
 		key = handler.authenticator.sessionKey
 	}
 	derived := hmac.New(sha256.New, key[:])
 	derived.Write([]byte("llmapi-logger/agent-cursor/v1"))
-	mac := hmac.New(sha256.New, derived.Sum(nil))
+	cursorKey := derived.Sum(nil)
+	mac := hmac.New(sha256.New, cursorKey)
 	names := make([]string, 0, len(values))
 	for name := range values {
 		if name != "cursor" && name != "limit" {
@@ -408,17 +441,25 @@ func (handler *managementHandler) agentCursorBinding(kind string, values url.Val
 		write(name)
 		write(values.Get(name))
 	}
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:12])
+	return agentCursorScope{key: cursorKey, digest: base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:12])}
 }
 
-func wrapAgentCursor(kind, binding, inner string) string {
+// wrapAgentCursor is BASE64URL(version "|" kind "|" key id "|" binding "|"
+// tag "|" inner); the tag covers the other five.
+func wrapAgentCursor(kind string, scope agentCursorScope, inner string) string {
 	if inner == "" {
 		return ""
 	}
-	return base64.RawURLEncoding.EncodeToString([]byte(agentCursorVersion + "|" + kind + "|" + binding + "|" + inner))
+	keyID := scope.keyID()
+	tag := scope.tag(agentCursorVersion, kind, keyID, scope.digest, inner)
+	return base64.RawURLEncoding.EncodeToString([]byte(agentCursorVersion + "|" + kind + "|" + keyID + "|" + scope.digest + "|" + tag + "|" + inner))
 }
 
-func unwrapAgentCursor(kind, binding, cursor string) (string, error) {
+// unwrapAgentCursor checks a cursor in this order: its form, version and
+// list (invalid_cursor), its key (cursor_expired), its query and identity
+// (cursor_query_mismatch), and the tag over the whole cursor
+// (invalid_cursor).
+func unwrapAgentCursor(kind string, scope agentCursorScope, cursor string) (string, error) {
 	if cursor == "" {
 		return "", nil
 	}
@@ -426,15 +467,27 @@ func unwrapAgentCursor(kind, binding, cursor string) (string, error) {
 	if err != nil {
 		return "", errInvalidCursor
 	}
-	parts := strings.SplitN(string(decoded), "|", 4)
-	if len(parts) != 4 || parts[0] != agentCursorVersion || parts[1] != kind || parts[3] == "" {
+	parts := strings.SplitN(string(decoded), "|", 6)
+	if len(parts) != 6 || parts[0] != agentCursorVersion || parts[1] != kind || parts[5] == "" {
 		return "", errInvalidCursor
 	}
-	if !hmac.Equal([]byte(parts[2]), []byte(binding)) {
+	if !hmac.Equal([]byte(parts[2]), []byte(scope.keyID())) {
+		return "", errCursorExpired
+	}
+	if !hmac.Equal([]byte(parts[3]), []byte(scope.digest)) {
 		return "", errCursorMismatch
 	}
-	return parts[3], nil
+	if !hmac.Equal([]byte(parts[4]), []byte(scope.tag(parts[0], parts[1], parts[2], parts[3], parts[5]))) {
+		return "", errInvalidCursor
+	}
+	return parts[5], nil
 }
+
+// errCursorExpired refuses a cursor signed with a key that has since been
+// replaced: the administrator changed admin_token, which every cursor key
+// is derived from.
+var errCursorExpired = argInvalid("cursor", reasonCursorExpired,
+	"`cursor` is no longer valid: the server's keys changed since it was issued; start the list again without `cursor`")
 
 // errCursorMismatch refuses a cursor of this list that belongs to another
 // query or another identity.

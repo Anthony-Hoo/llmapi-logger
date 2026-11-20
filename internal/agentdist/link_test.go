@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -157,6 +158,80 @@ func TestVerifyRejectsMalformed(t *testing.T) {
 	if _, err := signer.Verify(canonical); err != nil {
 		t.Fatalf("a correctly signed near expiry was rejected: %v", err)
 	}
+}
+
+// TestVerifyHasOneSpellingPerLink: every re-spelling of a valid signature
+// that a client can construct is refused, so one link has exactly one
+// spelling (and so one download budget). The decoder alone would accept CR
+// and LF anywhere.
+func TestVerifyHasOneSpellingPerLink(t *testing.T) {
+	clk := newClock()
+	signer, _ := NewSigner(testAdminToken, clk.Now)
+	signature, _ := signer.Mint()
+	if len(signature) != SignatureLength {
+		t.Fatalf("minted signature has %d characters, want %d", len(signature), SignatureLength)
+	}
+	if _, err := signer.Verify(signature); err != nil {
+		t.Fatalf("canonical spelling: %v", err)
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	variants := map[string]string{
+		"padding":         signature + "=",
+		"double padding":  signature + "==",
+		"std alphabet":    base64.RawStdEncoding.EncodeToString(mustDecode(t, signature)),
+		"std padded":      base64.StdEncoding.EncodeToString(mustDecode(t, signature)),
+		"trailing data":   signature + "A",
+		"trailing slash":  signature + "/",
+		"leading space":   " " + signature,
+		"trailing space":  signature + " ",
+		"tab inside":      signature[:5] + "\t" + signature[5:],
+		"NUL at end":      signature + "\x00",
+		"percent escape":  signature[:3] + "%41" + signature[4:],
+		"one char short":  signature[:len(signature)-1],
+		"non-ASCII":       signature[:len(signature)-1] + "é",
+		"last char + one": signature[:len(signature)-1] + string(alphabet[(strings.IndexByte(alphabet, signature[len(signature)-1])+1)%64]),
+	}
+	for index := 0; index <= len(signature); index++ {
+		for _, insert := range []string{"\n", "\r", "\r\n", "\n\r"} {
+			variants[fmt.Sprintf("%q at %d", insert, index)] = signature[:index] + insert + signature[index:]
+		}
+	}
+	// Removing one character and adding a CR keeps the length.
+	for index := 0; index < len(signature); index++ {
+		variants[fmt.Sprintf("CR in place of %d", index)] = signature[:index] + "\r" + signature[index+1:]
+	}
+	for index := 0; index < len(signature); index++ {
+		char := signature[index]
+		switch {
+		case char >= 'a' && char <= 'z':
+			variants[fmt.Sprintf("upper %d", index)] = signature[:index] + string(char-32) + signature[index+1:]
+		case char >= 'A' && char <= 'Z':
+			variants[fmt.Sprintf("lower %d", index)] = signature[:index] + string(char+32) + signature[index+1:]
+		}
+	}
+	for name, variant := range variants {
+		if variant == signature {
+			continue
+		}
+		if _, err := signer.Verify(variant); !errors.Is(err, ErrBadSignature) {
+			t.Errorf("%s: %v, want ErrBadSignature", name, err)
+		}
+	}
+	// The verified link names its nonce, which is what budgets are kept by.
+	link, err := signer.VerifyLink(signature)
+	payload := mustDecode(t, signature)
+	if err != nil || link.Nonce != string(payload[expiryDigits+1:expiryDigits+1+16]) {
+		t.Fatalf("VerifyLink: %+v, %v", link, err)
+	}
+}
+
+func mustDecode(t *testing.T, signature string) []byte {
+	t.Helper()
+	payload, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }
 
 func TestNewSignerRequiresToken(t *testing.T) {

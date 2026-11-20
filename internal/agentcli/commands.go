@@ -52,7 +52,7 @@ func flagToNow() flagSpec {
 
 func flagCursor() flagSpec {
 	return flagSpec{Name: "cursor", Value: "<cursor>", Query: "cursor",
-		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Repeat every other flag of the first page exactly (only --limit may change); a cursor of another query or another identity fails with INVALID_ARGUMENT, reason cursor_query_mismatch. Default: none (the first page)."}
+		Help: "Opaque next_cursor from the previous page; an empty next_cursor means there is no next page. Repeat every other flag of the first page exactly (only --limit may change); a cursor of another query or another identity fails with INVALID_ARGUMENT, reason cursor_query_mismatch; one issued before the server's keys changed (admin_token rotated) with reason cursor_expired: start the list again without --cursor. Default: none (the first page)."}
 }
 
 func flagLimit(minimum, maximum, fallback int) flagSpec {
@@ -61,7 +61,7 @@ func flagLimit(minimum, maximum, fallback int) flagSpec {
 }
 
 func flagOut(required bool, what string) flagSpec {
-	help := "Write {\"meta\": …, \"data\": …} to this file, data being " + what + " exactly as stdout would carry it (the file is replaced atomically), and print {path, bytes, sha256} with the original meta instead. The directory must exist and accept the file; this is checked before the server is asked, and an unusable --out fails with LOCAL_FILE_ERROR."
+	help := "Write {\"meta\": …, \"data\": …} to this file, data being " + what + " exactly as stdout would carry it (the file is replaced atomically), and print {path, bytes, sha256} with the original meta instead. The directory must exist and accept the file, and the name must be one the file system can hold; this is checked before the server is asked (a missing file is created and removed again), and an unusable --out fails with LOCAL_FILE_ERROR."
 	if required {
 		help += " Required."
 	} else {
@@ -123,7 +123,7 @@ func buildCommands() []*commandSpec {
 			Summary: "authorize this machine in the browser and save an agent token",
 			Description: "Opens the authorization page of the server in the browser and waits up to " + loginWaitText + " for the user to approve. " +
 				"The token is saved in credentials.json under the state directory (LLMAUDIT_HOME, default ~/.llmaudit) and never printed. " +
-				"The user, not the agent, should run this command.",
+				"An agent may run it only when it can open the user's browser and keep the command running for the whole wait while the user approves; otherwise the user runs it in their own terminal. Nobody types a password, API key or token: the user approves in the browser.",
 			Flags: []flagSpec{
 				{Name: "server", Value: "<url>", Help: "Server address, http:// or https:// with a host and an optional path; no user info, query or fragment. Default: the server of the saved credentials; required on the first login."},
 				{Name: "no-browser", Kind: boolFlag, Help: "Do not open a browser or listen locally: print the address, and read the one-time code the page shows from the terminal. Default: off."},
@@ -158,7 +158,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"version"},
 			Summary:     "show the client version and the API versions the server reports",
-			Description: "Asks the server (whoami) for its newest and minimum supported client versions. A failure to reach the server is not an error: meta.complete is then false.",
+			Description: "Asks the server (whoami) for its newest and minimum supported client versions. A failure to reach the server is not an error: meta.complete is then false. Neither is a state directory or credentials.json it may not use (a link, another user's or a shared directory, files others can access): nothing is changed or sent, data.server is null and meta.incomplete_reason is local_state_unusable; `llmaudit whoami` says what is wrong.",
 			Routes:      []routeSpec{{Method: "GET", Path: "/whoami", Meta: true}},
 			Examples:    []string{"llmaudit version"},
 			Run:         runVersion,
@@ -175,7 +175,7 @@ func buildCommands() []*commandSpec {
 				{Name: "status", Value: "<status>", Query: "status", Help: "error, 4xx, 5xx, or one HTTP status code 100-599. Default: all."},
 				{Name: "user-agent", Value: "<text>", Query: "user_agent", Help: "Only records whose inbound User-Agent (user_agent_untrusted in results) contains this text. Default: all."},
 				{Name: "path", Value: "<path>", Query: "path", Help: "Only this request path (path_untrusted in results), e.g. /v1/chat/completions, matched exactly; it must start with /. Default: all."},
-				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only this API protocol: openai, anthropic or gemini (the protocol field of results); anything else is INVALID_ARGUMENT. Default: all."},
+				{Name: "protocol", Value: "<protocol>", Query: "protocol", Help: "Only records of this API protocol, matched exactly against the protocol field of results: openai, anthropic and gemini for the built-in parsers, or the parser prefix of a route the deployment configured; a protocol no record has matches nothing (not an error). Default: all."},
 				{Name: "conversation", Value: "<id>", Query: "conversation", Help: "Only records of this conversation_id, matched exactly. Default: all."},
 				{Name: "forward-status", Value: "<state>", Query: "forward_status", Help: "Only records whose forwarding ended this way: in_progress, completed, rejected, client_cancelled, newapi_error, proxy_error or interrupted. Default: all."},
 				{Name: "blocked-by", Value: "<interceptor>", Query: "blocked_by", Help: "Only records a local policy blocked with this interceptor id, matched exactly as stored in blocked_by: content_policy, user_agent_policy, or an interceptor id of the deployment's routes. The server does not know the full list, so an unknown id matches nothing rather than failing. Default: all."},
@@ -198,7 +198,7 @@ func buildCommands() []*commandSpec {
 			Path:        []string{"requests", "get"},
 			Summary:     "show one audit record without the conversation text",
 			Description: "Credential header and query values are omitted (value_omitted: credential, with length). data.exports says, per --what of `llmaudit requests export <id> --what conversation --out <file>` and the other export kinds, whether the record can give it (available, pending, not_available with a reason, not_retained).",
-			Args:        []argSpec{{Name: "id", Help: "audit_id of the record (apx_ and 26 letters and digits, from `llmaudit requests list`)", PathParam: "id"}},
+			Args:        []argSpec{{Name: "id", Help: "audit_id of the record from `llmaudit requests list`, copied exactly (records the proxy creates have apx_ and 26 lower-case letters and digits)", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "headers", Value: "all", Query: "headers", Help: "all: include headers of every stage. The only accepted value. Default: inbound request headers only."},
 			},
@@ -209,13 +209,13 @@ func buildCommands() []*commandSpec {
 		{
 			Path:    []string{"requests", "export"},
 			Summary: "write the conversation, headers, a reconstructed or raw body, or a timeline of one record to a file",
-			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. complete is true only when the server says the record is finished and the content whole, as `llmaudit requests get <id>` would; otherwise meta.incomplete_reason says why (in_progress, parse_pending, capture_incomplete, timeline_incomplete, or completeness_unknown when the server did not say). " +
+			Description: "The content goes to --out; stdout gets {path, bytes, sha256, complete, missing_chunks?}. complete is true only when the server says the record is finished and the content whole, as `llmaudit requests get <id>` would; otherwise meta.incomplete_reason says why (in_progress, parse_pending, capture_incomplete, parse_partial for the conversation, request, response and timeline-response of a record whose parse is partial, timeline_incomplete, or completeness_unknown when the server did not say). " +
 				"Check data.exports of `llmaudit requests get <id>` first: it says per --what whether the record can give it. NOT_READY means the content will appear later; NOT_AVAILABLE (details.reason) means this record will never have it (blocked before forwarding, not parsed, not reconstructed: only OpenAI records are, not streamed, no body), so do not retry; NOT_RETAINED for raw-request/raw-response means the raw body was released after verification: export request or response instead.",
 			Args: []argSpec{{Name: "id", Help: "audit_id of the record", PathParam: "id"}},
 			Flags: []flagSpec{
 				{Name: "what", Value: "<what>", PathParam: "what", Required: true, Help: "conversation, headers, request, response, raw-request, raw-response, timeline-request or timeline-response. Required."},
 				{Name: "out", Value: "<file>", Required: true,
-					Help: "Write the exported content itself to this file, with no envelope around it (the file is replaced atomically), and print {path, bytes, sha256, complete, missing_chunks?} with meta.state exported. The directory must exist and accept the file; this is checked before the server is asked, and an unusable --out fails with LOCAL_FILE_ERROR. Required."},
+					Help: "Write the exported content itself to this file, with no envelope around it (the file is replaced atomically), and print {path, bytes, sha256, complete, missing_chunks?} with meta.state exported. The directory must exist and accept the file, and the name must be one the file system can hold; this is checked before the server is asked (a missing file is created and removed again), and an unusable --out fails with LOCAL_FILE_ERROR. Required."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests/{id}/export/{what}", Raw: true}},
 			Timeout:  60 * time.Second,
@@ -228,7 +228,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"usage", "overview"},
 			Summary:     "token usage totals grouped by a dimension",
-			Description: "Totals only include records that have been analyzed (data.coverage_unknown).",
+			Description: "Totals only include records that have been analyzed, and whether every record in the range has been analyzed cannot be checked here (data.coverage_unknown is always true). meta.complete is false only while billing is pending (billing_pending); data.billing_complete says the same.",
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (30m, 2h, 7d). Cannot be combined with --from. Default: 7d. The range is at most 400 days."},
 				flagFrom(), flagTo("now."),
@@ -256,7 +256,7 @@ func buildCommands() []*commandSpec {
 			Path:        []string{"usage", "trend"},
 			Summary:     "per-step token trend of one usage session",
 			Description: "NOT_FOUND means the session does not exist, is not visible to you, or has not been analyzed yet.",
-			Args:        []argSpec{{Name: "session", Help: "session_id of a `llmaudit usage sessions` card: agt_ or ses_ and 24 hexadecimal digits, or conv_ and the conversation id", PathParam: "id"}},
+			Args:        []argSpec{{Name: "session", Help: "session_id of a `llmaudit usage sessions` card, copied exactly: agt_ or ses_ and 24 hexadecimal digits, or a conversation_id (conv_...) itself", PathParam: "id"}},
 			Flags:       []flagSpec{flagOut(false, "the data (recommended for long sessions)")},
 			Routes:      []routeSpec{{Method: "GET", Path: "/usage/sessions/{id}/trend", Meta: true}},
 			Examples:    []string{"llmaudit usage trend agt_5d0c9b8a7f6e5d4c3b2a1f0e", "llmaudit usage trend agt_5d0c9b8a7f6e5d4c3b2a1f0e --out trend.json"},
@@ -266,7 +266,7 @@ func buildCommands() []*commandSpec {
 			Path:        []string{"usage", "tree"},
 			Summary:     "agent tree of one root agent",
 			Description: "Parents outside your scope appear as placeholders (visible=false).",
-			Args:        []argSpec{{Name: "tree", Help: "tree ID, 24 hexadecimal characters: tree_id of a `usage sessions` card (every card has one) or of `analysis sessions`", PathParam: "id"}},
+			Args:        []argSpec{{Name: "tree", Help: "tree ID, 24 hexadecimal characters: tree_id of a `usage sessions` card (every card has one), or of an `analysis sessions` agent row when it has one", PathParam: "id"}},
 			Routes:      []routeSpec{{Method: "GET", Path: "/usage/trees/{id}", Meta: true}},
 			Examples:    []string{"llmaudit usage tree 5d0c9b8a7f6e5d4c3b2a1f0e"},
 			Run:         runRead,
@@ -306,8 +306,9 @@ func buildCommands() []*commandSpec {
 			Run:      runRead,
 		},
 		{
-			Path:    []string{"weekly", "trend"},
-			Summary: "weekly totals over several weeks (administrators)",
+			Path:        []string{"weekly", "trend"},
+			Summary:     "weekly totals over several weeks (administrators)",
+			Description: "The weeks end with the current one, so meta.complete is false (evidence_pending): a trend is complete only when every week in it is frozen.",
 			Flags: []flagSpec{
 				{Name: "weeks", Value: "<n>", Query: "weeks", Help: "Number of weeks, 1-12. Default: 8."},
 				{Name: "group-id", Value: "<id>", Query: "group_id", Help: "Only this project group; 0 means ungrouped. Default: all groups."},
@@ -332,7 +333,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"weekly", "unattributed"},
 			Summary:     "activity no project rule matched (administrators)",
-			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`. Entries come most requests first; when --limit cut the list, data.truncated is true and meta.complete is false with incomplete_reason truncated (at 200, the server's maximum, a full list may be cut: the total is not known).",
+			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`. Entries come most requests first; when --limit cut the list, data.truncated is true and meta.complete is false with incomplete_reason truncated (at 200, the server's maximum, a full list may be cut: the total is not known). The list is computed now with the current project rules (data.computed_with current_rules), even for a frozen week (data.week_frozen), so it can differ from the frozen snapshot's unattributed total that `llmaudit weekly project -1 --week <week>` reads; meta.complete is false with evidence_pending only while the week has not ended.",
 			Flags: []flagSpec{
 				flagWeekStart("First day of the week, YYYY-MM-DD, on the deployment's week start day. Default: the current week."),
 				flagLimit(1, 200, 20),
@@ -362,7 +363,7 @@ func buildCommands() []*commandSpec {
 			Summary: "session analysis summary and the state of the last run",
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
-				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
+				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required. The range from --from to --to is at most 400 days."},
 				flagToNow(), flagUserID(true),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/overview", Meta: true}},
@@ -373,8 +374,8 @@ func buildCommands() []*commandSpec {
 			Path:    []string{"analysis", "users"},
 			Summary: "session analysis per user (administrators)",
 			Flags: []flagSpec{
-				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both."},
-				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
+				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
+				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required. The range from --from to --to is at most 400 days."},
 				flagToNow(),
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/analysis/users", Meta: true}},
@@ -386,7 +387,7 @@ func buildCommands() []*commandSpec {
 			Summary: "list analyzed sessions",
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (2h, 7d). One of --since or --from is required; not both. The range is at most 400 days."},
-				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required."},
+				{Name: "from", Value: "<time>", Query: "from", Help: "Start of the range: RFC 3339 or YYYY-MM-DD. One of --since or --from is required. The range from --from to --to is at most 400 days."},
 				flagToNow(),
 				{Name: "kind", Value: "<kind>", Query: "kind", Help: "agent or chat. Default: both."},
 				{Name: "flags", Value: "<list>", Query: "flags", Help: "Comma-separated session flags to filter by: loop, thrash, unverified, failures, corrections, error_paste, interrupt, heavy_model, danger, secret, compaction. Default: no filter."},

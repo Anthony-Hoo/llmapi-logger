@@ -275,7 +275,7 @@ func TestLogout(t *testing.T) {
 	if exit := h.run("logout"); exit != 0 {
 		t.Fatalf("exit %d %s", exit, h.stderr.String())
 	}
-	if _, err := loadCredentials(h.env); err == nil {
+	if _, err := loadCredentials(h.env, true); err == nil {
 		t.Fatal("credentials still present after logout")
 	}
 	request := server.recorded()[0]
@@ -289,14 +289,14 @@ func TestLogout(t *testing.T) {
 	if exit := h.run("logout"); exit != 0 {
 		t.Fatalf("exit %d %s", exit, h.stderr.String())
 	}
-	if _, err := loadCredentials(h.env); err == nil {
+	if _, err := loadCredentials(h.env, true); err == nil {
 		t.Fatal("credentials still present")
 	}
 	// FEATURE_DISABLED keeps them (contract: do not clear local credentials).
 	server.setResponder(failWith(agentapi.CodeFeatureDisabled))
 	h.saveLogin(server.URL)
 	h.expectFailure(h.run("logout"), agentapi.CodeFeatureDisabled, 1)
-	if _, err := loadCredentials(h.env); err != nil {
+	if _, err := loadCredentials(h.env, true); err != nil {
 		t.Fatal("credentials removed on FEATURE_DISABLED")
 	}
 }

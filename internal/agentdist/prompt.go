@@ -386,7 +386,7 @@ func posixPrompt(input PromptInput, info agentInfo, server string, p paths) stri
 	// The removal refuses any path that is not a work directory mktemp made,
 	// whatever the agent wrote in place of the placeholder.
 	s.add("Remove the work directory (the command refuses a path that is not the one step 1 created):",
-		"case "+p.work+" in */llmapi-audit-install.????????) rm -rf -- "+p.work+" ;; *) echo \"refused: not the work directory from step 1\" >&2; false ;; esac",
+		posixWorkRemoval(p.work),
 		"Check: the command exits with status 0.")
 	s.add("Check that the client runs on this machine:",
 		p.binary+" --help",
@@ -397,6 +397,24 @@ func posixPrompt(input PromptInput, info agentInfo, server string, p paths) stri
 		`Check: the output is one JSON object with "ok":true. Note data.role, data.tier and data.expires_at for your report.`)
 	footer(&builder, info, p)
 	return builder.String()
+}
+
+// mktempChar is one character of the X positions of mktemp's template: both
+// GNU and BSD mktemp fill them from letters and digits. Bash (5.0 and later,
+// globasciiranges), dash and zsh compare these ranges as ASCII.
+const mktempChar = "[A-Za-z0-9]"
+
+// posixWorkRemoval is the guarded removal of the work directory: it removes
+// work only when it is absolute, has no . or .. segment, and its base name
+// (everything after the last slash, so it holds no slash) is
+// llmapi-audit-install. followed by exactly eight mktemp characters. A
+// wildcard such as ? would also match a slash, so the base name is cut off
+// first and matched on its own. An empty segment is accepted: macOS's
+// default TMPDIR ends in a slash, so mktemp prints .../T//llmapi-audit-...
+func posixWorkRemoval(work string) string {
+	return "d=" + work + "; b=; case \"$d\" in */./*|*/../*|*/.|*/..) ;; /*) b=\"${d##*/}\" ;; esac; " +
+		"case \"$b\" in llmapi-audit-install." + strings.Repeat(mktempChar, 8) + ") rm -rf -- \"$d\" ;; " +
+		"*) echo \"refused: not the work directory from step 1\" >&2; false ;; esac"
 }
 
 func windowsPrompt(input PromptInput, info agentInfo, server string, p paths) string {

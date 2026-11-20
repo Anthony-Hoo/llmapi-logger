@@ -324,3 +324,42 @@ func TestGlobalFlagsBeforeTheCommand(t *testing.T) {
 		t.Errorf("--pretty=maybe whoami: exit %d", exit)
 	}
 }
+
+// --pretty works in every documented form and position, also when the
+// command line fails to parse: the failure of `-pretty=true requests` is
+// rendered pretty, `requests --pretty` is the group without a subcommand
+// (not an unknown command), and `requests --pretty list` runs the list.
+func TestGlobalFlagsInEveryFormAndPosition(t *testing.T) {
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	for _, args := range [][]string{{"-pretty=true", "requests"}, {"--pretty", "requests"}, {"requests", "--pretty"}, {"-pretty", "requests"}} {
+		exit := h.run(args...)
+		if exit != agentapi.ExitInvalidUsage || strings.HasPrefix(strings.TrimSpace(h.stderr.String()), "{") ||
+			!strings.Contains(h.stderr.String(), "missing_subcommand") {
+			t.Errorf("%v: exit %d, stderr %q (want the pretty missing_subcommand failure)", args, exit, h.stderr.String())
+		}
+	}
+	for _, args := range [][]string{{"requests", "--pretty=false"}, {"--pretty", "requests", "--pretty=false"}} {
+		h.run(args...)
+		body := h.failure()
+		if body.Details["reason"] != "missing_subcommand" {
+			t.Errorf("%v: %+v", args, body)
+		}
+	}
+	for _, args := range [][]string{{"requests", "--pretty", "list"}, {"requests", "-pretty=true", "list"}} {
+		if exit := h.run(args...); exit != 0 || strings.HasPrefix(strings.TrimSpace(h.stdout.String()), "{") {
+			t.Errorf("%v: exit %d, output %q (want the pretty list)", args, exit, h.stdout.String())
+		}
+	}
+	// After the command wins over before it.
+	if exit := h.run("--pretty", "requests", "list", "--pretty=false"); exit != 0 || !strings.HasPrefix(h.stdout.String(), "{") {
+		t.Errorf("later --pretty=false: exit %d %q", exit, h.stdout.String())
+	}
+	if exit := h.run("requests", "--help"); exit != 0 || !strings.Contains(h.stdout.String(), "list") {
+		t.Errorf("requests --help: exit %d", exit)
+	}
+	if exit := h.run("requests", "--pretty", "--help"); exit != 0 || !strings.Contains(h.stdout.String(), "list") {
+		t.Errorf("requests --pretty --help: exit %d %q", exit, h.stderr.String())
+	}
+}
