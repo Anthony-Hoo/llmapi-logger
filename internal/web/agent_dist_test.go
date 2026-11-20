@@ -578,12 +578,12 @@ func TestDownloadTrackerFullKeepsTheCapThroughTheRouter(t *testing.T) {
 	}
 	rows := 0
 	for _, entry := range env.store.Audit() {
-		if entry.Event == agentaccess.EventPackageDownloaded && entry.Outcome == agentaccess.OutcomeOK {
+		if entry.Event == agentaccess.EventPackageDownloaded {
 			rows++
 		}
 	}
 	if want := 2*agentdist.DownloadsPerLink + len(others) - len(refused); rows != want {
-		t.Fatalf("%d package_downloaded rows of served downloads, want %d", rows, want)
+		t.Fatalf("%d package_downloaded rows, want one per served download: %d", rows, want)
 	}
 	// The first link expires at start + 30 minutes: a refused link is served.
 	clock.now = start.Add(agentdist.LinkLifetime)
