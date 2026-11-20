@@ -252,6 +252,20 @@ func TestConfigFileIsCheckedLikeCredentials(t *testing.T) {
 	}
 	refused(h, problemNotFile, "whoami")
 
+	// The user's own config.json naming a CA file in the state directory
+	// that is a link: the CA file gets the same checks.
+	h = newHarness(t)
+	h.saveLogin(server.URL)
+	caLink := filepath.Join(h.home, "ca.pem")
+	if err := os.Symlink(elsewhere, caLink); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(h.home, configFile), `{"ca_file":"`+caLink+`"}`)
+	body := h.expectFailure(h.run("whoami"), "LOCAL_FILE_ERROR", 1)
+	if body.Details["reason"] != problemSymlink || body.Details["path"] != caLink || strings.Contains(body.Message, "PEM") || len(server.recorded()) != 0 {
+		t.Fatalf("CA file link: %+v", body)
+	}
+
 	// The user's own file others can write: tightened by whoami, reported
 	// (not changed) by version.
 	h = newHarness(t)
@@ -309,13 +323,36 @@ func TestConfigFileOfAnotherUserIsNotTrusted(t *testing.T) {
 	if body.Details["reason"] != problemNotOwned || opened {
 		t.Fatalf("login: %+v, browser opened %v", body, opened)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(authorizations) != 0 {
-		t.Fatalf("the server trusted through the planted CA was asked %d times", len(authorizations))
+	asked := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(authorizations)
+	}
+	if asked() != 0 {
+		t.Fatalf("the server trusted through the planted CA was asked %d times", asked())
 	}
 	if info, err := os.Lstat(planted); err != nil || info.Mode().Perm() != 0o600 || info.Sys().(*syscall.Stat_t).Uid != 4242 {
 		t.Fatalf("the planted file changed: %v %v", info, err)
+	}
+
+	// The user's own config.json names ca.pem in the state directory, and
+	// another user plants that file while the directory is loose.
+	h = newHarness(t)
+	h.saveLogin(tlsServer.URL)
+	_ = os.Chmod(h.home, 0o777)
+	plantedCA := filepath.Join(h.home, "ca.pem")
+	data, _ := os.ReadFile(caFile)
+	writeFile(t, plantedCA, string(data))
+	if err := os.Chown(plantedCA, 4242, 4242); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(h.home, configFile), `{"ca_file":"`+plantedCA+`"}`)
+	body = h.expectFailure(h.run("whoami"), "LOCAL_FILE_ERROR", 1)
+	if body.Details["reason"] != problemNotOwned || body.Details["path"] != plantedCA {
+		t.Fatalf("planted CA file: %+v", body)
+	}
+	if asked() != 0 {
+		t.Fatalf("the server trusted through the planted CA file was asked %d times", asked())
 	}
 }
 

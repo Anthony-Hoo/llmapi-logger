@@ -120,7 +120,9 @@ func removeCredentials(env *Env) error {
 // file owned by another user is refused with LOCAL_FILE_ERROR and never
 // read; a loose mode of the user's own file is tightened through a handle
 // opened without following links when fix is true, and refused otherwise.
-// These are the only two files the client reads from the state directory.
+// Besides credentials.json, these are the only files the client reads from
+// the state directory: config.json and, when it lies there, the CA file it
+// names (checkCAFileInState).
 func loadConfig(env *Env, fix bool) (localConfig, error) {
 	var config localConfig
 	dir, err := env.stateDir()
@@ -147,7 +149,50 @@ func loadConfig(env *Env, fix bool) (localConfig, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return config, localFileError("config.json is not valid: it accepts only {\"ca_file\": \"<path>\"}", nil)
 	}
+	if err := checkCAFileInState(dir, config.CAFile, fix); err != nil {
+		return config, err
+	}
 	return config, nil
+}
+
+// checkCAFileInState applies the same checks to the CA file config.json
+// names when it lies inside the state directory, and to every directory
+// between: a CA file planted there would decide which server gets the token
+// just as config.json does. A CA file elsewhere is the user's choice and is
+// read as it is.
+func checkCAFileInState(dir, caFile string, fix bool) error {
+	if caFile == "" {
+		return nil
+	}
+	path, err := filepath.Abs(caFile)
+	if err != nil {
+		return nil // newHTTPClient reports the unreadable file
+	}
+	relative, err := filepath.Rel(dir, path)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return nil
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	at := dir
+	for index, part := range parts {
+		at = filepath.Join(at, part)
+		last := index == len(parts)-1
+		mode := os.FileMode(0o700)
+		if last {
+			mode = 0o600
+		}
+		exists, problem := inspectPrivate(at, !last, mode, fix)
+		if !exists {
+			return nil // newHTTPClient reports the missing file
+		}
+		if problem != "" {
+			return &cliError{Code: agentapi.CodeLocalFileError,
+				Message: "the CA file config.json names lies in the state directory and is a link, of the wrong type, owned by another user, or accessible to others, so it is not read",
+				Hint:    "Ask the user to check it: a CA file in the state directory must be a regular file owned by them with mode 0600, or config.json must name one elsewhere.",
+				Details: map[string]any{"path": at, "reason": problem, "required_mode": fmt.Sprintf("%04o", mode)}}
+		}
+	}
+	return nil
 }
 
 // What can be wrong with an entry of the credential store (details.reason
