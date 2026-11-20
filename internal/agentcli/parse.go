@@ -123,17 +123,20 @@ func groupCommands(commands []*commandSpec, group string) []string {
 }
 
 // parse parses a full command line (without the program name). Global flags
-// (--pretty) are accepted before the command as well as after it.
+// (--pretty in each of its forms) are accepted before the command, between a
+// group and its command (llmaudit requests --pretty list), and after the
+// command; one after the command wins over one before it.
 func parse(env *Env, args []string) (*invocation, error) {
-	leadingPretty := false
-	for len(args) > 0 && isPrettyFlag(args[0]) {
-		name, value, hasValue := strings.Cut(strings.TrimLeft(args[0], "-"), "=")
-		set, err := boolValue("--"+name, value, hasValue)
-		if err != nil {
+	leadingPretty, args, err := takePretty(false, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(args) > 0 && isGroup(args[0]) {
+		var rest []string
+		if leadingPretty, rest, err = takePretty(leadingPretty, args[1:]); err != nil {
 			return nil, err
 		}
-		leadingPretty = set
-		args = args[1:]
+		args = append([]string{args[0]}, rest...)
 	}
 	spec, rest, err := findCommand(allCommands(), args)
 	if err != nil {
@@ -147,6 +150,26 @@ func parse(env *Env, args []string) (*invocation, error) {
 		inv.pretty = true
 	}
 	return inv, nil
+}
+
+// takePretty consumes the --pretty flags at the start of args; the last one
+// wins over current.
+func takePretty(current bool, args []string) (bool, []string, error) {
+	for len(args) > 0 && isPrettyFlag(args[0]) {
+		set, err := prettyValue(args[0])
+		if err != nil {
+			return false, nil, err
+		}
+		current = set
+		args = args[1:]
+	}
+	return current, args, nil
+}
+
+// prettyValue is the value of one --pretty flag.
+func prettyValue(arg string) (bool, error) {
+	name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+	return boolValue("--"+name, value, hasValue)
 }
 
 // isPrettyFlag reports whether arg is the global --pretty flag in any of

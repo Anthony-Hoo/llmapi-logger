@@ -44,7 +44,7 @@ func topHelp() string {
 }
 
 func globalFlagsHelp() string {
-	return "  --pretty                   Print a short human-readable table instead of compact JSON, for people: a list shows at most eight columns, the most useful first (requests list: audit_id, started_at, state, status_code, request_model_untrusted, path_untrusted). Parse the JSON, not this. Accepted before or after the command. Default: off.\n" +
+	return "  --pretty                   Print a short human-readable table instead of compact JSON, for people: a list shows at most eight columns, the most useful first (requests list: audit_id, started_at, state, status_code, request_model_untrusted, path_untrusted). Parse the JSON, not this. Accepted before the command, between a group and its command, or after the command, as --pretty, -pretty or --pretty=true|false; after the command wins. Default: off.\n" +
 		"  --help, -h                 Show help for the command.\n"
 }
 
