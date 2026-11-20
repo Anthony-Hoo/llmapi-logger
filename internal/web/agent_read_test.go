@@ -211,9 +211,6 @@ func (values corpus) containsSubstring(text string) bool {
 var derivedKeys = map[string]bool{
 	"state": true, "parse": true, "capture": true, "value_omitted": true, "headers_scope": true,
 	"next_cursor": true, "incomplete_reason": true, "version": true,
-	// data.exports of a detail: what each export kind gives, derived from
-	// the same detail (agentExportStates).
-	"reason": true,
 	// The root prefix of a lone agent's card, which the web's agent-tree
 	// route accepts but the web page does not link
 	// (TestAgentEverySessionCardHasAUsableTreeID).
@@ -245,6 +242,12 @@ func derivable(web corpus, path []string, key string, value any) bool {
 		return false
 	case string:
 		if typed == "" || web[typed] || derivedKeys[key] {
+			return true
+		}
+		// data.exports of a detail says what each export kind gives,
+		// derived from the same detail (agentExportStates); only its state
+		// and reason are exempt, nowhere else.
+		if key == "reason" && len(path) > 0 && path[0] == "exports" {
 			return true
 		}
 		if strings.HasSuffix(key, "_at") {
