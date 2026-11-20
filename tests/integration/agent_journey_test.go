@@ -425,7 +425,7 @@ func TestAgentJourneyAdministrator(t *testing.T) {
 
 	whoami := cli.read("whoami")
 	features, _ := whoami["features"].(map[string]any)
-	if whoami["role"] != "admin" || whoami["tier"] != "write" || whoami["device_name"] != "journey-host" ||
+	if whoami["role"] != "admin" || whoami["tier"] != "write" || whoami["device_name_untrusted"] != "journey-host" ||
 		features["insights"] != true || features["org_reports"] != true || features["session_analysis"] != true || features["write_allowed"] != true {
 		t.Fatalf("whoami %v", whoami)
 	}
@@ -627,7 +627,7 @@ func TestAgentJourneyDeveloper(t *testing.T) {
 	token := cli.savedToken()
 	whoami := cli.read("whoami")
 	identity, _ := whoami["identity"].(map[string]any)
-	if whoami["role"] != "developer" || whoami["tier"] != "read" || identity["username"] != "alpha" {
+	if whoami["role"] != "developer" || whoami["tier"] != "read" || identity["username_untrusted"] != "alpha" {
 		t.Fatalf("developer whoami %v", whoami)
 	}
 
