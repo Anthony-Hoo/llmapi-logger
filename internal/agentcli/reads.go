@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -71,8 +72,9 @@ type outSummary struct {
 // outPath resolves --out and checks, before anything is sent, that the file
 // can be written there: the directory exists and takes a new file (the
 // temporary file the atomic replace uses), the target is not a directory,
-// and on Windows an existing file is not read-only (it is opened for writing
-// and not truncated).
+// its name can be created there (a missing target is created exclusively
+// and removed), and on Windows an existing file is not read-only (it is
+// opened for writing and not truncated).
 func outPath(inv *invocation) (string, error) {
 	target, err := filepath.Abs(inv.value("out"))
 	if err != nil {
@@ -91,6 +93,26 @@ func outPath(inv *invocation) (string, error) {
 	}
 	_ = probe.Close()
 	_ = os.Remove(probePath)
+	// The longest name the write uses is the target's own (the temporary
+	// file's name is short and fixed). A name the file system cannot hold
+	// (too long in bytes on Linux, in UTF-16 units on NTFS, or not allowed
+	// there) fails only when the file is created, so a target that does not
+	// exist is created exclusively and removed again: that proves the name
+	// and leaves nothing behind. An existing target already proves it and
+	// is not touched.
+	switch _, err := os.Lstat(target); {
+	case errors.Is(err, fs.ErrNotExist):
+		created, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return "", localFileError("the --out file cannot be created in its directory: the name is too long or not allowed there", details)
+		}
+		_ = created.Close()
+		if err := os.Remove(target); err != nil {
+			return "", localFileError("the --out file cannot be created in its directory", details)
+		}
+	case err != nil:
+		return "", localFileError("the --out file name is not usable: it is too long or not allowed there", details)
+	}
 	// Windows cannot rename over a read-only file; POSIX can.
 	if info, err := os.Lstat(target); err == nil && info.Mode().IsRegular() && runtime.GOOS == "windows" {
 		existing, err := os.OpenFile(target, os.O_WRONLY, 0)

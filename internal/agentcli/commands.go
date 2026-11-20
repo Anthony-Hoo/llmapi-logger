@@ -61,7 +61,7 @@ func flagLimit(minimum, maximum, fallback int) flagSpec {
 }
 
 func flagOut(required bool, what string) flagSpec {
-	help := "Write {\"meta\": …, \"data\": …} to this file, data being " + what + " exactly as stdout would carry it (the file is replaced atomically), and print {path, bytes, sha256} with the original meta instead. The directory must exist and accept the file; this is checked before the server is asked, and an unusable --out fails with LOCAL_FILE_ERROR."
+	help := "Write {\"meta\": …, \"data\": …} to this file, data being " + what + " exactly as stdout would carry it (the file is replaced atomically), and print {path, bytes, sha256} with the original meta instead. The directory must exist and accept the file, and the name must be one the file system can hold; this is checked before the server is asked (a missing file is created and removed again), and an unusable --out fails with LOCAL_FILE_ERROR."
 	if required {
 		help += " Required."
 	} else {
@@ -214,7 +214,7 @@ func buildCommands() []*commandSpec {
 			Flags: []flagSpec{
 				{Name: "what", Value: "<what>", PathParam: "what", Required: true, Help: "conversation, headers, request, response, raw-request, raw-response, timeline-request or timeline-response. Required."},
 				{Name: "out", Value: "<file>", Required: true,
-					Help: "Write the exported content itself to this file, with no envelope around it (the file is replaced atomically), and print {path, bytes, sha256, complete, missing_chunks?} with meta.state exported. The directory must exist and accept the file; this is checked before the server is asked, and an unusable --out fails with LOCAL_FILE_ERROR. Required."},
+					Help: "Write the exported content itself to this file, with no envelope around it (the file is replaced atomically), and print {path, bytes, sha256, complete, missing_chunks?} with meta.state exported. The directory must exist and accept the file, and the name must be one the file system can hold; this is checked before the server is asked (a missing file is created and removed again), and an unusable --out fails with LOCAL_FILE_ERROR. Required."},
 			},
 			Routes:   []routeSpec{{Method: "GET", Path: "/requests/{id}/export/{what}", Raw: true}},
 			Timeout:  60 * time.Second,
