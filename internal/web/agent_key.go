@@ -18,9 +18,6 @@ import (
 // read from the body into a string that goes to the service and nowhere
 // else: no response, log line, audit row or error message contains it.
 
-// maxAgentKeyBodyBytes bounds the key and test bodies like the web route.
-const maxAgentKeyBodyBytes = maxSettingsBodyBytes
-
 const agentKeyObject = "analysis-settings"
 
 // agentTestModelBodyFields are the fields of the test-model body.

@@ -256,7 +256,12 @@ func (handler *managementHandler) serveAgentPlanApply(writer http.ResponseWriter
 // emptyAgentBody refuses a request body on an endpoint that takes none (apply
 // takes nothing but the plan id).
 func emptyAgentBody(writer http.ResponseWriter, request *http.Request) error {
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1024))
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxAgentApplyBodyBytes))
+	if err == nil {
+		if err := checkAgentBodyDepth(body); err != nil {
+			return err
+		}
+	}
 	trimmed := bytes.TrimSpace(body)
 	if err != nil || (len(trimmed) > 0 && string(trimmed) != "{}") {
 		return fieldFailure("body", reasonNotUsed, "apply takes no request body")

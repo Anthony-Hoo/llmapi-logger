@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,8 +26,6 @@ import (
 // runs, and a path that is not registered is NOT_FOUND.
 
 const agentPathPrefix = "/api/agent/"
-
-const maxAgentTokenBodyBytes = 4096
 
 // agentCall is what the dispatcher hands a facade handler. For an anonymous
 // endpoint Identity is zero and Principal unset.
@@ -367,8 +366,16 @@ func (handler *managementHandler) serveAgentToken(writer http.ResponseWriter, re
 		failure.write(writer)
 		return
 	}
-	request.Body = http.MaxBytesReader(writer, request.Body, maxAgentTokenBodyBytes)
-	decoder := json.NewDecoder(request.Body)
+	raw, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxAgentTokenBodyBytes))
+	if err != nil {
+		fieldFailure("body", reasonInvalidJSON, "the body must be exactly {\"code\": \"…\", \"code_verifier\": \"…\"}").write(writer)
+		return
+	}
+	if err := checkAgentBodyDepth(raw); err != nil {
+		agentWriteFailure(err).write(writer)
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var body struct {
 		Code         string `json:"code"`

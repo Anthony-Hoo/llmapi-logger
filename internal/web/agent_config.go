@@ -414,9 +414,12 @@ var errAgentPreviewWeek = argFormat("week", "the first day of a report week, YYY
 // list gets the same answer here and in a plan.
 func (handler *managementHandler) agentPreviewInput(writer http.ResponseWriter, request *http.Request) (orgreport.PreviewInput, error) {
 	var input orgreport.PreviewInput
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxOrgBodyBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxAgentPreviewBodyBytes))
 	if err != nil {
 		return input, argInvalid("body", reasonInvalidFormat, "the body must be one JSON object with week, group_id, rules and project_id")
+	}
+	if err := checkAgentBodyDepth(body); err != nil {
+		return input, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	var fields map[string]json.RawMessage

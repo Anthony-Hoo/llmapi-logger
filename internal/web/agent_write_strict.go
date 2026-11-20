@@ -34,24 +34,58 @@ const (
 func checkDuplicateKeys(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	path, err := duplicateKeyIn(decoder, "")
-	if err != nil || path == "" {
+	var path keyPath
+	found, err := duplicateKeyIn(decoder, &path)
+	if err != nil || !found {
 		return nil
 	}
-	return validationFailure(agentapi.CodeInvalidArgument, path, reasonDuplicateKey,
-		"the key "+strconv.Quote(lastSegment(path))+" appears more than once in one JSON object; give each field once")
+	field := path.String()
+	return validationFailure(agentapi.CodeInvalidArgument, field, reasonDuplicateKey,
+		"the key "+strconv.Quote(lastSegment(field))+" appears more than once in one JSON object; give each field once")
 }
 
-// duplicateKeyIn reads one JSON value and returns the path of the first key
-// repeated inside one of its objects, "" when there is none.
-func duplicateKeyIn(decoder *json.Decoder, path string) (string, error) {
+// keyPath is the path to a value as a stack of segments: a key, or an array
+// index when key is unset. Its text is built only for a refusal, so checking
+// a document costs memory linear in its size whatever its depth (contract
+// section 0.1 item 163).
+type keyPath []pathSegment
+
+type pathSegment struct {
+	key   string
+	index int
+	isKey bool
+}
+
+func (path *keyPath) pushKey(key string)  { *path = append(*path, pathSegment{key: key, isKey: true}) }
+func (path *keyPath) pushIndex(index int) { *path = append(*path, pathSegment{index: index}) }
+func (path *keyPath) pop()                { *path = (*path)[:len(*path)-1] }
+
+// String is the path as errors name it ("set.name", "args.labels[3].task_type").
+func (path keyPath) String() string {
+	var builder strings.Builder
+	for _, segment := range path {
+		if !segment.isKey {
+			builder.WriteString("[" + strconv.Itoa(segment.index) + "]")
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteByte('.')
+		}
+		builder.WriteString(segment.key)
+	}
+	return builder.String()
+}
+
+// duplicateKeyIn reads one JSON value and reports whether a key is repeated
+// inside one of its objects; path then ends with that key.
+func duplicateKeyIn(decoder *json.Decoder, path *keyPath) (bool, error) {
 	token, err := decoder.Token()
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	delimiter, ok := token.(json.Delim)
 	if !ok {
-		return "", nil
+		return false, nil
 	}
 	switch delimiter {
 	case '{':
@@ -59,36 +93,32 @@ func duplicateKeyIn(decoder *json.Decoder, path string) (string, error) {
 		for decoder.More() {
 			keyToken, err := decoder.Token()
 			if err != nil {
-				return "", err
+				return false, err
 			}
 			key, _ := keyToken.(string)
-			child := joinPath(path, key)
+			path.pushKey(key)
 			if seen[key] {
-				return child, nil
+				return true, nil
 			}
 			seen[key] = true
-			if found, err := duplicateKeyIn(decoder, child); err != nil || found != "" {
+			if found, err := duplicateKeyIn(decoder, path); err != nil || found {
 				return found, err
 			}
+			path.pop()
 		}
 	case '[':
 		for index := 0; decoder.More(); index++ {
-			if found, err := duplicateKeyIn(decoder, path+"["+strconv.Itoa(index)+"]"); err != nil || found != "" {
+			path.pushIndex(index)
+			if found, err := duplicateKeyIn(decoder, path); err != nil || found {
 				return found, err
 			}
+			path.pop()
 		}
 	default:
-		return "", errors.New("unexpected delimiter")
+		return false, errors.New("unexpected delimiter")
 	}
 	_, err = decoder.Token()
-	return "", err
-}
-
-func joinPath(path, key string) string {
-	if path == "" {
-		return key
-	}
-	return path + "." + key
+	return false, err
 }
 
 func lastSegment(path string) string {
@@ -109,23 +139,28 @@ func checkExactKeys(data []byte, target reflect.Type, prefix string) error {
 	if err := decoder.Decode(&value); err != nil {
 		return nil // the decoder reports it
 	}
-	if path := inexactKey(value, target, prefix); path != "" {
-		return validationFailure(agentapi.CodeInvalidArgument, path, reasonUnknownField,
-			"unknown field "+strconv.Quote(lastSegment(path))+": field names are matched exactly, with their case")
+	var path keyPath
+	if prefix != "" {
+		path.pushKey(prefix)
+	}
+	if inexactKey(value, target, &path) {
+		field := path.String()
+		return validationFailure(agentapi.CodeInvalidArgument, field, reasonUnknownField,
+			"unknown field "+strconv.Quote(lastSegment(field))+": field names are matched exactly, with their case")
 	}
 	return nil
 }
 
 var rawMessageType = reflect.TypeOf(json.RawMessage{})
 
-// inexactKey returns the path of the first key of value that names no field
-// of target exactly, "" when every key does.
-func inexactKey(value any, target reflect.Type, path string) string {
+// inexactKey reports whether some key of value names no field of target
+// exactly; path then ends with that key.
+func inexactKey(value any, target reflect.Type, path *keyPath) bool {
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
 	if target == rawMessageType {
-		return ""
+		return false
 	}
 	switch typed := value.(type) {
 	case map[string]any:
@@ -134,31 +169,33 @@ func inexactKey(value any, target reflect.Type, path string) string {
 			fields := exactJSONFields(target)
 			for _, key := range sortedKeys(typed) {
 				field, ok := fields[key]
-				child := joinPath(path, key)
-				if !ok {
-					return child
+				path.pushKey(key)
+				if !ok || inexactKey(typed[key], field, path) {
+					return true
 				}
-				if found := inexactKey(typed[key], field, child); found != "" {
-					return found
-				}
+				path.pop()
 			}
 		case reflect.Map:
 			for _, key := range sortedKeys(typed) {
-				if found := inexactKey(typed[key], target.Elem(), joinPath(path, key)); found != "" {
-					return found
+				path.pushKey(key)
+				if inexactKey(typed[key], target.Elem(), path) {
+					return true
 				}
+				path.pop()
 			}
 		}
 	case []any:
 		if target.Kind() == reflect.Slice || target.Kind() == reflect.Array {
 			for index, element := range typed {
-				if found := inexactKey(element, target.Elem(), path+"["+strconv.Itoa(index)+"]"); found != "" {
-					return found
+				path.pushIndex(index)
+				if inexactKey(element, target.Elem(), path) {
+					return true
 				}
+				path.pop()
 			}
 		}
 	}
-	return ""
+	return false
 }
 
 // exactJSONFields maps the exact JSON names of a struct's fields, the fields of

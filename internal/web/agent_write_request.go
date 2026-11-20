@@ -28,9 +28,85 @@ import (
 // names it; the values are then decoded strictly into the services' patch
 // types, which do every value check.
 
-// maxAgentPlanBodyBytes is the largest plan request: a calibration of 1000
-// labels, like the web route.
-const maxAgentPlanBodyBytes = 512 << 10
+// The request body limits of the facade, all of them stated here (contract
+// section 0.1 item 163). Every endpoint whose method carries a body is in
+// agentBodyLimits; the GET endpoints and logout do not read one.
+const (
+	// POST /token: {"code", "code_verifier"}.
+	maxAgentTokenBodyBytes = 4 << 10
+	// POST /plans: a calibration of 1000 labels, like the web route.
+	maxAgentPlanBodyBytes = 512 << 10
+	// POST /plans/{plan_id}/apply: nothing, or {}.
+	maxAgentApplyBodyBytes = 1 << 10
+	// PUT /config/analysis-settings/api-key and POST /analysis/test-model:
+	// like the web route's settings body (16 KiB).
+	maxAgentKeyBodyBytes = maxSettingsBodyBytes
+	// POST /config/project-preview: like the web route (64 KiB).
+	maxAgentPreviewBodyBytes = maxOrgBodyBytes
+)
+
+// agentBodyLimits maps every facade endpoint whose method carries a body to
+// its limit; 0 is an endpoint that does not read its body.
+var agentBodyLimits = map[string]int64{
+	"token.exchange":            maxAgentTokenBodyBytes,
+	"logout":                    0,
+	agentapi.EndpointPlanCreate: maxAgentPlanBodyBytes,
+	agentapi.EndpointPlanApply:  maxAgentApplyBodyBytes,
+	agentapi.EndpointAPIKeySet:  maxAgentKeyBodyBytes,
+	agentapi.EndpointTestModel:  maxAgentKeyBodyBytes,
+	"config.project-preview":    maxAgentPreviewBodyBytes,
+}
+
+// maxAgentBodyDepth is the deepest nesting of objects and arrays a facade
+// request body may have. The deepest legitimate input (a project rule in a
+// plan's set, add or remove, a calibration label) has four levels; a deeper
+// body is refused before any other check reads it, so the checks below
+// never see more than this many levels.
+const maxAgentBodyDepth = 32
+
+const reasonTooDeeplyNested = "too_deeply_nested"
+
+// jsonDepth is the deepest nesting of objects and arrays in data, counted in
+// one pass without allocating; brackets inside strings do not count. It does
+// not check that data is JSON.
+func jsonDepth(data []byte) int {
+	depth, deepest := 0, 0
+	inString, escaped := false, false
+	for _, character := range data {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case character == '\\':
+				escaped = true
+			case character == '"':
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > deepest {
+				deepest = depth
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return deepest
+}
+
+// checkAgentBodyDepth refuses a body nested deeper than maxAgentBodyDepth.
+func checkAgentBodyDepth(body []byte) error {
+	if jsonDepth(body) > maxAgentBodyDepth {
+		return fieldFailure("body", reasonTooDeeplyNested,
+			"the request body nests objects and arrays more than "+strconv.Itoa(maxAgentBodyDepth)+" levels deep")
+	}
+	return nil
+}
 
 // agentPlanRequest is a decoded POST /plans body.
 type agentPlanRequest struct {
@@ -65,7 +141,8 @@ var planArgs = map[string][]string{
 }
 
 // readAgentBody reads a JSON body of at most limit bytes and checks that it
-// is exactly one JSON value in which no object repeats a key.
+// nests at most maxAgentBodyDepth levels and is exactly one JSON value in
+// which no object repeats a key.
 func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int64) ([]byte, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, limit))
 	if err != nil {
@@ -73,6 +150,9 @@ func readAgentBody(writer http.ResponseWriter, request *http.Request, limit int6
 		if errors.As(err, &tooLarge) {
 			return nil, fieldFailure("body", reasonTooLarge, "the request body is too large")
 		}
+		return nil, err
+	}
+	if err := checkAgentBodyDepth(body); err != nil {
 		return nil, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
