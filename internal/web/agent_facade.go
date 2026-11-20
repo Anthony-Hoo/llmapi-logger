@@ -398,14 +398,29 @@ type agentFeatures struct {
 	WriteAllowed    bool `json:"write_allowed"`
 }
 
+// agentWhoamiResponse is the whoami result. The device name (typed by a
+// user on the authorization page) and the developer's user and token names
+// (reported by the gateway) are text written by other people: they sit
+// under keys ending in _untrusted and the response carries the notice
+// (contract section 0.1 items 24, 98 and 134).
 type agentWhoamiResponse struct {
-	Role       agentapi.Role      `json:"role"`
-	Tier       agentapi.Tier      `json:"tier"`
-	ExpiresAt  string             `json:"expires_at"`
-	DeviceName string             `json:"device_name"`
-	Identity   *developerIdentity `json:"identity,omitempty"`
-	Features   agentFeatures      `json:"features"`
-	ServerTime string             `json:"server_time"`
+	Role       agentapi.Role        `json:"role"`
+	Tier       agentapi.Tier        `json:"tier"`
+	ExpiresAt  string               `json:"expires_at"`
+	DeviceName string               `json:"device_name_untrusted"`
+	Identity   *agentWhoamiIdentity `json:"identity,omitempty"`
+	Features   agentFeatures        `json:"features"`
+	ServerTime string               `json:"server_time"`
+}
+
+// agentWhoamiIdentity is the developer identity of whoami: the fields of
+// developerIdentity (which the web session and the token exchange keep
+// answering unchanged), with the names marked.
+type agentWhoamiIdentity struct {
+	UserID    int64  `json:"user_id,omitempty"`
+	Username  string `json:"username_untrusted,omitempty"`
+	TokenID   *int64 `json:"token_id,omitempty"`
+	TokenName string `json:"token_name_untrusted,omitempty"`
 }
 
 // serveAgentWhoami describes the calling token. It is a read result and so
@@ -416,11 +431,15 @@ func (handler *managementHandler) serveAgentWhoami(writer http.ResponseWriter, r
 		return
 	}
 	identity := call.Identity
-	writeAgentOK(writer, agentapi.ReadSuccess(agentWhoamiResponse{
+	var who *agentWhoamiIdentity
+	if view := agentIdentityView(identity); view != nil {
+		who = &agentWhoamiIdentity{UserID: view.UserID, Username: view.Username, TokenID: view.TokenID, TokenName: view.TokenName}
+	}
+	envelope := agentapi.ReadSuccess(agentWhoamiResponse{
 		Role: identity.Role, Tier: identity.Tier,
 		ExpiresAt:  identity.ExpiresAt.UTC().Format(time.RFC3339),
 		DeviceName: identity.DeviceName,
-		Identity:   agentIdentityView(identity),
+		Identity:   who,
 		Features: agentFeatures{
 			Insights: handler.insights != nil, OrgReports: handler.org != nil,
 			SessionAnalysis: handler.sessionAnalysis != nil,
@@ -429,7 +448,10 @@ func (handler *managementHandler) serveAgentWhoami(writer http.ResponseWriter, r
 			WriteAllowed: handler.agent.AllowWrite() && identity.Role == agentapi.RoleAdmin,
 		},
 		ServerTime: handler.agent.Now().UTC().Format(time.RFC3339),
-	}, agentapi.Meta{State: "authenticated", Complete: true}))
+	}, agentapi.Meta{State: "authenticated", Complete: true})
+	// Every whoami has a device name, so every whoami has the notice.
+	envelope.Notice = agentapi.UntrustedNotice
+	writeAgentOK(writer, envelope)
 }
 
 // serveAgentLogout revokes the calling token.

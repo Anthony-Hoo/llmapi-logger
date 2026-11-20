@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -973,5 +974,54 @@ func TestNoAgentSecretLeaks(t *testing.T) {
 	}
 	if !strings.Contains(audit, "token_issued") || !strings.Contains(audit, "authorize_approved") {
 		t.Fatalf("audit rows missing: %s", audit)
+	}
+}
+
+// Contract section 0.1 item 134: whoami's device name (typed by a user) and
+// a developer's user and token names (reported by the gateway) are text
+// written by other people. They sit only under keys ending in _untrusted,
+// and every whoami carries the notice, for an administrator and a
+// developer alike.
+func TestWhoamiMarksThirdPartyNames(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{allowWrite: true})
+	ctx := context.Background()
+	request := agentaccesstest.Request(agentapi.TierRead)
+	request.DeviceName = "laptop-" + sweepMarker
+	scope := agentaccesstest.DeveloperScope(0x31, 42)
+	scope.Username, scope.TokenName = "user-"+sweepMarker, "token-"+sweepMarker
+	for name, grantor := range map[string]agentaccess.Grantor{
+		"administrator": {Role: agentapi.RoleAdmin},
+		"developer":     {Role: agentapi.RoleDeveloper, Scope: scope, SessionExpiresAt: time.Now().Add(time.Hour)},
+	} {
+		authorization, err := env.service.Approve(ctx, grantor, request, "192.0.2.40")
+		if err != nil {
+			t.Fatal(err)
+		}
+		issued, err := env.service.Exchange(ctx, authorization.Code, agentaccesstest.Verifier, "192.0.2.40", agentaccess.RequestMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := env.do(http.MethodGet, agentapi.PathPrefix+"/whoami", "", agentCaller{bearer: issued.Token}, agentapi.HeaderCLIVersion, agentapi.LatestVersion)
+		var decoded map[string]any
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &decoded) != nil {
+			t.Fatalf("%s whoami = %d %s", name, response.Code, response.Body.String())
+		}
+		var leaks []string
+		untrustedLeaks(decoded, "", "", &leaks)
+		if len(leaks) != 0 {
+			t.Errorf("%s: names under plain keys at %v", name, leaks)
+		}
+		if decoded["notice"] != agentapi.UntrustedNotice || !hasUntrustedKey(decoded["data"]) {
+			t.Errorf("%s whoami = %s", name, response.Body.String())
+		}
+		want := []string{`"device_name_untrusted":"laptop-` + sweepMarker}
+		if name == "developer" {
+			want = append(want, `"username_untrusted":"user-`+sweepMarker, `"token_name_untrusted":"token-`+sweepMarker)
+		}
+		for _, fragment := range want {
+			if !strings.Contains(response.Body.String(), fragment) {
+				t.Errorf("%s whoami lacks %s: %s", name, fragment, response.Body.String())
+			}
+		}
 	}
 }
