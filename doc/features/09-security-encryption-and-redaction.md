@@ -4,7 +4,7 @@
 
 本模块解决四件事：敏感审计数据落盘加密、内容对象的认证与哈希校验、append-only 防篡改事件链，以及管理面/普通日志的明文边界。
 
-项目仍按单用户单机模型设计：一把 32-byte 主密钥、一个 SQLite 数据库和一个静态管理 token。取得主机管理员权限、数据库和主密钥的攻击者不在首版防护范围内。
+项目仍按单用户单机模型设计：一把 32-byte 主密钥、一个 SQLite 数据库和一个静态管理 token。管理 token 不再是唯一的管理面凭据：网页会话 Cookie 由它登录换取，可选的开发者登录（[模块 19](19-developer-key-session.md)）与 Agent 接入（[模块 25](25-agent-access.md)，默认关闭）另有自己的凭据，但三者的签名或摘要密钥都由 `admin_token` 按用途标签派生，轮换 `admin_token` 仍是让它们全部失效的总开关。取得主机管理员权限、数据库和主密钥的攻击者不在首版防护范围内。
 
 ## 2. 管理面边界
 
@@ -16,6 +16,13 @@
 - 管理 JSON、错误、raw、reconstructed 和 timeline 响应全部 `Cache-Control: no-store`。
 
 前端不把 token 写入 localStorage、sessionStorage、IndexedDB、URL 或 Service Worker。缺失或错误凭证统一返回通用 `401`。
+
+**Agent 令牌**（模块 25，`agent_access.enabled` 默认关闭；关闭时下面的路径都不存在）：
+
+- 第三种凭据，只能调用 `/api/agent/v1/*`；`/api/v1/*` 不接受它，门面也不接受管理 token 与 Cookie。格式为 `lla_` 加 32 字节随机数，库里只存 `HMAC-SHA-256(K, token)`，`K` 由 `admin_token` 加用途标签派生；明文只在兑换响应里出现一次，由命令行存进本机仅本人可读的凭据文件。
+- 令牌由网页会话经授权确认页签发，身份与可见范围同签发它的会话（开发者令牌只能是只读档），不续期；可在“Agent 接入”页撤销。校验失败按来源地址单独限流。
+- 两条匿名路径：`POST /api/agent/v1/token`（以一次性授权码加 PKCE 校验串兑换令牌，失败另行限流）与 `GET /api/agent/v1/dl/<签名>/<文件名>`（凭 30 分钟有效的签名链接下载 Skill 安装包，签名密钥同样由 `admin_token` 派生，每条链接最多下载 30 次，只能取清单与清单里列出的包）。两者都不返回任何审计数据。
+- 门面输出里凭据类 Header 与查询参数的值一律不输出，只给名称和长度；分析模型的 API Key 只能由用户在终端里不回显地输入，不经过 Agent。细节见[接口合同](25-agent-access-contract.md)。
 
 ## 3. 主密钥
 

@@ -342,6 +342,24 @@ LIMIT $3`, arguments...)
 	return out, rows.Err()
 }
 
+// SuggestionExists reports whether suggestion id exists in one of scopes:
+// the read-only twin of DismissSuggestion's WHERE clause, so that a caller can
+// tell before dismissing whether the dismissal would find its row.
+func (store *Store) SuggestionExists(ctx context.Context, id int64, scopes []string) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return false, ErrClosed
+	}
+	var exists bool
+	if err := store.readerDB.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM analysis_suggestions WHERE id = $1 AND scope = ANY($2::text[]))`, id, scopes).Scan(&exists); err != nil {
+		return false, fmt.Errorf("postgres: check suggestion: %w", err)
+	}
+	return exists, nil
+}
+
 // DismissSuggestion marks one suggestion of a scope dismissed. It returns
 // sql.ErrNoRows when no such suggestion exists in that scope.
 func (store *Store) DismissSuggestion(ctx context.Context, id int64, scope string, nowNS int64) error {

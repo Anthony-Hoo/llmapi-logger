@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/contentpolicy"
@@ -50,6 +51,7 @@ type App struct {
 	orgReports      *orgreport.Service
 	retention       *retention.Runner
 	sessionRunner   *sessionanalysis.Runner
+	agentAccess     *agentaccess.Service
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
 	auditStore      runtimeStore
@@ -291,19 +293,23 @@ func installInsights(worker *parser.Worker, store runtimeStore, cipher security.
 }
 
 // New assembles the route matcher, interceptor engine, and reverse proxy.
-func New(configuration config.Config, logger *slog.Logger) (*App, error) {
-	return NewContext(context.Background(), configuration, logger)
+func New(configuration config.Config, logger *slog.Logger, options ...Option) (*App, error) {
+	return NewContext(context.Background(), configuration, logger, options...)
 }
 
 // NewContext assembles the application using the caller's lifecycle context
 // for startup database work. It deliberately adds no fixed deadline: full
 // integrity verification grows with retained history and must either finish,
 // fail validation, or be explicitly cancelled.
-func NewContext(ctx context.Context, configuration config.Config, logger *slog.Logger) (*App, error) {
-	return newContextWithStore(ctx, configuration, logger, openPostgres)
+func NewContext(ctx context.Context, configuration config.Config, logger *slog.Logger, options ...Option) (*App, error) {
+	return newContextWithStore(ctx, configuration, logger, openPostgres, options...)
 }
 
-func newContextWithStore(ctx context.Context, configuration config.Config, logger *slog.Logger, open storeOpener) (*App, error) {
+func newContextWithStore(ctx context.Context, configuration config.Config, logger *slog.Logger, open storeOpener, options ...Option) (*App, error) {
+	var seams assemblyOptions
+	for _, option := range options {
+		option(&seams)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -499,9 +505,22 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		}
 	}
 
+	developerLogin := developerLoginOptions(configuration, runtime.fingerprints)
+	// Agent access stays entirely unassembled when disabled: no service, no
+	// in-memory state, and the facade answers FEATURE_DISABLED.
+	agentAccess, err := assembleAgentAccess(configuration, runtime.store, developerLogin, logger)
+	if err != nil {
+		_ = application.closeComponents()
+		return nil, fmt.Errorf("assemble agent access: %w", err)
+	}
+	// Closed with the other components: its background work (a retried
+	// token revocation) ends before the store is closed.
+	application.agentAccess = agentAccess
+	agentDist := assembleAgentDist(configuration, agentAccess, seams.agentPackageDir, logger)
+
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
-		Developer:  developerLoginOptions(configuration, runtime.fingerprints),
+		Developer:  developerLogin,
 		Query:      queryService,
 		Insights:   insightsService, // context insights (WP2)
 		Users:      newAPIClient,
@@ -516,6 +535,11 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		SessionAnalysisSettings: sessionAnalysisSettings,
 
 		InjectedUserTextPrefixes: uiVocabulary(vocabulary).InjectedUserTextPrefixes(),
+
+		AgentAccess:    agentAccess,
+		AgentDist:      agentDist,
+		AgentPublicURL: configuration.AgentAccess.PublicURL,
+		RetentionDays:  configuration.RetentionDays,
 	})
 	if err != nil {
 		_ = application.closeComponents()
@@ -740,6 +764,9 @@ func (application *App) closeComponents() error {
 		}
 		if application.orgReports != nil {
 			application.orgReports.WaitSnapshots()
+		}
+		if application.agentAccess != nil {
+			application.agentAccess.Close()
 		}
 		if application.callerWorker != nil {
 			application.callerWorker.Close()

@@ -85,6 +85,11 @@ type InsightsUsageRow struct {
 	// actual billing; CostUSD sums their quota / quota_per_unit and is nil
 	// when there is none (doc/features/21-newapi-billing.md).
 	BilledRequests int64
+	// PendingBilling counts the requests whose token link still waits for
+	// NewAPI's billing (billing_state unchecked, links written before billing
+	// was recorded). A link billed or unbilled is final, and so is a request
+	// without a link: the rule billing_final of the agent facade uses.
+	PendingBilling int64
 	CostUSD        *float64
 	UncachedInput  int64
 	CacheRead      int64

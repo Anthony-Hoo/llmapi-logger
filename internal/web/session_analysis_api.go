@@ -102,10 +102,17 @@ func (handler *managementHandler) sessionAnalysisUser(writer http.ResponseWriter
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid session analysis query")
 		return nil, false
 	}
-	if userID != nil && !handler.requireAdmin(writer, request) {
+	if requireAdministratorSelector(requestPrincipal(request), userID != nil) != nil {
+		writeAdministratorRequired(writer)
 		return nil, false
 	}
 	return userID, true
+}
+
+// writeAdministratorRequired is requireAdmin's 403 for a decision taken by a
+// shared access rule.
+func writeAdministratorRequired(writer http.ResponseWriter) {
+	writeError(writer, http.StatusForbidden, "forbidden", "administrator session required")
 }
 
 // serveSessionAnalysisUsers returns the session totals of a period per NewAPI
@@ -206,15 +213,7 @@ func (handler *managementHandler) serveSessionAnalysisRun(writer http.ResponseWr
 // sessionViewer describes the caller for the analysis view log.
 func (handler *managementHandler) sessionViewer(request *http.Request) sessionanalysis.Viewer {
 	caller, ok := principalFrom(request.Context())
-	if !ok || caller.Role != roleDeveloper {
-		return sessionanalysis.Viewer{Role: "admin"}
-	}
-	viewer := sessionanalysis.Viewer{Role: "developer", TokenID: caller.Identity.TokenID}
-	if caller.Identity.UserID != 0 {
-		userID := caller.Identity.UserID
-		viewer.UserID = &userID
-	}
-	return viewer
+	return analysisViewer(caller, ok)
 }
 
 // serveSessionAnalysisPack returns the decrypted input pack of one session;
@@ -322,7 +321,8 @@ func (handler *managementHandler) serveSessionAnalysisReport(writer http.Respons
 		return
 	}
 	// A project, group or user report reads other people's sessions.
-	if selectors == 1 && !handler.requireAdmin(writer, request) {
+	if requireAdministratorSelector(requestPrincipal(request), selectors == 1) != nil {
+		writeAdministratorRequired(writer)
 		return
 	}
 	ctx, cancel := handler.insightsContext(request)

@@ -61,6 +61,13 @@ type SettingsView struct {
 // limits.
 var ErrInvalidSettings = errors.New("orgreport: invalid settings")
 
+// ErrSettingsUnavailable wraps a failure to read the saved section from the
+// store (not a missing row, nor a row that no longer decodes or validates).
+// Reads then run on the configuration file; every write refuses with it and
+// saves nothing, because a write that started from the file's values would
+// save them over the administrator's saved section.
+var ErrSettingsUnavailable = errors.New("orgreport: saved settings could not be read")
+
 // SettingsMessage returns the field message of an ErrInvalidSettings error,
 // and "" for any other error.
 func SettingsMessage(err error) string {
@@ -105,7 +112,7 @@ func overlaySettings(file config.OrgReportsConfig, edited EditableSettings) conf
 // page cannot edit from the settings in use.
 func (service *Service) settingsFor(candidate config.OrgReportsConfig) (Settings, error) {
 	if err := config.ValidateOrgReportsRuntime(candidate); err != nil {
-		return Settings{}, fmt.Errorf("%w: %s", ErrInvalidSettings, err.Error())
+		return Settings{}, settingsError(ReasonInvalidValue, err.Error())
 	}
 	next := service.settingsNow()
 	next.IdleGap = time.Duration(candidate.IdleGapSeconds) * time.Second
@@ -128,7 +135,7 @@ func (service *Service) readSaved(ctx context.Context) (config.OrgReportsConfig,
 		return service.file, 0, nil
 	}
 	if err != nil {
-		return service.file, 0, err
+		return service.file, 0, fmt.Errorf("%w: %w", ErrSettingsUnavailable, err)
 	}
 	var edited EditableSettings
 	decoder := json.NewDecoder(strings.NewReader(row.Settings))
@@ -144,6 +151,9 @@ func (service *Service) readSaved(ctx context.Context) (config.OrgReportsConfig,
 // on the file's values.
 func (service *Service) loadSavedSettings(ctx context.Context) {
 	candidate, updatedNS, err := service.readSaved(ctx)
+	if err == nil {
+		service.settingsNS = updatedNS
+	}
 	if err == nil && updatedNS != 0 {
 		var next Settings
 		if next, err = service.settingsFor(candidate); err == nil {
@@ -198,7 +208,27 @@ func (service *Service) settingsView(effective config.OrgReportsConfig, updatedN
 func (service *Service) EditableSettings(ctx context.Context) (SettingsView, error) {
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
+	effective, updatedNS := service.currentSettings(ctx)
+	return service.settingsView(effective, updatedNS), nil
+}
+
+// currentSettings returns the section in use and its version (the saved
+// row's time, 0 when the file applies). The caller holds settingsMu.
+func (service *Service) currentSettings(ctx context.Context) (config.OrgReportsConfig, int64) {
+	effective, updatedNS, _ := service.currentSettingsFor(ctx, false)
+	return effective, updatedNS
+}
+
+// currentSettingsFor is currentSettings for a read (write false: a store
+// read failure falls back to the file) or a write (write true: it fails with
+// ErrSettingsUnavailable instead). A row that was read but cannot be used is
+// the file-applies state for both and stays writable. The caller holds
+// settingsMu.
+func (service *Service) currentSettingsFor(ctx context.Context, write bool) (config.OrgReportsConfig, int64, error) {
 	effective, updatedNS, err := service.readSaved(ctx)
+	if write && errors.Is(err, ErrSettingsUnavailable) {
+		return config.OrgReportsConfig{}, 0, err
+	}
 	if err == nil && updatedNS != 0 {
 		_, err = service.settingsFor(effective)
 	}
@@ -206,7 +236,16 @@ func (service *Service) EditableSettings(ctx context.Context) (SettingsView, err
 		// The saved section is unusable; the service runs on the file.
 		effective, updatedNS = service.file, 0
 	}
-	return service.settingsView(effective, updatedNS), nil
+	return effective, updatedNS, nil
+}
+
+// checkSavedReadable refuses a write while the saved section cannot be read
+// from the store. The web routes replace or drop the whole section without
+// starting from it, but they refuse the same way as every other write, so
+// that no write lands while the stored state is unknown.
+func (service *Service) checkSavedReadable(ctx context.Context) error {
+	_, _, err := service.currentSettingsFor(ctx, true)
+	return err
 }
 
 // UpdateSettings validates, saves and applies a change. Weeks that are not
@@ -218,6 +257,9 @@ func (service *Service) UpdateSettings(ctx context.Context, edited EditableSetti
 	}
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
+	if err := service.checkSavedReadable(ctx); err != nil {
+		return SettingsView{}, err
+	}
 	candidate := overlaySettings(service.file, edited)
 	next, err := service.settingsFor(candidate)
 	if err != nil {
@@ -225,17 +267,39 @@ func (service *Service) UpdateSettings(ctx context.Context, edited EditableSetti
 	}
 	// The configuration file may list any well-formed key; the page only
 	// saves clients a request can actually be attributed to.
-	if unknown := service.unknownClients(candidate.RankedClients); len(unknown) != 0 {
-		return SettingsView{}, fmt.Errorf("%w: org_reports.ranked_clients entry %q is not a client of the vocabulary", ErrInvalidSettings, unknown[0])
+	if err := service.checkVocabulary(candidate.RankedClients); err != nil {
+		return SettingsView{}, err
 	}
+	return service.saveSettings(ctx, candidate, next, 0)
+}
+
+// checkVocabulary refuses ranked clients the vocabulary does not know.
+func (service *Service) checkVocabulary(clients []string) error {
+	if unknown := service.unknownClients(clients); len(unknown) != 0 {
+		failure := settingsError(ReasonUnknownClient, fmt.Sprintf("org_reports.ranked_clients entry %q is not a client of the vocabulary", unknown[0]))
+		for _, client := range service.clients {
+			failure.Allowed = append(failure.Allowed, client.Key)
+		}
+		return failure
+	}
+	return nil
+}
+
+// saveSettings stores and applies a validated candidate. The version it
+// stamps is the clock, raised above every version this process has stored
+// or read and above minimum, so two successive saves never share one. The
+// caller holds settingsMu.
+func (service *Service) saveSettings(ctx context.Context, candidate config.OrgReportsConfig, next Settings, minimum int64) (SettingsView, error) {
 	encoded, err := json.Marshal(editableOf(candidate))
 	if err != nil {
 		return SettingsView{}, err
 	}
-	row := storage.RuntimeSettings{Section: storage.SettingsOrgReports, Settings: string(encoded), UpdatedAtNS: service.now().UnixNano()}
+	version := max(service.now().UnixNano(), service.settingsNS+1, minimum)
+	row := storage.RuntimeSettings{Section: storage.SettingsOrgReports, Settings: string(encoded), UpdatedAtNS: version}
 	if err := service.saved.SaveRuntimeSettings(ctx, row); err != nil {
 		return SettingsView{}, err
 	}
+	service.settingsNS = version
 	service.applySettings(next)
 	service.logger.Info("org report settings saved")
 	return service.settingsView(candidate, row.UpdatedAtNS), nil
@@ -248,6 +312,14 @@ func (service *Service) ResetSettings(ctx context.Context) (SettingsView, error)
 	}
 	service.settingsMu.Lock()
 	defer service.settingsMu.Unlock()
+	if err := service.checkSavedReadable(ctx); err != nil {
+		return SettingsView{}, err
+	}
+	return service.resetSettings(ctx)
+}
+
+// resetSettings is ResetSettings with settingsMu held.
+func (service *Service) resetSettings(ctx context.Context) (SettingsView, error) {
 	next, err := service.settingsFor(service.file)
 	if err != nil {
 		return SettingsView{}, err

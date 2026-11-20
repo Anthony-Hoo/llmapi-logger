@@ -350,21 +350,31 @@ func (service *QueryService) Overview(ctx context.Context, fromNS, toNS int64, s
 	if service.trigger != nil {
 		response.Running = service.trigger.Running()
 	}
-	run, err := service.store.LatestSessionAnalysisRun(ctx)
-	if err == nil {
-		summary := RunSummary{
-			StartedNS: run.StartedAtNS, FinishedNS: run.FinishedAtNS, Trigger: run.Trigger,
-			Candidates: run.Candidates, Analyzed: run.Analyzed, Skipped: run.Skipped, Error: run.ErrorCategory,
-			FacetsDue: run.L1Candidates, FacetsOK: run.L1OK, FacetsBad: run.L1Invalid, FacetsError: run.L1Failed,
-			ModelInput: run.L1InputTokens, ModelOutput: run.L1OutputToks,
-			SkipReasons: map[string]int64{},
-		}
-		_ = json.Unmarshal([]byte(run.SkipReasons), &summary.SkipReasons)
-		response.LastRun = &summary
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	response.LastRun, err = service.lastRun(ctx)
+	if err != nil {
 		return OverviewResponse{}, err
 	}
 	return response, nil
+}
+
+// lastRun reads the latest batch run; nil when there has been none.
+func (service *QueryService) lastRun(ctx context.Context) (*RunSummary, error) {
+	run, err := service.store.LatestSessionAnalysisRun(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	summary := RunSummary{
+		StartedNS: run.StartedAtNS, FinishedNS: run.FinishedAtNS, Trigger: run.Trigger,
+		Candidates: run.Candidates, Analyzed: run.Analyzed, Skipped: run.Skipped, Error: run.ErrorCategory,
+		FacetsDue: run.L1Candidates, FacetsOK: run.L1OK, FacetsBad: run.L1Invalid, FacetsError: run.L1Failed,
+		ModelInput: run.L1InputTokens, ModelOutput: run.L1OutputToks,
+		SkipReasons: map[string]int64{},
+	}
+	_ = json.Unmarshal([]byte(run.SkipReasons), &summary.SkipReasons)
+	return &summary, nil
 }
 
 func mapTotals(totals storage.SessionSignalTotals) SignalTotals {

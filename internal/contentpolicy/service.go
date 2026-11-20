@@ -55,6 +55,8 @@ type Service struct {
 	mu         sync.Mutex
 	current    atomic.Pointer[snapshot]
 	now        func() time.Time
+	// stamped is the last version timestamp issued, guarded by mu.
+	stamped int64
 }
 
 // New loads and compiles persisted rules. A nil repository is supported for
@@ -248,6 +250,13 @@ func (service *Service) Create(ctx context.Context, input RuleInput) (Rule, erro
 	if _, err := compileRule(rule); err != nil {
 		return Rule{}, err
 	}
+	return service.commitCreate(ctx, rule)
+}
+
+// commitCreate persists a validated new rule and publishes it. The caller
+// holds service.mu.
+func (service *Service) commitCreate(ctx context.Context, rule Rule) (Rule, error) {
+	var err error
 	if service.repository != nil {
 		rule, err = service.repository.CreateContentPolicyRule(ctx, rule)
 		if err != nil {
@@ -301,6 +310,12 @@ func (service *Service) Update(ctx context.Context, id int64, input RuleInput) (
 	if _, err := compileRule(rule); err != nil {
 		return Rule{}, err
 	}
+	return service.commitUpdate(ctx, rules, index, rule)
+}
+
+// commitUpdate persists a validated replacement of rules[index] and publishes
+// the result. The caller holds service.mu.
+func (service *Service) commitUpdate(ctx context.Context, rules []Rule, index int, rule Rule) (Rule, error) {
 	if service.repository != nil {
 		persisted, err := service.repository.UpdateContentPolicyRule(ctx, rule)
 		if err != nil {
@@ -339,6 +354,12 @@ func (service *Service) Delete(ctx context.Context, id int64) error {
 	if index < 0 {
 		return ErrNotFound
 	}
+	return service.commitDelete(ctx, rules, index, id)
+}
+
+// commitDelete persists the removal of rules[index] and publishes the reduced
+// snapshot. The caller holds service.mu.
+func (service *Service) commitDelete(ctx context.Context, rules []Rule, index int, id int64) error {
 	if service.repository != nil {
 		if err := service.repository.DeleteContentPolicyRule(ctx, id); err != nil {
 			return err
@@ -353,8 +374,11 @@ func (service *Service) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
+// timestamp stamps a write: the clock, raised above every rule's version and
+// above every stamp this service has issued (stamped), so a version is never
+// reused. The caller holds service.mu.
 func (service *Service) timestamp() int64 {
-	now := service.now().UnixNano()
+	now := max(service.now().UnixNano(), service.stamped+1)
 	current := service.current.Load()
 	if current != nil {
 		for _, rule := range current.public {
@@ -363,6 +387,7 @@ func (service *Service) timestamp() int64 {
 			}
 		}
 	}
+	service.stamped = now
 	return now
 }
 
@@ -390,22 +415,49 @@ func compileSnapshot(rules []Rule) (*snapshot, error) {
 	return result, nil
 }
 
+// The validation functions below return *ValidationError values whose text
+// is exactly the "%w: message" form earlier releases returned; callers that
+// only test errors.Is(err, ErrInvalidRule) see no difference.
+
+func checkName(name string) error {
+	message := fmt.Sprintf("name is required and must be at most %d bytes", MaxNameBytes)
+	switch {
+	case name == "":
+		return invalidField("name", ReasonEmpty, message)
+	case len(name) > MaxNameBytes:
+		return invalidField("name", ReasonTooLong, message)
+	case strings.ContainsRune(name, '\x00'):
+		return invalidField("name", ReasonInvalidCharacter, message)
+	}
+	return nil
+}
+
+func checkModelPattern(pattern string) error {
+	message := fmt.Sprintf("model pattern must not have surrounding whitespace and must be at most %d bytes", MaxModelPatternBytes)
+	if strings.TrimSpace(pattern) != pattern {
+		return invalidField("model_pattern", ReasonSurroundingWhitespace, message)
+	}
+	if len(pattern) > MaxModelPatternBytes {
+		return invalidField("model_pattern", ReasonTooLong, message)
+	}
+	return nil
+}
+
 func compileRule(rule Rule) (capturedRule, error) {
-	name := rule.Name
-	if name == "" || len(name) > MaxNameBytes || strings.ContainsRune(name, '\x00') {
-		return capturedRule{}, fmt.Errorf("%w: name is required and must be at most %d bytes", ErrInvalidRule, MaxNameBytes)
+	if err := checkName(rule.Name); err != nil {
+		return capturedRule{}, err
 	}
 	if !ValidAction(rule.Action) {
-		return capturedRule{}, fmt.Errorf("%w: action must be block or dry_run", ErrInvalidRule)
+		return capturedRule{}, invalidField("action", ReasonInvalidValue, "action must be block or dry_run")
 	}
-	if strings.TrimSpace(rule.ModelPattern) != rule.ModelPattern || len(rule.ModelPattern) > MaxModelPatternBytes {
-		return capturedRule{}, fmt.Errorf("%w: model pattern must not have surrounding whitespace and must be at most %d bytes", ErrInvalidRule, MaxModelPatternBytes)
+	if err := checkModelPattern(rule.ModelPattern); err != nil {
+		return capturedRule{}, err
 	}
 	var model *regexp.Regexp
 	if rule.ModelPattern != "" {
 		compiled, err := regexp.Compile(rule.ModelPattern)
 		if err != nil {
-			return capturedRule{}, fmt.Errorf("%w: invalid model regular expression", ErrInvalidRule)
+			return capturedRule{}, invalidField("model_pattern", ReasonInvalidRegexp, "invalid model regular expression")
 		}
 		model = compiled
 	}
@@ -419,18 +471,18 @@ func compileRule(rule Rule) (capturedRule, error) {
 		return capturedRule{}, err
 	}
 	if len(keywords) == 0 {
-		return capturedRule{}, fmt.Errorf("%w: at least one keyword is required", ErrInvalidRule)
+		return capturedRule{}, invalidField("keywords", ReasonEmpty, "at least one keyword is required")
 	}
 	scopeJSON, err := json.Marshal(scopes)
 	if err != nil || len(scopeJSON) > MaxScanScopesJSON {
-		return capturedRule{}, fmt.Errorf("%w: scan scopes are too large", ErrInvalidRule)
+		return capturedRule{}, invalidField("scan_scopes", ReasonTooLong, "scan scopes are too large")
 	}
 	keywordJSON, err := json.Marshal(keywords)
 	if err != nil || len(keywordJSON) > MaxKeywordsJSONBytes {
-		return capturedRule{}, fmt.Errorf("%w: keywords exceed the size limit", ErrInvalidRule)
+		return capturedRule{}, invalidField("keywords", ReasonTooLong, "keywords exceed the size limit")
 	}
 	if rule.CreatedAtNS <= 0 || rule.UpdatedAtNS < rule.CreatedAtNS {
-		return capturedRule{}, fmt.Errorf("%w: invalid rule timestamps", ErrInvalidRule)
+		return capturedRule{}, invalidField("", ReasonInvalidValue, "invalid rule timestamps")
 	}
 	scopeSet := make(map[string]struct{}, len(scopes))
 	for _, scope := range scopes {
@@ -446,19 +498,19 @@ func compileRule(rule Rule) (capturedRule, error) {
 
 func normalizeInput(input RuleInput) (RuleInput, error) {
 	name := strings.TrimSpace(input.Name)
-	if name == "" || len(name) > MaxNameBytes || strings.ContainsRune(name, '\x00') {
-		return RuleInput{}, fmt.Errorf("%w: name is required and must be at most %d bytes", ErrInvalidRule, MaxNameBytes)
+	if err := checkName(name); err != nil {
+		return RuleInput{}, err
 	}
 	action := strings.TrimSpace(input.Action)
 	if action == "" {
 		action = ActionBlock
 	}
 	if !ValidAction(action) {
-		return RuleInput{}, fmt.Errorf("%w: action must be block or dry_run", ErrInvalidRule)
+		return RuleInput{}, invalidField("action", ReasonInvalidValue, "action must be block or dry_run")
 	}
 	modelPattern := input.ModelPattern
-	if strings.TrimSpace(modelPattern) != modelPattern || len(modelPattern) > MaxModelPatternBytes {
-		return RuleInput{}, fmt.Errorf("%w: model pattern must not have surrounding whitespace and must be at most %d bytes", ErrInvalidRule, MaxModelPatternBytes)
+	if err := checkModelPattern(modelPattern); err != nil {
+		return RuleInput{}, err
 	}
 	scopes, err := normalizeScopes(input.ScanScopes)
 	if err != nil {
@@ -469,15 +521,15 @@ func normalizeInput(input RuleInput) (RuleInput, error) {
 		return RuleInput{}, err
 	}
 	if len(keywords) == 0 {
-		return RuleInput{}, fmt.Errorf("%w: at least one keyword is required", ErrInvalidRule)
+		return RuleInput{}, invalidField("keywords", ReasonEmpty, "at least one keyword is required")
 	}
 	scopeJSON, err := json.Marshal(scopes)
 	if err != nil || len(scopeJSON) > MaxScanScopesJSON {
-		return RuleInput{}, fmt.Errorf("%w: scan scopes are too large", ErrInvalidRule)
+		return RuleInput{}, invalidField("scan_scopes", ReasonTooLong, "scan scopes are too large")
 	}
 	keywordJSON, err := json.Marshal(keywords)
 	if err != nil || len(keywordJSON) > MaxKeywordsJSONBytes {
-		return RuleInput{}, fmt.Errorf("%w: keywords exceed the size limit", ErrInvalidRule)
+		return RuleInput{}, invalidField("keywords", ReasonTooLong, "keywords exceed the size limit")
 	}
 	return RuleInput{
 		Name:         name,
@@ -494,14 +546,14 @@ func normalizeScopes(values []string) ([]string, error) {
 		return DefaultScanScopes(), nil
 	}
 	if len(values) == 0 {
-		return nil, fmt.Errorf("%w: at least one scan scope is required", ErrInvalidRule)
+		return nil, invalidField("scan_scopes", ReasonEmpty, "at least one scan scope is required")
 	}
 	scopes := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		scope := strings.TrimSpace(value)
 		if scope == "" || !ValidScanScope(scope) {
-			return nil, fmt.Errorf("%w: unknown scan scope", ErrInvalidRule)
+			return nil, invalidField("scan_scopes", ReasonInvalidValue, "unknown scan scope")
 		}
 		if _, exists := seen[scope]; exists {
 			continue
@@ -510,14 +562,15 @@ func normalizeScopes(values []string) ([]string, error) {
 		scopes = append(scopes, scope)
 	}
 	if len(scopes) == 0 || len(scopes) > len(AllScanScopes) {
-		return nil, fmt.Errorf("%w: invalid scan scope count", ErrInvalidRule)
+		return nil, invalidField("scan_scopes", ReasonInvalidValue, "invalid scan scope count")
 	}
 	return scopes, nil
 }
 
 func normalizeKeywords(values []string) ([]string, error) {
+	tooMany := fmt.Sprintf("at most %d keywords are allowed", MaxKeywords)
 	if len(values) > MaxKeywords {
-		return nil, fmt.Errorf("%w: at most %d keywords are allowed", ErrInvalidRule, MaxKeywords)
+		return nil, invalidField("keywords", ReasonTooMany, tooMany)
 	}
 	keywords := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
@@ -527,13 +580,13 @@ func normalizeKeywords(values []string) ([]string, error) {
 			continue
 		}
 		if len(keyword) > MaxKeywordBytes {
-			return nil, fmt.Errorf("%w: a keyword exceeds %d bytes", ErrInvalidRule, MaxKeywordBytes)
+			return nil, invalidField("keywords", ReasonTooLong, fmt.Sprintf("a keyword exceeds %d bytes", MaxKeywordBytes))
 		}
 		if strings.ContainsRune(keyword, '\x00') {
-			return nil, fmt.Errorf("%w: a keyword contains NUL", ErrInvalidRule)
+			return nil, invalidField("keywords", ReasonInvalidCharacter, "a keyword contains NUL")
 		}
 		if strings.ContainsAny(keyword, "\r\n") {
-			return nil, fmt.Errorf("%w: a keyword must be a single line", ErrInvalidRule)
+			return nil, invalidField("keywords", ReasonInvalidCharacter, "a keyword must be a single line")
 		}
 		key := strings.ToLower(keyword)
 		if _, exists := seen[key]; exists {
@@ -543,7 +596,7 @@ func normalizeKeywords(values []string) ([]string, error) {
 		keywords = append(keywords, keyword)
 	}
 	if len(keywords) > MaxKeywords {
-		return nil, fmt.Errorf("%w: at most %d keywords are allowed", ErrInvalidRule, MaxKeywords)
+		return nil, invalidField("keywords", ReasonTooMany, tooMany)
 	}
 	return keywords, nil
 }

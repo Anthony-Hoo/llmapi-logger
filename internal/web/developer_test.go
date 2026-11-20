@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -668,6 +669,41 @@ func TestCorrectBearerTokenDoesNotClearTheFailureCounter(t *testing.T) {
 	}
 	if got := send(testAdminToken); got != http.StatusTooManyRequests {
 		t.Fatalf("status after ten failures interleaved with successes = %d, want 429", got)
+	}
+}
+
+// Concurrent wrong bearer tokens from one address: the limit is checked and
+// the failure counted in one step, so exactly the limit of them is answered
+// as a wrong token and every other one is throttled.
+func TestConcurrentWrongBearerTokensStopAtTheLimit(t *testing.T) {
+	t.Parallel()
+	handler := newDeveloperHandler(t, Options{})
+	const attempts = 64
+	codes := make(chan int, attempts)
+	var wait sync.WaitGroup
+	start := make(chan struct{})
+	for index := 0; index < attempts; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			request.RemoteAddr = "203.0.113.11:5678"
+			request.Header.Set("Authorization", "Bearer wrong-token")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			codes <- response.Code
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(codes)
+	counts := map[int]int{}
+	for code := range codes {
+		counts[code]++
+	}
+	if counts[http.StatusUnauthorized] != loginFailureLimit || counts[http.StatusTooManyRequests] != attempts-loginFailureLimit {
+		t.Fatalf("statuses = %v, want %d x 401 and the rest 429", counts, loginFailureLimit)
 	}
 }
 

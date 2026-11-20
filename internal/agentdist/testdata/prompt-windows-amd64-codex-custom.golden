@@ -1,0 +1,62 @@
+Install the llmapi-audit Skill (version 0.1.0, windows-amd64) for Codex, so that you can query the LLM API audit server at https://audit.example.com through its command-line client llmaudit.
+
+Rules for this whole task:
+- Execute the numbered steps below in order, one at a time, running each command exactly as written. Do not skip, merge or reorder steps.
+- If a command fails or a step's check does not hold, stop at once. Do not try to repair it and do not continue with later steps. Tell the user which step failed and show the exact output.
+- Use only the download link in this prompt. Never fetch the package from any other address, mirror or repository, and never switch to another install method (a package manager, a git clone, building from source, copying files by hand).
+- Change nothing outside the install directory C:\Tools\agent skills\llmapi-audit. Never delete or modify its parent directory C:\Tools\agent skills or anything else in it. The one exception is the temporary work directory $env:TEMP\llmapi-audit-install-0123456789ab, which this prompt creates and removes.
+- Nothing here asks for a password, an API key or a token, and you must not ask the user for one. The login in a later step is authorized by the user in the browser.
+- Every command below is one complete PowerShell command and contains no single quote. If your shell tool runs PowerShell, run it as written; if it runs bash or another shell, run it as: powershell -NoProfile -Command '<the command>'. Nothing depends on variables from an earlier step.
+
+Final install directory: C:\Tools\agent skills\llmapi-audit
+Package file: llmapi-audit-0.1.0-windows-amd64.zip (3456789 bytes)
+Expected SHA-256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+The download link is valid until 2026-01-02T03:34:05Z. HTTP 410 (Gone) means it has expired: stop and ask the user to generate a new install prompt on the Agent access page of the web UI. HTTP 404 means the link or file is not valid: stop and report it.
+The archive's top level is the directory llmapi-audit/ itself: it contains llmapi-audit/SKILL.md, llmapi-audit/VERSION, llmapi-audit/references/ and llmapi-audit/scripts/llmaudit.exe. It is extracted into a work directory and then moved to the install directory as a whole, so it is never nested twice.
+
+1. Create an empty work directory (a leftover one from an earlier run of this prompt is removed first):
+   if (Test-Path -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab") { Remove-Item -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab" -Recurse -Force }; New-Item -ItemType Directory -Path "$env:TEMP\llmapi-audit-install-0123456789ab" | Out-Null
+   Check: the command reports no error.
+
+2. Download the package from the link in this prompt, and only from it:
+   $ProgressPreference = "SilentlyContinue"; Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -Uri "https://audit.example.com/api/agent/v1/dl/MTc2NzMyNjI0NS5leGFtcGxlLXNpZ25hdHVyZQ/llmapi-audit-0.1.0-windows-amd64.zip" -OutFile "$env:TEMP\llmapi-audit-install-0123456789ab\llmapi-audit-0.1.0-windows-amd64.zip"
+   Check: the command reports no error. If it reports 410 (Gone), the link has expired; if it reports another error, stop either way.
+
+3. Verify the SHA-256 digest of the download:
+   (Get-FileHash -Algorithm SHA256 -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab\llmapi-audit-0.1.0-windows-amd64.zip").Hash.ToLowerInvariant()
+   Check: the output is exactly 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef. If it differs in any character, stop: do not extract or run the file, and tell the user the digest did not match.
+
+4. Extract the archive into the work directory:
+   Expand-Archive -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab\llmapi-audit-0.1.0-windows-amd64.zip" -DestinationPath "$env:TEMP\llmapi-audit-install-0123456789ab\extract"
+   Then run: Get-ChildItem -Force -Name -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab\extract"; Test-Path -PathType Leaf -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab\extract\llmapi-audit\scripts\llmaudit.exe"
+   Check: the listing shows exactly one entry, llmapi-audit, followed by True.
+
+5. Check what is at the install directory now:
+   if (-not (Test-Path -LiteralPath "C:\Tools\agent skills\llmapi-audit")) { "absent" } elseif ((Get-Item -Force -LiteralPath "C:\Tools\agent skills\llmapi-audit").Attributes -band [IO.FileAttributes]::ReparsePoint) { "foreign"; Get-ChildItem -Force -LiteralPath "C:\Tools\agent skills\llmapi-audit" } elseif (Test-Path -PathType Leaf -LiteralPath "C:\Tools\agent skills\llmapi-audit\scripts\llmaudit.exe") { "previous-install" } else { "foreign"; Get-ChildItem -Force -LiteralPath "C:\Tools\agent skills\llmapi-audit" }
+   - absent: nothing is there; continue with the next step.
+   - previous-install: it is an earlier install of this Skill (it contains scripts\llmaudit.exe). Remove that directory, and only it:
+     Remove-Item -LiteralPath "C:\Tools\agent skills\llmapi-audit" -Recurse -Force
+   - foreign: something else is there. Stop. Delete nothing, and show the user the listing so they can decide what to do.
+
+6. Move the extracted Skill into place (the skills directory is created if it does not exist; nothing else in it is touched):
+   if (Test-Path -LiteralPath "C:\Tools\agent skills\llmapi-audit") { throw "the install directory still exists" }; New-Item -ItemType Directory -Force -Path "C:\Tools\agent skills" | Out-Null; Move-Item -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab\extract\llmapi-audit" -Destination "C:\Tools\agent skills\llmapi-audit"
+   Check: the command reports no error.
+
+7. Remove the work directory:
+   Remove-Item -LiteralPath "$env:TEMP\llmapi-audit-install-0123456789ab" -Recurse -Force
+
+8. Check that the client runs on this machine:
+   & "C:\Tools\agent skills\llmapi-audit\scripts\llmaudit.exe" --help
+   Check: it prints the usage of llmaudit and reports no error.
+
+9. Log in. The user authorizes this machine in the browser:
+   & "C:\Tools\agent skills\llmapi-audit\scripts\llmaudit.exe" login --server "https://audit.example.com"
+   The command opens the server's authorization page in the browser and waits up to 5 minutes while the user signs in there and approves. It never asks for a password, an API key or a token, and you must not ask the user for any of them.
+   If your environment cannot open a browser or cannot keep a command running that long, ask the user to run this exact command themselves in a terminal and to tell you when it has finished. Adding --no-browser makes it print an address the user can open in any browser; the page then shows a one-time code that the user types into the terminal themselves.
+   Check: the command exits successfully. If it reports LOGIN_TIMEOUT or LOGIN_DENIED, stop and tell the user.
+
+10. Verify the login:
+   & "C:\Tools\agent skills\llmapi-audit\scripts\llmaudit.exe" whoami
+   Check: the output is one JSON object with "ok":true. Note data.role, data.tier and data.expires_at for your report.
+
+When every step has succeeded, tell the user: the llmapi-audit Skill is installed in C:\Tools\agent skills\llmapi-audit, the role and tier that whoami reported, and that Codex should be started in a new session (or have its skills reloaded) before the Skill is available, because agents load skills when a session starts.
