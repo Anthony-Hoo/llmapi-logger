@@ -84,31 +84,38 @@ type agentApplyResult struct {
 }
 
 // serveAgentPlanCreate is POST /plans. It changes nothing and writes no
-// audit row (contract section 3.4).
+// audit row (contract section 3.4). Only a created plan counts against the
+// write quota: a request refused for any reason (validation, not found,
+// conflict, the per-token plan cap) gives back the slot the dispatcher took.
 func (handler *managementHandler) serveAgentPlanCreate(writer http.ResponseWriter, request *http.Request, call agentCall) {
-	if _, err := agentCallParams(request, call); err != nil {
+	refuse := func(err error) {
+		handler.agent.Refund(call.WriteSlot)
 		handler.writeAgentWriteFailure(writer, err)
+	}
+	if _, err := agentCallParams(request, call); err != nil {
+		refuse(err)
 		return
 	}
 	body, err := readAgentBody(writer, request, maxAgentPlanBodyBytes)
 	if err != nil {
-		handler.writeAgentWriteFailure(writer, err)
+		refuse(err)
 		return
 	}
 	planRequest, err := decodeAgentPlanRequest(body)
 	if err != nil {
-		handler.writeAgentWriteFailure(writer, err)
+		refuse(err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), orgReportTimeout)
 	defer cancel()
 	plan, err := handler.agentPlanFor(ctx, planRequest)
 	if err != nil {
-		handler.writeAgentWriteFailure(writer, err)
+		refuse(err)
 		return
 	}
 	stored, err := handler.agentPlans.Put(call.Identity.TokenID, plan)
 	if err != nil {
+		handler.agent.Refund(call.WriteSlot)
 		writeAgentServiceError(writer, err)
 		return
 	}

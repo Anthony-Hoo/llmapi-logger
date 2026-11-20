@@ -49,6 +49,7 @@ llmaudit apply pln_0123456789abcdef
 - `VERSION_CONFLICT`: someone changed the object after the plan was made. Read it again with `config show`, tell the user what changed, and plan again.
 - After success, `data` is `{op, target, applied: true}` (with the new `id` when something was created); run the read command in `next_actions` to confirm.
 - After `TIMEOUT` or `NETWORK_ERROR` the change may or may not have happened. Do not apply again. Read the object with `config show` first and tell the user what you found.
+- Write limits (`RATE_LIMITED`, wait `details.retry_after_seconds`): per token, 60 created plans, applies and `config set-key` together in 10 minutes, and at most 32 plans that are not applied or expired at the same time (a plan you do not apply holds its place until it expires 10 minutes after it was made, so do not create plans you will not show). A plan request the server refuses (validation, not found, conflict) counts toward neither. `analysis test-model`: 12 per hour per token. For the whole server: `analysis run` once in 10 minutes and `weekly regenerate` 6 times an hour; an apply refused because the operation could not start gives its place back.
 
 ## Creating and changing objects
 

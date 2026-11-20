@@ -36,6 +36,9 @@ type agentCall struct {
 	Identity  agentaccess.Identity
 	Principal principal
 	Meta      agentaccess.RequestMeta
+	// WriteSlot is the write quota's slot the request took, for a handler
+	// that gives it back when the request is refused (plan creation).
+	WriteSlot agentaccess.QuotaSlot
 }
 
 // agentHandler serves one registered facade endpoint. The request context
@@ -174,11 +177,13 @@ func (handler *managementHandler) serveAgent(writer http.ResponseWriter, request
 		writeAgentServiceError(writer, err)
 		return
 	}
-	if err := handler.takeAgentQuotas(endpoint, identity); err != nil {
+	slot, err := handler.takeAgentQuotas(endpoint, identity)
+	if err != nil {
 		handler.recordWriteDenied(request, endpoint, call, identity, err)
 		writeAgentServiceError(writer, err)
 		return
 	}
+	call.WriteSlot = slot
 	call.Identity, call.Principal = identity, caller
 	serve(writer, request.WithContext(withPrincipal(request.Context(), caller)), call)
 }
@@ -187,27 +192,29 @@ func (handler *managementHandler) serveAgent(writer http.ResponseWriter, request
 // the token and its permissions passed. Logout is never limited by a quota:
 // revoking a token must always work. A request refused by one quota leaves
 // the others as they were: a pack read refused by the sensitive-read quota
-// gives back the general read slot it took.
-func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, identity agentaccess.Identity) error {
+// gives back the general read slot it took. The write quota's slot is
+// returned to the caller: a plan request that is refused gives it back
+// (serveAgentPlanCreate), so only created plans count.
+func (handler *managementHandler) takeAgentQuotas(endpoint agentapi.Endpoint, identity agentaccess.Identity) (agentaccess.QuotaSlot, error) {
 	switch {
 	case endpoint.ID == "logout":
-		return nil
+		return agentaccess.QuotaSlot{}, nil
 	case endpoint.Tier == agentapi.TierRead:
 		read, err := handler.agent.TakeSlot(agentaccess.QuotaRead, identity)
 		if err != nil {
-			return err
+			return agentaccess.QuotaSlot{}, err
 		}
 		if endpoint.ID == "analysis.pack" || endpoint.ID == "analysis.facet" {
 			if err := handler.agent.Take(agentaccess.QuotaSensitiveRead, identity); err != nil {
 				handler.agent.Refund(read)
-				return err
+				return agentaccess.QuotaSlot{}, err
 			}
 		}
-		return nil
+		return agentaccess.QuotaSlot{}, nil
 	case endpoint.ID == agentapi.EndpointTestModel:
-		return handler.agent.Take(agentaccess.QuotaTestModel, identity)
+		return agentaccess.QuotaSlot{}, handler.agent.Take(agentaccess.QuotaTestModel, identity)
 	default:
-		return handler.agent.Take(agentaccess.QuotaWrite, identity)
+		return handler.agent.TakeSlot(agentaccess.QuotaWrite, identity)
 	}
 }
 

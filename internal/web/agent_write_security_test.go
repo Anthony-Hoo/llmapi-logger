@@ -572,6 +572,47 @@ func TestAgentRegenerateBlockedBehindAFreezeTimesOutAndRefunds(t *testing.T) {
 	}
 }
 
+// Contract section 0.1 item 102: a refused plan request (validation, not
+// found, conflict, the per-token plan cap) consumes neither the write quota
+// nor a place under the per-token plan cap; only created plans do.
+func TestRefusedPlanRequestsDoNotConsumeWriteLimits(t *testing.T) {
+	fixture := newWriteFixture(t)
+	refused := []any{
+		`{"op":"no.such.op"}`,
+		map[string]any{"op": "config.set", "kind": "ua-rule", "id": "999", "set": map[string]any{"enabled": false}},
+		map[string]any{"op": "config.remove", "kind": "content-rule", "id": "999"},
+		map[string]any{"op": "config.set", "kind": "ua-rule", "set": map[string]any{"name": "x"}},
+	}
+	for index := 0; index < 100; index++ {
+		response := fixture.facade(http.MethodPost, "/plans", refused[index%len(refused)], fixture.adminWrite)
+		if code := failure(t, response).Code; code == agentapi.CodeRateLimited {
+			t.Fatalf("refused request %d was rate limited", index)
+		}
+	}
+	for index := 0; index < agentaccess.MaxPlansPerToken; index++ {
+		fixture.plan(t, `{"op":"analysis.run"}`)
+	}
+	// The per-token cap refuses the next plan; that refusal is not counted.
+	for index := 0; index < 5; index++ {
+		if code := failure(t, fixture.facade(http.MethodPost, "/plans", `{"op":"analysis.run"}`, fixture.adminWrite)).Code; code != agentapi.CodeRateLimited {
+			t.Fatalf("plan beyond the per-token cap = %s", code)
+		}
+	}
+	identity, err := fixture.service.Authenticate(context.Background(), "Bearer "+fixture.adminWrite, "192.0.2.77")
+	if err != nil {
+		t.Fatal(err)
+	}
+	left := 0
+	for ; left < 100; left++ {
+		if _, err := fixture.service.TakeSlot(agentaccess.QuotaWrite, identity); err != nil {
+			break
+		}
+	}
+	if left != 60-agentaccess.MaxPlansPerToken {
+		t.Fatalf("write quota left after %d created plans = %d", agentaccess.MaxPlansPerToken, left)
+	}
+}
+
 // Contract section 4.5.1, the four operations without a check-only twin.
 func TestAgentOperationPlans(t *testing.T) {
 	fixture := newWriteFixture(t)
