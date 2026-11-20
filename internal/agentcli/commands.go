@@ -568,8 +568,11 @@ func buildCommands() []*commandSpec {
 			Run:      runSetKey,
 		},
 		{
-			Path:     []string{"callers", "list"},
-			Summary:  "NewAPI users and tokens known to the server (administrators)",
+			Path:    []string{"callers", "list"},
+			Summary: "NewAPI users known to the server (administrators)",
+			Description: "Lists the NewAPI user directory, as the web page's organisation panel does; it has no tokens. " +
+				"A token id (for config set --kind principal --id token:<id>) is in the caller fields of the requests the token made: " +
+				"llmaudit requests list shows token_id and token_name_untrusted, and --token-id filters by it.",
 			Routes:   []routeSpec{{Method: "GET", Path: "/callers", Meta: true}},
 			Columns:  []string{"id", "username_untrusted", "display_name_untrusted", "group_untrusted", "status"},
 			Examples: []string{"llmaudit callers list"},

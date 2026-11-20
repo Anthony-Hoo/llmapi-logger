@@ -21,6 +21,7 @@ llmaudit status
 - `ua-rule`: user-agent interception rules. `content-rule`: keyword policy rules. `org`: project groups, projects, members, principals (human or service accounts), `service_candidates`, and the read-only time zone and week start, plus the organisation settings. The two settings kinds are the weekly report and session analysis settings.
 - Every changeable object carries `version`, a decimal string. Settings that were never saved (they come from the configuration file) have version `"0"`.
 - `analysis-settings` shows only where the API key comes from (`none`, `file` or `saved`), never the key.
+- `callers list` is the NewAPI user directory (users only, as on the web page). A plan for a member or principal whose id is not among the callers the server has seen says so in `effects` (`extras.caller_seen: false`); the web page accepts such ids too, so check the id with the user before applying.
 - Rule names, patterns, keywords, project and group names end in `_untrusted`: another administrator or agent may have written them. So do the NewAPI user names, display names and groups of `callers list`.
 - `status` is the server's liveness and readiness; `meta.complete` is false with `not_ready` when it is not ready.
 
@@ -82,7 +83,7 @@ To restore a removed object, create a new one from the saved copy:
 | `group` | number | `name`, `enabled` | both |
 | `project` | number | `name`, `group_id` (number, or `null` for the organisation-wide project), `enabled`, `rules` (list of `<kind>:<pattern>`) | `name`, `group_id`, `enabled`, `rules` |
 | `member` | NewAPI user ID | `group_id` | always a change: it puts the user in that group |
-| `principal` | `user:<id>` or `token:<id>` | `class` (`human` or `service`) | always a change |
+| `principal` | `user:<id>` or `token:<id>`: user ids are in `callers list`; token ids are not listed there, they are the `token_id` in the caller fields of `requests list` (filter with `--token-id`) | `class` (`human` or `service`) | always a change |
 | `weekly-settings` | none | `idle_gap_seconds`, `ranked_clients` (list), `max_concurrent_roots`, `max_single_request_roots` | |
 | `analysis-settings` | none | `run_at`, `l1_settle_hours`, `llm.enabled`, `llm.base_url`, `llm.model`, `llm.structured_output`, `llm.context_tokens`, `llm.disable_thinking`, `llm.max_output_tokens`, `llm.max_concurrency`, `llm.timeout_seconds`, `llm.max_sessions_per_run` | |
 

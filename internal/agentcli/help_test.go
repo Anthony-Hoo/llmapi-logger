@@ -153,6 +153,19 @@ func TestHelpOutput(t *testing.T) {
 	}
 }
 
+// Contract section 0.1 item 111: callers list lists users only, and its help
+// says where a token id for a principal comes from.
+func TestCallersHelpSaysWhereTokenIDsAre(t *testing.T) {
+	h := newHarness(t)
+	if exit := h.run("callers", "list", "--help"); exit != 0 {
+		t.Fatalf("exit %d", exit)
+	}
+	help := h.stdout.String()
+	if strings.Contains(help, "users and tokens") || !strings.Contains(help, "token_id") || !strings.Contains(help, "--token-id") || !strings.Contains(help, "token:<id>") {
+		t.Fatalf("callers list help = %q", help)
+	}
+}
+
 // TestStandardLibraryOnly: the client imports nothing but the standard
 // library and the shared agentapi package.
 func TestStandardLibraryOnly(t *testing.T) {
