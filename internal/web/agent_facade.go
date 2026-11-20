@@ -418,7 +418,10 @@ func (handler *managementHandler) serveAgentWhoami(writer http.ResponseWriter, r
 		Identity:   agentIdentityView(identity),
 		Features: agentFeatures{
 			Insights: handler.insights != nil, OrgReports: handler.org != nil,
-			SessionAnalysis: handler.sessionAnalysis != nil, WriteAllowed: handler.agent.AllowWrite(),
+			SessionAnalysis: handler.sessionAnalysis != nil,
+			// The deployment switch is meaningful only to an administrator: a
+			// developer can never hold a write token.
+			WriteAllowed: handler.agent.AllowWrite() && identity.Role == agentapi.RoleAdmin,
 		},
 		ServerTime: handler.agent.Now().UTC().Format(time.RFC3339),
 	}, agentapi.Meta{State: "authenticated", Complete: true}))

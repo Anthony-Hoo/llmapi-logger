@@ -322,6 +322,12 @@ func TestAgentFlowForADeveloper(t *testing.T) {
 		me.Identity.TokenID == nil || *me.Identity.TokenID != 42 || me.Identity.TokenName != "agent-token" {
 		t.Fatalf("developer whoami = %s", whoami.Body.String())
 	}
+	// Contract section 0.1 item 109: a developer can never hold a write token,
+	// so the deployment's write switch is reported as false to it although the
+	// deployment allows agent writes.
+	if me.Features.WriteAllowed {
+		t.Fatalf("developer whoami reports write_allowed: %s", whoami.Body.String())
+	}
 	// It expires with the web session that authorized it.
 	if me.ExpiresAt != cookie.Expires.UTC().Format(time.RFC3339) {
 		t.Fatalf("developer token expires %s, session %s", me.ExpiresAt, cookie.Expires.UTC().Format(time.RFC3339))
