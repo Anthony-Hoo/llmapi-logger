@@ -196,7 +196,7 @@ func (handler *managementHandler) agentUsageRange(values url.Values) (agentRange
 	return timeRange, checkRangeLength(values, from, to, agentMaxServiceRange)
 }
 
-const agentCoverageAction = "Totals count analysed records only; the server cannot say how many records are not analysed yet (coverage_unknown)."
+const agentCoverageAction = "Totals count analysed records only, and whether every record in the range has been analysed cannot be checked through this interface (coverage_unknown); meta.complete says only whether billing is still pending."
 
 func (handler *managementHandler) agentInsightsReady(writer http.ResponseWriter) bool {
 	if handler.insights == nil {
@@ -250,20 +250,22 @@ func (handler *managementHandler) serveAgentUsageOverview(writer http.ResponseWr
 	writeAgentRead(writer, data, usageOverviewMeta(data), true, agentCoverageAction)
 }
 
-// Incomplete reasons of the usage overview (contract section 0.1 item 120).
-const (
-	agentIncompleteCoverage = "coverage_unknown"
-	agentIncompleteBilling  = "billing_pending"
-)
+// The incomplete reason of the usage overview (contract section 0.1 items
+// 120 and 147).
+const agentIncompleteBilling = "billing_pending"
 
-// usageOverviewMeta is complete only when the totals are known to cover
-// every record (never, while coverage_unknown) and no billing is pending.
+// usageOverviewMeta reflects what can be known (contract section 0.1 item
+// 147): complete unless billing is still pending in the range. Whether
+// every record in the range has been analysed cannot be determined through
+// this interface: the insights service reports no coverage, and the only
+// count of unanalysed records (orgreport's freeze check) is unscoped and
+// tied to the project identity version, so a scoped count would need new
+// storage queries. A flag that is false on every call carries no
+// information, so coverage stays the data field coverage_unknown with its
+// next_actions sentence, and is not a reason of meta.
 func usageOverviewMeta(data agentUsageOverview) agentapi.Meta {
 	meta := agentMetaOK()
-	switch {
-	case data.CoverageUnknown:
-		meta.Complete, meta.IncompleteReason = false, agentIncompleteCoverage
-	case !data.BillingComplete:
+	if !data.BillingComplete {
 		meta.Complete, meta.IncompleteReason = false, agentIncompleteBilling
 	}
 	return meta

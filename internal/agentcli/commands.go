@@ -227,7 +227,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"usage", "overview"},
 			Summary:     "token usage totals grouped by a dimension",
-			Description: "Totals only include records that have been analyzed (data.coverage_unknown).",
+			Description: "Totals only include records that have been analyzed, and whether every record in the range has been analyzed cannot be checked here (data.coverage_unknown is always true). meta.complete is false only while billing is pending (billing_pending); data.billing_complete says the same.",
 			Flags: []flagSpec{
 				{Name: "since", Value: "<duration>", Query: "since", Help: "Look back this far from --to or now (30m, 2h, 7d). Cannot be combined with --from. Default: 7d. The range is at most 400 days."},
 				flagFrom(), flagTo("now."),

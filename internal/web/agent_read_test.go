@@ -958,9 +958,10 @@ func TestAgentReadCompletenessRows(t *testing.T) {
 		}
 	}
 
-	// Usage overview: coverage is unknown, so the overview is not complete
-	// (contract section 0.1 item 120); billing completeness is explicit.
-	if got, decoded := meta("/usage/overview?" + fixtureWindow); got.Complete || got.IncompleteReason != agentIncompleteCoverage ||
+	// Usage overview: coverage cannot be checked, which data and next_actions
+	// say; meta.complete follows billing alone, and the fixture's requests are
+	// all billed (contract section 0.1 item 147).
+	if got, decoded := meta("/usage/overview?" + fixtureWindow); !got.Complete || got.IncompleteReason != "" ||
 		!strings.Contains(string(decoded.Data), `"coverage_unknown":true`) ||
 		len(decoded.NextActions) == 0 {
 		t.Fatalf("overview = %+v %v", got, decoded.NextActions)
