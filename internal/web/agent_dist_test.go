@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -445,5 +446,114 @@ func TestDownloadRespellingsShareOneBudget(t *testing.T) {
 	_, _, fresh := requestInstallLink(t, env, agentCaller{bearer: testAdminToken}, `{"agent":"claude-code","platform":"linux-amd64"}`)
 	if code := get("/api/agent/v1/dl/" + fresh + "/" + agentdist.ManifestFile); code != http.StatusOK {
 		t.Fatalf("fresh link = %d", code)
+	}
+}
+
+// TestDownloadTrackerFullKeepsTheCapThroughTheRouter (contract section 0.1
+// items 141 and 165) is the reviewer's case end to end: 70 developer keys,
+// each within its 20 links per 10 minutes, issue more than 4096 links in 30
+// minutes and download each once, so the download tracker is full of live
+// links. Two links issued first, drained before, never get more than 30
+// downloads however often they are tried again, the links that found the
+// tracker full are refused with RATE_LIMITED, and one of them is served as
+// soon as the first link expires.
+func TestDownloadTrackerFullKeepsTheCapThroughTheRouter(t *testing.T) {
+	env := newAgentEnv(t, agentEnvOptions{})
+	dir, _ := packTestPackages(t)
+	start := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	clock := &distClock{now: start}
+	withDist(t, env, dir, clock)
+	signIn := func(index int) agentCaller {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(fmt.Sprintf(`{"api_key":"sk-trackerdev%04d"}`, index)))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = fmt.Sprintf("203.0.113.%d:40000", index+1)
+		response := httptest.NewRecorder()
+		env.handler.ServeHTTP(response, request)
+		cookies := response.Result().Cookies()
+		if response.Code != http.StatusOK || len(cookies) != 1 {
+			t.Fatalf("developer %d sign-in = %d %s", index, response.Code, response.Body.String())
+		}
+		return agentCaller{cookie: cookies[0]}
+	}
+	mint := func(caller agentCaller) string {
+		response := env.do(http.MethodPost, agentInstallLinksPath, `{"agent":"claude-code","platform":"linux-amd64"}`, caller)
+		if response.Code != http.StatusOK {
+			return ""
+		}
+		match := linkPattern.FindStringSubmatch(strings.ReplaceAll(response.Body.String(), `\"`, `"`))
+		if match == nil {
+			t.Fatalf("no link in %s", response.Body.String())
+		}
+		return match[1][strings.Index(match[1], "/api/agent/v1/dl/"):] + agentdist.ManifestFile
+	}
+	drain := func(path string) int {
+		served := 0
+		for served < 1000 && env.do(http.MethodGet, path, "", agentCaller{}).Code == http.StatusOK {
+			served++
+		}
+		return served
+	}
+	callers := make([]agentCaller, 70)
+	for index := range callers {
+		callers[index] = signIn(index)
+	}
+	first := mint(callers[0])
+	clock.now = clock.now.Add(time.Second)
+	second := mint(callers[1])
+	clock.now = clock.now.Add(time.Second)
+	served := map[string]int{first: drain(first), second: drain(second)}
+	var others []string
+	for window := 0; window < 3; window++ {
+		for _, caller := range callers {
+			for count := 0; count < agentdist.InstallLinksPerWindow; count++ {
+				if path := mint(caller); path != "" {
+					others = append(others, path)
+				}
+			}
+		}
+		if window < 2 {
+			clock.now = clock.now.Add(agentdist.InstallLinkWindow)
+		}
+	}
+	if len(others) <= 4096 {
+		t.Fatalf("only %d links were issued; the tracker cannot fill", len(others))
+	}
+	var refused []string
+	for _, path := range others {
+		response := env.do(http.MethodGet, path, "", agentCaller{})
+		switch response.Code {
+		case http.StatusOK:
+		case http.StatusTooManyRequests:
+			if decodeAgent(t, response).Error.Code != agentapi.CodeRateLimited || response.Header().Get("Retry-After") == "" {
+				t.Fatalf("refusal of a fresh link: %s", response.Body.String())
+			}
+			refused = append(refused, path)
+		default:
+			t.Fatalf("download = %d", response.Code)
+		}
+	}
+	if len(refused) == 0 {
+		t.Fatal("no link found the tracker full")
+	}
+	for cycle := 0; cycle < 5; cycle++ {
+		served[first] += drain(first)
+		served[second] += drain(second)
+	}
+	if served[first] != agentdist.DownloadsPerLink || served[second] != agentdist.DownloadsPerLink {
+		t.Fatalf("the first two links served %d and %d downloads, cap %d", served[first], served[second], agentdist.DownloadsPerLink)
+	}
+	rows := 0
+	for _, entry := range env.store.Audit() {
+		if entry.Event == agentaccess.EventPackageDownloaded && entry.Outcome == agentaccess.OutcomeOK {
+			rows++
+		}
+	}
+	if want := 2*agentdist.DownloadsPerLink + len(others) - len(refused); rows != want {
+		t.Fatalf("%d package_downloaded rows of served downloads, want %d", rows, want)
+	}
+	// The first link expires at start + 30 minutes: a refused link is served.
+	clock.now = start.Add(agentdist.LinkLifetime)
+	if code := env.do(http.MethodGet, refused[0], "", agentCaller{}).Code; code != http.StatusOK {
+		t.Fatalf("a refused link after the first expired = %d", code)
 	}
 }

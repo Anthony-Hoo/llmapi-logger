@@ -31,8 +31,9 @@ const DownloadsPerLink = 30
 
 // maxTrackedLinks bounds the download counter. Only links that verify are
 // counted, keyed by their nonce, and only authenticated users can mint them,
-// so this is a guard against a runaway client rather than against forgery;
-// a full counter makes room by dropping the entry that expires first.
+// so this is a guard against a runaway client rather than against forgery.
+// A full counter only drops the entries of expired links; a link it does not
+// track yet then waits (contract section 0.1 items 141 and 165).
 const maxTrackedLinks = 4096
 
 // ErrNoPackages means the package directory holds no usable packages: they
@@ -358,6 +359,8 @@ type DownloadResult struct {
 //   - a correctly signed but expired link: 410 LINK_EXPIRED;
 //   - more than DownloadsPerLink downloads with one link: 429 RATE_LIMITED
 //     with Retry-After until the link expires;
+//   - a link not counted yet while maxTrackedLinks live links are counted:
+//     429 RATE_LIMITED with Retry-After until the soonest of them expires;
 //   - otherwise 200 with the file.
 //
 // Files are opened through an os.Root of the package directory, so a path
@@ -378,12 +381,14 @@ func (service *Service) ServeDownload(writer http.ResponseWriter, request *http.
 	if !ValidFileName(file) || service.manifest == nil || !service.manifest.Lists(file) {
 		return notFound(writer)
 	}
-	if !service.allowDownload(link.Nonce, expires) {
-		retry := int(expires.Sub(service.now()).Seconds()) + 1
-		if retry < 1 {
-			retry = 1
-		}
-		writer.Header().Set("Retry-After", strconv.Itoa(retry))
+	switch outcome, wait := service.allowDownload(link.Nonce, expires); outcome {
+	case downloadAllowed:
+	case downloadTrackerFull:
+		writer.Header().Set("Retry-After", retryAfterSeconds(wait))
+		return writeDownloadFailure(writer, http.StatusTooManyRequests, agentapi.CodeRateLimited,
+			"too many download links are in use on this server right now", "Wait for the number of seconds in Retry-After and download again with the same link.", nil, file)
+	default:
+		writer.Header().Set("Retry-After", retryAfterSeconds(wait+time.Second))
 		return writeDownloadFailure(writer, http.StatusTooManyRequests, agentapi.CodeRateLimited,
 			"this download link has been used too many times", "Ask the user to generate a new install prompt on the Agent access page of the web UI.", nil, file)
 	}
@@ -434,48 +439,57 @@ func writeDownloadFailure(writer http.ResponseWriter, status int, code agentapi.
 	return DownloadResult{Status: status, Code: code, File: file}
 }
 
+// The answers of allowDownload.
+const (
+	downloadAllowed = iota
+	downloadLinkUsedUp
+	downloadTrackerFull
+)
+
 // allowDownload counts one download for a verified link, keyed by its nonce
 // (the decoded, verified payload), so that no re-spelling of the request can
-// open a second budget. Entries of expired links are dropped on the way.
-// When the tracker is still full, the entry of the link that expires first
-// is dropped to make room: a fresh link is never refused because the
-// tracker is full. That needs more than maxTrackedLinks links issued within
-// one link lifetime, and only signed-in users can issue them (20 per 10
-// minutes per identity); the dropped link at worst gets a new budget for
-// what is left of its life.
-func (service *Service) allowDownload(nonce string, expires time.Time) bool {
+// open a second budget. Entries of expired links are dropped on the way, and
+// only those: a live link keeps its count until it expires, so no link ever
+// gets more than DownloadsPerLink downloads. When the tracker is still full,
+// a link it does not track yet is refused (downloadTrackerFull) until the
+// soonest entry expires; wait is that time. That needs more than
+// maxTrackedLinks links, each downloaded at least once, within one link
+// lifetime, and only signed-in web sessions can issue links (20 per 10
+// minutes per identity). For a link that is used up, wait is the time until
+// it expires.
+func (service *Service) allowDownload(nonce string, expires time.Time) (int, time.Duration) {
 	now := service.now()
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	var soonest time.Time
 	for key, use := range service.downloads {
 		if !now.Before(use.expires) {
 			delete(service.downloads, key)
+		} else if soonest.IsZero() || use.expires.Before(soonest) {
+			soonest = use.expires
 		}
 	}
 	use := service.downloads[nonce]
 	if use == nil {
-		for len(service.downloads) >= maxTrackedLinks {
-			service.dropSoonestDownload()
+		if len(service.downloads) >= maxTrackedLinks {
+			return downloadTrackerFull, soonest.Sub(now)
 		}
 		use = &linkUse{expires: expires}
 		service.downloads[nonce] = use
 	}
 	if use.count >= DownloadsPerLink {
-		return false
+		return downloadLinkUsedUp, expires.Sub(now)
 	}
 	use.count++
-	return true
+	return downloadAllowed, 0
 }
 
-// dropSoonestDownload removes the tracked link that expires first. The
-// caller holds service.mu and the map is not empty.
-func (service *Service) dropSoonestDownload() {
-	var soonestKey string
-	var soonest time.Time
-	for key, use := range service.downloads {
-		if soonest.IsZero() || use.expires.Before(soonest) {
-			soonestKey, soonest = key, use.expires
-		}
+// retryAfterSeconds is wait in whole seconds, rounded down so it is never
+// longer than wait, and at least one.
+func retryAfterSeconds(wait time.Duration) string {
+	seconds := int(wait / time.Second)
+	if seconds < 1 {
+		seconds = 1
 	}
-	delete(service.downloads, soonestKey)
+	return strconv.Itoa(seconds)
 }

@@ -386,45 +386,63 @@ func TestDownloadBudgetIsKeptPerNonce(t *testing.T) {
 	}
 }
 
-// TestFullDownloadTrackerDoesNotRefuseFreshLinks: with the counter full of
-// live links, a fresh link is still served; entries of expired links go
-// first, then the entry that expires first.
-func TestFullDownloadTrackerDoesNotRefuseFreshLinks(t *testing.T) {
+// TestFullDownloadTrackerNeverDropsALiveLink (contract section 0.1 items 141
+// and 165): with the counter full of live links, a link it does not track
+// yet is refused with RATE_LIMITED and a Retry-After no longer than the time
+// until the soonest entry expires; a link it already tracks keeps its count
+// up to the cap; entries of expired links make room, and as soon as one
+// entry expires a fresh link is served again.
+func TestFullDownloadTrackerNeverDropsALiveLink(t *testing.T) {
 	service, clk, _, manifest := newTestService(t)
 	file := manifest.Packages[0].File
-	fill := func(expires time.Time) {
-		service.mu.Lock()
-		defer service.mu.Unlock()
-		for index := len(service.downloads); index < maxTrackedLinks; index++ {
-			service.downloads[fmt.Sprintf("filler-%d", index)] = &linkUse{count: 1, expires: expires}
-		}
+	tracked, _ := service.signer.Mint()
+	if recorder, _ := download(service, tracked, file); recorder.Code != http.StatusOK {
+		t.Fatalf("first download: status %d", recorder.Code)
 	}
-	// Full of live entries that all outlive the fresh link's minting.
-	fill(clk.now.Add(LinkLifetime))
+	// Full of live entries; the soonest expires in 90 seconds.
+	service.mu.Lock()
+	for index := len(service.downloads); index < maxTrackedLinks; index++ {
+		expires := clk.now.Add(LinkLifetime)
+		if index == 1 {
+			expires = clk.now.Add(90 * time.Second)
+		}
+		service.downloads[fmt.Sprintf("filler-%d", index)] = &linkUse{count: 1, expires: expires}
+	}
+	service.mu.Unlock()
 	fresh, _ := service.signer.Mint()
-	if recorder, _ := download(service, fresh, file); recorder.Code != http.StatusOK {
-		t.Fatalf("fresh link with a full tracker: status %d %s", recorder.Code, recorder.Body.String())
+	recorder, result := download(service, fresh, file)
+	if recorder.Code != http.StatusTooManyRequests || result.Code != agentapi.CodeRateLimited || result.Served {
+		t.Fatalf("fresh link with a full tracker: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if retry, err := strconv.Atoi(recorder.Header().Get("Retry-After")); err != nil || retry < 1 || retry > 90 {
+		t.Fatalf("Retry-After = %q, want at most the 90 seconds until the soonest entry expires", recorder.Header().Get("Retry-After"))
 	}
 	service.mu.Lock()
-	if len(service.downloads) > maxTrackedLinks {
-		t.Fatalf("tracker grew to %d", len(service.downloads))
+	if len(service.downloads) != maxTrackedLinks || service.downloads["filler-1"] == nil {
+		t.Fatalf("a refused link changed the tracker: %d entries", len(service.downloads))
 	}
 	service.mu.Unlock()
-	// The fresh link keeps its own budget while others are added.
+	// The tracked link keeps its count and its cap.
 	for attempt := 2; attempt <= DownloadsPerLink; attempt++ {
-		if recorder, _ := download(service, fresh, file); recorder.Code != http.StatusOK {
-			t.Fatalf("download %d of the fresh link: status %d", attempt, recorder.Code)
+		if recorder, _ := download(service, tracked, file); recorder.Code != http.StatusOK {
+			t.Fatalf("download %d of the tracked link: status %d", attempt, recorder.Code)
 		}
 	}
-	if recorder, _ := download(service, fresh, file); recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("download %d of the fresh link: status %d", DownloadsPerLink+1, recorder.Code)
+	if recorder, _ := download(service, tracked, file); recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("download %d of the tracked link: status %d", DownloadsPerLink+1, recorder.Code)
 	}
-	// Entries of links that have expired make room before any live one.
-	clk.advance(LinkLifetime + time.Second)
+	// As soon as the soonest entry expires, the fresh link is served.
+	clk.advance(90 * time.Second)
+	if recorder, _ := download(service, fresh, file); recorder.Code != http.StatusOK {
+		t.Fatalf("fresh link after one entry expired: status %d %s", recorder.Code, recorder.Body.String())
+	}
 	service.mu.Lock()
-	service.downloads = map[string]*linkUse{}
+	if len(service.downloads) != maxTrackedLinks {
+		t.Fatalf("tracker holds %d entries", len(service.downloads))
+	}
 	service.mu.Unlock()
-	fill(clk.now.Add(-time.Second))
+	// Entries of links that have expired make room before anything else.
+	clk.advance(LinkLifetime)
 	live, _ := service.signer.Mint()
 	if recorder, _ := download(service, live, file); recorder.Code != http.StatusOK {
 		t.Fatalf("live link with a tracker full of expired entries: status %d", recorder.Code)
@@ -433,6 +451,58 @@ func TestFullDownloadTrackerDoesNotRefuseFreshLinks(t *testing.T) {
 	defer service.mu.Unlock()
 	if len(service.downloads) != 1 {
 		t.Fatalf("expired entries were kept: %d tracked", len(service.downloads))
+	}
+}
+
+// TestFullDownloadTrackerKeepsEveryLinkAtItsCap is the reviewer's case: two
+// links that expire first, drained, then more than maxTrackedLinks other live
+// links each downloaded once, then the first two drained again and again.
+// Neither ever gets more than DownloadsPerLink downloads, and a link that is
+// refused because the tracker is full is served once an entry expires.
+func TestFullDownloadTrackerKeepsEveryLinkAtItsCap(t *testing.T) {
+	service, clk, _, manifest := newTestService(t)
+	file := manifest.Packages[0].File
+	drain := func(signature string) int {
+		served := 0
+		for served < 1000 {
+			if recorder, _ := download(service, signature, file); recorder.Code != http.StatusOK {
+				break
+			}
+			served++
+		}
+		return served
+	}
+	first, _ := service.signer.Mint()
+	clk.advance(time.Second)
+	second, _ := service.signer.Mint()
+	clk.advance(time.Second)
+	served := map[string]int{first: drain(first), second: drain(second)}
+	refused := ""
+	for index := 0; index < maxTrackedLinks; index++ {
+		other, _ := service.signer.Mint()
+		if recorder, _ := download(service, other, file); recorder.Code != http.StatusOK {
+			refused = other
+		}
+	}
+	if refused == "" {
+		t.Fatal("no fresh link was refused although the tracker was full")
+	}
+	for cycle := 0; cycle < 10; cycle++ {
+		served[first] += drain(first)
+		served[second] += drain(second)
+	}
+	if served[first] != DownloadsPerLink || served[second] != DownloadsPerLink {
+		t.Fatalf("served %d and %d downloads, cap %d", served[first], served[second], DownloadsPerLink)
+	}
+	service.mu.Lock()
+	if len(service.downloads) > maxTrackedLinks {
+		t.Fatalf("tracker grew to %d", len(service.downloads))
+	}
+	service.mu.Unlock()
+	// The first link expires; the refused one is then served.
+	clk.advance(LinkLifetime - 2*time.Second)
+	if recorder, _ := download(service, refused, file); recorder.Code != http.StatusOK {
+		t.Fatalf("refused link after the first entry expired: %d", recorder.Code)
 	}
 }
 
