@@ -215,6 +215,9 @@ var derivedKeys = map[string]bool{
 	// route accepts but the web page does not link
 	// (TestAgentEverySessionCardHasAUsableTreeID).
 	"tree_id": true,
+	// A fixed label of weekly unattributed saying it is computed with the
+	// current rules (contract section 0.1 item 146); it carries no data.
+	"computed_with": true,
 }
 
 // derivable reports whether one facade value can be read off the web corpus.

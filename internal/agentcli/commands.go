@@ -305,8 +305,9 @@ func buildCommands() []*commandSpec {
 			Run:      runRead,
 		},
 		{
-			Path:    []string{"weekly", "trend"},
-			Summary: "weekly totals over several weeks (administrators)",
+			Path:        []string{"weekly", "trend"},
+			Summary:     "weekly totals over several weeks (administrators)",
+			Description: "The weeks end with the current one, so meta.complete is false (evidence_pending): a trend is complete only when every week in it is frozen.",
 			Flags: []flagSpec{
 				{Name: "weeks", Value: "<n>", Query: "weeks", Help: "Number of weeks, 1-12. Default: 8."},
 				{Name: "group-id", Value: "<id>", Query: "group_id", Help: "Only this project group; 0 means ungrouped. Default: all groups."},
@@ -331,7 +332,7 @@ func buildCommands() []*commandSpec {
 		{
 			Path:        []string{"weekly", "unattributed"},
 			Summary:     "activity no project rule matched (administrators)",
-			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`. Entries come most requests first; when --limit cut the list, data.truncated is true and meta.complete is false with incomplete_reason truncated (at 200, the server's maximum, a full list may be cut: the total is not known).",
+			Description: "Each entry carries the server's draft_rule; turn it into a project rule with `llmaudit config set --kind project --id <id> --add rules=<kind>:<pattern>`. Entries come most requests first; when --limit cut the list, data.truncated is true and meta.complete is false with incomplete_reason truncated (at 200, the server's maximum, a full list may be cut: the total is not known). The list is computed now with the current project rules (data.computed_with current_rules), even for a frozen week (data.week_frozen), so it can differ from the frozen snapshot's unattributed total that `llmaudit weekly project -1 --week <week>` reads; meta.complete is false with evidence_pending only while the week has not ended.",
 			Flags: []flagSpec{
 				flagWeekStart("First day of the week, YYYY-MM-DD, on the deployment's week start day. Default: the current week."),
 				flagLimit(1, 200, 20),
