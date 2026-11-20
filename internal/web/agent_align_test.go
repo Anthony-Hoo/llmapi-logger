@@ -314,6 +314,7 @@ var dynamicSamples = map[string]string{
 	"diff.KeySource":                                 "saved",
 	"formatAgentID(id)":                              "42",
 	"kind":                                           "weekly-settings",
+	"catalogList":                                    "`llmaudit config show --kind org` lists the groups, projects and members with their group_id.",
 }
 
 // serverCommandTexts returns every string the server code of internal/web

@@ -104,3 +104,34 @@ func TestEveryApplyRefusalNamesNoBody(t *testing.T) {
 		}
 	}
 }
+
+// Contract section 0.1 item 108: every CONFLICT of the write services
+// carries details.reason (and details.field when there is one) and a hint
+// with the next step and the read command that shows what is in the way.
+func TestConflictsSayWhatToDo(t *testing.T) {
+	fixture := newWriteFixture(t)
+	ids := fixture.seed(t)
+	check := func(name string, body agentapi.ErrorBody, reason, field, hint string) {
+		t.Helper()
+		if body.Code != agentapi.CodeConflict || body.Details["reason"] != reason || (field != "" && body.Details["field"] != field) ||
+			!strings.Contains(body.Hint, hint) || !strings.Contains(body.Hint, "llmaudit config show --kind org") {
+			t.Errorf("%s = %s %v %q", name, body.Code, body.Details, body.Hint)
+		}
+	}
+	check("group with projects", failure(t, fixture.facade(http.MethodPost, "/plans",
+		map[string]any{"op": "config.remove", "kind": "group", "id": ids.group}, fixture.adminWrite)),
+		"has_projects", "", "llmaudit config remove --kind project")
+	check("duplicate group name", failure(t, fixture.facade(http.MethodPost, "/plans",
+		map[string]any{"op": "config.set", "kind": "group", "set": map[string]any{"name": "GROUP SEED", "enabled": true}}, fixture.adminWrite)),
+		"duplicate", "name", "Choose another name")
+	fixture.planAndApply(t, map[string]any{"op": "config.remove", "kind": "project", "id": ids.project})
+	check("group with members", failure(t, fixture.facade(http.MethodPost, "/plans",
+		map[string]any{"op": "config.remove", "kind": "group", "id": ids.group}, fixture.adminWrite)),
+		"has_members", "", "llmaudit config remove --kind member")
+	// A conflict the store reports without a typed reason (a constraint).
+	stored := agentWriteFailure(fmt.Errorf("%w: org_groups_name_key", orgreport.ErrConflict))
+	if stored.Code != agentapi.CodeConflict || stored.Details["reason"] != "constraint" || !strings.Contains(stored.Hint, "llmaudit config show --kind org") ||
+		strings.Contains(stored.Message, "org_groups_name_key") {
+		t.Errorf("store conflict = %+v", stored)
+	}
+}

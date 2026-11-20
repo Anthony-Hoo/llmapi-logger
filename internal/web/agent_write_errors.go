@@ -77,11 +77,18 @@ func agentWriteFailure(err error) *agentFailure {
 	case errors.As(err, &policyInvalid):
 		return validationFailure(agentapi.CodeInvalidArgument, policyInvalid.Field, policyInvalid.Reason, policyInvalid.Message)
 	case errors.As(err, &orgInvalid):
-		code := agentapi.CodeInvalidArgument
 		if orgInvalid.Conflict {
-			code = agentapi.CodeConflict
+			failure := validationFailure(agentapi.CodeConflict, orgInvalid.Field, orgInvalid.Reason, orgInvalid.Message)
+			failure.Hint = orgConflictHint(orgInvalid.Object, orgInvalid.Reason)
+			return failure
 		}
-		return validationFailure(code, orgInvalid.Field, orgInvalid.Reason, orgInvalid.Message)
+		return validationFailure(agentapi.CodeInvalidArgument, orgInvalid.Field, orgInvalid.Reason, orgInvalid.Message)
+	case errors.Is(err, orgreport.ErrConflict):
+		// A conflict the store reported (a constraint), without a typed
+		// reason: the catalog changed in a way the check could not see.
+		failure := validationFailure(agentapi.CodeConflict, "", "constraint", "the change conflicts with the stored catalog")
+		failure.Hint = orgConflictHint("", "constraint")
+		return failure
 	case errors.As(err, &orgSettings):
 		return validationFailure(agentapi.CodeInvalidArgument, orgSettings.Field, orgSettings.Reason, orgSettings.Message)
 	case errors.Is(err, orgreport.ErrInvalidSettings):
@@ -114,6 +121,30 @@ func agentWriteFailure(err error) *agentFailure {
 		return &agentFailure{Code: code, Details: map[string]any{"field": "body"}}
 	}
 	return &agentFailure{Code: code}
+}
+
+// orgConflictHint is the next step for a CONFLICT of the org catalog. It
+// names no other object's id (contract section 0.1 item 35): the read
+// command lists them.
+func orgConflictHint(object, reason string) string {
+	const catalogList = "`llmaudit config show --kind org` lists the groups, projects and members with their group_id."
+	switch reason {
+	case orgreport.ReasonHasProjects:
+		return "Move the group's projects to another group (`llmaudit config set --kind project --id <project-id> --set group_id=<other-group-id>`) " +
+			"or remove them (`llmaudit config remove --kind project --id <project-id>`) first, then plan the removal again. " + catalogList
+	case orgreport.ReasonHasMembers:
+		return "Move the group's members to another group (`llmaudit config set --kind member --id <user-id> --set group_id=<other-group-id>`) " +
+			"or remove them (`llmaudit config remove --kind member --id <user-id>`) first, then plan the removal again. " + catalogList
+	case orgreport.ReasonDuplicate:
+		switch object {
+		case orgreport.ObjectGroup:
+			return "Another project group has this name (names are compared without regard to case). Choose another name, or change the existing group with --id instead. " + catalogList
+		case orgreport.ObjectProject:
+			return "Another project in the same group (or another organisation-wide project) has this name, compared without regard to case. Choose another name, or change the existing project with --id instead. " + catalogList
+		}
+		return "Another entry of the catalog conflicts with this one. " + catalogList
+	}
+	return "The change conflicts with the catalog as it is stored now. Read it again with `llmaudit config show --kind org` and make a new plan."
 }
 
 // agentApplyFailure classifies an error a plan's execution returned. Typed
