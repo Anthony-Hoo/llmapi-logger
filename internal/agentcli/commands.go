@@ -265,7 +265,7 @@ func buildCommands() []*commandSpec {
 			Path:        []string{"usage", "tree"},
 			Summary:     "agent tree of one root agent",
 			Description: "Parents outside your scope appear as placeholders (visible=false).",
-			Args:        []argSpec{{Name: "tree", Help: "tree ID, 24 hexadecimal characters: tree_id of a `usage sessions` card (every card has one) or of `analysis sessions`", PathParam: "id"}},
+			Args:        []argSpec{{Name: "tree", Help: "tree ID, 24 hexadecimal characters: tree_id of a `usage sessions` card (every card has one), or of an `analysis sessions` agent row when it has one", PathParam: "id"}},
 			Routes:      []routeSpec{{Method: "GET", Path: "/usage/trees/{id}", Meta: true}},
 			Examples:    []string{"llmaudit usage tree 5d0c9b8a7f6e5d4c3b2a1f0e"},
 			Run:         runRead,
