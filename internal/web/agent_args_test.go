@@ -67,7 +67,7 @@ func badArguments() []badArgument {
 		get("requests.list", "/requests?cursor=bogus", "cursor", reasonInvalidCursor),
 		get("requests.list", "/requests?limit=201", "limit", reasonOutOfRange),
 		get("requests.list", "/requests?limit=1&limit=2", "limit", reasonRepeatedParameter),
-		get("requests.list", "/requests?protocol=foo", "protocol", reasonNotAllowedValue),
+		get("requests.list", "/requests?protocol=+openai", "protocol", reasonInvalidFormat),
 		get("requests.list", "/requests?path=v1", "path", reasonInvalidFormat),
 		get("requests.list", "/requests?model=%20x", "model", reasonInvalidFormat),
 		get("requests.list", "/requests?user_agent=%20x", "user_agent", reasonInvalidFormat),

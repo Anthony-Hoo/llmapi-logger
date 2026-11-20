@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,5 +235,82 @@ func TestCapturedContentIncompleteExports(t *testing.T) {
 	raw := fixture.facade(http.MethodGet, "/requests/short-content/export/raw-request", "", fixture.developer)
 	if raw.Header().Get("X-Audit-Stored-Length") != "4" || raw.Body.Len() != 4 {
 		t.Fatalf("raw body: stored length %q, %d bytes", raw.Header().Get("X-Audit-Stored-Length"), raw.Body.Len())
+	}
+}
+
+// The protocol filter is open, like model: a route may name any parser and
+// the protocol is the parser name's prefix, so records with other protocols
+// exist. The facade lists exactly what the web route lists for any protocol
+// value, an unknown one giving an empty list, and refuses only what the web
+// route's own rule refuses (more than 512 bytes, NUL, surrounding spaces).
+func TestRequestsProtocolIsAnOpenFilter(t *testing.T) {
+	fixture := newReadFixture(t)
+	record := fixtureAudit("custom-protocol", 50*time.Second, fixture.ownFingerprint, 42, storage.ForwardCompleted, nil)
+	record.detail.Audit.Protocol, record.detail.Audit.ParserName = "custom", "custom.passthrough"
+	fixture.audits.records = append([]auditRecord{record}, fixture.audits.records...)
+	ids := func(body []byte) []string {
+		var page struct {
+			Items []struct {
+				AuditID string `json:"audit_id"`
+			} `json:"items"`
+			Data *struct {
+				Items []struct {
+					AuditID string `json:"audit_id"`
+				} `json:"items"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			t.Fatalf("list body %s", body)
+		}
+		items := page.Items
+		if page.Data != nil {
+			items = page.Data.Items
+		}
+		out := []string{}
+		for _, item := range items {
+			out = append(out, item.AuditID)
+		}
+		return out
+	}
+	for protocol, want := range map[string][]string{
+		"custom":  {"custom-protocol"},
+		"gemini":  nil,
+		"unknown": {},
+	} {
+		facade := fixture.facade(http.MethodGet, "/requests?collapse=false&protocol="+protocol, "", fixture.adminRead)
+		web := fixture.web(http.MethodGet, "/api/v1/audits?protocol="+protocol, "", fixture.adminWeb)
+		if facade.Code != http.StatusOK || web.Code != http.StatusOK {
+			t.Fatalf("protocol=%s: facade %d %s, web %d", protocol, facade.Code, facade.Body.String(), web.Code)
+		}
+		got, onWeb := ids(facade.Body.Bytes()), ids(web.Body.Bytes())
+		if !reflect.DeepEqual(got, onWeb) {
+			t.Errorf("protocol=%s: facade %v, web %v", protocol, got, onWeb)
+		}
+		if want != nil && !reflect.DeepEqual(got, want) {
+			t.Errorf("protocol=%s: %v, want %v", protocol, got, want)
+		}
+		for _, id := range got {
+			if protocol == "gemini" && id == "custom-protocol" {
+				t.Errorf("protocol=gemini listed the custom record")
+			}
+		}
+		if meta := decodeAgent(t, facade).Meta; meta == nil || !meta.Complete {
+			t.Errorf("protocol=%s: meta %+v", protocol, meta)
+		}
+	}
+	// The web route's limits are query.validateFilter's (this fixture's
+	// stand-in does not model them; the real service refuses exactly these
+	// as invalid protocol); the facade applies the same rule itself.
+	for _, bad := range []string{"+openai", "openai+", "%00", strings.Repeat("p", 513)} {
+		facade := fixture.facade(http.MethodGet, "/requests?protocol="+bad, "", fixture.adminRead)
+		body := decodeAgent(t, facade)
+		if facade.Code != http.StatusBadRequest || body.Error.Details["field"] != "protocol" || body.Error.Details["reason"] != reasonInvalidFormat {
+			t.Errorf("protocol=%q: facade %d %s", bad, facade.Code, facade.Body.String())
+		}
+	}
+	for _, good := range []string{"x", strings.Repeat("p", 512), "anthropic.messages", "Open AI"} {
+		if facade := fixture.facade(http.MethodGet, "/requests?protocol="+url.QueryEscape(good), "", fixture.adminRead); facade.Code != http.StatusOK {
+			t.Errorf("protocol=%q: facade %d", good, facade.Code)
+		}
 	}
 }

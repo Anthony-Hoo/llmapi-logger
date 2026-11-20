@@ -222,13 +222,14 @@ func (handler *managementHandler) serveAgentRequests(writer http.ResponseWriter,
 	writeAgentRead(writer, list, agentMetaOK(), true, actions...)
 }
 
-// Closed value sets of the audit list filters (contract section 0.1 item
-// 119). The protocol is the prefix of the route's parser name, and only the
-// three parser families exist; forward and capture states are the service's
-// own (capture_chunk_missing appears in results only, contract section 0
-// row 6).
+// Closed value sets of the audit list filters (contract section 0.1 items
+// 119 and 145): only sets the service itself refuses every other value of.
+// Forward and capture states are the service's own (query.validateFilter;
+// capture_chunk_missing appears in results only, contract section 0 row 6).
+// The protocol is not one: it is the prefix of the route's parser name, a
+// route may name any parser (config.validateRoutes), and the service
+// matches any protocol text, so it is an open filter like model.
 var (
-	agentProtocols      = []string{"openai", "anthropic", "gemini"}
 	agentForwardStates  = []string{storage.ForwardInProgress, storage.ForwardCompleted, storage.ForwardRejected, storage.ForwardClientCancelled, storage.ForwardNewAPIError, storage.ForwardProxyError, storage.ForwardInterrupted}
 	agentCaptureFilters = []string{storage.CapturePending, storage.CaptureComplete, storage.CapturePartial, storage.CaptureFailed}
 	agentStableCode     = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -317,9 +318,6 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 		}
 		cursor = query.Cursor{BeforeStartedAtNS: at, BeforeID: id}
 	}
-	if filter.Protocol, err = agentClosedValue(values, "protocol", agentProtocols); err != nil {
-		return filter, cursor, 0, err
-	}
 	if filter.ForwardStatus, err = agentClosedValue(values, "forward_status", agentForwardStates); err != nil {
 		return filter, cursor, 0, err
 	}
@@ -343,7 +341,7 @@ func (handler *managementHandler) agentAuditFilter(values url.Values, caller pri
 	for _, text := range []struct {
 		name   string
 		target *string
-	}{{"model", &filter.Model}, {"user_agent", &filter.UserAgent}, {"blocked_by", &filter.BlockedBy}, {"conversation", &filter.Conversation},
+	}{{"protocol", &filter.Protocol}, {"model", &filter.Model}, {"user_agent", &filter.UserAgent}, {"blocked_by", &filter.BlockedBy}, {"conversation", &filter.Conversation},
 		{"username", &filter.Username}, {"token_name", &filter.TokenName}} {
 		if *text.target, err = agentFreeText(values, text.name); err != nil {
 			return filter, cursor, 0, err

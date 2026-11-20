@@ -125,6 +125,10 @@ func (audits *scopedAudits) List(_ context.Context, filter query.Filter, cursor 
 		if filter.ForwardStatus != "" && summary.ForwardStatus != filter.ForwardStatus {
 			continue
 		}
+		// Exactly as the stores match it (a.protocol = $n).
+		if filter.Protocol != "" && summary.Protocol != filter.Protocol {
+			continue
+		}
 		if len(page.Items) == limit {
 			last := page.Items[len(page.Items)-1]
 			page.NextCursor = &query.Cursor{BeforeStartedAtNS: last.StartedAtNS, BeforeID: last.AuditID}
