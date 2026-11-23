@@ -390,10 +390,17 @@ func TestPrettyOutputIsBounded(t *testing.T) {
 		wide = append(wide, `"`+strings.Repeat(string(rune('a'+index)), 60)+`":"`+strings.Repeat("x", 60)+`"`)
 	}
 	rows := []string{"{" + strings.Join(wide, ",") + "}"}
-	for index := 0; index < 200000; index++ {
+	for index := 0; index < maxPrettyTableRows; index++ {
 		rows = append(rows, `{}`)
 	}
-	data := `{"items":[` + strings.Join(rows, ",") + `],"zz":"after"}`
+	// One table is bounded by its rows (item 194), so several of them are
+	// needed to reach the limit on the whole output.
+	table := `[` + strings.Join(rows, ",") + `]`
+	tables := make([]string, 0, 8)
+	for index := 0; index < 8; index++ {
+		tables = append(tables, `"t`+strconv.Itoa(index)+`":`+table)
+	}
+	data := `{` + strings.Join(tables, ",") + `,"zz":"after"}`
 	out := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(data), Meta: json.RawMessage(`{"state":"ok","complete":true,"incomplete_reason":""}`)}, nil)
 	if len(out) > maxPrettyBytes+64<<10 {
 		t.Fatalf("%d bytes of data rendered to %d bytes, more than the %d limit", len(data), len(out), maxPrettyBytes)
@@ -404,6 +411,51 @@ func TestPrettyOutputIsBounded(t *testing.T) {
 	if strings.Contains(out, "zz: after") {
 		t.Fatal("values after the limit were still rendered")
 	}
+}
+
+// TestPrettyTableRowsAreBounded (contract section 0.1 item 194): the table
+// writer holds every row until it is flushed, so a table shows at most
+// maxPrettyTableRows rows and says how many it left out; rendering a list of
+// very many small rows must not need memory for all of them.
+func TestPrettyTableRowsAreBounded(t *testing.T) {
+	const total = 500000
+	items := make([]any, 0, total+1)
+	header := map[string]any{}
+	for index := 0; index < maxTableColumns; index++ {
+		header[strings.Repeat(string(rune('a'+index)), 60)] = "x"
+	}
+	items = append(items, header)
+	for index := 0; index < total; index++ {
+		items = append(items, map[string]any{})
+	}
+	var builder strings.Builder
+	allocated := allocatedBy(func() {
+		renderValue(&builder, "", map[string]any{"items": items}, 0, nil)
+	})
+	out := builder.String()
+	if allocated > 64<<20 {
+		t.Fatalf("rendering %d rows allocated %d MiB", total+1, allocated>>20)
+	}
+	if lines := strings.Count(out, "\n"); lines != 1+1+maxPrettyTableRows+1 {
+		t.Fatalf("%d lines, want the label, the header, %d rows and the note", lines, maxPrettyTableRows)
+	}
+	if want := "  … " + strconv.Itoa(total+1-maxPrettyTableRows) + " more rows not shown: run the command without --pretty for all of them\n"; !strings.HasSuffix(out, want) {
+		t.Fatalf("the output does not end with %q: %.120q", want, out[len(out)-120:])
+	}
+	// A table of ordinary size is shown whole, without a note.
+	small := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(`{"items":[{"a":1},{"a":2},{"a":3}]}`)}, nil)
+	if small != "ok\nitems:\n  a\n  1\n  2\n  3\n" {
+		t.Fatalf("small table %q", small)
+	}
+}
+
+// allocatedBy is how many bytes run allocates.
+func allocatedBy(run func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	run()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
 }
 
 // LOCAL_FILE_ERROR carries a hint wherever it is raised, through the shared

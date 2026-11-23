@@ -171,7 +171,15 @@ func renderValue(builder *strings.Builder, label string, value any, depth int, p
 				headers[index] = shorten(terminalText(column), 60)
 			}
 			fmt.Fprintln(writer, indent+"  "+strings.Join(headers, "\t"))
-			for _, row := range rows {
+			// The table writer keeps every row until it is flushed, so the
+			// rows given to it are bounded here: the limit on the output
+			// alone would stop the flush only after all of them had been
+			// formatted and held (contract section 0.1 item 194).
+			shown := rows
+			if len(shown) > maxPrettyTableRows {
+				shown = shown[:maxPrettyTableRows]
+			}
+			for _, row := range shown {
 				cells := make([]string, len(columns))
 				for index, column := range columns {
 					cells[index] = shorten(scalarText(row[column]), 60)
@@ -179,6 +187,9 @@ func renderValue(builder *strings.Builder, label string, value any, depth int, p
 				fmt.Fprintln(writer, indent+"  "+strings.Join(cells, "\t"))
 			}
 			_ = writer.Flush()
+			if hidden := len(rows) - len(shown); hidden > 0 && builder.Len() < maxPrettyBytes {
+				fmt.Fprintf(builder, "%s  … %d more rows not shown: run the command without --pretty for all of them\n", indent, hidden)
+			}
 			return
 		}
 		parts := make([]string, 0, len(typed))
@@ -193,6 +204,12 @@ func renderValue(builder *strings.Builder, label string, value any, depth int, p
 
 // maxTableColumns bounds a --pretty table.
 const maxTableColumns = 8
+
+// maxPrettyTableRows bounds the rows of one --pretty table. A list from the
+// server has at most a few hundred items (a page is at most 200), so a real
+// result is never cut; the bound is for the memory the table writer needs,
+// which holds every row it is given until the table is flushed.
+const maxPrettyTableRows = 5000
 
 // tableOf turns a list of objects into rows with at most eight scalar
 // columns: first the preferred columns the rows have, in their order, then
