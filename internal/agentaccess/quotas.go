@@ -1,0 +1,154 @@
+package agentaccess
+
+import (
+	"context"
+	"encoding/json"
+	"strconv"
+	"time"
+
+	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/storage"
+)
+
+// Quota is one of the per-token or global limits of contract section 7 that
+// apply to authenticated facade requests.
+type Quota int
+
+const (
+	// QuotaRead: every read-tier request of a token except logout.
+	QuotaRead Quota = iota
+	// QuotaSensitiveRead: input pack and facet reads of a token, counted in
+	// addition to QuotaRead.
+	QuotaSensitiveRead
+	// QuotaWrite: plan creation, plan execution and setting or clearing the
+	// model key, per token.
+	QuotaWrite
+	// QuotaAnalysisRun: executions of analysis.run, for the whole process.
+	QuotaAnalysisRun
+	// QuotaRegenerate: executions of weekly.regenerate, for the whole
+	// process.
+	QuotaRegenerate
+	// QuotaTestModel: connection tests of a token.
+	QuotaTestModel
+	// QuotaDeniedAudit bounds the write_denied rows one token can cause: a
+	// refused request is not counted by the write limits, and without it a
+	// token without write rights could add rows at the request rate.
+	QuotaDeniedAudit
+)
+
+// Quota sizes (contract section 7). They are implementation constants, not
+// configuration.
+var quotaSizes = map[Quota]struct {
+	limit  int
+	window time.Duration
+	global bool
+}{
+	QuotaRead:          {120, time.Minute, false},
+	QuotaSensitiveRead: {20, time.Minute, false},
+	QuotaWrite:         {60, 10 * time.Minute, false},
+	QuotaAnalysisRun:   {1, 10 * time.Minute, true},
+	QuotaRegenerate:    {6, time.Hour, true},
+	QuotaTestModel:     {12, time.Hour, false},
+	QuotaDeniedAudit:   {60, 10 * time.Minute, false},
+}
+
+func newQuotaLimiters(now func() time.Time) map[Quota]*windowLimiter {
+	limiters := make(map[Quota]*windowLimiter, len(quotaSizes))
+	for quota, size := range quotaSizes {
+		limiters[quota] = newWindowLimiter(size.limit, size.window, now)
+	}
+	return limiters
+}
+
+// Take counts one event against quota for the calling token and refuses it
+// with RATE_LIMITED (and the wait) when the window is full. A refused event is
+// not counted.
+func (service *Service) Take(quota Quota, identity Identity) error {
+	_, err := service.TakeSlot(quota, identity)
+	return err
+}
+
+// QuotaSlot is one event counted by TakeSlot. Refund gives it back.
+type QuotaSlot struct {
+	quota Quota
+	slot  limiterSlot
+}
+
+// TakeSlot is Take for an event that may turn out not to count: the caller
+// keeps the slot and hands it to Refund when, for instance, the operation it
+// stood for was never started.
+func (service *Service) TakeSlot(quota Quota, identity Identity) (QuotaSlot, error) {
+	limiter, ok := service.quotas[quota]
+	if !ok {
+		return QuotaSlot{}, fail(agentapi.CodeInternal)
+	}
+	key := "global"
+	if !quotaSizes[quota].global {
+		key = strconv.FormatInt(identity.TokenID, 10)
+	}
+	slot, allowed, wait := limiter.takeSlot(key)
+	if !allowed {
+		return QuotaSlot{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: wait}
+	}
+	return QuotaSlot{quota: quota, slot: slot}, nil
+}
+
+// Refund gives back an event TakeSlot counted, in the window it was counted
+// in; after that window has ended it changes nothing. The zero slot is
+// ignored, so a caller may refund a slot it never took.
+func (service *Service) Refund(slot QuotaSlot) {
+	if service == nil {
+		return
+	}
+	if limiter, ok := service.quotas[slot.quota]; ok {
+		limiter.refund(slot.slot)
+	}
+}
+
+// WriteAudit describes one write_applied, write_failed or write_denied row.
+// ChangedKeys are key names only; nothing in it may be a written value.
+type WriteAudit struct {
+	Event       string
+	ObjectKind  string
+	ObjectID    string
+	ChangedKeys []string
+	Outcome     string
+	ErrorCode   agentapi.Code
+}
+
+// RecordWrite appends a write audit row for the calling token. Like
+// RecordAudit it never fails the caller.
+func (service *Service) RecordWrite(ctx context.Context, identity Identity, meta RequestMeta, write WriteAudit) {
+	entry := auditFor(identity, meta, write.Event, write.Outcome)
+	entry.ObjectKind, entry.ObjectID = write.ObjectKind, write.ObjectID
+	if write.ChangedKeys != nil {
+		encoded, err := json.Marshal(write.ChangedKeys)
+		if err == nil {
+			entry.ChangedKeys = string(encoded)
+		}
+	}
+	entry.ErrorCode = string(write.ErrorCode)
+	service.RecordAudit(ctx, entry)
+}
+
+// RecordSensitiveRead appends the sensitive_read row of a pack or facet read
+// for the calling token; an empty errorCode is a successful read. The command
+// and CLI version come from request headers, so they are cleaned as for every
+// other token event: a client cannot record the reserved "web" or arbitrary
+// text (contract section 0.1 item 176). Like RecordAudit it never fails the
+// caller.
+func (service *Service) RecordSensitiveRead(ctx context.Context, identity Identity, meta RequestMeta, objectKind, objectID string, errorCode agentapi.Code) {
+	entry := auditFor(identity, meta, EventSensitiveRead, OutcomeOK)
+	entry.ObjectKind, entry.ObjectID = objectKind, objectID
+	if errorCode != "" {
+		entry.Outcome, entry.ErrorCode = OutcomeFailed, string(errorCode)
+	}
+	service.RecordAudit(ctx, entry)
+}
+
+// storage outcome names, re-exported for callers of RecordWrite.
+const (
+	OutcomeOK     = storage.AgentOutcomeOK
+	OutcomeDenied = storage.AgentOutcomeDenied
+	OutcomeFailed = storage.AgentOutcomeFailed
+)

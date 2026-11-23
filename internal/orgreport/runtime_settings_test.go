@@ -254,3 +254,91 @@ func TestOrgSettingsAreReadBackAtStartup(t *testing.T) {
 		t.Fatalf("store error applied something: %+v", public)
 	}
 }
+
+// Contract section 0.1 item 128: no write of the weekly-report settings
+// starts from the configuration file because the saved row could not be
+// read. The agent's patch and reset and the web's PUT (UpdateSettings) and
+// DELETE (ResetSettings) refuse with ErrSettingsUnavailable and save nothing;
+// reads (EditableSettings, CheckPatchSettings, CheckResetSettings) still
+// fall back to the file. A row that was read but cannot be used stays
+// writable.
+func TestSettingsWritesRefuseWhenTheSavedSectionCannotBeRead(t *testing.T) {
+	ctx := context.Background()
+	const saved = `{"idle_gap_seconds":45,"ranked_clients":["codex"],"max_concurrent_roots":4,"max_single_request_roots":50}`
+	gap := 90
+	writes := map[string]func(*Service, int64) error{
+		"agent patch": func(service *Service, version int64) error {
+			_, err := service.PatchSettings(ctx, version, SettingsChange{Set: SettingsPatch{IdleGapSeconds: &gap}})
+			return err
+		},
+		"agent patch at version 0": func(service *Service, _ int64) error {
+			// The version a plan made during the error shows.
+			_, err := service.PatchSettings(ctx, 0, SettingsChange{Set: SettingsPatch{IdleGapSeconds: &gap}})
+			return err
+		},
+		"agent reset": func(service *Service, version int64) error {
+			_, err := service.ResetSettingsIfVersion(ctx, version)
+			return err
+		},
+		"web put": func(service *Service, _ int64) error {
+			_, err := service.UpdateSettings(ctx, EditableSettings{IdleGapSeconds: 90, RankedClients: []string{"codex"}, MaxConcurrentRoots: 4, MaxSingleRequestRoots: 50})
+			return err
+		},
+		"web delete": func(service *Service, _ int64) error {
+			_, err := service.ResetSettings(ctx)
+			return err
+		},
+	}
+	for name, write := range writes {
+		t.Run(name, func(t *testing.T) {
+			store := &settingsMemory{rows: map[string]storage.RuntimeSettings{
+				storage.SettingsOrgReports: {Section: storage.SettingsOrgReports, UpdatedAtNS: 5, Settings: saved},
+			}}
+			service, err := NewService(ctx, Options{Settings: testSettings(), File: fileOrgSection(), SavedSettings: store})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.mu.Lock()
+			store.fail = errors.New("transient: reader pool exhausted")
+			store.mu.Unlock()
+			// Reads keep falling back to the file.
+			view, err := service.EditableSettings(ctx)
+			if err != nil || view.Source != SettingsSourceFile || view.UpdatedNS != 0 {
+				t.Fatalf("read during the error = %+v, %v", view, err)
+			}
+			diff, err := service.CheckPatchSettings(ctx, AnyVersion, SettingsChange{Set: SettingsPatch{IdleGapSeconds: &gap}})
+			if err != nil || diff.Version != 0 || diff.Before.MaxConcurrentRoots != 10 {
+				t.Fatalf("check during the error = %+v, %v", diff, err)
+			}
+			if _, err := service.CheckResetSettings(ctx, AnyVersion); err != nil {
+				t.Fatalf("reset check during the error = %v", err)
+			}
+			if err := write(service, 5); !errors.Is(err, ErrSettingsUnavailable) {
+				t.Fatalf("write during the error = %v", err)
+			}
+			store.mu.Lock()
+			store.fail = nil
+			row := store.rows[storage.SettingsOrgReports]
+			store.mu.Unlock()
+			if row.UpdatedAtNS != 5 || row.Settings != saved {
+				t.Fatalf("a refused write changed the saved row: %+v", row)
+			}
+			if view, _ := service.EditableSettings(ctx); view.Settings.MaxConcurrentRoots != 4 || view.UpdatedNS != 5 {
+				t.Fatalf("saved section afterwards = %+v", view)
+			}
+		})
+	}
+
+	// A row that was read but no longer validates is the file-applies state:
+	// writes start from the file and succeed.
+	store := &settingsMemory{rows: map[string]storage.RuntimeSettings{
+		storage.SettingsOrgReports: {Section: storage.SettingsOrgReports, UpdatedAtNS: 6, Settings: `{"idle_gap_seconds":0,"ranked_clients":["codex"],"max_concurrent_roots":4,"max_single_request_roots":50}`},
+	}}
+	service, err := NewService(ctx, Options{Settings: testSettings(), File: fileOrgSection(), SavedSettings: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PatchSettings(ctx, 0, SettingsChange{Set: SettingsPatch{IdleGapSeconds: &gap}}); err != nil {
+		t.Fatalf("patch over an unusable row = %v", err)
+	}
+}

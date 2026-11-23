@@ -1,0 +1,286 @@
+package agentcli
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"sort"
+	"strings"
+	"text/tabwriter"
+
+	"llmapi-logger/internal/agentapi"
+)
+
+// tokenPattern matches token-shaped text: the prefix and at least the
+// encoded length of base64url characters.
+var tokenPattern = regexp.MustCompile(regexp.QuoteMeta(agentapi.TokenPrefix) + fmt.Sprintf("[A-Za-z0-9_-]{%d,}", agentapi.TokenEncodedChars))
+
+// maskTokens replaces token-shaped strings in explanatory text (message,
+// hint, next_actions). Business data is never touched.
+func maskTokens(text string) string {
+	return tokenPattern.ReplaceAllString(text, agentapi.TokenPrefix+"***")
+}
+
+// terminalText is text that --pretty shows on a terminal. Every control
+// character becomes a space: C0 (below 0x20, newline and carriage return
+// included), DEL and the C1 range U+0080–U+009F (U+009B is a CSI on some
+// terminals). So no server-provided text, and no text from audited traffic
+// that reaches a response, can carry an escape sequence to the terminal or
+// start an output line of its own; other Unicode text is kept as it is
+// (contract section 0.1 item 189). Every server-provided string --pretty
+// prints goes through it.
+func terminalText(text string) string {
+	return strings.Map(func(char rune) rune {
+		if char < 0x20 || (char >= 0x7f && char <= 0x9f) {
+			return ' '
+		}
+		return char
+	}, text)
+}
+
+// renderPrettySuccess renders a success for people. columns is the
+// command's preferred column order for tables (see tableOf).
+func renderPrettySuccess(envelope outEnvelope, columns []string) string {
+	var builder strings.Builder
+	builder.WriteString("ok\n")
+	var data any
+	if err := decodeNumbers(envelope.Data, &data); err == nil {
+		renderValue(&builder, "", data, 0, columns)
+		if builder.Len() >= maxPrettyBytes {
+			// A table cut off by the limit may end in the middle of a line.
+			if text := builder.String(); !strings.HasSuffix(text, "\n") {
+				builder.WriteString("\n")
+			}
+			builder.WriteString(prettyTruncatedNote + "\n")
+		}
+	}
+	if len(envelope.Meta) > 0 {
+		var meta map[string]any
+		if decodeNumbers(envelope.Meta, &meta) == nil {
+			builder.WriteString(terminalText(fmt.Sprintf("meta: state=%v complete=%v", meta["state"], meta["complete"])))
+			if reason, _ := meta["incomplete_reason"].(string); reason != "" {
+				builder.WriteString(" incomplete_reason=" + terminalText(reason))
+			}
+			builder.WriteString("\n")
+		}
+	}
+	if envelope.WebURL != "" {
+		builder.WriteString("web: " + terminalText(envelope.WebURL) + "\n")
+	} else if envelope.WebPath != "" {
+		builder.WriteString("web: " + terminalText(envelope.WebPath) + "\n")
+	}
+	for _, action := range envelope.NextActions {
+		builder.WriteString("next: " + terminalText(action) + "\n")
+	}
+	if envelope.Notice != "" {
+		builder.WriteString("notice: " + terminalText(envelope.Notice) + "\n")
+	}
+	return builder.String()
+}
+
+func renderPrettyFailure(body agentapi.ErrorBody) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "error %s: %s\n", terminalText(string(body.Code)), terminalText(body.Message))
+	if body.Hint != "" {
+		builder.WriteString("hint: " + terminalText(body.Hint) + "\n")
+	}
+	keys := make([]string, 0, len(body.Details))
+	for key := range body.Details {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(&builder, "%s: %s\n", terminalText(key), scalarText(body.Details[key]))
+	}
+	return builder.String()
+}
+
+func decodeNumbers(raw []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	return decoder.Decode(target)
+}
+
+// maxPrettyDepth bounds the nesting --pretty indents. Indentation grows
+// with depth, so a response nested thousands of levels deep would otherwise
+// render to output quadratic in its size; an object at this depth is written
+// on one line as compact JSON instead (contract section 0.1 item 178).
+const maxPrettyDepth = 32
+
+// maxPrettyBytes bounds what --pretty renders of a result's data. A table
+// pads every row to the width of its columns, so even with headers and cells
+// shortened a row of a few bytes can render to several hundred; a response of
+// many such rows would render to far more than its own size. Rendering stops
+// once the output has reached this size, with prettyTruncatedNote; the JSON
+// output is the interface and is never cut (contract section 0.1 item 193).
+const maxPrettyBytes = 8 << 20
+
+const prettyTruncatedNote = "… output truncated at 8 MiB: run the command without --pretty for the full result"
+
+// prettyLimit is where a table is flushed: it takes no more bytes once the
+// output has reached maxPrettyBytes, which ends the flush.
+type prettyLimit struct{ builder *strings.Builder }
+
+func (limit prettyLimit) Write(data []byte) (int, error) {
+	if limit.builder.Len() >= maxPrettyBytes {
+		return 0, errors.New("pretty output limit reached")
+	}
+	return limit.builder.Write(data)
+}
+
+func renderValue(builder *strings.Builder, label string, value any, depth int, preferred []string) {
+	if builder.Len() >= maxPrettyBytes {
+		return
+	}
+	indent := strings.Repeat("  ", depth)
+	// label is an object key from the response: printed only, never looked up.
+	label = terminalText(label)
+	switch typed := value.(type) {
+	case map[string]any:
+		if label != "" && depth >= maxPrettyDepth {
+			builder.WriteString(indent + label + ": " + scalarText(typed) + "\n")
+			return
+		}
+		if label != "" {
+			builder.WriteString(indent + label + ":\n")
+			depth++
+		}
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			renderValue(builder, key, typed[key], depth, preferred)
+		}
+	case []any:
+		if rows, columns := tableOf(typed, preferred); rows != nil {
+			if label != "" {
+				builder.WriteString(indent + label + ":\n")
+			}
+			writer := tabwriter.NewWriter(prettyLimit{builder}, 0, 2, 2, ' ', 0)
+			// The column names are response keys too; rows are still looked
+			// up by the keys as sent. A header is shortened like a cell:
+			// the table pads every row to its widest column, so one very
+			// long key would otherwise multiply into every row (contract
+			// section 0.1 item 193).
+			headers := make([]string, len(columns))
+			for index, column := range columns {
+				headers[index] = shorten(terminalText(column), 60)
+			}
+			fmt.Fprintln(writer, indent+"  "+strings.Join(headers, "\t"))
+			// The table writer keeps every row until it is flushed, so the
+			// rows given to it are bounded here: the limit on the output
+			// alone would stop the flush only after all of them had been
+			// formatted and held (contract section 0.1 item 194).
+			shown := rows
+			if len(shown) > maxPrettyTableRows {
+				shown = shown[:maxPrettyTableRows]
+			}
+			for _, row := range shown {
+				cells := make([]string, len(columns))
+				for index, column := range columns {
+					cells[index] = shorten(scalarText(row[column]), 60)
+				}
+				fmt.Fprintln(writer, indent+"  "+strings.Join(cells, "\t"))
+			}
+			_ = writer.Flush()
+			if hidden := len(rows) - len(shown); hidden > 0 && builder.Len() < maxPrettyBytes {
+				fmt.Fprintf(builder, "%s  … %d more rows not shown: run the command without --pretty for all of them\n", indent, hidden)
+			}
+			return
+		}
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			parts = append(parts, scalarText(item))
+		}
+		builder.WriteString(indent + label + ": " + strings.Join(parts, ", ") + "\n")
+	default:
+		builder.WriteString(indent + label + ": " + scalarText(value) + "\n")
+	}
+}
+
+// maxTableColumns bounds a --pretty table.
+const maxTableColumns = 8
+
+// maxPrettyTableRows bounds the rows of one --pretty table. A list from the
+// server has at most a few hundred items (a page is at most 200), so a real
+// result is never cut; the bound is for the memory the table writer needs,
+// which holds every row it is given until the table is flushed.
+const maxPrettyTableRows = 5000
+
+// tableOf turns a list of objects into rows with at most eight scalar
+// columns: first the preferred columns the rows have, in their order, then
+// the other scalar columns alphabetically.
+func tableOf(items []any, preferred []string) ([]map[string]any, []string) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	rows := make([]map[string]any, 0, len(items))
+	scalar := map[string]bool{}
+	for _, item := range items {
+		row, ok := item.(map[string]any)
+		if !ok {
+			return nil, nil
+		}
+		rows = append(rows, row)
+		for key, value := range row {
+			switch value.(type) {
+			case map[string]any, []any:
+			default:
+				scalar[key] = true
+			}
+		}
+	}
+	var columns []string
+	used := map[string]bool{}
+	for _, key := range preferred {
+		if scalar[key] && !used[key] && len(columns) < maxTableColumns {
+			used[key] = true
+			columns = append(columns, key)
+		}
+	}
+	rest := make([]string, 0, len(scalar))
+	for key := range scalar {
+		if !used[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		if len(columns) == maxTableColumns {
+			break
+		}
+		columns = append(columns, key)
+	}
+	if len(columns) == 0 {
+		return nil, nil
+	}
+	return rows, columns
+}
+
+func scalarText(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return "-"
+	case string:
+		return terminalText(typed)
+	case map[string]any, []any:
+		// json.Marshal escapes only characters below 0x20; DEL and the C1
+		// range come out raw.
+		encoded, _ := json.Marshal(typed)
+		return terminalText(string(encoded))
+	default:
+		return terminalText(fmt.Sprint(typed))
+	}
+}
+
+func shorten(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit-1]) + "…"
+}

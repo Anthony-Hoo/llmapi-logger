@@ -179,6 +179,23 @@ WHERE 1 = 1`)
 // loads the encrypted request URI, Header values, and parsed conversation for
 // the authenticated query service, but never loads Body chunks.
 func (store *Store) QueryAuditDetail(ctx context.Context, auditID string, scope *AuditScope) (AuditQueryDetail, error) {
+	return store.queryAuditDetail(ctx, auditID, scope, true)
+}
+
+// QueryAuditMetadata reads only the audit summary row (under the same scope
+// rule as QueryAuditDetail), the stages and the bodies' metadata, in one
+// read-only transaction. It reads none of the derived records (request URI,
+// headers, parsed result, turn graph, token link), so a record whose turn
+// graph fails verification still has its metadata for the raw-body and
+// timeline exports (contract section 0.1 item 185).
+func (store *Store) QueryAuditMetadata(ctx context.Context, auditID string, scope *AuditScope) (AuditQueryDetail, error) {
+	return store.queryAuditDetail(ctx, auditID, scope, false)
+}
+
+// queryAuditDetail is QueryAuditDetail when full is set and
+// QueryAuditMetadata when it is not; one function keeps the summary row, the
+// scope handling and the transaction of the two the same.
+func (store *Store) queryAuditDetail(ctx context.Context, auditID string, scope *AuditScope, full bool) (AuditQueryDetail, error) {
 	if ctx == nil {
 		return AuditQueryDetail{}, errors.New("postgres: nil context")
 	}
@@ -239,30 +256,36 @@ WHERE a.audit_id = ` + parameter(len(arguments)+1))
 		}
 		return AuditQueryDetail{}, fmt.Errorf("postgres: read query detail: %w", err)
 	}
-	if err := transaction.QueryRowContext(ctx, `
+	if full {
+		if err := transaction.QueryRowContext(ctx, `
 SELECT request_uri_enc
 FROM audit_records
 WHERE audit_id = $1`, auditID).Scan(&detail.RequestURIEnc); err != nil {
-		return AuditQueryDetail{}, fmt.Errorf("postgres: read encrypted request URI: %w", err)
+			return AuditQueryDetail{}, fmt.Errorf("postgres: read encrypted request URI: %w", err)
+		}
+		detail.RequestURIEnc = cloneBytes(detail.RequestURIEnc)
 	}
-	detail.RequestURIEnc = cloneBytes(detail.RequestURIEnc)
 	if detail.Stages, err = readStages(ctx, transaction, auditID); err != nil {
 		return AuditQueryDetail{}, err
 	}
-	if detail.Headers, err = readHeaderEvidence(ctx, transaction, auditID); err != nil {
-		return AuditQueryDetail{}, err
+	if full {
+		if detail.Headers, err = readHeaderEvidence(ctx, transaction, auditID); err != nil {
+			return AuditQueryDetail{}, err
+		}
 	}
 	if detail.Bodies, err = readBodies(ctx, transaction, auditID); err != nil {
 		return AuditQueryDetail{}, err
 	}
-	if detail.ParsedResult, err = readParsedResultSummary(ctx, transaction, auditID); err != nil {
-		return AuditQueryDetail{}, err
-	}
-	if detail.TurnGraph, err = readTurnGraph(ctx, transaction, auditID); err != nil {
-		return AuditQueryDetail{}, err
-	}
-	if detail.TokenLink, err = readTokenLinkSummary(ctx, transaction, auditID); err != nil {
-		return AuditQueryDetail{}, err
+	if full {
+		if detail.ParsedResult, err = readParsedResultSummary(ctx, transaction, auditID); err != nil {
+			return AuditQueryDetail{}, err
+		}
+		if detail.TurnGraph, err = readTurnGraph(ctx, transaction, auditID); err != nil {
+			return AuditQueryDetail{}, err
+		}
+		if detail.TokenLink, err = readTokenLinkSummary(ctx, transaction, auditID); err != nil {
+			return AuditQueryDetail{}, err
+		}
 	}
 	if err := transaction.Commit(); err != nil {
 		return AuditQueryDetail{}, fmt.Errorf("postgres: commit query detail: %w", err)

@@ -48,6 +48,11 @@ type sessionResponse struct {
 	// user text from the effective vocabulary; the conversation view's
 	// user-input outline skips text parts that start with one of them.
 	InjectedUserTextPrefixes []string `json:"injected_user_text_prefixes,omitempty"`
+	// AgentAccessEnabled tells the UI whether the agent access pages and
+	// /api/v1/agent-access exist; AgentWriteAllowed whether an administrator
+	// may authorize a read-write agent token (doc/features/25-agent-access.md).
+	AgentAccessEnabled bool `json:"agent_access_enabled"`
+	AgentWriteAllowed  bool `json:"agent_write_allowed"`
 }
 
 // authenticatedSession builds the session response for an authenticated
@@ -58,6 +63,8 @@ func (handler *managementHandler) authenticatedSession(callerRole role) sessionR
 		InsightsEnabled: handler.insights != nil, OrgReportsEnabled: handler.org != nil,
 		SessionAnalysisEnabled:   handler.sessionAnalysis != nil,
 		InjectedUserTextPrefixes: handler.injectedUserTextPrefixes,
+		AgentAccessEnabled:       handler.agent != nil,
+		AgentWriteAllowed:        handler.agent.AllowWrite(),
 	}
 }
 
@@ -211,23 +218,29 @@ func (handler *managementHandler) serveReady(writer http.ResponseWriter, request
 		methodNotAllowed(writer, http.MethodGet)
 		return
 	}
+	status := handler.readyStatus(request.Context())
+	responseStatus := http.StatusOK
+	if status.Status == "not_ready" {
+		responseStatus = http.StatusServiceUnavailable
+	}
+	writeJSON(writer, responseStatus, status)
+}
+
+// readyStatus is the readiness /readyz and the facade's status report.
+func (handler *managementHandler) readyStatus(ctx context.Context) ReadyStatus {
 	status := ReadyStatus{
 		Status:        "healthy",
 		Database:      "ok",
 		EncryptionKey: "ok",
 	}
 	if handler.readiness != nil {
-		status = handler.readiness(request.Context())
+		status = handler.readiness(ctx)
 	} else if handler.query == nil || !handler.query.Healthy() {
 		status.Status = "degraded"
 		status.Database = "unavailable"
 		status.EncryptionKey = "unknown"
 	}
-	responseStatus := http.StatusOK
-	if status.Status == "not_ready" {
-		responseStatus = http.StatusServiceUnavailable
-	}
-	writeJSON(writer, responseStatus, status)
+	return status
 }
 
 func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, request *http.Request) {
@@ -239,14 +252,14 @@ func (handler *managementHandler) serveAuditList(writer http.ResponseWriter, req
 		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
 		return
 	}
-	scope := handler.sessionScope(request)
-	filter, cursor, limit, err := parseListQuery(request.URL.Query(), scope != nil)
+	caller := requestPrincipal(request)
+	filter, cursor, limit, err := parseListQuery(request.URL.Query(), !callerMayFilterByCaller(caller))
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_query", "invalid audit list query")
 		return
 	}
 	// Applied after parsing so no query string can reach or replace it.
-	filter.Scope = scope
+	scopeAuditFilter(caller, &filter)
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
 	page, err := handler.query.List(ctx, filter, cursor, limit)
@@ -527,13 +540,9 @@ func (handler *managementHandler) authorizeAudit(writer http.ResponseWriter, req
 		writeError(writer, http.StatusServiceUnavailable, "query_unavailable", "audit query is unavailable")
 		return false
 	}
-	scope := handler.sessionScope(request)
-	if scope == nil {
-		return true
-	}
 	ctx, cancel := context.WithTimeout(request.Context(), queryTimeout)
 	defer cancel()
-	if err := handler.query.Authorize(ctx, auditID, scope); err != nil {
+	if err := authorizeAuditRead(ctx, handler.query, requestPrincipal(request), auditID); err != nil {
 		handler.writeQueryError(writer, err)
 		return false
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/storage"
@@ -222,6 +223,39 @@ func (service *QueryService) Report(ctx context.Context, week string, scope *que
 // SuggestionStore dismisses suggestions.
 type SuggestionStore interface {
 	DismissSuggestion(ctx context.Context, id int64, scope string, nowNS int64) error
+}
+
+// SuggestionChecker reads, without writing, whether a suggestion exists in
+// one of the given scopes: DismissSuggestion's condition.
+type SuggestionChecker interface {
+	SuggestionExists(ctx context.Context, id int64, scopes []string) (bool, error)
+}
+
+// ErrCannotCheck reports that the store cannot answer a check-only question
+// (it lacks the read), so the caller cannot know in advance what a write
+// would find.
+var ErrCannotCheck = errors.New("sessionanalysis: the store cannot check this")
+
+// CheckDismissSuggestion runs DismissSuggestion's checks without writing:
+// query.ErrNotFound when no all-keys or project suggestion has this id (a
+// dismissed one still exists, and dismissing it again succeeds, as on the web
+// route). ErrCannotCheck when the store has no such read.
+func (service *QueryService) CheckDismissSuggestion(ctx context.Context, id int64) error {
+	if _, ok := service.store.(SuggestionStore); !ok || id <= 0 {
+		return query.ErrNotFound
+	}
+	checker, ok := service.store.(SuggestionChecker)
+	if !ok {
+		return ErrCannotCheck
+	}
+	exists, err := checker.SuggestionExists(ctx, id, []string{storage.ScopeAll, storage.ScopeProject})
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return query.ErrNotFound
+	}
+	return nil
 }
 
 // DismissSuggestion marks one all-keys or project suggestion dismissed

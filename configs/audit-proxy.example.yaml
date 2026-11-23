@@ -80,6 +80,21 @@ session_analysis:
     timeout_seconds: 120
     max_sessions_per_run: 300
 
+# Agent access (doc/features/25-agent-access.md): a token-authenticated facade
+# under /api/agent/ for the llmaudit command-line client. Off by default and
+# the whole section may be omitted. Deploy a version that contains this module
+# BEFORE adding the section: configuration loading is strict, so an older
+# binary refuses to start on it. Remove it again before rolling back.
+# allow_write lets administrators authorize read-write agent tokens.
+# public_url is the address written into install prompts; empty uses the
+# scheme and Host the browser used (forwarded headers are ignored), so set it
+# behind a TLS-terminating proxy or a path prefix. Only ASCII letters, digits
+# and - . _ ~ : / % [ ] are accepted.
+# agent_access:
+#   enabled: false
+#   allow_write: false
+#   public_url: ""
+
 interceptors:
   require-client-credential:
     type: require_credential

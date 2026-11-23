@@ -16,6 +16,7 @@
 - `POST /api/v1/session` 按来源地址限流失败登录（5 分钟 10 次 → 429 + `Retry-After`）。
 - 带 `Authorization` 头的请求同样按来源地址限流：同一地址 5 分钟内送来 10 个错误的 Bearer 令牌之后，该地址的 Bearer 请求一律返回 429 + `Retry-After`，直到窗口结束，带着正确令牌的也不例外。与登录不同，送对令牌不清零计数：Bearer 请求是持续的（健康检查、脚本），清零会让与正常脚本共用地址的人一直猜下去。它与登录接口各用各的计数器，互不影响；Cookie 会话不受影响。**注意**：多个客户端共用同一个来源地址时（例如都经同一个反向代理访问管理面），任何一个送够 10 个错令牌，就会让这个地址上所有的 Bearer 请求在窗口内失败，健康检查脚本也在内。
 - 所有证据 JSON、错误、raw、reconstructed 和 timeline 响应都使用 `Cache-Control: no-store`。
+- 启用 `agent_access`（[模块 25](25-agent-access.md)，默认关闭）后多出两组路由。`/api/agent/v1/*` 是给本机命令行 `llmaudit` 用的门面：只认 `Authorization: Bearer lla_…` 形式的 Agent 令牌，不读 Cookie、不接受管理 token，不经过上面的 Cookie/Bearer 鉴权，自带统一信封、错误码与限流；其中兑换令牌与凭签名下载安装包两条路径是匿名的。`/api/v1/agent-access/*` 是网页侧的授权确认、设备列表与撤销、生成安装提示词和“Agent 最近的改动”，用网页会话鉴权，管理员与开发者都可调用。功能关闭时 `/api/agent/` 下所有请求返回同一个 `FEATURE_DISABLED` 的 404，`/api/v1/agent-access/*` 的回答与 `/api/v1` 下其他不存在的路径相同（管理员 404、开发者 403、未登录 401）。接口定义见[接口合同](25-agent-access-contract.md)。
 
 ## 3. 列表 API
 

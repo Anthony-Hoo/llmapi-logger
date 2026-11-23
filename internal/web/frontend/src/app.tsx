@@ -36,6 +36,9 @@ import { ContentPolicyPanel } from "./components/content-policy-panel";
 import { ReportSettingsPanel } from "./components/settings/report-settings-panel";
 import { SystemSettings, type SettingsSection } from "./components/settings/system-settings";
 import { ConversationView } from "./components/conversation-view";
+import { AgentAccessView } from "./components/agent-access/agent-access-view";
+import { AgentAuthorizeView } from "./components/agent-access/authorize-view";
+import { browserAddressBar, takeAuthorizeRequest, type AuthorizeParse } from "./lib/agent-access/authorize";
 // Recharts is only needed by the insights charts, so keep it out of the main chunk.
 const InsightsView = lazy(() => import("./components/insights/insights-view").then((module) => ({ default: module.InsightsView })));
 // Organisation reports are optional and admin-only; keep them out of the main chunk.
@@ -101,10 +104,18 @@ export function orgReportsEnabled(session: SessionInfo | null): boolean {
   return session?.org_reports_enabled === true;
 }
 
+/** Agent access (doc/features/25) exists only when the server enables it. */
+export function agentAccessEnabled(session: SessionInfo | null): boolean {
+  return session?.agent_access_enabled === true;
+}
+
 export function App() {
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "anonymous">("checking");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [session, setSession] = useState<SessionInfo | null>(null);
+  // A `llmaudit login` request in the address bar, read once; it survives
+  // signing in because nothing else touches the address bar.
+  const [authorize, setAuthorize] = useState<AuthorizeParse>(() => takeAuthorizeRequest(browserAddressBar()));
 
   const handleUnauthorized = useCallback(() => {
     setAuthState("anonymous");
@@ -161,12 +172,27 @@ export function App() {
     }
   }
 
+  if (authorize.kind === "invalid") {
+    return <AgentAuthorizeView client={client} session={session} parse={authorize} onDone={() => setAuthorize({ kind: "none" })} />;
+  }
+
   if (authState === "anonymous") {
     return (
       <TokenGate
         message={authMessage}
         onSubmit={createSession}
+        continuingAuthorization={authorize.kind === "valid"}
       />
+    );
+  }
+
+  if (authorize.kind === "valid") {
+    return authState === "authenticated" && session ? (
+      <AgentAuthorizeView client={client} session={session} parse={authorize} onDone={() => setAuthorize({ kind: "none" })} />
+    ) : (
+      <main className="flex min-h-screen items-center justify-center px-gutter py-12">
+        <Skeleton className="h-64 w-full max-w-lg" />
+      </main>
     );
   }
 
@@ -202,9 +228,11 @@ const loginModes: { id: LoginMode; label: string; field: string; placeholder: st
 function TokenGate({
   message,
   onSubmit,
+  continuingAuthorization = false,
 }: {
   message: string | null;
   onSubmit: (mode: LoginMode, credential: string) => Promise<void>;
+  continuingAuthorization?: boolean;
 }) {
   const [mode, setMode] = useState<LoginMode>("admin");
   const [draft, setDraft] = useState("");
@@ -256,6 +284,12 @@ function TokenGate({
           </div>
         </CardHeader>
         <CardContent className="p-6 pt-0">
+          {continuingAuthorization ? (
+            <Alert variant="info" className="mb-4">
+              <AlertTitle>命令行正在请求授权</AlertTitle>
+              <AlertDescription>先登录，登录后会显示授权确认页。</AlertDescription>
+            </Alert>
+          ) : null}
           {message ? (
             <Alert variant="warning" className="mb-4">
               <AlertTitle>需要重新认证</AlertTitle>
@@ -314,7 +348,7 @@ function TokenGate({
   );
 }
 
-function Dashboard({
+export function Dashboard({
   client,
   session,
   checkingSession,
@@ -332,9 +366,10 @@ function Dashboard({
   const injectedUserTextPrefixes = session?.injected_user_text_prefixes;
   const hasOrgReports = orgReportsEnabled(session);
   const hasSessionAnalysis = session?.session_analysis_enabled === true;
+  const hasAgentAccess = agentAccessEnabled(session);
   // Configuration pages share one entry, "系统配置"; the main navigation
   // lists reading surfaces only.
-  const [view, setView] = useState<"audits" | "insights" | "org-report" | "analysis" | "settings">("audits");
+  const [view, setView] = useState<"audits" | "insights" | "org-report" | "analysis" | "agent-access" | "settings">("audits");
   const [page, setPage] = useState<{ items: AuditSummary[]; next_cursor: AuditCursor | null }>({
     items: [],
     next_cursor: null,
@@ -516,6 +551,11 @@ function Dashboard({
                   会话分析
                 </button>
               ) : null}
+              {hasAgentAccess ? (
+                <button type="button" className={segmentedItemClassName(view === "agent-access")} aria-current={view === "agent-access" ? "page" : undefined} onClick={() => setView("agent-access")}>
+                  Agent 接入
+                </button>
+              ) : null}
               {isDeveloper ? null : (
                 <button type="button" className={segmentedItemClassName(view === "settings")} aria-current={view === "settings" ? "page" : undefined} onClick={() => setView("settings")}>
                   系统配置
@@ -545,6 +585,8 @@ function Dashboard({
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <SessionAnalysisView client={client} isDeveloper={isDeveloper} refreshKey={refreshKey} />
           </Suspense>
+        ) : view === "agent-access" && hasAgentAccess && session ? (
+          <AgentAccessView client={client} session={session} refreshKey={refreshKey} />
         ) : view === "insights" && hasInsights ? (
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
             <InsightsView

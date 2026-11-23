@@ -86,6 +86,8 @@ type Service struct {
 	mu         sync.Mutex
 	current    atomic.Pointer[snapshot]
 	now        func() time.Time
+	// stamped is the last version timestamp issued, guarded by mu.
+	stamped int64
 }
 
 // New loads and compiles persisted rules. A nil repository is supported for
@@ -205,7 +207,12 @@ func (service *Service) Create(ctx context.Context, input RuleInput) (Rule, erro
 	if _, err := compileRule(rule); err != nil {
 		return Rule{}, err
 	}
+	return service.commitCreate(ctx, rule)
+}
 
+// commitCreate persists a validated new rule and publishes it. The caller
+// holds service.mu.
+func (service *Service) commitCreate(ctx context.Context, rule Rule) (Rule, error) {
 	var err error
 	if service.repository != nil {
 		rule, err = service.repository.CreateUserAgentRule(ctx, rule)
@@ -254,6 +261,12 @@ func (service *Service) Update(ctx context.Context, id int64, input RuleInput) (
 	if _, err := compileRule(rule); err != nil {
 		return Rule{}, err
 	}
+	return service.commitUpdate(ctx, rules, index, rule)
+}
+
+// commitUpdate persists a validated replacement of rules[index] and publishes
+// the result. The caller holds service.mu.
+func (service *Service) commitUpdate(ctx context.Context, rules []Rule, index int, rule Rule) (Rule, error) {
 	if service.repository != nil {
 		persisted, err := service.repository.UpdateUserAgentRule(ctx, rule)
 		if err != nil {
@@ -292,6 +305,12 @@ func (service *Service) Delete(ctx context.Context, id int64) error {
 	if index < 0 {
 		return ErrNotFound
 	}
+	return service.commitDelete(ctx, rules, index, id)
+}
+
+// commitDelete persists the removal of rules[index] and publishes the reduced
+// snapshot. The caller holds service.mu.
+func (service *Service) commitDelete(ctx context.Context, rules []Rule, index int, id int64) error {
 	if service.repository != nil {
 		if err := service.repository.DeleteUserAgentRule(ctx, id); err != nil {
 			return err
@@ -306,8 +325,12 @@ func (service *Service) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
+// timestamp stamps a write: the clock, raised above every rule's version and
+// above every stamp this service has issued (stamped), so a version is never
+// reused, not even by a rule recreated under a deleted rule's id. The caller
+// holds service.mu.
 func (service *Service) timestamp() int64 {
-	now := service.now().UnixNano()
+	now := max(service.now().UnixNano(), service.stamped+1)
 	current := service.current.Load()
 	if current != nil {
 		for _, rule := range current.public {
@@ -316,6 +339,7 @@ func (service *Service) timestamp() int64 {
 			}
 		}
 	}
+	service.stamped = now
 	return now
 }
 
@@ -347,23 +371,42 @@ func compileSnapshot(rules []Rule) (*snapshot, error) {
 	return result, nil
 }
 
+// compileRule validates and compiles one rule. Its errors are
+// *ValidationError values whose text is exactly the "%w: message" form
+// earlier releases returned, so callers that only test errors.Is(err,
+// ErrInvalidRule) see no difference.
 func compileRule(rule Rule) (compiledRule, error) {
-	if rule.Name == "" || len(rule.Name) > MaxNameBytes || strings.ContainsRune(rule.Name, '\x00') {
-		return compiledRule{}, fmt.Errorf("%w: rule name is required and must be at most 128 bytes", ErrInvalidRule)
+	switch {
+	case rule.Name == "":
+		return compiledRule{}, invalidField("name", ReasonEmpty, "rule name is required and must be at most 128 bytes")
+	case len(rule.Name) > MaxNameBytes:
+		return compiledRule{}, invalidField("name", ReasonTooLong, "rule name is required and must be at most 128 bytes")
+	case strings.ContainsRune(rule.Name, '\x00'):
+		return compiledRule{}, invalidField("name", ReasonInvalidCharacter, "rule name is required and must be at most 128 bytes")
 	}
-	if strings.TrimSpace(rule.ModelPattern) == "" || len(rule.ModelPattern) > MaxPatternBytes {
-		return compiledRule{}, fmt.Errorf("%w: model pattern is required and must be at most 2048 bytes", ErrInvalidRule)
+	if err := checkPattern("model_pattern", rule.ModelPattern, "model pattern is required and must be at most 2048 bytes"); err != nil {
+		return compiledRule{}, err
 	}
-	if strings.TrimSpace(rule.UserAgentPattern) == "" || len(rule.UserAgentPattern) > MaxPatternBytes {
-		return compiledRule{}, fmt.Errorf("%w: user agent pattern is required and must be at most 2048 bytes", ErrInvalidRule)
+	if err := checkPattern("user_agent_pattern", rule.UserAgentPattern, "user agent pattern is required and must be at most 2048 bytes"); err != nil {
+		return compiledRule{}, err
 	}
 	model, err := regexp.Compile(rule.ModelPattern)
 	if err != nil {
-		return compiledRule{}, fmt.Errorf("%w: invalid model regular expression", ErrInvalidRule)
+		return compiledRule{}, invalidField("model_pattern", ReasonInvalidRegexp, "invalid model regular expression")
 	}
 	userAgent, err := regexp.Compile(rule.UserAgentPattern)
 	if err != nil {
-		return compiledRule{}, fmt.Errorf("%w: invalid user agent regular expression", ErrInvalidRule)
+		return compiledRule{}, invalidField("user_agent_pattern", ReasonInvalidRegexp, "invalid user agent regular expression")
 	}
 	return compiledRule{rule: rule, model: model, userAgent: userAgent}, nil
+}
+
+func checkPattern(field, pattern, message string) error {
+	if strings.TrimSpace(pattern) == "" {
+		return invalidField(field, ReasonEmpty, message)
+	}
+	if len(pattern) > MaxPatternBytes {
+		return invalidField(field, ReasonTooLong, message)
+	}
+	return nil
 }

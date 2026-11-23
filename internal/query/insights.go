@@ -185,6 +185,7 @@ func (service *Insights) fold(rows []storage.InsightsUsageRow) usageFold {
 		accumulator.mix.ToolResult += row.Mix.ToolResult
 		accumulator.mix.Media += row.Mix.Media
 		accumulator.totals.BilledRequests += row.BilledRequests
+		accumulator.totals.PendingBillingRequests += row.PendingBilling
 		if row.CostUSD != nil {
 			accumulator.cost += *row.CostUSD
 		}
@@ -519,6 +520,9 @@ func (service *Insights) Sessions(ctx context.Context, request SessionsQuery) (i
 			card.Models = []string{}
 		}
 		card.ContextWindow = service.windows.ContextWindow(row.Model)
+		if len(row.Root) != 0 {
+			card.RootTreeID = treeIDOf(row.Root)
+		}
 		if realRoots[string(row.Root)] {
 			card.TreeID = treeIDOf(row.Root)
 			if row.Role == insights.RoleMain {
@@ -650,6 +654,7 @@ func (service *Insights) Trend(ctx context.Context, sessionID string, scope *Sco
 	}
 	last := rows[len(rows)-1]
 	if len(last.Root) != 0 {
+		response.RootTreeID = treeIDOf(last.Root)
 		real, err := service.store.InsightsRealRoots(ctx, storage.InsightsFilter{Scope: filter.Scope, RootFPRs: [][]byte{last.Root}})
 		if err != nil {
 			return insights.TrendResponse{}, fmt.Errorf("query: insights real trees: %w", err)

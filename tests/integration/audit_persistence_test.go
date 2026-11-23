@@ -920,7 +920,7 @@ func assertJSONEquivalent(t *testing.T, got, want []byte) {
 	}
 }
 
-func startApp(t *testing.T, cfg config.Config) *runningApp {
+func startApp(t *testing.T, cfg config.Config, options ...app.Option) *runningApp {
 	t.Helper()
 	address := reserveAddress(t)
 	adminAddress := reserveAddress(t)
@@ -929,7 +929,7 @@ func startApp(t *testing.T, cfg config.Config) *runningApp {
 
 	logs := &synchronizedLogBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, nil))
-	application, err := app.New(cfg, logger)
+	application, err := app.New(cfg, logger, options...)
 	if err != nil {
 		t.Fatalf("assemble audited app: %v", err)
 	}

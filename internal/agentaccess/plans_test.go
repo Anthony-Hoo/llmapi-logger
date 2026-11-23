@@ -1,0 +1,311 @@
+package agentaccess
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/storage"
+)
+
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (clock *testClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.now
+}
+
+func (clock *testClock) Advance(duration time.Duration) {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	clock.now = clock.now.Add(duration)
+}
+
+func codeOf(t *testing.T, err error) agentapi.Code {
+	t.Helper()
+	if err == nil {
+		return ""
+	}
+	return CodeOf(err)
+}
+
+func TestPlanStoreSingleUseOwnerAndExpiry(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}
+	store := NewPlanStore(clock.Now, nil)
+	plan, err := store.Put(1, "payload")
+	if err != nil || !strings.HasPrefix(plan.ID, "pln_") || !plan.ExpiresAt.Equal(clock.Now().Add(PlanLifetime)) {
+		t.Fatalf("put = %+v, %v", plan, err)
+	}
+	// Another token cannot see it, and asking does not consume it.
+	if _, err := store.Take(2, plan.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("foreign take = %v", err)
+	}
+	if !ValidPlanID(plan.ID) || ValidPlanID("pln_x") || ValidPlanID(plan.ID+"=") || ValidPlanID("abc_"+plan.ID[4:]) {
+		t.Fatalf("plan id shape check fails for %q", plan.ID)
+	}
+	taken, err := store.Take(1, plan.ID)
+	if err != nil || taken.Payload != "payload" {
+		t.Fatalf("take = %+v, %v", taken, err)
+	}
+	if _, err := store.Take(1, plan.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("second take = %v", err)
+	}
+
+	expiring, _ := store.Put(1, "late")
+	clock.Advance(PlanLifetime)
+	if _, err := store.Take(2, expiring.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("foreign expired take = %v", err)
+	}
+	if _, err := store.Take(1, expiring.ID); codeOf(t, err) != agentapi.CodePlanExpired {
+		t.Fatalf("expired take = %v", err)
+	}
+	if _, err := store.Take(1, expiring.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("expired plan is gone after one answer, got %v", err)
+	}
+}
+
+func TestPlanStoreIsBounded(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}
+	store := NewPlanStore(clock.Now, nil)
+	// The store is filled by many tokens: one token alone stops at its own
+	// cap (TestPlanStoreCapsEachToken).
+	for index := range MaxPlans {
+		if _, err := store.Put(int64(index/MaxPlansPerToken+1), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var coded *Error
+	if _, err := store.Put(999, nil); !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited || coded.RetryAfter <= 0 {
+		t.Fatalf("full store = %v", err)
+	}
+	clock.Advance(PlanLifetime)
+	if _, err := store.Put(1, nil); err != nil {
+		t.Fatalf("expired plans make room: %v", err)
+	}
+	clock.Advance(planRetention)
+	if _, err := store.Put(1, nil); err != nil || store.Len() > 2 {
+		t.Fatalf("sweep left %d plans (%v)", store.Len(), err)
+	}
+}
+
+// One token cannot exhaust the store for the others: beyond its own cap its
+// plans are refused, other tokens are unaffected, and taking or expiry makes
+// room again.
+func TestPlanStoreCapsEachToken(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}
+	store := NewPlanStore(clock.Now, nil)
+	var first Plan
+	for index := range MaxPlansPerToken {
+		plan, err := store.Put(1, nil)
+		if err != nil {
+			t.Fatalf("plan %d: %v", index, err)
+		}
+		if index == 0 {
+			first = plan
+		}
+		clock.Advance(time.Second)
+	}
+	var coded *Error
+	_, err := store.Put(1, nil)
+	if !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited ||
+		coded.RetryAfter != first.ExpiresAt.Sub(clock.Now()) {
+		t.Fatalf("plan beyond the token's cap = %v", err)
+	}
+	if _, err := store.Put(2, nil); err != nil {
+		t.Fatalf("another token refused: %v", err)
+	}
+	if _, err := store.Take(1, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(1, nil); err != nil {
+		t.Fatalf("a taken plan makes room: %v", err)
+	}
+	clock.Advance(PlanLifetime)
+	for range MaxPlansPerToken {
+		if _, err := store.Put(1, nil); err != nil {
+			t.Fatalf("expired plans make room: %v", err)
+		}
+	}
+}
+
+func newQuotaService(t *testing.T, clock *testClock) *Service {
+	t.Helper()
+	service, err := New(Options{AdminToken: "admin-token-for-quota-tests", Store: &auditStore{}, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+// auditStore records audit rows; the other methods are unused here.
+type auditStore struct {
+	Store
+	mu      sync.Mutex
+	entries []storage.AgentAuditEntry
+}
+
+func (store *auditStore) InsertAgentAudit(_ context.Context, entry storage.AgentAuditEntry) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.entries = append(store.entries, entry)
+	return nil
+}
+
+func TestQuotasFollowTheContract(t *testing.T) {
+	cases := []struct {
+		quota  Quota
+		limit  int
+		window time.Duration
+		global bool
+	}{
+		{QuotaRead, 120, time.Minute, false},
+		{QuotaSensitiveRead, 20, time.Minute, false},
+		{QuotaWrite, 60, 10 * time.Minute, false},
+		{QuotaAnalysisRun, 1, 10 * time.Minute, true},
+		{QuotaRegenerate, 6, time.Hour, true},
+		{QuotaTestModel, 12, time.Hour, false},
+		{QuotaDeniedAudit, 60, 10 * time.Minute, false},
+	}
+	for _, test := range cases {
+		clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}
+		service := newQuotaService(t, clock)
+		first, second := Identity{TokenID: 1}, Identity{TokenID: 2}
+		for index := 0; index < test.limit; index++ {
+			if err := service.Take(test.quota, first); err != nil {
+				t.Fatalf("quota %d event %d: %v", test.quota, index, err)
+			}
+		}
+		var coded *Error
+		if err := service.Take(test.quota, first); !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited || coded.RetryAfter != test.window {
+			t.Fatalf("quota %d over the limit = %v", test.quota, err)
+		}
+		err := service.Take(test.quota, second)
+		if test.global && codeOf(t, err) != agentapi.CodeRateLimited {
+			t.Fatalf("global quota %d admitted another token", test.quota)
+		}
+		if !test.global && err != nil {
+			t.Fatalf("per-token quota %d refused another token: %v", test.quota, err)
+		}
+		clock.Advance(test.window - time.Second)
+		if codeOf(t, service.Take(test.quota, first)) != agentapi.CodeRateLimited {
+			t.Fatalf("quota %d reopened early", test.quota)
+		}
+		clock.Advance(time.Second)
+		if err := service.Take(test.quota, first); err != nil {
+			t.Fatalf("quota %d did not reopen: %v", test.quota, err)
+		}
+	}
+}
+
+func TestRecordWriteKeepsKeyNamesOnly(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)}
+	store := &auditStore{}
+	service, err := New(Options{AdminToken: "admin-token-for-quota-tests", Store: store, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := Identity{TokenID: 9, Role: agentapi.RoleAdmin, Tier: agentapi.TierWrite}
+	service.RecordWrite(context.Background(), identity, RequestMeta{Command: "apply", CLIVersion: "1.0.0"}, WriteAudit{
+		Event: EventWriteApplied, ObjectKind: "content-rule", ObjectID: "12", ChangedKeys: []string{"enabled", "keywords"}, Outcome: OutcomeOK,
+	})
+	service.RecordWrite(context.Background(), identity, RequestMeta{}, WriteAudit{
+		Event: EventWriteFailed, ObjectKind: "content-rule", ObjectID: "12", Outcome: OutcomeFailed, ErrorCode: agentapi.CodeVersionConflict,
+	})
+	if len(store.entries) != 2 {
+		t.Fatalf("rows = %d", len(store.entries))
+	}
+	applied, failed := store.entries[0], store.entries[1]
+	if applied.Event != EventWriteApplied || applied.ChangedKeys != `["enabled","keywords"]` || applied.ObjectKind != "content-rule" ||
+		applied.ObjectID != "12" || applied.TokenID == nil || *applied.TokenID != 9 || applied.Role != "admin" || applied.Command != "apply" {
+		t.Fatalf("applied row = %+v", applied)
+	}
+	if failed.ChangedKeys != "" || failed.ErrorCode != "VERSION_CONFLICT" || failed.Outcome != OutcomeFailed {
+		t.Fatalf("failed row = %+v", failed)
+	}
+}
+
+// Peek reads a plan without spending it (contract section 0.1 item 131); only
+// Take hands it out. CheckRoom answers what Put would about the caps
+// without storing (item 130).
+func TestPlanStorePeekAndCheckRoom(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)}
+	store := NewPlanStore(clock.Now, nil)
+	plan, err := store.Put(7, "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if peeked, err := store.Peek(7, plan.ID); err != nil || peeked.Payload != "payload" {
+			t.Fatalf("peek = %+v, %v", peeked, err)
+		}
+	}
+	if _, err := store.Peek(8, plan.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("peek by another token = %v", err)
+	}
+	if _, err := store.Take(7, plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Peek(7, plan.ID); codeOf(t, err) != agentapi.CodePlanNotFound {
+		t.Fatalf("peek after take = %v", err)
+	}
+	expiring, _ := store.Put(7, "old")
+	clock.Advance(PlanLifetime)
+	if _, err := store.Peek(7, expiring.ID); codeOf(t, err) != agentapi.CodePlanExpired {
+		t.Fatalf("peek of an expired plan = %v", err)
+	}
+	for range MaxPlansPerToken {
+		if err := store.CheckRoom(7); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Put(7, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held := store.Len()
+	var coded *Error
+	if err := store.CheckRoom(7); !errors.As(err, &coded) || coded.Code != agentapi.CodeRateLimited || coded.RetryAfter != PlanLifetime {
+		t.Fatalf("check at the cap = %v", err)
+	}
+	if store.Len() != held || store.CheckRoom(8) != nil {
+		t.Fatal("CheckRoom stored something or refused another token")
+	}
+}
+
+// The plan ids written in the Skill and the command-line help as examples
+// have the shape of a real one (the prefix and 22 base64url characters of 16
+// bytes), so an agent copying the shape gets it right.
+func TestExamplePlanIDsHaveThePlanIDShape(t *testing.T) {
+	pattern := regexp.MustCompile(`pln_[A-Za-z0-9_-]+`)
+	files, err := filepath.Glob(filepath.Join("..", "..", "skill", "llmapi-audit", "references", "*.md"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("skill references: %v %v", files, err)
+	}
+	files = append(files, filepath.Join("..", "..", "skill", "llmapi-audit", "SKILL.md"), filepath.Join("..", "agentcli", "commands.go"))
+	seen := 0
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range pattern.FindAllString(string(data), -1) {
+			seen++
+			if !ValidPlanID(id) {
+				t.Errorf("%s: %s is not the shape of a plan id", file, id)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no example plan id found")
+	}
+}

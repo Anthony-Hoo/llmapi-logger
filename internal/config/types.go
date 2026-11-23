@@ -43,6 +43,7 @@ type Config struct {
 	Insights               InsightsConfig               `yaml:"insights"`
 	OrgReports             OrgReportsConfig             `yaml:"org_reports"`
 	SessionAnalysis        SessionAnalysisConfig        `yaml:"session_analysis"`
+	AgentAccess            AgentAccessConfig            `yaml:"agent_access"`
 	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
 	Routes                 []RouteConfig                `yaml:"routes"`
 }

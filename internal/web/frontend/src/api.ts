@@ -58,6 +58,7 @@ import type {
   AnalysisUsers,
 } from "./lib/session-analysis/types";
 import type { AnalysisProbeResult, AnalysisSettingsUpdate, AnalysisSettingsView, OrgEditableSettings, OrgSettingsView } from "./lib/settings/types";
+import type { AgentAccessApi, AgentChangeList, AgentTokenList, AuthorizationResponse, InstallLink } from "./lib/agent-access/types";
 
 const API_BASE = "/api/v1";
 
@@ -140,6 +141,8 @@ export interface ApiClient {
   dismissAnalysisSuggestion: (id: number, signal?: AbortSignal) => Promise<void>;
   /** Organisation reports (doc/features/23); every route 404s when disabled. */
   org: OrgApi;
+  /** Agent access (doc/features/25); every route 404s when disabled. */
+  agentAccess: AgentAccessApi;
 }
 
 export interface OrgApi {
@@ -266,6 +269,21 @@ export function createApiClient(
     self: (signal) => requestJSON<OrgSelfReport>(`${orgBase}/me/weekly`, signal),
   };
 
+  const agentBase = `${API_BASE}/agent-access`;
+  const agentAccess: AgentAccessApi = {
+    authorize: (request, signal) => mutateJSON<AuthorizationResponse>(`${agentBase}/authorizations`, "POST", request, signal),
+    listTokens: async (signal) => {
+      const result = await requestJSON<AgentTokenList>(`${agentBase}/tokens`, signal);
+      return { ...result, items: result.items ?? [] };
+    },
+    revokeToken: (tokenID, signal) => deleteResource(`${agentBase}/tokens/${encodeURIComponent(String(tokenID))}`, signal),
+    createInstallLink: (request, signal) => mutateJSON<InstallLink>(`${agentBase}/install-links`, "POST", request, signal),
+    listChanges: async (limit = 50, signal) => {
+      const result = await requestJSON<AgentChangeList>(`${agentBase}/changes?${new URLSearchParams({ limit: String(limit) })}`, signal);
+      return { ...result, items: result.items ?? [] };
+    },
+  };
+
   async function login(credentials: Record<string, string>, signal?: AbortSignal): Promise<SessionInfo> {
     const response = await sessionFetch(
       `${API_BASE}/session`,
@@ -285,6 +303,7 @@ export function createApiClient(
 
   return {
     org,
+    agentAccess,
     // Returns null rather than throwing when nobody is signed in: an anonymous
     // visitor is an expected state during start-up, not an error.
     async getSession(signal) {

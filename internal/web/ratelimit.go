@@ -63,6 +63,32 @@ func (limiter *loginLimiter) recordFailure(request *http.Request) {
 	now := limiter.now()
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
+	limiter.recordFailureLocked(key, now)
+}
+
+// checkAndRecord admits or refuses one attempt whose outcome is already
+// known, and counts it when it failed, in a single critical section: a burst
+// of concurrent failures from one address can never be admitted past the
+// limit by checking before any of them is counted. A refused attempt is not
+// counted again.
+func (limiter *loginLimiter) checkAndRecord(request *http.Request, failed bool) (bool, time.Duration) {
+	if limiter == nil {
+		return true, 0
+	}
+	key := loginLimiterKey(request)
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	now := limiter.now()
+	if window, exists := limiter.windows[key]; exists && now.Before(window.expiresAt) && window.failures >= loginFailureLimit {
+		return false, window.expiresAt.Sub(now)
+	}
+	if failed {
+		limiter.recordFailureLocked(key, now)
+	}
+	return true, 0
+}
+
+func (limiter *loginLimiter) recordFailureLocked(key string, now time.Time) {
 	window, exists := limiter.windows[key]
 	if !exists || !now.Before(window.expiresAt) {
 		window = &loginWindow{expiresAt: now.Add(loginFailureWindow)}

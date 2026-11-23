@@ -109,7 +109,7 @@ func TestSettingsSaveOverridesTheFileAndKeepsTheKeySecret(t *testing.T) {
 	}
 
 	edited := initial.Settings
-	edited.RunAt, edited.LLM.Model, edited.LLM.BaseURL, edited.LLM.MaxConcurrency = "03:30", "  page-model  ", "http://10.1.2.3:8000/v1", 4
+	edited.RunAt, edited.LLM.Model, edited.LLM.BaseURL, edited.LLM.MaxConcurrency = "03:30", "  page-model  ", "http://127.0.0.2:8000/v1", 4
 	saved, err := service.Update(ctx, SettingsUpdate{EditableSettings: edited, APIKey: ptr("page-key-9999")})
 	if err != nil || saved.Source != SourceSaved || saved.APIKey != KeySaved || saved.Settings.LLM.Model != "page-model" || saved.Settings.RunAt != "03:30" ||
 		saved.File.LLM.Model != "file-model" || saved.UpdatedNS == 0 {

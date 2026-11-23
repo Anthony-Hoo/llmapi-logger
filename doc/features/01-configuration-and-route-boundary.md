@@ -41,6 +41,10 @@ org_reports:               # 可选，默认关闭（模块 23）
     max_single_request_roots: 200
   llm_classification:
     enabled: false
+agent_access:              # 可选，默认关闭（模块 25）；整段可省略
+  enabled: false
+  allow_write: false
+  public_url: ""
 
 interceptors:
   require-client-credential:
@@ -105,9 +109,10 @@ routes:
 11. `developer_login.enabled` 默认 false。启用后开发者用 NewAPI 用户 API Key 登录并只读取自己 Key 的记录（[模块 19](19-developer-key-session.md)）；它只依赖已必填的 `newapi.url`，不需要 `newapi.access_token`/`user_id`。主密钥不可用时该登录自动保持关闭。
 12. `insights.enabled` 默认 true，控制上下文分析与用量洞察（[模块 20](20-context-insights.md)）；省略整个 `insights` 块或只写部分字段时保持默认。`insights.vocabulary_file`（工具词表 / 注入标记 / Agent 标识覆盖）可选，为空表示只用内嵌默认值；非空时不能带前后空白，且启动时必须已存在并且是普通文件。配置校验只检查文件存在，不读取内容，格式由加载方解析。路径应放在仓库外。`insights.context_windows` 可选，按模型 id 覆盖内嵌的上下文窗口：键不能为空、不能含空白或 NUL，仅大小写不同的键视为重复；值必须为正整数。`insights.pricing_file` 已废弃（成本改为 NewAPI 实际计费，见[模块 21](21-newapi-billing.md)）：仍可解析以免旧配置启动失败，但不校验、不读取，启动时输出一次警告。
 13. `org_reports.enabled` 默认 false（[模块 23](23-org-project-reports.md)）；关闭时整个块不做任何校验，不提取、不跑作业、`/api/v1/org/*` 一律 404。开启时必须同时配置 `newapi.access_token`/`user_id` 且 `insights.enabled=true`，否则拒绝启动；`timezone` 必须是可加载的 IANA 时区（二进制内嵌 tzdata）；`week_start` 只能是 `monday`/`sunday`；`idle_gap_seconds` 为 1–3600；`ranked_clients` 为 1–64 个互不重复的小写客户端键（只校验格式，不要求已出现在词表里，以便先列出后续覆盖才加入的客户端）；`anomaly` 两个阈值为 1–1000000；`llm_classification.enabled` 是原 M5 设计留下的保留字段，对应功能已由顶层 `session_analysis`（[模块 24](24-session-analysis.md)）提供，必须为 false。项目组、项目和规则存数据库，不进 YAML。`session_analysis` 的运行时间和 `llm` 一节（`allow_non_local` 除外）可以由管理员在管理页面上修改：保存的值存数据库（`runtime_settings`），覆盖 YAML 里的同名项，直到在页面上恢复；规则见 [24 §4.1](24-session-analysis.md)。`org_reports` 的 `idle_gap_seconds`、`ranked_clients` 和 `anomaly` 两个阈值也是这样（[23 §3](23-org-project-reports.md)）。
-14. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
-15. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
-16. match 只能是 exact 或 template，规则不得重叠。
+14. `agent_access.enabled` 默认 false（[模块 25](25-agent-access.md)）；整段可省略，关闭时整段不做校验，不注册 `/api/agent/` 与 `/api/v1/agent-access/*` 下的任何路由。开启时要求存储支持 Agent 令牌；`available` 模式下数据库在启动时不可用，则模块不装配、记一条告警，门面返回 `FEATURE_DISABLED`，代理照常转发。`allow_write` 默认 false，决定能否签发读写档的 Agent 令牌以及读写档令牌能否调用写接口。`public_url` 是写进安装提示词的对外地址，为空时使用用户当前访问的地址；非空时必须是 http/https 地址，有主机，可以带端口与路径（管理面可能挂在反向代理的子路径下），不能带空白、userinfo、query 和 fragment，且只能由 ASCII 字母、数字与 `-._~:/%[]` 组成、最长 2048 个字符（安装提示词把它写进 shell 命令，同一规则在那里也检查；见[接口合同](25-agent-access-contract.md) §8.1）。为空时取浏览器这次访问的协议与 Host，不读转发头，所以 TLS 终止在反向代理、或管理面挂在子路径下的部署必须设置它。因为配置加载是严格模式，升级时先部署包含模块 25 的版本、再写这一段，回滚前先删掉这一段（[部署说明](../deployment/README.md)）。
+15. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
+16. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
+17. match 只能是 exact 或 template，规则不得重叠。
 
 validate-config 只检查配置，不要求 DB 或 NewAPI 在线。
 
@@ -187,7 +192,7 @@ strict：每个白名单请求访问 NewAPI 前检查 key、DB、writer 和 writ
 
 ## 10. 管理面
 
-admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情、verified reconstructed JSON、SSE timeline、异常 raw Body 和动态拦截规则。无论监听地址是否 loopback，所有管理 API 都必须鉴权。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。启用 `developer_login` 后另有一种身份：NewAPI 用户提交自己的 API Key 登录，只读取该 Key 产生的记录，且不能访问 health、ready、调用者目录、UA 规则与关键词规则（[模块 19](19-developer-key-session.md)）。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值；raw request/response Body 只对 `retention_state=full` 按需读取，metadata 使用 reconstructed API。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
+admin_listen 默认 127.0.0.1:8081，提供 health、ready、audit 列表/详情、verified reconstructed JSON、SSE timeline、异常 raw Body 和动态拦截规则。无论监听地址是否 loopback，所有管理 API 都必须鉴权。CLI 使用静态 Bearer token；Web UI 登录成功后使用七天过期的 HttpOnly Cookie。启用 `developer_login` 后另有一种身份：NewAPI 用户提交自己的 API Key 登录，只读取该 Key 产生的记录，且不能访问 health、ready、调用者目录、UA 规则与关键词规则（[模块 19](19-developer-key-session.md)）。启用 `agent_access` 后还有第三种凭据：本机编码 Agent 经命令行 `llmaudit` 持有的 Agent 令牌，只能调用 `/api/agent/v1/*`，身份与可见范围同签发它的网页会话（[模块 25](25-agent-access.md)）。普通列表只额外解密入站 User-Agent，用于展示和筛选；其他 Header、Request-URI、Body 与 conversation 不进入列表。详情会解密 Request-URI 和逐项 Header/Trailer 值；raw request/response Body 只对 `retention_state=full` 按需读取，metadata 使用 reconstructed API。静态 UI shell 不返回数据，可以先加载并让用户输入 token。管理面不进入公开 NewAPI server。
 
 ## 11. 测试
 

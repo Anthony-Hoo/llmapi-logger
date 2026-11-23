@@ -26,6 +26,9 @@ type Store interface {
 	ListAudits(context.Context, storage.AuditQueryFilter, storage.AuditQueryCursor, int) (storage.AuditListPage, error)
 	QueryRequestHeaderEvidence(context.Context, string) ([]storage.HeaderEvidence, error)
 	QueryAuditDetail(context.Context, string, *storage.AuditScope) (storage.AuditQueryDetail, error)
+	// QueryAuditMetadata reads only the Audit, Stages and Bodies of the
+	// detail projection, none of the derived records.
+	QueryAuditMetadata(context.Context, string, *storage.AuditScope) (storage.AuditQueryDetail, error)
 	QueryAuditScope(context.Context, string) (storage.AuditScopeRow, error)
 	RawBodyMeta(context.Context, string, string) (storage.RawBodyMetadata, error)
 	StreamBodyChunks(context.Context, string, string, func(storage.BodyChunk) error) error
@@ -81,7 +84,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		TokenName:             filter.TokenName,
 		UpstreamErrorClass:    filter.UpstreamErrorClass,
 		ConversationID:        filter.Conversation,
-		CollapseConversations: filter.CollapseConversations && filter.Conversation == "" && !filter.hasRowFilters(),
+		CollapseConversations: filter.Collapses(),
 		Scope:                 storageScope(filter.Scope),
 	}
 	storageCursor := storage.AuditQueryCursor{
@@ -112,6 +115,12 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 		page.NextCursor = &Cursor{BeforeStartedAtNS: last.StartedAtNS, BeforeID: last.AuditID}
 	}
 	return page, nil
+}
+
+// Collapses reports whether List folds conversations for filter: collapse was
+// asked for and neither a conversation nor any row filter is set.
+func (filter Filter) Collapses() bool {
+	return filter.CollapseConversations && filter.Conversation == "" && !filter.hasRowFilters()
 }
 
 // Filtering must precede collapse, including the User-Agent match performed
@@ -251,6 +260,81 @@ func (service *Service) Authorize(ctx context.Context, auditID string, scope *Sc
 	return nil
 }
 
+// GetMetadata is the part of Get that needs no decryption: the audit summary,
+// the stages and the bodies' metadata, under the same scope check. The
+// request URI, headers, parsed result, conversation, turn and token link are
+// left empty. A raw body or a stream timeline is served from its own chunks
+// and events, so their exports read only this and stay available when a
+// derived record (the parsed JSON, the turn graph) fails verification and Get
+// answers ErrIntegrity (contract section 0.1 item 183). The store reads only
+// those rows (QueryAuditMetadata), not the derived records it would then
+// drop: reading the turn graph alone verifies its sequence hashes and fails
+// for a damaged one (item 185).
+func (service *Service) GetMetadata(ctx context.Context, auditID string, scope *Scope) (Detail, error) {
+	if ctx == nil {
+		return Detail{}, invalid("nil context")
+	}
+	if err := validateAuditID(auditID); err != nil {
+		return Detail{}, err
+	}
+	storageDetail, err := service.store.QueryAuditMetadata(ctx, auditID, storageScope(scope))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Detail{}, ErrNotFound
+	}
+	if err != nil {
+		return Detail{}, fmt.Errorf("query: get audit metadata: %w", err)
+	}
+	return Detail{Audit: mapAudit(storageDetail.Audit), Stages: mapStages(storageDetail.Stages), Bodies: mapBodies(storageDetail.Bodies)}, nil
+}
+
+func mapStages(stages []storage.HTTPStage) []Stage {
+	out := make([]Stage, 0, len(stages))
+	for _, stage := range stages {
+		out = append(out, Stage{
+			Stage:         stage.Stage,
+			State:         stage.State,
+			Proto:         stage.Proto,
+			Method:        stage.Method,
+			Host:          stage.Host,
+			StatusCode:    stage.StatusCode,
+			ContentLength: stage.ContentLength,
+			StartedAtNS:   stage.StartedAtNS,
+			EndedAtNS:     stage.EndedAtNS,
+			ErrorCode:     stage.ErrorCode,
+		})
+	}
+	return out
+}
+
+func mapBodies(bodies []storage.BodyStream) []Body {
+	out := make([]Body, 0, len(bodies))
+	for _, body := range bodies {
+		var digest *string
+		if len(body.SHA256) != 0 {
+			encoded := hex.EncodeToString(body.SHA256)
+			digest = &encoded
+		}
+		out = append(out, Body{
+			Stage:                  body.Stage,
+			SourceStage:            body.SourceStage,
+			ObservedLength:         body.ObservedLength,
+			StoredLength:           body.StoredLength,
+			SHA256:                 digest,
+			HashComplete:           body.HashComplete,
+			EOFSeen:                body.EOFSeen,
+			State:                  body.State,
+			RetentionState:         body.RetentionState,
+			FirstObservedAtNS:      body.FirstObservedAtNS,
+			LastObservedAtNS:       body.LastObservedAtNS,
+			ChunkCount:             body.ChunkCount,
+			StreamEventCount:       body.StreamEventCount,
+			StreamTimelineComplete: body.StreamTimelineComplete,
+			ErrorCode:              body.ErrorCode,
+		})
+	}
+	return out
+}
+
 func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (Detail, error) {
 	if ctx == nil {
 		return Detail{}, invalid("nil context")
@@ -268,9 +352,9 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 
 	detail := Detail{
 		Audit:   mapAudit(storageDetail.Audit),
-		Stages:  make([]Stage, 0, len(storageDetail.Stages)),
+		Stages:  mapStages(storageDetail.Stages),
 		Headers: make([]Header, 0, len(storageDetail.Headers)),
-		Bodies:  make([]Body, 0, len(storageDetail.Bodies)),
+		Bodies:  mapBodies(storageDetail.Bodies),
 	}
 	requestURIAAD, err := security.AAD(auditID, "request_uri")
 	if err != nil {
@@ -282,20 +366,6 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 	}
 	detail.RequestURI = string(requestURI)
 	clear(requestURI)
-	for _, stage := range storageDetail.Stages {
-		detail.Stages = append(detail.Stages, Stage{
-			Stage:         stage.Stage,
-			State:         stage.State,
-			Proto:         stage.Proto,
-			Method:        stage.Method,
-			Host:          stage.Host,
-			StatusCode:    stage.StatusCode,
-			ContentLength: stage.ContentLength,
-			StartedAtNS:   stage.StartedAtNS,
-			EndedAtNS:     stage.EndedAtNS,
-			ErrorCode:     stage.ErrorCode,
-		})
-	}
 	for _, header := range storageDetail.Headers {
 		aad, err := security.AAD(
 			auditID,
@@ -322,30 +392,6 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 			ValueIndex:  header.ValueIndex,
 			ValueLength: header.ValueLength,
 			Value:       value,
-		})
-	}
-	for _, body := range storageDetail.Bodies {
-		var digest *string
-		if len(body.SHA256) != 0 {
-			encoded := hex.EncodeToString(body.SHA256)
-			digest = &encoded
-		}
-		detail.Bodies = append(detail.Bodies, Body{
-			Stage:                  body.Stage,
-			SourceStage:            body.SourceStage,
-			ObservedLength:         body.ObservedLength,
-			StoredLength:           body.StoredLength,
-			SHA256:                 digest,
-			HashComplete:           body.HashComplete,
-			EOFSeen:                body.EOFSeen,
-			State:                  body.State,
-			RetentionState:         body.RetentionState,
-			FirstObservedAtNS:      body.FirstObservedAtNS,
-			LastObservedAtNS:       body.LastObservedAtNS,
-			ChunkCount:             body.ChunkCount,
-			StreamEventCount:       body.StreamEventCount,
-			StreamTimelineComplete: body.StreamTimelineComplete,
-			ErrorCode:              body.ErrorCode,
 		})
 	}
 	if parsed := storageDetail.ParsedResult; parsed != nil {

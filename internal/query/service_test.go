@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -63,6 +64,13 @@ func TestStreamRawDecryptsAndVerifiesCompleteBody(t *testing.T) {
 	}
 	if output.String() != "hello world" {
 		t.Fatalf("raw output = %q", output.String())
+	}
+	// For a complete body the digest RawMeta reports is the lower-case hex
+	// SHA-256 of exactly the bytes StreamRaw writes. The command-line client
+	// compares a raw export with it (contract section 0.1 item 191), so the
+	// two must never mean different things.
+	if digest := sha256.Sum256(output.Bytes()); metadata.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("RawMeta digest %s is not the SHA-256 of the streamed body", metadata.SHA256)
 	}
 }
 
@@ -904,6 +912,11 @@ func (store *fakeStore) QueryRequestHeaderEvidence(_ context.Context, auditID st
 
 func (store *fakeStore) QueryAuditDetail(context.Context, string, *sqlite.AuditScope) (sqlite.AuditQueryDetail, error) {
 	return store.detail, store.detailErr
+}
+
+// QueryAuditMetadata returns only the part of detail the stores read for it.
+func (store *fakeStore) QueryAuditMetadata(context.Context, string, *sqlite.AuditScope) (sqlite.AuditQueryDetail, error) {
+	return sqlite.AuditQueryDetail{Audit: store.detail.Audit, Stages: store.detail.Stages, Bodies: store.detail.Bodies}, store.detailErr
 }
 
 func (store *fakeStore) QueryAuditScope(_ context.Context, auditID string) (sqlite.AuditScopeRow, error) {

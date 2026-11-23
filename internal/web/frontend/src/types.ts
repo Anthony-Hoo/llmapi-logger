@@ -27,6 +27,10 @@ export interface SessionInfo {
    * text parts that start with one of them.
    */
   injected_user_text_prefixes?: string[];
+  /** Agent access (doc/features/25); false or absent hides every entry. */
+  agent_access_enabled?: boolean;
+  /** True when administrators may authorize write-tier agent tokens. */
+  agent_write_allowed?: boolean;
 }
 
 export interface AuditCursor {

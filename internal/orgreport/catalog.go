@@ -1,6 +1,7 @@
 package orgreport
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -136,23 +137,28 @@ func Compile(catalog Catalog) (*Compiled, error) {
 		catalog: catalog.clone(), byGroup: map[int64][]compiledProject{}, names: map[int64]string{},
 		members: map[int64]int64{}, users: map[int64]string{}, tokens: map[int64]string{}, groups: map[int64]Group{},
 	}
-	if len(catalog.Groups) > MaxGroups || len(catalog.Projects) > MaxProjects {
-		return nil, fmt.Errorf("%w: too many groups or projects", ErrInvalid)
+	// Errors are *ValidationError values (validation.go); their text is the
+	// one these checks have always produced.
+	if len(catalog.Groups) > MaxGroups {
+		return nil, invalidAt(ObjectCatalog, 0, "groups", ReasonTooMany, "too many groups or projects")
+	}
+	if len(catalog.Projects) > MaxProjects {
+		return nil, invalidAt(ObjectCatalog, 0, "projects", ReasonTooMany, "too many groups or projects")
 	}
 	groupNames := map[string]bool{}
 	for _, group := range catalog.Groups {
 		if group.ID <= 0 {
-			return nil, fmt.Errorf("%w: group id must be positive", ErrInvalid)
+			return nil, invalidAt(ObjectGroup, group.ID, "id", ReasonInvalidID, "group id must be positive")
 		}
 		if _, duplicate := result.groups[group.ID]; duplicate {
-			return nil, fmt.Errorf("%w: duplicate group id", ErrInvalid)
+			return nil, invalidAt(ObjectGroup, group.ID, "id", ReasonDuplicate, "duplicate group id")
 		}
-		if err := validateName(group.Name); err != nil {
+		if err := nameError(ObjectGroup, group.ID, group.Name); err != nil {
 			return nil, err
 		}
 		folded := strings.ToLower(group.Name)
 		if groupNames[folded] {
-			return nil, fmt.Errorf("%w: duplicate group name", ErrConflict)
+			return nil, conflictAt(ObjectGroup, group.ID, "name", ReasonDuplicate, "duplicate group name")
 		}
 		groupNames[folded] = true
 		result.groups[group.ID] = group
@@ -162,25 +168,29 @@ func Compile(catalog Catalog) (*Compiled, error) {
 	sort.Slice(projects, func(i, j int) bool { return projects[i].ID < projects[j].ID })
 	for index, project := range projects {
 		if project.ID <= 0 || (index > 0 && projects[index-1].ID == project.ID) {
-			return nil, fmt.Errorf("%w: project ids must be positive and unique", ErrInvalid)
+			return nil, invalidAt(ObjectProject, project.ID, "id", ReasonInvalidID, "project ids must be positive and unique")
 		}
-		if err := validateName(project.Name); err != nil {
+		if err := nameError(ObjectProject, project.ID, project.Name); err != nil {
 			return nil, err
 		}
 		scope := int64(0)
 		if project.GroupID != nil {
 			scope = *project.GroupID
 			if _, ok := result.groups[scope]; !ok {
-				return nil, fmt.Errorf("%w: project references an unknown group", ErrInvalid)
+				return nil, invalidAt(ObjectProject, project.ID, "group_id", ReasonUnknownGroup, "project references an unknown group")
 			}
 		}
 		key := fmt.Sprintf("%d\x00%s", scope, strings.ToLower(project.Name))
 		if projectNames[key] {
-			return nil, fmt.Errorf("%w: duplicate project name in the same scope", ErrConflict)
+			return nil, conflictAt(ObjectProject, project.ID, "name", ReasonDuplicate, "duplicate project name in the same scope")
 		}
 		projectNames[key] = true
 		rules, err := CompileRules(project.Rules)
 		if err != nil {
+			var invalid *ValidationError
+			if errors.As(err, &invalid) {
+				invalid.Object, invalid.ID = ObjectProject, project.ID
+			}
 			return nil, err
 		}
 		result.names[project.ID] = project.Name
@@ -196,19 +206,26 @@ func Compile(catalog Catalog) (*Compiled, error) {
 	}
 	for _, member := range catalog.Members {
 		if member.UserID <= 0 {
-			return nil, fmt.Errorf("%w: member user id must be positive", ErrInvalid)
+			return nil, invalidAt(ObjectMember, member.UserID, "user_id", ReasonInvalidID, "member user id must be positive")
 		}
 		if _, ok := result.groups[member.GroupID]; !ok {
-			return nil, fmt.Errorf("%w: member references an unknown group", ErrInvalid)
+			return nil, invalidAt(ObjectMember, member.UserID, "group_id", ReasonUnknownGroup, "member references an unknown group")
 		}
 		if _, duplicate := result.members[member.UserID]; duplicate {
-			return nil, fmt.Errorf("%w: a user belongs to one group only", ErrConflict)
+			return nil, conflictAt(ObjectMember, member.UserID, "user_id", ReasonDuplicate, "a user belongs to one group only")
 		}
 		result.members[member.UserID] = member.GroupID
 	}
 	for _, principal := range catalog.Principals {
-		if principal.ID <= 0 || (principal.Class != ClassHuman && principal.Class != ClassService) {
-			return nil, fmt.Errorf("%w: invalid principal", ErrInvalid)
+		if principal.ID <= 0 {
+			failure := invalidAt(ObjectPrincipal, principal.ID, "id", ReasonInvalidID, "invalid principal")
+			failure.Kind = principal.Kind
+			return nil, failure
+		}
+		if principal.Class != ClassHuman && principal.Class != ClassService {
+			failure := invalidAt(ObjectPrincipal, principal.ID, "class", ReasonInvalidValue, "invalid principal")
+			failure.Kind = principal.Kind
+			return nil, failure
 		}
 		switch principal.Kind {
 		case PrincipalUser:
@@ -216,7 +233,9 @@ func Compile(catalog Catalog) (*Compiled, error) {
 		case PrincipalToken:
 			result.tokens[principal.ID] = principal.Class
 		default:
-			return nil, fmt.Errorf("%w: principal kind must be user or token", ErrInvalid)
+			failure := invalidAt(ObjectPrincipal, principal.ID, "kind", ReasonInvalidValue, "principal kind must be user or token")
+			failure.Kind = principal.Kind
+			return nil, failure
 		}
 	}
 	return result, nil
@@ -229,16 +248,25 @@ func validateName(name string) error {
 	return nil
 }
 
-// CompileRules validates and compiles the rules of one project.
+// CompileRules validates and compiles the rules of one project. Its errors
+// are *ValidationError values with Object "project", ID 0 and Field
+// "rules[i].pattern" / "rules[i].kind" (i indexes rules) or "rules".
 func CompileRules(rules []Rule) ([]compiledRule, error) {
 	if len(rules) > MaxRulesPerProject {
-		return nil, fmt.Errorf("%w: at most %d rules per project", ErrInvalid, MaxRulesPerProject)
+		return nil, invalidAt(ObjectProject, 0, "rules", ReasonTooMany, fmt.Sprintf("at most %d rules per project", MaxRulesPerProject))
 	}
 	out := make([]compiledRule, 0, len(rules))
-	for _, rule := range rules {
+	for index, rule := range rules {
+		at := fmt.Sprintf("rules[%d].", index)
 		pattern := strings.TrimSpace(rule.Pattern)
-		if pattern == "" || len(pattern) > MaxRulePatternBytes || strings.ContainsAny(pattern, "\x00\r\n") {
-			return nil, fmt.Errorf("%w: rule pattern must be 1-%d bytes", ErrInvalid, MaxRulePatternBytes)
+		message := fmt.Sprintf("rule pattern must be 1-%d bytes", MaxRulePatternBytes)
+		switch {
+		case pattern == "":
+			return nil, invalidAt(ObjectProject, 0, at+"pattern", ReasonEmpty, message)
+		case len(pattern) > MaxRulePatternBytes:
+			return nil, invalidAt(ObjectProject, 0, at+"pattern", ReasonTooLong, message)
+		case strings.ContainsAny(pattern, "\x00\r\n"):
+			return nil, invalidAt(ObjectProject, 0, at+"pattern", ReasonInvalidCharacter, message)
 		}
 		compiled := compiledRule{kind: rule.Kind}
 		switch rule.Kind {
@@ -256,19 +284,19 @@ func CompileRules(rules []Rule) ([]compiledRule, error) {
 			}
 		case RuleRepoName:
 			if strings.ContainsAny(pattern, "/\\") {
-				return nil, fmt.Errorf("%w: repo_name is a single name, not a path", ErrInvalid)
+				return nil, invalidAt(ObjectProject, 0, at+"pattern", ReasonNotASingleName, "repo_name is a single name, not a path")
 			}
 			compiled.literal = strings.ToLower(pattern)
 		case RulePathGlob:
 			normalized := NormalizePath(pattern)
 			if normalized == "" {
-				return nil, fmt.Errorf("%w: invalid path_glob", ErrInvalid)
+				return nil, invalidAt(ObjectProject, 0, at+"pattern", ReasonInvalidValue, "invalid path_glob")
 			}
 			compiled.glob = globRegexp(normalized)
 		case RuleAgentProject:
 			compiled.literal = strings.ToLower(pattern)
 		default:
-			return nil, fmt.Errorf("%w: rule kind must be repo_url, repo_name, path_glob or agent_project", ErrInvalid)
+			return nil, invalidAt(ObjectProject, 0, at+"kind", ReasonInvalidValue, "rule kind must be repo_url, repo_name, path_glob or agent_project")
 		}
 		out = append(out, compiled)
 	}
