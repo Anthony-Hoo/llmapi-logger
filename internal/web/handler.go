@@ -32,6 +32,9 @@ type AuditQuery interface {
 	// scope means an administrator and always passes.
 	Authorize(context.Context, string, *query.Scope) error
 	Get(context.Context, string, *query.Scope) (query.Detail, error)
+	// GetMetadata is Get's audit summary, stages and bodies only, read
+	// without decrypting anything (query.Service.GetMetadata).
+	GetMetadata(context.Context, string, *query.Scope) (query.Detail, error)
 	ReconstructTurn(context.Context, string) (query.ReconstructedTurn, error)
 	Timeline(context.Context, string, query.Side) (query.StreamTimeline, error)
 	RawMeta(context.Context, string, query.Side) (query.RawMetadata, error)

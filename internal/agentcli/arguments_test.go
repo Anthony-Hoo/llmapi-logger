@@ -1,6 +1,7 @@
 package agentcli
 
 import (
+	"errors"
 	"testing"
 
 	"llmapi-logger/internal/agentapi"
@@ -109,6 +110,57 @@ func TestLocalUsageErrorsNameFieldAndReason(t *testing.T) {
 		if body.Details["field"] != test.field || body.Details["reason"] != test.reason {
 			t.Errorf("%v: details %v, want field %q reason %q", test.args, body.Details, test.field, test.reason)
 		}
+	}
+}
+
+// TestRepeatedBooleanFlagIsRefused: a command's boolean flag given twice is
+// refused whatever its values, so --write --write=false or --clear
+// --clear=false never keeps one of them silently; a single --flag=false still
+// means false (contract section 0.1 item 181).
+func TestRepeatedBooleanFlagIsRefused(t *testing.T) {
+	h := newHarness(t)
+	for _, args := range [][]string{
+		{"login", "--server", "https://audit.example.com", "--write", "--write=false"},
+		{"login", "--server", "https://audit.example.com", "--write=false", "--write"},
+		{"login", "--server", "https://audit.example.com", "--write", "-write"},
+		{"login", "--server", "https://audit.example.com", "--write=false", "--write=false"},
+	} {
+		inv, err := parse(h.env, args)
+		var failure *cliError
+		if !errors.As(err, &failure) || failure.Code != agentapi.CodeInvalidArgument || failure.Details["field"] != "--write" || failure.Details["reason"] != "repeated_parameter" {
+			t.Errorf("%v: invocation %v error %v", args, inv != nil, err)
+		}
+	}
+	if inv, err := parse(h.env, []string{"login", "--server", "https://audit.example.com", "--write=false"}); err != nil || inv.has("write") {
+		t.Fatalf("single --write=false: error %v", err)
+	}
+	// The global --pretty keeps "the last one wins".
+	if inv, err := parse(h.env, []string{"whoami", "--pretty", "--pretty=false"}); err != nil || inv.pretty {
+		t.Fatalf("repeated --pretty: error %v", err)
+	}
+
+	server := newFakeServer(t, nil)
+	h.saveLogin(server.URL)
+	h.terminal.interactive = true
+	h.terminal.secret = "sk-test-not-a-key"
+	for _, args := range [][]string{
+		{"config", "set-key", "--kind", "analysis-settings", "--clear", "--clear=false"},
+		{"config", "set-key", "--kind", "analysis-settings", "--clear=false", "--clear"},
+	} {
+		body := h.expectFailure(h.run(args...), agentapi.CodeInvalidArgument, agentapi.ExitInvalidUsage)
+		if body.Details["field"] != "--clear" || body.Details["reason"] != "repeated_parameter" {
+			t.Errorf("%v: details %v", args, body.Details)
+		}
+	}
+	if requests := server.recorded(); len(requests) != 0 {
+		t.Fatalf("a repeated --clear reached the server: %+v", requests)
+	}
+	// A single --clear=false sets the key from the terminal; nothing is cleared.
+	if exit := h.run("config", "set-key", "--kind", "analysis-settings", "--clear=false"); exit != 0 {
+		t.Fatalf("--clear=false: exit %d %s", exit, h.stderr.String())
+	}
+	if requests := server.recorded(); len(requests) != 1 || requests[0].Method != "PUT" || h.terminal.reads != 1 {
+		t.Fatalf("--clear=false requests %+v reads %d", requests, h.terminal.reads)
 	}
 }
 

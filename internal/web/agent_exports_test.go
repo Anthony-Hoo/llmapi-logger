@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -311,6 +312,69 @@ func TestRequestsProtocolIsAnOpenFilter(t *testing.T) {
 	for _, good := range []string{"x", strings.Repeat("p", 512), "anthropic.messages", "Open AI"} {
 		if facade := fixture.facade(http.MethodGet, "/requests?protocol="+url.QueryEscape(good), "", fixture.adminRead); facade.Code != http.StatusOK {
 			t.Errorf("protocol=%q: facade %d", good, facade.Code)
+		}
+	}
+}
+
+// corruptDerived is the fixture's audits with Get failing verification for
+// one record, as query.Service.Get does when its parsed JSON or turn graph
+// does not decrypt; the record's raw chunks and stream events are intact.
+type corruptDerived struct {
+	*scopedAudits
+	corrupt string
+}
+
+func (audits corruptDerived) Get(ctx context.Context, auditID string, scope *query.Scope) (query.Detail, error) {
+	detail, err := audits.scopedAudits.Get(ctx, auditID, scope)
+	if err == nil && auditID == audits.corrupt {
+		return query.Detail{}, query.ErrIntegrity
+	}
+	return detail, err
+}
+
+// Contract section 0.1 item 183: the raw and timeline exports read only the
+// record's metadata, as the web routes do, so a record whose derived content
+// fails verification still exports them with the same completeness; the
+// conversation export still answers EVIDENCE_UNAVAILABLE, and another
+// caller's record is still not found.
+func TestRawAndTimelineExportsDoNotNeedTheDerivedRecord(t *testing.T) {
+	fixture := newReadFixture(t)
+	kinds := []string{"raw-request", "raw-response", "timeline-response"}
+	type exported struct {
+		code             int
+		complete, reason string
+		body             string
+	}
+	export := func(kind string) exported {
+		response := fixture.facade(http.MethodGet, "/requests/own-1/export/"+kind, "", fixture.developer)
+		return exported{response.Code, response.Header().Get(headerExportComplete), response.Header().Get(headerExportIncomplete), response.Body.String()}
+	}
+	intact := map[string]exported{}
+	for _, kind := range kinds {
+		intact[kind] = export(kind)
+		if intact[kind].code != http.StatusOK || intact[kind].complete == "" {
+			t.Fatalf("intact %s = %+v", kind, intact[kind])
+		}
+	}
+	fixture.handler.query = corruptDerived{scopedAudits: fixture.audits, corrupt: "own-1"}
+	for _, kind := range kinds {
+		if got := export(kind); got != intact[kind] {
+			t.Errorf("%s of a record whose derived content is corrupt = %+v, want %+v", kind, got, intact[kind])
+		}
+	}
+	// The request was not streamed: its timeline is not available, for that
+	// reason and not for the corrupt parse.
+	if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/requests/own-1/export/timeline-request", "", fixture.developer)); code != agentapi.CodeNotAvailable {
+		t.Errorf("timeline-request = %s", code)
+	}
+	for _, kind := range []string{"conversation", "headers"} {
+		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/requests/own-1/export/"+kind, "", fixture.developer)); code != agentapi.CodeEvidenceUnavailable {
+			t.Errorf("%s of a corrupt record = %s", kind, code)
+		}
+	}
+	for _, kind := range append(kinds, "timeline-request") {
+		if code := facadeOutcome(t, fixture.facade(http.MethodGet, "/requests/foreign/export/"+kind, "", fixture.developer)); code != agentapi.CodeNotFound {
+			t.Errorf("developer %s of another caller's record = %s", kind, code)
 		}
 	}
 }

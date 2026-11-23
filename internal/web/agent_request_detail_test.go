@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"llmapi-logger/internal/query"
@@ -18,6 +19,55 @@ func (audits detailLikeService) Get(ctx context.Context, auditID string, scope *
 	detail, err := audits.scopedAudits.Get(ctx, auditID, scope)
 	detail.Audit.UserAgent = nil
 	return detail, err
+}
+
+// A credential-shaped User-Agent is null in the list and in the detail, as the
+// headers view omits it by the same rule (contract section 0.1 item 174).
+func TestRequestUserAgentIsMaskedLikeItsHeader(t *testing.T) {
+	fixture := newReadFixture(t)
+	fixture.handler.query = detailLikeService{fixture.audits}
+	const credential = "Bearer sk-example-not-a-real-key"
+	found := false
+	for index := range fixture.audits.records {
+		record := &fixture.audits.records[index]
+		if record.detail.Audit.AuditID != "own-1" {
+			continue
+		}
+		found = true
+		value := credential
+		record.detail.Audit.UserAgent = &value
+		for headerIndex := range record.detail.Headers {
+			if header := &record.detail.Headers[headerIndex]; strings.EqualFold(header.Name, "user-agent") {
+				header.Value = credential
+			}
+		}
+	}
+	if !found {
+		t.Fatal("fixture record own-1 missing")
+	}
+	list := readData(t, fixture.facade(http.MethodGet, "/requests?collapse=false", "", fixture.adminRead))
+	for _, raw := range list["items"].([]any) {
+		item := raw.(map[string]any)
+		switch item["audit_id"] {
+		case "own-1":
+			if value, present := item["user_agent_untrusted"]; !present || value != nil {
+				t.Errorf("list user agent of a credential-shaped value = %v (present %v)", value, present)
+			}
+		default:
+			// A normal User-Agent is still output.
+			if item["user_agent_untrusted"] == nil {
+				t.Errorf("%s: normal user agent dropped", item["audit_id"])
+			}
+		}
+	}
+	response := fixture.facade(http.MethodGet, "/requests/own-1?headers=all", "", fixture.adminRead)
+	detail := readData(t, response)
+	if value, present := detail["user_agent_untrusted"]; !present || value != nil {
+		t.Errorf("detail user agent of a credential-shaped value = %v (present %v)", value, present)
+	}
+	if strings.Contains(response.Body.String(), "sk-example") {
+		t.Errorf("the detail carries the credential: %s", response.Body.String())
+	}
 }
 
 // TestRequestDetailAgreesWithTheList: every field the list item and the

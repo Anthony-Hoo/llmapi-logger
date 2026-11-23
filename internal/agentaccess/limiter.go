@@ -26,7 +26,15 @@ type windowLimiter struct {
 	// ended by finish. It is kept apart from the windows: an attempt in
 	// flight belongs to no window until it is known to have failed.
 	pending map[string]int
-	now     func() time.Time
+	// sweepAt is the number of tracked keys beyond which the next record
+	// sweeps expired windows. After a sweep it doubles past the keys still
+	// live, so the O(n) sweep runs once per doubling of the map instead of on
+	// every event while many live keys are tracked (contract section 0.1 item
+	// 175). Live windows are never evicted.
+	sweepAt int
+	// sweeps counts full sweeps, for tests.
+	sweeps int
+	now    func() time.Time
 }
 
 type limiterWindow struct {
@@ -42,7 +50,7 @@ type limiterSlot struct {
 }
 
 func newWindowLimiter(limit int, window time.Duration, now func() time.Time) *windowLimiter {
-	return &windowLimiter{limit: limit, window: window, entries: make(map[string]*limiterWindow), pending: make(map[string]int), now: now}
+	return &windowLimiter{limit: limit, window: window, entries: make(map[string]*limiterWindow), pending: make(map[string]int), sweepAt: limiterSweepThreshold, now: now}
 }
 
 // allow reports whether key is still under its limit, and how long it must
@@ -72,12 +80,14 @@ func (limiter *windowLimiter) recordLocked(key string, now time.Time) *limiterWi
 		limiter.entries[key] = entry
 	}
 	entry.count++
-	if len(limiter.entries) > limiterSweepThreshold {
+	if len(limiter.entries) > limiter.sweepAt {
+		limiter.sweeps++
 		for tracked, window := range limiter.entries {
 			if !now.Before(window.expiresAt) {
 				delete(limiter.entries, tracked)
 			}
 		}
+		limiter.sweepAt = max(limiterSweepThreshold, 2*len(limiter.entries))
 	}
 	return entry
 }

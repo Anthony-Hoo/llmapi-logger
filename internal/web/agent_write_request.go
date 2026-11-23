@@ -493,13 +493,11 @@ func agentExpectedVersion(request agentPlanRequest, any int64) (int64, error) {
 	return version, nil
 }
 
-// isKeyField reports the API key under any of its names.
+// isKeyField reports the API key under any of its names. The rule is shared
+// with the command-line client, which refuses the same names before sending
+// anything (contract section 0.1 item 177).
 func isKeyField(field string) bool {
-	switch strings.ToLower(strings.TrimSpace(field)) {
-	case "api_key", "llm.api_key":
-		return true
-	}
-	return false
+	return agentapi.IsKeyField(field)
 }
 
 const keyFieldMessage = "api_key is not a settable field: the user sets it with `llmaudit config set-key --kind analysis-settings`"

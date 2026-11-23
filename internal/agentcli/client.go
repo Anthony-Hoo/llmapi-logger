@@ -284,7 +284,11 @@ func decodeEnvelope(response *http.Response, data []byte, requireMeta bool) (*se
 	if err := decoder.Decode(&envelope); err != nil || envelope.OK == nil {
 		return nil, invalidResponse(status, "the server response is not a valid envelope")
 	}
-	if decoder.More() {
+	// Only whitespace may follow the envelope. More is no end-of-input check:
+	// it only says whether an element follows inside an array or object, so
+	// a stray } or ] after the envelope would pass it (contract section 0.1
+	// item 182).
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, invalidResponse(status, "the server response has data after the envelope")
 	}
 	if !*envelope.OK {

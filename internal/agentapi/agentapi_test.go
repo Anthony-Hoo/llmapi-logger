@@ -248,6 +248,21 @@ func TestMaskingKeepsAgentAndOrdinaryHeaders(t *testing.T) {
 	}
 }
 
+// The API key is one field under every name the server and the client accept
+// (contract section 0.1 item 177).
+func TestIsKeyField(t *testing.T) {
+	for _, field := range []string{"api_key", "API_KEY", " api_key ", "llm.api_key", "LLM.Api_Key", " llm.api_key\t", "a.b.api_key", "llm. api_key"} {
+		if !IsKeyField(field) {
+			t.Errorf("%q is not a key field", field)
+		}
+	}
+	for _, field := range []string{"", "llm", "llm.model", "api_key.llm", "api_keys", "my_api_key", "llm.api_key_source", "apikey", "api-key"} {
+		if IsKeyField(field) {
+			t.Errorf("%q is a key field", field)
+		}
+	}
+}
+
 // Everything addressed to the agent is English: the notice and every default
 // message and hint of the error table carry no CJK text.
 func TestAgentFacingTextIsEnglish(t *testing.T) {

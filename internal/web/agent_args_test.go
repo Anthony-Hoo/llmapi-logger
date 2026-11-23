@@ -386,6 +386,33 @@ func TestAgentDownloadParameterErrorNamesFieldAndReason(t *testing.T) {
 	}
 }
 
+// The sensitive_read row cleans the client-reported command and version like
+// every other token event: a client cannot record the reserved "web" or
+// arbitrary text (contract section 0.1 item 176).
+func TestAgentSensitiveReadAuditCleansCommandAndVersion(t *testing.T) {
+	fixture := newReadFixture(t)
+	for _, resource := range []string{"pack", "facet"} {
+		path := agentapi.PathPrefix + "/analysis/sessions/" + analysisOwnID + "/" + resource
+		readData(t, fixture.do(http.MethodGet, path, "", agentCaller{bearer: fixture.developer},
+			// The suffix after "-" passes the client-version gate but is not a
+			// plausible version string.
+			agentapi.HeaderCommand, "web", agentapi.HeaderCLIVersion, agentapi.LatestVersion+"-<script> x"))
+		entries := fixture.store.Audit()
+		last := entries[len(entries)-1]
+		if last.Event != agentaccess.EventSensitiveRead || last.Command != agentaccess.CommandUnknown || last.CLIVersion != "" {
+			t.Fatalf("%s audit row with a reserved command = %+v", resource, last)
+		}
+		readData(t, fixture.do(http.MethodGet, path, "", agentCaller{bearer: fixture.developer},
+			agentapi.HeaderCommand, "analysis."+resource, agentapi.HeaderCLIVersion, agentapi.LatestVersion))
+		entries = fixture.store.Audit()
+		last = entries[len(entries)-1]
+		if last.Event != agentaccess.EventSensitiveRead || last.Command != "analysis."+resource || last.CLIVersion != agentapi.LatestVersion ||
+			last.ObjectID != analysisOwnID || last.TokenID == nil || last.Outcome != storage.AgentOutcomeOK {
+			t.Fatalf("%s audit row with a valid command = %+v", resource, last)
+		}
+	}
+}
+
 // A pack or facet read refused for its id still writes the failed
 // sensitive_read row (contract section 0.1 item 28).
 func TestAgentRefusedSessionIDIsAuditedAsAFailedSensitiveRead(t *testing.T) {

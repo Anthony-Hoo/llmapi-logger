@@ -7,10 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentapi"
 	"llmapi-logger/internal/sessionanalysis"
-	"llmapi-logger/internal/storage"
 )
 
 // Session analysis on the facade (contract section 4.3.5). The scope, the
@@ -417,18 +415,15 @@ func (handler *managementHandler) serveAgentAnalysisSessions(writer http.Respons
 }
 
 // recordSensitiveRead writes the sensitive_read audit row of a pack or facet
-// read (contract section 3.4); the view log is written by the service.
+// read (contract section 3.4); the view log is written by the service. The
+// service cleans the client-reported command and version (contract section
+// 0.1 item 176).
 func (handler *managementHandler) recordSensitiveRead(ctx context.Context, call agentCall, kind string, err error) {
-	tokenID := call.Identity.TokenID
-	entry := storage.AgentAuditEntry{
-		Event: agentaccess.EventSensitiveRead, TokenID: &tokenID, Role: string(call.Identity.Role),
-		Command: call.Meta.Command, CLIVersion: call.Meta.CLIVersion,
-		ObjectKind: kind, ObjectID: call.Params["id"], Outcome: storage.AgentOutcomeOK,
-	}
+	var code agentapi.Code
 	if err != nil {
-		entry.Outcome, entry.ErrorCode = storage.AgentOutcomeFailed, string(agentErrorCodeOf(err))
+		code = agentErrorCodeOf(err)
 	}
-	handler.agent.RecordAudit(ctx, entry)
+	handler.agent.RecordSensitiveRead(ctx, call.Identity, call.Meta, kind, call.Params["id"], code)
 }
 
 type agentPack struct {

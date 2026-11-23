@@ -241,18 +241,36 @@ func checkRangeLength(values url.Values, fromNS, toNS int64, maximum time.Durati
 // the same 400 days unexported).
 const agentMaxServiceRange = query.MaxInsightsRange
 
+// agentInstantMinYear and agentInstantMaxYear bound the instants a query
+// accepts: int64 nanoseconds end on 2262-04-11, and an instant beyond them
+// would wrap to an unrelated time and the query would silently read the wrong
+// interval (contract section 0.1 item 179).
+const (
+	agentInstantMinYear = 1970
+	agentInstantMaxYear = 2261
+)
+
 func parseAgentInstant(value string, endOfDay bool) (time.Time, error) {
 	if day, err := time.Parse(time.DateOnly, value); err == nil {
 		if endOfDay {
 			day = day.AddDate(0, 0, 1)
 		}
-		return day.UTC(), nil
+		return checkAgentInstantYear(day.UTC())
 	}
 	instant, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil || instant.UnixNano() <= 0 {
 		return time.Time{}, errors.New("invalid time")
 	}
-	return instant.UTC(), nil
+	return checkAgentInstantYear(instant.UTC())
+}
+
+// checkAgentInstantYear refuses an instant, already in UTC and shifted to the
+// end of its day when it is one, outside the years int64 nanoseconds hold.
+func checkAgentInstantYear(instant time.Time) (time.Time, error) {
+	if year := instant.Year(); year < agentInstantMinYear || year > agentInstantMaxYear {
+		return time.Time{}, errors.New("invalid time")
+	}
+	return instant, nil
 }
 
 func parseSince(value string) (time.Duration, error) {

@@ -273,6 +273,58 @@ func TestCalibratePlanStatesWhatTheLabelsMatch(t *testing.T) {
 	}
 }
 
+// Contract section 0.1 item 173: apply saves the calibration the plan showed
+// or nothing. When the stored facets were replaced or the analysis model was
+// switched after the plan was made, apply is refused as a stale plan and no
+// calibration is saved.
+func TestCalibrateApplyRefusesWhatThePlanDidNotShow(t *testing.T) {
+	fixture := newWriteFixture(t)
+	setFacetModel := func(model string) {
+		facet := fixture.analysis.facets[analysisOwnID]
+		facet.Kind, facet.PromptVersion, facet.Model = storage.PackKindSession, sessionanalysis.PromptVersion, model
+		fixture.analysis.facets[analysisOwnID] = facet
+	}
+	setFacetModel("local-model")
+	matched := map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{map[string]any{"session_id": analysisOwnID, "task_type": "bug_fix"}}}}
+	refused := func(name, planID string) {
+		t.Helper()
+		saves := fixture.suggestions.calibrationSaveCount()
+		body := failure(t, fixture.facade(http.MethodPost, "/plans/"+planID+"/apply", nil, fixture.adminWrite))
+		if body.Code != agentapi.CodeVersionConflict || !strings.Contains(body.Hint, "new calibration plan") {
+			t.Fatalf("%s: apply = %s %q", name, body.Code, body.Hint)
+		}
+		if got := fixture.suggestions.calibrationSaveCount(); got != saves {
+			t.Fatalf("%s: %d calibration(s) saved by a refused apply", name, got-saves)
+		}
+	}
+
+	// The facet is replaced by one of another model: the plan showed one
+	// sample, apply would save none.
+	plan := fixture.plan(t, matched)
+	if plan.Extras["samples"] != float64(1) {
+		t.Fatalf("plan extras = %v", plan.Extras)
+	}
+	setFacetModel("replaced-model")
+	refused("facet replaced", plan.PlanID)
+	setFacetModel("local-model")
+
+	// The model is switched while every count stays the same (the label
+	// matches no facet before and after): the model alone refuses it.
+	unmatched := map[string]any{"op": "analysis.calibrate", "args": map[string]any{"labels": []any{map[string]any{"session_id": strings.Repeat("0", 64), "task_type": "bug_fix"}}}}
+	plan = fixture.plan(t, unmatched)
+	service := fixture.handler.sessionAnalysis.(*sessionanalysis.QueryService)
+	service.SetModel("other-model")
+	refused("model switched", plan.PlanID)
+	service.SetModel("local-model")
+
+	// Nothing changed: apply saves the calibration.
+	saves := fixture.suggestions.calibrationSaveCount()
+	applied := fixture.planAndApply(t, matched)
+	if !strings.Contains(string(applied.Result), `"samples":1`) || fixture.suggestions.calibrationSaveCount() != saves+1 {
+		t.Fatalf("unchanged apply = %s, saves %d -> %d", applied.Result, saves, fixture.suggestions.calibrationSaveCount())
+	}
+}
+
 // Contract section 0.1 item 105: the web routes put any positive user id in
 // a group and classify any user or token id (org_admin_api.go), so the agent
 // plans them too, and the plan says when the id is not among the callers the

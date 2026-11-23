@@ -326,6 +326,33 @@ func TestPrettyTableColumns(t *testing.T) {
 	}
 }
 
+// TestPrettyDepthIsBounded: --pretty output of a deeply nested object stays
+// linear in the size of the response; an object at the depth cap is written
+// on one line as compact JSON, and shallow data renders as before (contract
+// section 0.1 item 178).
+func TestPrettyDepthIsBounded(t *testing.T) {
+	const levels = 2000
+	data := strings.Repeat(`{"k":`, levels) + `{"v":1}` + strings.Repeat(`}`, levels)
+	out := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(data)}, nil)
+	if len(out) > 4*len(data)+4096 {
+		t.Fatalf("%d levels (%d bytes of data) rendered to %d bytes", levels, len(data), len(out))
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 1+maxPrettyDepth+1 {
+		t.Fatalf("%d lines, want %d", len(lines), 1+maxPrettyDepth+1)
+	}
+	last := lines[len(lines)-1]
+	wantLast := strings.Repeat("  ", maxPrettyDepth) + "k: " + data[len(`{"k":`)*(maxPrettyDepth+1):len(data)-(maxPrettyDepth+1)]
+	if last != wantLast {
+		t.Fatalf("last line %.120q, want %.120q", last, wantLast)
+	}
+
+	shallow := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(`{"a":{"b":{"c":1,"d":[1,2]}},"e":"x"}`)}, nil)
+	if shallow != "ok\na:\n  b:\n    c: 1\n    d: 1, 2\ne: x\n" {
+		t.Fatalf("shallow output %q", shallow)
+	}
+}
+
 // LOCAL_FILE_ERROR carries a hint wherever it is raised, through the shared
 // error table: an unusable --out, an unreadable --file, a missing home.
 func TestLocalFileErrorsCarryAHint(t *testing.T) {

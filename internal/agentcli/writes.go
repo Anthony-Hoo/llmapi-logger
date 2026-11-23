@@ -45,14 +45,61 @@ func splitAssignment(flag, value string) (string, string, error) {
 }
 
 // refuseKeyField keeps the API key out of every value a command line or
-// file can carry: it only enters through the no-echo terminal prompt.
+// file can carry: it only enters through the no-echo terminal prompt. The
+// key is api_key under any name the server takes for it, llm.api_key
+// included (contract section 0.1 item 177).
 func refuseKeyField(field string) error {
-	if strings.EqualFold(strings.TrimSpace(field), "api_key") {
+	if agentapi.IsKeyField(field) {
 		return &cliError{Code: agentapi.CodeInvalidArgument, Message: "api_key cannot be given as a value; nothing was sent",
 			Hint:    "Ask the user to run `llmaudit config set-key --kind analysis-settings` themselves in a terminal.",
 			Details: map[string]any{"field": "api_key"}}
 	}
 	return nil
+}
+
+// refuseKeyMember applies refuseKeyField to every object member name at any
+// depth of a JSON value, so {"llm":{"api_key":…}} in a --patch-file or
+// --set-json llm={"api_key":…} is refused like llm.api_key. The value has
+// already passed strictJSON. Member names are read as decoded tokens, so an
+// escaped spelling of the name is caught too.
+func refuseKeyMember(value json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	// UseNumber keeps a number such as 1e400 from failing the walk before a
+	// later member is read.
+	decoder.UseNumber()
+	if keyMember(decoder) {
+		return refuseKeyField("api_key")
+	}
+	return nil
+}
+
+// keyMember reads one JSON value and reports whether one of its objects has
+// a member that names the API key.
+func keyMember(decoder *json.Decoder) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return false
+	}
+	for decoder.More() {
+		if delimiter == '{' {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return false
+			}
+			if key, _ := keyToken.(string); agentapi.IsKeyField(key) {
+				return true
+			}
+		}
+		if keyMember(decoder) {
+			return true
+		}
+	}
+	_, _ = decoder.Token()
+	return false
 }
 
 // strictJSON decodes exactly one JSON value in which no object names a key
@@ -162,6 +209,9 @@ func setValues(inv *invocation) (map[string]any, error) {
 			if err != nil {
 				return nil, usageError("--set-json", fmt.Sprintf("--set-json %s: the value is not one valid JSON value", field))
 			}
+			if err := refuseKeyMember(value); err != nil {
+				return nil, err
+			}
 			set[field] = value
 		case "patch-file":
 			data, err := os.ReadFile(given.value)
@@ -175,6 +225,11 @@ func setValues(inv *invocation) (map[string]any, error) {
 			var fields map[string]json.RawMessage
 			if err != nil || json.Unmarshal(value, &fields) != nil || fields == nil {
 				return nil, usageError("--patch-file", "--patch-file must hold one JSON object whose keys are field names")
+			}
+			// The walk covers the top-level field names as well as names
+			// nested in their values.
+			if err := refuseKeyMember(value); err != nil {
+				return nil, err
 			}
 			for field, raw := range fields {
 				if err := refuseKeyField(field); err != nil {

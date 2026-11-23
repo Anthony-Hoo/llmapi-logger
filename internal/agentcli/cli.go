@@ -231,14 +231,32 @@ func writeSuccess(env *Env, prettyOutput bool, outcome *result, columns []string
 		envelope.WebURL = strings.TrimRight(outcome.server, "/") + source.WebPath
 	}
 	if prettyOutput {
-		_, err := io.WriteString(env.Stdout, renderPrettySuccess(envelope, columns))
-		return err
+		return writeOutput(env.Stdout, []byte(renderPrettySuccess(envelope, columns)))
 	}
 	encoded, err := encodeJSON(envelope)
 	if err != nil {
 		return internalError("cannot encode the output")
 	}
-	_, _ = env.Stdout.Write(encoded)
+	return writeOutput(env.Stdout, encoded)
+}
+
+// outputLostHint tells the agent that the command itself ran: only its result
+// was lost, so a write must not simply be repeated.
+const outputLostHint = "The command ran, but its result could not be written to standard output (for example a closed pipe or a full disk). " +
+	"Make standard output writable first. Do not simply repeat a write command such as apply: check with the matching read command whether the change took effect."
+
+// writeOutput writes a result to standard output. A failed or short write is
+// an error, so the command exits non-zero instead of 0 with its result lost
+// (contract section 0.1 item 180).
+func writeOutput(writer io.Writer, data []byte) error {
+	written, err := writer.Write(data)
+	if err == nil && written < len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return &cliError{Code: agentapi.CodeLocalFileError, Message: "could not write the result to standard output", Hint: outputLostHint,
+			Details: map[string]any{"stream": "stdout", "reason": "write_failed"}}
+	}
 	return nil
 }
 

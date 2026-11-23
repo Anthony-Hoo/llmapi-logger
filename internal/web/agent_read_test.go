@@ -1121,6 +1121,43 @@ func TestAgentTransientDatabaseErrorsAreUpstreamUnavailable(t *testing.T) {
 
 // --- parameters -------------------------------------------------------------
 
+// Instants int64 nanoseconds cannot hold are refused as a format error instead
+// of wrapping to an unrelated time (2600-01-01 used to read as a 2015 time).
+func TestAgentRangeRefusesInstantsBeyondNanoseconds(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	parse := func(query string) (agentRange, error) {
+		values, _ := urlValues(query)
+		return parseAgentRange(values, now)
+	}
+	for _, bad := range []string{
+		"from=0001-01-01", "from=1969-12-31", "from=2262-01-01", "from=2600-01-01", "from=9999-12-31",
+		"to=0001-01-01", "to=2600-01-01", "to=9999-12-31",
+		// The end-of-day shift moves 2261-12-31 into 2262.
+		"to=2261-12-31",
+		"from=0001-01-01T00:00:00Z", "from=2262-01-01T00:00:00Z", "from=2600-01-01T00:00:00Z", "from=9999-12-31T23:59:59Z",
+		// The offset moves this one into 2262 once it is in UTC.
+		"to=2261-12-31T23:00:00-05:00",
+	} {
+		_, err := parse(bad)
+		var argument agentArgError
+		if !errors.As(err, &argument) || argument.reason != reasonInvalidFormat || !strings.Contains(argument.message, agentInstantForm) {
+			t.Errorf("%s = %v, want the invalid time format error", bad, err)
+		}
+	}
+	for _, good := range []string{
+		"from=1970-01-01", "from=1970-01-01T00:00:00.000000001Z", "from=2261-12-31", "from=2261-12-31T23:59:59Z",
+		"to=2261-12-30", "to=2261-12-31T23:59:59Z", "to=1970-01-01",
+	} {
+		if _, err := parse(good); err != nil {
+			t.Errorf("%s refused: %v", good, err)
+		}
+	}
+	got, err := parse("from=2261-12-31")
+	if err != nil || *got.FromNS != time.Date(2261, 12, 31, 0, 0, 0, 0, time.UTC).UnixNano() {
+		t.Errorf("last accepted date = %+v %v", got, err)
+	}
+}
+
 func TestAgentReadParameters(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	parse := func(query string) (agentRange, error) {

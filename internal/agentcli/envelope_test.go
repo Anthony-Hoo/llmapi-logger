@@ -342,3 +342,79 @@ func TestVersion(t *testing.T) {
 		t.Fatalf("unreachable: exit %d %s %s", exit, h.stdout.String(), h.stderr.String())
 	}
 }
+
+// failingWriter fails every write, or writes one byte less than asked
+// without an error when short is set.
+type failingWriter struct{ short bool }
+
+func (writer failingWriter) Write(data []byte) (int, error) {
+	if writer.short {
+		return len(data) - 1, nil
+	}
+	return 0, errors.New("broken pipe")
+}
+
+// TestUnwritableStdoutFails: a result that cannot be written to stdout
+// (failed or short write) is a non-zero exit with a failure envelope on
+// stderr saying so, in JSON and --pretty alike (contract section 0.1 item
+// 180).
+func TestUnwritableStdoutFails(t *testing.T) {
+	server := newFakeServer(t, nil)
+	for _, writer := range []failingWriter{{}, {short: true}} {
+		for _, pretty := range []bool{false, true} {
+			h := newHarness(t)
+			h.saveLogin(server.URL)
+			h.env.Stdout = writer
+			args := []string{"whoami"}
+			if pretty {
+				args = append(args, "--pretty")
+			}
+			exit := h.run(args...)
+			stderr := h.stderr.String()
+			if exit != agentapi.ExitError || !strings.Contains(stderr, "LOCAL_FILE_ERROR") ||
+				!strings.Contains(stderr, "could not write the result to standard output") || !strings.Contains(stderr, "The command ran") {
+				t.Errorf("short %v pretty %v: exit %d stderr %q", writer.short, pretty, exit, stderr)
+			}
+		}
+	}
+}
+
+// TestTrailingDataAfterTheEnvelopeIsRefused: anything but whitespace after
+// the envelope is INVALID_RESPONSE, closing brackets included (contract
+// section 0.1 item 182).
+func TestTrailingDataAfterTheEnvelopeIsRefused(t *testing.T) {
+	response := &http.Response{StatusCode: 200, Header: http.Header{}}
+	for _, body := range []string{
+		`{"ok":true,"data":{}}}`,
+		`{"ok":true,"data":{}}]`,
+		`{"ok":true,"data":{}} ]`,
+		`{"ok":true,"data":{}},`,
+		`{"ok":true,"data":{}}:`,
+		`{"ok":true,"data":{}}x`,
+		`{"ok":true,"data":{}}1`,
+		`{"ok":true,"data":{}}{}`,
+		`{"ok":false,"error":{"code":"NOT_FOUND"}}}`,
+	} {
+		_, err := decodeEnvelope(response, []byte(body), false)
+		var failure *cliError
+		if !errors.As(err, &failure) || failure.Code != agentapi.CodeInvalidResponse {
+			t.Errorf("%s: err %v, want INVALID_RESPONSE", body, err)
+		}
+	}
+	for _, body := range []string{`{"ok":true,"data":{}}`, `{"ok":true,"data":{}}` + " \r\n\t\n"} {
+		if _, err := decodeEnvelope(response, []byte(body), false); err != nil {
+			t.Errorf("%q: %v", body, err)
+		}
+	}
+
+	server := newFakeServer(t, respondJSON(200, `{"ok":true,"data":{"plan_id":"pln_1"}}}`))
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	if exit := h.run("analysis", "run"); exit != agentapi.ExitError || h.failure().Code != agentapi.CodeInvalidResponse {
+		t.Fatalf("exit %d stdout %q stderr %q", exit, h.stdout.String(), h.stderr.String())
+	}
+	server.setResponder(respondJSON(200, `{"ok":true,"data":{"items":[]},"meta":`+okMeta+`}]`))
+	if exit := h.run("requests", "list"); exit != agentapi.ExitError || h.failure().Code != agentapi.CodeInvalidResponse {
+		t.Fatalf("exit %d stdout %q stderr %q", exit, h.stdout.String(), h.stderr.String())
+	}
+}

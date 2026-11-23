@@ -834,6 +834,10 @@ func (queries *fakeQuery) Get(context.Context, string, *query.Scope) (query.Deta
 	return queries.detail, queries.detailErr
 }
 
+func (queries *fakeQuery) GetMetadata(context.Context, string, *query.Scope) (query.Detail, error) {
+	return query.Detail{Audit: queries.detail.Audit, Stages: queries.detail.Stages, Bodies: queries.detail.Bodies}, queries.detailErr
+}
+
 func (queries *fakeQuery) ReconstructTurn(context.Context, string) (query.ReconstructedTurn, error) {
 	return queries.reconstructed, queries.reconstructErr
 }

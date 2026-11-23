@@ -88,6 +88,21 @@ type suggestionMemory struct {
 	dismissed []int64
 	// facetLoads counts the facet reads, i.e. the work of a calibration check.
 	facetLoads int
+	// calibrationSaves counts the calibrations saved.
+	calibrationSaves int
+}
+
+func (memory *suggestionMemory) SaveFacetCalibration(ctx context.Context, calibration storage.FacetCalibration) error {
+	memory.mu.Lock()
+	memory.calibrationSaves++
+	memory.mu.Unlock()
+	return memory.memoryAnalysisStore.SaveFacetCalibration(ctx, calibration)
+}
+
+func (memory *suggestionMemory) calibrationSaveCount() int {
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	return memory.calibrationSaves
 }
 
 func (memory *suggestionMemory) LoadSessionFacet(ctx context.Context, key []byte) (storage.SessionFacet, error) {

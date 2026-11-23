@@ -173,8 +173,11 @@ func (h *harness) success() map[string]json.RawMessage {
 	h.t.Helper()
 	var envelope map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(h.stdout.Bytes()))
-	if err := decoder.Decode(&envelope); err != nil || decoder.More() {
+	if err := decoder.Decode(&envelope); err != nil {
 		h.t.Fatalf("stdout is not one JSON envelope: %q", h.stdout.String())
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		h.t.Fatalf("stdout has data after the envelope: %q", h.stdout.String())
 	}
 	if string(envelope["ok"]) != "true" {
 		h.t.Fatalf("stdout envelope is not ok: %s", h.stdout.String())

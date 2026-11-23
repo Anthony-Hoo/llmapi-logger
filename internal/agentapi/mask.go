@@ -58,6 +58,20 @@ func IsCredential(name, value string) bool {
 	return false
 }
 
+// IsKeyField reports whether a field name names the analysis model's API
+// key: api_key itself or any dotted path whose last segment is api_key
+// (llm.api_key), trimmed and case-insensitive. The server refuses such a
+// field in a plan, and the command-line client refuses it before anything is
+// sent, because the key only enters through the no-echo terminal prompt
+// (contract section 0.1 item 177).
+func IsKeyField(field string) bool {
+	name := strings.ToLower(strings.TrimSpace(field))
+	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
+		name = strings.TrimSpace(name[dot+1:])
+	}
+	return name == "api_key"
+}
+
 // MaskValue returns the output form of one value. A value that is not valid
 // UTF-8 is still passed through as Go replaces invalid bytes when encoding
 // JSON; the length is that of the original bytes.

@@ -166,9 +166,20 @@ func agentAuditItemOf(summary query.AuditSummary) agentAuditItem {
 			UserID: summary.NewAPIUserID, UsernameUntrusted: summary.Username, DisplayNameUntrusted: summary.DisplayName,
 			TokenID: summary.NewAPITokenID, TokenNameUntrusted: summary.TokenName,
 		},
-		UserAgentUntrusted: summary.UserAgent,
+		UserAgentUntrusted: agentUserAgentOf(summary.UserAgent),
 		ConversationID:     summary.ConversationID, ConversationTurns: summary.ConversationTurns,
 	}
+}
+
+// agentUserAgentOf is the User-Agent a list item or a detail outputs: null
+// when the value is credential-shaped by the masking rule the headers view
+// applies, so a value omitted there is not shown here (contract section 0.1
+// item 174).
+func agentUserAgentOf(value *string) *string {
+	if value == nil || agentapi.IsCredential("User-Agent", *value) {
+		return nil
+	}
+	return value
 }
 
 type agentAuditList struct {
@@ -887,7 +898,17 @@ func (handler *managementHandler) serveAgentRequestExport(writer http.ResponseWr
 	// Every export says whether it is complete, from the record's state
 	// exactly as `requests get` derives meta (and, for a timeline or a raw
 	// body, from the content's own completeness too).
-	detail, err := handler.query.Get(ctx, auditID, callerReadScope(call.Principal))
+	read := handler.query.Get
+	if strings.HasPrefix(what, "raw-") || strings.HasPrefix(what, "timeline-") {
+		// A raw body and a timeline are served from their own chunks and
+		// events, as the web routes serve them: their state and completeness
+		// need only the summary and the bodies, so they do not depend on the
+		// decrypted URI, headers, parse or turn graph Get verifies (contract
+		// section 0.1 item 183). Only this kind's state is read below, so the
+		// other kinds' states derived from this partial detail do not matter.
+		read = handler.query.GetMetadata
+	}
+	detail, err := read(ctx, auditID, callerReadScope(call.Principal))
 	if err != nil {
 		handler.writeAgentServiceFailure(writer, err, "")
 		return

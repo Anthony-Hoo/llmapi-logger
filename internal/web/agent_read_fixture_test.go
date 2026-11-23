@@ -149,6 +149,16 @@ func (audits *scopedAudits) Get(_ context.Context, auditID string, scope *query.
 	return record.detail, err
 }
 
+// GetMetadata returns only what query.Service.GetMetadata fills, so a handler
+// that reads anything else on that path is caught.
+func (audits *scopedAudits) GetMetadata(_ context.Context, auditID string, scope *query.Scope) (query.Detail, error) {
+	record, err := audits.find(auditID, scope)
+	if err != nil {
+		return query.Detail{}, err
+	}
+	return query.Detail{Audit: record.detail.Audit, Stages: record.detail.Stages, Bodies: record.detail.Bodies}, nil
+}
+
 // The services below do not check ownership themselves: the web and the
 // facade must call Authorize first. They answer for any id that exists, and
 // only for content the record has, as query.Service does: a reconstruction

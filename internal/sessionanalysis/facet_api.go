@@ -264,14 +264,18 @@ func (service *QueryService) compareLabels(ctx context.Context, labels []Calibra
 // Samples labels have a stored facet of the current prompt version and model;
 // Unmatched (indexes) have none and are skipped; Empty (indexes) matched but
 // name no field to compare; Compared counts the comparisons per field, and
-// HiddenFields are the fields the saved calibration would hide.
+// HiddenFields are the fields the saved calibration would hide. Model and
+// PromptVersion are the ones the facets were compared for, so a caller can
+// tell that a later Calibrate would compare against something else.
 type CalibrationPreview struct {
-	Labels       int              `json:"labels"`
-	Samples      int64            `json:"samples"`
-	Unmatched    []int            `json:"unmatched"`
-	Empty        []int            `json:"empty"`
-	Compared     map[string]int64 `json:"compared"`
-	HiddenFields []string         `json:"hidden_fields"`
+	Model         string           `json:"model"`
+	PromptVersion string           `json:"prompt_version"`
+	Labels        int              `json:"labels"`
+	Samples       int64            `json:"samples"`
+	Unmatched     []int            `json:"unmatched"`
+	Empty         []int            `json:"empty"`
+	Compared      map[string]int64 `json:"compared"`
+	HiddenFields  []string         `json:"hidden_fields"`
 }
 
 // CheckCalibrate runs every check Calibrate runs and compares the labels
@@ -285,6 +289,7 @@ func (service *QueryService) CheckCalibrate(ctx context.Context, labels []Calibr
 	if err := ValidateCalibrationLabels(labels); err != nil {
 		return CalibrationPreview{}, err
 	}
+	model := service.modelName()
 	comparison, err := service.compareLabels(ctx, labels)
 	if err != nil {
 		return CalibrationPreview{}, err
@@ -293,7 +298,7 @@ func (service *QueryService) CheckCalibrate(ctx context.Context, labels []Calibr
 	for field, count := range comparison.compared {
 		agreement[field] = float64(comparison.agreed[field]) / float64(count)
 	}
-	return CalibrationPreview{Labels: len(labels), Samples: comparison.samples, Unmatched: append([]int{}, comparison.unmatched...),
+	return CalibrationPreview{Model: model, PromptVersion: PromptVersion, Labels: len(labels), Samples: comparison.samples, Unmatched: append([]int{}, comparison.unmatched...),
 		Empty: append([]int{}, comparison.empty...), Compared: comparison.compared, HiddenFields: hiddenFrom(agreement, comparison.compared)}, nil
 }
 

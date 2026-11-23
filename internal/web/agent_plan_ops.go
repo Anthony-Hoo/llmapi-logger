@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -131,6 +133,25 @@ func (handler *managementHandler) planAnalysisCalibrate(ctx context.Context, req
 		if !runner.CalibrationAvailable() {
 			return agentApplied{}, calibrationUnavailable(again)
 		}
+		// The calibration saved must be the one the plan showed (contract
+		// section 0.1 item 173): Calibrate compares with the model and the
+		// stored facets of this moment, so a model switch or replaced facets
+		// would save a different, irreversible calibration. Compare again and
+		// refuse when anything the plan showed differs. A switch between this
+		// check and Calibrate's own comparison is not caught; the window is
+		// that of two reads of the same facets.
+		current, err := runner.CheckCalibrate(ctx, labels)
+		if err != nil {
+			if errors.Is(err, query.ErrInvalidQuery) && !runner.CalibrationAvailable() {
+				return agentApplied{}, calibrationUnavailable(again)
+			}
+			return agentApplied{}, err
+		}
+		if !sameCalibrationPreview(preview, current) {
+			return agentApplied{}, &agentFailure{Code: agentapi.CodeVersionConflict,
+				Message: "the calibration these labels produce changed after the plan was made: the analysis model or the stored facets changed",
+				Hint:    "Nothing was saved. Make a new calibration plan with the same labels and check what it states before applying it."}
+		}
 		result, err := handler.sessionAnalysis.Calibrate(ctx, labels)
 		if err != nil {
 			if errors.Is(err, query.ErrInvalidQuery) && !runner.CalibrationAvailable() {
@@ -143,6 +164,17 @@ func (handler *managementHandler) planAnalysisCalibrate(ctx context.Context, req
 			HiddenFields: append([]string{}, result.HiddenFields...), CreatedAt: agentTime(result.CreatedNS)}}, nil
 	}
 	return plan, nil
+}
+
+// sameCalibrationPreview reports whether two comparisons of the same labels
+// found the same thing: model, prompt version, samples, unmatched and empty
+// labels, comparisons per field and hidden fields. A nil and an empty slice
+// or map are equal.
+func sameCalibrationPreview(planned, current sessionanalysis.CalibrationPreview) bool {
+	return planned.Model == current.Model && planned.PromptVersion == current.PromptVersion &&
+		planned.Labels == current.Labels && planned.Samples == current.Samples &&
+		slices.Equal(planned.Unmatched, current.Unmatched) && slices.Equal(planned.Empty, current.Empty) &&
+		maps.Equal(planned.Compared, current.Compared) && slices.Equal(planned.HiddenFields, current.HiddenFields)
 }
 
 // calibrationMatchEffect says how many labels the calibration compares and

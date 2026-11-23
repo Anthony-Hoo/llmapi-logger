@@ -207,6 +207,21 @@
 171. **三处已知限制**（已知限制，补第 166、169 条与 §9）：(a) `--out` 的名字只有一个字符时，预检与写入用的随机名字也只有一个字符，从 36 个 ASCII 字母与数字里取，最多试 10 次，与目标同名（不分大小写）的跳过。目录里已经有其中大部分名字时，可能次次撞上，预检答 `LOCAL_FILE_ERROR`（`the --out file cannot be created in its directory`）；换一个长一点的名字即可。(b) 状态目录经一个作为符号链接的上层目录到达，而 `config.json` 又按真实路径写 CA 文件时，`checkCAFileInState` 按路径比较，认不出这个 CA 文件在状态目录里，按“状态目录之外”的规则读取、不做检查。`config.json` 本身经第 169 条检查，只有本人能写它，这样写是本人的选择。(c) `LLMAUDIT_HOME` 在不能表示属主与权限位的文件系统上（例如挂进 Linux 的 Windows 盘：文件一律显示为别人也能访问，`chmod` 不生效）时，收紧失败，按设计答 `LOCAL_FILE_ERROR`（`accessible_to_others`），提示写明状态目录需要 0700、`credentials.json` 需要 0600；把状态目录放到本人的、能设这些权限的文件系统上即可。都不改。
 172. **粘贴授权码时只有一个协程写提示**（修正登录的实现，补第 170 条的测试；CI 第一次带竞态检测运行时发现）：`login --no-browser` 读授权码的 `readPastedCode` 原来由读输入的协程在空行之后重新打印 `Authorization code: `，调用方的协程同时打印第一次提示，两处并发写 `env.Stderr`；等待超时返回之后，读输入的协程还可能在命令已经输出错误时再写一次。真实终端上是提示与后续输出的先后不定，测试里是对同一个缓冲区的数据竞争。现在读输入的协程不写任何东西：空行经一个通道告诉调用方，由调用方重新提示；函数返回之后不再有对 `env.Stderr` 的写入。行为不变：先提示一次，每个空行之后再提示一次，输入结束而没有授权码仍答 `NO_TTY`。同一次运行里，值上限的并发峰值测试（`TestAgentBodyCostIsBoundedAtTheValueLimits`）要求 30 个并发的建计划请求全部答 `INVALID_ARGUMENT`，而它的请求体通过值上限、要占解码名额，慢的机器上（竞态检测器下）等名额超过 10 秒的请求按第 170 条答 `TIMEOUT`；这个测试改为接受这两种回答（合计 30 个，其中被解码的不少于名额数 4 个），堆峰值的上限照旧检查，限制本身（4 个并发解码、等 10 秒）没有改。字节上限的那个峰值测试不变：它的请求体超过值上限，在扫描时就被拒绝，不占名额，也就不会超时。
 
+第 173–184 条来自对整个合并请求的一次自动代码审查（十二条意见，十一条修改，一条不改）。
+
+173. **校准计划在执行时按计划所示核对**（修正第 105 条的执行）：`analysis.calibrate` 的计划在创建时用 `CheckCalibrate` 把标注与已存分面比对一遍并写明结果，执行时 `Calibrate` 却按那一刻的模型与分面重新比对、不做任何核对。计划创建之后换了分析模型，或后台运行替换了分面，保存下来的就是另一份不可恢复的校准（例如 0 个样本，所有字段都不再隐藏）。现在 `CalibrationPreview` 带上比对所用的模型与提示词版本，执行时先再比对一次：模型、提示词版本、标注数、样本数、未匹配与无可比字段的标注、各字段的比对次数、会隐藏的字段，任何一项与计划不同就答 `VERSION_CONFLICT`，什么都不保存，提示重新建计划。核对与保存之间仍有两次读取同一批分面的间隔，这里不处理；各字段的一致率不在计划里，一致率变了而隐藏字段不变的情况不拦。测试 `TestCalibrateApplyRefusesWhatThePlanDidNotShow`。
+174. **凭据形状的 User-Agent 不在摘要里输出**（补 §4.3.2）：`requests list` 与 `requests get` 的 `user_agent_untrusted` 原样复制 User-Agent 的值，而 Header 视图按规则 3（值以 `Bearer `、`Basic `、`sk-`、`lla_` 开头）会把同一个值屏蔽掉，于是屏蔽可以从另一个字段绕过。现在这个字段经同一个 `agentapi.IsCredential` 判断，命中时为 `null`；Header 视图里仍能看到 `value_omitted: "credential"` 与长度。普通的 User-Agent 照常输出。门面里没有别处原样输出 User-Agent 的值。`requests list --user-agent` 的子串筛选仍会匹配这样的值（与网页的筛选相同），没有改。测试 `TestRequestUserAgentIsMaskedLikeItsHeader`。
+175. **限流器的清扫摊还**：`windowLimiter` 在跟踪的键超过 1024 个之后，每记一次事件都在持锁状态下扫一遍整张表；来自很多不同来源地址的失败请求会让每次事件的代价与活跃键数成正比，而鉴权也要拿这把锁。现在清扫只在键数超过 `sweepAt` 时进行，扫完把 `sweepAt` 设为剩余键数的两倍（不低于 1024），于是表每翻一倍才扫一次。活跃窗口仍不淘汰，也不设硬上限：超限时是拒绝新来源还是淘汰旧窗口是另一个取舍，而每个这样的请求本来就要查一次存储。测试 `TestLimiterSweepIsAmortisedOverLiveKeys`。
+176. **敏感读取的审计行清洗命令与版本**（修正 §3.4 的实现）：读取 pack 与 facet 的 `sensitive_read` 行原来把请求头里的命令名与客户端版本原样写入，别的令牌事件与写入事件都经 `cleanCommand`、`cleanVersion`。持有令牌的客户端因此可以让一行记成服务端保留的 `web`，或写进任意文本。现在这一行由 `agentaccess.Service.RecordSensitiveRead` 生成，与写入事件同一套清洗：保留值与不合格的命令记为 `unknown`，不合格的版本记为空。`RecordAudit` 本身不变，服务端自己记 `web` 的地方不受影响。测试 `TestAgentSensitiveReadAuditCleansCommandAndVersion`。
+177. **Key 的任何写法都在本地拒绝**（修正第 41 条在客户端的实现）：客户端只拒绝字段名 `api_key`，服务端则把 `api_key` 与 `llm.api_key` 都当作 Key；`--set llm.api_key=…`、`--set-json`、`--patch-file` 与 `analysis test-model --set` 因此会先把值发出去再被服务端拒绝。现在两端共用 `agentapi.IsKeyField`（去空白、不分大小写，`api_key` 或以 `.api_key` 结尾的点分路径），客户端还逐层检查 `--set-json` 的值与 `--patch-file` 的整个对象，任何深度上名为 `api_key` 的成员（含转义写法）都在发出请求之前以 `INVALID_ARGUMENT`、`details.field: api_key` 拒绝。服务端因此把任何 `x.api_key` 都答成“不可设置”而不是“未知字段”。测试 `TestKeyUnderEveryNameIsRefusedLocally`、`TestIsKeyField`。
+178. **`--pretty` 的缩进深度封顶**：缩进随嵌套深度增长，嵌套几千层的响应会渲染出与其大小成平方关系的输出（12 KB、2000 层的数据渲染成 4 MB），而客户端接受的响应上限是 256 MiB。现在第 32 层的对象不再继续缩进，改为在一行里输出紧凑 JSON，输出与输入成线性关系；正常的几层嵌套渲染结果不变。测试 `TestPrettyDepthIsBounded`。
+179. **超出纳秒可表示范围的时间被拒绝**（补 §4 的时间参数）：`YYYY-MM-DD` 形式原来不检查范围，RFC 3339 形式只检查大于 0；超出 int64 纳秒范围的时间会回绕，`2600-01-01` 变成 2015 年的一个时刻，查询读的是另一段时间，还报告完整。现在换算成 UTC、并把日期移到当天结束之后，年份必须在 1970 到 2261 之间（int64 纳秒止于 2262-04-11），否则是原有的格式错误；`1970-01-01` 作为日期照旧接受，`to=2261-12-31` 因移到次日而被拒绝。测试 `TestAgentRangeRefusesInstantsBeyondNanoseconds`。
+180. **结果写不出去时命令失败**（补 §2.3 的本地错误表）：默认的 JSON 输出丢弃写标准输出的错误，结果没写出去命令也以 0 退出；`--pretty` 的路径会失败，但报成 `INTERNAL`。现在两条路径共用 `writeOutput`：写失败或只写出一部分时是 `LOCAL_FILE_ERROR`（退出码 1），`details.stream: stdout`、`details.reason: write_failed`，提示写明命令已经执行、只是结果丢了，像 `apply` 这样的写入不要直接重跑，先用对应的读取命令确认。测试 `TestUnwritableStdoutFails`。
+181. **重复给出的布尔参数被拒绝**：值为假的布尔参数原来被直接丢弃，`login --write --write=false` 仍然申请读写档位，`config set-key --clear --clear=false` 仍然走清除。现在一条命令的布尔参数给了两次就以 `repeated_parameter` 拒绝，与重复的字符串参数一样，不论各次的值；只给一次 `--flag=false` 仍表示假。全局的 `--pretty` 仍是后者为准（第 123、151 条）。测试 `TestRepeatedBooleanFlagIsRefused`。
+182. **信封之后不得有多余数据**：`decodeEnvelope` 用 `Decoder.More()` 判断信封之后是否还有内容，而它只回答数组或对象里是否还有下一个元素，`{"ok":true,"data":{}}}` 或信封后跟一个 `]` 都被当成成功。现在解码之后要求读到 `io.EOF`，其余一律是 `INVALID_RESPONSE`；尾部的空白照旧接受。测试 `TestTrailingDataAfterTheEnvelopeIsRefused`。
+183. **原始 Body 与时间线的导出不依赖解析结果**（对齐网页，补 §4.3.1 的导出）：每种导出原来都先调 `query.Service.Get`，它要解密 Request-URI、Header、解析结果并重建轮次，其中任何一项校验失败就是 `ErrIntegrity`；于是原始分片完好的记录也导不出 `raw-request`、`raw-response`、`timeline-request`、`timeline-response`，而网页的原始 Body 与时间线接口只读各自的分片与事件，照样能给。现在这四种导出改读新增的 `query.Service.GetMetadata`：同样的入口检查与存储查询，只返回摘要、阶段与 Body 的元数据，不解密任何内容；`Get` 的返回与失败条件不变。归属仍由先行的 `Authorize` 把关。其余导出（`headers`、`conversation`、`request`、`response`）仍用 `Get`，派生内容校验失败时照旧是 `EVIDENCE_UNAVAILABLE`。测试 `TestRawAndTimelineExportsDoNotNeedTheDerivedRecord`、`TestGetMetadataNeedsNoDecryption`。
+184. **不改：把终端里输入的 Key 从服务端返回的文字里抹掉**。审查提出，服务端若在错误信息里回显刚输入的 Key，`config set-key` 与 `analysis test-model --prompt-key` 会把它打印到标准错误。这两条命令没有交互终端就以 `NO_TTY` 失败，只能由用户本人在终端里运行，输出回到的是那个终端，不是 Agent 的上下文；本服务端的任何响应都不带 Key（第 41 条），连接测试的结果只有类别，没有上游返回的文字；会回显 Key 的服务端本来就已经拿到了它。所以客户端不做这层替换。
+
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |
@@ -520,6 +535,8 @@
 - 既有的四种凭据传输方式（`Authorization` 的 Bearer 与裸值、`X-Api-Key`、`X-Goog-Api-Key`、查询参数 `key`）在任何门面响应里都不出现原值。
 - `X-Agent-Session-Id`、`X-Agent-Id`、`X-Agent-Parent-Id`、`X-Agent-Role`、`X-Agent-Name`、`X-Agent-Project`、`User-Agent`、`X-Oneapi-Request-Id` 的值照常输出。
 
+摘要里的 `user_agent_untrusted` 是 User-Agent 头的另一份副本，同样过这套规则：命中时为 `null`（§0.1 第 174 条）。
+
 **做不到的**：对话正文、工具结果、原始 Body、重建结果里本身带着的密钥，这里不处理。
 
 #### 4.3.3 用量洞察
@@ -640,7 +657,7 @@
 |---|---|
 | `config.set`、`config.remove`、`config.reset`、`config.clear-key` | 对象存在（修改与删除；成员与主体的用户、令牌 ID 网页也不查，照收，但不在已见过的调用者里时 `effects` 写明，§0.1 第 105 条）；合并后的对象通过该服务的全部规范化与校验（正则编译、目录整体编译、设置的取值范围与上下文预算）；删除的前置条件（项目组下没有项目与成员） |
 | `analysis.run` | 运行器可用。已在运行不算校验失败：计划照建，`extras.running` 为真，执行时返回 `RUN_IN_PROGRESS` |
-| `analysis.calibrate` | 条数在 1–1000 之间；每条的 `session_id` 是 64 位十六进制；各字段取值在枚举内；模型阶段已启用。另按执行时的同一规则把标注与已存的分面比对一遍（不保存），在 `effects`、`extras` 里写明比对了几条、跳过了哪几条、哪几条没有可比的字段、会隐藏哪些字段（§0.1 第 105 条） |
+| `analysis.calibrate` | 条数在 1–1000 之间；每条的 `session_id` 是 64 位十六进制；各字段取值在枚举内；模型阶段已启用。另按执行时的同一规则把标注与已存的分面比对一遍（不保存），在 `effects`、`extras` 里写明比对了几条、跳过了哪几条、哪几条没有可比的字段、会隐藏哪些字段（§0.1 第 105 条）；执行时再比对一次，与计划所示不同就是 `VERSION_CONFLICT`（§0.1 第 173 条） |
 | `analysis.dismiss` | ID 是正整数；有这个 ID 的全站或项目范围的建议（与执行时的条件相同，已忽略的也算），否则 `NOT_FOUND`（§0.1 第 105 条） |
 | `weekly.regenerate` | `week` 是合法的周起始日；该周已结束；快照存储可用。早于保留期不拒绝，`effects` 写明会丢什么（§0.1 第 72 条）；计划的版本是该周快照的 `generated_at`，执行时比对（第 74 条） |
 - `effects` 是给人读的后果说明，由服务端按操作类型生成，例如“启用后立即对线上请求生效”“未冻结的周将按新规则重新归属”“换模型后全部输入包将重新标注”。

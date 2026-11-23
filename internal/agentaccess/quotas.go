@@ -131,6 +131,21 @@ func (service *Service) RecordWrite(ctx context.Context, identity Identity, meta
 	service.RecordAudit(ctx, entry)
 }
 
+// RecordSensitiveRead appends the sensitive_read row of a pack or facet read
+// for the calling token; an empty errorCode is a successful read. The command
+// and CLI version come from request headers, so they are cleaned as for every
+// other token event: a client cannot record the reserved "web" or arbitrary
+// text (contract section 0.1 item 176). Like RecordAudit it never fails the
+// caller.
+func (service *Service) RecordSensitiveRead(ctx context.Context, identity Identity, meta RequestMeta, objectKind, objectID string, errorCode agentapi.Code) {
+	entry := auditFor(identity, meta, EventSensitiveRead, OutcomeOK)
+	entry.ObjectKind, entry.ObjectID = objectKind, objectID
+	if errorCode != "" {
+		entry.Outcome, entry.ErrorCode = OutcomeFailed, string(errorCode)
+	}
+	service.RecordAudit(ctx, entry)
+}
+
 // storage outcome names, re-exported for callers of RecordWrite.
 const (
 	OutcomeOK     = storage.AgentOutcomeOK

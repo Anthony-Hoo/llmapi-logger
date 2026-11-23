@@ -1,6 +1,7 @@
 package agentaccess
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -48,6 +49,42 @@ func TestLimiterInFlightCapIsIndependentOfTheFailureLimit(t *testing.T) {
 	now = now.Add(time.Minute)
 	if allowed, _ := limiter.admit("a", 5); !allowed {
 		t.Fatal("the window did not end")
+	}
+}
+
+// Many live keys from distinct sources do not make every event sweep the
+// whole map: sweeps are amortised, and expired windows still go once the map
+// is swept.
+func TestLimiterSweepIsAmortisedOverLiveKeys(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limiter := newWindowLimiter(3, time.Minute, func() time.Time { return now })
+	const keys = 8000
+	for index := 0; index < keys; index++ {
+		limiter.record(fmt.Sprintf("192.0.2.%d", index))
+	}
+	if len(limiter.entries) != keys {
+		t.Fatalf("live entries = %d, want %d: a live window was evicted", len(limiter.entries), keys)
+	}
+	// 1024 doubled up to 8000 is three sweeps; allow a little slack, far
+	// below one sweep per event.
+	if limiter.sweeps > 5 {
+		t.Fatalf("sweeps = %d for %d live keys, want a logarithmic number", limiter.sweeps, keys)
+	}
+	now = now.Add(2 * time.Minute)
+	before := limiter.sweeps
+	for index := 0; limiter.sweeps == before; index++ {
+		if index > 2*keys {
+			t.Fatal("no sweep ran after the windows expired")
+		}
+		limiter.record(fmt.Sprintf("198.51.100.%d", index))
+	}
+	for key, window := range limiter.entries {
+		if !now.Before(window.expiresAt) {
+			t.Fatalf("expired window %s kept after a sweep", key)
+		}
+	}
+	if len(limiter.entries) >= keys {
+		t.Fatalf("entries after sweep = %d", len(limiter.entries))
 	}
 }
 

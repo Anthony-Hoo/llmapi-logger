@@ -78,10 +78,20 @@ func decodeNumbers(raw []byte, target any) error {
 	return decoder.Decode(target)
 }
 
+// maxPrettyDepth bounds the nesting --pretty indents. Indentation grows
+// with depth, so a response nested thousands of levels deep would otherwise
+// render to output quadratic in its size; an object at this depth is written
+// on one line as compact JSON instead (contract section 0.1 item 178).
+const maxPrettyDepth = 32
+
 func renderValue(builder *strings.Builder, label string, value any, depth int, preferred []string) {
 	indent := strings.Repeat("  ", depth)
 	switch typed := value.(type) {
 	case map[string]any:
+		if label != "" && depth >= maxPrettyDepth {
+			builder.WriteString(indent + label + ": " + scalarText(typed) + "\n")
+			return
+		}
 		if label != "" {
 			builder.WriteString(indent + label + ":\n")
 			depth++

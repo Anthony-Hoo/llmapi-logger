@@ -111,6 +111,60 @@ func TestSetKeyNeedsATerminal(t *testing.T) {
 	}
 }
 
+// TestKeyUnderEveryNameIsRefusedLocally: llm.api_key, and an api_key member
+// nested in a --set-json or --patch-file value, are the key as much as
+// api_key is; each is refused before any request (contract section 0.1 item
+// 177).
+func TestKeyUnderEveryNameIsRefusedLocally(t *testing.T) {
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	dir := t.TempDir()
+	dotted := writeFile(t, filepath.Join(dir, "dotted.json"), `{"llm.model":"m","LLM.API_KEY":"sk-test-not-a-key"}`)
+	nested := writeFile(t, filepath.Join(dir, "nested.json"), `{"llm":{"model":"m","api_key":"sk-test-not-a-key"}}`)
+	deep := writeFile(t, filepath.Join(dir, "deep.json"), `{"a":[1e400,{"b":{" Api_Key ":"sk-test-not-a-key"}}]}`)
+	escaped := writeFile(t, filepath.Join(dir, "escaped.json"), `{"llm":{"api_key":"sk-test-not-a-key"}}`)
+	for _, args := range [][]string{
+		{"analysis", "test-model", "--set", "llm.api_key=sk-test-not-a-key"},
+		{"analysis", "test-model", "--set", " LLM.Api_Key =sk-test-not-a-key"},
+		{"config", "set", "--kind", "analysis-settings", "--set", "llm.api_key=sk-test-not-a-key"},
+		{"config", "set", "--kind", "analysis-settings", "--set-json", `llm.api_key="sk-test-not-a-key"`},
+		{"config", "set", "--kind", "analysis-settings", "--set-json", `llm={"api_key":"sk-test-not-a-key"}`},
+		{"config", "set", "--kind", "analysis-settings", "--set-json", `llm=[{"x":{"API_KEY":"sk-test-not-a-key"}}]`},
+		{"config", "set", "--kind", "analysis-settings", "--add", "llm.api_key=sk-test-not-a-key"},
+		{"config", "set", "--kind", "analysis-settings", "--remove", "llm.api_key=sk-test-not-a-key"},
+		{"config", "set", "--kind", "analysis-settings", "--patch-file", dotted},
+		{"config", "set", "--kind", "analysis-settings", "--patch-file", nested},
+		{"config", "set", "--kind", "analysis-settings", "--patch-file", deep},
+		{"config", "set", "--kind", "analysis-settings", "--patch-file", escaped},
+	} {
+		body := h.expectFailure(h.run(args...), agentapi.CodeInvalidArgument, agentapi.ExitInvalidUsage)
+		if body.Details["field"] != "api_key" || !strings.Contains(body.Hint, "llmaudit config set-key --kind analysis-settings") {
+			t.Errorf("%v: %+v", args, body)
+		}
+		if strings.Contains(h.stdout.String()+h.stderr.String(), "sk-test") {
+			t.Fatalf("%v: the key was printed", args)
+		}
+	}
+	if requests := server.recorded(); len(requests) != 0 {
+		t.Fatalf("a key value reached the server: %d requests", len(requests))
+	}
+
+	// Ordinary nested values and the terminal prompt still work.
+	h.terminal.interactive = true
+	h.terminal.secret = "sk-test-not-a-key"
+	if exit := h.run("config", "set", "--kind", "analysis-settings", "--set-json", `llm.model="m"`, "--set", "llm.base_url=https://llm.example.com/v1"); exit != 0 {
+		t.Fatalf("ordinary set: exit %d %s", exit, h.stderr.String())
+	}
+	if exit := h.run("config", "set-key", "--kind", "analysis-settings"); exit != 0 {
+		t.Fatalf("set-key: exit %d %s", exit, h.stderr.String())
+	}
+	requests := server.recorded()
+	if len(requests) != 2 || requests[1].Method != "PUT" || !jsonEqual(t, requests[1].Body, `{"api_key":"sk-test-not-a-key"}`) {
+		t.Fatalf("requests %+v", requests)
+	}
+}
+
 func TestSetKeyFromTerminal(t *testing.T) {
 	server := newFakeServer(t, respondJSON(200, `{"ok":true,"data":{"api_key":"saved"}}`))
 	h := newHarness(t)

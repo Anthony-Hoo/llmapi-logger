@@ -465,7 +465,7 @@ func buildCommands() []*commandSpec {
 			Description: "Probes the model with the saved settings, overridden by --set values that are not saved. Exit code 6 when the probe ran but failed (data.ok false). " +
 				"--prompt-key asks the user for a key in the terminal without echo; there is no other way to pass a key.",
 			Flags: []flagSpec{
-				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is JSON null (refused here: only a project's group_id accepts null), anything else a string. Not api_key. Repeatable. Default: the saved settings."},
+				{Name: "set", Kind: listFlag, Value: "<field>=<value>", Body: "set", Help: "Unsaved analysis-settings field for this test (run_at, l1_settle_hours or llm.*, as listed by `llmaudit config set --help`), split at the first '='; true/false are booleans, decimal numbers are numbers, null is JSON null (refused here: only a project's group_id accepts null), anything else a string. Not api_key under any name (llm.api_key included): it is refused before anything is sent. Repeatable. Default: the saved settings."},
 				{Name: "prompt-key", Kind: boolFlag, Help: "Read an API key for this test from the interactive terminal without echo; it is not saved. Fails with NO_TTY when stdin is not a terminal. Default: use the saved key."},
 			},
 			Routes:   []routeSpec{{Method: "POST", Path: "/analysis/test-model", Body: []string{"api_key"}, Meta: true}},
@@ -514,7 +514,7 @@ func buildCommands() []*commandSpec {
 			Summary: "plan: create or change a configuration object (administrators, write tier)",
 			Description: "Only creates a plan and prints it (before, after, effects); `llmaudit apply <plan-id>` executes it. Without --id a new object is created. " +
 				"--set, --set-json and --patch-file can be mixed; when they name the same field the one given later on the command line wins. " +
-				"A field may not appear in both --set and --add/--remove. The API key is not a field: the user sets it with `llmaudit config set-key --kind analysis-settings`.",
+				"A field may not appear in both --set and --add/--remove. The API key is not a field: the user sets it with `llmaudit config set-key --kind analysis-settings`. A field named api_key or ending in .api_key (llm.api_key), or an api_key member anywhere inside a --set-json or --patch-file value, is refused before anything is sent.",
 			Fields: configFields,
 			Flags: []flagSpec{
 				{Name: "kind", Value: "<kind>", Body: "kind", Required: true, Help: "One of " + configKinds + ". Required."},

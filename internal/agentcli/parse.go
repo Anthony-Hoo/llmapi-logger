@@ -197,6 +197,10 @@ func isNegativeNumber(arg string) bool {
 // a positional argument.
 func parseFlags(env *Env, spec *commandSpec, args []string) (*invocation, error) {
 	inv := &invocation{env: env, spec: spec}
+	// seenBool records each boolean flag given, false occurrences included:
+	// inv.given keeps only the true ones, so it cannot tell that
+	// --clear --clear=false repeats --clear.
+	seenBool := map[string]bool{}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		if arg == "--" {
@@ -232,6 +236,14 @@ func parseFlags(env *Env, spec *commandSpec, args []string) (*invocation, error)
 			if err != nil {
 				return nil, err
 			}
+			// A boolean flag given twice is refused like a repeated string
+			// flag, whatever its values: --write --write=false must not
+			// silently keep one of them (contract section 0.1 item 181). The
+			// global --pretty, handled above, keeps "the last one wins".
+			if seenBool[flag.Name] {
+				return nil, usageErrorWith("--"+name, "repeated_parameter", fmt.Sprintf("flag --%s given more than once", name))
+			}
+			seenBool[flag.Name] = true
 			if set {
 				inv.given = append(inv.given, occurrence{flag: flag, value: "true"})
 			}
