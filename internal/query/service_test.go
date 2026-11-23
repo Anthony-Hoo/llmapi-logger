@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -63,6 +64,13 @@ func TestStreamRawDecryptsAndVerifiesCompleteBody(t *testing.T) {
 	}
 	if output.String() != "hello world" {
 		t.Fatalf("raw output = %q", output.String())
+	}
+	// For a complete body the digest RawMeta reports is the lower-case hex
+	// SHA-256 of exactly the bytes StreamRaw writes. The command-line client
+	// compares a raw export with it (contract section 0.1 item 191), so the
+	// two must never mean different things.
+	if digest := sha256.Sum256(output.Bytes()); metadata.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("RawMeta digest %s is not the SHA-256 of the streamed body", metadata.SHA256)
 	}
 }
 
