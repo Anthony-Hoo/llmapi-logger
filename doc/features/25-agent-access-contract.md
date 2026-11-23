@@ -231,6 +231,11 @@
 189. **`--pretty` 输出的文字一律去掉控制字符**（补第 99 条）：`--pretty` 只对字符串值做了控制字符替换，错误的代码、信息、提示与细节的键，成功结果的 `meta`、网页地址、`next_actions`、`notice`，以及对象的键与表头都原样写到终端，响应里的转义序列（例如设置剪贴板的 OSC 52）可以到达用户的终端；嵌套值写成紧凑 JSON 时，`0x7f` 与 C1 区也不会被转义。现在所有来自服务端的文字都经 `terminalText`：`0x20` 以下（含回车与换行，所以伪造不出额外的输出行）、`0x7f` 与 U+0080–U+009F 一律换成空格，其余文字（中文、带重音的字母、表情）不变。默认的 JSON 输出不在此列：它由 JSON 编码器产生，`0x20` 以下的字符本来就被转义。双向控制符与零宽字符不处理。测试 `TestPrettyNeutralisesControlCharacters`、`TestPrettyKeepsOrdinaryText`。
 190. **导出时写文件失败是本地文件错误**（修正第 124 条涉及的 `--out`）：`requests export` 把响应体复制到 `--out` 文件，复制中的任何错误原来都报成 `NETWORK_ERROR`（“连不上服务器”），磁盘写满、配额或文件大小限制造成的写失败因此被说成网络问题，后面的 `LOCAL_FILE_ERROR` 分支对它不可达。现在分开：读响应体出错仍是网络错误（超时的处理不变），写文件出错是 `LOCAL_FILE_ERROR`，带 `details.field: --out` 与路径。两种失败之后都不留临时文件，已有的目标文件保持原样。测试 `TestExportWriteFailureIsLocalFileError`、`TestExportBrokenBodyIsNetworkError`。
 
+第 191–192 条来自对第 185–190 条的修改的复审（两条意见，全部修改）。
+
+191. **原始 Body 的导出核对摘要**（补 §4.3.1 的导出）：服务端在流式输出原始 Body 时，要等所有分片写完才比对整体的 SHA-256；多分片的响应这时已经提交，比对失败只能记日志，响应头里的 `Content-Length` 照样满足，客户端于是把没通过校验的证据存成文件，还报告 `complete: true`。现在客户端在服务端声明完整（`X-Audit-Complete: true`）并给出格式正确的 `X-Audit-SHA256` 时，把收到的字节的摘要与它比对（不分大小写），在临时文件替换 `--out` 之前进行：不一致就是 `EVIDENCE_UNAVAILABLE`（`details.reason: digest_mismatch`），不写出任何文件，已有的目标保持原样。服务端不声明完整的捕获不比对（那时记录的摘要不是已存字节的摘要），其他导出没有摘要。网页的原始 Body 下载不变。测试 `TestRawExportDigestIsVerified`。
+192. **下载审计行的测试等待写入**：`package_downloaded` 行是处理函数在送完文件之后写的，而测试里的请求在收到响应时就返回，随后立刻数行数，偶尔会少一行（整包运行时出现过 29 行）。测试改为在限定时间内等到预期的行数再断言；产品代码不变。
+
 ## 1. 目录与归属
 
 | 位置 | 内容 | 阶段 |

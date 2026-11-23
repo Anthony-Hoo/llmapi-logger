@@ -706,3 +706,55 @@ func TestExportBrokenBodyIsNetworkError(t *testing.T) {
 		assertExportLeftNothing(t, dir, missing, existing)
 	}
 }
+
+// TestRawExportDigestIsVerified (contract section 0.1 item 191): a raw body
+// the server calls complete must have the SHA-256 the server sent with it.
+// A body that does not is EVIDENCE_UNAVAILABLE and replaces nothing; a body
+// that does, and a body the server does not call complete, are written.
+func TestRawExportDigestIsVerified(t *testing.T) {
+	raw := []byte("\x00\x01raw body\xff")
+	digest := sha256.Sum256(raw)
+	good := hex.EncodeToString(digest[:])
+	other := sha256.Sum256([]byte("another body"))
+	bad := hex.EncodeToString(other[:])
+	server := newFakeServer(t, func(writer http.ResponseWriter, request *http.Request, _ []byte) {
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		switch {
+		case strings.Contains(request.URL.Path, "/requests/match/"):
+			writer.Header().Set("X-Audit-Complete", "true")
+			writer.Header().Set("X-Audit-SHA256", strings.ToUpper(good))
+		case strings.Contains(request.URL.Path, "/requests/mismatch/"):
+			writer.Header().Set("X-Audit-Complete", "true")
+			writer.Header().Set("X-Audit-SHA256", bad)
+		case strings.Contains(request.URL.Path, "/requests/partial/"):
+			// An incomplete capture: its digest is not one of the stored bytes.
+			writer.Header().Set("X-Audit-Complete", "false")
+			writer.Header().Set("X-Audit-SHA256", bad)
+		}
+		_, _ = writer.Write(raw)
+	})
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "raw.bin")
+	existing := writeFile(t, filepath.Join(dir, "existing.json"), "precious")
+	for _, target := range []string{missing, existing} {
+		body := h.expectFailure(h.run("requests", "export", "mismatch", "--what", "raw-response", "--out", target), agentapi.CodeEvidenceUnavailable, agentapi.ExitError)
+		if body.Details["reason"] != "digest_mismatch" || body.Details["path"] != target {
+			t.Fatalf("details %v", body.Details)
+		}
+		assertExportLeftNothing(t, dir, missing, existing)
+	}
+	for _, id := range []string{"match", "partial"} {
+		target := filepath.Join(dir, id+".bin")
+		if exit := h.run("requests", "export", id, "--what", "raw-response", "--out", target); exit != 0 {
+			t.Fatalf("%s: exit %d %s", id, exit, h.stderr.String())
+		}
+		if content, _ := os.ReadFile(target); !bytes.Equal(content, raw) {
+			t.Fatalf("%s: content %q", id, content)
+		}
+		if envelope := h.success(); strings.Contains(string(envelope["data"]), `"complete":true`) != (id == "match") {
+			t.Fatalf("%s: data %s", id, envelope["data"])
+		}
+	}
+}

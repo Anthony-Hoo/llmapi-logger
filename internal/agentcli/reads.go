@@ -196,12 +196,30 @@ func runExport(inv *invocation) (*result, error) {
 	// network one (contract section 0.1 item 190). writeAtomic removes the
 	// temporary file on either.
 	body := &bodyReader{reader: response.Body}
-	size, sum, err := writeAtomic(target, false, func(writer io.Writer) error {
+	// A raw body the server calls complete comes with the SHA-256 recorded
+	// when it was captured. The server checks that digest only after it has
+	// streamed every chunk, when it can no longer answer with an error, so
+	// the client compares the bytes it received before they replace --out
+	// (contract section 0.1 item 191).
+	mismatch := false
+	size, sum, err := writeAtomicChecked(target, false, func(writer io.Writer) error {
 		_, err := io.Copy(writer, body)
 		return err
+	}, func(_ int64, sum string) error {
+		if expected, verify := exportDigest(response.Header); verify && !strings.EqualFold(expected, sum) {
+			mismatch = true
+			return errors.New("digest mismatch")
+		}
+		return nil
 	})
 	if body.err != nil {
 		return nil, transportError(ctx, body.err)
+	}
+	if mismatch {
+		return nil, &cliError{Code: agentapi.CodeEvidenceUnavailable,
+			Message: "the downloaded raw body does not match the SHA-256 the server recorded for it; nothing was written to --out",
+			Hint:    "Tell the user that this record's raw body failed its integrity check. Do not retry; an existing --out file was left as it was.",
+			Details: map[string]any{"reason": "digest_mismatch", "field": "--out", "path": target}}
 	}
 	if err != nil {
 		return nil, localFileError("cannot write the --out file", map[string]any{"field": "--out", "path": target})
@@ -219,6 +237,25 @@ func runExport(inv *invocation) (*result, error) {
 	meta, _ := json.Marshal(agentapi.Meta{State: "exported", Complete: complete, IncompleteReason: reason})
 	ok := true
 	return &result{envelope: &serverEnvelope{OK: &ok, Data: data, Meta: meta}, server: c.server}, nil
+}
+
+// exportDigest is the SHA-256 an export must have, and whether there is one
+// to verify: only a body the server calls complete (X-Audit-Complete: true)
+// that comes with a well-formed X-Audit-SHA256. An incomplete capture has no
+// digest of exactly the stored bytes, and exports other than raw bodies carry
+// no digest.
+func exportDigest(header http.Header) (string, bool) {
+	expected := header.Get("X-Audit-SHA256")
+	if header.Get("X-Audit-Complete") != "true" || len(expected) != 64 {
+		return "", false
+	}
+	for index := 0; index < len(expected); index++ {
+		char := expected[index]
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
+			return "", false
+		}
+	}
+	return expected, true
 }
 
 // bodyReader records the error of reading a response body, so that a copy

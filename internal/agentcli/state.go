@@ -390,6 +390,13 @@ var tempFileWriter = func(file *os.File) io.Writer { return file }
 // target's, the name outPath proved can be created. It returns the size and
 // SHA-256 of what was written.
 func writeAtomic(target string, private bool, write func(io.Writer) error) (int64, string, error) {
+	return writeAtomicChecked(target, private, write, nil)
+}
+
+// writeAtomicChecked is writeAtomic with a check of what was written, run
+// before the temporary file replaces target: when check returns an error the
+// temporary file is removed and target is left as it was.
+func writeAtomicChecked(target string, private bool, write func(io.Writer) error, check func(size int64, sum string) error) (int64, string, error) {
 	dir := filepath.Dir(target)
 	var file *os.File
 	var tempPath string
@@ -414,6 +421,12 @@ func writeAtomic(target string, private bool, write func(io.Writer) error) (int6
 	if err := write(io.MultiWriter(tempFileWriter(file), hash, counter)); err != nil {
 		return 0, "", err
 	}
+	sum := hex.EncodeToString(hash.Sum(nil))
+	if check != nil {
+		if err := check(counter.count, sum); err != nil {
+			return 0, "", err
+		}
+	}
 	if err := file.Sync(); err != nil {
 		return 0, "", err
 	}
@@ -426,7 +439,7 @@ func writeAtomic(target string, private bool, write func(io.Writer) error) (int6
 		return 0, "", err
 	}
 	committed = true
-	return counter.count, hex.EncodeToString(hash.Sum(nil)), nil
+	return counter.count, sum, nil
 }
 
 // createPrivateTemp creates a private temporary file with a short fixed

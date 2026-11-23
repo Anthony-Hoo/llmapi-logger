@@ -468,11 +468,21 @@ func TestDownloadRespellingsShareOneBudget(t *testing.T) {
 	if served != agentdist.DownloadsPerLink {
 		t.Fatalf("one link in %d spellings served %d downloads, want %d", len(same), served, agentdist.DownloadsPerLink)
 	}
-	rows := 0
-	for _, entry := range env.store.Audit() {
-		if entry.Event == agentaccess.EventPackageDownloaded {
-			rows++
+	// The handler writes the package_downloaded row after it has served the
+	// file, and get returns as soon as the response has arrived: wait for the
+	// rows of the downloads just served instead of counting at once.
+	downloadRows := func() int {
+		rows := 0
+		for _, entry := range env.store.Audit() {
+			if entry.Event == agentaccess.EventPackageDownloaded {
+				rows++
+			}
 		}
+		return rows
+	}
+	rows := downloadRows()
+	for deadline := time.Now().Add(5 * time.Second); rows < agentdist.DownloadsPerLink && time.Now().Before(deadline); rows = downloadRows() {
+		time.Sleep(5 * time.Millisecond)
 	}
 	if rows != agentdist.DownloadsPerLink {
 		t.Fatalf("package_downloaded rows = %d", rows)
