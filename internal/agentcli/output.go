@@ -3,6 +3,7 @@ package agentcli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -47,6 +48,13 @@ func renderPrettySuccess(envelope outEnvelope, columns []string) string {
 	var data any
 	if err := decodeNumbers(envelope.Data, &data); err == nil {
 		renderValue(&builder, "", data, 0, columns)
+		if builder.Len() >= maxPrettyBytes {
+			// A table cut off by the limit may end in the middle of a line.
+			if text := builder.String(); !strings.HasSuffix(text, "\n") {
+				builder.WriteString("\n")
+			}
+			builder.WriteString(prettyTruncatedNote + "\n")
+		}
 	}
 	if len(envelope.Meta) > 0 {
 		var meta map[string]any
@@ -101,7 +109,31 @@ func decodeNumbers(raw []byte, target any) error {
 // on one line as compact JSON instead (contract section 0.1 item 178).
 const maxPrettyDepth = 32
 
+// maxPrettyBytes bounds what --pretty renders of a result's data. A table
+// pads every row to the width of its columns, so even with headers and cells
+// shortened a row of a few bytes can render to several hundred; a response of
+// many such rows would render to far more than its own size. Rendering stops
+// once the output has reached this size, with prettyTruncatedNote; the JSON
+// output is the interface and is never cut (contract section 0.1 item 193).
+const maxPrettyBytes = 8 << 20
+
+const prettyTruncatedNote = "… output truncated at 8 MiB: run the command without --pretty for the full result"
+
+// prettyLimit is where a table is flushed: it takes no more bytes once the
+// output has reached maxPrettyBytes, which ends the flush.
+type prettyLimit struct{ builder *strings.Builder }
+
+func (limit prettyLimit) Write(data []byte) (int, error) {
+	if limit.builder.Len() >= maxPrettyBytes {
+		return 0, errors.New("pretty output limit reached")
+	}
+	return limit.builder.Write(data)
+}
+
 func renderValue(builder *strings.Builder, label string, value any, depth int, preferred []string) {
+	if builder.Len() >= maxPrettyBytes {
+		return
+	}
 	indent := strings.Repeat("  ", depth)
 	// label is an object key from the response: printed only, never looked up.
 	label = terminalText(label)
@@ -128,12 +160,15 @@ func renderValue(builder *strings.Builder, label string, value any, depth int, p
 			if label != "" {
 				builder.WriteString(indent + label + ":\n")
 			}
-			writer := tabwriter.NewWriter(builder, 0, 2, 2, ' ', 0)
+			writer := tabwriter.NewWriter(prettyLimit{builder}, 0, 2, 2, ' ', 0)
 			// The column names are response keys too; rows are still looked
-			// up by the keys as sent.
+			// up by the keys as sent. A header is shortened like a cell:
+			// the table pads every row to its widest column, so one very
+			// long key would otherwise multiply into every row (contract
+			// section 0.1 item 193).
 			headers := make([]string, len(columns))
 			for index, column := range columns {
-				headers[index] = terminalText(column)
+				headers[index] = shorten(terminalText(column), 60)
 			}
 			fmt.Fprintln(writer, indent+"  "+strings.Join(headers, "\t"))
 			for _, row := range rows {

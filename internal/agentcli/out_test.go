@@ -355,6 +355,57 @@ func TestPrettyDepthIsBounded(t *testing.T) {
 	}
 }
 
+// TestPrettyTableHeaderIsBounded (contract section 0.1 item 193): a table
+// pads every row to its widest column, so a header is shortened like a cell.
+// One very long key in a list of objects must not multiply into every row.
+func TestPrettyTableHeaderIsBounded(t *testing.T) {
+	// The long key sorts first: a table pads every column but the last.
+	long := strings.Repeat("a", 10000)
+	rows := []string{`{"` + long + `":1}`}
+	for index := 0; index < 1000; index++ {
+		rows = append(rows, `{"z":1}`)
+	}
+	data := `{"items":[` + strings.Join(rows, ",") + `]}`
+	out := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(data)}, nil)
+	if len(out) > 8*len(data)+4096 {
+		t.Fatalf("%d bytes of data rendered to %d bytes", len(data), len(out))
+	}
+	if !strings.Contains(out, strings.Repeat("a", 59)+"…") || strings.Contains(out, strings.Repeat("a", 61)) {
+		t.Fatalf("the long header is not shortened to 60 characters: %.200q", out)
+	}
+	// A header of ordinary length is printed whole.
+	short := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(`{"items":[{"audit_id":"a1","state":"ok"}]}`)}, nil)
+	if !strings.Contains(short, "audit_id") || !strings.Contains(short, "state") || strings.Contains(short, prettyTruncatedNote) {
+		t.Fatalf("short headers %q", short)
+	}
+}
+
+// TestPrettyOutputIsBounded (contract section 0.1 item 193): even with
+// headers and cells shortened, a table pads a row of a few bytes to the width
+// of eight columns. Rendering stops at maxPrettyBytes with a note; the meta
+// line still follows.
+func TestPrettyOutputIsBounded(t *testing.T) {
+	wide := make([]string, 0, maxTableColumns)
+	for index := 0; index < maxTableColumns; index++ {
+		wide = append(wide, `"`+strings.Repeat(string(rune('a'+index)), 60)+`":"`+strings.Repeat("x", 60)+`"`)
+	}
+	rows := []string{"{" + strings.Join(wide, ",") + "}"}
+	for index := 0; index < 200000; index++ {
+		rows = append(rows, `{}`)
+	}
+	data := `{"items":[` + strings.Join(rows, ",") + `],"zz":"after"}`
+	out := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(data), Meta: json.RawMessage(`{"state":"ok","complete":true,"incomplete_reason":""}`)}, nil)
+	if len(out) > maxPrettyBytes+64<<10 {
+		t.Fatalf("%d bytes of data rendered to %d bytes, more than the %d limit", len(data), len(out), maxPrettyBytes)
+	}
+	if !strings.HasSuffix(out, "\n"+prettyTruncatedNote+"\nmeta: state=ok complete=true\n") {
+		t.Fatalf("the output does not end with the note and the meta line: %.200q", out[len(out)-200:])
+	}
+	if strings.Contains(out, "zz: after") {
+		t.Fatal("values after the limit were still rendered")
+	}
+}
+
 // LOCAL_FILE_ERROR carries a hint wherever it is raised, through the shared
 // error table: an unusable --out, an unreadable --file, a missing home.
 func TestLocalFileErrorsCarryAHint(t *testing.T) {
