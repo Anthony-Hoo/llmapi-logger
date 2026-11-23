@@ -63,6 +63,15 @@ const (
 	tokenDisplayPrefixLength = 8
 )
 
+// exchangeInFlightCap bounds the code exchanges of one address in flight at
+// once, next to the exchange failure limit above (contract section 0.1 item
+// 186). One `llmaudit login` makes a single exchange, so a handful is plenty;
+// it is not 1 because the clients behind one proxy or NAT address share the
+// key. It is far below lookupInFlightCap, which serves every command an agent
+// runs. A failing burst from one address writes at most exchangeFailureLimit +
+// exchangeInFlightCap failure rows in one window.
+const exchangeInFlightCap = 4
+
 // Audit events (contract section 3.4).
 const (
 	EventAuthorizeApproved   = "authorize_approved"

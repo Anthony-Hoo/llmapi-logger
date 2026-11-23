@@ -326,12 +326,26 @@ func (service *Service) Deny(ctx context.Context, grantor Grantor, request Autho
 // POST /api/agent/v1/token). A code is consumed by its first redemption even
 // when a later step fails; redeeming it again revokes the token it issued.
 // source is the client address for the exchange-failure limiter.
+//
+// The limiter admits an attempt in the same step as it checks the failure
+// count, and the attempt ends (counted as a failure exactly when refuse ran)
+// only after its audit row and any replay revocation are written. An attempt
+// beyond exchangeInFlightCap in flight from one address is refused with
+// RATE_LIMITED and the limiter's short wait, before anything is written. So a
+// burst of failing exchanges cannot all pass the check before the first of
+// them is counted: at most exchangeFailureLimit + exchangeInFlightCap of them
+// fail, and write a failure row, in one window (contract section 0.1 item
+// 186).
 func (service *Service) Exchange(ctx context.Context, code, verifier, source string, meta RequestMeta) (Issued, error) {
-	if allowed, retryAfter := service.exchanges.allow(source); !allowed {
+	if allowed, retryAfter := service.exchanges.admit(source, exchangeInFlightCap); !allowed {
 		return Issued{}, &Error{Code: agentapi.CodeRateLimited, RetryAfter: retryAfter}
 	}
+	// One deferred finish ends the admitted attempt on every path, a panic
+	// included: an in-flight place never expires on its own.
+	failed := false
+	defer func() { service.exchanges.finish(source, failed) }()
 	refuse := func(role agentapi.Role) (Issued, error) {
-		service.exchanges.record(source)
+		failed = true
 		service.RecordAudit(ctx, storage.AgentAuditEntry{
 			Event: EventTokenExchangeFailed, Role: string(role), Command: cleanCommand(meta.Command),
 			CLIVersion: cleanVersion(meta.CLIVersion), Outcome: storage.AgentOutcomeFailed,

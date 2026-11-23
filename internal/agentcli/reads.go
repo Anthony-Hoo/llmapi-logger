@@ -191,13 +191,17 @@ func runExport(inv *invocation) (*result, error) {
 		}
 		return nil, err
 	}
-	var copyErr error
+	// A failure to read the body is the network's; a failure to write the
+	// file (disk full, quota, file-size limit) is a local file error, not a
+	// network one (contract section 0.1 item 190). writeAtomic removes the
+	// temporary file on either.
+	body := &bodyReader{reader: response.Body}
 	size, sum, err := writeAtomic(target, false, func(writer io.Writer) error {
-		_, copyErr = io.Copy(writer, response.Body)
-		return copyErr
+		_, err := io.Copy(writer, body)
+		return err
 	})
-	if copyErr != nil {
-		return nil, transportError(ctx, copyErr)
+	if body.err != nil {
+		return nil, transportError(ctx, body.err)
 	}
 	if err != nil {
 		return nil, localFileError("cannot write the --out file", map[string]any{"field": "--out", "path": target})
@@ -215,6 +219,21 @@ func runExport(inv *invocation) (*result, error) {
 	meta, _ := json.Marshal(agentapi.Meta{State: "exported", Complete: complete, IncompleteReason: reason})
 	ok := true
 	return &result{envelope: &serverEnvelope{OK: &ok, Data: data, Meta: meta}, server: c.server}, nil
+}
+
+// bodyReader records the error of reading a response body, so that a copy
+// that fails can tell a broken body from a failed write.
+type bodyReader struct {
+	reader io.Reader
+	err    error
+}
+
+func (body *bodyReader) Read(buffer []byte) (int, error) {
+	count, err := body.reader.Read(buffer)
+	if err != nil && !errors.Is(err, io.EOF) {
+		body.err = err
+	}
+	return count, err
 }
 
 // exportCompleteness reads the completeness headers of an export. Only an

@@ -133,8 +133,16 @@ const agentAdministratorOnlyHint = "Leave this argument out and run the command 
 // agentParams checks the query string of one facade call: every key must be
 // in allowed and appear once. Unknown keys are refused rather than ignored,
 // so a misspelt filter never silently widens a result.
+//
+// The raw query is parsed here and its error refused first: URL.Query drops
+// every pair that does not decode, so ?from=%zz would read the unfiltered
+// list and the dropped key would escape the checks below (contract section
+// 0.1 item 188).
 func agentParams(request *http.Request, allowed ...string) (url.Values, error) {
-	values := request.URL.Query()
+	values, err := parseAgentQuery(request)
+	if err != nil {
+		return nil, err
+	}
 	permitted := make(map[string]bool, len(allowed))
 	for _, key := range allowed {
 		permitted[key] = true
@@ -160,6 +168,21 @@ func agentParams(request *http.Request, allowed ...string) (url.Values, error) {
 	}
 	return values, nil
 }
+
+// parseAgentQuery parses the raw query string, refusing one that does not
+// decode: a bad percent escape, or a semicolon, which Go no longer accepts as
+// a separator.
+func parseAgentQuery(request *http.Request) (url.Values, error) {
+	values, err := url.ParseQuery(request.URL.RawQuery)
+	if err != nil {
+		return nil, errQueryEncoding
+	}
+	return values, nil
+}
+
+// errQueryEncoding refuses a query string that does not decode.
+var errQueryEncoding = argInvalid("query", reasonInvalidFormat,
+	"the query string is not validly percent-encoded: write a literal % as %25 and a literal ; as %3B, and separate parameters with &")
 
 // agentRange is a resolved time range in Unix nanoseconds. To is exclusive;
 // either end is nil when the caller gave neither it nor something implying it.
@@ -296,11 +319,13 @@ func parseSince(value string) (time.Duration, error) {
 	default:
 		return 0, errors.New("invalid since")
 	}
-	duration := time.Duration(count) * unit
-	if duration > maxSinceDays*24*time.Hour {
+	// Compare the count before multiplying: seven digits of hours, days or
+	// weeks overflow time.Duration, and the wrapped value (30501w is about
+	// 72h) would pass a check made after it (contract section 0.1 item 187).
+	if int64(count) > int64(maxSinceDays*24*time.Hour/unit) {
 		return 0, errors.New("invalid since")
 	}
-	return duration, nil
+	return time.Duration(count) * unit, nil
 }
 
 func asciiDigits(value string) bool {

@@ -22,6 +22,23 @@ func maskTokens(text string) string {
 	return tokenPattern.ReplaceAllString(text, agentapi.TokenPrefix+"***")
 }
 
+// terminalText is text that --pretty shows on a terminal. Every control
+// character becomes a space: C0 (below 0x20, newline and carriage return
+// included), DEL and the C1 range U+0080–U+009F (U+009B is a CSI on some
+// terminals). So no server-provided text, and no text from audited traffic
+// that reaches a response, can carry an escape sequence to the terminal or
+// start an output line of its own; other Unicode text is kept as it is
+// (contract section 0.1 item 189). Every server-provided string --pretty
+// prints goes through it.
+func terminalText(text string) string {
+	return strings.Map(func(char rune) rune {
+		if char < 0x20 || (char >= 0x7f && char <= 0x9f) {
+			return ' '
+		}
+		return char
+	}, text)
+}
+
 // renderPrettySuccess renders a success for people. columns is the
 // command's preferred column order for tables (see tableOf).
 func renderPrettySuccess(envelope outEnvelope, columns []string) string {
@@ -34,32 +51,32 @@ func renderPrettySuccess(envelope outEnvelope, columns []string) string {
 	if len(envelope.Meta) > 0 {
 		var meta map[string]any
 		if decodeNumbers(envelope.Meta, &meta) == nil {
-			fmt.Fprintf(&builder, "meta: state=%v complete=%v", meta["state"], meta["complete"])
+			builder.WriteString(terminalText(fmt.Sprintf("meta: state=%v complete=%v", meta["state"], meta["complete"])))
 			if reason, _ := meta["incomplete_reason"].(string); reason != "" {
-				fmt.Fprintf(&builder, " incomplete_reason=%s", reason)
+				builder.WriteString(" incomplete_reason=" + terminalText(reason))
 			}
 			builder.WriteString("\n")
 		}
 	}
 	if envelope.WebURL != "" {
-		builder.WriteString("web: " + envelope.WebURL + "\n")
+		builder.WriteString("web: " + terminalText(envelope.WebURL) + "\n")
 	} else if envelope.WebPath != "" {
-		builder.WriteString("web: " + envelope.WebPath + "\n")
+		builder.WriteString("web: " + terminalText(envelope.WebPath) + "\n")
 	}
 	for _, action := range envelope.NextActions {
-		builder.WriteString("next: " + action + "\n")
+		builder.WriteString("next: " + terminalText(action) + "\n")
 	}
 	if envelope.Notice != "" {
-		builder.WriteString("notice: " + envelope.Notice + "\n")
+		builder.WriteString("notice: " + terminalText(envelope.Notice) + "\n")
 	}
 	return builder.String()
 }
 
 func renderPrettyFailure(body agentapi.ErrorBody) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "error %s: %s\n", body.Code, body.Message)
+	fmt.Fprintf(&builder, "error %s: %s\n", terminalText(string(body.Code)), terminalText(body.Message))
 	if body.Hint != "" {
-		builder.WriteString("hint: " + body.Hint + "\n")
+		builder.WriteString("hint: " + terminalText(body.Hint) + "\n")
 	}
 	keys := make([]string, 0, len(body.Details))
 	for key := range body.Details {
@@ -67,7 +84,7 @@ func renderPrettyFailure(body agentapi.ErrorBody) string {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		fmt.Fprintf(&builder, "%s: %s\n", key, scalarText(body.Details[key]))
+		fmt.Fprintf(&builder, "%s: %s\n", terminalText(key), scalarText(body.Details[key]))
 	}
 	return builder.String()
 }
@@ -86,6 +103,8 @@ const maxPrettyDepth = 32
 
 func renderValue(builder *strings.Builder, label string, value any, depth int, preferred []string) {
 	indent := strings.Repeat("  ", depth)
+	// label is an object key from the response: printed only, never looked up.
+	label = terminalText(label)
 	switch typed := value.(type) {
 	case map[string]any:
 		if label != "" && depth >= maxPrettyDepth {
@@ -110,7 +129,13 @@ func renderValue(builder *strings.Builder, label string, value any, depth int, p
 				builder.WriteString(indent + label + ":\n")
 			}
 			writer := tabwriter.NewWriter(builder, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(writer, indent+"  "+strings.Join(columns, "\t"))
+			// The column names are response keys too; rows are still looked
+			// up by the keys as sent.
+			headers := make([]string, len(columns))
+			for index, column := range columns {
+				headers[index] = terminalText(column)
+			}
+			fmt.Fprintln(writer, indent+"  "+strings.Join(headers, "\t"))
 			for _, row := range rows {
 				cells := make([]string, len(columns))
 				for index, column := range columns {
@@ -189,17 +214,14 @@ func scalarText(value any) string {
 	case nil:
 		return "-"
 	case string:
-		return strings.Map(func(char rune) rune {
-			if char < 0x20 || char == 0x7f {
-				return ' '
-			}
-			return char
-		}, typed)
+		return terminalText(typed)
 	case map[string]any, []any:
+		// json.Marshal escapes only characters below 0x20; DEL and the C1
+		// range come out raw.
 		encoded, _ := json.Marshal(typed)
-		return string(encoded)
+		return terminalText(string(encoded))
 	default:
-		return fmt.Sprint(typed)
+		return terminalText(fmt.Sprint(typed))
 	}
 }
 

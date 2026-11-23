@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -530,5 +532,177 @@ func TestOutAlternateDataStreamIsRefused(t *testing.T) {
 		if existing && string(data) != "precious" || !existing && err == nil {
 			t.Fatalf("existing %v: the base file is %q, %v", existing, data, err)
 		}
+	}
+}
+
+// hostileText is name followed by an OSC 52 clipboard sequence (ESC … BEL),
+// CR, LF, DEL and U+009B (a CSI on some terminals); cleanText is how --pretty
+// must show it: every control a space, the rest as it is.
+func hostileText(name string) string { return name + "\x1b]52;c;ZmFrZQ==\x07\r\n\x7f\u009bend" }
+func cleanText(name string) string   { return name + " ]52;c;ZmFrZQ==     end" }
+
+// assertTerminalSafe checks that out has exactly lines lines and no control
+// character (C0, DEL, C1) other than the newlines that end them. It checks
+// runes, not bytes: 0x9b is also a UTF-8 continuation byte.
+func assertTerminalSafe(t *testing.T, out string, lines int) {
+	t.Helper()
+	if got := strings.Count(out, "\n"); got != lines || !strings.HasSuffix(out, "\n") {
+		t.Fatalf("%d lines, want %d: %q", got, lines, out)
+	}
+	for _, char := range out {
+		if char != '\n' && (char < 0x20 || (char >= 0x7f && char <= 0x9f)) {
+			t.Fatalf("control character %U in %q", char, out)
+		}
+	}
+}
+
+// TestPrettyNeutralisesControlCharacters (contract section 0.1 item 189):
+// no server-provided text --pretty prints, in a failure or a success, can
+// carry a control character to the terminal or forge an output line.
+func TestPrettyNeutralisesControlCharacters(t *testing.T) {
+	server := newFakeServer(t, nil)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+
+	failure, _ := json.Marshal(map[string]any{"ok": false, "error": map[string]any{
+		"code": hostileText("CODE"), "message": hostileText("message"), "hint": hostileText("hint"),
+		"details": map[string]any{hostileText("key"): hostileText("value"), "nested": []any{hostileText("item"), map[string]any{"k": "\x7f\u009b"}}},
+	}})
+	server.setResponder(respondJSON(http.StatusNotFound, string(failure)))
+	h.run("--pretty", "usage", "trend", "ses_1")
+	out := h.stderr.String()
+	assertTerminalSafe(t, out, 4)
+	// The nested value is compact JSON: its C0 controls are JSON escapes,
+	// its DEL and C1 spaces (checked by assertTerminalSafe).
+	for _, name := range []string{"CODE", "message", "hint", "key", "value"} {
+		if !strings.Contains(out, cleanText(name)) {
+			t.Errorf("failure: %s is not shown as %q: %q", name, cleanText(name), out)
+		}
+	}
+
+	success, _ := json.Marshal(map[string]any{
+		"ok": true,
+		"data": map[string]any{
+			hostileText("label"): hostileText("scalar"),
+			"list":               []any{hostileText("element"), map[string]any{"k": "\x7f\u009b"}},
+			"rows":               []any{map[string]any{hostileText("header"): hostileText("cell")}},
+		},
+		"meta":         map[string]any{"state": hostileText("state"), "complete": false, "incomplete_reason": hostileText("reason")},
+		"next_actions": []string{hostileText("next")},
+		"web_path":     "/ui/" + hostileText("web"),
+		"notice":       hostileText("notice"),
+	})
+	server.setResponder(respondJSON(http.StatusOK, string(success)))
+	if exit := h.run("--pretty", "usage", "trend", "ses_1"); exit != 0 {
+		t.Fatalf("exit %d %s", exit, h.stderr.String())
+	}
+	out = h.stdout.String()
+	// ok, label, list, rows, table header, table row, meta, web, next, notice.
+	assertTerminalSafe(t, out, 10)
+	for _, name := range []string{"label", "scalar", "element", "header", "cell", "state", "reason", "web", "next", "notice"} {
+		if !strings.Contains(out, cleanText(name)) {
+			t.Errorf("success: %s is not shown as %q: %q", name, cleanText(name), out)
+		}
+	}
+}
+
+// TestPrettyKeepsOrdinaryText: text without control characters, Chinese,
+// accented and emoji text included, renders exactly as before.
+func TestPrettyKeepsOrdinaryText(t *testing.T) {
+	failure := renderPrettyFailure(agentapi.ErrorBody{Code: agentapi.CodeNotFound, Message: "未找到会话 café 🙂", Hint: "检查 ID «ses_1»",
+		Details: map[string]any{"路径": "/ui/审计", "list": []any{"é", map[string]any{"k": "ü 😀"}}}})
+	if want := "error NOT_FOUND: 未找到会话 café 🙂\nhint: 检查 ID «ses_1»\nlist: [\"é\",{\"k\":\"ü 😀\"}]\n路径: /ui/审计\n"; failure != want {
+		t.Fatalf("failure %q, want %q", failure, want)
+	}
+	success := renderPrettySuccess(outEnvelope{OK: true, Data: json.RawMessage(`{"名称":"naïve 🙂","rows":[{"列":"值"}]}`),
+		Meta: json.RawMessage(`{"state":"succeeded","complete":false,"incomplete_reason":"truncated"}`), NextActions: []string{"下一步 →"},
+		WebPath: "/ui/会话", Notice: "注意 ✓"}, nil)
+	if want := "ok\nrows:\n  列\n  值\n名称: naïve 🙂\nmeta: state=succeeded complete=false incomplete_reason=truncated\nweb: /ui/会话\nnext: 下一步 →\nnotice: 注意 ✓\n"; success != want {
+		t.Fatalf("success %q, want %q", success, want)
+	}
+}
+
+// fullDiskWriter accepts limit bytes and then fails, like a full disk.
+type fullDiskWriter struct {
+	writer io.Writer
+	limit  int
+}
+
+func (failing *fullDiskWriter) Write(data []byte) (int, error) {
+	if len(data) > failing.limit {
+		written, _ := failing.writer.Write(data[:failing.limit])
+		failing.limit = 0
+		return written, errors.New("no space left on device")
+	}
+	failing.limit -= len(data)
+	return failing.writer.Write(data)
+}
+
+// exportServer answers every export with size bytes; broken cuts the body
+// off after a part of it.
+func exportServer(t *testing.T, size int, broken bool) *fakeServer {
+	return newFakeServer(t, func(writer http.ResponseWriter, _ *http.Request, _ []byte) {
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		writer.Header().Set("Content-Length", strconv.Itoa(size))
+		writer.Header().Set("X-Audit-Complete", "true")
+		writer.WriteHeader(http.StatusOK)
+		if !broken {
+			_, _ = writer.Write(bytes.Repeat([]byte("x"), size))
+			return
+		}
+		_, _ = writer.Write(bytes.Repeat([]byte("x"), size/4))
+		writer.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	})
+}
+
+// assertExportLeftNothing checks that a failed export left no temporary
+// file, did not create a missing --out and did not change an existing one.
+func assertExportLeftNothing(t *testing.T, dir, missing, existing string) {
+	t.Helper()
+	assertNoTempFiles(t, dir)
+	if _, err := os.Lstat(missing); err == nil {
+		t.Fatal("a failed export created the --out file")
+	}
+	if data, _ := os.ReadFile(existing); string(data) != "precious" {
+		t.Fatalf("a failed export changed the existing --out file to %.40q", data)
+	}
+}
+
+// TestExportWriteFailureIsLocalFileError (contract section 0.1 item 190): a
+// write to the --out file that fails part way through the copy is
+// LOCAL_FILE_ERROR naming --out, not a network failure, and leaves nothing
+// behind.
+func TestExportWriteFailureIsLocalFileError(t *testing.T) {
+	server := exportServer(t, 256<<10, false)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	original := tempFileWriter
+	tempFileWriter = func(file *os.File) io.Writer { return &fullDiskWriter{writer: file, limit: 1000} }
+	t.Cleanup(func() { tempFileWriter = original })
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "export.json")
+	existing := writeFile(t, filepath.Join(dir, "existing.json"), "precious")
+	for _, target := range []string{missing, existing} {
+		body := h.expectFailure(h.run("requests", "export", "77", "--what", "conversation", "--out", target), agentapi.CodeLocalFileError, agentapi.ExitError)
+		if body.Details["field"] != "--out" || body.Details["path"] != target {
+			t.Fatalf("details %v", body.Details)
+		}
+		assertExportLeftNothing(t, dir, missing, existing)
+	}
+}
+
+// TestExportBrokenBodyIsNetworkError: a response body that breaks off
+// mid-stream is still NETWORK_ERROR, and leaves nothing behind.
+func TestExportBrokenBodyIsNetworkError(t *testing.T) {
+	server := exportServer(t, 256<<10, true)
+	h := newHarness(t)
+	h.saveLogin(server.URL)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "export.json")
+	existing := writeFile(t, filepath.Join(dir, "existing.json"), "precious")
+	for _, target := range []string{missing, existing} {
+		h.expectFailure(h.run("requests", "export", "77", "--what", "conversation", "--out", target), agentapi.CodeNetworkError, agentapi.ExitError)
+		assertExportLeftNothing(t, dir, missing, existing)
 	}
 }

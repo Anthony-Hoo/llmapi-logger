@@ -26,6 +26,9 @@ type Store interface {
 	ListAudits(context.Context, storage.AuditQueryFilter, storage.AuditQueryCursor, int) (storage.AuditListPage, error)
 	QueryRequestHeaderEvidence(context.Context, string) ([]storage.HeaderEvidence, error)
 	QueryAuditDetail(context.Context, string, *storage.AuditScope) (storage.AuditQueryDetail, error)
+	// QueryAuditMetadata reads only the Audit, Stages and Bodies of the
+	// detail projection, none of the derived records.
+	QueryAuditMetadata(context.Context, string, *storage.AuditScope) (storage.AuditQueryDetail, error)
 	QueryAuditScope(context.Context, string) (storage.AuditScopeRow, error)
 	RawBodyMeta(context.Context, string, string) (storage.RawBodyMetadata, error)
 	StreamBodyChunks(context.Context, string, string, func(storage.BodyChunk) error) error
@@ -263,7 +266,10 @@ func (service *Service) Authorize(ctx context.Context, auditID string, scope *Sc
 // left empty. A raw body or a stream timeline is served from its own chunks
 // and events, so their exports read only this and stay available when a
 // derived record (the parsed JSON, the turn graph) fails verification and Get
-// answers ErrIntegrity (contract section 0.1 item 183).
+// answers ErrIntegrity (contract section 0.1 item 183). The store reads only
+// those rows (QueryAuditMetadata), not the derived records it would then
+// drop: reading the turn graph alone verifies its sequence hashes and fails
+// for a damaged one (item 185).
 func (service *Service) GetMetadata(ctx context.Context, auditID string, scope *Scope) (Detail, error) {
 	if ctx == nil {
 		return Detail{}, invalid("nil context")
@@ -271,7 +277,7 @@ func (service *Service) GetMetadata(ctx context.Context, auditID string, scope *
 	if err := validateAuditID(auditID); err != nil {
 		return Detail{}, err
 	}
-	storageDetail, err := service.store.QueryAuditDetail(ctx, auditID, storageScope(scope))
+	storageDetail, err := service.store.QueryAuditMetadata(ctx, auditID, storageScope(scope))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Detail{}, ErrNotFound
 	}

@@ -906,6 +906,11 @@ func (store *fakeStore) QueryAuditDetail(context.Context, string, *sqlite.AuditS
 	return store.detail, store.detailErr
 }
 
+// QueryAuditMetadata returns only the part of detail the stores read for it.
+func (store *fakeStore) QueryAuditMetadata(context.Context, string, *sqlite.AuditScope) (sqlite.AuditQueryDetail, error) {
+	return sqlite.AuditQueryDetail{Audit: store.detail.Audit, Stages: store.detail.Stages, Bodies: store.detail.Bodies}, store.detailErr
+}
+
 func (store *fakeStore) QueryAuditScope(_ context.Context, auditID string) (sqlite.AuditScopeRow, error) {
 	if store.scopeErr != nil {
 		return sqlite.AuditScopeRow{}, store.scopeErr

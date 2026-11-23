@@ -379,6 +379,11 @@ func ensurePrivateDir(dir string) error {
 	return nil
 }
 
+// tempFileWriter is what writeAtomic writes the temporary file through. It
+// is the file itself; tests replace it to make a write fail part way, as a
+// full disk would.
+var tempFileWriter = func(file *os.File) io.Writer { return file }
+
 // writeAtomic writes target through a temporary file in the same directory
 // and renames it over target. private makes the file readable by the current
 // user only; any other temporary file has a random name as long as the
@@ -406,7 +411,7 @@ func writeAtomic(target string, private bool, write func(io.Writer) error) (int6
 	}()
 	hash := sha256.New()
 	counter := &countingWriter{}
-	if err := write(io.MultiWriter(file, hash, counter)); err != nil {
+	if err := write(io.MultiWriter(tempFileWriter(file), hash, counter)); err != nil {
 		return 0, "", err
 	}
 	if err := file.Sync(); err != nil {

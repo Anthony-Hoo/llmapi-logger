@@ -277,7 +277,14 @@ type agentChangeItem struct {
 // serveAgentChanges lists the newest write_applied, write_failed and
 // write_denied rows; ?limit= is 1-200, default 50.
 func (handler *managementHandler) serveAgentChanges(writer http.ResponseWriter, request *http.Request) {
-	values := request.URL.Query()
+	// URL.Query would drop a pair that does not decode, and ?limit=%zz would
+	// then list the default page; refuse it like the facade does (contract
+	// section 0.1 item 188).
+	values, err := parseAgentQuery(request)
+	if err != nil {
+		writeAgentFieldError(writer, "query")
+		return
+	}
 	for key, entries := range values {
 		if key != "limit" || len(entries) != 1 {
 			writeAgentFieldError(writer, key)
