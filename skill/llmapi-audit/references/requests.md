@@ -61,7 +61,7 @@ llmaudit requests export <audit-id> --what timeline-response --out timeline.json
 |---|---|
 | `conversation` | The reconstructed conversation (messages, tool calls, results). |
 | `headers` | Headers of every stage as `{audit_id, headers}`, each with `name_untrusted`; credentials omitted as above. |
-| `request`, `response` | The reconstructed provider JSON. Only OpenAI-protocol records whose bodies were complete are reconstructed; for Anthropic and Gemini records these two are `not_available` (`not_reconstructed`): use `conversation` or the raw body. |
+| `request`, `response` | The reconstructed provider JSON. Only OpenAI- and Anthropic-protocol records whose bodies were complete are reconstructed; for Gemini records, and for Anthropic records written before Anthropic turns were stored, these two are `not_available` (`not_reconstructed`): use `conversation` or the raw body. A reconstructed streamed response is the event summary and the aggregated message, not the SSE text. |
 | `raw-request`, `raw-response` | The raw bytes as received. `NOT_RETAINED` means the raw body was released after it was verified against the reconstruction: export `request`/`response` instead. That is not data loss. |
 | `timeline-request`, `timeline-response` | The streaming timeline (when each event arrived). Only a streamed body has one: a request is normally not streamed, so `timeline-request` is usually `not_available` (`not_streamed`), and so is the response of a non-streaming request. |
 

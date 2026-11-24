@@ -76,8 +76,8 @@ func (worker *Worker) analyzeProject(ctx context.Context, audit storage.ParserAu
 // identity, newest first so the current and previous report weeks fill in
 // before older history. Headers are read first; the request body only when
 // the headers carry no strong signal, from raw chunks while they are retained
-// or from the verified turn graph for OpenAI audits. Released Anthropic and
-// Gemini bodies are skipped and keep a header-only identity.
+// or from the verified turn graph once they are released. Released bodies of
+// a protocol without a normalizer are skipped and keep a header-only identity.
 func (worker *Worker) projectBackfill(ctx context.Context) int {
 	analyzer := worker.currentProjectAnalyzer()
 	store, listable := worker.store.(ProjectBackfillStore)
@@ -168,7 +168,7 @@ func (worker *Worker) projectRequestBody(ctx context.Context, audit storage.Pars
 		return source.Data, true
 	}
 	reconstructor := worker.bodyReconstructor()
-	if reconstructor == nil || audit.Protocol != "openai" {
+	if reconstructor == nil || !worker.reconstructable(audit) {
 		return nil, false
 	}
 	reconstruction, err := reconstructor.ReconstructBodies(ctx, audit.AuditID)

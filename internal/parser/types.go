@@ -105,6 +105,10 @@ type Result struct {
 	HasToolCall        *bool
 	Conversation       *conversation.Conversation
 	ParsedJSON         []byte
+	// StopReason is set only by the insights backfill, from the envelope of a
+	// released stream response. A live parse leaves it empty: the analyzer
+	// reads the stop reason from the response body.
+	StopReason string
 }
 
 // IsUsable reports whether at least one trusted public field was extracted.

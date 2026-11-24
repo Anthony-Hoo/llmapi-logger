@@ -765,9 +765,10 @@ func agentSideBody(bodies []query.Body, side string) *query.Body {
 // Content that does not exist is pending while the record is still being
 // forwarded, captured, parsed or verified, and unavailable for good once that
 // is over: a blocked record was never forwarded; a record whose parse was
-// skipped or failed has no conversation; only the OpenAI parser rebuilds a
-// request and response (and only from complete bodies), so other records
-// never have a reconstruction; a body without stream events has no timeline.
+// skipped or failed has no conversation; only a parser with a normalizer
+// (OpenAI, Anthropic) rebuilds a request and response (and only from complete
+// bodies), so other records never have a reconstruction; a body without
+// stream events has no timeline.
 func agentExportStates(detail query.Detail) map[string]agentExportState {
 	audit := detail.Audit
 	running := audit.ForwardStatus == storage.ForwardInProgress

@@ -114,7 +114,7 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 - 普通日志不记录 Query value、Header value、Body、conversation、Token、key、密文或底层错误文本。
 - 列表只定向解密入站 User-Agent；不读取其他 Header、Request-URI、Body 或 content objects。
 - 详情在鉴权后解密 Request-URI、Header/Trailer、窄 parsed result 和 verified turn 所需对象。
-- OpenAI verified conversation 从对象重建；没有 normalizer 或异常记录可以使用 `parsed_json_enc` 内的加密回退 conversation。
+- OpenAI 与 Anthropic verified conversation 从对象重建；没有 normalizer 或异常记录可以使用 `parsed_json_enc` 内的加密回退 conversation。
 - raw API 只对 `retention_state=full` 开放；metadata 返回 `410 raw_not_retained`。
 - reconstructed API 返回 verified provider JSON；timeline API 返回认证后的逻辑 SSE 时间点。
 - NewAPI 调用者只保存 request ID、用户 ID/用户名、Token ID/名称和状态，不保存完整或打码 API Key。

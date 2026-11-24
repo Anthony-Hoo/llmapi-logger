@@ -25,8 +25,9 @@ func addExportRecords(fixture *readFixture) {
 		record.row.ForwardStatus = record.detail.Audit.ForwardStatus
 		fixture.audits.records = append([]auditRecord{record}, fixture.audits.records...)
 	}
-	// An Anthropic record: parsed, with a conversation, but only the OpenAI
-	// parser rebuilds a request and a response.
+	// A record without a turn, as an Anthropic one written before Anthropic
+	// turns were stored: parsed, with a conversation, but no rebuilt request
+	// or response.
 	add("anthropic-no-turn", 20*time.Second, func(detail *query.Detail) {
 		detail.Audit.Protocol, detail.Audit.ParserName, detail.Turn = "anthropic", "anthropic.messages", nil
 	})

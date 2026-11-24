@@ -260,7 +260,7 @@ org_reports:
 - **优先级**：客户端自身的条目先于共享条目；请求体路径先于 Header（Codex 的 Header 只在请求体没有 `workspaces` 时作为回退）；文本模式最后执行，只补空缺字段，同一请求内后出现的匹配覆盖先出现的（环境更新）。只扫描前 8 条与后 8 条消息里的 system/developer/user 文本（含注入块），**从不扫描工具结果、工具调用和 assistant 文本**，避免工具输出里的路径被误认成 cwd。
 - **`source` 取值**比计划多了 `declared` 与 `root`：`declared` > `codex_turn_metadata`（remote）> `agent_header`（OpenCode 哈希）> `root` > `cwd` > `none`。另加 `body_scanned` 列，标记该行是否读过请求体（回填时 Header 已有强信号就不读请求体）。
 - **OpenCode 哈希**：解密后的身份里保存 Header 原值（40 位十六进制，`global` 等值丢弃）；规则编译时对字面量 `repo_url` 预先计算 `sha1("git-remote:" + host/org/repo)` 比对。OpenCode 自己对 origin 的规范化方式是否与本项目一致仍待真实请求核对（§11）。
-- **回填**：parser worker 每个扫描周期（30 秒）在 insights 回填之后执行，按 `started_at_ns` **倒序**、每次最多 50 条，让本周和上周先补齐。先只解密白名单 Header；Header 没有 remote、项目哈希或声明名时才读请求体：raw 仍在则直接读，OpenAI 的 metadata 记录走已验证的重建，Anthropic/Gemini 的 raw 已释放则只保存 Header 结果。
+- **回填**：parser worker 每个扫描周期（30 秒）在 insights 回填之后执行，按 `started_at_ns` **倒序**、每次最多 50 条，让本周和上周先补齐。先只解密白名单 Header；Header 没有 remote、项目哈希或声明名时才读请求体：raw 仍在则直接读，OpenAI 与 Anthropic 的 metadata 记录走已验证的重建，没有 normalizer 的协议 raw 已释放则只保存 Header 结果。
 - **迁移**：`002_org_reports.sql` 只在运行时 `migrate()` 中执行，离线导入器的基线仍是 001（见 04 §3.5）。副作用：已被新版代理打开过的空库会多出 org 表，不能再作为离线导入目标；导入应在首次启动前完成。
 ### 13.2 M2 项目组、项目与主体
 

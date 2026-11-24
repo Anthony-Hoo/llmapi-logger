@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"llmapi-logger/internal/storage"
 )
@@ -133,7 +134,10 @@ func (linker *Linker) Link(ctx context.Context, in LinkInput) (storage.AnalysisR
 	switch {
 	case nodeFPR != nil:
 		sessionID, sessionLink = agentSessionPrefix+hex.EncodeToString(nodeFPR)[:sessionIDHexDigits], SessionLinkAgent
-	case meta.ConversationID != nil && *meta.ConversationID != "":
+	// A turn conversation is the session only for OpenAI. The conversation of
+	// another protocol groups stored turns and may be inferred from repeated
+	// content across callers, so those audits keep the rules below.
+	case strings.EqualFold(in.Protocol, "openai") && meta.ConversationID != nil && *meta.ConversationID != "":
 		sessionID, sessionLink = *meta.ConversationID, SessionLinkConversation
 	case len(analysis.SessionKeyFPR) != 0:
 		key := append(append([]byte(nil), meta.APIKeyFPR...), analysis.SessionKeyFPR...)

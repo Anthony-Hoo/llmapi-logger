@@ -66,7 +66,7 @@ GET /api/v1/audits/{audit_id}/reconstructed/response
 
 只对 verified turn 可用。返回从 envelope、有序 item refs 和 binary objects 重建的 provider JSON，而不是从 UI conversation 反向生成。data URL 与 inline file data 使用原始二进制恢复；`file_id` 等外部引用保留。
 
-OpenAI JSON 请求/非流式响应要求 canonical 语义与原 Body 一致。SSE 响应返回可审计的聚合语义对象和 event descriptors，不宣称返回原始 SSE wire bytes；需要原字节时只有异常 full raw 才提供。
+OpenAI 与 Anthropic 的 JSON 请求/非流式响应要求 canonical 语义与原 Body 一致。SSE 响应返回可审计的聚合语义对象和 event descriptors，不宣称返回原始 SSE wire bytes；需要原字节时只有异常 full raw 才提供。
 
 UI 提供“下载重建请求 JSON”和“下载重建响应 JSON”，不会把页面渲染文本重新编码作为证据。
 

@@ -35,6 +35,7 @@ func PrepareWithLookup(turn Turn, cipher security.Cipher, lookup ObjectLookup) (
 		return PreparedTurn{}, ErrInvalidModel
 	}
 	accumulator := newBinaryAccumulator()
+	accumulator.skipInlineFileData = turn.SkipInlineFileData
 	encoder := &contentEncoder{}
 	defer encoder.release()
 	objects := make(map[string]plainContentCandidate)
