@@ -11,7 +11,7 @@ import (
 
 const (
 	Messages = "anthropic.messages"
-	version  = "2"
+	version  = "3"
 )
 
 type Parser struct{}

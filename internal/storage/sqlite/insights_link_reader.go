@@ -16,8 +16,8 @@ const (
 )
 
 // AnalysisAuditMeta is the audit-level context the analyzer needs beyond the
-// parser input. Event times are absolute; ConversationID is the OpenAI turn
-// graph conversation of this audit, when one was written.
+// parser input. Event times are absolute; ConversationID is the turn graph
+// conversation of this audit, when one was written.
 type AnalysisAuditMeta = storage.AnalysisAuditMeta
 
 // AnalysisLinkCandidate is one earlier analysis row of a session, with the

@@ -25,7 +25,8 @@ type plainExternalReference struct {
 }
 
 type binaryAccumulator struct {
-	objects map[string]binaryCandidate
+	objects            map[string]binaryCandidate
+	skipInlineFileData bool
 }
 
 func newBinaryAccumulator() *binaryAccumulator {
@@ -82,7 +83,7 @@ func (accumulator *binaryAccumulator) transformAt(value any, pointer string) (tr
 					Value:       text,
 				})
 			}
-			if text, ok := child.(string); ok && isInlineFileData(typed, key) {
+			if text, ok := child.(string); ok && !accumulator.skipInlineFileData && isInlineFileData(typed, key) {
 				candidate, marker, decoded, err := parseInlineFileData(typed, text)
 				if err != nil {
 					return transformResult{}, err

@@ -140,8 +140,8 @@ func (worker *Worker) projectBackfillLater(auditID string, position *keyset) {
 // identity, newest first so the current and previous report weeks fill in
 // before older history. Headers are read first; the request body only when
 // the headers carry no strong signal, from raw chunks while they are retained
-// or from the verified turn graph for OpenAI audits. Released Anthropic and
-// Gemini bodies are skipped and keep a header-only identity.
+// or from the verified turn graph once they are released. Released bodies of
+// a protocol without a normalizer are skipped and keep a header-only identity.
 //
 // Invariant: every audit_analysis row at or below projectMark.covered has a
 // current identity, or was attempted in this process (by the backfill or the
@@ -365,7 +365,7 @@ func (worker *Worker) projectRequestBody(ctx context.Context, audit storage.Pars
 		return source.Data, true
 	}
 	reconstructor := worker.bodyReconstructor()
-	if reconstructor == nil || audit.Protocol != "openai" {
+	if reconstructor == nil || !worker.reconstructable(audit) {
 		return nil, false
 	}
 	reconstruction, err := reconstructor.ReconstructBodies(ctx, audit.AuditID)

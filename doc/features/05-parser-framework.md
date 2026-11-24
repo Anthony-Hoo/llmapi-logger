@@ -42,10 +42,10 @@ normalizer 返回的 plaintext 只存在于 worker 内存。`auditmodel.Prepare`
 | OpenAI Chat Completions | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
 | OpenAI Completions | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
 | OpenAI Responses / Compact | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
-| Anthropic Messages | 保持既有 JSON/SSE 解析和对话展示 | 尚未实现 | full |
+| Anthropic Messages | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
 | Gemini GenerateContent | 保持既有 JSON/SSE 解析和对话展示 | 尚未实现 | full |
 
-当前生产容量优化重点覆盖 OpenAI Responses 和 Chat Completions。Anthropic/Gemini 仍保持代理协议兼容和审计可读性，但在没有 normalizer 前不会删除 raw evidence，也不宣称获得 item/binary 级 O(n) 增长。
+当前生产容量优化覆盖 OpenAI Responses、Chat Completions 和 Anthropic Messages。Gemini 仍保持代理协议兼容和审计可读性，但在没有 normalizer 前不会删除 raw evidence，也不宣称获得 item/binary 级 O(n) 增长。Anthropic 的 `source.data` 图片/文档目前随所在 message 对象整体去重，不单独提取为 binary object。
 
 ## 4. Result 与敏感数据
 
@@ -71,7 +71,7 @@ type Result struct {
 
 明文列只保存窄摘要。`Conversation` 只在 worker 内存使用：
 
-- OpenAI verified turn 的详情 conversation 从内容对象重建，不再写第二份 conversation；
+- OpenAI 与 Anthropic verified turn 的详情 conversation 从内容对象重建，不再写第二份 conversation；
 - 没有 normalizer 的协议或 normalization/reconstruction 异常，raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化。这份副本动辄数 MB，所以 `parsed_json_enc` 在加密前按需 gzip，格式见[模块 9](09-security-encryption-and-redaction.md) §5.1；
 - 列表、普通日志和明文 SQLite 列永远不包含消息正文、reasoning、工具参数或结果。
 
@@ -118,6 +118,8 @@ OpenAI 请求拆分规则：
 
 provider 输入若包含保留 marker 名、畸形 JSON、错误 data URL/Base64、未知重建布局或重建 hash 不一致，normalizer 必须失败并保留 full raw。
 
+Anthropic Messages 的拆分规则见[模块 07](07-anthropic-protocol-parser.md) §8，失败语义与上一段相同。
+
 ## 8. 状态语义
 
 `audit_records.parse_status`：
@@ -133,7 +135,7 @@ provider 输入若包含保留 marker 名、畸形 JSON、错误 data URL/Base64
 
 ## 9. 查询派生
 
-OpenAI verified turn 的管理 conversation 由 query 层执行以下步骤后生成：
+OpenAI 与 Anthropic verified turn 的管理 conversation 由 query 层执行以下步骤后生成：
 
 1. 恢复 request/response refs；
 2. 解密并验证 content/binary objects；
@@ -141,7 +143,7 @@ OpenAI verified turn 的管理 conversation 由 query 层执行以下步骤后�
 4. 比较 sequence/reconstruction SHA-256；
 5. 再从重建 provider 值生成协议无关 conversation。
 
-这样列表和详情不需要保存第二份消息正文。Anthropic/Gemini 在当前版本从加密 parsed fallback 读取 conversation，同时 full raw 仍是权威证据。
+这样列表和详情不需要保存第二份消息正文。第 5 步由写入该 turn 的协议 parser 完成（`query.reconstructedConversation` 按 parser 名分发）。Gemini 在当前版本从加密 parsed fallback 读取 conversation，同时 full raw 仍是权威证据；升级前写入的 Anthropic 记录没有 turn graph，读取方式同 Gemini。
 
 ## 10. 最少测试
 
@@ -152,5 +154,5 @@ OpenAI verified turn 的管理 conversation 由 query 层执行以下步骤后�
 - provider JSON 请求与响应精确重建。
 - data URL 解码字节去重、inline file data、`file_id` 外部引用。
 - normalization/reconstruction 失败时四阶段 raw 保持 full 且可完整下载。
-- verified OpenAI parsed JSON 不含第二份 conversation；无 normalizer 的协议仍能从加密 fallback 展示 conversation。
+- verified OpenAI/Anthropic parsed JSON 不含第二份 conversation；无 normalizer 的协议仍能从加密 fallback 展示 conversation。
 - parser/query/UI 不把敏感正文写入列表、日志或明文列。

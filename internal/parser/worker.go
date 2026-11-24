@@ -385,6 +385,7 @@ func runAnalyzer(ctx context.Context, analyzer AuditAnalyzer, audit storage.Pars
 		Response:         input.Response.Data,
 		ResponseComplete: input.Response.Complete,
 		ResponseIsStream: result.ObservedStream != nil && *result.ObservedStream,
+		StopReason:       result.StopReason,
 		Headers:          input.Headers,
 		RequestModel:     result.RequestModel,
 		ResponseModel:    result.ResponseModel,

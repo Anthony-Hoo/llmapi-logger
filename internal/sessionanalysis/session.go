@@ -14,8 +14,8 @@ import (
 )
 
 // ConversationLoader returns the decrypted conversation of one audit: the
-// verified turn graph for OpenAI records, the encrypted parser conversation
-// otherwise.
+// verified turn graph when the audit has one, the encrypted parser
+// conversation otherwise.
 type ConversationLoader interface {
 	SessionConversation(ctx context.Context, auditID string) (*conversation.Conversation, error)
 }

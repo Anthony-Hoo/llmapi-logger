@@ -193,7 +193,9 @@ docker compose exec nginx nginx -t
 
 PostgreSQL 数据库与 `audit.key` 必须作为一个备份集保存，使用一致快照备份与已验证的恢复流程。具体流程见 [备份与恢复](backup-and-restore.md)。
 
-普通 OpenAI 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、4xx/5xx、采集不完整、解析/normalization/重建失败和其他异常保持 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw 返回 410 误判为丢失。
+普通 OpenAI 与 Anthropic 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、4xx/5xx、采集不完整、解析/normalization/重建失败和其他异常保持 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw 返回 410 误判为丢失。
+
+Anthropic Messages 自解析器版本 3 起写 turn 并释放 raw。写出这类记录后不能回退到更早的版本：旧版本不认识 `anthropic.*` 重建布局，这些记录的详情会报完整性错误，而 raw 已经释放。升级只能前滚。
 
 最终镜像只包含 distroless 运行环境、Go 二进制、`/agent-packages` 下的 Skill 安装包和空的数据/配置挂载目录，不包含 Node、pnpm、前端源码、Go 源码或构建工具。
 
