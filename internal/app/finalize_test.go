@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,9 @@ func TestUnifiedWritePathHandsCommittedAuditsToTheParser(t *testing.T) {
 		t.Run(writePath, func(t *testing.T) {
 			configuration := insightsTestConfig(t, upstream.URL, true, "")
 			configuration.Audit.WritePath = writePath
+			// The unified path needs a staging directory; without one the
+			// application falls back to the legacy path.
+			configuration.Audit.Staging.Dir = filepath.Join(t.TempDir(), "staging")
 			application, err := newSQLiteTest(configuration, logger)
 			if err != nil {
 				t.Fatal(err)
