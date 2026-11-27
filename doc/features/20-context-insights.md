@@ -76,7 +76,7 @@ parser worker 已经持有解密后的请求/响应 Body，在同一次解析中
 “分析会话”是趋势与会话卡片的分组单位，记为 `analysis_session_id`，粒度是**单个 Agent**（主 Agent 与每个子 Agent 各一个会话，父子关系见 §5.8）。三协议统一按以下顺序取第一个可用的键：
 
 1. **客户端显式 Agent 标识**（§5.8 表中的节点 ID，例如 Codex `thread-id`、Claude Code `x-claude-code-agent-id`/会话 ID、OpenCode `x-opencode-session-id`、dsh `x-deepseek-harness-session-id`、ZCode `x-session-id`、pi `session-id`）。
-2. **OpenAI 既有 `turns.conversation_id`**：仅在没有显式标识时使用。Codex 把根会话 ID 填进 `prompt_cache_key`，新版 OpenCode 填的是直接父会话 ID，父子 Agent 会落进同一个 conversation（每个 Agent 一条链，见 §5.8“与 OpenAI 轮次图的关系”），所以有显式 Agent 标识时优先使用第 1 条。
+2. **OpenAI 既有 `turns.conversation_id`**：仅在没有显式标识时使用。只有请求的轮次（模块 18 §6：客户端中途取消、流被截断等，请求可用）也是 turn，所以这类记录同样按 turn conversation 归入会话；在此之前它们没有 turn，按下面的会话 key 或推断归属。Codex 把根会话 ID 填进 `prompt_cache_key`，新版 OpenCode 填的是直接父会话 ID，父子 Agent 会落进同一个 conversation（每个 Agent 一条链，见 §5.8“与 OpenAI 轮次图的关系”），所以有显式 Agent 标识时优先使用第 1 条。
 3. **Anthropic / Gemini 的轻量拼接**：不移植完整对象图。依次取：
   1. 通用 `metadata.{session_id, conversation_id, thread_id}`；Claude Code 新版的 `metadata.user_id` 是 JSON，其中有 `session_id`。
   2. 推断键：`HMAC(派生子密钥, protocol ‖ api_key_fpr ‖ system 指纹 ‖ 首条用户消息 item 指纹)`。同一 Agent 会话的请求共享系统提示词和首条用户消息，主 Agent 与子 Agent 的系统提示词通常不同，因此天然分开。

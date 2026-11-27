@@ -17,6 +17,7 @@ import (
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/anthropic"
+	"llmapi-logger/internal/parser/openai"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -406,19 +407,30 @@ func TestNoRequestOnlyTurnWithoutAUsableRequest(t *testing.T) {
 	ctx := context.Background()
 	h := headers("User-Agent", "example-agent/1.0", "X-Api-Key", "sk-requestonlykey", "anthropic-version", "2023-06-01")
 	stream := upstreamResponse{contentType: "text/event-stream", body: noStopStream}
+	chat := headers("Authorization", "Bearer sk-requestonlykey")
+	chatStream := upstreamResponse{contentType: "text/event-stream", body: openAIHalfStream}
 	cases := []struct {
-		name    string
-		headers http.Header
-		body    string
-		code    string
+		name     string
+		path     string
+		headers  http.Header
+		body     string
+		response upstreamResponse
+		// code is the saved error code; empty means any code but the
+		// normalization and reconstruction ones.
+		code string
 	}{
-		{"not JSON", h, `{"model":"model-example","messages":[`, "missing_message_stop"},
-		{"over the decode limit", headers("User-Agent", "example-agent/1.0", "X-Api-Key", "sk-requestonlykey", "Content-Encoding", "gzip"),
-			gzipText(t, requestOnlyRequest(`{"role":"user","content":"`+strings.Repeat("a", 256<<10)+`"}`)), "gzip_ratio_exceeded"},
-		{"reserved marker", h, requestOnlyRequest(`{"role":"user","content":[{"type":"text","text":"x","` + auditmodel.ItemMarkerKey + `":0}]}`), "missing_message_stop"},
+		{"not JSON", "/v1/messages", h, `{"model":"model-example","messages":[`, stream, "missing_message_stop"},
+		{"over the decode limit", "/v1/messages", headers("User-Agent", "example-agent/1.0", "X-Api-Key", "sk-requestonlykey", "Content-Encoding", "gzip"),
+			gzipText(t, requestOnlyRequest(`{"role":"user","content":"`+strings.Repeat("a", 256<<10)+`"}`)), stream, "gzip_ratio_exceeded"},
+		// The normalizer refuses it.
+		{"reserved marker", "/v1/messages", h, requestOnlyRequest(`{"role":"user","content":[{"type":"text","text":"x","` + auditmodel.ItemMarkerKey + `":0}]}`), stream, "missing_message_stop"},
+		// It normalizes, and preparing its objects fails: a data URL that is
+		// not base64.
+		{"does not verify", "/v1/chat/completions", chat,
+			`{"model":"model-example","stream":true,"messages":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,%%%invalid%%%"}]}]}`, chatStream, ""},
 	}
 	for _, test := range cases {
-		id := harness.send("/v1/messages", test.headers, test.body, stream)
+		id := harness.send(test.path, test.headers, test.body, test.response)
 		if got := harness.retention(id); got.request != sqlite.RetentionFull || got.response != sqlite.RetentionFull {
 			t.Fatalf("%s: retention %+v, want full", test.name, got)
 		}
@@ -427,12 +439,87 @@ func TestNoRequestOnlyTurnWithoutAUsableRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 		if detail.TurnGraph != nil || detail.ParsedResult == nil || detail.ParsedResult.Status != sqlite.ParsePartial ||
-			detail.ParsedResult.ErrorCode == nil || *detail.ParsedResult.ErrorCode != test.code {
+			detail.ParsedResult.ErrorCode == nil || (test.code != "" && *detail.ParsedResult.ErrorCode != test.code) ||
+			*detail.ParsedResult.ErrorCode == "normalization_failed" || *detail.ParsedResult.ErrorCode == "reconstruction_failed" {
 			t.Fatalf("%s: turn %v, parsed %+v", test.name, detail.TurnGraph != nil, detail.ParsedResult)
 		}
+		t.Logf("%s: saved as %s / %s", test.name, detail.ParsedResult.Status, *detail.ParsedResult.ErrorCode)
 		if events := integrityEventTypes(t, harness.dbPath, id); !reflect.DeepEqual(events, []string{"capture_finalized"}) {
 			t.Fatalf("%s: integrity events %v", test.name, events)
 		}
+	}
+	if err := harness.store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatalf("integrity payloads: %v", err)
+	}
+}
+
+// openAIFallback is what the old worker stored as the fallback conversation
+// of a Chat Completions audit whose stream was cut: the parse of the
+// captured bodies.
+func openAIFallback(t *testing.T, request, response string) any {
+	t.Helper()
+	implementation, err := openai.New(openai.ChatCompletions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return implementation.Parse(context.Background(), parser.Input{
+		Request:  parser.BodySource{Present: true, Complete: true, ContentType: "application/json", Data: []byte(request)},
+		Response: parser.BodySource{Present: true, ContentType: "text/event-stream", Data: []byte(response)},
+	}).Conversation
+}
+
+// openAIHalfStream is a Chat Completions stream cut before its end.
+const openAIHalfStream = `data: {"id":"chatcmpl-half","object":"chat.completion.chunk","model":"model-example","choices":[{"index":0,"delta":{"role":"assistant","content":"half an ans"}}]}` + "\n\n"
+
+// The same for OpenAI Chat Completions, whose rebuilt conversation comes
+// from another adapter. Insights take an OpenAI audit's session from its turn
+// conversation (insights.Link), so a cancelled audit, which had no turn
+// before, now has session link "conversation"; live and backfilled analyses
+// are equal.
+func TestRequestOnlyTurnOfAnOpenAICancel(t *testing.T) {
+	t.Parallel()
+	harness := newInsightsHarness(t, runnerAnalyzer(t))
+	ctx := context.Background()
+	h := headers("Authorization", "Bearer sk-requestonlykey", "User-Agent", "example-agent/1.0")
+	request := `{"model":"model-example","stream":true,"prompt_cache_key":"cache-request-only","messages":[{"role":"system","content":"You are an agent."},{"role":"user","content":"explain the build"}]}`
+	id := harness.sendCancelled("/v1/chat/completions", h, request, openAIHalfStream)
+	if got := harness.retention(id); got.request != sqlite.RetentionMetadata || got.response != sqlite.RetentionFull {
+		t.Fatalf("retention %+v", got)
+	}
+	parsed, plaintext := harness.parsedPlaintext(id)
+	if parsed.Status != sqlite.ParsePartial || parsed.ErrorCode == nil || bytes.Contains(plaintext, []byte(`"conversation"`)) ||
+		!bytes.Contains(plaintext, []byte(parser.PartialResponseMessagesKey)) {
+		t.Fatalf("parsed %+v: %s", parsed, plaintext)
+	}
+	t.Logf("saved as %s / %s", parsed.Status, *parsed.ErrorCode)
+	service := harness.service()
+	detail, err := service.Get(ctx, id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := openAIFallback(t, request, openAIHalfStream)
+	if !reflect.DeepEqual(detail.Conversation, fallback) {
+		got, _ := json.Marshal(detail.Conversation)
+		want, _ := json.Marshal(fallback)
+		t.Fatalf("detail conversation differs from the fallback\n got: %s\nwant: %s", got, want)
+	}
+	live := harness.analysis(id)
+	if live.SessionLink == nil || *live.SessionLink != insights.SessionLinkConversation || live.AnalysisSessionID == nil || *live.AnalysisSessionID != detail.Turn.ConversationID {
+		t.Fatalf("live analysis session %v / %v, turn conversation %s", live.SessionLink, live.AnalysisSessionID, detail.Turn.ConversationID)
+	}
+	row := live
+	row.AnalysisVersion--
+	if err := harness.store.SaveAnalysis(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	harness.enableInsights(true)
+	harness.worker.ResetBackfillForTest()
+	harness.worker.BackfillForTest(ctx)
+	got := harness.analysis(id)
+	live.DetailEnc, got.DetailEnc = nil, nil
+	got.AnalyzedAtNS = live.AnalyzedAtNS
+	if !reflect.DeepEqual(got, live) {
+		t.Fatalf("backfilled analysis differs\n got: %+v\nwant: %+v", got, live)
 	}
 	if err := harness.store.VerifyIntegrityPayloads(ctx); err != nil {
 		t.Fatalf("integrity payloads: %v", err)
