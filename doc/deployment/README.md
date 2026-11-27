@@ -124,9 +124,9 @@ curl -H 'Authorization: Bearer REPLACE_ME' \
 
 `audit.staging.max_bytes`（默认 4 GiB）限制目录里全部文件的大小。写满、磁盘满或写文件出错时，该阶段停止保留后续字节，阶段记为 partial，错误码为 `capture_budget_exhausted`（写错误为 `staging_write_failed`），raw 全部保留，转发不受影响。
 
-导入时无法确认的文件不会被删：没有对应 audit、或缺 Body 行的改名为 `<audit_id>.orphan`；中间记录校验失败、文件头不是这条 audit、块与库里的接不上的改名为 `<audit_id>.corrupt`，导入其中校验通过的前半部分。这两类文件计入 `max_bytes`，确认无用后由运维手动清理。有文件读不出来（例如权限不对）时导入整体失败，审计不可用，日志 `audit staging import failed`；修好后重启。
+导入时无法确认的文件不会被删：没有对应 audit、缺 Body 行、或 audit 已终结却缺文件里的块的改名为 `<audit_id>.orphan`；中间记录校验失败、文件头不是这条 audit、块与库里的接不上的改名为 `<audit_id>.corrupt`，导入其中校验通过的前半部分。这两类文件计入 `max_bytes`，确认无用后由运维手动清理。有文件读不出来（例如权限不对）时导入整体失败，审计不可用，日志 `audit staging import failed`；修好后重启。
 
-终结提交最终失败时文件也留在目录里，计入 `max_bytes`，直到下次启动。进程继续运行时，writer 的恢复会在几秒内把这条 audit 以 failed 终结，下次启动看到它已终结只删除文件，暂存的块不会进库；进程在那之前退出时，下次启动照常导入（[模块 03](../features/03-audit-session-and-evidence-capture.md) §13.5）。
+终结提交最终失败时文件也留在目录里，计入 `max_bytes`。数据库恢复可写之后，writer 的恢复在把这条 audit 以 failed 终结的同一个事务里先写入暂存的块，提交后删除文件；进程在那之前退出时，下次启动照常导入。恢复插入暂存块被拒绝时 audit 照样终结，文件保留，下次启动改名为 `.orphan`（[模块 03](../features/03-audit-session-and-evidence-capture.md) §13.5）。
 
 ### 3.3 写入路径的发布与回滚顺序
 

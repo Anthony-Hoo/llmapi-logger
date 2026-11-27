@@ -210,7 +210,7 @@ unified 下阶段开始只记在内存里：版本 1 当场按 legacy 的循环�
 
 **暂存文件。** 每条 audit 一个文件 `<dir>/<audit_id>.stg`，以 `O_EXCL` 和 0600 创建，文件里只有一个指明 audit 的文件头和逐块记录，块是与 `body_chunks.data_enc` 逐字节相同的密文，带 CRC 帧，可以原样插入库里。后台 writer 每批最多攒 5 ms，写完后对本批涉及的每个文件 fsync 一次，新建文件后再 fsync 目录；暂存从不阻塞调用方。块的密文在写进文件之前留在内存里，写失败的块仍可读。检查点和提交读暂存的块不取会话锁，也不等暂存 writer；读失败是那一次写的本地错误，该 audit 记为 failed（模块 04 §5.1）。构造提交之后不再落暂存。
 
-**保留到何时。** `CommitAudit` 得到确认后，会话丢弃该 audit 还在队列里的记录并删除文件（`Stager.Discard`）；提交最终失败时文件留在目录里（`Stager.Keep`），计入 `max_bytes`，等下次启动导入（§13.5 第三条限制）。
+**保留到何时。** `CommitAudit` 得到确认后，会话丢弃该 audit 还在队列里的记录并删除文件（`Stager.Discard`）；提交最终失败时文件留在目录里（`Stager.Keep`），计入 `max_bytes`，由 writer 恢复把块写进库之后删除，进程先停下时由下次启动导入（§13.5 第三条）。
 
 **耗尽。** 暂存拒绝一个块时，该阶段停止保留后续字节，只继续计算哈希、长度、时间和 SSE：
 
@@ -234,15 +234,15 @@ Body 标为故障，阶段 partial，`capture_status` 为 partial，raw 保留 `
 
 1. **重试救不回检查点丢在失败批次里的 audit。** 检查点所在批次失败时，writer 把它记进恢复表；该 audit 的 `CommitAudit` 在终结之前先写这些失败标记（`prepareFinalization`），所以即使重试的提交成功，audit 也以 failed 终结。快请求的检查点常与它的提交同批，故障期间发出的检查点也是这样。
 2. **`Finish` 在 unified 下更慢。** 响应侧保留的块在 `Finish` 时才压缩加密（请求侧已在检查点 1 封好），分块响应和 HTTP/2 响应的结束（晚于终结提交的那几类）随之推后这段时间。实测由编排方补在设计文档的实施记录里。
-3. **最终失败的提交通常补不进暂存的块。** 文件留到下次启动（`Stager.Keep`）。但提交是交给 writer 之后失败的，writer 恢复（每 5 秒一轮，`recoverCaptureEntry`）会在进程里把 audit 以 failed 终结；下次启动导入时看到它已终结，只删除文件。只有进程在恢复终结之前退出，或者提交根本没有发出（版本 2 的块封不出来）时，下次启动才把这些块导入。检查点已经写进库的块不受影响。`Stager.Keep` 和 `releaseStaged` 的注释写的是“下次启动导入”，没有提这个前提。
-
+3. **最终失败的提交丢掉仍在内存里的那部分 Body。** 最终失败时会话把暂存文件留下（`Stager.Keep`），存储把这次失败连同对暂存块的引用（文件位置，不是密文，`storage.StagedChunkHolder`）记进恢复表。存储恢复可写之后，writer 恢复（`recoverCaptureEntry`，每 5 秒一轮，进程关闭时还有一轮）在把 audit 以 failed 终结的同一个事务里，先把这些块插到各自的 Body 行下（`insertStagedChunks`，规则同启动导入：只插接得上库里已有块的、Body 行属于自己的），`finalizeIncompleteCapture` 再像对待其他已存的块一样按它们收尾长度和块数；事务提交之后才删除文件。插入被单独拒绝时（例如块被约束拒绝），audit 照样以 failed 终结，文件保留，记 `audit staged chunks not recovered`，下次启动把它改名为 `.orphan`。进程在这之前停下时，下次启动的导入把块插进仍未终结的 audit，再由 `RecoverInterruptedAudits` 以 interrupted 终结。与 legacy 在同样故障下相比：会话还在内存里的部分（每个阶段最多 `stage_bytes`，通常是最后不足一块的尾部）丢失；响应对在 `Finish` 时才定，提交失败后 `response_sent` 只有检查点 2 写的阶段行、没有 Body 行；legacy 则丢掉与它失败的 `FinishAudit` 同批的那些异步写，其余的块都在。提交根本没有发出（版本 2 的块封不出来，或入队前的校验失败）时没有记入恢复表，文件留给下次启动导入。
 ### 13.6 启动导入
 
 启动顺序：验证完整性链 → 导入暂存 → `RecoverInterruptedAudits` → 构造 Manager（`internal/app/app.go` 的 `assembleAuditWithStore`）。只要配置了 `audit.staging.dir` 且目录可用，不论 `write_path` 都导入（`Stager.Import`），所以 unified 留下的文件在切回 legacy 后也会导入。每个文件用一个 writer 操作 `RestoreStagedChunks`（模块 04 §5.1）：
 
 | 情形 | 处理 |
 | --- | --- |
-| audit 已终结（提交之后、删文件之前停了） | 只删文件 |
+| audit 已终结，文件里的块库里都有（提交之后、或恢复写入失败提交的暂存块之后，删文件之前停了） | 只删文件 |
+| audit 已终结，但缺文件里的块（恢复插入时被拒绝） | 不改动已终结的 audit，文件改名为 `.orphan` |
 | 没有这条 audit | 改名为 `.orphan` |
 | 某个阶段有块却没有 Body 行（落暂存时的检查点丢了） | 导入其他阶段，文件改名为 `.orphan` |
 | 正常 | 逐条校验 CRC、块元数据、AEAD，以及每个阶段的 seq、offset 向前推进；插入接着库里已有块的那些，然后删文件 |

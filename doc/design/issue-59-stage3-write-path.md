@@ -1169,7 +1169,8 @@ Body 采集拆成两层：
 3. **构造提交之后不再落暂存**，迟到的读按耗尽处理（`capture_budget_exhausted`），以免会话释放暂存之后又建出文件。
 4. **legacy 下暂存目录不可用只记告警**，不影响启动；配置了目录且可用时，不论写入路径都导入。
 5. **`max_bytes` 必须为正**，是新增的配置校验；它计入目录里的全部普通文件，包括导入改名保留的文件。
-6. **日志码。** 暂存 writer 写失败的日志在磁盘满时记 `staging_full`，阶段上的错误码是 `capture_budget_exhausted`，两处不一致（模块 13 §2.1）。
+6. **日志码。** 暂存 writer 写失败的日志与被拒绝的阶段用同一个错误码：目录或磁盘满为 `capture_budget_exhausted`，其他写错误为 `staging_write_failed`（F.6）。删除、改名暂存文件失败和审计管理器构造失败的日志只带稳定的 `reason` 码，不带错误原文（模块 13 §2.1）。
+7. **最终失败的提交，其暂存块由 writer 恢复写入。** F.5 只写了提交得到确认后删文件。提交交给 writer 之后最终失败时，存储在恢复表里记下对暂存块的引用（文件位置，`storage.StagedChunkHolder`）；恢复在把 audit 以 failed 终结的同一个事务里先插入这些块，再由 `finalizeIncompleteCapture` 收尾，提交后删文件。写入的是 `body_chunks` 的行，`body_streams` 的 `stored_length`、`chunk_count` 由随后的 `finalizeIncompleteCapture` 按块求出，都在签名之前；不改动任何已终结的 audit。启动导入遇到已终结、库里却缺文件中块的 audit 时，不写库，文件改名为 `.orphan`。两种顺序（进程活着时恢复，或先停下再由启动导入）写出的块相同；终态不同，分别是 failed 和 interrupted，与 legacy 在同样两种情况下的区别相同。
 
 ### R.4 parser
 
@@ -1188,7 +1189,7 @@ Body 采集拆成两层：
 正文没有写、实施时确认的限制，模块 03 §13.5、§13.7 有详细说明：
 
 1. 检查点丢在失败批次里的 audit，即使重试的提交成功也以 failed 终结：`CommitAudit` 先写恢复表里的失败标记。快请求的检查点常与提交同批，故障期间发出的检查点也是这样。
-2. 提交交给 writer 之后最终失败时，暂存文件保留到下次启动，但进程继续运行时 writer 恢复会先把 audit 以 failed 终结，下次启动只删除文件，暂存的块不进库；进程在那之前退出、或提交因块封不出来没有发出时才会导入。这与 `Stager.Keep` 的注释和提交 `9594800` 的说明不一致，待维护者确认是否要在恢复终结之前导入。
+2. 提交交给 writer 之后最终失败时，会话仍在内存里的部分（每个阶段最多 `stage_bytes`）丢失，`response_sent` 没有 Body 行；暂存的块由 writer 恢复在终结前写入（R.3 第 7 条）。legacy 在同样故障下保留除失败批次以外的全部异步写。
 3. 随 Body 结束到达的上游响应 Trailer 只由 `CommitAudit` 写；进程在 `Finish` 之前退出时没有，legacy 在 EOF 时已异步写出。
 4. `Finish` 在 unified 下更慢：响应侧的块在这时才压缩加密。
 5. 设置页在审计存储打不开时只能读（R.5 第 2 条）。
