@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/headerblock"
+	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -435,4 +437,113 @@ func TestSessionWithoutTheInboundStageWritesConsistentBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	compareCaptureDigests(t, store, auditID)
+}
+
+// queryHeaders reads an audit's Headers through the query service, the path
+// of the detail view, the Agent API and the exports.
+func queryHeaders(t *testing.T, store *Store, cipher security.Cipher, auditID string) []string {
+	t.Helper()
+	service, err := query.New(store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := service.Get(context.Background(), auditID, nil)
+	if err != nil {
+		t.Fatalf("detail of %s: %v", auditID, err)
+	}
+	if detail.Audit.CaptureStatus != CaptureFailed {
+		t.Fatalf("%s capture status %q", auditID, detail.Audit.CaptureStatus)
+	}
+	headers := make([]string, 0, len(detail.Headers))
+	for _, header := range detail.Headers {
+		headers = append(headers, header.Stage+" "+header.Kind+" "+header.Name+" "+strconv.Itoa(header.ValueIndex)+" "+header.Value)
+	}
+	return headers
+}
+
+func withoutStage(headers []string, stage string) []string {
+	kept := make([]string, 0, len(headers))
+	for _, header := range headers {
+		if !strings.HasPrefix(header, stage+" ") {
+			kept = append(kept, header)
+		}
+	}
+	return kept
+}
+
+// A failed capture stays readable on version 2, as on legacy: the same
+// rejected write through both write paths, and the detail view of each.
+// Where the block keeps Headers legacy could not store (its header write
+// needs the stage row, or was the rejected write), version 2 shows them; all
+// other Headers are the same.
+func TestSessionFailedCaptureStaysReadable(t *testing.T) {
+	t.Parallel()
+	cipher := v2TestCipher(t)
+	for _, test := range []struct {
+		name                      string
+		legacyTable, legacyWhen   string
+		unifiedTable, unifiedWhen string
+		stopAt                    int
+		extraStage                string // the stage whose Headers only version 2 kept
+	}{
+		{"checkpoint 1 rejected", "http_stages", "NEW.stage = 'request_sent_to_newapi'", "http_stages", "NEW.stage = 'request_sent_to_newapi'", crashNone, StageRequestSent},
+		{"inbound block rejected, no later write", "http_headers", "NEW.stage = 'request_for_newapi_received_from_nginx'",
+			"http_header_blocks", "true", crashInterceptor, ""},
+		{"inbound block rejected, later writes", "http_headers", "NEW.stage = 'request_for_newapi_received_from_nginx'",
+			"http_header_blocks", "", crashNone, StageRequestReceived},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			legacyStore, _ := openSignedStore(t)
+			unifiedStore, _ := openSignedStore(t)
+			injectInsertFailure(t, legacyStore, test.legacyTable, test.legacyWhen)
+			if test.unifiedWhen == "" {
+				// Reject only the block BeginAudit writes, while the inbound
+				// stage is the audit's only stage row; checkpoint 1 then
+				// writes the whole block again.
+				if _, err := unifiedStore.writerConn.ExecContext(ctx, `CREATE FUNCTION reject_inbound_block_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM http_stages AS s WHERE s.audit_id = NEW.audit_id AND s.stage <> 'request_for_newapi_received_from_nginx') THEN
+        RAISE EXCEPTION 'injected inbound block failure' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER reject_inbound_block BEFORE INSERT ON http_header_blocks FOR EACH ROW EXECUTE FUNCTION reject_inbound_block_fn()`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				injectInsertFailure(t, unifiedStore, test.unifiedTable, test.unifiedWhen)
+			}
+			legacyID := runSession(t, legacyStore, cipher, audit.WritePathLegacy, typicalV2Drive(), test.stopAt)
+			unifiedID := runSession(t, unifiedStore, cipher, audit.WritePathUnified, typicalV2Drive(), test.stopAt)
+			for _, store := range []*Store{legacyStore, unifiedStore} {
+				writerBarrier(t, store)
+				if _, err := store.RecoverInterruptedAudits(ctx, 9_000_000_000_000_000_000); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+					t.Fatalf("payload verification: %v", err)
+				}
+			}
+			legacy, unified := queryHeaders(t, legacyStore, cipher, legacyID), queryHeaders(t, unifiedStore, cipher, unifiedID)
+			if test.extraStage != "" {
+				if len(withoutStage(unified, test.extraStage)) == len(unified) || len(withoutStage(legacy, test.extraStage)) != len(legacy) {
+					t.Fatalf("%s: legacy %v, unified %v", test.extraStage, legacy, unified)
+				}
+				unified = withoutStage(unified, test.extraStage)
+			}
+			if !reflect.DeepEqual(legacy, unified) {
+				t.Fatalf("detail headers differ:\n legacy  %v\n unified %v", legacy, unified)
+			}
+			// The parser's allowlist read goes through the same rule.
+			source, err := unifiedStore.LoadParserHeaderSource(ctx, unifiedID, []string{"user-agent"})
+			if err != nil || !source.CaptureFailed {
+				t.Fatalf("parser header source %+v, %v", source, err)
+			}
+			if _, err := headerblock.Expand(cipher, unifiedID, source); err != nil {
+				t.Fatalf("parser expand: %v", err)
+			}
+		})
+	}
 }

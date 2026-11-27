@@ -117,12 +117,17 @@ type HeaderBlockEvidence struct {
 // HeaderSource is everything a reader needs to expand the saved Headers of one
 // audit through headerblock.Expand, whichever capture version wrote them.
 // Version 1 fills Rows; version 2 fills Block. StageSet names the stages that
-// have an http_stages row, which a version 2 block must match exactly.
+// have an http_stages row, which a version 2 block must match exactly unless
+// CaptureFailed is set.
 type HeaderSource struct {
 	CaptureVersion int
 	Rows           []HeaderEvidence
 	Block          *HeaderBlockEvidence
 	StageSet       []string
+	// CaptureFailed is set when the audit's stored capture_status is failed:
+	// a write was rejected, so its block and its stage rows may legitimately
+	// disagree. capture_status is covered by the capture payload digest.
+	CaptureFailed bool
 }
 
 // ParsedResultSummary is the narrow, non-secret projection of parsed_results.
@@ -199,6 +204,7 @@ func (detail AuditQueryDetail) HeaderSource() HeaderSource {
 		Rows:           detail.Headers,
 		Block:          detail.HeaderBlock,
 		StageSet:       stages,
+		CaptureFailed:  detail.Audit.CaptureStatus == CaptureFailed,
 	}
 }
 

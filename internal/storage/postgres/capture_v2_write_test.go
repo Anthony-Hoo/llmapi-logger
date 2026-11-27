@@ -524,15 +524,11 @@ WHERE a.audit_id = 'v2-inbound'`).Scan(&captureStatus, &errorCode, &stageState, 
 			}
 			// With the block rejected and no later write (an interceptor
 			// rejection, or a crash before checkpoint 1), the stage row has no
-			// block: the payload verifies, reading the Headers reports the
-			// stage-set mismatch. A later write that inserts a stage row would
-			// have written a block again. Reported as an open question.
-			_, err = expandDetail(t, store, cipher, "v2-inbound")
-			if test.lost && err != nil {
-				t.Fatalf("Expand without the inbound stage = %v", err)
-			}
-			if !test.lost && !errors.Is(err, headerblock.ErrIntegrity) {
-				t.Fatalf("Expand with the inbound block rejected = %v", err)
+			// block. The audit is failed, so it reads like legacy after a
+			// rejected header write: the stage's Headers are absent.
+			values, err := expandDetail(t, store, cipher, "v2-inbound")
+			if err != nil || len(values) != 0 {
+				t.Fatalf("Expand = %v, %v", flatHeaders(values), err)
 			}
 		})
 	}
@@ -562,6 +558,14 @@ func TestCaptureV2TamperIsDetected(t *testing.T) {
 		{"content_type", []string{`UPDATE http_stages SET content_type = 'text/plain' WHERE audit_id = 'v2-tamper' AND stage = 'response_received_from_newapi'`}},
 		{"content_encoding", []string{`UPDATE http_stages SET content_encoding = NULL WHERE audit_id = 'v2-tamper' AND stage = 'response_received_from_newapi'`}},
 		{"block row deleted", []string{`DELETE FROM http_header_blocks WHERE audit_id = 'v2-tamper'`}},
+		// capture_status is a field of both digests, so marking a healthy
+		// audit failed, alone or to hide a removed block from the read path,
+		// fails payload verification.
+		{"capture_status flipped to failed", []string{`UPDATE audit_records SET capture_status = 'failed' WHERE audit_id = 'v2-tamper'`}},
+		{"block deleted and capture_status flipped", []string{
+			`DELETE FROM http_header_blocks WHERE audit_id = 'v2-tamper'`,
+			`UPDATE audit_records SET capture_status = 'failed' WHERE audit_id = 'v2-tamper'`}},
+		{"version 1 capture_status flipped to failed", []string{`UPDATE audit_records SET capture_status = 'failed' WHERE audit_id = 'v1-tamper'`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -704,10 +708,11 @@ func TestVersionSixDatabaseUpgradesAndVerifies(t *testing.T) {
 // A checkpoint rejected inside the writer is rolled back whole, and the
 // session, which is not told, sends a later block that still names the
 // stage it inserted. The store cannot open the block to drop that section,
-// so it writes it as sent: the audit is finalized failed, its payload
-// verifies, and reading its Headers reports the stage-set mismatch. This pins
-// the behaviour reported as an open question (C.8 against B.8).
-func TestCaptureV2RejectedCheckpointLeavesAMismatchedBlock(t *testing.T) {
+// so it writes it as sent. The audit is finalized failed, its payload
+// verifies, and it stays readable: the section of the stage without a row is
+// shown (it is stored and authentic). A healthy audit with the same mismatch
+// is an integrity error (TestCaptureV2TamperIsDetected, read path).
+func TestCaptureV2RejectedCheckpointStaysReadable(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	cipher := v2TestCipher(t)
@@ -725,7 +730,15 @@ func TestCaptureV2RejectedCheckpointLeavesAMismatchedBlock(t *testing.T) {
 	if err := store.VerifyIntegrityPayloads(ctx); err != nil {
 		t.Fatalf("payload verification: %v", err)
 	}
-	if _, err := expandDetail(t, store, cipher, "v2-rejected"); !errors.Is(err, headerblock.ErrIntegrity) {
-		t.Fatalf("Expand = %v", err)
+	values, err := expandDetail(t, store, cipher, "v2-rejected")
+	if err != nil {
+		t.Fatalf("Expand of a failed capture = %v", err)
+	}
+	expanded := map[string]bool{}
+	for _, value := range values {
+		expanded[value.Stage] = true
+	}
+	if len(expanded) != 4 || !expanded[StageRequestSent] {
+		t.Fatalf("expanded stages %v", expanded)
 	}
 }

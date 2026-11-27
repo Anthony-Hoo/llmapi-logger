@@ -171,8 +171,8 @@ func applyCheckpoint(transaction dbTransaction, checkpoint *checkpointWrite) err
 	// The block is written whole even when a recorded failure left a stage
 	// row missing: the store cannot open it to drop that stage's section, and
 	// writing it keeps the Headers the session captured. Such an audit is
-	// already marked failed; its block may then name a stage without a row,
-	// which headerblock.Expand reports as an integrity error
+	// already marked failed, and headerblock.Expand reads a failed audit
+	// whose block names a stage without a row without an integrity error
 	// (doc/features/09-security-encryption-and-redaction.md).
 	if err := upsertHeaderBlock(transaction, checkpoint.AuditID, checkpoint.HeaderBlock); err != nil {
 		return err

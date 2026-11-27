@@ -87,7 +87,7 @@ JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`
 
 - **块明文：** `"LLHB" 0x01`，之后每个已写入的阶段一段：阶段码（1 到 4，按阶段顺序严格递增），header 段，trailer 段。每段是 `u32be(名称数)`，每个名称是 `u32be(长度) 名称 u32be(值数) (u32be(长度) 值)+`，整数都是大端。名称按字节序严格递增，值数至少为 1，明文不超过 64 MiB。解码逐条校验这些规则和长度，不允许尾随字节，所以一段明文只有一种解码。
 - **存储：** 明文经 `bodycodec` 按 `application/x-llmapi-header-block` 判定是否 gzip，再 AES-GCM 加密，存 `compression`、`plaintext_length` 和密文三项。读取时依次认证解密、按 `plaintext_length` 解压核对长度、严格解码。
-- **残缺块：** 块里只含到那时为止已写入的阶段；读取时块里的阶段集合必须等于该 audit 的阶段行集合，否则按完整性错误处理。
+- **残缺块：** 块里只含到那时为止已写入的阶段；读取时块里的阶段集合必须等于该 audit 的阶段行集合，否则按完整性错误处理。`capture_status` 为 `failed` 的 audit 例外，见 §8 末尾。
 - **User-Agent：** `0x01 (u32be(长度) 值)+`，取 `request_received` 中名称与 `user-agent` 不区分大小写相等的全部值，不压缩。没有这个 Header 时存 NULL，与“有一个空值”区分。
 - **读取入口：** `headerblock.Expand` 按 `capture_version` 分派：1 用上表的逐值 AAD 解密各行，2 打开整块；两者输出同一个扁平列表（阶段顺序、header 先于 trailer、名称字节序、value index）。
 - **测试向量：** `internal/headerblock/testdata/vectors.json` 固定块明文、拒绝样例、两个 AAD、User-Agent 编码，以及用合成密钥封好的块和 User-Agent，供另一份实现对照。
@@ -169,14 +169,21 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 - 入站 Key 指纹只用于开发者会话的作用域判定，不进入任何 DTO、日志或错误；开发者登录提交的 Key 只作为一次上游校验请求的凭据，不落库也不回显。
 - 开发者会话看不到被本地策略拦截的记录，`blocked_by`/`block_code` 属管理员可见信息。
 
-详情能解密但 schema、枚举、连续 index、marker 或 hash 非法时，整条请求返回通用完整性错误，不返回部分明文。版本 2 的块不能认证、解不开、不满足严格解码规则，或者块里的阶段集合与阶段行集合不等，同样按完整性错误处理。
+详情能解密但 schema、枚举、连续 index、marker 或 hash 非法时，整条请求返回通用完整性错误，不返回部分明文。版本 2 的块不能认证、解不开、不满足严格解码规则，或者（capture 没有失败时）块里的阶段集合与阶段行集合不等，同样按完整性错误处理。
 
-已知的边界情形有两种，都只出现在 writer 里被可隔离的错误（约束、触发器）拒绝了一次写、因而已经标为 `capture_write_failed` 的记录上。会话不知道写被拒绝：
+块里的阶段集合与阶段行集合必须相等，这一条只对 capture 没有失败的 audit 是完整性检查。writer 里被可隔离的错误（约束、触发器）拒绝了一次写时，audit 的 `capture_status` 被标为 `failed`，会话却不知道，块与阶段行就可能对不上：
 
-- **检查点被拒绝。** 整个检查点回滚，它插入的阶段行不存在。之后的写仍按会话以为已写入的阶段封块，存储无法打开块去掉缺行阶段的段，照原样写入（测试 `TestCaptureV2RejectedCheckpointLeavesAMismatchedBlock`）。
-- **`BeginAudit` 的入站块被拒绝，入站阶段行保留。** 之后插入阶段行或带上 trailer 的写会重新写整块；没有这样的写时（拦截器拒绝，或在检查点 1 之前崩溃），这条 audit 有入站阶段行而没有块（`TestCaptureV2InboundRejectionKeepsTheStartRow`）。
+- **检查点被拒绝。** 整个检查点回滚，它插入的阶段行不存在，之后的块仍含那个阶段的段；存储没有密钥，无法打开块去掉它。
+- **`BeginAudit` 的入站块被拒绝，入站阶段行保留。** 之后插入阶段行或带上 trailer 的写会重新写整块；没有这样的写时（拦截器拒绝，或在检查点 1 之前崩溃），这条 audit 有入站阶段行而没有块。
 
-两种情形下载荷校验都通过，但读 Header 时阶段集合不等，详情返回完整性错误。怎样处理待维护者决定。
+已存 `capture_status` 为 `failed` 的 audit 照常可读，与 legacy 写入路径上同样的写失败一致（`headerblock.Expand` 是唯一的判定处，详情、Agent 门面、导出和 parser 的白名单读取都经过它）：
+
+- 有阶段行、块里没有它的段，或者根本没有块：这个阶段的 Header 不显示，等同 legacy 上 Header 写失败时没有行。
+- 块里有段、却没有阶段行：照常显示。legacy 在这种情形下没有 Header 行，只是因为它的 Header 写依赖阶段行；块用这条 audit 的 AAD 认证过，又被签名的摘要覆盖，是已存且真实的证据，隐藏它没有理由。
+
+认证、解压、严格解码和阶段集合本身的合法性（已知阶段、不重复）都不放宽。没有失败的 audit 上，阶段集合不等照旧是完整性错误。`capture_status` 是版本 1 和版本 2 capture 摘要的字段，把一条已终结的健康 audit 改成 `failed`（单独改，或者为了掩盖删掉的块）会让载荷校验失败，读取方的放宽借此不能被用来掩盖篡改；测试 `TestCaptureV2TamperIsDetected` 覆盖了这几种改法。还在进行中的 audit 没有签名，它的任何列本来就不受链保护。
+
+一个已知的缺口：写失败是批次级（存储）失败时，失败标记由 writer 恢复表稍后补写（每 5 秒，或在该 audit 的 `CommitAudit` 之前）。在补写之前，进行中的 audit 不是 `failed`；进程恰好在这段时间退出时恢复表丢失，启动恢复把它终结为 `partial`，如果之后的检查点写了含缺行阶段的块，这条 audit 读 Header 时报完整性错误。
 
 ## 9. 故障行为
 

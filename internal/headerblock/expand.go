@@ -33,7 +33,7 @@ func Expand(c security.Cipher, auditID string, src storage.HeaderSource) ([]Valu
 		if len(src.Rows) != 0 {
 			return nil, fmt.Errorf("%w: version 2 audit with header rows", ErrIntegrity)
 		}
-		return expandBlock(c, auditID, src.Block, src.StageSet)
+		return expandBlock(c, auditID, src.Block, src.StageSet, src.CaptureFailed)
 	default:
 		return nil, fmt.Errorf("%w: unknown capture version %d", ErrIntegrity, src.CaptureVersion)
 	}
@@ -75,8 +75,31 @@ func expandRows(c security.Cipher, auditID string, rows []storage.HeaderEvidence
 	return values, nil
 }
 
-func expandBlock(c security.Cipher, auditID string, block *storage.HeaderBlockEvidence, stageSet []string) ([]Value, error) {
+// expandBlock opens a version 2 block. For an audit whose capture is not
+// failed the block's stages must be exactly the stage rows; anything else is
+// an integrity error.
+//
+// For a failed capture (captureFailed) a rejected write may have left the
+// two apart, and the audit must stay readable as it does on the legacy path:
+//   - a stage row without a section, or no block at all: that stage's Headers
+//     are absent, as legacy shows no rows for a header write that failed;
+//   - a section for a stage without a row: kept. Legacy has no rows there
+//     only because its header write needs the stage row; the block was
+//     authenticated under this audit and is covered by the signed digest,
+//     so dropping it would hide stored, authentic evidence.
+//
+// Authentication, decompression and strict decoding are never relaxed, and
+// the stage set itself must still be valid (known stages, no repeats).
+func expandBlock(c security.Cipher, auditID string, block *storage.HeaderBlockEvidence, stageSet []string, captureFailed bool) ([]Value, error) {
+	if captureFailed {
+		if err := validStageSet(stageSet); err != nil {
+			return nil, err
+		}
+	}
 	if block == nil {
+		if captureFailed {
+			return []Value{}, nil
+		}
 		// No block means no stage has a section, which matches only an audit
 		// without stage rows.
 		if err := CheckStageSet(nil, stageSet); err != nil {
@@ -88,15 +111,29 @@ func expandBlock(c security.Cipher, auditID string, block *storage.HeaderBlockEv
 	if err != nil {
 		return nil, err
 	}
-	if err := CheckStageSet(stages, stageSet); err != nil {
-		clearStages(stages)
-		return nil, err
+	if !captureFailed {
+		if err := CheckStageSet(stages, stageSet); err != nil {
+			clearStages(stages)
+			return nil, err
+		}
 	}
 	values := Flatten(stages)
 	if values == nil {
 		values = []Value{}
 	}
 	return values, nil
+}
+
+// validStageSet checks a stage set without comparing it to a block.
+func validStageSet(stageSet []string) error {
+	seen := make(map[string]bool, len(stageSet))
+	for _, name := range stageSet {
+		if _, ok := StageCode(name); !ok || seen[name] {
+			return fmt.Errorf("%w: invalid stage set", ErrIntegrity)
+		}
+		seen[name] = true
+	}
+	return nil
 }
 
 func clearValues(values []Value) {
