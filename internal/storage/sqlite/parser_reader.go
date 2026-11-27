@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"llmapi-logger/internal/storage"
 )
 
 const maxParserReadLimit = 1000
@@ -136,6 +138,7 @@ WHERE audit_id = ? AND stage = ?`, auditID, stageName).Scan(
 	result.Stage.ContentLength = nullInt64Pointer(contentLength)
 	result.Stage.EndedAtNS = nullInt64Pointer(endedAt)
 	result.Stage.ErrorCode = nullStringPointer(errorCode)
+	result.CaptureVersion = storage.CaptureVersion1
 
 	var body BodyStream
 	var digest []byte
@@ -280,6 +283,17 @@ ORDER BY lower(name), value_index`, arguments...)
 		return nil, fmt.Errorf("sqlite: iterate parser request headers: %w", err)
 	}
 	return result, nil
+}
+
+// LoadParserHeaderSource returns the allowlisted inbound request headers in
+// the form headerblock.Expand reads. SQLite stores capture version 1 only, so
+// it is always the rows LoadParserRequestHeaders filters in SQL.
+func (store *Store) LoadParserHeaderSource(ctx context.Context, auditID string, names []string) (HeaderSource, error) {
+	rows, err := store.LoadParserRequestHeaders(ctx, auditID, names)
+	if err != nil {
+		return HeaderSource{}, err
+	}
+	return HeaderSource{CaptureVersion: storage.CaptureVersion1, Rows: rows}, nil
 }
 
 // ReadParserChunks returns ciphertext chunks strictly after afterSeq, ordered

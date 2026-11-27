@@ -17,6 +17,7 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
@@ -572,6 +573,15 @@ func (store *fakeStore) ReadParserChunks(_ context.Context, auditID, stage strin
 		}
 	}
 	return result, nil
+}
+
+// LoadParserHeaderSource returns version 1 rows, as the SQLite store does.
+func (store *fakeStore) LoadParserHeaderSource(ctx context.Context, auditID string, names []string) (storage.HeaderSource, error) {
+	rows, err := store.LoadParserRequestHeaders(ctx, auditID, names)
+	if err != nil {
+		return storage.HeaderSource{}, err
+	}
+	return storage.HeaderSource{CaptureVersion: storage.CaptureVersion1, Rows: rows}, nil
 }
 
 func (store *fakeStore) LoadParserRequestHeaders(_ context.Context, _ string, names []string) ([]sqlite.HeaderEvidence, error) {

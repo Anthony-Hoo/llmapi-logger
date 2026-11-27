@@ -102,6 +102,8 @@ func (session *Session) finishUnified() error {
 	}
 	endedAtNS := session.now().UnixNano()
 
+	versionTwo := session.headerBlockLocked()
+	var blockStages []*stageCapture
 	for _, name := range stageNames {
 		stage := session.stages[name]
 		finish := finishes[name]
@@ -112,6 +114,13 @@ func (session *Session) finishUnified() error {
 		final.EndedAtNS = &finish.EndedAtNS
 		final.ErrorCode = finish.ErrorCode
 		stageCommit := storage.StageCommit{Stage: final, StageWritten: stage.rowWritten, BodyWritten: stage.bodyRowWritten}
+		if versionTwo {
+			content := stageContent(stage)
+			stageCommit.ContentType, stageCommit.ContentEncoding = content.ContentType, content.ContentEncoding
+			if !stage.rowWritten || session.hasStageRowLocked(stage) {
+				blockStages = append(blockStages, stage)
+			}
+		}
 		if bodyFinish := finish.Body; bodyFinish != nil {
 			body := bodyStreamOf(session.auditID, name, bodyFinish)
 			if source, ok := mergedFrom[name]; ok {
@@ -139,6 +148,17 @@ func (session *Session) finishUnified() error {
 			commit.PayloadBytes += int64(len(chunk.DataEnc))
 		}
 	}
+	// Version 2: the complete block, nil when the last checkpoint wrote the
+	// same one (C.8). A block that cannot be sealed fails the commit before it
+	// is sent; startup recovery then finalizes the audit with the block the
+	// checkpoints wrote.
+	var blockErr error
+	if versionTwo {
+		commit.HeaderBlock, _, blockErr = session.blockForLocked(blockStages)
+		if commit.HeaderBlock != nil {
+			commit.PayloadBytes += int64(len(commit.HeaderBlock.DataEnc))
+		}
+	}
 	commit.Finish = storage.AuditFinish{
 		AuditID:         session.auditID,
 		EndedAtNS:       endedAtNS,
@@ -161,7 +181,13 @@ func (session *Session) finishUnified() error {
 	session.mu.Unlock()
 
 	var writeErrors []error
-	if persisted, err := session.commitWithRetries(commit); err != nil {
+	commitWithRetries := session.commitWithRetries
+	if blockErr != nil {
+		commitWithRetries = func(storage.AuditCommit) (storage.AuditFinish, error) {
+			return storage.AuditFinish{}, fmt.Errorf("seal header block: %w", blockErr)
+		}
+	}
+	if persisted, err := commitWithRetries(commit); err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("commit audit: %w", err))
 		captureStatus = storage.CapturePartial
 		if errorCode == nil {
@@ -198,6 +224,7 @@ func (session *Session) finishUnified() error {
 	}
 	session.mu.Lock()
 	session.releaseRetainedLocked()
+	session.clearHeaderFieldsLocked()
 	session.terminal = &terminal
 	session.mu.Unlock()
 	return errors.Join(writeErrors...)

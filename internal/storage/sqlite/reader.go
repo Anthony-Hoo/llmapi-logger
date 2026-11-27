@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"llmapi-logger/internal/storage"
 )
 
 const stageOrderSQL = `CASE stage
@@ -129,6 +131,7 @@ func scanAudit(row rowScanner, destination *AuditRecord) error {
 	destination.NewAPIRequestID = nullStringPointer(requestID)
 	destination.CallerNextAtNS = nullInt64Pointer(callerNextAt)
 	destination.CallerUpdatedAtNS = nullInt64Pointer(callerUpdatedAt)
+	destination.CaptureVersion = storage.CaptureVersion1
 	return nil
 }
 

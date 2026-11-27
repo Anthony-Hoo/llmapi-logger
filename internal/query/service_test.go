@@ -15,6 +15,7 @@ import (
 
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
@@ -899,11 +900,20 @@ type fakeStore struct {
 
 func (store *fakeStore) Healthy() bool { return store.healthy }
 
+// The fake stores version 1 audits unless a row says otherwise, as the SQLite
+// store does; a zero capture version is filled in as 1.
 func (store *fakeStore) ListAudits(_ context.Context, filter sqlite.AuditQueryFilter, cursor sqlite.AuditQueryCursor, limit int) (sqlite.AuditListPage, error) {
+	page, err := store.listPage, store.listErr
 	if store.listFunc != nil {
-		return store.listFunc(filter, cursor, limit)
+		page, err = store.listFunc(filter, cursor, limit)
 	}
-	return store.listPage, store.listErr
+	rows := make([]sqlite.AuditListRow, len(page.Rows))
+	for index, row := range page.Rows {
+		row.CaptureVersion = storage.EffectiveCaptureVersion(row.CaptureVersion)
+		rows[index] = row
+	}
+	page.Rows = rows
+	return page, err
 }
 
 func (store *fakeStore) QueryRequestHeaderEvidence(_ context.Context, auditID string) ([]sqlite.HeaderEvidence, error) {
@@ -911,7 +921,9 @@ func (store *fakeStore) QueryRequestHeaderEvidence(_ context.Context, auditID st
 }
 
 func (store *fakeStore) QueryAuditDetail(context.Context, string, *sqlite.AuditScope) (sqlite.AuditQueryDetail, error) {
-	return store.detail, store.detailErr
+	detail := store.detail
+	detail.Audit.CaptureVersion = storage.EffectiveCaptureVersion(detail.Audit.CaptureVersion)
+	return detail, store.detailErr
 }
 
 // QueryAuditMetadata returns only the part of detail the stores read for it.

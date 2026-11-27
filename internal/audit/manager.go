@@ -219,13 +219,11 @@ func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *se
 }
 
 // captureVersionFor is the single place that chooses the capture version of
-// the unified path. Version 2 (the header block) needs a store that writes
-// it; this step writes version 1 only, so the answer is ignored until the
-// version 2 session lands.
+// the unified path: version 2 (the header block) on a store that writes it,
+// which is PostgreSQL; version 1 otherwise, which is SQLite (H.2).
 func captureVersionFor(store Store) int {
 	if support, ok := store.(headerBlockSupport); ok && support.SupportsHeaderBlock() {
-		// Version 2 branch point: the header block is not written yet.
-		return storage.CaptureVersion1
+		return storage.CaptureVersion2
 	}
 	return storage.CaptureVersion1
 }

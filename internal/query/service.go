@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"llmapi-logger/internal/conversation"
+	"llmapi-logger/internal/headerblock"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -101,7 +102,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 
 	page := Page{Items: make([]AuditSummary, 0, len(storagePage.Rows))}
 	for _, row := range storagePage.Rows {
-		userAgent, _, err := service.readUserAgent(ctx, row.AuditID, "")
+		userAgent, _, err := service.readUserAgent(ctx, row, "")
 		if err != nil {
 			return Page{}, err
 		}
@@ -147,7 +148,7 @@ func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter
 		}
 		for index, row := range storagePage.Rows {
 			scanned++
-			userAgent, matches, err := service.readUserAgent(ctx, row.AuditID, filter.UserAgent)
+			userAgent, matches, err := service.readUserAgent(ctx, row, filter.UserAgent)
 			if err != nil {
 				return Page{}, err
 			}
@@ -174,32 +175,51 @@ func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter
 	return page, nil
 }
 
-func (service *Service) readUserAgent(ctx context.Context, auditID, needle string) (*string, bool, error) {
-	headers, err := service.store.QueryRequestHeaderEvidence(ctx, auditID)
-	if err != nil {
-		return nil, false, fmt.Errorf("query: read request headers: %w", err)
+// readUserAgent returns the inbound User-Agent the list shows for one row (its
+// first value) and whether any value contains needle, ignoring case; without
+// a User-Agent nothing matches. It dispatches on capture_version (C.5):
+// version 2 opens user_agent_enc, which the list query already returned;
+// version 1 reads the row's http_headers values with one query per row.
+func (service *Service) readUserAgent(ctx context.Context, row storage.AuditListRow, needle string) (*string, bool, error) {
+	var values []string
+	switch row.CaptureVersion {
+	case storage.CaptureVersion1:
+		headers, err := service.store.QueryRequestHeaderEvidence(ctx, row.AuditID)
+		if err != nil {
+			return nil, false, fmt.Errorf("query: read request headers: %w", err)
+		}
+		for _, header := range headers {
+			if !strings.EqualFold(header.Name, "user-agent") {
+				continue
+			}
+			plaintext, err := service.decryptHeader(row.AuditID, header)
+			if err != nil {
+				return nil, false, err
+			}
+			values = append(values, string(plaintext))
+			clear(plaintext)
+		}
+	case storage.CaptureVersion2:
+		opened, err := headerblock.OpenUserAgent(service.cipher, row.AuditID, row.UserAgentEnc)
+		if err != nil {
+			return nil, false, ErrIntegrity
+		}
+		values = opened
+	default:
+		return nil, false, ErrIntegrity
 	}
-	var userAgent *string
+	if len(values) == 0 {
+		return nil, false, nil
+	}
+	userAgent := values[0]
 	matched := needle == ""
 	userAgentNeedle := strings.ToLower(needle)
-	for _, header := range headers {
-		if !strings.EqualFold(header.Name, "user-agent") {
-			continue
-		}
-		plaintext, err := service.decryptHeader(auditID, header)
-		if err != nil {
-			return nil, false, err
-		}
-		value := string(plaintext)
-		clear(plaintext)
-		if userAgent == nil {
-			userAgent = &value
-		}
+	for _, value := range values {
 		if needle != "" && strings.Contains(strings.ToLower(value), userAgentNeedle) {
 			matched = true
 		}
 	}
-	return userAgent, matched && userAgent != nil, nil
+	return &userAgent, matched, nil
 }
 
 func (service *Service) decryptHeader(auditID string, header storage.HeaderEvidence) ([]byte, error) {
@@ -352,7 +372,7 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 	detail := Detail{
 		Audit:   mapAudit(storageDetail.Audit),
 		Stages:  mapStages(storageDetail.Stages),
-		Headers: make([]Header, 0, len(storageDetail.Headers)),
+		Headers: make([]Header, 0),
 		Bodies:  mapBodies(storageDetail.Bodies),
 	}
 	requestURIAAD, err := security.AAD(auditID, "request_uri")
@@ -365,33 +385,23 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 	}
 	detail.RequestURI = string(requestURI)
 	clear(requestURI)
-	for _, header := range storageDetail.Headers {
-		aad, err := security.AAD(
-			auditID,
-			"header",
-			header.Stage,
-			header.Kind,
-			header.Name,
-			strconv.Itoa(header.ValueIndex),
-		)
-		if err != nil {
-			return Detail{}, ErrIntegrity
-		}
-		plaintext, err := service.cipher.Decrypt(aad, header.ValueEnc)
-		if err != nil || len(plaintext) != header.ValueLength {
-			clear(plaintext)
-			return Detail{}, ErrIntegrity
-		}
-		value := string(plaintext)
-		clear(plaintext)
+	// Both capture versions expand to the same flat list in the same order
+	// (headerblock.Expand), so the web view, the Agent API, its credential
+	// masking and the exports see no difference.
+	headers, err := headerblock.Expand(service.cipher, auditID, storageDetail.HeaderSource())
+	if err != nil {
+		return Detail{}, ErrIntegrity
+	}
+	for _, header := range headers {
 		detail.Headers = append(detail.Headers, Header{
 			Stage:       header.Stage,
 			Kind:        header.Kind,
 			Name:        header.Name,
 			ValueIndex:  header.ValueIndex,
-			ValueLength: header.ValueLength,
-			Value:       value,
+			ValueLength: len(header.Value),
+			Value:       string(header.Value),
 		})
+		clear(header.Value)
 	}
 	if parsed := storageDetail.ParsedResult; parsed != nil {
 		detail.ParsedResult = &ParsedResult{

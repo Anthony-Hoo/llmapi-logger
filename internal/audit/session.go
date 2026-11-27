@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/bodycodec"
+	"llmapi-logger/internal/headerblock"
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -49,6 +50,11 @@ type stageCapture struct {
 	// merged: a checkpoint wrote this duplicate's body row pointing at its
 	// source, without chunks of its own.
 	merged bool
+	// Capture version 2: the Header fields snapshotted at stage start and the
+	// Trailer fields when they arrived (hasTrailers).
+	headerFields  []headerblock.Field
+	trailerFields []headerblock.Field
+	hasTrailers   bool
 }
 
 // TerminalSummary is the immutable, non-sensitive request outcome available
@@ -115,6 +121,10 @@ type Session struct {
 	// inboundNotStored: BeginAudit kept the start row without the inbound
 	// stage (storage.ErrInboundStageNotStored).
 	inboundNotStored bool
+	// writtenBlock is the shape of the last header block an accepted write
+	// carried (capture version 2); blockWritten is false before the first.
+	writtenBlock blockShape
+	blockWritten bool
 }
 
 func newSession(manager *Manager, requestContext context.Context, auditID, routeID string, started time.Time) *Session {
@@ -654,6 +664,10 @@ func (session *Session) addHeaders(stageName, kind string, headers http.Header) 
 
 func (session *Session) addHeadersLocked(stage *stageCapture, kind string, headers http.Header) {
 	if len(headers) == 0 || !stage.persisted {
+		return
+	}
+	if session.headerBlockLocked() {
+		session.snapshotHeadersLocked(stage, kind, headers)
 		return
 	}
 	if session.manager != nil {

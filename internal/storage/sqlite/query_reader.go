@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"llmapi-logger/internal/storage"
 )
 
 // ListAudits reads only the narrow columns needed by the audit list. limit is
@@ -495,6 +497,8 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	destination.Username = nullStringPointer(username)
 	destination.NewAPITokenID = nullInt64Pointer(newAPITokenID)
 	destination.TokenName = nullStringPointer(tokenName)
+	// SQLite only ever stores capture version 1 (http_headers rows).
+	destination.CaptureVersion = storage.CaptureVersion1
 	return nil
 }
 

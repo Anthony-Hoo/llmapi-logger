@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"llmapi-logger/internal/bodycodec"
+	"llmapi-logger/internal/headerblock"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -46,14 +48,24 @@ func (worker *Worker) loadInput(ctx context.Context, audit storage.ParserAudit) 
 
 // loadRequestHeaders decrypts the allowlisted inbound request headers with the
 // same AAD the query service verifies. Any failure discards the partial set.
+//
+// A version 1 audit has its rows filtered by name in SQL and only those are
+// decrypted. A version 2 audit keeps all its Headers in one ciphertext, so the
+// whole block is opened in the process and the other values are cleared right
+// after filtering; the maintainer accepted that for this internal tool
+// (design decision 2, module 09).
 func (worker *Worker) loadRequestHeaders(ctx context.Context, auditID string, names []string) (http.Header, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
-	evidence, err := worker.store.LoadParserRequestHeaders(ctx, auditID, names)
+	source, err := worker.store.LoadParserHeaderSource(ctx, auditID, names)
 	if err != nil {
 		return nil, err
 	}
+	if source.CaptureVersion == storage.CaptureVersion2 {
+		return worker.filterBlockHeaders(auditID, source, names)
+	}
+	evidence := source.Rows
 	if len(evidence) == 0 {
 		return nil, nil
 	}
@@ -74,6 +86,50 @@ func (worker *Worker) loadRequestHeaders(ctx context.Context, auditID string, na
 	return headers, nil
 }
 
+// filterBlockHeaders keeps, from an opened version 2 block, what the version
+// 1 query selects: request_received Headers (not Trailers) whose lower-case
+// name is on the allowlist, in the query's order (lower-case name, then
+// value_index; the stored name breaks a tie).
+func (worker *Worker) filterBlockHeaders(auditID string, source storage.HeaderSource, names []string) (http.Header, error) {
+	allowed := make(map[string]bool, len(names))
+	for _, name := range names {
+		if lowered := strings.ToLower(strings.TrimSpace(name)); lowered != "" {
+			allowed[lowered] = true
+		}
+	}
+	values, err := headerblock.Expand(worker.cipher, auditID, source)
+	if err != nil {
+		return nil, errors.New("parser: request header integrity failure")
+	}
+	selected := make([]headerblock.Value, 0, len(allowed))
+	for _, value := range values {
+		if value.Stage == storage.StageRequestReceived && value.Kind == storage.HeaderKindHeader && allowed[strings.ToLower(value.Name)] {
+			selected = append(selected, value)
+			continue
+		}
+		clear(value.Value)
+	}
+	if len(selected) == 0 {
+		return nil, nil
+	}
+	sort.SliceStable(selected, func(left, right int) bool {
+		leftName, rightName := strings.ToLower(selected[left].Name), strings.ToLower(selected[right].Name)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		if selected[left].ValueIndex != selected[right].ValueIndex {
+			return selected[left].ValueIndex < selected[right].ValueIndex
+		}
+		return selected[left].Name < selected[right].Name
+	})
+	headers := make(http.Header, len(selected))
+	for _, value := range selected {
+		headers.Add(value.Name, string(value.Value))
+		clear(value.Value)
+	}
+	return headers, nil
+}
+
 func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (BodySource, *int, error) {
 	stage, err := worker.store.LoadParserStage(ctx, auditID, stageName)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -88,7 +144,16 @@ func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (
 	}
 
 	source := BodySource{Present: true, Complete: true}
-	if err := worker.decryptContentHeaders(auditID, stageName, stage.Headers, &source); err != nil {
+	if stage.CaptureVersion == storage.CaptureVersion2 {
+		// Version 2 stores the chosen values on the stage row (C.6); the
+		// header block is not opened for them.
+		if stage.ContentType != nil {
+			source.ContentType = *stage.ContentType
+		}
+		if stage.ContentEncoding != nil {
+			source.ContentEncoding = *stage.ContentEncoding
+		}
+	} else if err := worker.decryptContentHeaders(auditID, stageName, stage.Headers, &source); err != nil {
 		source.Complete = false
 		source.ErrorCode = "capture_integrity_error"
 		return source, statusCode, err

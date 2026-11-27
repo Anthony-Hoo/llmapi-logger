@@ -45,7 +45,10 @@ type Store interface {
 	ReleaseProcessingParse(context.Context, string) error
 	LoadParserStage(context.Context, string, string) (storage.ParserStage, error)
 	ReadParserChunks(context.Context, string, string, int64, int) ([]storage.BodyChunk, error)
-	LoadParserRequestHeaders(context.Context, string, []string) ([]storage.HeaderEvidence, error)
+	// LoadParserHeaderSource returns the allowlisted inbound request headers:
+	// the filtered rows of a version 1 audit, the whole block of a version 2
+	// audit (loadRequestHeaders filters it in the process).
+	LoadParserHeaderSource(context.Context, string, []string) (storage.HeaderSource, error)
 	SaveParsedResult(context.Context, storage.ParsedResult) error
 	SaveParsedAudit(context.Context, storage.ParsedAudit) error
 }

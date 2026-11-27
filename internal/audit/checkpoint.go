@@ -42,14 +42,29 @@ func (manager *Manager) beginUnified(ctx context.Context, request *http.Request,
 	for _, group := range stage.groups {
 		inbound.Headers = append(inbound.Headers, group.rows...)
 	}
-	session.mu.Unlock()
 	record.Inbound = &inbound
 	record.CaptureVersion = manager.captureVersion
+	inboundWritten := true
+	var shape blockShape
+	if session.headerBlockLocked() {
+		// Version 2: the sealed User-Agent and a block with the inbound
+		// stage alone (K items 1 and 8). Without a block the stage is left
+		// to the next write.
+		shape, inboundWritten = session.sealInboundLocked(stage, &record)
+		if !inboundWritten {
+			record.Inbound = nil
+		}
+	}
+	session.mu.Unlock()
 	err := manager.store.BeginAudit(ctx, record)
 	switch {
+	case err == nil && !inboundWritten:
 	case err == nil:
 		session.mu.Lock()
 		session.markStageWrittenLocked(stage)
+		if session.headerBlockLocked() {
+			session.markBlockWrittenLocked(shape)
+		}
 		session.mu.Unlock()
 	case errors.Is(err, storage.ErrInboundStageNotStored):
 		session.inboundStageNotStored(stage)
@@ -185,8 +200,9 @@ func (session *Session) forwardInProgressLocked() bool {
 // bodies are left to the commit.
 func (session *Session) checkpointLocked() {
 	checkpoint := storage.AuditCheckpoint{AuditID: session.auditID, CaptureVersion: session.manager.captureVersion}
+	versionTwo := session.headerBlockLocked()
 	var chunks storage.ChunkList
-	var newStages, chunkStages []*stageCapture
+	var newStages, chunkStages, blockStages []*stageCapture
 	var newBodies []*stageCapture
 	merges := map[*stageCapture]bool{}
 	for _, name := range stageNamesInOrder {
@@ -197,6 +213,12 @@ func (session *Session) checkpointLocked() {
 		if !stage.rowWritten {
 			checkpoint.Stages = append(checkpoint.Stages, stageStartValues(session.auditID, stage))
 			newStages = append(newStages, stage)
+			if versionTwo {
+				checkpoint.Contents = append(checkpoint.Contents, stageContent(stage))
+			}
+		}
+		if !stage.rowWritten || session.hasStageRowLocked(stage) {
+			blockStages = append(blockStages, stage)
 		}
 		for _, group := range stage.groups {
 			if !group.written {
@@ -227,7 +249,18 @@ func (session *Session) checkpointLocked() {
 		}
 		chunkStages = append(chunkStages, stage)
 	}
-	if len(checkpoint.Stages) == 0 && len(checkpoint.Headers) == 0 && len(checkpoint.Bodies) == 0 && len(chunks) == 0 {
+	var shape blockShape
+	if versionTwo {
+		// The whole block of the stages written so far, this checkpoint's
+		// included (C.8); left out when the last one written is the same.
+		block, blockShape, err := session.blockForLocked(blockStages)
+		if err != nil {
+			session.logCheckpointDeferred(err)
+			return
+		}
+		checkpoint.HeaderBlock, shape = block, blockShape
+	}
+	if len(checkpoint.Stages) == 0 && len(checkpoint.Headers) == 0 && len(checkpoint.Bodies) == 0 && len(chunks) == 0 && checkpoint.HeaderBlock == nil {
 		return
 	}
 	if len(chunks) != 0 {
@@ -241,6 +274,9 @@ func (session *Session) checkpointLocked() {
 	}
 	for _, stage := range newStages {
 		stage.rowWritten = true
+	}
+	if checkpoint.HeaderBlock != nil {
+		session.markBlockWrittenLocked(shape)
 	}
 	for _, stage := range session.stages {
 		for index := range stage.groups {

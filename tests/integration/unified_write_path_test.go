@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +18,10 @@ import (
 	"time"
 
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/headerblock"
 	"llmapi-logger/internal/protofixture"
+	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/postgres"
 )
 
@@ -43,17 +47,88 @@ func unifiedConfig(t *testing.T, upstreamURL, writePath string) config.Config {
 }
 
 // storedShape is what both write paths must agree on for one audit, without
-// identifiers, times and ciphertext.
+// identifiers, times and ciphertext. Header is the audit's Headers expanded
+// through headerblock.Expand, whichever capture version stored them;
+// DetailHeaders is the same list as the detail API returns it.
 type storedShape struct {
-	Audit  string
-	Stages []string
-	Bodies []string
-	Chunks []string
-	Header []string
-	Detail string
+	Audit         string
+	Stages        []string
+	Bodies        []string
+	Chunks        []string
+	Header        []string
+	DetailHeaders string
+	Detail        string
+	Events        []string
 }
 
-func readStoredShape(t *testing.T, database *sql.DB, client *http.Client, adminURL, auditID string) storedShape {
+// headerValueShown is how a Header value enters the comparison: the values
+// that differ between two runs by nature (the exchange id, the request id the
+// fake upstream echoes, the server's Date) are left out or reduced to their
+// length.
+func headerValueShown(name, value string) (string, bool) {
+	switch http.CanonicalHeaderKey(name) {
+	case "X-Oneapi-Request-Id", "X-Protofixture-Exchange":
+		return "", false
+	case "Date":
+		return fmt.Sprintf("len=%d", len(value)), true
+	}
+	return value, true
+}
+
+// readHeaderSource assembles the Header evidence of one audit as the store's
+// detail reader does: capture_version, the http_headers rows, the block and
+// the stage set.
+func readHeaderSource(t *testing.T, database *sql.DB, auditID string) storage.HeaderSource {
+	t.Helper()
+	var source storage.HeaderSource
+	if err := database.QueryRow(`SELECT capture_version FROM audit_records WHERE audit_id = $1`, auditID).Scan(&source.CaptureVersion); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.Query(`SELECT stage, kind, name, value_index, value_length, value_enc FROM http_headers WHERE audit_id = $1`, auditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var row storage.HeaderEvidence
+		if err := rows.Scan(&row.Stage, &row.Kind, &row.Name, &row.ValueIndex, &row.ValueLength, &row.ValueEnc); err != nil {
+			t.Fatal(err)
+		}
+		source.Rows = append(source.Rows, row)
+	}
+	rows.Close()
+	var block storage.HeaderBlockEvidence
+	switch err := database.QueryRow(`SELECT compression, plaintext_length, block_enc FROM http_header_blocks WHERE audit_id = $1`, auditID).
+		Scan(&block.Compression, &block.PlaintextLength, &block.DataEnc); {
+	case err == nil:
+		source.Block = &block
+	case !errors.Is(err, sql.ErrNoRows):
+		t.Fatal(err)
+	}
+	stages, err := database.Query(`SELECT stage FROM http_stages WHERE audit_id = $1`, auditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for stages.Next() {
+		var stage string
+		if err := stages.Scan(&stage); err != nil {
+			t.Fatal(err)
+		}
+		source.StageSet = append(source.StageSet, stage)
+	}
+	stages.Close()
+	return source
+}
+
+func expandStoredHeaders(t *testing.T, database *sql.DB, cipher security.Cipher, auditID string) []headerblock.Value {
+	t.Helper()
+	values, err := headerblock.Expand(cipher, auditID, readHeaderSource(t, database, auditID))
+	if err != nil {
+		t.Fatalf("%s: expand headers: %v", auditID, err)
+	}
+	return values
+}
+
+func readStoredShape(t *testing.T, database *sql.DB, client *http.Client, adminURL string, cipher security.Cipher, auditID string) storedShape {
 	t.Helper()
 	var shape storedShape
 	var forward, capture, parse string
@@ -84,12 +159,17 @@ func readStoredShape(t *testing.T, database *sql.DB, client *http.Client, adminU
 		}
 		return out
 	}
-	shape.Stages = collect(`SELECT stage, state, status_code, content_length, error_code FROM http_stages WHERE audit_id = $1 ORDER BY stage`)
+	// host is left out: the two apps listen on different ports.
+	shape.Stages = collect(`SELECT stage, state, proto, method, status_code, content_length, error_code FROM http_stages WHERE audit_id = $1 ORDER BY stage`)
 	shape.Bodies = collect(`SELECT stage, source_stage, observed_length, stored_length, encode(sha256, 'hex'), hash_complete, eof_seen, state,
 		retention_state, chunk_count, stream_event_count, stream_timeline_complete, error_code FROM body_streams WHERE audit_id = $1 ORDER BY stage`)
 	shape.Chunks = collect(`SELECT stage, seq, "offset", plaintext_length, compression FROM body_chunks WHERE audit_id = $1 ORDER BY stage, seq`)
-	shape.Header = collect(`SELECT stage, kind, name, value_index, value_length FROM http_headers WHERE audit_id = $1
-		AND name NOT IN ('X-Oneapi-Request-Id', 'X-Protofixture-Exchange') ORDER BY stage, kind, name, value_index`)
+	shape.Events = collect(`SELECT event_type FROM integrity_events WHERE audit_id = $1 ORDER BY sequence`)
+	for _, value := range expandStoredHeaders(t, database, cipher, auditID) {
+		if shown, ok := headerValueShown(value.Name, string(value.Value)); ok {
+			shape.Header = append(shape.Header, fmt.Sprintf("%s %s %s %d %q", value.Stage, value.Kind, value.Name, value.ValueIndex, shown))
+		}
+	}
 	var detail map[string]any
 	if err := json.Unmarshal(authorizedAdminGET(t, client, adminURL+"/api/v1/audits/"+auditID), &detail); err != nil {
 		t.Fatal(err)
@@ -97,7 +177,109 @@ func readStoredShape(t *testing.T, database *sql.DB, client *http.Client, adminU
 	conversation, _ := json.Marshal(detail["conversation"])
 	parsed, _ := json.Marshal(detail["parsed_result"])
 	shape.Detail = string(conversation) + string(parsedWithoutTimes(parsed))
+	headers, _ := detail["headers"].([]any)
+	kept := make([]any, 0, len(headers))
+	for _, entry := range headers {
+		header, _ := entry.(map[string]any)
+		name, _ := header["name"].(string)
+		value, _ := header["value"].(string)
+		if shown, ok := headerValueShown(name, value); ok {
+			header["value"] = shown
+			if http.CanonicalHeaderKey(name) == "Date" {
+				delete(header, "value_length")
+			}
+			kept = append(kept, header)
+		}
+	}
+	encoded, _ := json.Marshal(kept)
+	shape.DetailHeaders = string(encoded)
 	return shape
+}
+
+// requireCaptureVersionsAcross checks what differs by design between the two write
+// paths on PostgreSQL (B.10): legacy rows are version 1 with no block,
+// User-Agent or content columns; unified rows are version 2 with no header
+// rows, the User-Agent the list reads and the content headers the parser
+// would choose from the same Headers.
+func requireCaptureVersionsAcross(t *testing.T, label string, legacyDB, unifiedDB *sql.DB, legacyCipher, unifiedCipher security.Cipher, legacyID, unifiedID string) {
+	t.Helper()
+	var legacyVersion, unifiedVersion, legacyBlocks, unifiedRows, legacyContent int
+	var legacyAgent, unifiedAgent []byte
+	if err := legacyDB.QueryRow(`SELECT capture_version, user_agent_enc, (SELECT COUNT(*) FROM http_header_blocks WHERE audit_id = $1),
+		(SELECT COUNT(*) FROM http_stages WHERE audit_id = $1 AND (content_type IS NOT NULL OR content_encoding IS NOT NULL))
+		FROM audit_records WHERE audit_id = $1`, legacyID).Scan(&legacyVersion, &legacyAgent, &legacyBlocks, &legacyContent); err != nil {
+		t.Fatal(err)
+	}
+	if err := unifiedDB.QueryRow(`SELECT capture_version, user_agent_enc, (SELECT COUNT(*) FROM http_headers WHERE audit_id = $1)
+		FROM audit_records WHERE audit_id = $1`, unifiedID).Scan(&unifiedVersion, &unifiedAgent, &unifiedRows); err != nil {
+		t.Fatal(err)
+	}
+	if legacyVersion != 1 || legacyAgent != nil || legacyBlocks != 0 || legacyContent != 0 || unifiedVersion != 2 || unifiedRows != 0 {
+		t.Fatalf("%s: legacy version %d (user agent %v, %d blocks, %d content columns), unified version %d with %d header rows",
+			label, legacyVersion, legacyAgent != nil, legacyBlocks, legacyContent, unifiedVersion, unifiedRows)
+	}
+	legacyHeaders := expandStoredHeaders(t, legacyDB, legacyCipher, legacyID)
+	var fields []headerblock.Field
+	for _, value := range legacyHeaders {
+		if value.Stage == storage.StageRequestReceived && value.Kind == storage.HeaderKindHeader {
+			if len(fields) == 0 || fields[len(fields)-1].Name != value.Name {
+				fields = append(fields, headerblock.Field{Name: value.Name})
+			}
+			fields[len(fields)-1].Values = append(fields[len(fields)-1].Values, value.Value)
+		}
+	}
+	agents, err := headerblock.OpenUserAgent(unifiedCipher, unifiedID, unifiedAgent)
+	if want := headerblock.UserAgentValues(fields); err != nil || !reflect.DeepEqual(agents, want) {
+		t.Fatalf("%s: user_agent_enc %q (%v), legacy User-Agent %q", label, agents, err, want)
+	}
+	rows, err := unifiedDB.Query(`SELECT stage, content_type, content_encoding FROM http_stages WHERE audit_id = $1`, unifiedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var stage string
+		var contentType, contentEncoding sql.NullString
+		if err := rows.Scan(&stage, &contentType, &contentEncoding); err != nil {
+			t.Fatal(err)
+		}
+		// The parser's rule on the legacy rows (decryptContentHeaders): the
+		// first non-empty value of a Header whose lower-case name matches.
+		var wantType, wantEncoding string
+		for _, value := range legacyHeaders {
+			if value.Stage != stage || value.Kind != storage.HeaderKindHeader || len(value.Value) == 0 {
+				continue
+			}
+			switch strings.ToLower(value.Name) {
+			case "content-type":
+				if wantType == "" {
+					wantType = string(value.Value)
+				}
+			case "content-encoding":
+				if wantEncoding == "" {
+					wantEncoding = string(value.Value)
+				}
+			}
+		}
+		if contentType.String != wantType || contentType.Valid != (wantType != "") ||
+			contentEncoding.String != wantEncoding || contentEncoding.Valid != (wantEncoding != "") {
+			t.Fatalf("%s: %s content columns %v %v, legacy headers say %q %q", label, stage, contentType, contentEncoding, wantType, wantEncoding)
+		}
+	}
+}
+
+// appCipher opens the audit key of a running app's configuration.
+func appCipher(t *testing.T, cfg config.Config) security.Cipher {
+	t.Helper()
+	key, err := security.LoadOrCreateKey(cfg.KeyPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewAESGCM(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cipher
 }
 
 func parsedWithoutTimes(raw []byte) []byte {
@@ -129,8 +311,9 @@ func waitParsed(t *testing.T, database *sql.DB, auditID string) {
 	t.Fatalf("audit %s did not finish parsing", auditID)
 }
 
-// The unified write path on PostgreSQL (version 1 rows): a few requests of
-// every protocol are stored, parsed, verified and readable as on legacy.
+// The unified write path on PostgreSQL stores capture version 2: a few
+// requests of every protocol, a large streamed answer and one cut after 2 MiB
+// are stored, parsed, verified and read back as on legacy (version 1).
 func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 	upstream := protofixture.NewUpstream("ux")
 	server := httptest.NewServer(upstream)
@@ -139,6 +322,8 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 	unifiedConfigValue := unifiedConfig(t, server.URL, config.AuditWritePathUnified)
 	legacy := startApp(t, legacyConfig)
 	unified := startApp(t, unifiedConfigValue)
+	cipher := appCipher(t, legacyConfig)
+	unifiedCipher := appCipher(t, unifiedConfigValue)
 	client := &http.Client{Timeout: 3 * integrationTimeout}
 	legacyDB := openAuditDatabase(t, legacyConfig.DatabaseURL)
 	defer legacyDB.Close()
@@ -191,8 +376,9 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 				if legacyStatus != unifiedStatus || !bytes.Equal(legacyBody, unifiedBody) {
 					t.Fatalf("%s: client saw %d and %d", value, legacyStatus, unifiedStatus)
 				}
-				legacyShape := readStoredShape(t, legacyDB, client, legacy.adminURL, legacyID)
-				unifiedShape := readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedID)
+				legacyShape := readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID)
+				unifiedShape := readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
+				requireCaptureVersionsAcross(t, value.String(), legacyDB, unifiedDB, cipher, unifiedCipher, legacyID, unifiedID)
 				if !reflect.DeepEqual(legacyShape, unifiedShape) {
 					t.Fatalf("%s: stored audits differ:\n legacy  %+v\n unified %+v", value, legacyShape, unifiedShape)
 				}
@@ -221,7 +407,7 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 	if legacyStatus != unifiedStatus || !bytes.Equal(legacyBody, unifiedBody) || len(unifiedBody) < 5<<19 {
 		t.Fatalf("large answer: client saw %d (%d bytes) and %d (%d bytes)", legacyStatus, len(legacyBody), unifiedStatus, len(unifiedBody))
 	}
-	if legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedID); !reflect.DeepEqual(legacyShape, unifiedShape) {
+	if legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID); !reflect.DeepEqual(legacyShape, unifiedShape) {
 		t.Fatalf("large answer: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
 	}
 	cases++
@@ -230,7 +416,7 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 	exchange.Response.CutAt, exchange.Response.Abort = 2<<20+333, true
 	legacyStatus, _, legacyID = send(legacy, legacyDB, exchange)
 	unifiedStatus, _, unifiedID = send(unified, unifiedDB, exchange)
-	legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedID)
+	legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
 	if legacyStatus != unifiedStatus || !reflect.DeepEqual(legacyShape, unifiedShape) {
 		t.Fatalf("cut answer: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
 	}

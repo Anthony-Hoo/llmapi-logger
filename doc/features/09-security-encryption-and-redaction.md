@@ -63,8 +63,8 @@ AAD 使用 NUL 分隔的受控字段，禁止调用方随意拼接不同格式�
 | binary object | `binary_object`、binary hash、compression |
 | external ref | `external_ref`、content hash、JSON pointer、ref kind |
 | stream timeline | audit id、`stream_timeline_v1`、stage、compression |
-| Header 块（`capture_version=2`，尚未启用） | audit id、`header_block_v1`、compression |
-| 入站 User-Agent（`capture_version=2`，尚未启用） | audit id、`user_agent_v1` |
+| Header 块（`capture_version=2`） | audit id、`header_block_v1`、compression |
+| 入站 User-Agent（`capture_version=2`） | audit id、`user_agent_v1` |
 
 解密后还必须校验 plaintext/encoded length、object hash、semantic hash、binary hash、sequence hash 和 reconstruction hash。GCM 成功不代表结构自动可信。
 
@@ -83,7 +83,7 @@ JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`
 
 ### 5.2 Header 块与入站 User-Agent
 
-`internal/headerblock` 实现第 3 阶段设计（`doc/design/issue-59-stage3-write-path.md` C.3 到 C.8）的存储格式。写入路径和读取方还没有用它，现有记录都是逐值加密的 `http_headers` 行（`capture_version=1`）。
+`internal/headerblock` 实现第 3 阶段设计（`doc/design/issue-59-stage3-write-path.md` C.3 到 C.8）的存储格式。PostgreSQL 上 `audit.write_path: unified` 的新记录按它写（`capture_version=2`，迁移 007）；legacy 写入路径和 SQLite 存储照旧逐值加密写 `http_headers` 行（`capture_version=1`）。两种记录并存，读取方一律按 `capture_version` 分派。
 
 - **块明文：** `"LLHB" 0x01`，之后每个已写入的阶段一段：阶段码（1 到 4，按阶段顺序严格递增），header 段，trailer 段。每段是 `u32be(名称数)`，每个名称是 `u32be(长度) 名称 u32be(值数) (u32be(长度) 值)+`，整数都是大端。名称按字节序严格递增，值数至少为 1，明文不超过 64 MiB。解码逐条校验这些规则和长度，不允许尾随字节，所以一段明文只有一种解码。
 - **存储：** 明文经 `bodycodec` 按 `application/x-llmapi-header-block` 判定是否 gzip，再 AES-GCM 加密，存 `compression`、`plaintext_length` 和密文三项。读取时依次认证解密、按 `plaintext_length` 解压核对长度、严格解码。
@@ -91,6 +91,27 @@ JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`
 - **User-Agent：** `0x01 (u32be(长度) 值)+`，取 `request_received` 中名称与 `user-agent` 不区分大小写相等的全部值，不压缩。没有这个 Header 时存 NULL，与“有一个空值”区分。
 - **读取入口：** `headerblock.Expand` 按 `capture_version` 分派：1 用上表的逐值 AAD 解密各行，2 打开整块；两者输出同一个扁平列表（阶段顺序、header 先于 trailer、名称字节序、value index）。
 - **测试向量：** `internal/headerblock/testdata/vectors.json` 固定块明文、拒绝样例、两个 AAD、User-Agent 编码，以及用合成密钥封好的块和 User-Agent，供另一份实现对照。
+- **何时写：** `BeginAudit` 写 `user_agent_enc` 和只含入站阶段的块；之后每次插入阶段行的写（两个检查点、`CommitAudit`）都覆盖写一次整块，含到那时为止已写入的全部阶段，所以块里的阶段集合始终等于阶段行集合。trailer 到达后，下一次写也会带上新块；`CommitAudit` 时块与最后一次检查点写的相同（没有响应 trailer）就不再写。崩溃或终结失败的记录留下最后一次成功写入的块，恢复时对它签名（D.4）。
+
+### 5.3 加密列与明文列（`capture_version=2` 之后）
+
+与采集有关的密文列：
+
+| 列 | 内容 | 版本 |
+| --- | --- | --- |
+| `audit_records.request_uri_enc` | Request-URI | 1、2 |
+| `audit_records.user_agent_enc`（新） | 入站 User-Agent 的全部值 | 2；版本 1 恒为 NULL |
+| `http_headers.value_enc` | 一个 Header 或 Trailer 值 | 1；版本 2 没有这张表的行 |
+| `http_header_blocks.block_enc`（新） | 全部阶段的 Header 和 Trailer，压缩后整块加密 | 2 |
+| `body_chunks.data_enc`、`stream_timelines.timeline_enc`、`parsed_results.parsed_json_enc` | Body 块、SSE 时间线、解析结果 | 不变 |
+
+迁移 007 新增的明文列，不用密钥就能读到：
+
+- `audit_records.capture_version`：1 或 2。
+- `http_stages.content_type`、`content_encoding`：版本 2 每个阶段 parser 选用的 Content-Type 和 Content-Encoding（该阶段 header 里名称小写后匹配的第一个非空值）。这两个值原来只在密文里，现在随阶段行明文存放，parser 和回填扫描判断内容类型时不必解密块（设计 C.6、K 第 6 项）。其余 Header 的值仍只在块里。
+- `http_header_blocks.compression`、`plaintext_length`：块的压缩方式和明文长度，即一条 audit 全部 Header 的总字节数。
+
+版本 2 的 `capture_finalized` 摘要按设计 D.2 计算：在版本 1 的字段之外覆盖 `user_agent_enc`、两个内容列和块的三列（密文取数据库算的 SHA-256），不覆盖 `http_headers`。域字符串是 `llmapi-logger/capture-payload/v2\x00`，`capture_version` 不单独作为字段，由域字符串绑定；校验按 `capture_version` 选版本，改成别的值都会让载荷校验失败。固定测试向量和它描述的夹具在 `internal/storage/postgres/integrity_capture_v2_test.go`。
 
 ## 6. 内容寻址与密文随机性
 
@@ -138,8 +159,9 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 ## 8. 明文边界
 
 - 普通日志不记录 Query value、Header value、Body、conversation、Token、key、密文或底层错误文本。
-- 列表只定向解密入站 User-Agent；不读取其他 Header、Request-URI、Body 或 content objects。
-- 详情在鉴权后解密 Request-URI、Header/Trailer、窄 parsed result 和 verified turn 所需对象。
+- 列表只定向解密入站 User-Agent；不读取其他 Header、Request-URI、Body 或 content objects。版本 2 的行直接解密列表查询已经带回的 `user_agent_enc`，版本 1 的行照旧每行查一次 `http_headers`。
+- 详情在鉴权后解密 Request-URI、Header/Trailer、窄 parsed result 和 verified turn 所需对象。两个版本都经 `headerblock.Expand` 得到同一个扁平列表，Web、Agent 门面的凭据掩码和导出看到的完全相同。
+- parser 读白名单内的入站 Header（洞察和项目标识用）时，版本 1 在 SQL 里按名称过滤、只解密名单内的值；版本 2 的 Header 是一段密文，parser 在进程内解密整块，按白名单过滤后立即清掉其余的值。这是维护者接受的明文边界变化（第 3 阶段设计决定 2）：这是内网的内部工具，parser 进程本来就持有主密钥。parser 判断内容类型不打开块，读阶段行上的两个明文列。
 - OpenAI 与 Anthropic verified conversation 从对象重建；没有 normalizer 或异常记录可以使用 `parsed_json_enc` 内的加密回退 conversation。
 - raw API 只对 `retention_state=full` 开放；metadata 返回 `410 raw_not_retained`。
 - reconstructed API 返回 verified provider JSON；timeline API 返回认证后的逻辑 SSE 时间点。
@@ -147,7 +169,9 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 - 入站 Key 指纹只用于开发者会话的作用域判定，不进入任何 DTO、日志或错误；开发者登录提交的 Key 只作为一次上游校验请求的凭据，不落库也不回显。
 - 开发者会话看不到被本地策略拦截的记录，`blocked_by`/`block_code` 属管理员可见信息。
 
-详情能解密但 schema、枚举、连续 index、marker 或 hash 非法时，整条请求返回通用完整性错误，不返回部分明文。
+详情能解密但 schema、枚举、连续 index、marker 或 hash 非法时，整条请求返回通用完整性错误，不返回部分明文。版本 2 的块不能认证、解不开、不满足严格解码规则，或者块里的阶段集合与阶段行集合不等，同样按完整性错误处理。
+
+已知的边界情形：检查点或 `BeginAudit` 的入站块在 writer 里被可隔离的错误拒绝（约束、触发器）时，audit 被标为 failed，而会话并不知道。之后的写仍按它以为已写入的阶段封块，存储无法打开块去掉缺行阶段的段，于是照原样写入。这样的 audit 载荷校验通过，但读 Header 时阶段集合不等，详情返回完整性错误。只有已经标为 `capture_write_failed` 的记录会出现这种情形，测试 `TestCaptureV2RejectedCheckpointLeavesAMismatchedBlock` 固定了它；怎样处理待维护者决定。
 
 ## 9. 故障行为
 
