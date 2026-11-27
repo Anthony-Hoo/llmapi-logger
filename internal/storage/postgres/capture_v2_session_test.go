@@ -390,8 +390,10 @@ func normalizeSessionDump(dump harnessDump) harnessDump {
 				case column == "audit_id", strings.HasSuffix(column, "_at_ns"), column == "ttft_ns",
 					column == "capture_version", column == "user_agent_enc", column == "content_type", column == "content_encoding",
 					column == "payload_digest", column == "event_mac", column == "previous_mac",
-					// The timeline plaintext holds observation times.
-					column == "timeline_enc":
+					// The timeline plaintext holds observation times, so its
+					// length and compression vary with the clock too.
+					column == "timeline_enc",
+					table == "stream_timelines" && (column == "plaintext_length" || column == "compression"):
 					continue
 				}
 				copied[column] = value

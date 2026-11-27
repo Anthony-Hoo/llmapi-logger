@@ -27,11 +27,19 @@ COMMIT;
 // (created_at_ns, turn_id), by name.
 func turnsCreatedIndexes(t *testing.T, db rowQueryer) []string {
 	t.Helper()
+	// The indexes of this schema's turns are selected before their
+	// definitions are rendered: pg_indexes may render the definition of an
+	// index in another schema, which fails with "could not open relation"
+	// when a concurrent test drops that schema meanwhile.
 	rows, err := db.QueryContext(context.Background(), `
-SELECT indexname FROM pg_indexes
-WHERE schemaname = current_schema() AND tablename = 'turns'
-  AND indexdef LIKE '%(created_at_ns, turn_id)'
-ORDER BY indexname`)
+WITH own AS MATERIALIZED (
+    SELECT x.indexrelid, c.relname
+    FROM pg_index AS x JOIN pg_class AS c ON c.oid = x.indexrelid
+    WHERE x.indrelid = to_regclass('turns')
+)
+SELECT relname FROM own
+WHERE pg_get_indexdef(indexrelid) LIKE '%(created_at_ns, turn_id)'
+ORDER BY relname`)
 	if err != nil {
 		t.Fatal(err)
 	}
