@@ -70,8 +70,8 @@ func TestDecideRawRetentionPerSide(t *testing.T) {
 		{"422 unclassified", abnormal(status(422)), keep},
 		{"400 empty class", with(abnormal(status(400)), func(o *RawRetentionOutcome) { o.UpstreamErrorClass = class("") }), keep},
 
-		// Statuses the decision does not name keep the request (awaiting the
-		// maintainer).
+		// Statuses the decision does not name keep the request, as the
+		// maintainer confirmed.
 		{"402 unlisted", abnormal(status(402)), keep},
 		{"404 unlisted", abnormal(status(404)), keep},
 		{"405 unlisted", abnormal(status(405)), keep},

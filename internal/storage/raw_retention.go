@@ -150,10 +150,10 @@ func requestReleaseFor(outcome RawRetentionOutcome) bool {
 	case releaseRequestIfClassified:
 		return outcome.UpstreamErrorClass != nil && *outcome.UpstreamErrorClass != ""
 	default:
-		// Unlisted: 402, 404, 405, 413, 415 and every other status the
-		// decision does not name. Awaits the maintainer (issue #59, design
-		// 5.9); until then the request raw is kept, as before. Answering it
-		// is one entry in abnormalRequestRelease.
+		// 402, 404, 405, 413, 415 and every other status the decision does
+		// not name keep the request raw. The maintainer confirmed this when
+		// asked (issue #59, design 5.9): a status releases the request only
+		// by being listed in abnormalRequestRelease.
 		return false
 	}
 }

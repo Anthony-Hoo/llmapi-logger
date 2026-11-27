@@ -412,7 +412,7 @@ Header 的写入随这一步重写（5.10）：四个阶段的 Header 和 Traile
 
 **结论：乙，按侧决定保留，同步更新模块 18。** 它不依赖 4.2，排在 P1 之后。补充以下规则和必须修的代码缺口：
 
-1. **4xx 细分。** `5xx`、`429`、`401`、`403`、`408`、`409`、`499`、客户端中途取消，以及响应解析不完整的记录：请求侧规范化和重建校验通过，并且 `request_sent.source_stage == request_received`（没有 `body_stage_mismatch`）时，释放请求 raw，只留响应侧 raw。只有 `upstream_error_class IS NULL` 的 `400` 和 `422`，以及请求解析失败、校验失败或超限的记录，保留请求侧的 `full` raw。这样 `429` 重试风暴不会打爆空间，畸形请求的取证能力也保住了。
+1. **4xx 细分。** `5xx`、`429`、`401`、`403`、`408`、`409`、`499`、客户端中途取消，以及响应解析不完整的记录：请求侧规范化和重建校验通过，并且 `request_sent.source_stage == request_received`（没有 `body_stage_mismatch`）时，释放请求 raw，只留响应侧 raw。只有 `upstream_error_class IS NULL` 的 `400` 和 `422`，以及请求解析失败、校验失败或超限的记录，保留请求侧的 `full` raw。这样 `429` 重试风暴不会打爆空间，畸形请求的取证能力也保住了。上面没有列出的状态码（`402`、`404`、`405`、`413`、`415` 等其他非 2xx/3xx）保留请求 raw；实现时就此问过维护者，答复是保留。
 2. **残缺响应不丢内容。** 有 turn 以后 `parsed_json_enc` 默认不再存 `conversation`，而 `LayoutNone` 的重建只输出请求消息。残缺的响应消息不能直接写回 `parsed_json_enc.conversation`：`query/service.go` 的 `validConversation` 会校验索引连续，写回去会得到 `500 ErrIntegrity`。在 `parsed_json_enc` 里用独立的键 `partial_response_messages` 只保存响应侧的半截消息，详情、会话导出、回填和归档读取时统一合并并重排 `Index`。
 3. **下游按侧支持。**
    - `internal/parser/backfill.go` 的 `backfillInput` 改为请求、响应分别判断走重建还是读 raw，不再只看 `StageRequestReceived`。
