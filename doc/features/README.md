@@ -188,3 +188,12 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 ## PostgreSQL 与历史存储更新
 
 运行时采用 PostgreSQL 单写者锁、独立迁移及 repeatable-read 证据快照。capture 缓冲按需增长并释放；内容对象在压缩加密前批量查重并验证既有对象；insights v8 使用加密共享前缀节点，后台有界回填保留旧明细可读。图重建改为迭代复用引用数组，仍逐祖先验证重建 hash，不声称已消除所有历史长度相关 CPU 开销。具体边界和回滚见上述方案与部署文档。
+
+issue #59 第 1 阶段（方案见 [`doc/design/issue-59-unified-write-cold-archive.md`](../design/issue-59-unified-write-cold-archive.md)，本地基线见其附录 B）在不改变任何完整性摘要字节的前提下收紧了几处读写：
+
+- 洞察回填和项目标识回填各带一个进程内水位，全部处理完之后每轮只读上一轮以来的新行；必然失败的记录每个进程最多读一次 Body，存储故障按退避重试（[模块 20](20-context-insights.md) §9、[模块 23](23-org-project-reports.md)）。
+- 保存一轮时只把库里还没有的 content/binary object 发给数据库，已有对象用批量查询核对身份（[模块 18](18-content-addressed-conversation-storage.md)）。
+- 完整性摘要里的密文 SHA-256 由 PostgreSQL 计算，密文不再取回进程；摘要字节与之前完全相同。
+- `parsed_json_enc` 在明文达到 4 KiB 且压缩有收益时先 gzip 再加密，旧行原样可读；旧版本读不了压缩行（[模块 09](09-security-encryption-and-redaction.md)）。
+- 迁移 005 删除无人使用的 `content_objects_semantic_idx`，schema 版本为 5（[模块 04](04-sqlite-storage-and-migrations.md) §3.7）。
+- 四类协议的合成夹具和 A/B 压测工具 `cmd/audit-bench` 见[模块 14](14-test-benchmark-and-fault-injection.md) §9。

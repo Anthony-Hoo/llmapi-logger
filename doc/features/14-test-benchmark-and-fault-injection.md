@@ -234,6 +234,8 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" `
 - 数据是合成的。文本可压缩性、工具定义体积、会话长度分布和协议构成都与真实部署不同，绝对值只能看量级；A/B 的价值在于同一工作负载下两个提交或两种配置的差。
 - 数据库是本地的，参数是谁的就记录谁的（`shared_buffers`、`fsync`、`synchronous_commit`、`max_wal_size`、`checkpoint_timeout`、`wal_compression` 等写进结果）。本地测试库常见 `fsync=off`，提交延迟和检查点行为与生产不同。
 - idle 阶段能否看到回填重扫取决于时长。parser worker 每 30 s 一跳，insights 回填（`backfillRescanInterval`）和项目标识回填（`projectBackfillRescanInterval`）在一次扫描没有候选之后都要等 10 分钟才再扫；计时从最后一次空扫算起，可能落在 drain 里。短于约 10.5 分钟的 idle 可能一次重扫都没有，默认 11 分钟。不重扫时 idle 里也有别的读：本地 smoke 的 idle 阶段 `audit_records` 每秒约一次顺序扫描，推断来自 NewAPI 调用者 worker 每秒一次的待办查询（`ListDueCallerLookups`），这么小的表上规划器选了顺序扫描，大表上未必；组织报表的周快照任务也在 idle 里写入。
+- 到可查询的延迟只有在待解析积压不超过 100 条时才反映写入和解析路径。解析 worker 的内存队列容量是 100（`parser.QueueCapacity`），满了以后的 audit 留在 `pending`，由每 30 秒一次、每次最多 100 条的扫描重新入队；突发超过这个量时，量到的是扫描间隔。要比较写入路径，把并发和会话数调到积压不溢出。
+- 读取阶段的抽样按请求在工作负载里的位置排序后用种子洗牌，同一工作负载的两次运行读到同一批位置上的 audit，详情与导出的分位数因此可比。
 - 时间到可查询的延迟包含轮询间隔；内存峰值包含压测驱动和 fake upstream 自身。
 - 被中断的 `run`（信号、超时、连接中断）不会删除它用 `--fresh-schema` 建的 schema，名字打印在开头，需要手动删除。
 - `dist` 的“每个会话每天”按 `turns.created_at_ns`（解析时间）的 UTC 日分组，只是归档按天切段时的近似。
