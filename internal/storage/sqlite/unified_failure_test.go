@@ -427,16 +427,23 @@ func TestBeginAuditInboundStageKeepsStartRow(t *testing.T) {
 	for _, testCase := range []struct {
 		table, stageState, stageCode string
 		stages                       int
+		stageLost                    bool
 	}{
 		{table: "http_headers", stages: 1, stageState: StageStatePartial, stageCode: "capture_headers_failed"},
-		{table: "http_stages", stages: 0},
+		{table: "http_stages", stages: 0, stageLost: true},
 	} {
 		id := "inbound-" + testCase.table
 		if _, err := store.writerDB.Exec(`CREATE TRIGGER reject_inbound BEFORE INSERT ON ` + testCase.table + `
 WHEN NEW.audit_id = '` + id + `' BEGIN SELECT RAISE(ABORT, 'injected inbound failure'); END`); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.BeginAudit(ctx, inbound(id)); err != nil {
+		err := store.BeginAudit(ctx, inbound(id))
+		if testCase.stageLost {
+			// Only a lost stage row is reported, and not as a storage failure.
+			if !errors.Is(err, storage.ErrInboundStageNotStored) || ErrorClass(err) != "inbound_stage_not_stored" {
+				t.Fatalf("%s: BeginAudit error = %v", testCase.table, err)
+			}
+		} else if err != nil {
 			t.Fatalf("%s: BeginAudit error = %v", testCase.table, err)
 		}
 		if _, err := store.writerDB.Exec("DROP TRIGGER reject_inbound"); err != nil {
@@ -452,7 +459,7 @@ WHEN NEW.audit_id = '` + id + `' BEGIN SELECT RAISE(ABORT, 'injected inbound fai
 		}
 	}
 	setWriterReadOnly(t, store, true)
-	if err := store.BeginAudit(ctx, inbound("inbound-read-only")); ErrorClass(err) != "sqlite_read_only" {
+	if err := store.BeginAudit(ctx, inbound("inbound-read-only")); ErrorClass(err) != "sqlite_read_only" || errors.Is(err, storage.ErrInboundStageNotStored) {
 		t.Fatalf("batch failure error = %v", err)
 	}
 	setWriterReadOnly(t, store, false)
@@ -474,9 +481,16 @@ WHEN NEW.audit_id = '` + id + `' BEGIN SELECT RAISE(ABORT, 'injected inbound fai
 // merges while the session decides a merge in memory (see the report).
 func TestBeginAuditInboundFailureMatchesLegacyEndToEnd(t *testing.T) {
 	t.Parallel()
-	for _, trigger := range []struct{ name, table, when string }{
-		{"stage row", "http_stages", "NEW.stage = '" + StageRequestReceived + "'"},
-		{"header rows", "http_headers", "NEW.stage = '" + StageRequestReceived + "' AND NEW.kind = 'header'"},
+	for _, trigger := range []struct {
+		name, table, when string
+		mergeableRequest  bool
+	}{
+		{"stage row", "http_stages", "NEW.stage = '" + StageRequestReceived + "'", false},
+		{"header rows", "http_headers", "NEW.stage = '" + StageRequestReceived + "' AND NEW.kind = 'header'", false},
+		// The session learned from BeginAudit that the stage row is lost and
+		// sends request_sent unmerged with its chunks, with DedupInDB for the
+		// request pair, so request_sent is stored as legacy stores it.
+		{"stage row with a mergeable request pair", "http_stages", "NEW.stage = '" + StageRequestReceived + "'", true},
 	} {
 		t.Run(trigger.name, func(t *testing.T) {
 			t.Parallel()
@@ -487,7 +501,11 @@ WHEN ` + trigger.when + ` BEGIN SELECT RAISE(ABORT, 'injected inbound failure');
 					t.Fatal(err)
 				}
 			}
-			mismatchedRequest(run)
+			if trigger.mergeableRequest {
+				sendRequest(run, eqNoise(3<<19, 80), 256<<10, http.Header{"X-Checksum": {"c"}})
+			} else {
+				mismatchedRequest(run)
+			}
 			run.startResponseReceived(http.StatusOK, responseHeaders("text/event-stream"), -1, true)
 			run.startResponseSent(http.StatusOK, responseHeaders("text/event-stream"))
 			for _, event := range eqSSE(4) {
@@ -510,6 +528,20 @@ WHEN ` + trigger.when + ` BEGIN SELECT RAISE(ABORT, 'injected inbound failure');
 			run.assertSameRows()
 			if n := countRows(t, run.unified.store, "SELECT count(*) FROM http_stages WHERE audit_id = ?", run.id); n < 3 {
 				t.Fatalf("unified kept %d stage rows", n)
+			}
+			if run.unified.inboundLost != (trigger.table == "http_stages") {
+				t.Fatalf("inbound lost = %v", run.unified.inboundLost)
+			}
+			if trigger.mergeableRequest {
+				if run.unified.merged[StageRequestSent] || !run.unified.lastCommit.DedupInDB[0] {
+					t.Fatal("the request pair was merged in memory after a lost inbound stage")
+				}
+				if body := bodyRow(t, run, StageRequestSent); body.SourceStage != StageRequestSent || body.StoredLength != 3<<19 {
+					t.Fatalf("request_sent body = %+v", body)
+				}
+				if n := countRows(t, run.unified.store, "SELECT count(*) FROM body_chunks WHERE audit_id = ? AND stage = ?", run.id, StageRequestSent); n != 2 {
+					t.Fatalf("request_sent chunks = %d", n)
+				}
 			}
 		})
 	}

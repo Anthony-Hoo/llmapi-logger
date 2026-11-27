@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/storage"
 	sqlitecodes "modernc.org/sqlite/lib"
 )
 
@@ -37,6 +38,9 @@ func ErrorClass(err error) string {
 	var identity storedObjectIntegrityError
 	var local localWriteError
 	switch {
+	case errors.Is(err, storage.ErrInboundStageNotStored):
+		// Not a storage failure: the start record committed.
+		return "inbound_stage_not_stored"
 	case errors.Is(err, ErrRecoveryOverflow):
 		return "recovery_overflow"
 	case errors.Is(err, ErrQueueFull):

@@ -788,6 +788,9 @@ type eqUnified struct {
 	// its source, without its own chunks.
 	merged      map[string]bool
 	checkpoints int
+	// inboundLost is set when BeginAudit reported ErrInboundStageNotStored;
+	// the request pair is then never merged in memory.
+	inboundLost bool
 	// lastCommit is the last CommitAudit input, kept for retry tests.
 	lastCommit AuditCommit
 	// failCommit, when set, replaces the CommitAudit call.
@@ -801,7 +804,9 @@ func (sink *eqUnified) beginAudit(record AuditRecord, inbound *eqStage) {
 		stage.Headers = append(stage.Headers, sealHeaders(sink.run.t, sink.cipher, record.AuditID, inbound.name, group)...)
 	}
 	record.Inbound = &stage
-	if err := sink.store.BeginAudit(sink.run.ctx, record); err != nil {
+	if err := sink.store.BeginAudit(sink.run.ctx, record); errors.Is(err, storage.ErrInboundStageNotStored) {
+		sink.inboundLost = true
+	} else if err != nil {
 		sink.run.t.Fatal(err)
 	}
 	sink.stageWritten[inbound.name] = true
@@ -843,7 +848,7 @@ func (sink *eqUnified) checkpoint() {
 		if !sink.bodyWritten[name] {
 			body := BodyStream{AuditID: run.id, Stage: name, SourceStage: name, State: StageStateStreaming, RetentionState: RetentionPending}
 			if name == StageRequestSent {
-				if source := run.stages[StageRequestReceived]; source != nil && mergeableNow(source.body, stage.body) {
+				if source := run.stages[StageRequestReceived]; source != nil && !sink.inboundLost && mergeableNow(source.body, stage.body) {
 					body.SourceStage = StageRequestReceived
 					sink.merged[name] = true
 				}
@@ -911,7 +916,7 @@ func (sink *eqUnified) commit(finishes []StageFinish, finish AuditFinish) AuditF
 		}
 		// A duplicate whose own rows were already written self-sourced cannot
 		// be merged here; the store decides from the rows, as legacy does.
-		if !sink.merged[pair[1]] && (sink.bodyWritten[pair[1]] || sink.chunksWritten[pair[1]] > 0) {
+		if !sink.merged[pair[1]] && (sink.bodyWritten[pair[1]] || sink.chunksWritten[pair[1]] > 0) || index == 0 && sink.inboundLost {
 			commit.DedupInDB[index] = true
 			continue
 		}

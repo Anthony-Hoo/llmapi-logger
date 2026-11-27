@@ -77,7 +77,29 @@ func (store *Store) BeginAudit(ctx context.Context, record AuditRecord) error {
 	if storage.EffectiveCaptureVersion(record.CaptureVersion) != storage.CaptureVersion1 {
 		return errUnsupportedCaptureVersion
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: cloneAuditRecord(record)})
+	if record.Inbound == nil {
+		return store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: cloneAuditRecord(record)})
+	}
+	// The outcome of the inbound part travels beside the acknowledgement: the
+	// operation itself succeeds, so the start row and its failure marks
+	// commit, and only a committed batch reports the lost stage row.
+	write := &beginAuditWrite{record: cloneAuditRecord(record)}
+	if err := store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: write}); err != nil {
+		return err
+	}
+	if write.inboundStageLost {
+		return fmt.Errorf("sqlite: begin audit: %w", storage.ErrInboundStageNotStored)
+	}
+	return nil
+}
+
+// beginAuditWrite is a BeginAudit carrying the inbound stage. The writer sets
+// inboundStageLost when the stage row was rejected in its nested savepoint;
+// the caller reads it only after a nil acknowledgement, which the writer
+// sends after the batch committed.
+type beginAuditWrite struct {
+	record           AuditRecord
+	inboundStageLost bool
 }
 
 // errUnsupportedCaptureVersion rejects version 2 writes: the SQLite schema has
@@ -499,14 +521,17 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 		if store.recoveryOverflow.Load() {
 			return ErrRecoveryOverflow
 		}
-		record := request.data.(AuditRecord)
-		if err := insertAudit(transaction, record); err != nil {
+		write, withInbound := request.data.(*beginAuditWrite)
+		if !withInbound {
+			return insertAudit(transaction, request.data.(AuditRecord))
+		}
+		write.inboundStageLost = false
+		if err := insertAudit(transaction, write.record); err != nil {
 			return err
 		}
-		if record.Inbound == nil {
-			return nil
-		}
-		return insertInboundStage(transaction, record)
+		lost, err := insertInboundStage(transaction, write.record)
+		write.inboundStageLost = lost
+		return err
 	case writeStartStage:
 		return insertStage(transaction, request.data.(HTTPStage))
 	case writeStartBody:
@@ -603,23 +628,25 @@ WHERE audit_id=? AND ended_at_ns IS NULL`, auditID); err != nil {
 // the audit as markCaptureWriteFailed does for a failed StartStage or
 // AddHeaders of request_received. Without the stage row its headers are not
 // attempted, as their AddHeaders would only fail on the missing parent.
-func insertInboundStage(transaction *sql.Tx, record AuditRecord) error {
+// stageLost reports that the stage row was rolled back; a lost header group
+// alone keeps the stage row and is not reported.
+func insertInboundStage(transaction *sql.Tx, record AuditRecord) (stageLost bool, err error) {
 	inbound := record.Inbound
 	failed, err := isolatedInboundWrite(transaction, func() error { return insertStage(transaction, inbound.Stage) })
 	if err != nil {
-		return err
+		return false, err
 	}
 	if failed {
-		return markCaptureWriteFailed(transaction, writeRequest{kind: writeStartStage, data: inbound.Stage})
+		return true, markCaptureWriteFailed(transaction, writeRequest{kind: writeStartStage, data: inbound.Stage})
 	}
 	if len(inbound.Headers) == 0 {
-		return nil
+		return false, nil
 	}
 	failed, err = isolatedInboundWrite(transaction, func() error { return insertHeaders(transaction, inbound.Headers) })
 	if err != nil || !failed {
-		return err
+		return false, err
 	}
-	return markCaptureWriteFailed(transaction, writeRequest{kind: writeAddHeaders, data: inbound.Headers})
+	return false, markCaptureWriteFailed(transaction, writeRequest{kind: writeAddHeaders, data: inbound.Headers})
 }
 
 // isolatedInboundWrite runs write in a nested savepoint. It reports an
