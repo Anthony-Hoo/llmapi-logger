@@ -179,13 +179,15 @@ func lineDiff(want, got string) string {
 	return strings.Join(report, "\n")
 }
 
-// loopbackFault is a broken connection on the test's own loopback hops. When
-// the upstream answers before the proxy's transport has made its final read
-// of the request body, the HTTP/1 server in front of the proxy may refuse
-// that read once the response has started, and the transport then closes the
-// upstream connection mid-answer ("use of closed network connection"). A
-// plain net/http reverse proxy shows the same race, so it is not what this
-// test is about; the fake upstream's first-byte delay makes it rare, and a
+// loopbackFault is a broken connection on the test's own loopback hops. It
+// shows up as an upstream connection closed mid-answer ("use of closed
+// network connection") when the upstream answers at once. The likely cause,
+// inferred and not proven: the upstream answers before the proxy's transport
+// has made its final read of the request body, the HTTP/1 server in front of
+// the proxy refuses that read once the response has started, and the
+// transport closes the connection. A plain net/http reverse proxy with
+// nothing from this repository shows the same failures, so it is not what
+// this test is about; the fake upstream's first-byte delay makes it rare, and a
 // case that still hits it is run again on a fresh store.
 type loopbackFault struct{ err error }
 
