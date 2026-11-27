@@ -113,6 +113,16 @@ JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`
 
 版本 2 的 `capture_finalized` 摘要按设计 D.2 计算：在版本 1 的字段之外覆盖 `user_agent_enc`、两个内容列和块的三列（密文取数据库算的 SHA-256），不覆盖 `http_headers`。域字符串是 `llmapi-logger/capture-payload/v2\x00`，`capture_version` 不单独作为字段，由域字符串绑定；校验按 `capture_version` 选版本，改成别的值都会让载荷校验失败。固定测试向量和它描述的夹具在 `internal/storage/postgres/integrity_capture_v2_test.go`。
 
+### 5.4 本地暂存文件
+
+unified 写入路径把超出内存预算的 Body 块写到 `audit.staging.dir`（模块 03 §13.4）。文件里只有密文和块的元数据，不加任何新的密钥或密码学结构：
+
+- 每个块就是 `body_chunks.data_enc` 那份密文，AAD 同上表的 raw Body chunk v2，所以可以原样插入库里；
+- 明文的元数据是文件头里的 audit id，以及每块的阶段码、seq、offset、明文长度、编码长度、观察时间和压缩方式，与库里同一行的非密文列相同；
+- 每条记录的 CRC-32C 只用来发现写了一半的尾部记录，真实性靠 AEAD：启动导入逐块按它自己的 AAD 认证解密后才插入（模块 03 §13.6）。
+
+放在哪里由配置和启动检查约束（模块 01 §4 第 18 项）：必须是绝对路径，不能是主密钥所在的目录、包含它或位于其中，这样同一个卷、同一份备份里不会同时有密文和打开它的密钥；目录以 0700、文件以 0600 创建，Unix 上要求目录属主是进程用户、组和其他用户没有权限，Windows 交给目录 ACL。目录里的文件是证据的一部分，备份和权限按审计数据对待；部署见[部署说明](../deployment/README.md) 3.2。
+
 ## 6. 内容寻址与密文随机性
 
 内容地址在压缩和加密前计算：
@@ -162,6 +172,7 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 - 列表只定向解密入站 User-Agent；不读取其他 Header、Request-URI、Body 或 content objects。版本 2 的行直接解密列表查询已经带回的 `user_agent_enc`，版本 1 的行照旧每行查一次 `http_headers`。
 - 详情在鉴权后解密 Request-URI、Header/Trailer、窄 parsed result 和 verified turn 所需对象。两个版本都经 `headerblock.Expand` 得到同一个扁平列表，Web、Agent 门面的凭据掩码和导出看到的完全相同。
 - parser 读白名单内的入站 Header（洞察和项目标识用）时，版本 1 在 SQL 里按名称过滤、只解密名单内的值；版本 2 的 Header 是一段密文，parser 在进程内解密整块，按白名单过滤后立即清掉其余的值。这是维护者接受的明文边界变化（第 3 阶段设计决定 2）：这是内网的内部工具，parser 进程本来就持有主密钥。parser 判断内容类型不打开块，读阶段行上的两个明文列。
+- unified 写入路径的会话在内存里持有明文，比 legacy 久：Body 明文在单阶段和全局预算之内，从观察到它直到写库，以及交给 parser 的那一份（模块 03 §13.4、§13.8）；版本 2 的 Header 字段从阶段开始深拷贝，直到 `CommitAudit` 得到应答后清零。版本 2 的交接作业还带着两个接收阶段的 Header 字段明文（凭据类 Header 也在其中），在 parser 内存里直到作业的 `Release`；版本 1 的作业带的是密文行。这些明文都只在进程内存里，不写日志、不落盘；超出预算的部分落暂存时已经加密（§5.4）。与压缩器的私有缓冲一样，释放后的内存不声称安全擦除。
 - OpenAI 与 Anthropic verified conversation 从对象重建；没有 normalizer 或异常记录可以使用 `parsed_json_enc` 内的加密回退 conversation。
 - raw API 只对 `retention_state=full` 开放；metadata 返回 `410 raw_not_retained`。
 - reconstructed API 返回 verified provider JSON；timeline API 返回认证后的逻辑 SSE 时间点。
@@ -209,6 +220,8 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 - 相同明文随机密文、nonce/ciphertext/tag/AAD 篡改。
 - content/binary/external/timeline AAD、长度、compression 和 hash 篡改。
 - integrity event MAC、previous MAC、payload、缺 capture/semantic event 和尾部顺序测试。
+- Header 块和 User-Agent 的测试向量；版本 2 摘要的固定向量；改动 `capture_version`、`user_agent_enc`、块、内容列、`capture_status`、`forward_status` 都让载荷校验失败；failed 与 interrupted 的 audit 按 §8 的规则可读，其余 audit 阶段集合不等时报完整性错误。
+- 暂存文件尾部截断、中间 CRC 或 AEAD 失败、文件头指向别的 audit 时按模块 03 §13.6 处理，不导入未通过认证的块。
 - verified OpenAI parsed JSON 不重复保存 conversation；fallback conversation 只存在于密文。
 - raw metadata/full/pending 状态与 410/409/正常下载语义。
 - DB/WAL、日志、Git diff 和构建产物扫描不到测试凭据、Body、二进制或主密钥明文。
