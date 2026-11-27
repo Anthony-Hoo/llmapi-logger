@@ -402,39 +402,115 @@ func TestUnifiedWritesRejectCaptureVersion2(t *testing.T) {
 }
 
 // BeginAudit with the inbound stage writes the audit row, the stage row and
-// its headers in one operation; a rejected header rolls all of them back.
-func TestBeginAuditInboundStageIsOneOperation(t *testing.T) {
+// its headers in one operation. A rejected stage row or header loses only
+// that part: the start row commits, marked as legacy marks a failed
+// StartStage or AddHeaders. A batch-level failure still fails BeginAudit.
+func TestBeginAuditInboundStageKeepsStartRow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, _ := openTestStore(t)
-	record := testAudit("inbound")
-	record.Inbound = &InboundStage{
-		Stage:   HTTPStage{AuditID: "inbound", Stage: StageRequestReceived, Proto: "HTTP/1.1", Method: "POST", Host: "proxy.example.com", StartedAtNS: 2},
-		Headers: []HTTPHeader{{AuditID: "inbound", Stage: StageRequestReceived, Kind: HeaderKindHeader, Name: "Content-Type", ValueLength: 4, ValueEnc: []byte{1}}},
+	inbound := func(id string) AuditRecord {
+		record := testAudit(id)
+		record.Inbound = &InboundStage{
+			Stage:   HTTPStage{AuditID: id, Stage: StageRequestReceived, Proto: "HTTP/1.1", Method: "POST", Host: "proxy.example.com", StartedAtNS: 2},
+			Headers: []HTTPHeader{{AuditID: id, Stage: StageRequestReceived, Kind: HeaderKindHeader, Name: "Content-Type", ValueLength: 4, ValueEnc: []byte{1}}},
+		}
+		return record
 	}
-	if err := store.BeginAudit(ctx, record); err != nil {
+	if err := store.BeginAudit(ctx, inbound("inbound")); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := store.Snapshot(ctx, "inbound")
-	if err != nil || len(snapshot.Stages) != 1 || snapshot.Stages[0].State != StageStateStreaming || len(snapshot.Headers) != 1 {
+	if err != nil || len(snapshot.Stages) != 1 || snapshot.Stages[0].State != StageStateStreaming || len(snapshot.Headers) != 1 || snapshot.Audit.CaptureStatus != CapturePending {
 		t.Fatalf("inbound snapshot = %+v %v", snapshot, err)
 	}
-	if _, err := store.writerDB.Exec(`CREATE TRIGGER reject_inbound_header BEFORE INSERT ON http_headers
-BEGIN SELECT RAISE(ABORT, 'injected header failure'); END`); err != nil {
-		t.Fatal(err)
+	for _, testCase := range []struct {
+		table, stageState, stageCode string
+		stages                       int
+	}{
+		{table: "http_headers", stages: 1, stageState: StageStatePartial, stageCode: "capture_headers_failed"},
+		{table: "http_stages", stages: 0},
+	} {
+		id := "inbound-" + testCase.table
+		if _, err := store.writerDB.Exec(`CREATE TRIGGER reject_inbound BEFORE INSERT ON ` + testCase.table + `
+WHEN NEW.audit_id = '` + id + `' BEGIN SELECT RAISE(ABORT, 'injected inbound failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.BeginAudit(ctx, inbound(id)); err != nil {
+			t.Fatalf("%s: BeginAudit error = %v", testCase.table, err)
+		}
+		if _, err := store.writerDB.Exec("DROP TRIGGER reject_inbound"); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := store.Snapshot(ctx, id)
+		if err != nil || snapshot.Audit.CaptureStatus != CaptureFailed || snapshot.Audit.ErrorCode == nil || *snapshot.Audit.ErrorCode != "capture_write_failed" ||
+			len(snapshot.Headers) != 0 || len(snapshot.Stages) != testCase.stages {
+			t.Fatalf("%s: snapshot = %+v %v", testCase.table, snapshot, err)
+		}
+		if testCase.stages == 1 && (snapshot.Stages[0].State != testCase.stageState || snapshot.Stages[0].ErrorCode == nil || *snapshot.Stages[0].ErrorCode != testCase.stageCode) {
+			t.Fatalf("%s: stage = %+v", testCase.table, snapshot.Stages[0])
+		}
 	}
-	record.AuditID = "inbound-rejected"
-	record.Inbound.Stage.AuditID = record.AuditID
-	record.Inbound.Headers[0].AuditID = record.AuditID
-	if err := store.BeginAudit(ctx, record); ErrorClass(err) != "sqlite_constraint" {
-		t.Fatalf("BeginAudit error = %v", err)
+	setWriterReadOnly(t, store, true)
+	if err := store.BeginAudit(ctx, inbound("inbound-read-only")); ErrorClass(err) != "sqlite_read_only" {
+		t.Fatalf("batch failure error = %v", err)
 	}
-	if n := countRows(t, store, "SELECT count(*) FROM audit_records WHERE audit_id = 'inbound-rejected'"); n != 0 {
-		t.Fatal("a rejected inbound header left the audit row")
+	setWriterReadOnly(t, store, false)
+	if n := countRows(t, store, "SELECT count(*) FROM audit_records WHERE audit_id = 'inbound-read-only'"); n != 0 {
+		t.Fatal("a failed batch committed the start row")
 	}
 	wrong := testAudit("inbound-wrong-stage")
 	wrong.Inbound = &InboundStage{Stage: HTTPStage{AuditID: "inbound-wrong-stage", Stage: StageRequestSent, StartedAtNS: 2}}
 	if err := store.BeginAudit(ctx, wrong); err == nil {
 		t.Fatal("an inbound stage other than request_received was accepted")
+	}
+}
+
+// The same trigger at BeginAudit time on both databases: legacy loses its
+// StartStage or AddHeaders of request_received, the unified path loses the
+// inbound part of BeginAudit. End to end through the checkpoints and
+// CommitAudit, both end failed with the same rows. The request and response
+// pairs are not mergeable here, because for a failed audit legacy never
+// merges while the session decides a merge in memory (see the report).
+func TestBeginAuditInboundFailureMatchesLegacyEndToEnd(t *testing.T) {
+	t.Parallel()
+	for _, trigger := range []struct{ name, table, when string }{
+		{"stage row", "http_stages", "NEW.stage = '" + StageRequestReceived + "'"},
+		{"header rows", "http_headers", "NEW.stage = '" + StageRequestReceived + "' AND NEW.kind = 'header'"},
+	} {
+		t.Run(trigger.name, func(t *testing.T) {
+			t.Parallel()
+			run := newEqRun(t, "inbound-"+trigger.table)
+			for _, store := range []*Store{run.legacy.store, run.unified.store} {
+				if _, err := store.writerDB.Exec(`CREATE TRIGGER reject_inbound BEFORE INSERT ON ` + trigger.table + `
+WHEN ` + trigger.when + ` BEGIN SELECT RAISE(ABORT, 'injected inbound failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mismatchedRequest(run)
+			run.startResponseReceived(http.StatusOK, responseHeaders("text/event-stream"), -1, true)
+			run.startResponseSent(http.StatusOK, responseHeaders("text/event-stream"))
+			for _, event := range eqSSE(4) {
+				run.read(StageResponseReceived, event)
+				run.write(event, nil)
+			}
+			run.readError(StageResponseReceived)
+			run.finish()
+			if run.unified.checkpoints != 2 {
+				t.Fatalf("checkpoints = %d", run.unified.checkpoints)
+			}
+			for _, result := range []AuditFinish{run.commitResult, run.legacyResult} {
+				if result.CaptureStatus != CaptureFailed || result.ErrorCode == nil || *result.ErrorCode != "capture_write_failed" {
+					t.Fatalf("outcome = %+v", result)
+				}
+			}
+			if !sameFinish(run.commitResult, run.legacyResult) {
+				t.Fatalf("committed outcome %+v, legacy %+v", run.commitResult, run.legacyResult)
+			}
+			run.assertSameRows()
+			if n := countRows(t, run.unified.store, "SELECT count(*) FROM http_stages WHERE audit_id = ?", run.id); n < 3 {
+				t.Fatalf("unified kept %d stage rows", n)
+			}
+		})
 	}
 }

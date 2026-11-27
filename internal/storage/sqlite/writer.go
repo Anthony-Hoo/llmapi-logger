@@ -506,10 +506,7 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 		if record.Inbound == nil {
 			return nil
 		}
-		if err := insertStage(transaction, record.Inbound.Stage); err != nil {
-			return err
-		}
-		return insertHeaders(transaction, record.Inbound.Headers)
+		return insertInboundStage(transaction, record)
 	case writeStartStage:
 		return insertStage(transaction, request.data.(HTTPStage))
 	case writeStartBody:
@@ -597,6 +594,54 @@ WHERE audit_id=? AND ended_at_ns IS NULL`, auditID); err != nil {
 		}
 	}
 	return nil
+}
+
+// insertInboundStage writes the inbound stage row and then its headers, each
+// in a nested savepoint, so the start row commits whenever it would have
+// committed without them: admission never depends on the inbound evidence
+// being storable. An isolatable failure rolls back only that part and marks
+// the audit as markCaptureWriteFailed does for a failed StartStage or
+// AddHeaders of request_received. Without the stage row its headers are not
+// attempted, as their AddHeaders would only fail on the missing parent.
+func insertInboundStage(transaction *sql.Tx, record AuditRecord) error {
+	inbound := record.Inbound
+	failed, err := isolatedInboundWrite(transaction, func() error { return insertStage(transaction, inbound.Stage) })
+	if err != nil {
+		return err
+	}
+	if failed {
+		return markCaptureWriteFailed(transaction, writeRequest{kind: writeStartStage, data: inbound.Stage})
+	}
+	if len(inbound.Headers) == 0 {
+		return nil
+	}
+	failed, err = isolatedInboundWrite(transaction, func() error { return insertHeaders(transaction, inbound.Headers) })
+	if err != nil || !failed {
+		return err
+	}
+	return markCaptureWriteFailed(transaction, writeRequest{kind: writeAddHeaders, data: inbound.Headers})
+}
+
+// isolatedInboundWrite runs write in a nested savepoint. It reports an
+// isolatable failure as rolled back; any other failure is returned and fails
+// the whole batch, as it would for the start row itself.
+func isolatedInboundWrite(transaction *sql.Tx, write func() error) (bool, error) {
+	if _, err := transaction.Exec("SAVEPOINT begin_inbound"); err != nil {
+		return false, fmt.Errorf("sqlite writer: inbound savepoint: %w", err)
+	}
+	writeErr := write()
+	if writeErr != nil {
+		if !canIsolateWriteError(writeErr) {
+			return false, writeErr
+		}
+		if _, err := transaction.Exec("ROLLBACK TO begin_inbound"); err != nil {
+			return false, fmt.Errorf("sqlite writer: rollback inbound: %w", err)
+		}
+	}
+	if _, err := transaction.Exec("RELEASE begin_inbound"); err != nil {
+		return false, fmt.Errorf("sqlite writer: release inbound: %w", err)
+	}
+	return writeErr != nil, nil
 }
 
 func insertAudit(transaction *sql.Tx, record AuditRecord) error {

@@ -37,7 +37,8 @@ func (store *Store) Checkpoint(ctx context.Context, checkpoint AuditCheckpoint) 
 // whole checkpoint; markCaptureWriteFailed then fails the audit.
 func writeAuditCheckpoint(transaction *sql.Tx, checkpoint AuditCheckpoint) error {
 	var ended sql.NullInt64
-	if err := transaction.QueryRow("SELECT ended_at_ns FROM audit_records WHERE audit_id = ?", checkpoint.AuditID).Scan(&ended); err != nil {
+	var captureStatus string
+	if err := transaction.QueryRow("SELECT ended_at_ns, capture_status FROM audit_records WHERE audit_id = ?", checkpoint.AuditID).Scan(&ended, &captureStatus); err != nil {
 		return fmt.Errorf("sqlite writer: read checkpoint state: %w", err)
 	}
 	if ended.Valid {
@@ -48,15 +49,47 @@ func writeAuditCheckpoint(transaction *sql.Tx, checkpoint AuditCheckpoint) error
 			return err
 		}
 	}
-	if err := insertHeaders(transaction, checkpoint.Headers); err != nil {
+	if captureStatus != CaptureFailed {
+		if err := insertHeaders(transaction, checkpoint.Headers); err != nil {
+			return err
+		}
+		for _, body := range checkpoint.Bodies {
+			if err := insertBody(transaction, body); err != nil {
+				return err
+			}
+		}
+		return insertOwnedChunks(transaction, checkpoint.AuditID, checkpoint.Chunks, nil)
+	}
+	// An earlier write was lost (for example the inbound stage row at
+	// BeginAudit), so the session may send parts whose parent row is
+	// missing. Legacy loses exactly those operations, each on its own; skip
+	// them instead of losing the whole checkpoint on a foreign key.
+	stages, err := storedStageSet(transaction, "http_stages", checkpoint.AuditID)
+	if err != nil {
+		return err
+	}
+	var headers []HTTPHeader
+	for _, header := range checkpoint.Headers {
+		if stages[header.Stage] {
+			headers = append(headers, header)
+		}
+	}
+	if err := insertHeaders(transaction, headers); err != nil {
 		return err
 	}
 	for _, body := range checkpoint.Bodies {
+		if !stages[body.Stage] || !stages[body.SourceStage] {
+			continue
+		}
 		if err := insertBody(transaction, body); err != nil {
 			return err
 		}
 	}
-	return insertOwnedChunks(transaction, checkpoint.AuditID, checkpoint.Chunks, nil)
+	bodies, err := storedStageSet(transaction, "body_streams", checkpoint.AuditID)
+	if err != nil {
+		return err
+	}
+	return insertOwnedChunks(transaction, checkpoint.AuditID, checkpoint.Chunks, func(stage string) bool { return bodies[stage] })
 }
 
 // insertOwnedChunks inserts every chunk of source. keep, when non-nil, skips
