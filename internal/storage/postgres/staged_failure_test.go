@@ -103,6 +103,16 @@ func TestCheckpointRejectedByTrigger(t *testing.T) {
 				t.Fatal("rolled-back checkpoint left its stage row")
 			}
 		}},
+		{"http_headers", "NEW.kind = 'trailer' AND NEW.stage = 'request_for_newapi_received_from_nginx'", "request and response trailers", func(t *testing.T, legacy, unified harnessDump) {
+			// The checkpoint carrying the request trailers is rolled back,
+			// but request_received's row came from BeginAudit: the header
+			// marker lands on it, as legacy's AddHeaders failure does.
+			for name, dump := range map[string]harnessDump{"legacy": legacy, "unified": unified} {
+				if row := stageRow(dump, "http_stages", StageRequestReceived); row["error_code"] != "capture_headers_failed" || row["state"] != StageStatePartial {
+					t.Fatalf("%s request_received not marked: %v", name, row)
+				}
+			}
+		}},
 		{"body_streams", "NEW.stage = 'request_sent_to_newapi'", "stream both pairs merged", func(t *testing.T, legacy, unified harnessDump) {
 			if stageRow(unified, "body_streams", StageRequestReceived) != nil || stageRow(legacy, "body_streams", StageRequestReceived) == nil {
 				t.Fatal("granularity differs from the design")
@@ -123,8 +133,8 @@ func TestCheckpointRejectedByTrigger(t *testing.T) {
 	}
 	cipher := harnessCipher(t)
 	sealer := harnessSealer{t: t, cipher: cipher}
-	for _, test := range cases {
-		t.Run(test.table, func(t *testing.T) {
+	for index, test := range cases {
+		t.Run(fmt.Sprintf("%d %s", index, test.table), func(t *testing.T) {
 			t.Parallel()
 			legacyStore, unifiedStore := openHarnessStore(t), openHarnessStore(t)
 			for _, store := range []*Store{legacyStore, unifiedStore} {
@@ -340,9 +350,11 @@ func TestCommitFinalAttemptHandsOutcomeToRecovery(t *testing.T) {
 		countStage(dump, "body_chunks", StageRequestReceived) != 1 || stageRow(dump, "body_streams", StageResponseReceived) != nil {
 		t.Fatalf("rows after final failure: stages %v bodies %v chunks %v", summarizeRows(dump["http_stages"]), summarizeRows(dump["body_streams"]), summarizeRows(dump["body_chunks"]))
 	}
+	// The lost commit is recorded as the FinishStage operations it replaces
+	// would have been: every stage is marked as a storage loss.
 	for _, row := range dump["http_stages"] {
-		if row["state"] != StageStatePartial || row["ended_at_ns"] == nil {
-			t.Fatalf("stage left open: %v", row)
+		if row["state"] != StageStatePartial || row["ended_at_ns"] == nil || row["error_code"] != "capture_storage_failed" {
+			t.Fatalf("stage not reconciled as a storage loss: %v", row)
 		}
 	}
 	if countRows(dump, "integrity_events") != 1 {
@@ -548,6 +560,70 @@ func auditEnded(t *testing.T, store *Store, auditID string) bool {
 		t.Fatal(err)
 	}
 	return ended.Valid
+}
+
+// TestCommitDedupMaskLimitsTheDatabaseMerge clears DedupInDB for pairs whose
+// bodies were written separately and are equal: they must stay separate,
+// which shows the mask, not the data, decides.
+func TestCommitDedupMaskLimitsTheDatabaseMerge(t *testing.T) {
+	t.Parallel()
+	store := openHarnessStore(t)
+	cipher := harnessCipher(t)
+	sealer := harnessSealer{t: t, cipher: cipher}
+	clock := &harnessClock{now: 1_000_000}
+	for _, test := range []struct{ scenario, duplicate string }{
+		{"duplicate ahead of its source", StageRequestSent},
+		{"response pair merged in the database", StageResponseSent},
+	} {
+		h := buildHarness(t, clock, "dedup-mask-"+test.duplicate, test.scenario)
+		ops := h.unifiedOps(sealer)
+		commit := ops[len(ops)-1].data.(AuditCommit)
+		if commit.DedupInDB == [2]bool{} {
+			t.Fatalf("%s: scenario does not merge in the database", test.scenario)
+		}
+		commit.DedupInDB = [2]bool{}
+		ops[len(ops)-1].data = commit
+		runHarnessOps(t, store, ops)
+		dump := dumpAudit(t, store.readerDB, cipher, h.id)
+		if row := stageRow(dump, "body_streams", test.duplicate); row["source_stage"] != test.duplicate || countStage(dump, "body_chunks", test.duplicate) == 0 {
+			t.Fatalf("%s merged despite the mask: %v", test.duplicate, row)
+		}
+	}
+	if err := store.VerifyIntegrityPayloads(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFailedCheckpointedAuditRecovers interrupts an audit whose checkpoint 1
+// merged the request pair and whose checkpoint 2 failed: recovery reconciles
+// the failed audit by source_stage without new logic (B.4).
+func TestFailedCheckpointedAuditRecovers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := openHarnessStore(t)
+	injectInsertFailure(t, store, "http_stages", "NEW.stage = 'response_received_from_newapi'")
+	cipher := harnessCipher(t)
+	h := buildHarness(t, &harnessClock{now: 1_000_000}, "failed-interrupted", "interrupted after checkpoint 2")
+	runHarnessOps(t, store, h.unifiedOps(harnessSealer{t: t, cipher: cipher}))
+	dump := dumpAudit(t, store.readerDB, cipher, h.id)
+	audit := dump["audit_records"][0]
+	if audit["capture_status"] != CaptureFailed || audit["forward_status"] != ForwardInterrupted || audit["error_code"] != "capture_write_failed" {
+		t.Fatalf("recovered audit %v", audit)
+	}
+	source := stageRow(dump, "body_streams", StageRequestReceived)
+	duplicate := stageRow(dump, "body_streams", StageRequestSent)
+	if duplicate["source_stage"] != StageRequestReceived || duplicate["state"] != StageStatePartial ||
+		duplicate["stored_length"] != source["stored_length"] || duplicate["chunk_count"] != source["chunk_count"] ||
+		duplicate["stored_length"] == int64(0) || countStage(dump, "body_chunks", StageRequestSent) != 0 {
+		t.Fatalf("merged duplicate not reconciled from its source: %v / %v", duplicate, source)
+	}
+	if stageRow(dump, "http_stages", StageResponseReceived) != nil || len(dump["http_stages"]) != 2 {
+		t.Fatalf("stages %v", summarizeRows(dump["http_stages"]))
+	}
+	assertAuditEvents(t, store, h.id, 1)
+	if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestStagedWriteInputs needs no database: version 2 is refused until its

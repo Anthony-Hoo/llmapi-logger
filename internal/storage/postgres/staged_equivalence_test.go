@@ -184,6 +184,32 @@ func equivalenceScenarios() []equivalenceScenario {
 			h.typicalStream(600, 2000, 32<<10)
 			h.finish()
 		}},
+		{name: "checkpoints deferred to the commit", build: func(h *harness) {
+			// Both checkpoints met a full queue: the commit carries all.
+			request := jsonRequest(5 << 18)
+			h.startRequest("POST", request)
+			h.upload(request, 32<<10)
+			h.endUpload(nil)
+			h.respond(200, streamResponseHeaders(), -1, false)
+			h.relay(sseResponse(3000), 1024)
+			h.eof(StageResponseReceived, nil)
+			h.finish()
+		}},
+		{name: "checkpoint 1 deferred to checkpoint 2", build: func(h *harness) {
+			request := jsonRequest(5 << 18)
+			h.startRequest("POST", request)
+			h.upload(request, 32<<10)
+			h.endUpload(nil)
+			h.respond(200, streamResponseHeaders(), -1, true)
+			h.relay(sseResponse(3000), 1024)
+			h.eof(StageResponseReceived, nil)
+			h.finish()
+		}},
+		{name: "response pair merged in the database", build: func(h *harness) {
+			h.responseInDB = true
+			h.typicalStream(600, 5<<18, 32<<10)
+			h.finish()
+		}},
 		{name: "non stream", build: func(h *harness) {
 			request := jsonRequest(400)
 			response := []byte(`{"id":"example","choices":[{"message":{"role":"assistant","content":"synthetic reply"}}]}`)
@@ -461,6 +487,20 @@ func expectScenarioShape(t *testing.T, name string, h *harness, legacyOps, unifi
 		}
 		if commit.DedupInDB != [2]bool{} {
 			fail("dedup in database %v", commit.DedupInDB)
+		}
+	case "checkpoints deferred to the commit":
+		if len(unifiedOps) != 2 || commit.Stages[1].StageWritten || commit.Stages[0].BodyWritten || commit.DedupInDB != [2]bool{} ||
+			source(StageRequestSent) != StageRequestReceived || chunks(StageRequestSent) != 0 {
+			fail("commit did not insert and merge the request pair")
+		}
+	case "checkpoint 1 deferred to checkpoint 2":
+		if len(h.checkpoints) != 1 || !h.mergedAtCheckpoint || len(unifiedOps[1].data.(AuditCheckpoint).Stages) != 3 {
+			fail("checkpoint 2 did not carry the request side")
+		}
+	case "response pair merged in the database":
+		if commit.DedupInDB != [2]bool{false, true} || commit.Stages[3].Body.SourceStage != StageResponseSent ||
+			source(StageResponseSent) != StageResponseReceived || chunks(StageResponseSent) != 0 {
+			fail("response pair not left to the database")
 		}
 	case "bodies over one MiB", "incompressible bodies over one MiB":
 		if chunks(StageRequestReceived) < 3 || chunks(StageResponseReceived) < 3 || chunks(StageRequestSent) != 0 || chunks(StageResponseSent) != 0 {

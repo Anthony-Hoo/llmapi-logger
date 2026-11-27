@@ -135,6 +135,9 @@ type harness struct {
 	consumed                 map[int]bool
 	mergedAtCheckpoint       bool
 	requestSentWrittenAsSelf bool
+	// responseInDB leaves the response pair to the database merge, as a
+	// session does when it cannot decide the pair in memory.
+	responseInDB bool
 }
 
 func newHarness(t *testing.T, clock *harnessClock, id string) *harness {
@@ -767,7 +770,8 @@ func (h *harness) unifiedOps(s harnessSealer) []hOp {
 	default:
 		requestMerged = h.pairMergesAtFinish(StageRequestReceived, StageRequestSent)
 	}
-	responseMerged := h.pairMergesAtFinish(StageResponseReceived, StageResponseSent)
+	responseMerged := !h.responseInDB && h.pairMergesAtFinish(StageResponseReceived, StageResponseSent)
+	dedup[1] = h.responseInDB
 	commit := AuditCommit{Finish: h.auditFinish, DedupInDB: dedup}
 	finals := make(map[string]*BodyFinish)
 	for _, value := range h.stageFinishes {
