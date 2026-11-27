@@ -98,10 +98,20 @@ func (worker *Worker) projectBackfillEnabled() bool {
 	return listable && worker.currentProjectAnalyzer() != nil
 }
 
+// ProjectIdentityLoader reads one stored identity row. With it the identity
+// backfill checks a retry handed over by the insights backfill before it
+// reads any evidence.
+type ProjectIdentityLoader interface {
+	LoadProjectIdentity(ctx context.Context, auditID string) (storage.ProjectIdentityRow, error)
+}
+
 // projectBackfillLater records an audit the insights backfill just analysed:
 // it may have no current identity, wherever it lies relative to the identity
-// backfill's watermark. position is nil when it is unknown. It is due at
-// once.
+// backfill's watermark. Most already have one (a version bump re-analyses
+// the whole history), so the list decides: a known position only lowers the
+// watermark, which costs the next pass an index range walk and no evidence.
+// An unknown position becomes a retry that is due at once and is checked
+// against the stored identity first.
 func (worker *Worker) projectBackfillLater(auditID string, position *keyset) {
 	if !worker.projectBackfillEnabled() {
 		return
@@ -109,10 +119,11 @@ func (worker *Worker) projectBackfillLater(auditID string, position *keyset) {
 	if _, skipped := worker.projectSkipped[auditID]; skipped {
 		return
 	}
-	if retry, waiting := worker.projectRetry[auditID]; waiting {
-		if position != nil {
-			retry.position = position
-		}
+	if position != nil {
+		worker.projectMark.lower(position)
+		return
+	}
+	if _, waiting := worker.projectRetry[auditID]; waiting {
 		return
 	}
 	if len(worker.projectRetry) >= backfillRetryCap {
@@ -140,8 +151,8 @@ func (worker *Worker) projectBackfillLater(auditID string, position *keyset) {
 // row appears later, whatever its position, only from this goroutine: the
 // live path runs analyzeProject before the insights analyzer writes the row
 // and records a failed identity as a retry or a skip, and an insights
-// backfill that writes a row reports it to projectBackfillLater. A retry set
-// that is full lowers the
+// backfill that writes a row reports it to projectBackfillLater, which lowers
+// the watermark to it. A retry set that is full lowers the
 // watermark instead. Nothing else deletes an identity row without its audit
 // or lowers identity_version; the first pass after a restart covers nothing,
 // which also handles a new ProjectIdentityVersion.
@@ -177,6 +188,10 @@ func (worker *Worker) projectBackfill(ctx context.Context) int {
 		auditID := worker.projectRetryQueue[0]
 		worker.projectRetryQueue = worker.projectRetryQueue[1:]
 		if retry, waiting := worker.projectRetry[auditID]; waiting && retry.pass != worker.projectPass {
+			if worker.projectIdentityCurrent(ctx, auditID) {
+				delete(worker.projectRetry, auditID)
+				continue
+			}
 			worker.attemptProject(ctx, analyzer, auditID, retry.position)
 			attempted++
 		}
@@ -223,6 +238,17 @@ func (worker *Worker) projectBackfill(ctx context.Context) int {
 		worker.projectCursor = &storage.ProjectBackfillCursor{StartedAtNS: candidate.StartedAtNS, AuditID: candidate.AuditID}
 	}
 	return attempted
+}
+
+// projectIdentityCurrent reports whether auditID already has an identity at
+// the current version; false when the store cannot tell.
+func (worker *Worker) projectIdentityCurrent(ctx context.Context, auditID string) bool {
+	loader, ok := worker.store.(ProjectIdentityLoader)
+	if !ok {
+		return false
+	}
+	row, err := loader.LoadProjectIdentity(ctx, auditID)
+	return err == nil && row.Version >= insights.ProjectIdentityVersion
 }
 
 // projectHorizon reads the newest analysed audit position; nil when the store

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/storage"
 )
@@ -63,6 +65,10 @@ func TestRetryableFailureClassification(t *testing.T) {
 		{"disk full", sqlStateError("53100"), true},
 		{"lock not available", sqlStateError("55P03"), true},
 		{"admin shutdown", sqlStateError("57P01"), true},
+		// The shape a terminated PostgreSQL backend returns from the reader
+		// and the writer, captured against the test database.
+		{"terminated backend", &pgconn.PgError{Severity: "FATAL", Code: "57P01"}, true},
+		{"cancelled while the worker runs", context.Canceled, true},
 		{"io error", sqlStateError("58030"), true},
 		{"constraint violation", sqlStateError("23505"), false},
 		{"invalid JSON request", errors.New("insights: request is not valid JSON"), false},

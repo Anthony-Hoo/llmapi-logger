@@ -44,11 +44,12 @@ const backfillSkipFailed = "failed"
 
 // retryableFailure reports whether err may clear without any change to the
 // audit: the storage was busy, unreachable, full, read-only or shut, or an
-// operation timed out. Anything else, an analysis that rejects the evidence
+// operation timed out or was cancelled while the worker kept running (the
+// callers handle their own shutdown first). Anything else, an analysis that rejects the evidence
 // or a panic, fails the same way on the same evidence, so the audit is not
 // loaded again in this process; a restart tries it once more.
 func retryableFailure(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.ErrUnexpectedEOF) ||
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, storage.ErrClosed) || errors.Is(err, storage.ErrQueueFull) || errors.Is(err, storage.ErrRecoveryOverflow) {
 		return true
 	}

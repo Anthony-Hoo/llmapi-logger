@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -194,13 +195,70 @@ func TestProjectWatermarkPicksUpAuditsTheInsightsBackfillAnalyses(t *testing.T) 
 	if attempted := projectPass(t, worker, clock); attempted != 1 || !world.identity["old"] {
 		t.Fatalf("project pass attempted %d, identity %v", attempted, world.identity["old"])
 	}
-	// The pass stayed bounded: it read no analysed row below the watermark.
-	if examined := world.takeExamined(); examined != 0 {
-		t.Fatalf("project pass read %d rows", examined)
+	// The watermark was lowered to the old audit: the pass walked the rows
+	// from there up (old and done-0001..done-0009) and nothing below.
+	if examined := world.takeExamined(); examined != 10 {
+		t.Fatalf("project pass read %d rows, want 10", examined)
 	}
-	if attempted := projectPass(t, worker, clock); attempted != 0 {
+	if attempted := projectPass(t, worker, clock); attempted != 0 || world.takeExamined() != 0 {
 		t.Fatalf("a later project pass attempted %d", attempted)
 	}
+}
+
+// After a version bump the insights backfill re-analyses audits that already
+// have a current identity. Handing them over must not make the identity
+// backfill read their evidence again.
+func TestProjectWatermarkHandoffSparesIdentifiedAudits(t *testing.T) {
+	t.Parallel()
+	world := newCostWorld()
+	seedAnalysed(t, world, 10)
+	worker, clock := watermarkWorker(t, world, &worldAnalyzer{world: world})
+	project := &failingProjectAnalyzer{world: world}
+	worker.SetProjectAnalyzer(project)
+	projectPass(t, worker, clock)
+	for _, id := range []string{"done-0001", "done-0004"} {
+		world.analysed[id] = false // the analysis is outdated; the identity is not
+	}
+	restarted, restartedClock := watermarkWorker(t, world, &worldAnalyzer{world: world})
+	restarted.SetProjectAnalyzer(project)
+	restarted.projectMark = worker.projectMark // only the insights side starts over
+	if attempted := insightsPass(t, restarted, restartedClock); attempted != 2 {
+		t.Fatalf("insights pass attempted %d", attempted)
+	}
+	world.takeLoads()
+	if attempted := projectPass(t, restarted, restartedClock); attempted != 0 {
+		t.Fatalf("identity pass attempted %d", attempted)
+	}
+	if loads := world.takeLoads(); len(loads) != 0 {
+		t.Fatalf("identity pass read bodies %v", loads)
+	}
+}
+
+// A handed-over audit whose position is unknown is checked against the
+// stored identity before any evidence is read.
+func TestProjectRetryChecksTheStoredIdentityFirst(t *testing.T) {
+	t.Parallel()
+	world := newCostWorld()
+	seedAnalysed(t, world, 3)
+	worker, clock := newCostWorker(t, identityWorld{horizonWorld{world}}, &recordingParser{name: watermarkParser})
+	worker.SetAnalyzer(&worldAnalyzer{world: world})
+	worker.SetProjectAnalyzer(&failingProjectAnalyzer{world: world})
+	worker.projectBackfillLater("done-0001", nil)
+	if attempted := projectPass(t, worker, clock); attempted != 0 || len(worker.projectRetry) != 0 || len(world.takeLoads()) != 0 {
+		t.Fatalf("attempted %d, retries %v", attempted, worker.projectRetry)
+	}
+}
+
+// identityWorld adds the identity row lookup the PostgreSQL store has.
+type identityWorld struct{ horizonWorld }
+
+func (world identityWorld) LoadProjectIdentity(_ context.Context, auditID string) (storage.ProjectIdentityRow, error) {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	if !world.identity[auditID] {
+		return storage.ProjectIdentityRow{}, errors.New("no rows")
+	}
+	return storage.ProjectIdentityRow{AuditID: auditID, Version: insights.ProjectIdentityVersion}, nil
 }
 
 // A live identity failure on an old audit: the insights row written right
