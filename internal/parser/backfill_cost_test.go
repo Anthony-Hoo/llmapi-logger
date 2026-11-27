@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/builtin"
@@ -187,8 +188,11 @@ func (reconstructor *noGraphReconstructor) take() map[string]int {
 	return called
 }
 
-// costCase is one kind of audit and the body loads each backfill pass spends
-// on it: request and response bodies count separately.
+// costCase is one kind of audit and, per backfill pass, whether the pass
+// loaded its evidence (1) or left it alone (0). Evidence is the raw bodies
+// while they are retained and a rebuild from the turn graph once they are
+// released; which of the two an audit needs depends on the protocol's
+// normalizer and on the retention rules, and is not what these tests pin.
 type costCase struct {
 	id         string
 	wantStatus string
@@ -201,6 +205,12 @@ func TestBackfillCostPerKindOfAudit(t *testing.T) {
 	harness := newInsightsHarness(t, nil)
 	store := harness.countingWorker(nil)
 	ctx := context.Background()
+	service, err := query.New(harness.store, harnessCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconstructor := &noGraphReconstructor{Reconstructor: service, none: map[string]bool{}, called: map[string]int{}}
+	harness.worker.SetReconstructor(reconstructor)
 	anthropic := func(extra ...string) map[string][]string {
 		return headers(append([]string{"User-Agent", "example-agent/1.0", "X-Api-Key", "sk-costkey", "anthropic-version", "2023-06-01"}, extra...)...)
 	}
@@ -212,36 +222,33 @@ func TestBackfillCostPerKindOfAudit(t *testing.T) {
 
 	// Analysed by the first pass, then done.
 	add("analysable", harness.send("/v1/messages", anthropic(), messagesBody("model-example", "You are an agent.", userMessage("task")), ok),
-		storage.ParseOK, true, 2, 0, 0)
+		storage.ParseOK, true, 1, 0, 0)
 	// A request whose gzip expansion passes MaxGzipRatio. decodeContent stops
 	// at the ratio limit (gzip_ratio_exceeded) and hands on a truncated
 	// prefix, as it truncates an identity body over MaxDecodedBodyBytes
 	// (body_too_large): the parser still reads the response, so the audit is
 	// partial, but the request is no longer JSON and the real runner fails on
 	// it every time. Before issue #59 every pass loaded both bodies again; a
-	// failure that waiting cannot clear now ends the attempts after one load.
+	// failure that waiting cannot clear now ends the attempts after one pass.
 	overLimit := messagesBody("model-example", "You are an agent.", userMessage("pad"+strings.Repeat(" ", 4<<20)))
 	add("over_decode_limit", harness.send("/v1/messages", anthropic("Content-Encoding", "gzip"), gzipText(t, overLimit), ok),
-		storage.ParsePartial, false, 2)
+		storage.ParsePartial, false, 1)
 	// A request in an encoding the parser cannot decode: partial, the request
 	// decodes to nothing, skipped as no_request_body after one load.
 	add("unsupported_request_encoding", harness.send("/v1/messages", anthropic("Content-Encoding", "br"), "not-brotli", ok),
-		storage.ParsePartial, false, 2)
+		storage.ParsePartial, false, 1)
 	// No request body at all: skipped as no_body before any body is read.
 	add("no_request_body_stream", harness.send("/v1/messages", anthropic(), "", ok),
 		storage.ParseOK, false)
 	// The analysis fails every time with an error waiting does not clear: it
 	// used to be reloaded on every pass, now once.
 	failing := harness.send("/v1/messages", anthropic(), messagesBody("model-example", "You are an agent.", userMessage("doomed")), ok)
-	add("analysis_always_fails", failing, storage.ParseOK, false, 2)
+	add("analysis_always_fails", failing, storage.ParseOK, false, 1)
 	// A storage outage while saving: never given up, retried on a backoff of
 	// 10, 20 and 40 minutes (passes start every 10), and analysed once the
 	// outage ends before the eighth pass.
 	outage := harness.send("/v1/messages", anthropic(), messagesBody("model-example", "You are an agent.", userMessage("outage")), ok)
-	add("storage_outage", outage, storage.ParseOK, true, 2, 2, 0, 2, 0, 0, 0, 2)
-	// Raw released, no reconstructor: skipped as raw_unavailable unread.
-	add("raw_unavailable", harness.sendChat("released task", chatResponse("model-example", "ok")),
-		storage.ParseOK, false)
+	add("storage_outage", outage, storage.ParseOK, true, 1, 1, 0, 1, 0, 0, 0, 1)
 
 	for name, test := range cases {
 		audit, err := harness.store.LoadParserAudit(ctx, test.id)
@@ -255,6 +262,7 @@ func TestBackfillCostPerKindOfAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reconstructor.take() // drop anything the live path asked for
 	doomed := doomedAnalyzer{AuditAnalyzer: runner, fail: map[string]bool{failing: true}, outage: map[string]bool{outage: true}}
 	harness.worker.SetAnalyzer(doomed)
 	store.takeLoads() // drop the live parse reads
@@ -264,14 +272,19 @@ func TestBackfillCostPerKindOfAudit(t *testing.T) {
 		}
 		attempted := runPass(t, harness.worker, store)
 		loads := store.takeLoads()
-		t.Logf("pass %d: attempted %d audits, body loads %v", pass+1, attempted, loads)
+		rebuilt := reconstructor.take()
+		t.Logf("pass %d: attempted %d audits, body loads %v, reconstructions %v", pass+1, attempted, loads, rebuilt)
 		for name, test := range cases {
 			want := 0
 			if pass < len(test.perPass) {
 				want = test.perPass[pass]
 			}
-			if loads[test.id] != want {
-				t.Errorf("pass %d %s: %d body loads, want %d", pass+1, name, loads[test.id], want)
+			got := 0
+			if loads[test.id]+rebuilt[test.id] > 0 {
+				got = 1
+			}
+			if got != want {
+				t.Errorf("pass %d %s: evidence loaded %d (body loads %d, reconstructions %d), want %d", pass+1, name, got, loads[test.id], rebuilt[test.id], want)
 			}
 		}
 	}
@@ -336,8 +349,38 @@ func TestBackfillCostOfTheOtherSkipReasons(t *testing.T) {
 }
 
 // erroringParser stands for a parser that no longer yields a usable result
-// for evidence it once parsed.
+// for evidence it once parsed. It stays a normalizer, so the backfill still
+// treats the protocol's released bodies as rebuildable.
 type erroringParser struct{ parser.Parser }
+
+func (wrapped erroringParser) NormalizeAudit(ctx context.Context, input parser.Input, result parser.Result) (auditmodel.Turn, error) {
+	return wrapped.Parser.(parser.AuditNormalizer).NormalizeAudit(ctx, input, result)
+}
+
+// A released body with no reconstructor installed is skipped as
+// raw_unavailable once, without reading anything.
+func TestBackfillSkipsReleasedRawWithoutAReconstructor(t *testing.T) {
+	t.Parallel()
+	harness := newInsightsHarness(t, nil)
+	store := harness.countingWorker(nil)
+	released := harness.sendChat("released task", chatResponse("model-example", "ok"))
+	harness.enableInsights(false)
+	store.takeLoads()
+	for pass := range 3 {
+		attempted := runPass(t, harness.worker, store)
+		loads := store.takeLoads()
+		want := 0
+		if pass == 0 {
+			want = 1
+		}
+		if attempted != want || len(loads) != 0 {
+			t.Errorf("pass %d: attempted %d (want %d), body loads %v", pass+1, attempted, want, loads)
+		}
+	}
+	if harness.hasAnalysis(released) {
+		t.Error("an audit with released raw and no reconstructor was analysed")
+	}
+}
 
 func (erroringParser) Parse(context.Context, parser.Input) parser.Result {
 	return parser.Result{Status: parser.StatusError, ErrorCode: "parse_error"}
