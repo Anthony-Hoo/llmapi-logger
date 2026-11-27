@@ -49,6 +49,15 @@ func sendBoth(t *testing.T, legacy, unified *eqRun, exchange *eqExchange) (eqCli
 
 func compareRuns(t *testing.T, legacy, unified *eqRun, delta func(map[string][]eqRow)) map[string][]eqRow {
 	t.Helper()
+	// The rows as committed, before any parse released raw chunks.
+	for id, committed := range legacy.captured {
+		if delta != nil {
+			delta(committed)
+		}
+		if diffs := diffEqDumps(committed, unified.captured[id]); len(diffs) != 0 {
+			t.Fatalf("committed rows differ:\n%s", strings.Join(diffs[:min(len(diffs), 30)], "\n"))
+		}
+	}
 	legacy.worker.Close()
 	unified.worker.Close()
 	legacyDump := dumpEqDatabase(t, legacy.dbPath, legacy.cipher)
@@ -516,4 +525,160 @@ func TestCrashPointsMatchLegacyAfterRecovery(t *testing.T) {
 			}
 		})
 	}
+}
+
+// largeResponseExchange is a streamed chat turn whose answer spans several
+// 1 MiB chunks: the first delta event is repeated.
+func largeResponseExchange(t *testing.T, size int) *eqExchange {
+	t.Helper()
+	built, err := protofixture.Build(protofixture.Case{Protocol: protofixture.OpenAIChat, Scenario: protofixture.ScenarioBasic, Stream: true},
+		protofixture.Options{Seed: 777})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := fromFixture("large-response", built[0], 64<<10)
+	delta := exchange.respChunks[1]
+	chunks := [][]byte{exchange.respChunks[0]}
+	total := 0
+	for total < size {
+		chunks = append(chunks, delta)
+		total += len(delta)
+	}
+	exchange.respChunks = append(chunks, exchange.respChunks[1:]...)
+	return exchange
+}
+
+// The request pair merged at checkpoint 1 no longer qualifies at Finish
+// (Close fails after EOF): the commit points request_sent back at itself
+// and writes its own chunks, sealed from the borrowed bytes (B.5, K item 3).
+func TestRequestPairUnmergedAtFinish(t *testing.T) {
+	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
+	var counting *countingStore
+	var mergedAtCheckpoint atomic.Bool
+	unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, func(store *sqlite.Store) audit.Store {
+		counting = &countingStore{Store: store}
+		counting.checkpoint = func(checkpoint storage.AuditCheckpoint) error {
+			for _, body := range checkpoint.Bodies {
+				if body.Stage == storage.StageRequestSent && body.SourceStage == storage.StageRequestReceived {
+					mergedAtCheckpoint.Store(true)
+				}
+			}
+			return nil
+		}
+		return counting
+	})
+	exchange := largeStreamExchange(t)
+	exchange.closeErr = errors.New("close failed")
+	sendBoth(t, legacy, unified, exchange)
+	dump := compareRuns(t, legacy, unified, nil)
+	if !mergedAtCheckpoint.Load() {
+		t.Fatal("checkpoint 1 did not merge the request pair")
+	}
+	sent := 0
+	for _, row := range dump["body_chunks"] {
+		if row["stage"] == `"`+storage.StageRequestSent+`"` {
+			sent++
+		}
+	}
+	if sent < 3 {
+		t.Fatalf("request_sent has %d chunks of its own", sent)
+	}
+}
+
+// Responses over 1 MiB, complete and cut after the first chunk: the merged
+// pair, and the duplicate sealed from borrowed bytes when the pair cannot
+// merge.
+func TestLargeResponsesMatchLegacy(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cut   int
+		abort bool
+	}{
+		{name: "complete"},
+		{name: "upstream cut after the first MiB", cut: 1<<20 + 4096, abort: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
+			unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, nil)
+			// Compared before the parse releases the raw chunks.
+			for _, run := range []*eqRun{legacy, unified} {
+				run.manager.SetCompletionNotifier(nil)
+				run.noParse = true
+			}
+			exchange := largeResponseExchange(t, 5<<19)
+			exchange.cutAt, exchange.abort = test.cut, test.abort
+			sendBoth(t, legacy, unified, exchange)
+			dump := compareRuns(t, legacy, unified, nil)
+			chunks := map[string]int{}
+			for _, row := range dump["body_chunks"] {
+				chunks[row["stage"]]++
+			}
+			if chunks[`"`+storage.StageResponseReceived+`"`] < 2 {
+				t.Fatalf("response chunks %v", chunks)
+			}
+		})
+	}
+}
+
+// A client that goes away during the upload: the forward is no longer in
+// progress when the request body ends, so no checkpoint is written and the
+// commit carries everything (B.1).
+func TestClientCancelDuringUploadSkipsCheckpoints(t *testing.T) {
+	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
+	var counting *countingStore
+	unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, func(store *sqlite.Store) audit.Store {
+		counting = &countingStore{Store: store}
+		return counting
+	})
+	legacy.noParse, unified.noParse = true, true
+	exchange := largeStreamExchange(t)
+	exchange.cancelAfterRead = 1200 << 10
+	sendBoth(t, legacy, unified, exchange)
+	for _, run := range []*eqRun{legacy, unified} {
+		run.waitParsed(run.lastAuditID())
+	}
+	dump := compareRuns(t, legacy, unified, nil)
+	if counting.checkpoints.Load() != 0 || counting.commits.Load() != 1 {
+		t.Fatalf("checkpoints %d, commits %d", counting.checkpoints.Load(), counting.commits.Load())
+	}
+	if forward := dump["audit_records"][0]["forward_status"]; forward != `"client_cancelled"` {
+		t.Fatalf("forward %s", forward)
+	}
+}
+
+// A CommitAudit the store rejects as an operation (a trigger on a table only
+// the commit writes) is not retried; the writer records the outcome itself
+// and finalizes the audit as failed.
+func TestCommitConstraintFailureOnTheRealStore(t *testing.T) {
+	var counting *countingStore
+	unified := newEqRun(t, audit.WritePathUnified, audit.Options{CommitRetries: 3, Sleep: func(time.Duration) { t.Error("retried") }},
+		func(store *sqlite.Store) audit.Store {
+			counting = &countingStore{Store: store}
+			return counting
+		})
+	unified.noParse = true
+	execSQL(t, unified.dbPath, `CREATE TRIGGER reject_timeline BEFORE INSERT ON stream_timelines BEGIN SELECT RAISE(ABORT, 'rejected by test'); END`)
+	_, id := unified.send(copyChunks(largeStreamExchange(t)))
+	if counting.commits.Load() != 1 {
+		t.Fatalf("commit attempts %d", counting.commits.Load())
+	}
+	record := completionLogRecords(t, unified.logs.Bytes())[0]
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		snapshot, err := unified.store.Snapshot(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Audit.EndedAtNS != nil {
+			if snapshot.Audit.CaptureStatus != "failed" {
+				t.Fatalf("finalized as %s", snapshot.Audit.CaptureStatus)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("audit was not finalized; completion log %v", record)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Logf("completion log: capture_status=%v error_code=%v", record["capture_status"], record["error_code"])
 }

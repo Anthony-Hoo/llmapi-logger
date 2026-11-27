@@ -203,6 +203,41 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 			}
 		}
 	}
+	// A streamed answer over 2 MiB: the merged response pair's chunks reach
+	// the PostgreSQL store, which keeps the session's chunk slices.
+	large, err := protofixture.Build(protofixture.Case{Protocol: protofixture.OpenAIChat, Scenario: protofixture.ScenarioBasic, Stream: true}, protofixture.Options{Seed: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := large[0]
+	delta := exchange.Response.Chunks[1]
+	chunks := [][]byte{exchange.Response.Chunks[0]}
+	for size := 0; size < 5<<19; size += len(delta) {
+		chunks = append(chunks, delta)
+	}
+	exchange.Response.Chunks = append(chunks, exchange.Response.Chunks[1:]...)
+	legacyStatus, legacyBody, legacyID := send(legacy, legacyDB, exchange)
+	unifiedStatus, unifiedBody, unifiedID := send(unified, unifiedDB, exchange)
+	if legacyStatus != unifiedStatus || !bytes.Equal(legacyBody, unifiedBody) || len(unifiedBody) < 5<<19 {
+		t.Fatalf("large answer: client saw %d (%d bytes) and %d (%d bytes)", legacyStatus, len(legacyBody), unifiedStatus, len(unifiedBody))
+	}
+	if legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedID); !reflect.DeepEqual(legacyShape, unifiedShape) {
+		t.Fatalf("large answer: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
+	}
+	cases++
+	// The same answer cut by the upstream after 2 MiB keeps its raw chunks:
+	// response_sent writes its own, sealed from the bytes it borrowed.
+	exchange.Response.CutAt, exchange.Response.Abort = 2<<20+333, true
+	legacyStatus, _, legacyID = send(legacy, legacyDB, exchange)
+	unifiedStatus, _, unifiedID = send(unified, unifiedDB, exchange)
+	legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedID)
+	if legacyStatus != unifiedStatus || !reflect.DeepEqual(legacyShape, unifiedShape) {
+		t.Fatalf("cut answer: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
+	}
+	if responseChunks := strings.Count(strings.Join(unifiedShape.Chunks, "|"), "response_from_newapi_sent_to_nginx"); responseChunks < 2 {
+		t.Fatalf("cut answer: response_sent has %d chunks: %v", responseChunks, unifiedShape.Chunks)
+	}
+	cases++
 	for _, running := range []*runningApp{legacy, unified} {
 		if err := running.stop(); err != nil {
 			t.Fatal(err)

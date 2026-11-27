@@ -75,6 +75,11 @@ type eqExchange struct {
 	cutAt       int
 	abort       bool
 	cancel      bool
+	// closeErr is what Close of the inbound body returns.
+	closeErr error
+	// cancelAfterRead, when positive, cancels the client request once the
+	// upstream has read this many request bytes; the upload then fails.
+	cancelAfterRead int
 }
 
 // eqUpstream is the scripted upstream of one run.
@@ -121,6 +126,11 @@ func (upstream *eqUpstream) roundTrip(request *http.Request) (*http.Response, er
 			count, err := request.Body.Read(buffer[:limit])
 			read += count
 			upstream.event("request-read", read)
+			if exchange.cancelAfterRead > 0 && read >= exchange.cancelAfterRead {
+				upstream.cancel()
+				_ = request.Body.Close()
+				return nil, context.Canceled
+			}
 			if err != nil {
 				break
 			}
@@ -221,8 +231,9 @@ func (body *eqResponseBody) Close() error {
 
 // fixedReader returns at most size bytes per Read.
 type fixedReader struct {
-	data []byte
-	size int
+	data     []byte
+	size     int
+	closeErr error
 }
 
 func (reader *fixedReader) Read(buffer []byte) (int, error) {
@@ -234,7 +245,7 @@ func (reader *fixedReader) Read(buffer []byte) (int, error) {
 	return count, nil
 }
 
-func (reader *fixedReader) Close() error { return nil }
+func (reader *fixedReader) Close() error { return reader.closeErr }
 
 // eqRun is one write path's process: store, manager, handler, parser.
 type eqRun struct {
@@ -252,6 +263,8 @@ type eqRun struct {
 	clock    atomic.Int64
 	reads    atomic.Int64
 	noParse  bool
+	// captured holds each audit's capture rows as committed, before the parse.
+	captured map[string]map[string][]eqRow
 }
 
 func eqRoutes() []config.RouteConfig {
@@ -303,7 +316,9 @@ func newEqRun(t *testing.T, writePath string, options audit.Options, wrap func(*
 	if run.worker, err = parser.NewWorker(store, run.cipher, builtin.All(), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatal(err)
 	}
-	run.manager.SetCompletionNotifier(run.worker.Notify)
+	// The parse is started by send, after the committed capture rows were
+	// read: a successful parse releases the raw chunks.
+	run.manager.SetCompletionNotifier(func(string) bool { return true })
 	workerCtx, stop := context.WithCancel(ctx)
 	if err := run.worker.Start(workerCtx); err != nil {
 		t.Fatal(err)
@@ -350,7 +365,7 @@ func (run *eqRun) send(exchange *eqExchange) (eqClientView, string) {
 	run.upstream.cancel = cancel
 	var body io.Reader = http.NoBody
 	if exchange.body != nil {
-		body = &fixedReader{data: exchange.body, size: exchange.readSize}
+		body = &fixedReader{data: exchange.body, size: exchange.readSize, closeErr: exchange.closeErr}
 	}
 	request := httptest.NewRequestWithContext(ctx, exchange.method, "http://proxy.example.com"+exchange.path, body)
 	request.Header = exchange.header.Clone()
@@ -372,6 +387,10 @@ func (run *eqRun) send(exchange *eqExchange) (eqClientView, string) {
 	result := recorder.Result()
 	view := eqClientView{status: result.StatusCode, header: result.Header, body: recorder.Body.Bytes(), trailer: result.Trailer}
 	id := run.lastAuditID()
+	if run.captured == nil {
+		run.captured = map[string]map[string][]eqRow{}
+	}
+	run.captured[id] = dumpEqAudit(run.t, run.dbPath, run.cipher, id)
 	if !run.noParse {
 		run.waitParsed(id)
 	}
@@ -525,6 +544,9 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 		if legacy.reads.Load() != unified.reads.Load() {
 			t.Fatalf("%s: clock reads %d (legacy) and %d (unified)", exchange.name, legacy.reads.Load(), unified.reads.Load())
 		}
+		if diffs := diffEqDumps(legacy.captured[legacyID], unified.captured[unifiedID]); len(diffs) != 0 {
+			t.Fatalf("%s: committed rows differ:\n%s", exchange.name, strings.Join(diffs[:min(len(diffs), 30)], "\n"))
+		}
 		ids = append(ids, legacyID)
 	}
 	compareCompletionLogs(t, legacy.logs.Bytes(), unified.logs.Bytes())
@@ -660,7 +682,21 @@ func parserClockColumn(table, column string) bool {
 	}
 }
 
+// captureTables are the tables the capture session writes.
+var captureTables = []string{"audit_records", "http_stages", "http_headers", "body_streams", "body_chunks", "stream_timelines", "integrity_events"}
+
+// dumpEqAudit reads one audit's capture rows.
+func dumpEqAudit(t *testing.T, path string, cipher security.Cipher, auditID string) map[string][]eqRow {
+	t.Helper()
+	return dumpEqTables(t, path, cipher, captureTables, auditID)
+}
+
 func dumpEqDatabase(t *testing.T, path string, cipher security.Cipher) map[string][]eqRow {
+	t.Helper()
+	return dumpEqTables(t, path, cipher, nil, "")
+}
+
+func dumpEqTables(t *testing.T, path string, cipher security.Cipher, only []string, auditID string) map[string][]eqRow {
 	t.Helper()
 	database, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
 	if err != nil {
@@ -680,9 +716,17 @@ func dumpEqDatabase(t *testing.T, path string, cipher security.Cipher) map[strin
 		tables = append(tables, name)
 	}
 	_ = names.Close()
+	if only != nil {
+		tables = only
+	}
 	dump := map[string][]eqRow{}
 	for _, table := range tables {
-		rows, err := database.Query(`SELECT * FROM "` + table + `"`)
+		statement, arguments := `SELECT * FROM "`+table+`"`, []any(nil)
+		if auditID != "" {
+			statement += " WHERE audit_id = ?"
+			arguments = append(arguments, auditID)
+		}
+		rows, err := database.Query(statement, arguments...)
 		if err != nil {
 			t.Fatal(err)
 		}
