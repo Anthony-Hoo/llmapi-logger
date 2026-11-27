@@ -32,6 +32,10 @@ const (
 
 var ErrUnavailable = errors.New("audit unavailable")
 
+// ErrUnifiedUnsupported is NewManagerWithOptions refusing the unified write
+// path because the store cannot serve it.
+var ErrUnifiedUnsupported = errors.New("audit: the store cannot serve audit.write_path unified")
+
 // Store is the ordered persistence surface used by a Session.
 // FinishAuditWithResult is a barrier for earlier asynchronous writes and
 // returns the effective committed outcome for the completion log.
@@ -217,7 +221,7 @@ func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *se
 	manager.commitRetries.Store(int32(options.CommitRetries))
 	if options.WritePath == WritePathUnified {
 		if support, ok := store.(unifiedWriteSupport); ok && !support.SupportsUnifiedWrite() {
-			return nil, errors.New("audit: the store cannot serve audit.write_path unified")
+			return nil, ErrUnifiedUnsupported
 		}
 		manager.unified = true
 		manager.captureVersion = captureVersionFor(store)

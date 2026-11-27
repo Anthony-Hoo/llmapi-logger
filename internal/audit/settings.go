@@ -40,8 +40,9 @@ type CaptureSettingsView struct {
 	Settings  CaptureEditableSettings `json:"settings"`
 	// File is what the configuration file says, i.e. what a reset returns to.
 	File CaptureEditableSettings `json:"file"`
-	// WritePath is audit.write_path from the configuration file, shown
-	// read-only: the legacy path does not use the retry count.
+	// WritePath is the write path the audit manager runs: audit.write_path,
+	// or legacy when unified fell back (staging unusable in available mode).
+	// Shown read-only: the legacy path does not use the retry count.
 	WritePath string `json:"write_path"`
 }
 
@@ -80,7 +81,8 @@ type CommitRetrySetter interface {
 type CaptureSettingsOptions struct {
 	// FileRetries is audit.commit_retries from the configuration file.
 	FileRetries int
-	// WritePath is audit.write_path from the configuration file.
+	// WritePath is the write path the audit manager runs (Manager.WritePath),
+	// which may differ from audit.write_path after a fallback.
 	WritePath string
 	// Store is nil when the audit store could not be opened: reads answer
 	// with the file, writes refuse with ErrSettingsUnavailable.

@@ -246,3 +246,35 @@ func sealTestChunk(t *testing.T, cipher security.Cipher, auditID string, seq, of
 	return storage.BodyChunk{AuditID: auditID, Stage: storage.StageRequestReceived, Seq: seq, Offset: offset, PlaintextLength: len(plaintext),
 		EncodedLength: len(encoded), ObservedAtNS: time.Now().UnixNano(), Compression: compression, DataEnc: encrypted}
 }
+
+type noUnifiedStore struct{ *sqlite.Store }
+
+func (noUnifiedStore) SupportsUnifiedWrite() bool { return false }
+
+// A manager that refuses unified is logged with a stable reason, never the
+// error text (AGENTS.md, module 13).
+func TestManagerRefusalLogsAStableReason(t *testing.T) {
+	directory := t.TempDir()
+	configuration := config.Default()
+	configuration.DBPath = filepath.Join(directory, "audit.db")
+	configuration.KeyPath = filepath.Join(directory, "key", "audit.key")
+	configuration.Audit.WritePath = config.AuditWritePathUnified
+	configuration.Audit.Staging.Dir = filepath.Join(directory, "staging")
+	var logs bytes.Buffer
+	runtime := assembleAuditWithStore(context.Background(), configuration, slog.New(slog.NewJSONHandler(&logs, nil)),
+		func(ctx context.Context, _ string, logger *slog.Logger) (runtimeStore, error) {
+			store, err := sqlite.OpenWithLogger(ctx, configuration.DBPath, logger)
+			if err != nil {
+				return nil, err
+			}
+			return noUnifiedStore{store}, nil
+		})
+	if runtime.store != nil || runtime.manager.Healthy() {
+		t.Fatal("a refused manager audits")
+	}
+	text := logs.String()
+	if !strings.Contains(text, `"msg":"audit manager unavailable"`) || !strings.Contains(text, `"reason":"unified_unsupported"`) ||
+		strings.Contains(text, "cannot serve") {
+		t.Fatalf("log %s", text)
+	}
+}

@@ -1041,7 +1041,11 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 	if err != nil {
 		closeStager()
 		_ = store.Close()
-		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable", "reason", err.Error())
+		reason := "invalid_audit_options"
+		if errors.Is(err, audit.ErrUnifiedUnsupported) {
+			reason = "unified_unsupported"
+		}
+		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable", "reason", reason)
 		unavailable := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: unavailable, manager: unavailable}
 	}
