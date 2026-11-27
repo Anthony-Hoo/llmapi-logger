@@ -47,6 +47,9 @@ const (
 	writeDeleteContentPolicyRule
 	writeCheckpoint
 	writeCommitAudit
+	// writeRestoreStagedChunks is the start-up import of local staging
+	// (staged_restore.go).
+	writeRestoreStagedChunks
 )
 
 type writeRequest struct {
@@ -555,6 +558,8 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 			return err
 		}
 		return commitAudit(transaction, commit, signer)
+	case writeRestoreStagedChunks:
+		return restoreStagedChunks(transaction, request.data.(*stagedRestoreWrite))
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
 	case writeClaimPendingParse:

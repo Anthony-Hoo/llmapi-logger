@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -195,13 +196,25 @@ func chunkBoundsOf(source ChunkSource) [4]int64 {
 	if source == nil {
 		return bounds
 	}
-	_ = source.Each(func(chunk BodyChunk) error {
+	each := source.Each
+	if metadata, ok := source.(chunkMetadataSource); ok {
+		// Staged chunks: their bounds need no file read, which matters as
+		// this runs under the recovery and submit locks.
+		each = metadata.EachMetadata
+	}
+	_ = each(func(chunk BodyChunk) error {
 		if order := storage.StageOrder(chunk.Stage); order >= 0 {
 			bounds[order] = max(bounds[order], chunk.Offset+int64(chunk.PlaintextLength))
 		}
 		return nil
 	})
 	return bounds
+}
+
+// chunkMetadataSource is a chunk source that can yield its chunks without
+// their ciphertext (internal/audit's source over staged chunks).
+type chunkMetadataSource interface {
+	EachMetadata(visit func(BodyChunk) error) error
 }
 
 // chunkPayloadBytes sizes the ciphertext of an in-memory chunk list. Any other
@@ -305,6 +318,7 @@ func insertChunkRows(transaction dbTransaction, auditID string, source ChunkSour
 	}
 	batch := make([]BodyChunk, 0, 8)
 	size := 0
+	var insertErr error
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -322,7 +336,8 @@ INSERT INTO body_chunks (
     audit_id, stage, seq, "offset", plaintext_length, encoded_length,
     observed_at_ns, compression, data_enc
 ) VALUES `+strings.Join(values, ","), arguments...); err != nil {
-			return fmt.Errorf("postgres writer: add chunk: %w", err)
+			insertErr = fmt.Errorf("postgres writer: add chunk: %w", err)
+			return insertErr
 		}
 		return nil
 	}
@@ -343,8 +358,18 @@ INSERT INTO body_chunks (
 		size += len(chunk.DataEnc)
 		return nil
 	})
+	if insertErr != nil {
+		return insertErr
+	}
 	if err != nil {
-		return err
+		var local localWriteError
+		if errors.As(err, &local) {
+			return err
+		}
+		// The source could not be read (a staged chunk's file, F.4): a local
+		// error, so only this operation rolls back and the audit is failed,
+		// as on SQLite; it must not fail the batch and every write in it.
+		return localWriteError("postgres writer: read owned chunks failed")
 	}
 	return flush()
 }

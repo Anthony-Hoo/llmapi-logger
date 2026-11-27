@@ -135,11 +135,23 @@ func chunkBounds(source ChunkSource) map[string]int64 {
 	if source == nil {
 		return bounds
 	}
-	_ = source.Each(func(chunk BodyChunk) error {
+	each := source.Each
+	if metadata, ok := source.(chunkMetadataSource); ok {
+		// Staged chunks: their bounds need no file read, which matters as
+		// this runs under the recovery and submit locks.
+		each = metadata.EachMetadata
+	}
+	_ = each(func(chunk BodyChunk) error {
 		bounds[chunk.Stage] = max(bounds[chunk.Stage], chunk.Offset+int64(chunk.PlaintextLength))
 		return nil
 	})
 	return bounds
+}
+
+// chunkMetadataSource is a chunk source that can yield its chunks without
+// their ciphertext (internal/audit's source over staged chunks).
+type chunkMetadataSource interface {
+	EachMetadata(visit func(BodyChunk) error) error
 }
 
 func checkpointChunkBounds(checkpoint AuditCheckpoint) map[string]int64 {

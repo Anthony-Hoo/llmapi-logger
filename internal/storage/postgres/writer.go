@@ -54,6 +54,9 @@ const (
 	// in-flight write and final write (checkpoint_writer.go, commit_writer.go).
 	writeCheckpoint
 	writeCommitAudit
+	// writeRestoreStagedChunks is the start-up import of local staging
+	// (staged_restore.go).
+	writeRestoreStagedChunks
 )
 
 type writeRequest struct {
@@ -579,6 +582,8 @@ func (store *Store) applyWrite(transaction dbTransaction, request writeRequest) 
 			return err
 		}
 		return applyCommit(transaction, commit, signer)
+	case writeRestoreStagedChunks:
+		return restoreStagedChunks(transaction, request.data.(*stagedRestoreWrite))
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
 	case writeClaimPendingParse:
