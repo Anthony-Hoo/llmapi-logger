@@ -207,6 +207,35 @@ func (worker *Worker) decryptContentHeaders(auditID, stageName string, headers [
 }
 
 func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string, body storage.BodyStream) ([]byte, bool, string, error) {
+	return assembleBody(body, storedChunks{ctx: ctx, worker: worker, auditID: auditID, stage: stageName})
+}
+
+// assembledChunk is one chunk of a body, in seq order, as a chunkSource
+// yields it: its position, and what plaintext needs to open it.
+type assembledChunk struct {
+	seq    int64
+	offset int64
+	// stored is the encrypted row (the database source); plaintext is the
+	// chunk's bytes (the in-memory source).
+	stored    *storage.BodyChunk
+	plaintext []byte
+}
+
+// chunkSource feeds assembleBody: page returns at most parserChunkPage chunks
+// after afterSeq in seq order (an error is a read failure), and plaintext
+// opens one of them (an error is an integrity failure).
+type chunkSource interface {
+	page(afterSeq int64) ([]assembledChunk, error)
+	plaintext(chunk assembledChunk) ([]byte, error)
+}
+
+// assembleBody rebuilds a stored body from its chunks, with every check the
+// parser makes on stored evidence: contiguous seq and offset, each chunk
+// opened under its own AAD, the encoded-size limit, the stored length and the
+// digest of the body row, and the row's completeness. It returns the raw
+// bytes (what could be read, on failure), whether they are complete, the
+// stable evidence code and the failure.
+func assembleBody(body storage.BodyStream, source chunkSource) ([]byte, bool, string, error) {
 	initialCapacity := int(min(int64(maxEncodedBodySize), body.StoredLength))
 	buffer := bytes.NewBuffer(make([]byte, 0, initialCapacity))
 	expectedSeq := int64(0)
@@ -215,7 +244,7 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 	complete := body.State == storage.StageStateComplete && body.HashComplete && body.EOFSeen && body.StoredLength == body.ObservedLength
 
 	for {
-		chunks, err := worker.store.ReadParserChunks(ctx, auditID, stageName, afterSeq, parserChunkPage)
+		chunks, err := source.page(afterSeq)
 		if err != nil {
 			return buffer.Bytes(), false, "evidence_read_error", err
 		}
@@ -223,35 +252,12 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 			break
 		}
 		for _, chunk := range chunks {
-			if chunk.Seq != expectedSeq || chunk.Offset != expectedOffset {
+			if chunk.seq != expectedSeq || chunk.offset != expectedOffset {
 				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk sequence or offset mismatch")
 			}
-			compression := chunk.Compression
-			if compression == "" {
-				compression = bodycodec.CompressionNone
-			}
-			aad, err := security.AAD(auditID, "body_chunk_v2", chunk.Stage, strconv.FormatInt(chunk.Seq, 10), compression)
+			plaintext, err := source.plaintext(chunk)
 			if err != nil {
-				return buffer.Bytes(), false, "capture_integrity_error", fmt.Errorf("parser: body chunk AAD: %w", err)
-			}
-			encoded, err := worker.cipher.Decrypt(aad, chunk.DataEnc)
-			if err != nil && compression == bodycodec.CompressionNone {
-				legacyAAD, legacyErr := security.AAD(auditID, "body_chunk", chunk.Stage, strconv.FormatInt(chunk.Seq, 10))
-				if legacyErr == nil {
-					encoded, err = worker.cipher.Decrypt(legacyAAD, chunk.DataEnc)
-				}
-			}
-			if err != nil {
-				return buffer.Bytes(), false, "capture_integrity_error", fmt.Errorf("parser: decrypt body chunk: %w", err)
-			}
-			if chunk.EncodedLength > 0 && len(encoded) != chunk.EncodedLength {
-				clear(encoded)
-				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk encoded length mismatch")
-			}
-			plaintext, decodeErr := bodycodec.Decode(encoded, compression, chunk.PlaintextLength)
-			clear(encoded)
-			if decodeErr != nil {
-				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk decompression failed")
+				return buffer.Bytes(), false, "capture_integrity_error", err
 			}
 			if buffer.Len()+len(plaintext) > maxEncodedBodySize {
 				remaining := maxEncodedBodySize - buffer.Len()
@@ -263,7 +269,7 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 			_, _ = buffer.Write(plaintext)
 			expectedSeq++
 			expectedOffset += int64(len(plaintext))
-			afterSeq = chunk.Seq
+			afterSeq = chunk.seq
 		}
 		if len(chunks) < parserChunkPage {
 			break
@@ -288,6 +294,59 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 		return raw, false, errorCode, nil
 	}
 	return raw, true, "", nil
+}
+
+// storedChunks is the chunk source of a stored body: the body_chunks rows of
+// the stage's source, paged from the store and opened with the cipher.
+type storedChunks struct {
+	ctx     context.Context
+	worker  *Worker
+	auditID string
+	stage   string
+}
+
+func (source storedChunks) page(afterSeq int64) ([]assembledChunk, error) {
+	chunks, err := source.worker.store.ReadParserChunks(source.ctx, source.auditID, source.stage, afterSeq, parserChunkPage)
+	if err != nil {
+		return nil, err
+	}
+	page := make([]assembledChunk, len(chunks))
+	for index := range chunks {
+		page[index] = assembledChunk{seq: chunks[index].Seq, offset: chunks[index].Offset, stored: &chunks[index]}
+	}
+	return page, nil
+}
+
+func (source storedChunks) plaintext(entry assembledChunk) ([]byte, error) {
+	chunk := entry.stored
+	compression := chunk.Compression
+	if compression == "" {
+		compression = bodycodec.CompressionNone
+	}
+	aad, err := security.AAD(source.auditID, "body_chunk_v2", chunk.Stage, strconv.FormatInt(chunk.Seq, 10), compression)
+	if err != nil {
+		return nil, fmt.Errorf("parser: body chunk AAD: %w", err)
+	}
+	encoded, err := source.worker.cipher.Decrypt(aad, chunk.DataEnc)
+	if err != nil && compression == bodycodec.CompressionNone {
+		legacyAAD, legacyErr := security.AAD(source.auditID, "body_chunk", chunk.Stage, strconv.FormatInt(chunk.Seq, 10))
+		if legacyErr == nil {
+			encoded, err = source.worker.cipher.Decrypt(legacyAAD, chunk.DataEnc)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("parser: decrypt body chunk: %w", err)
+	}
+	if chunk.EncodedLength > 0 && len(encoded) != chunk.EncodedLength {
+		clear(encoded)
+		return nil, errors.New("parser: body chunk encoded length mismatch")
+	}
+	plaintext, decodeErr := bodycodec.Decode(encoded, compression, chunk.PlaintextLength)
+	clear(encoded)
+	if decodeErr != nil {
+		return nil, errors.New("parser: body chunk decompression failed")
+	}
+	return plaintext, nil
 }
 
 func decodeContent(raw []byte, contentEncoding string) ([]byte, string, error) {
