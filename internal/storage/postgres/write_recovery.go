@@ -92,6 +92,46 @@ func (store *Store) rememberFailedWrite(request writeRequest, barrier uint64) {
 	case writeFinishAudit:
 		v := request.data.(*AuditFinish)
 		remember(v.AuditID, "", false, false, 0, v)
+	case writeCheckpoint:
+		// What the StartStage, StartBody, AddHeaders and AddChunk operations
+		// the checkpoint replaces would have recorded together (B.8).
+		v := request.data.(*checkpointWrite)
+		for _, stage := range v.Stages {
+			remember(v.AuditID, stage.Stage, false, false, 0, nil)
+		}
+		for _, body := range v.Bodies {
+			remember(v.AuditID, body.Stage, false, false, body.ObservedLength, nil)
+		}
+		for _, header := range v.Headers {
+			remember(v.AuditID, header.Stage, true, false, 0, nil)
+		}
+		for index, bound := range v.chunkBounds() {
+			if bound >= 0 {
+				remember(v.AuditID, captureStageNames[index], false, true, bound, nil)
+			}
+		}
+	case writeCommitAudit:
+		// A whole commit lost in a failed batch: what its FinishStage,
+		// AddHeaders, AddChunk and FinishAudit would have recorded. Only the
+		// last attempt gets here (runWriter); a queue-full or operation-level
+		// failure records the outcome alone, as FinishAudit does.
+		v := request.data.(*commitWrite)
+		for _, stage := range v.Stages {
+			var observed int64
+			if stage.Body != nil {
+				observed = stage.Body.ObservedLength
+			}
+			remember(v.Finish.AuditID, stage.Stage.Stage, false, false, observed, nil)
+		}
+		for _, header := range v.Headers {
+			remember(v.Finish.AuditID, header.Stage, true, false, 0, nil)
+		}
+		for index, bound := range v.chunkBounds() {
+			if bound >= 0 {
+				remember(v.Finish.AuditID, captureStageNames[index], false, true, bound, nil)
+			}
+		}
+		remember(v.Finish.AuditID, "", false, false, 0, &v.Finish)
 	}
 	store.recoveryPending.Store(int32(len(store.recoveries)))
 	// Queue-full finalization is not seen by the writer until it is woken.
@@ -262,7 +302,7 @@ WHERE audit_id=$3 AND stage=$4`, loss.observed, loss.chunk, id, captureStageName
 		return false, nil
 	}
 	finish := cloneAuditFinish(*entry.finish)
-	if err := finishAudit(tx, &finish, store.integrity.Load()); err != nil {
+	if err := finishAudit(tx, &finish, store.integrity.Load(), legacyDedup); err != nil {
 		return false, fmt.Errorf("postgres: recover finalization: %w", err)
 	}
 	return true, nil

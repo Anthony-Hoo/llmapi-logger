@@ -12,6 +12,7 @@ import (
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/uaguard"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -49,6 +50,10 @@ const (
 	// is an orgWrite closure so that the feature adds a single writer case.
 	writeOrg
 	writeDerived
+	// writeCheckpoint and writeCommitAudit are the staged write path's
+	// in-flight write and final write (checkpoint_writer.go, commit_writer.go).
+	writeCheckpoint
+	writeCommitAudit
 )
 
 type writeRequest struct {
@@ -57,23 +62,52 @@ type writeRequest struct {
 	ack      chan error
 	sequence uint64
 	policy   *policyWrite
+	// payloadBytes is the ciphertext a checkpoint or commit carries. Legacy
+	// operations leave it zero, so their batching is unchanged.
+	payloadBytes int64
 }
+
+const (
+	// A checkpoint or commit above this size gets a transaction of its own.
+	aloneWritePayloadBytes = 16 << 20
+	// A batch stops collecting once its checkpoints and commits reach this.
+	batchPayloadBytes = 32 << 20
+)
 
 // alone reports whether the request gets a transaction of its own. A policy
 // write has its own deadline. A retention batch is a write whose cost grows
 // with the stored data, and a storage error fails a whole batch, so it must
-// not share its fate with audit writes that happened to queue beside it.
+// not share its fate with audit writes that happened to queue beside it. A
+// large checkpoint or commit is alone for the same reason.
 func (request writeRequest) alone() bool {
-	return request.policy != nil || request.kind == writeDeleteExpired
+	return request.policy != nil || request.kind == writeDeleteExpired || request.payloadBytes > aloneWritePayloadBytes
 }
 
 // BeginAudit enqueues a parent audit row and waits until its batch commits.
+// Under the staged write path the record carries its inbound stage, which is
+// written in the same operation (K item 1).
 func (store *Store) BeginAudit(ctx context.Context, record AuditRecord) error {
 	record.Defaults()
+	if record.Inbound != nil {
+		inbound := *record.Inbound
+		inbound.Stage.Defaults()
+		record.Inbound = &inbound
+	}
 	if err := validateAuditRecord(record); err != nil {
 		return err
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: cloneAuditRecord(record)})
+	if err := storage.ValidateAuditRecordCapture(record); err != nil {
+		return err
+	}
+	if err := requireCaptureVersion(record.CaptureVersion); err != nil {
+		return err
+	}
+	owned := cloneAuditRecord(record)
+	if record.Inbound != nil {
+		inbound := cloneInboundStage(*record.Inbound)
+		owned.Inbound = &inbound
+	}
+	return store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: owned})
 }
 
 // StartStage non-blockingly appends an observed HTTP stage to the writer
@@ -179,6 +213,11 @@ func (store *Store) submitAsync(ctx context.Context, request writeRequest) error
 			// Replaying must wait for every earlier accepted stage write.
 			store.rememberFailedWrite(request, store.submittedSequence)
 		}
+		if commit, ok := request.data.(*commitWrite); ok && request.kind == writeCommitAudit && commit.FinalAttempt {
+			// Only the last attempt hands the outcome to recovery; an earlier
+			// one leaves the audit open for the session's retry (B.8).
+			store.rememberFailedWrite(commit.finishRequest(request.sequence), store.submittedSequence)
+		}
 		return ErrQueueFull
 	}
 }
@@ -227,9 +266,10 @@ func (store *Store) runWriter() {
 		batch = append(batch, first)
 		timer := time.NewTimer(writerBatchDelay)
 		queueClosed := false
+		payloadBytes := first.payloadBytes
 
 	collect:
-		for !first.alone() && len(batch) < writerBatchSize {
+		for !first.alone() && len(batch) < writerBatchSize && payloadBytes < batchPayloadBytes {
 			select {
 			case request, open := <-store.queue:
 				if !open {
@@ -241,6 +281,7 @@ func (store *Store) runWriter() {
 					break collect
 				}
 				batch = append(batch, request)
+				payloadBytes += request.payloadBytes
 			case <-timer.C:
 				break collect
 			}
@@ -260,6 +301,10 @@ func (store *Store) runWriter() {
 					"storage_error", ErrorClass(err), "write_count", len(batch))
 			}
 			for _, request := range batch {
+				if commit, ok := request.data.(*commitWrite); ok && request.kind == writeCommitAudit && !commit.FinalAttempt {
+					// The session retries; recovery must not finalize first.
+					continue
+				}
 				store.rememberFailedWrite(request, request.sequence)
 			}
 		} else if wrote {
@@ -267,11 +312,21 @@ func (store *Store) runWriter() {
 		}
 		if err == nil {
 			for index, request := range batch {
-				if request.kind == writeFinishAudit {
+				switch request.kind {
+				case writeFinishAudit:
 					if results[index] != nil && !errors.Is(results[index], sql.ErrNoRows) {
 						store.rememberFailedWrite(request, request.sequence)
 					} else if results[index] == nil {
 						store.forgetFinishedRecovery(request.data.(*AuditFinish).AuditID)
+					}
+				case writeCommitAudit:
+					// An operation-level failure is never retried, so the
+					// outcome goes to recovery whatever the attempt (B.8).
+					commit := request.data.(*commitWrite)
+					if results[index] != nil && !errors.Is(results[index], sql.ErrNoRows) {
+						store.rememberFailedWrite(commit.finishRequest(request.sequence), request.sequence)
+					} else if results[index] == nil {
+						store.forgetFinishedRecovery(commit.Finish.AuditID)
 					}
 				}
 			}
@@ -281,7 +336,10 @@ func (store *Store) runWriter() {
 		}
 		for index, request := range batch {
 			if request.ack != nil {
-				if err != nil {
+				if err != nil && request.kind == writeCommitAudit {
+					// The caller may retry a batch-level failure (B.8).
+					request.ack <- fmt.Errorf("%w: %w", ErrWriteBatchFailed, err)
+				} else if err != nil {
 					request.ack <- err
 				} else {
 					request.ack <- results[index]
@@ -403,6 +461,18 @@ func markCaptureWriteFailed(transaction dbTransaction, request writeRequest) err
 		auditIDs = []string{request.data.(BodyChunk).AuditID}
 	case writeFinishStage:
 		auditIDs = []string{request.data.(StageFinish).AuditID}
+	case writeCheckpoint:
+		// The checkpoint replaces StartStage, AddHeaders, StartBody and
+		// AddChunk: record what their failures would have recorded. The
+		// rows this checkpoint inserted are rolled back, so the stage and body
+		// markers only land on rows an earlier write left (B.8).
+		checkpoint := request.data.(*checkpointWrite)
+		auditIDs = []string{checkpoint.AuditID}
+		for _, header := range checkpoint.Headers {
+			headerStages[[2]string{header.AuditID, header.Stage}] = struct{}{}
+		}
+	case writeCommitAudit:
+		auditIDs = []string{request.data.(*commitWrite).Finish.AuditID}
 	}
 	for _, auditID := range auditIDs {
 		if _, err := transaction.Exec(`
@@ -422,13 +492,32 @@ WHERE audit_id = $1 AND stage = $2
 	}
 	if request.kind == writeAddChunk {
 		chunk := request.data.(BodyChunk)
-		if _, err := transaction.Exec(`
+		if err := markMissingChunk(transaction, chunk.AuditID, chunk.Stage, chunk.Offset+int64(chunk.PlaintextLength)); err != nil {
+			return err
+		}
+	}
+	if request.kind == writeCheckpoint {
+		checkpoint := request.data.(*checkpointWrite)
+		bounds := checkpoint.chunkBounds()
+		for index, stage := range captureStageNames {
+			if bounds[index] < 0 {
+				continue
+			}
+			if err := markMissingChunk(transaction, checkpoint.AuditID, stage, bounds[index]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func markMissingChunk(transaction dbTransaction, auditID, stage string, observed int64) error {
+	if _, err := transaction.Exec(`
 UPDATE body_streams SET observed_length = GREATEST(observed_length, $1), error_code = $2
 WHERE audit_id = $3 AND stage = $4 AND state = 'streaming'
   AND EXISTS (SELECT 1 FROM audit_records a WHERE a.audit_id = body_streams.audit_id AND a.ended_at_ns IS NULL)`,
-			chunk.Offset+int64(chunk.PlaintextLength), CaptureChunkMissing, chunk.AuditID, chunk.Stage); err != nil {
-			return fmt.Errorf("postgres writer: record missing chunk: %w", err)
-		}
+		observed, CaptureChunkMissing, auditID, stage); err != nil {
+		return fmt.Errorf("postgres writer: record missing chunk: %w", err)
 	}
 	return nil
 }
@@ -440,7 +529,18 @@ func (store *Store) applyWrite(transaction dbTransaction, request writeRequest) 
 		if store.recoveryOverflow.Load() {
 			return ErrRecoveryOverflow
 		}
-		return insertAudit(transaction, request.data.(AuditRecord))
+		record := request.data.(AuditRecord)
+		if err := insertAudit(transaction, record); err != nil {
+			return err
+		}
+		if record.Inbound == nil {
+			return nil
+		}
+		// The rows StartStage and AddHeaders write for request_received.
+		if err := insertStageRows(transaction, []HTTPStage{record.Inbound.Stage}); err != nil {
+			return err
+		}
+		return insertHeaderRows(transaction, record.Inbound.Headers)
 	case writeStartStage:
 		return insertStage(transaction, request.data.(HTTPStage))
 	case writeStartBody:
@@ -452,25 +552,18 @@ func (store *Store) applyWrite(transaction dbTransaction, request writeRequest) 
 	case writeFinishStage:
 		return finishStage(transaction, request.data.(StageFinish))
 	case writeFinishAudit:
-		store.recoveryMu.Lock()
-		entry, pending := store.recoveries[request.data.(*AuditFinish).AuditID]
-		store.recoveryMu.Unlock()
-		if pending && !entry.marked {
-			// A failed recovery attempt and this batch use separate
-			// transactions. The later finish must not outrun its marker.
-			entry.finish = nil
-			if _, err := store.recoverCaptureEntry(transaction, request.data.(*AuditFinish).AuditID, entry); err != nil {
-				return err
-			}
+		if err := store.prepareFinalization(transaction, request.data.(*AuditFinish).AuditID); err != nil {
+			return err
 		}
-		if store.recoveryOverflow.Load() {
-			if _, err := transaction.Exec(`UPDATE audit_records
-SET capture_status='failed', error_code='capture_recovery_overflow'
-WHERE audit_id=$1 AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID); err != nil {
-				return err
-			}
+		return finishAudit(transaction, request.data.(*AuditFinish), signer, legacyDedup)
+	case writeCheckpoint:
+		return applyCheckpoint(transaction, request.data.(*checkpointWrite))
+	case writeCommitAudit:
+		commit := request.data.(*commitWrite)
+		if err := store.prepareFinalization(transaction, commit.Finish.AuditID); err != nil {
+			return err
 		}
-		return finishAudit(transaction, request.data.(*AuditFinish), signer)
+		return applyCommit(transaction, commit, signer)
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
 	case writeClaimPendingParse:
@@ -514,6 +607,30 @@ WHERE audit_id=$1 AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID)
 	default:
 		return fmt.Errorf("postgres writer: unknown operation %d", request.kind)
 	}
+}
+
+// prepareFinalization runs before a FinishAudit or CommitAudit finalizes an
+// audit: a failed recovery attempt and this batch use separate transactions,
+// so the finish must not outrun its failure marker, and an overflowed
+// recovery table forbids claiming any capture complete.
+func (store *Store) prepareFinalization(transaction dbTransaction, auditID string) error {
+	store.recoveryMu.Lock()
+	entry, pending := store.recoveries[auditID]
+	store.recoveryMu.Unlock()
+	if pending && !entry.marked {
+		entry.finish = nil
+		if _, err := store.recoverCaptureEntry(transaction, auditID, entry); err != nil {
+			return err
+		}
+	}
+	if store.recoveryOverflow.Load() {
+		if _, err := transaction.Exec(`UPDATE audit_records
+SET capture_status='failed', error_code='capture_recovery_overflow'
+WHERE audit_id=$1 AND ended_at_ns IS NULL`, auditID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func insertAudit(transaction dbTransaction, record AuditRecord) error {
@@ -708,8 +825,11 @@ WHERE audit_id = $14 AND stage = $15`,
 	if err := requireOneRow(result, "finish body"); err != nil {
 		return err
 	}
-	if finish.Body.Timeline != nil {
-		timeline := finish.Body.Timeline
+	return saveStreamTimeline(transaction, finish.AuditID, finish.Stage, finish.Body.Timeline)
+}
+
+func saveStreamTimeline(transaction dbTransaction, auditID, stage string, timeline *StreamTimeline) error {
+	if timeline != nil {
 		if _, err := transaction.Exec(`
 INSERT INTO stream_timelines (
     audit_id, stage, event_count, first_event_at_ns, last_event_at_ns,
@@ -723,7 +843,7 @@ ON CONFLICT(audit_id, stage) DO UPDATE SET
     compression = excluded.compression,
     plaintext_length = excluded.plaintext_length,
     timeline_enc = excluded.timeline_enc`,
-			finish.AuditID, finish.Stage, timeline.EventCount,
+			auditID, stage, timeline.EventCount,
 			timeline.FirstEventAtNS, timeline.LastEventAtNS,
 			boolInteger(timeline.Complete), timeline.Compression,
 			timeline.PlaintextLength, timeline.DataEnc,
@@ -734,7 +854,14 @@ ON CONFLICT(audit_id, stage) DO UPDATE SET
 	return nil
 }
 
-func finishAudit(transaction dbTransaction, finish *AuditFinish, signer *security.IntegritySigner) error {
+// legacyDedup merges both stage pairs in the database, as the legacy write
+// path and every recovery do.
+var legacyDedup = [2]bool{true, true}
+
+// finishAudit finalizes one audit. dedupInDB selects the stage pairs
+// (request, response) whose equivalent bodies are merged here; CommitAudit
+// clears a pair it already decided in memory.
+func finishAudit(transaction dbTransaction, finish *AuditFinish, signer *security.IntegritySigner, dedupInDB [2]bool) error {
 	// Recovery and a caller retry may meet after an uncertain Ack. A second
 	// finalization must not overwrite parsing/caller state or sign a new event.
 	var ended sql.NullInt64
@@ -757,7 +884,7 @@ func finishAudit(transaction dbTransaction, finish *AuditFinish, signer *securit
 		}
 		finish.ErrorCode = &code
 	} else {
-		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
+		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID, dedupInDB); err != nil {
 			return err
 		}
 	}
@@ -900,11 +1027,14 @@ type bodyDedupState struct {
 	TimelineComplete int
 }
 
-func deduplicateEquivalentBodyStages(transaction dbTransaction, auditID string) error {
-	for _, pair := range [][2]string{
+func deduplicateEquivalentBodyStages(transaction dbTransaction, auditID string, pairs [2]bool) error {
+	for index, pair := range [][2]string{
 		{StageRequestReceived, StageRequestSent},
 		{StageResponseReceived, StageResponseSent},
 	} {
+		if !pairs[index] {
+			continue
+		}
 		if err := deduplicateEquivalentBodyPair(transaction, auditID, pair[0], pair[1]); err != nil {
 			return err
 		}
@@ -1037,6 +1167,8 @@ func cloneAuditRecord(record AuditRecord) AuditRecord {
 	record.CallerNextAtNS = cloneInt64(record.CallerNextAtNS)
 	record.CallerUpdatedAtNS = cloneInt64(record.CallerUpdatedAtNS)
 	record.APIKeyFPR = cloneBytes(record.APIKeyFPR)
+	record.UserAgentEnc = cloneBytes(record.UserAgentEnc)
+	record.Inbound = nil
 	return record
 }
 
