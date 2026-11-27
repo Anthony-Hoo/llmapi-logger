@@ -27,3 +27,8 @@ func (worker *Worker) ResetBackfillForTest() {
 	worker.backfillRetryQueue = nil
 	worker.backfillNextScan = time.Time{}
 }
+
+// SetNowForTest replaces the worker clock; call it before Start.
+func (worker *Worker) SetNowForTest(now func() time.Time) {
+	worker.now = now
+}

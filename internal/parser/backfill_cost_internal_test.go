@@ -26,6 +26,9 @@ type costWorld struct {
 	analysed  map[string]bool
 	identity  map[string]bool
 	bodyLoads map[string]int
+	// chunkFailures fails the next body reads of an audit, as a storage
+	// outage in the middle of a load does.
+	chunkFailures map[string]int
 	// examined counts the rows each list walks: those after its lower bound,
 	// up to the last one it returns, as an ordered index range scan would.
 	examined int
@@ -143,10 +146,17 @@ func (world *costWorld) ListProjectIdentityBackfillCandidates(_ context.Context,
 }
 
 func (world *costWorld) ReadParserChunks(ctx context.Context, auditID, stage string, afterSeq int64, limit int) ([]storage.BodyChunk, error) {
+	world.mu.Lock()
 	if afterSeq < 0 {
-		world.mu.Lock()
 		world.bodyLoads[auditID]++
-		world.mu.Unlock()
+	}
+	failing := world.chunkFailures[auditID] > 0
+	if failing {
+		world.chunkFailures[auditID]--
+	}
+	world.mu.Unlock()
+	if failing {
+		return nil, fmt.Errorf("read chunks: %w", storage.ErrClosed)
 	}
 	return world.fakeStore.ReadParserChunks(ctx, auditID, stage, afterSeq, limit)
 }
@@ -231,14 +241,17 @@ func projectPass(t *testing.T, worker *Worker, clock *testClock) int {
 	return 0
 }
 
-// More permanently skipped audits than backfillSkipCap. The skip set is thrown
-// away whenever it fills: a pass ends with only the last N-4096 skips
-// remembered, the next pass re-attempts the first ones, refills the set
-// before it reaches the remembered tail and throws that away too. Every pass
-// re-reads every one of them.
+// oldBackfillSkipCap is the skip-set size before issue #59. The set used to
+// be thrown away whenever it filled: a pass ended with only the last N-4096
+// skips remembered, the next pass re-attempted the first ones, refilled the
+// set before it reached the remembered tail and threw that away too, so every
+// pass re-read every one of them (5000 of 5000 here). Now the set is not
+// reset, so each is read once.
+const oldBackfillSkipCap = 4096
+
 func TestBackfillSkipCapThrash(t *testing.T) {
 	t.Parallel()
-	const audits = backfillSkipCap + 904
+	const audits = oldBackfillSkipCap + 904
 	world := newCostWorld()
 	for index := range audits {
 		world.add(t, fmt.Sprintf("audit-%05d", index), "unusable.parser", StatusPartial, int64(index+1), []byte(`{"model":"m"}`))
@@ -250,39 +263,57 @@ func TestBackfillSkipCapThrash(t *testing.T) {
 		attempted := insightsPass(t, worker, clock)
 		loads := totalLoads(world.takeLoads())
 		t.Logf("pass %d: attempted %d, body loads %d of %d skipped audits", pass+1, attempted, loads, audits)
-		if attempted != audits || loads != audits {
-			t.Errorf("pass %d: attempted %d loads %d, want %d", pass+1, attempted, loads, audits)
+		want := 0
+		if pass == 0 {
+			want = audits
+		}
+		if attempted != want || loads != want {
+			t.Errorf("pass %d: attempted %d loads %d, want %d", pass+1, attempted, loads, want)
 		}
 	}
 }
 
-// A project identity save that fails every time: projectBackfillOne keeps no
-// memory, so every pass reads the weak-header body again.
+// A project identity save that fails every time used to re-read the
+// weak-header body on every pass (projectBackfillOne kept no memory). A
+// failure that cannot clear now ends the attempts after one load; a storage
+// outage keeps being retried on a backoff of 10, 20, 40, 80 minutes and
+// succeeds once it ends.
 func TestProjectBackfillCostOfARepeatedFailure(t *testing.T) {
 	t.Parallel()
 	world := newCostWorld()
-	for index, id := range []string{"identified", "doomed"} {
+	for index, id := range []string{"identified", "doomed", "outage"} {
 		world.add(t, id, "test.parser", StatusOK, int64(index+1), []byte(`{"model":"m"}`))
 		world.analysed[id] = true
 	}
 	worker, clock := newCostWorker(t, world)
-	project := &failingProjectAnalyzer{world: world, fail: map[string]bool{"doomed": true}}
+	project := &failingProjectAnalyzer{world: world, fail: map[string]bool{"doomed": true}, outage: map[string]bool{"outage": true}}
 	worker.SetProjectAnalyzer(project)
-	for pass, want := range []map[string]int{{"identified": 1, "doomed": 1}, {"doomed": 1}, {"doomed": 1}} {
+	// Passes start every 10 minutes; the outage retries fall due at 10, 30
+	// and 70 minutes.
+	for pass, want := range []map[string]int{
+		{"identified": 1, "doomed": 1, "outage": 1}, {"outage": 1}, {}, {"outage": 1}, {}, {}, {}, {"outage": 1},
+	} {
+		if pass == 7 {
+			delete(project.outage, "outage")
+		}
 		attempted := projectPass(t, worker, clock)
 		loads := world.takeLoads()
 		t.Logf("pass %d: attempted %d, body loads %v", pass+1, attempted, loads)
-		if len(loads) != len(want) || loads["doomed"] != want["doomed"] || loads["identified"] != want["identified"] {
+		if len(loads) != len(want) || loads["doomed"] != want["doomed"] || loads["identified"] != want["identified"] || loads["outage"] != want["outage"] {
 			t.Errorf("pass %d: body loads %v, want %v", pass+1, loads, want)
 		}
+	}
+	if !world.identity["outage"] || world.identity["doomed"] {
+		t.Fatalf("identities: outage %v doomed %v", world.identity["outage"], world.identity["doomed"])
 	}
 }
 
 // failingProjectAnalyzer stores an identity unless the audit is named in
 // fail; its headers are always weak, so the body is read.
 type failingProjectAnalyzer struct {
-	world *costWorld
-	fail  map[string]bool
+	world  *costWorld
+	fail   map[string]bool
+	outage map[string]bool
 }
 
 func (analyzer *failingProjectAnalyzer) AnalyzeAudit(ctx context.Context, input insights.Input) error {
@@ -292,6 +323,9 @@ func (analyzer *failingProjectAnalyzer) AnalyzeAudit(ctx context.Context, input 
 func (analyzer *failingProjectAnalyzer) Save(_ context.Context, input insights.Input, _ bool) error {
 	if analyzer.fail[input.AuditID] {
 		return errors.New("synthetic identity failure")
+	}
+	if analyzer.outage[input.AuditID] {
+		return fmt.Errorf("synthetic identity save: %w", storage.ErrQueueFull)
 	}
 	analyzer.world.mu.Lock()
 	analyzer.world.identity[input.AuditID] = true

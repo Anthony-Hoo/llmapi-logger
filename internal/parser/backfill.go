@@ -3,7 +3,10 @@ package parser
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"sort"
 	"time"
@@ -16,17 +19,65 @@ import (
 const (
 	// backfillBatch bounds the audits analysed per scan tick.
 	backfillBatch = 20
-	// backfillSkipCap bounds the in-memory set of audits that cannot be
-	// analysed, so a permanently unusable audit is not retried in a tight loop.
-	backfillSkipCap = 4096
-	// backfillRetryCap bounds the in-memory set of audits waiting for a retry.
-	// An audit that does not fit lowers the watermark instead, so the next
-	// pass lists it again.
+	// backfillSkipCap bounds each in-memory set of audits skipped for good.
+	// A full set first forgets the covered audits, which no pass lists again;
+	// an audit that still does not fit is attempted again by the next pass
+	// that lists it.
+	backfillSkipCap = 1 << 16
+	// backfillRetryCap bounds each in-memory set of audits waiting for a
+	// retry. An audit that does not fit lowers the watermark instead, so the
+	// next pass lists it again.
 	backfillRetryCap = 1 << 16
 	// backfillRescanInterval is the pause after the candidate list is
-	// exhausted, before the next pass starts again from the watermark.
+	// exhausted, before the next pass starts again from the watermark. It is
+	// also the first retry delay.
 	backfillRescanInterval = 10 * time.Minute
+	// backfillRetryDoublings caps the retry backoff at
+	// backfillRescanInterval << backfillRetryDoublings (80 minutes).
+	backfillRetryDoublings = 3
 )
+
+// Stable reason logged with error_code analysis_backfill_skipped and
+// project_backfill_skipped when a failure that cannot clear by waiting ends
+// the attempts on an audit for this process.
+const backfillSkipFailed = "failed"
+
+// retryableFailure reports whether err may clear without any change to the
+// audit: the storage was busy, unreachable, full, read-only or shut, or an
+// operation timed out. Anything else, an analysis that rejects the evidence
+// or a panic, fails the same way on the same evidence, so the audit is not
+// loaded again in this process; a restart tries it once more.
+func retryableFailure(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, storage.ErrClosed) || errors.Is(err, storage.ErrQueueFull) || errors.Is(err, storage.ErrRecoveryOverflow) {
+		return true
+	}
+	var network net.Error
+	if errors.As(err, &network) {
+		return true
+	}
+	var state interface{ SQLState() string }
+	if errors.As(err, &state) && len(state.SQLState()) >= 2 {
+		// Connection, transaction rollback (serialization, deadlock),
+		// insufficient resources, object in use (lock timeout), operator
+		// intervention (shutdown, cancel) and system errors.
+		switch state.SQLState()[:2] {
+		case "08", "40", "53", "55", "57", "58":
+			return true
+		}
+		return false
+	}
+	switch storage.ErrorClass(err) {
+	case "sqlite_busy", "sqlite_full", "sqlite_io_error", "sqlite_read_only":
+		return true
+	}
+	return false
+}
+
+// retryDelay is the wait before attempt number attempts+1.
+func retryDelay(attempts int) time.Duration {
+	return backfillRescanInterval << min(max(attempts-1, 0), backfillRetryDoublings)
+}
 
 // Stable reasons logged with error_code analysis_backfill_skipped.
 const (
@@ -175,12 +226,78 @@ func (mark *watermark) abandon() {
 
 func keysetPointer(value keyset) *keyset { return &value }
 
-// backfillRetry is one audit a backfill must try again. position is nil
-// while it is unknown (the audit came from the live path); pass is the pass
-// that last attempted it, so a pass tries it once.
+// backfillRetry is one audit a backfill must try again after a failure that
+// may clear by waiting. position is nil while it is unknown (the audit came
+// from the live path); pass is the pass that last attempted it, so a pass
+// tries it once; attempts counts the failures and nextAt is when it is due.
 type backfillRetry struct {
 	position *keyset
 	pass     uint64
+	attempts int
+	nextAt   time.Time
+}
+
+func (retry *backfillRetry) due(now time.Time) bool { return !now.Before(retry.nextAt) }
+
+// recordRetry records one more retryable failure of auditID in a retry set
+// and backs its next attempt off. When the set is full the audit's position
+// is uncovered instead, so the next pass lists it again.
+func recordRetry(retries *map[string]*backfillRetry, mark *watermark, auditID string, position *keyset, now time.Time) {
+	retry, waiting := (*retries)[auditID]
+	if !waiting {
+		if len(*retries) >= backfillRetryCap {
+			mark.lower(position)
+			return
+		}
+		if *retries == nil {
+			*retries = make(map[string]*backfillRetry)
+		}
+		retry = &backfillRetry{}
+		(*retries)[auditID] = retry
+	}
+	if position != nil {
+		retry.position = position
+	}
+	retry.attempts++
+	retry.nextAt = now.Add(retryDelay(retry.attempts))
+}
+
+// rememberSkip records that auditID is skipped for good in a skip set; the
+// value is its position, nil while unknown. A full set first forgets the
+// audits the watermark covers: no pass lists them again unless the watermark
+// is lowered. If it is still full the audit is not remembered, and the next
+// pass that lists it attempts it again.
+func rememberSkip(skipped *map[string]*keyset, mark *watermark, auditID string, position *keyset) {
+	if *skipped == nil {
+		*skipped = make(map[string]*keyset)
+	}
+	if _, known := (*skipped)[auditID]; !known && len(*skipped) >= backfillSkipCap {
+		for id, at := range *skipped {
+			if at != nil && mark.covered != nil && !keysetBefore(*mark.covered, *at) {
+				delete(*skipped, id)
+			}
+		}
+		if len(*skipped) >= backfillSkipCap {
+			return
+		}
+	}
+	if previous := (*skipped)[auditID]; position == nil && previous != nil {
+		position = previous
+	}
+	(*skipped)[auditID] = position
+}
+
+// dueRetries lists the retries due at now that a pass listing after bound
+// cannot list itself: their position is unknown or covered.
+func dueRetries(retries map[string]*backfillRetry, after *keyset, now time.Time) []string {
+	var due []string
+	for auditID, retry := range retries {
+		if retry.due(now) && (retry.position == nil || (after != nil && !keysetBefore(*after, *retry.position))) {
+			due = append(due, auditID)
+		}
+	}
+	sort.Strings(due)
+	return due
 }
 
 // SetReconstructor installs the optional body source for metadata-retention
@@ -209,8 +326,8 @@ func (worker *Worker) bodyReconstructor() Reconstructor {
 //
 // Invariant: every audit at or below backfillMark.covered has a current
 // analysis, or is not a candidate (not ended, or parse status not ok or
-// partial), or was skipped for good by an attempt in this process, or is in
-// backfillRetry. It holds because:
+// partial), or was attempted in this process (by the backfill or the live
+// analysis) and skipped for good, or is in backfillRetry. It holds because:
 //   - covered only advances, at the end of a pass, to the horizon read when
 //     the pass began, and the pass listed every candidate after its start;
 //   - an audit becomes a candidate later only through a live parse in
@@ -249,7 +366,7 @@ func (worker *Worker) backfill(ctx context.Context) int {
 		mark.begin(horizon)
 		worker.backfillPass++
 		worker.backfillCursor = mark.passAfter
-		worker.backfillRetryQueue = dueRetries(worker.backfillRetry, mark.passAfter)
+		worker.backfillRetryQueue = dueRetries(worker.backfillRetry, mark.passAfter, worker.now())
 		worker.backfillProgress.begin(worker.now().UnixNano())
 	}
 
@@ -268,8 +385,8 @@ func (worker *Worker) backfill(ctx context.Context) int {
 		}
 	}
 	if mark.passAfter != nil {
-		// Everything at or below the watermark is analysed, skipped or was
-		// retried just now.
+		// Everything at or below the watermark is analysed, was attempted and
+		// skipped or failed, or was retried just now if its retry was due.
 		worker.backfillProgress.advance(mark.passAfter.StartedAtNS)
 	}
 	if attempted >= backfillBatch {
@@ -299,8 +416,11 @@ func (worker *Worker) backfill(ctx context.Context) int {
 		if waiting {
 			retry.position = keysetPointer(position)
 		}
-		_, skipped := worker.backfillSkipped[candidate.AuditID]
-		if !skipped && (!waiting || retry.pass != worker.backfillPass) {
+		at, skipped := worker.backfillSkipped[candidate.AuditID]
+		if skipped && at == nil {
+			worker.backfillSkipped[candidate.AuditID] = keysetPointer(position)
+		}
+		if !skipped && (!waiting || (retry.pass != worker.backfillPass && retry.due(worker.now()))) {
 			worker.attemptBackfill(ctx, analyzer, candidate.AuditID, &position)
 			attempted++
 		}
@@ -324,19 +444,6 @@ func (worker *Worker) backfillHorizon(ctx context.Context) (*keyset, error) {
 	return &horizon, nil
 }
 
-// dueRetries lists the retries a pass listing after bound cannot list itself:
-// their position is unknown or covered.
-func dueRetries(retries map[string]*backfillRetry, after *keyset) []string {
-	var due []string
-	for auditID, retry := range retries {
-		if retry.position == nil || (after != nil && !keysetBefore(*after, *retry.position)) {
-			due = append(due, auditID)
-		}
-	}
-	sort.Strings(due)
-	return due
-}
-
 // attemptBackfill runs backfillOne and marks a remaining retry as tried by
 // this pass.
 func (worker *Worker) attemptBackfill(ctx context.Context, analyzer AuditAnalyzer, auditID string, position *keyset) {
@@ -352,71 +459,57 @@ func (worker *Worker) backfillEnabled() bool {
 	return listable && worker.auditAnalyzer() != nil
 }
 
-// backfillLater records an audit the live path left without an analysis, so
-// the backfill retries it whichever side of the watermark it lies on.
-func (worker *Worker) backfillLater(auditID string) {
-	if worker.backfillEnabled() {
-		worker.rememberBackfillRetry(auditID, nil)
-	}
-}
-
-func (worker *Worker) rememberBackfillRetry(auditID string, position *keyset) {
-	rememberRetry(&worker.backfillRetry, &worker.backfillMark, auditID, position)
-}
-
-// rememberRetry adds auditID to a retry set. When the set is full the
-// audit's position is uncovered instead, so the next pass lists it again.
-func rememberRetry(retries *map[string]*backfillRetry, mark *watermark, auditID string, position *keyset) {
-	if retry, waiting := (*retries)[auditID]; waiting {
-		if position != nil {
-			retry.position = position
-		}
+// backfillLater records an audit the live path left without an analysis,
+// whichever side of the watermark it lies on. err is the analysis failure;
+// nil means the request body was missing or empty. A failure that may clear
+// by waiting is retried later; anything else would fail the same way on the
+// same evidence, so the audit is skipped without loading it again.
+func (worker *Worker) backfillLater(auditID string, input Input, err error) {
+	if !worker.backfillEnabled() {
 		return
 	}
-	if len(*retries) >= backfillRetryCap {
-		mark.lower(position)
+	if (err == nil && input.Request.ErrorCode == "evidence_read_error") || (err != nil && retryableFailure(err)) {
+		recordRetry(&worker.backfillRetry, &worker.backfillMark, auditID, nil, worker.now())
 		return
 	}
-	if *retries == nil {
-		*retries = make(map[string]*backfillRetry)
-	}
-	(*retries)[auditID] = &backfillRetry{position: position}
+	rememberSkip(&worker.backfillSkipped, &worker.backfillMark, auditID, nil)
 }
 
-func (worker *Worker) backfillSkip(auditID, reason string) {
+func (worker *Worker) backfillSkip(auditID, reason string, position *keyset) {
 	delete(worker.backfillRetry, auditID)
-	worker.rememberBackfillSkip(auditID)
+	rememberSkip(&worker.backfillSkipped, &worker.backfillMark, auditID, position)
 	worker.logger.Info("insights backfill skipped", "audit_id", auditID, "error_code", "analysis_backfill_skipped", "reason", reason)
 }
 
-func (worker *Worker) backfillFail(auditID, reason string, err error, position *keyset) {
-	// Transient failures retry on the next bounded rescan. Only explicit permanent
-	// skips enter backfillSkipped; the cursor and scan interval prevent a hot loop.
-	worker.rememberBackfillRetry(auditID, position)
-	worker.logger.Warn("insights backfill failed", "audit_id", auditID, "error_code", "analysis_backfill_failed", "reason", reason, "storage_error", storage.ErrorClass(err))
-}
-
-func (worker *Worker) rememberBackfillSkip(auditID string) {
-	if worker.backfillSkipped == nil || len(worker.backfillSkipped) >= backfillSkipCap {
-		worker.backfillSkipped = make(map[string]struct{})
+// backfillFail records a failed attempt. A retryable failure waits for its
+// backoff and is never given up, so a storage outage is retried once it
+// ends; any other failure skips the audit for this process: the evidence was
+// already loaded once and would fail the same way.
+func (worker *Worker) backfillFail(auditID, reason string, err error, position *keyset, retryable bool) {
+	worker.logger.Warn("insights backfill failed", "audit_id", auditID, "error_code", "analysis_backfill_failed", "reason", reason, "storage_error", storage.ErrorClass(err), "retry", retryable)
+	if retryable {
+		recordRetry(&worker.backfillRetry, &worker.backfillMark, auditID, position, worker.now())
+		return
 	}
-	worker.backfillSkipped[auditID] = struct{}{}
+	worker.backfillSkip(auditID, backfillSkipFailed, position)
 }
 
 func canceled(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// backfillOne analyses one audit; position is nil when it is unknown.
+// backfillOne analyses one audit; position is nil when it is unknown. A
+// failure before any body is read is always retried: it costs nothing to try
+// again.
 func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, auditID string, position *keyset) {
 	audit, err := worker.store.LoadParserAudit(ctx, auditID)
 	if errors.Is(err, sql.ErrNoRows) {
-		worker.backfillSkip(auditID, backfillSkipAuditMissing)
+		worker.backfillSkip(auditID, backfillSkipAuditMissing, position)
 		return
 	}
 	if err != nil {
 		if ctx.Err() == nil {
-			worker.backfillFail(auditID, "audit_load_failed", err, position)
+			worker.backfillFail(auditID, "audit_load_failed", err, position, true)
 		}
 		return
 	}
@@ -426,19 +519,27 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, a
 	}
 	implementation := worker.parsers[audit.ParserName]
 	if implementation == nil {
-		worker.backfillSkip(auditID, backfillSkipNoParser)
+		worker.backfillSkip(auditID, backfillSkipNoParser, position)
 		return
 	}
 
 	input, evidenceErr, reconstruction, reason, err := worker.backfillInput(ctx, audit)
 	if err != nil {
 		if ctx.Err() == nil {
-			worker.backfillFail(auditID, reason, err, position)
+			worker.backfillFail(auditID, reason, err, position, reason == "evidence_read_failed" || retryableFailure(err))
 		}
 		return
 	}
 	if reason != "" {
-		worker.backfillSkip(auditID, reason)
+		worker.backfillSkip(auditID, reason, position)
+		return
+	}
+	if input.Request.ErrorCode == "evidence_read_error" || input.Response.ErrorCode == "evidence_read_error" {
+		// The store failed while the body was read: what was read is not the
+		// evidence, so parsing it could skip the audit for good.
+		if ctx.Err() == nil {
+			worker.backfillFail(auditID, "evidence_read_failed", evidenceErr, position, true)
+		}
 		return
 	}
 
@@ -450,11 +551,11 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, a
 	}
 	worker.normalizeResult(&result, input, evidenceErr)
 	if result.Status != StatusOK && result.Status != StatusPartial {
-		worker.backfillSkip(auditID, backfillSkipNotUsable)
+		worker.backfillSkip(auditID, backfillSkipNotUsable, position)
 		return
 	}
 	if !input.Request.Present || len(input.Request.Data) == 0 {
-		worker.backfillSkip(auditID, backfillSkipNoRequestBody)
+		worker.backfillSkip(auditID, backfillSkipNoRequestBody, position)
 		return
 	}
 	if err := runAnalyzer(ctx, analyzer, audit, input, result); err != nil {
@@ -463,7 +564,7 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, a
 			if errors.Is(err, errAnalyzerPanic) {
 				reason = "analysis_panic"
 			}
-			worker.backfillFail(auditID, reason, err, position)
+			worker.backfillFail(auditID, reason, err, position, retryableFailure(err))
 		}
 		return
 	}

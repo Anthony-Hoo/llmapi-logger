@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/sqlite"
@@ -98,22 +99,28 @@ func TestBackfillWatermarkBoundsSteadyStatePasses(t *testing.T) {
 // An audit that started before the watermark but is parsed after the pass
 // that set it: a long request, a parse retried after a save failure, a row
 // left pending for a later scan, or one closed by startup recovery. The live
-// analysis either writes its row or hands the audit to the backfill.
+// analysis either writes its row or hands the audit to the backfill: a
+// failure that may clear is retried after its backoff, one that cannot is
+// remembered as skipped and its body is not loaded again.
 func TestBackfillWatermarkAuditParsedAfterThePassThatCoveredIt(t *testing.T) {
 	t.Parallel()
+	outage := fmt.Errorf("save analysis: %w", storage.ErrQueueFull)
 	for _, test := range []struct {
-		name         string
-		saveFailures int
-		liveErr      error
-		noRequest    bool
-		wantAttempts int
-		wantAnalysed bool
+		name          string
+		saveFailures  int
+		liveErr       error
+		noRequest     bool
+		requestUnread bool
+		wantAttempts  int
+		wantAnalysed  bool
 	}{
 		{name: "live analysis succeeds", wantAttempts: 0, wantAnalysed: true},
-		{name: "live analysis fails", liveErr: errors.New("analysis failed"), wantAttempts: 1, wantAnalysed: true},
+		{name: "live analysis hits a storage outage", liveErr: outage, wantAttempts: 1, wantAnalysed: true},
 		{name: "live analysis times out while the worker runs", liveErr: context.DeadlineExceeded, wantAttempts: 1, wantAnalysed: true},
-		{name: "parse retried after a save failure", saveFailures: 1, liveErr: errors.New("analysis failed"), wantAttempts: 1, wantAnalysed: true},
-		{name: "no request body when parsed", noRequest: true, wantAttempts: 1},
+		{name: "live analysis rejects the evidence", liveErr: errors.New("request is not JSON"), wantAttempts: 0},
+		{name: "parse retried after a save failure", saveFailures: 1, liveErr: outage, wantAttempts: 1, wantAnalysed: true},
+		{name: "no request body when parsed", noRequest: true, wantAttempts: 0},
+		{name: "request body unreadable when parsed", requestUnread: true, wantAttempts: 1, wantAnalysed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -136,17 +143,21 @@ func TestBackfillWatermarkAuditParsedAfterThePassThatCoveredIt(t *testing.T) {
 			}
 
 			world.saveFailures = test.saveFailures
+			if test.requestUnread {
+				world.chunkFailures = map[string]int{"long": 1}
+			}
 			worker.process(context.Background(), "long")
 			if test.saveFailures > 0 {
 				// Released to pending; a later scan parses it again.
 				insightsPass(t, worker, clock)
 				worker.process(context.Background(), "long")
 			}
-			if world.audits["long"].ParseStatus != StatusOK {
-				t.Fatalf("parse status %q", world.audits["long"].ParseStatus)
+			if status := world.audits["long"].ParseStatus; status != StatusOK && status != StatusPartial {
+				t.Fatalf("parse status %q", status)
 			}
 			delete(analyzer.fail, "long")
-			attempted := insightsPass(t, worker, clock)
+			// A retry falls due one rescan interval after the live failure.
+			attempted := insightsPass(t, worker, clock) + insightsPass(t, worker, clock)
 			if attempted != test.wantAttempts || world.analysed["long"] != test.wantAnalysed {
 				t.Fatalf("attempted %d analysed %v, want %d and %v", attempted, world.analysed["long"], test.wantAttempts, test.wantAnalysed)
 			}
@@ -200,7 +211,7 @@ func TestProjectWatermarkRetriesALiveIdentityFailure(t *testing.T) {
 	seedAnalysed(t, world, 10)
 	addInFlight(t, world, "long", 150)
 	worker, clock := watermarkWorker(t, world, &worldAnalyzer{world: world})
-	project := &failingProjectAnalyzer{world: world, fail: map[string]bool{"long": true}}
+	project := &failingProjectAnalyzer{world: world, outage: map[string]bool{"long": true}}
 	worker.SetProjectAnalyzer(project)
 	projectPass(t, worker, clock)
 
@@ -208,8 +219,8 @@ func TestProjectWatermarkRetriesALiveIdentityFailure(t *testing.T) {
 	if !world.analysed["long"] || world.identity["long"] {
 		t.Fatalf("live path: analysed %v identity %v", world.analysed["long"], world.identity["long"])
 	}
-	delete(project.fail, "long")
-	if attempted := projectPass(t, worker, clock); attempted != 1 || !world.identity["long"] {
+	delete(project.outage, "long")
+	if attempted := projectPass(t, worker, clock) + projectPass(t, worker, clock); attempted != 1 || !world.identity["long"] {
 		t.Fatalf("project pass attempted %d, identity %v", attempted, world.identity["long"])
 	}
 }
@@ -238,7 +249,7 @@ func TestBackfillWatermarkAfterRetention(t *testing.T) {
 	world := newCostWorld()
 	seedAnalysed(t, world, 10)
 	world.add(t, "failing", watermarkParser, StatusOK, 150, []byte(`{"model":"m"}`))
-	analyzer := &worldAnalyzer{world: world, fail: map[string]error{"failing": errors.New("save failed")}}
+	analyzer := &worldAnalyzer{world: world, fail: map[string]error{"failing": fmt.Errorf("save: %w", storage.ErrQueueFull)}}
 	worker, clock := watermarkWorker(t, world, analyzer)
 	insightsPass(t, worker, clock)
 	if _, waiting := worker.backfillRetry["failing"]; !waiting {
@@ -264,7 +275,7 @@ func TestBackfillWatermarkLowersWhenTheRetrySetIsFull(t *testing.T) {
 	for index := range backfillRetryCap {
 		retries[fmt.Sprintf("r-%d", index)] = &backfillRetry{}
 	}
-	rememberRetry(&retries, &mark, "overflow", &keyset{StartedAtNS: 500, AuditID: "overflow"})
+	recordRetry(&retries, &mark, "overflow", &keyset{StartedAtNS: 500, AuditID: "overflow"}, time.Now())
 	if _, kept := retries["overflow"]; kept {
 		t.Fatal("full retry set grew")
 	}
@@ -274,7 +285,7 @@ func TestBackfillWatermarkLowersWhenTheRetrySetIsFull(t *testing.T) {
 	}
 	mark.complete()
 	mark.covered = &keyset{StartedAtNS: 900, AuditID: "z"}
-	rememberRetry(&retries, &mark, "live-overflow", nil)
+	recordRetry(&retries, &mark, "live-overflow", nil, time.Now())
 	if mark.begin(nil); mark.passAfter != nil {
 		t.Fatalf("an unknown position must uncover everything, pass lists after %+v", mark.passAfter)
 	}
@@ -313,7 +324,7 @@ func TestBackfillProgressOfABoundedPass(t *testing.T) {
 	for index := range backfillBatch + 5 {
 		id := fmt.Sprintf("retry-%02d", index)
 		world.add(t, id, watermarkParser, StatusOK, int64(150+index), []byte(`{"model":"m"}`))
-		analyzer.fail[id] = errors.New("save failed")
+		analyzer.fail[id] = fmt.Errorf("save: %w", storage.ErrQueueFull)
 	}
 	worker, clock := watermarkWorker(t, world, analyzer)
 	insightsPass(t, worker, clock)
@@ -332,5 +343,25 @@ func TestBackfillProgressOfABoundedPass(t *testing.T) {
 	worker.backfill(context.Background())
 	if !worker.AnalysisBackfillCovered(until, since) {
 		t.Fatal("coverage not claimed after the retries ran")
+	}
+}
+
+// A storage failure in the middle of a body load used to be parsed as if it
+// were the evidence; with an empty request the audit was skipped for good as
+// no_request_body. It is now a retryable failure.
+func TestBackfillRetriesABodyLoadThatFailedHalfway(t *testing.T) {
+	t.Parallel()
+	world := newCostWorld()
+	world.add(t, "flaky", watermarkParser, StatusOK, 100, []byte(`{"model":"m"}`))
+	world.chunkFailures = map[string]int{"flaky": 1}
+	worker, clock := watermarkWorker(t, world, &worldAnalyzer{world: world})
+	if attempted := insightsPass(t, worker, clock); attempted != 1 || world.analysed["flaky"] {
+		t.Fatalf("first pass attempted %d, analysed %v", attempted, world.analysed["flaky"])
+	}
+	if _, skipped := worker.backfillSkipped["flaky"]; skipped {
+		t.Fatal("a failed read skipped the audit for good")
+	}
+	if attempted := insightsPass(t, worker, clock); attempted != 1 || !world.analysed["flaky"] {
+		t.Fatalf("retry attempted %d, analysed %v", attempted, world.analysed["flaky"])
 	}
 }

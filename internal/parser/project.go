@@ -74,7 +74,14 @@ func (worker *Worker) analyzeProject(ctx context.Context, audit storage.ParserAu
 	if err == nil || ctx.Err() != nil {
 		return
 	}
-	worker.projectBackfillLater(audit.AuditID, nil)
+	if worker.projectBackfillEnabled() {
+		if retryableFailure(err) {
+			recordRetry(&worker.projectRetry, &worker.projectMark, audit.AuditID, nil, worker.now())
+		} else {
+			// The backfill would fail the same way on the same evidence.
+			rememberSkip(&worker.projectSkipped, &worker.projectMark, audit.AuditID, nil)
+		}
+	}
 	if canceled(err) {
 		return
 	}
@@ -91,13 +98,31 @@ func (worker *Worker) projectBackfillEnabled() bool {
 	return listable && worker.currentProjectAnalyzer() != nil
 }
 
-// projectBackfillLater records an analysed audit that has no current
-// identity, wherever it lies relative to the identity backfill's watermark;
-// position is nil when it is unknown.
+// projectBackfillLater records an audit the insights backfill just analysed:
+// it may have no current identity, wherever it lies relative to the identity
+// backfill's watermark. position is nil when it is unknown. It is due at
+// once.
 func (worker *Worker) projectBackfillLater(auditID string, position *keyset) {
-	if worker.projectBackfillEnabled() {
-		rememberRetry(&worker.projectRetry, &worker.projectMark, auditID, position)
+	if !worker.projectBackfillEnabled() {
+		return
 	}
+	if _, skipped := worker.projectSkipped[auditID]; skipped {
+		return
+	}
+	if retry, waiting := worker.projectRetry[auditID]; waiting {
+		if position != nil {
+			retry.position = position
+		}
+		return
+	}
+	if len(worker.projectRetry) >= backfillRetryCap {
+		worker.projectMark.lower(position)
+		return
+	}
+	if worker.projectRetry == nil {
+		worker.projectRetry = make(map[string]*backfillRetry)
+	}
+	worker.projectRetry[auditID] = &backfillRetry{position: position}
 }
 
 // projectBackfill gives up to projectBackfillBatch analysed audits their
@@ -108,13 +133,15 @@ func (worker *Worker) projectBackfillLater(auditID string, position *keyset) {
 // Gemini bodies are skipped and keep a header-only identity.
 //
 // Invariant: every audit_analysis row at or below projectMark.covered has a
-// current identity, or is in projectRetry. A pass lists every candidate after
-// the watermark, and covered only advances, when a pass completes, to the
-// newest analysis row present when it began. An analysis row appears later,
-// whatever its position, only from this goroutine: the live path runs
-// analyzeProject before the insights analyzer writes the row and reports a
-// failed identity to projectBackfillLater, and an insights backfill that
-// writes a row reports it the same way. A retry set that is full lowers the
+// current identity, or was attempted in this process (by the backfill or the
+// live path) and skipped for good, or is in projectRetry. A pass lists every
+// candidate after the watermark, and covered only advances, when a pass
+// completes, to the newest analysis row present when it began. An analysis
+// row appears later, whatever its position, only from this goroutine: the
+// live path runs analyzeProject before the insights analyzer writes the row
+// and records a failed identity as a retry or a skip, and an insights
+// backfill that writes a row reports it to projectBackfillLater. A retry set
+// that is full lowers the
 // watermark instead. Nothing else deletes an identity row without its audit
 // or lowers identity_version; the first pass after a restart covers nothing,
 // which also handles a new ProjectIdentityVersion.
@@ -139,7 +166,7 @@ func (worker *Worker) projectBackfill(ctx context.Context) int {
 		mark.begin(horizon)
 		worker.projectPass++
 		worker.projectCursor = nil
-		worker.projectRetryQueue = dueRetries(worker.projectRetry, mark.passAfter)
+		worker.projectRetryQueue = dueRetries(worker.projectRetry, mark.passAfter, worker.now())
 	}
 
 	attempted := 0
@@ -185,7 +212,11 @@ func (worker *Worker) projectBackfill(ctx context.Context) int {
 		if waiting {
 			retry.position = keysetPointer(position)
 		}
-		if !waiting || retry.pass != worker.projectPass {
+		at, skipped := worker.projectSkipped[candidate.AuditID]
+		if skipped && at == nil {
+			worker.projectSkipped[candidate.AuditID] = keysetPointer(position)
+		}
+		if !skipped && (!waiting || (retry.pass != worker.projectPass && retry.due(worker.now()))) {
 			worker.attemptProject(ctx, analyzer, candidate.AuditID, &position)
 			attempted++
 		}
@@ -218,9 +249,18 @@ func (worker *Worker) attemptProject(ctx context.Context, analyzer ProjectAnalyz
 	}
 }
 
-func (worker *Worker) projectBackfillFail(auditID, reason string, err error, position *keyset) {
-	rememberRetry(&worker.projectRetry, &worker.projectMark, auditID, position)
-	worker.logger.Warn("project identity backfill failed", "audit_id", auditID, "error_code", "project_backfill_failed", "reason", reason, "storage_error", storage.ErrorClass(err))
+// projectBackfillFail records a failed attempt with the same policy as
+// backfillFail: a retryable failure backs off and is never given up, any
+// other skips the audit for this process.
+func (worker *Worker) projectBackfillFail(auditID, reason string, err error, position *keyset, retryable bool) {
+	worker.logger.Warn("project identity backfill failed", "audit_id", auditID, "error_code", "project_backfill_failed", "reason", reason, "storage_error", storage.ErrorClass(err), "retry", retryable)
+	if retryable {
+		recordRetry(&worker.projectRetry, &worker.projectMark, auditID, position, worker.now())
+		return
+	}
+	delete(worker.projectRetry, auditID)
+	rememberSkip(&worker.projectSkipped, &worker.projectMark, auditID, position)
+	worker.logger.Info("project identity backfill skipped", "audit_id", auditID, "error_code", "project_backfill_skipped", "reason", backfillSkipFailed)
 }
 
 func (worker *Worker) projectBackfillOne(ctx context.Context, analyzer ProjectAnalyzer, auditID string, position *keyset) {
@@ -231,7 +271,7 @@ func (worker *Worker) projectBackfillOne(ctx context.Context, analyzer ProjectAn
 	}
 	if err != nil {
 		if ctx.Err() == nil {
-			worker.projectBackfillFail(auditID, "audit_load_failed", err, position)
+			worker.projectBackfillFail(auditID, "audit_load_failed", err, position, true)
 		}
 		return
 	}
@@ -259,7 +299,11 @@ func (worker *Worker) projectBackfillOne(ctx context.Context, analyzer ProjectAn
 	}
 	if err := saveProjectSafely(ctx, analyzer, input, bodyScanned); err != nil {
 		if ctx.Err() == nil {
-			worker.projectBackfillFail(auditID, insights.ErrorCode(err), err, position)
+			reason := insights.ErrorCode(err)
+			if errors.Is(err, errAnalyzerPanic) {
+				reason = "project_identity_panic"
+			}
+			worker.projectBackfillFail(auditID, reason, err, position, retryableFailure(err))
 		}
 		return
 	}

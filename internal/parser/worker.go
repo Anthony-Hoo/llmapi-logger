@@ -47,7 +47,7 @@ type Worker struct {
 	backfillMark       watermark
 	backfillCursor     *storage.AnalysisBackfillCursor
 	backfillPass       uint64
-	backfillSkipped    map[string]struct{}
+	backfillSkipped    map[string]*keyset
 	backfillRetry      map[string]*backfillRetry
 	backfillRetryQueue []string
 	backfillNextScan   time.Time
@@ -57,6 +57,7 @@ type Worker struct {
 	projectMark       watermark
 	projectCursor     *storage.ProjectBackfillCursor
 	projectPass       uint64
+	projectSkipped    map[string]*keyset
 	projectRetry      map[string]*backfillRetry
 	projectRetryQueue []string
 	projectNextScan   time.Time
@@ -334,7 +335,7 @@ func (worker *Worker) analyze(ctx context.Context, audit storage.ParserAudit, in
 		return
 	}
 	if !input.Request.Present || len(input.Request.Data) == 0 {
-		worker.backfillLater(audit.AuditID)
+		worker.backfillLater(audit.AuditID, input, nil)
 		return
 	}
 	// The optional project identity hook is independent of the insights
@@ -344,7 +345,7 @@ func (worker *Worker) analyze(ctx context.Context, audit storage.ParserAudit, in
 	if err == nil || ctx.Err() != nil {
 		return
 	}
-	worker.backfillLater(audit.AuditID)
+	worker.backfillLater(audit.AuditID, input, err)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}

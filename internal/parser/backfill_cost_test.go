@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -39,6 +40,14 @@ type countingStore struct {
 	// missing makes LoadParserAudit report sql.ErrNoRows, as when retention
 	// deletes an audit between the candidate list and the load.
 	missing map[string]bool
+	// now is the worker's clock; runPass moves it on by the rescan interval.
+	now time.Time
+}
+
+func (store *countingStore) clock() time.Time {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.now
 }
 
 func (store *countingStore) ReadParserChunks(ctx context.Context, auditID, stage string, afterSeq int64, limit int) ([]storage.BodyChunk, error) {
@@ -73,7 +82,7 @@ func (store *countingStore) takeLoads() map[string]int {
 // countingStore; parsers lists the parsers it knows (nil: all built-in ones).
 func (harness *insightsHarness) countingWorker(parsers []parser.Parser) *countingStore {
 	harness.t.Helper()
-	counting := &countingStore{Store: harness.store, bodyLoads: map[string]int{}, missing: map[string]bool{}}
+	counting := &countingStore{Store: harness.store, bodyLoads: map[string]int{}, missing: map[string]bool{}, now: time.Unix(1_800_000_000, 0)}
 	if parsers == nil {
 		parsers = builtin.All()
 	}
@@ -81,6 +90,7 @@ func (harness *insightsHarness) countingWorker(parsers []parser.Parser) *countin
 	if err != nil {
 		harness.t.Fatal(err)
 	}
+	worker.SetNowForTest(counting.clock)
 	harness.t.Cleanup(worker.Close)
 	harness.worker = worker
 	return counting
@@ -95,17 +105,21 @@ func harnessCipher(t *testing.T) security.Cipher {
 	return cipher
 }
 
-// runPass drives one complete insights backfill pass: from an empty cursor
-// until the candidate list comes back empty. It returns the audits attempted.
-func runPass(t *testing.T, worker *parser.Worker) int {
+// runPass drives one complete insights backfill pass: from the start until
+// the candidate list comes back empty, then lets the rescan interval pass. It
+// returns the audits attempted.
+func runPass(t *testing.T, worker *parser.Worker, store *countingStore) int {
 	t.Helper()
 	ctx := context.Background()
 	worker.ResetBackfillForTest()
-	began := time.Now().UnixNano()
+	began := store.clock().UnixNano()
 	attempted := 0
 	for range 100000 {
 		attempted += worker.BackfillForTest(ctx)
 		if worker.AnalysisBackfillCovered(math.MaxInt64, began) {
+			store.mu.Lock()
+			store.now = store.now.Add(10 * time.Minute)
+			store.mu.Unlock()
 			return attempted
 		}
 	}
@@ -126,16 +140,21 @@ func gzipText(t *testing.T, text string) string {
 	return buffer.String()
 }
 
-// doomedAnalyzer wraps the real runner and fails the named audits every
-// time, as a deterministic analysis error or a long storage outage would.
+// doomedAnalyzer wraps the real runner. It fails the audits in fail every
+// time with an error that waiting does not clear, and those in outage with a
+// storage outage until they are removed from it.
 type doomedAnalyzer struct {
 	parser.AuditAnalyzer
-	fail map[string]bool
+	fail   map[string]bool
+	outage map[string]bool
 }
 
 func (analyzer doomedAnalyzer) AnalyzeAudit(ctx context.Context, input insights.Input) error {
 	if analyzer.fail[input.AuditID] {
 		return &insights.RunError{Code: insights.ErrorCodeAnalysisSaveFailed, Err: errors.New("synthetic save failure")}
+	}
+	if analyzer.outage[input.AuditID] {
+		return &insights.RunError{Code: insights.ErrorCodeAnalysisSaveFailed, Err: fmt.Errorf("synthetic save: %w", storage.ErrQueueFull)}
 	}
 	return analyzer.AuditAnalyzer.AnalyzeAudit(ctx, input)
 }
@@ -199,24 +218,30 @@ func TestBackfillCostPerKindOfAudit(t *testing.T) {
 	// prefix, as it truncates an identity body over MaxDecodedBodyBytes
 	// (body_too_large): the parser still reads the response, so the audit is
 	// partial, but the request is no longer JSON and the real runner fails on
-	// it every time. backfillFail keeps it for the next pass.
+	// it every time. Before issue #59 every pass loaded both bodies again; a
+	// failure that waiting cannot clear now ends the attempts after one load.
 	overLimit := messagesBody("model-example", "You are an agent.", userMessage("pad"+strings.Repeat(" ", 4<<20)))
 	add("over_decode_limit", harness.send("/v1/messages", anthropic("Content-Encoding", "gzip"), gzipText(t, overLimit), ok),
-		storage.ParsePartial, false, 2, 2, 2)
+		storage.ParsePartial, false, 2)
 	// A request in an encoding the parser cannot decode: partial, the request
 	// decodes to nothing, skipped as no_request_body after one load.
 	add("unsupported_request_encoding", harness.send("/v1/messages", anthropic("Content-Encoding", "br"), "not-brotli", ok),
-		storage.ParsePartial, false, 2, 0, 0)
+		storage.ParsePartial, false, 2)
 	// No request body at all: skipped as no_body before any body is read.
 	add("no_request_body_stream", harness.send("/v1/messages", anthropic(), "", ok),
-		storage.ParseOK, false, 0, 0, 0)
-	// The analysis fails every time (a deterministic save failure): reloaded
-	// on every pass.
+		storage.ParseOK, false)
+	// The analysis fails every time with an error waiting does not clear: it
+	// used to be reloaded on every pass, now once.
 	failing := harness.send("/v1/messages", anthropic(), messagesBody("model-example", "You are an agent.", userMessage("doomed")), ok)
-	add("analysis_always_fails", failing, storage.ParseOK, false, 2, 2, 2)
+	add("analysis_always_fails", failing, storage.ParseOK, false, 2)
+	// A storage outage while saving: never given up, retried on a backoff of
+	// 10, 20 and 40 minutes (passes start every 10), and analysed once the
+	// outage ends before the eighth pass.
+	outage := harness.send("/v1/messages", anthropic(), messagesBody("model-example", "You are an agent.", userMessage("outage")), ok)
+	add("storage_outage", outage, storage.ParseOK, true, 2, 2, 0, 2, 0, 0, 0, 2)
 	// Raw released, no reconstructor: skipped as raw_unavailable unread.
 	add("raw_unavailable", harness.sendChat("released task", chatResponse("model-example", "ok")),
-		storage.ParseOK, false, 0, 0, 0)
+		storage.ParseOK, false)
 
 	for name, test := range cases {
 		audit, err := harness.store.LoadParserAudit(ctx, test.id)
@@ -230,15 +255,23 @@ func TestBackfillCostPerKindOfAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	harness.worker.SetAnalyzer(doomedAnalyzer{AuditAnalyzer: runner, fail: map[string]bool{failing: true}})
+	doomed := doomedAnalyzer{AuditAnalyzer: runner, fail: map[string]bool{failing: true}, outage: map[string]bool{outage: true}}
+	harness.worker.SetAnalyzer(doomed)
 	store.takeLoads() // drop the live parse reads
-	for pass := range 3 {
-		attempted := runPass(t, harness.worker)
+	for pass := range 8 {
+		if pass == 7 {
+			delete(doomed.outage, outage)
+		}
+		attempted := runPass(t, harness.worker, store)
 		loads := store.takeLoads()
 		t.Logf("pass %d: attempted %d audits, body loads %v", pass+1, attempted, loads)
 		for name, test := range cases {
-			if loads[test.id] != test.perPass[pass] {
-				t.Errorf("pass %d %s: %d body loads, want %d", pass+1, name, loads[test.id], test.perPass[pass])
+			want := 0
+			if pass < len(test.perPass) {
+				want = test.perPass[pass]
+			}
+			if loads[test.id] != want {
+				t.Errorf("pass %d %s: %d body loads, want %d", pass+1, name, loads[test.id], want)
 			}
 		}
 	}
@@ -285,7 +318,7 @@ func TestBackfillCostOfTheOtherSkipReasons(t *testing.T) {
 	harness.worker.SetReconstructor(reconstructor)
 	store.missing[missing] = true
 	for pass := range 3 {
-		attempted := runPass(t, harness.worker)
+		attempted := runPass(t, harness.worker, store)
 		loads := store.takeLoads()
 		rebuilt := reconstructor.take()
 		t.Logf("pass %d: attempted %d, body loads %v, reconstructions %v", pass+1, attempted, loads, rebuilt)

@@ -7,7 +7,8 @@ import "sync"
 // failed". The backfill lists candidates oldest first; one pass runs from its
 // watermark until the list comes back empty. Everything at or below the
 // watermark was attempted by an earlier pass or by the live analysis, so a
-// pass advances past it as soon as it has retried the audits waiting there.
+// pass advances past it as soon as it has retried the audits there whose
+// retry is due.
 // The parser goroutine writes, any goroutine reads.
 type backfillProgress struct {
 	mu sync.Mutex
@@ -62,10 +63,10 @@ func (progress *backfillProgress) covered(untilNS, sinceNS int64) bool {
 // began at or after sinceNS has accounted for every parsed audit without a
 // current analysis that started before untilNS: the pass attempted it, or it
 // lies below the pass's watermark, where every such audit was attempted
-// after it became a candidate and the ones waiting for a retry were retried
-// by this pass first. Audits still without an analysis after that were
-// skipped or failed; waiting longer does not help. It is false while no
-// analyzer is installed.
+// after it became a candidate and those whose retry was due were retried by
+// this pass first. Audits still without an analysis after that were skipped
+// or failed; waiting longer does not help, except for a storage failure that
+// is still backing off. It is false while no analyzer is installed.
 func (worker *Worker) AnalysisBackfillCovered(untilNS, sinceNS int64) bool {
 	if worker == nil || worker.auditAnalyzer() == nil {
 		return false
