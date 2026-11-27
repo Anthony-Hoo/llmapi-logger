@@ -687,8 +687,11 @@ func insertInboundStage(transaction dbTransaction, inbound InboundStage) (stageS
 	}
 	if inbound.HeaderBlock != nil {
 		// Version 2: a block with only this stage. A rejected block is marked
-		// as a rejected AddHeaders of the stage; the next write that inserts
-		// a stage row overwrites the block with every stage written so far.
+		// as a rejected AddHeaders of the stage. The session is not told: a
+		// later write that inserts a stage row or adds trailers writes the
+		// whole block again, but an audit without one (an interceptor
+		// rejection, a crash before checkpoint 1) keeps a stage row without
+		// a block, which headerblock.Expand reports as an integrity error.
 		marker := []HTTPHeader{{AuditID: inbound.Stage.AuditID, Stage: inbound.Stage.Stage}}
 		_, err = part(func() error { return upsertHeaderBlock(transaction, inbound.Stage.AuditID, inbound.HeaderBlock) },
 			writeRequest{kind: writeAddHeaders, data: marker})

@@ -522,6 +522,18 @@ WHERE a.audit_id = 'v2-inbound'`).Scan(&captureStatus, &errorCode, &stageState, 
 			if err := store.VerifyIntegrityPayloads(ctx); err != nil {
 				t.Fatal(err)
 			}
+			// With the block rejected and no later write (an interceptor
+			// rejection, or a crash before checkpoint 1), the stage row has no
+			// block: the payload verifies, reading the Headers reports the
+			// stage-set mismatch. A later write that inserts a stage row would
+			// have written a block again. Reported as an open question.
+			_, err = expandDetail(t, store, cipher, "v2-inbound")
+			if test.lost && err != nil {
+				t.Fatalf("Expand without the inbound stage = %v", err)
+			}
+			if !test.lost && !errors.Is(err, headerblock.ErrIntegrity) {
+				t.Fatalf("Expand with the inbound block rejected = %v", err)
+			}
 		})
 	}
 }

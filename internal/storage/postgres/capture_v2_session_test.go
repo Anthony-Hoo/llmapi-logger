@@ -399,3 +399,40 @@ func normalizeSessionDump(dump harnessDump) harnessDump {
 	}
 	return normalized
 }
+
+// storage.ErrInboundStageNotStored on version 2 through the real session: the
+// start row stays, the inbound stage is never put in a block, and the
+// finished audit verifies and reads back the three stages it has.
+func TestSessionWithoutTheInboundStageWritesConsistentBlocks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cipher := v2TestCipher(t)
+	store, _ := openSignedStore(t)
+	injectInsertFailure(t, store, "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'")
+	auditID := runSession(t, store, cipher, audit.WritePathUnified, typicalV2Drive(), crashNone)
+	var captureStatus string
+	if err := store.readerDB.QueryRow(`SELECT capture_status FROM audit_records WHERE audit_id = $1`, auditID).Scan(&captureStatus); err != nil || captureStatus != CaptureFailed {
+		t.Fatalf("capture status %q, %v", captureStatus, err)
+	}
+	stored, err := store.QueryAuditDetail(ctx, auditID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{StageRequestSent, StageResponseReceived, StageResponseSent}
+	if source := stored.HeaderSource(); !reflect.DeepEqual(source.StageSet, want) || source.Block == nil {
+		t.Fatalf("stage rows %v, block %v", source.StageSet, source.Block != nil)
+	}
+	values, err := expandDetail(t, store, cipher, auditID)
+	if err != nil {
+		t.Fatalf("Expand = %v", err)
+	}
+	for _, value := range values {
+		if value.Stage == StageRequestReceived {
+			t.Fatalf("block holds the inbound stage: %v", flatHeaders(values))
+		}
+	}
+	if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	compareCaptureDigests(t, store, auditID)
+}

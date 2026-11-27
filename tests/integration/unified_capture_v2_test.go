@@ -64,7 +64,9 @@ func maskHeaderJSON(value any) any {
 }
 
 // agentView is what the Agent API gives for one record: the Headers of
-// `requests get --headers all` and the headers, request and response exports.
+// `requests get --headers all` and the headers, conversation, request,
+// response and raw exports. The timeline exports are left out: they hold
+// observation times, which differ between the two runs.
 func agentView(t *testing.T, cli *journeyCLI, auditID string) string {
 	t.Helper()
 	var parts []string
@@ -73,7 +75,7 @@ func agentView(t *testing.T, cli *journeyCLI, auditID string) string {
 	_ = json.Unmarshal(envelope.Data, &record)
 	headers, _ := json.Marshal(maskHeaderJSON(record["headers"]))
 	parts = append(parts, fmt.Sprintf("get exit=%d headers_scope=%v headers=%s", exit, record["headers_scope"], headers))
-	for _, what := range []string{"headers", "request", "response"} {
+	for _, what := range []string{"headers", "conversation", "request", "response", "raw-request", "raw-response"} {
 		out := filepath.Join(t.TempDir(), what+".out")
 		exit, envelope := cli.run("requests", "export", auditID, "--what", what, "--out", out)
 		code := ""
@@ -81,10 +83,10 @@ func agentView(t *testing.T, cli *journeyCLI, auditID string) string {
 			code = string(envelope.Error.Code)
 		}
 		content, _ := os.ReadFile(out)
-		if what == "headers" && len(content) != 0 {
+		if (what == "headers" || what == "conversation") && len(content) != 0 {
 			var document any
 			if err := json.Unmarshal(content, &document); err != nil {
-				t.Fatalf("headers export of %s is not JSON: %v", auditID, err)
+				t.Fatalf("%s export of %s is not JSON: %v", what, auditID, err)
 			}
 			content, _ = json.Marshal(maskHeaderJSON(document))
 		}
@@ -108,7 +110,8 @@ func agentLogin(t *testing.T, running *runningApp) *journeyCLI {
 // and unified (version 2). The client sees the same bytes; the stored audits
 // agree on every table as B.10 defines it, with Headers compared through
 // headerblock.Expand; the detail API and the Agent API (its credential
-// masking and the header, request and response exports) give the same output;
+// masking and the header, conversation, request, response and raw exports)
+// give the same output;
 // every audit verifies. Client-cancel scenarios are left out: where the client
 // gives up depends on timing, not on the write path.
 func TestUnifiedCaptureVersion2MatchesLegacyOnPostgreSQL(t *testing.T) {

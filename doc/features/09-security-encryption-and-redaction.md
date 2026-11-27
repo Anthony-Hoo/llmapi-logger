@@ -171,7 +171,12 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 
 详情能解密但 schema、枚举、连续 index、marker 或 hash 非法时，整条请求返回通用完整性错误，不返回部分明文。版本 2 的块不能认证、解不开、不满足严格解码规则，或者块里的阶段集合与阶段行集合不等，同样按完整性错误处理。
 
-已知的边界情形：检查点或 `BeginAudit` 的入站块在 writer 里被可隔离的错误拒绝（约束、触发器）时，audit 被标为 failed，而会话并不知道。之后的写仍按它以为已写入的阶段封块，存储无法打开块去掉缺行阶段的段，于是照原样写入。这样的 audit 载荷校验通过，但读 Header 时阶段集合不等，详情返回完整性错误。只有已经标为 `capture_write_failed` 的记录会出现这种情形，测试 `TestCaptureV2RejectedCheckpointLeavesAMismatchedBlock` 固定了它；怎样处理待维护者决定。
+已知的边界情形有两种，都只出现在 writer 里被可隔离的错误（约束、触发器）拒绝了一次写、因而已经标为 `capture_write_failed` 的记录上。会话不知道写被拒绝：
+
+- **检查点被拒绝。** 整个检查点回滚，它插入的阶段行不存在。之后的写仍按会话以为已写入的阶段封块，存储无法打开块去掉缺行阶段的段，照原样写入（测试 `TestCaptureV2RejectedCheckpointLeavesAMismatchedBlock`）。
+- **`BeginAudit` 的入站块被拒绝，入站阶段行保留。** 之后插入阶段行或带上 trailer 的写会重新写整块；没有这样的写时（拦截器拒绝，或在检查点 1 之前崩溃），这条 audit 有入站阶段行而没有块（`TestCaptureV2InboundRejectionKeepsTheStartRow`）。
+
+两种情形下载荷校验都通过，但读 Header 时阶段集合不等，详情返回完整性错误。怎样处理待维护者决定。
 
 ## 9. 故障行为
 
