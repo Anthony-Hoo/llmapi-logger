@@ -64,6 +64,24 @@ var ErrClosed = errors.New("sqlite store is closed")
 var ErrQueueFull = errors.New("sqlite writer queue is full")
 var ErrRecoveryOverflow = errors.New("sqlite capture recovery capacity exceeded; restart required")
 
+// ErrWriteBatchFailed wraps the acknowledgement of an operation whose whole
+// writer batch was rolled back, including a COMMIT with an uncertain outcome.
+// It separates a batch-level failure, which a CommitAudit may retry, from the
+// operation's own result, which it must not.
+var ErrWriteBatchFailed = errors.New("audit writer batch failed")
+
+// Capture versions of audit_records.capture_version. Version 1 stores Header
+// values as per-value http_headers rows; version 2 stores one encrypted header
+// block per audit, user_agent_enc and the stage content columns. Zero in a
+// write input means version 1, the column default.
+const (
+	CaptureVersion1 = 1
+	CaptureVersion2 = 2
+)
+
+// HeaderBlockMaxPlaintextLength bounds the decoded header block of one audit.
+const HeaderBlockMaxPlaintextLength = 64 << 20
+
 // AuditRecord is the parent row created before interceptor evaluation.
 type AuditRecord struct {
 	AuditID           string
@@ -92,6 +110,111 @@ type AuditRecord struct {
 	// APIKeyFPR scopes developer sessions to the audits their own key produced.
 	// It is nil when the request carried no credential.
 	APIKeyFPR []byte
+	// CaptureVersion is fixed by BeginAudit and never changes afterwards. The
+	// legacy path leaves it zero, which stores the column default 1.
+	CaptureVersion int
+	// UserAgentEnc is the sealed inbound User-Agent of a version 2 audit, nil
+	// when the request carried none. Version 1 audits never have one.
+	UserAgentEnc []byte
+	// Inbound is a BeginAudit input only: under the unified write path the
+	// request_received stage row and its headers are written in the same
+	// operation as the audit row. The legacy path passes nil, and readers
+	// never fill it.
+	Inbound *InboundStage
+}
+
+// InboundStage is the request_received stage that BeginAudit writes together
+// with the audit row. Headers holds per-value rows for version 1; HeaderBlock
+// holds a block with only this stage for version 2. ContentType and
+// ContentEncoding are the version 2 http_stages columns.
+type InboundStage struct {
+	Stage           HTTPStage
+	Headers         []HTTPHeader
+	HeaderBlock     *HeaderBlock
+	ContentType     *string
+	ContentEncoding *string
+}
+
+// AuditCheckpoint is one write of an in-flight audit that the session does not
+// wait for. It only inserts rows that were not written before, in the shape
+// legacy has committed for an in-flight request, and never writes final values.
+type AuditCheckpoint struct {
+	AuditID        string
+	CaptureVersion int
+	// Stages are the new stages: streaming, no end time, status and length as
+	// at stage start.
+	Stages []HTTPStage
+	// Contents carries the version 2 content columns of the new Stages, at most
+	// one entry per stage. Version 1 leaves it empty.
+	Contents []StageContent
+	// Headers holds the new (stage, kind) groups, version 1 only.
+	Headers []HTTPHeader
+	// HeaderBlock is the whole block written so far, version 2 only; it
+	// replaces the stored block.
+	HeaderBlock *HeaderBlock
+	// Bodies are new body rows with initial values; a merged request_sent
+	// carries SourceStage request_received.
+	Bodies []BodyStream
+	// Chunks are newly sealed owning chunks; nil when there are none.
+	Chunks ChunkSource
+}
+
+// StageContent is the content-type and content-encoding a version 2 stage
+// row stores (nil for none); see headerblock.ContentHeaders.
+type StageContent struct {
+	Stage           string
+	ContentType     *string
+	ContentEncoding *string
+}
+
+// AuditCommit is the final write at Finish. BeginAudit has already written the
+// audit row.
+type AuditCommit struct {
+	Finish         AuditFinish
+	CaptureVersion int           // must equal the value on the audit row
+	Stages         []StageCommit // every stage that was reached, in stage order
+	Headers        []HTTPHeader  // version 1 only: groups no checkpoint wrote
+	HeaderBlock    *HeaderBlock  // version 2 only: the full block; nil when unchanged since the last checkpoint
+	Chunks         ChunkSource   // owning chunks no checkpoint wrote
+	DedupInDB      [2]bool       // request pair, response pair: merge in the database as legacy does
+	FinalAttempt   bool          // the last retry
+	PayloadBytes   int64
+}
+
+// StageCommit is the final state of one stage at CommitAudit.
+type StageCommit struct {
+	Stage           HTTPStage // final values
+	StageWritten    bool      // a checkpoint inserted the stage row: update it, otherwise insert
+	ContentType     *string   // version 2 only
+	ContentEncoding *string
+	Body            *BodyStream // final values; the duplicate of a merged pair is already in merged form
+	BodyWritten     bool        // a checkpoint inserted the body row
+	Timeline        *StreamTimeline
+}
+
+// HeaderBlock is the sealed header block of one audit (http_header_blocks).
+type HeaderBlock struct {
+	Compression     string
+	PlaintextLength int64
+	DataEnc         []byte
+}
+
+// ChunkSource can be iterated more than once; each chunk is either ciphertext
+// held in memory or a position in a staging file.
+type ChunkSource interface {
+	Each(visit func(BodyChunk) error) error
+}
+
+// ChunkList is a ChunkSource over chunks held in memory.
+type ChunkList []BodyChunk
+
+func (chunks ChunkList) Each(visit func(BodyChunk) error) error {
+	for _, chunk := range chunks {
+		if err := visit(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // HTTPStage represents one actually observed proxy boundary. Missing stages
@@ -321,6 +444,9 @@ type Snapshot struct {
 	Headers []HTTPHeader
 	Bodies  []BodyStream
 	Chunks  []BodyChunk
+	// HeaderBlock is the stored header block of a version 2 audit, nil for
+	// version 1.
+	HeaderBlock *HeaderBlock
 }
 
 func (record *AuditRecord) Defaults() {

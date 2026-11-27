@@ -24,6 +24,13 @@ type AuditListPage = storage.AuditListPage
 // response.
 type HeaderEvidence = storage.HeaderEvidence
 
+// HeaderBlockEvidence is the stored header block of a version 2 audit.
+type HeaderBlockEvidence = storage.HeaderBlockEvidence
+
+// HeaderSource is the Header evidence of one audit in the form
+// headerblock.Expand reads.
+type HeaderSource = storage.HeaderSource
+
 // ParsedResultSummary is the narrow, non-secret projection of parsed_results.
 type ParsedResultSummary = storage.ParsedResultSummary
 

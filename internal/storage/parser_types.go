@@ -18,6 +18,12 @@ type ParserStage struct {
 	Stage   HTTPStage
 	Body    *BodyStream
 	Headers []HTTPHeader
+	// CaptureVersion selects where the content headers come from: version 1
+	// decrypts Headers, version 2 reads ContentType and ContentEncoding (the
+	// http_stages columns, nil for none) and leaves Headers empty.
+	CaptureVersion  int
+	ContentType     *string
+	ContentEncoding *string
 }
 
 // ParsedResult is the latest compact protocol summary for one audit. Sensitive

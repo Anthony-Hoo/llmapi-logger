@@ -75,6 +75,7 @@ var (
 	ErrClosed           = storage.ErrClosed
 	ErrQueueFull        = storage.ErrQueueFull
 	ErrRecoveryOverflow = storage.ErrRecoveryOverflow
+	ErrWriteBatchFailed = storage.ErrWriteBatchFailed
 )
 
 var stableBlockCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -157,6 +158,29 @@ type AuditFinish = storage.AuditFinish
 // Snapshot is a consistent encrypted evidence view used by integration and
 // query layers. Ciphertext blobs are returned unchanged.
 type Snapshot = storage.Snapshot
+
+// InboundStage is the request_received stage BeginAudit writes with the audit
+// row under the unified write path.
+type InboundStage = storage.InboundStage
+
+// AuditCheckpoint is one write of an in-flight audit that the session does not
+// wait for.
+type AuditCheckpoint = storage.AuditCheckpoint
+
+// StageContent carries the version 2 content columns of a new stage row.
+type StageContent = storage.StageContent
+
+// AuditCommit is the final write at Finish.
+type AuditCommit = storage.AuditCommit
+
+// StageCommit is the final state of one stage at CommitAudit.
+type StageCommit = storage.StageCommit
+
+// HeaderBlock is the sealed header block of one audit.
+type HeaderBlock = storage.HeaderBlock
+
+// ChunkSource can be iterated more than once over sealed owning chunks.
+type ChunkSource = storage.ChunkSource
 
 func validateAuditRecord(record AuditRecord) error {
 	if record.AuditID == "" || record.RouteID == "" || record.Protocol == "" || record.ParserName == "" || record.Method == "" || record.Path == "" {

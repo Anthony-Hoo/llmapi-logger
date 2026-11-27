@@ -10,7 +10,8 @@ import (
 )
 
 func validSettingsSection(section string) bool {
-	return section == storage.SettingsSessionAnalysis || section == storage.SettingsOrgReports
+	return section == storage.SettingsSessionAnalysis || section == storage.SettingsOrgReports ||
+		section == storage.SettingsAuditCapture
 }
 
 // LoadRuntimeSettings reads the saved settings of one section; sql.ErrNoRows
