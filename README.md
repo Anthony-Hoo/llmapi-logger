@@ -154,7 +154,7 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 
 - 运行时必须配置 PostgreSQL `database_url`，数据库和 `audit.key` 必须作为同一个备份集保存。
 - PostgreSQL 使用一致快照备份；旧 SQLite 迁移见 [PostgreSQL 迁移指南](doc/deployment/postgresql-migration.md)，不要直接复制活动主 DB 文件。
-- OpenAI、Anthropic 与 Gemini verified 2xx/3xx 请求在对象重建校验和语义完整性事件写入成功后删除 raw chunks；拦截、解析或重建异常以及没有 turn 的记录两侧保留 `full` raw；有 verified turn 的 4xx/5xx 与客户端取消保留响应侧 `full` raw，请求侧按模块 18 §6 释放或保留（`upstream_error_class` 为空的 400/422 保留）。
+- OpenAI、Anthropic 与 Gemini verified 2xx/3xx 请求在对象重建校验和语义完整性事件写入成功后删除 raw chunks；拦截、解析或重建异常以及没有 turn 的记录两侧保留 `full` raw；有 verified turn 的 4xx/5xx 与客户端取消保留响应侧 `full` raw，请求侧按模块 18 §6 释放或保留（`upstream_error_class` 为空的 400/422 保留）；响应不完整、因响应而解析不完整或未被规范化、但请求可用的记录得到只有请求的轮次，响应侧保留 `full` raw，请求侧按同一规则判定。
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
 - 管理端即使只监听 loopback，也必须鉴权；支持 Bearer token 和 Web UI 的七天 HttpOnly Cookie。启用 Agent 接入后另有 Agent 令牌，只能调用 `/api/agent/v1/*`；匿名可达的只有用一次性授权码兑换令牌、凭 30 分钟签名链接下载安装包这两条路径。轮换 `admin_token` 会让 Cookie、Agent 令牌和下载链接全部失效。
 - 审计列表只额外返回解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情、reconstructed、timeline 和 full raw 都受 Admin Token 或管理 Cookie 保护并禁止缓存。

@@ -13,8 +13,14 @@ type RawRetentionOutcome struct {
 	// RequestNormalized is true when the turn rebuilt a request body, that
 	// is, its request layout is not auditmodel.LayoutNone.
 	RequestNormalized bool
-	ForwardStatus     string
-	CaptureStatus     string
+	// ResponseOmitted is true when the turn carries no response (its
+	// response layout is auditmodel.LayoutNone) although a response body was
+	// captured: a request-only turn, prepared because the response was
+	// incomplete, parsed partially or not normalized. Nothing stands in for
+	// that response, so its raw is never released.
+	ResponseOmitted bool
+	ForwardStatus   string
+	CaptureStatus   string
 	// StatusCode is the HTTP status recorded on the audit; nil when no
 	// response status was observed.
 	StatusCode *int64
@@ -69,13 +75,19 @@ var abnormalRequestRelease = map[int64]requestRelease{
 
 // DecideRawRetention applies the per-side raw retention rule.
 //
-// Without a verified turn and an ok parse nothing is released: there is no
-// verified reconstruction to stand in for the raw bytes. A normal outcome
-// (forward completed, capture complete, 2xx/3xx) releases both sides, as
-// before. Any other outcome keeps the response raw, and releases the request
-// raw only when its two stages were merged and the outcome is one the decision
-// lists. A row that keeps the request wins over the cancellation: a client
-// cancel after an unclassified 400 or an unlisted status keeps the request.
+// Without a verified turn nothing is released: there is no verified
+// reconstruction to stand in for the raw bytes. A turn that carries the
+// response needs an ok parse; a request-only turn (ResponseOmitted) may also
+// come with a partial one, since its parse is partial because of the response
+// it does not carry. A normal outcome (forward completed, capture complete,
+// 2xx/3xx) with the response in the turn releases both sides, as before. Any
+// other outcome, and every request-only turn, keeps the response raw, and
+// releases the request raw only when its two stages were merged and the
+// outcome is normal or one the decision lists. A request-only turn of a
+// normal outcome is the decision's "response parse incomplete" row (or a
+// complete response the normalizer declined). A row that keeps the request
+// wins over the cancellation: a client cancel after an unclassified 400 or an
+// unlisted status keeps the request.
 //
 // What "verified" covers for the request: the parser rebuilt the request
 // from its content objects and envelope and checked that the canonical JSON
@@ -87,15 +99,25 @@ var abnormalRequestRelease = map[int64]requestRelease{
 // normal request already gets when its raw is released. Merged stages extend
 // it to request_sent, whose bytes were found identical to request_received.
 func DecideRawRetention(outcome RawRetentionOutcome) RawRetention {
-	if outcome.ParseStatus != ParseOK || !outcome.TurnVerified {
+	if !outcome.TurnVerified {
 		return RawRetention{}
 	}
-	if outcome.ForwardStatus == ForwardCompleted && outcome.CaptureStatus == CaptureComplete &&
-		outcome.StatusCode != nil && *outcome.StatusCode >= 200 && *outcome.StatusCode < 400 {
+	switch {
+	case outcome.ParseStatus == ParseOK:
+	case outcome.ParseStatus == ParsePartial && outcome.ResponseOmitted:
+	default:
+		return RawRetention{}
+	}
+	normal := outcome.ForwardStatus == ForwardCompleted && outcome.CaptureStatus == CaptureComplete &&
+		outcome.StatusCode != nil && *outcome.StatusCode >= 200 && *outcome.StatusCode < 400
+	if normal && !outcome.ResponseOmitted {
 		return RawRetention{ReleaseRequest: true, ReleaseResponse: true}
 	}
 	if !outcome.RequestNormalized || !outcome.RequestStagesMerged {
 		return RawRetention{}
+	}
+	if normal {
+		return RawRetention{ReleaseRequest: true}
 	}
 	return RawRetention{ReleaseRequest: requestReleaseFor(outcome)}
 }

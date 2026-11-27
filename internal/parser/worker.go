@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -416,21 +417,104 @@ func (worker *Worker) retryProcessingReleases(ctx context.Context) {
 	}
 }
 
+// prepareTurn prepares the turn of a parsed audit. A full turn, carrying the
+// request and the response, needs an ok parse of complete bodies. When that
+// cannot be had because of the response alone, a request-only turn is
+// prepared instead (prepareRequestOnlyTurn): its response layout is none, and
+// the response raw stays as the only evidence of the response.
 func (worker *Worker) prepareTurn(ctx context.Context, audit storage.ParserAudit, implementation Parser, input Input, result *Result) *auditmodel.PreparedTurn {
-	if implementation == nil || result == nil || result.Status != StatusOK || !input.Request.Complete || (input.Response.Present && !input.Response.Complete) {
+	if implementation == nil || result == nil || !input.Request.Complete {
 		return nil
 	}
 	normalizer, ok := implementation.(AuditNormalizer)
 	if !ok {
 		return nil
 	}
+	if result.Status != StatusOK || (input.Response.Present && !input.Response.Complete) {
+		return worker.prepareRequestOnlyTurn(ctx, audit, implementation, normalizer, input, result)
+	}
 	turn, err := normalizer.NormalizeAudit(ctx, input, *result)
+	if errors.Is(err, ErrStreamResidueTooLarge) {
+		// The response is complete and was parsed; its stream only carries
+		// more than the envelope may hold. The parse stays ok, the response
+		// raw stays, and the request can still be released.
+		prepared := worker.prepareRequestOnlyTurn(ctx, audit, implementation, normalizer, input, result)
+		if prepared != nil {
+			if result.ErrorCode == "" {
+				result.ErrorCode = ErrorCodeResponseNotNormalized
+			}
+			return prepared
+		}
+	}
 	if err != nil {
 		result.Status = StatusPartial
 		result.ErrorCode = "normalization_failed"
 		result.ParsedJSON = nil
 		return nil
 	}
+	return worker.prepareNormalizedTurn(ctx, audit, turn, result)
+}
+
+// prepareRequestOnlyTurn prepares a turn from the request alone for an audit
+// whose response was captured but cannot be carried by the turn: it is
+// incomplete, the parse is partial because of it, or the normalizer declined
+// it. The request must be one a full turn would accept: a complete body, which
+// the parser reads without fault on its own (so a partial parse is partial
+// because of the response), and which normalizes and verifies against its
+// decoded bytes. Whatever fails, it returns nil and leaves the result as it
+// is: the audit then keeps all of its raw, as it did before.
+//
+// The normalizer is called with the response removed from the input, which
+// every normalizer answers with response layout none; no protocol needs its
+// own request-only path.
+func (worker *Worker) prepareRequestOnlyTurn(ctx context.Context, audit storage.ParserAudit, implementation Parser, normalizer AuditNormalizer, input Input, result *Result) *auditmodel.PreparedTurn {
+	if result.Status != StatusOK && result.Status != StatusPartial {
+		return nil
+	}
+	if !input.Request.Present || !input.Request.Complete || input.Request.ErrorCode != "" || !input.Response.Present ||
+		input.Response.ErrorCode == "evidence_read_error" || input.Response.ErrorCode == "capture_integrity_error" {
+		// No response, so nothing to leave out; or the response could not be
+		// read as it was stored, so what the parser saw is not the evidence.
+		return nil
+	}
+	requestOnly := input
+	requestOnly.Response = BodySource{}
+	requestOnly.StatusCode = nil
+	if parsed := parseSafely(ctx, implementation, requestOnly); parsed.Status != StatusOK {
+		return nil
+	}
+	turn, err := normalizer.NormalizeAudit(ctx, requestOnly, *result)
+	if err != nil || turn.RequestLayout == auditmodel.LayoutNone || turn.ResponseLayout != auditmodel.LayoutNone {
+		return nil
+	}
+	turn.ResponseItems, turn.ResponseEnvelope, turn.ResponseOriginal = nil, nil, nil
+	// A failed check must not relabel the parse: the audit then stays as it
+	// was before request-only turns existed.
+	probe := *result
+	return worker.prepareNormalizedTurn(ctx, audit, turn, &probe)
+}
+
+// ErrorCodeResponseNotNormalized is the parse error code of an ok parse whose
+// complete response the normalizer declined (ErrStreamResidueTooLarge): the
+// audit has a request-only turn and keeps its response raw.
+const ErrorCodeResponseNotNormalized = "response_not_normalized"
+
+// responseMessages returns the response-phase messages of a parsed
+// conversation, which a request-only turn does not rebuild.
+func responseMessages(value *conversation.Conversation) []conversation.Message {
+	messages := make([]conversation.Message, 0)
+	for _, message := range value.Messages {
+		if message.Phase == conversation.PhaseResponse {
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
+// prepareNormalizedTurn fills the audit fields of a normalized turn and
+// prepares it with the reconstruction check. A failed check marks the parse
+// partial with reconstruction_failed.
+func (worker *Worker) prepareNormalizedTurn(ctx context.Context, audit storage.ParserAudit, turn auditmodel.Turn, result *Result) *auditmodel.PreparedTurn {
 	turn.AuditID = audit.AuditID
 	turn.Protocol = audit.Protocol
 	turn.ParserName = audit.ParserName
@@ -507,7 +591,7 @@ func (worker *Worker) persistResult(ctx context.Context, audit storage.ParserAud
 	if implementation != nil {
 		parserVersion = implementation.Version()
 	}
-	plaintext, generatedPlaintext := parsedResultPlaintext(result, prepared == nil)
+	plaintext, generatedPlaintext := parsedResultPlaintext(result, prepared)
 	// Large results, chiefly the fallback conversation, are compressed inside
 	// the encrypted payload; see auditmodel.SealParsedResult.
 	encrypted, err := auditmodel.SealParsedResult(worker.cipher, audit.AuditID, audit.ParserName, plaintext)
@@ -548,21 +632,45 @@ func (worker *Worker) persistResult(ctx context.Context, audit storage.ParserAud
 	return result.Status, worker.store.SaveParsedAudit(ctx, storage.ParsedAudit{Result: storageResult, Turn: prepared})
 }
 
-func parsedResultPlaintext(result Result, includeConversation bool) ([]byte, bool) {
+// PartialResponseMessagesKey is the parsed_json_enc key under which an audit
+// with a request-only turn keeps the response-phase messages of its parsed
+// conversation. The turn rebuilds only the request messages; readers append
+// these after them (doc/features/18 section 6).
+const PartialResponseMessagesKey = "partial_response_messages"
+
+// parsedResultPlaintext is the plaintext of parsed_json_enc. Without a turn
+// it holds the whole parsed conversation as the fallback copy. With a turn
+// the conversation is rebuilt from the turn and not stored again, except for
+// what a turn without a response (response layout none) cannot rebuild: the
+// response-phase messages of the conversation, kept on their own under
+// PartialResponseMessagesKey. A turn with no captured response has none, and
+// stores nothing more.
+func parsedResultPlaintext(result Result, prepared *auditmodel.PreparedTurn) ([]byte, bool) {
 	plaintext := result.ParsedJSON
 	generated := false
 	if len(plaintext) == 0 {
 		plaintext, _ = json.Marshal(compactResultJSON(result))
 		generated = true
 	}
-	if !includeConversation || result.Conversation == nil {
+	if result.Conversation == nil {
 		return plaintext, generated
+	}
+	key, value := "conversation", any(result.Conversation)
+	if prepared != nil {
+		if prepared.ResponseLayout != auditmodel.LayoutNone {
+			return plaintext, generated
+		}
+		messages := responseMessages(result.Conversation)
+		if len(messages) == 0 {
+			return plaintext, generated
+		}
+		key, value = PartialResponseMessagesKey, messages
 	}
 	var envelope map[string]any
 	if err := json.Unmarshal(plaintext, &envelope); err != nil || envelope == nil {
 		envelope = make(map[string]any)
 	}
-	envelope["conversation"] = result.Conversation
+	envelope[key] = value
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		return plaintext, generated

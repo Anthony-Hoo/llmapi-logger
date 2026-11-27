@@ -3,11 +3,14 @@ package parser_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/streamevidence"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/security"
@@ -27,9 +30,12 @@ func messagesStream(extra string) string {
 // TestStreamResidueOverLimitKeepsRawEvidence runs Anthropic streams through
 // the proxy, the store and the parser worker. A stream whose residue (here
 // one unknown event) fits is stored as a verified turn and its raw bodies
-// are released; one whose residue exceeds the limit is declined, so all of
-// its raw bodies stay, the parse is partial with normalization_failed, and
-// the conversation is stored as the fallback copy.
+// are released. One whose residue exceeds the limit is declined by the
+// normalizer: the response is complete and parsed, so the parse stays ok
+// (error code response_not_normalized), the audit gets a request-only turn,
+// its request raw is released and its response raw stays. The assistant
+// message is kept on its own in the parsed result, not as a fallback copy of
+// the conversation, and no reconstruction_failed event is written.
 func TestStreamResidueOverLimitKeepsRawEvidence(t *testing.T) {
 	t.Parallel()
 	harness := newInsightsHarness(t, nil)
@@ -56,8 +62,8 @@ func TestStreamResidueOverLimitKeepsRawEvidence(t *testing.T) {
 	if got := retention(small); got[0] != sqlite.RetentionMetadata || got[1] != sqlite.RetentionMetadata {
 		t.Fatalf("stream with a small residue: retention %q, want metadata", got)
 	}
-	if got := retention(large); got[0] != sqlite.RetentionFull || got[1] != sqlite.RetentionFull {
-		t.Fatalf("stream over the residue limit: retention %q, want full", got)
+	if got := retention(large); got[0] != sqlite.RetentionMetadata || got[1] != sqlite.RetentionFull {
+		t.Fatalf("stream over the residue limit: retention %q, want request metadata and response full", got)
 	}
 
 	cipher, err := security.NewAESGCM(bytes.Repeat([]byte{0x5a}, security.KeySize))
@@ -80,12 +86,58 @@ func TestStreamResidueOverLimitKeepsRawEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.TurnGraph != nil || detail.ParsedResult == nil || detail.ParsedResult.Status != sqlite.ParsePartial ||
-		detail.ParsedResult.ErrorCode == nil || *detail.ParsedResult.ErrorCode != "normalization_failed" {
-		t.Fatalf("declined stream: turn %v, parsed %+v", detail.TurnGraph != nil, detail.ParsedResult)
+	if detail.TurnGraph == nil || detail.TurnGraph.ResponseLayout != auditmodel.LayoutNone || detail.ParsedResult == nil ||
+		detail.ParsedResult.Status != sqlite.ParseOK ||
+		detail.ParsedResult.ErrorCode == nil || *detail.ParsedResult.ErrorCode != parser.ErrorCodeResponseNotNormalized {
+		t.Fatalf("declined stream: turn %+v, parsed %+v", detail.TurnGraph, detail.ParsedResult)
 	}
 	plaintext, err := auditmodel.OpenParsedResult(cipher, large, "anthropic.messages", detail.ParsedResult.ParsedJSONEnc)
-	if err != nil || !bytes.Contains(plaintext, []byte(`"conversation"`)) || !bytes.Contains(plaintext, []byte(`"ok"`)) {
-		t.Fatalf("declined stream has no fallback conversation: %v", err)
+	if err != nil || bytes.Contains(plaintext, []byte(`"conversation"`)) || !bytes.Contains(plaintext, []byte(`"partial_response_messages"`)) ||
+		!bytes.Contains(plaintext, []byte(`"ok"`)) || bytes.Contains(plaintext, []byte("hello")) {
+		t.Fatalf("declined stream: parsed result %s, %v", plaintext, err)
 	}
+	events := integrityEventTypes(t, harness.dbPath, large)
+	for _, event := range events {
+		if event == "reconstruction_failed" {
+			t.Fatalf("declined stream has a reconstruction_failed event: %v", events)
+		}
+	}
+	// The response raw downloads as it was sent.
+	var raw bytes.Buffer
+	if err := service.StreamRaw(ctx, large, query.SideResponse, &raw); err != nil || !bytes.Contains(raw.Bytes(), []byte(padding)) {
+		t.Fatalf("declined stream response raw: %v", err)
+	}
+	if err := service.StreamRaw(ctx, large, query.SideRequest, &raw); !errors.Is(err, query.ErrNotRetained) {
+		t.Fatalf("declined stream request raw = %v, want ErrNotRetained", err)
+	}
+	if err := harness.store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatalf("integrity payloads: %v", err)
+	}
+}
+
+// integrityEventTypes lists the integrity events of one audit, in order.
+func integrityEventTypes(t *testing.T, dbPath, auditID string) []string {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query(`SELECT event_type FROM integrity_events WHERE audit_id = ? ORDER BY rowid`, auditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var types []string
+	for rows.Next() {
+		var eventType string
+		if err := rows.Scan(&eventType); err != nil {
+			t.Fatal(err)
+		}
+		types = append(types, eventType)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return types
 }

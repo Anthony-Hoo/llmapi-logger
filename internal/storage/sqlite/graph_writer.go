@@ -153,22 +153,26 @@ ON CONFLICT(audit_id) DO UPDATE SET
 // storage.DecideRawRetention to the same outcome.
 func decideRawRetention(transaction *sql.Tx, value ParsedAudit, graphVerified bool) (storage.RawRetention, error) {
 	result := value.Result
-	if result.Status != ParseOK || !graphVerified {
-		return storage.RawRetention{}, nil
+	if !graphVerified || value.Turn == nil {
+		return storage.DecideRawRetention(storage.RawRetentionOutcome{ParseStatus: result.Status}), nil
 	}
 	outcome := storage.RawRetentionOutcome{
 		ParseStatus:        result.Status,
 		TurnVerified:       graphVerified,
-		RequestNormalized:  value.Turn != nil && value.Turn.RequestLayout != auditmodel.LayoutNone,
+		RequestNormalized:  value.Turn.RequestLayout != auditmodel.LayoutNone,
 		UpstreamErrorClass: result.UpstreamErrorClass,
 	}
 	var statusCode sql.NullInt64
+	var responseBodies int
 	if err := transaction.QueryRow(`
-SELECT forward_status, capture_status, status_code
+SELECT forward_status, capture_status, status_code,
+       (SELECT COUNT(*) FROM body_streams WHERE audit_id = ? AND stage IN (?, ?))
 FROM audit_records
-WHERE audit_id = ?`, result.AuditID).Scan(&outcome.ForwardStatus, &outcome.CaptureStatus, &statusCode); err != nil {
+WHERE audit_id = ?`, result.AuditID, StageResponseReceived, StageResponseSent, result.AuditID).Scan(&outcome.ForwardStatus, &outcome.CaptureStatus, &statusCode, &responseBodies); err != nil {
 		return storage.RawRetention{}, fmt.Errorf("sqlite writer: read raw retention outcome: %w", err)
 	}
+	// A request-only turn; see the PostgreSQL store.
+	outcome.ResponseOmitted = value.Turn.ResponseLayout == auditmodel.LayoutNone && responseBodies > 0
 	if statusCode.Valid {
 		outcome.StatusCode = &statusCode.Int64
 	}

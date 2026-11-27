@@ -90,15 +90,16 @@ canonical Prepare 在同一轮内先以规范化明文 hash 去重，再压缩�
 
 保留状态按侧决定。请求侧是 `request_for_newapi_received_from_nginx` 和 `request_sent_to_newapi`，响应侧是另外两个阶段；同一侧的两个阶段状态相同。释放一侧时删除该侧的 chunks（合并后它们属于 `source_stage` 指向的那个阶段，合并不跨侧），并把该侧两行的 `stored_length`、`chunk_count` 置 0。判定规则是 `internal/storage` 的 `DecideRawRetention`，PostgreSQL 与 SQLite 两个存储调用同一个函数：
 
-1. 没有 verified turn，或解析结果不是 `ok`：两侧都 `full`。这包括 interceptor 拒绝、解析 error/partial/skipped、内容编码不支持、超过解码上限、binary/data URL 解码失败、normalization 或重建失败、对象写入失败；也包括 turn 已准备好、但解析结果在保存前因加密失败降为 error 的记录。
-2. 正常结果（forward `completed`、capture `complete`、状态 2xx/3xx）：两侧都 `metadata`。
-3. 其余结果：响应侧一律 `full`。请求侧只有同时满足下面三条才 `metadata`，否则 `full`：
+1. 没有 verified turn：两侧都 `full`。这包括 interceptor 拒绝、解析 error/skipped、请求不完整、请求内容编码不支持或超过解码上限、binary/data URL 解码失败、normalization 或重建失败、对象写入失败。turn 带着响应时解析结果还必须是 `ok`；只有请求的轮次（见下）可以是 `ok` 或 `partial`。解析结果为其他状态时两侧都 `full`，包括 turn 已准备好、但解析结果在保存前因加密失败降为 error 的记录。
+2. 正常结果（forward `completed`、capture `complete`、状态 2xx/3xx），turn 带着响应：两侧都 `metadata`。
+3. 其余结果，以及所有只有请求的轮次：响应侧一律 `full`。请求侧只有同时满足下面三条才 `metadata`，否则 `full`：
    - turn 重建出了请求（request layout 不是 `none`）。重建校验比较的是重建结果与解码后 `request_for_newapi_received_from_nginx` Body 的 canonical JSON 哈希，再加上落库后请求序列哈希的复读比较。它保证语义 JSON 一致，不复原键序、空白和 Content-Encoding，与普通成功请求释放 raw 时得到的保证相同；
    - `request_sent_to_newapi.source_stage = request_for_newapi_received_from_nginx`：两个请求阶段长度与 SHA-256 一致并已合并，两个阶段都是 `complete`，没有 `body_stage_mismatch`。不一致时两份请求 raw 都保留；
    - 结果在下表中为“释放”。
 
 | 结果 | 请求侧 |
 | --- | --- |
+| 只有请求的轮次，正常结果（响应解析不完整，或完整的响应未被 normalizer 收录） | 释放 |
 | 5xx | 释放 |
 | 401、403、408、409、429、499 | 释放 |
 | 400、422，`upstream_error_class` 非空 | 释放 |
@@ -109,9 +110,22 @@ canonical Prepare 在同一轮内先以规范化明文 hash 去重，再压缩�
 
 保留优先于取消：客户端在一个上表判为保留的状态之后取消，请求侧仍保留。表中“待维护者确认”的两行是设计 5.9 没有点名的情形，问题已提交维护者；在答复之前按原规则保留请求 raw，不丢任何证据。答复只需改 `abnormalRequestRelease` 里的一行。
 
-没有 turn 的异常记录（例如客户端在流中途断开、响应不完整）两侧都保留 `full`，“只有请求的轮次”另行实现。
+**只有请求的轮次。** 请求可用、而响应无法放进 turn 时，parser 只用请求准备一个 turn，response layout 为 `none`（`parser/worker.go` 的 `prepareRequestOnlyTurn`）。条件是：
 
-`upstream_error_class` 是不签名的派生列，判定只在保存解析结果时读取一次；之后改写该列不影响已定的保留状态。每一侧的 `retention_state` 进入 `semantic_compacted` 事件的摘要，新行按写入时的状态签名，摘要格式、schema 和约束都不变。按旧规则写入的异常记录四个阶段都是 `full`，不迁移、不改写，照常通过校验和读取。回滚到旧二进制时，它能照常读取按新规则写入的行（`metadata` 一侧按已释放处理），但这些记录已经没有请求 raw 可以返回，只能下载响应 raw 或读取重建请求。
+- 解析结果是 `ok` 或 `partial`，捕获到了响应 Body，并且属于下列之一：响应 Body 不完整（例如客户端在流中途取消）；解析为 `partial`（例如响应事件异常、缺终止事件）；normalizer 以 `parser.ErrStreamResidueTooLarge` 放弃了完整的响应（§10）；
+- 请求 Body 完整、没有采集或解码错误码；响应 Body 不是因读库失败或密文校验失败才不完整（`evidence_read_error`、`capture_integrity_error`），否则 parser 看到的不是证据本身；
+- 单独解析请求得到 `ok`，即解析的 `partial` 来自响应；
+- normalizer 在去掉响应的输入上规范化出请求（request layout 不是 `none`），并通过与完整 turn 相同的重建校验：重建结果与解码后请求 Body 的 canonical JSON 哈希一致。
+
+normalizer 没有为此单独实现：去掉响应后，每个 normalizer 都只输出请求、response layout 为 `none`，新协议的 normalizer 自动覆盖。任一条件不满足时不生成 turn，解析结果原样保存，四阶段 raw 保持 `full`；请求不完整、超过解码上限、无法解码或不能通过校验的记录都属此类。
+
+存储判定这类 turn 的方式是：turn 的 response layout 为 `none`，而响应阶段有 Body 行（`RawRetentionOutcome.ResponseOmitted`）。没有响应 Body 的 turn（例如响应前就取消）不属此类，判定不变。
+
+解析状态和错误码照实保存：响应不完整或解析为 `partial` 的记录仍是 `partial`，错误码与以前相同（例如中途取消为采集给出的 `body_read_error`，缺终止事件为 `missing_message_stop`），不因有了 turn 改标为完整。残留超限的记录响应完整、也已解析，只是没有被规范化：解析记为 `ok`、错误码 `response_not_normalized`（`parser.ErrorCodeResponseNotNormalized`；解析已带错误码时保留原码），不写 `reconstruction_failed` 事件，写 `semantic_compacted` 事件。
+
+下一轮请求照常以只有请求的轮次为父轮次候选，父上下文基准只能是它的请求序列（没有响应 item）。
+
+`upstream_error_class` 是不签名的派生列，判定只在保存解析结果时读取一次；之后改写该列不影响已定的保留状态。每一侧的 `retention_state` 进入 `semantic_compacted` 事件的摘要，新行按写入时的状态签名，摘要格式、schema 和约束都不变；`partial_response_messages` 在 `parsed_json_enc` 的密文里，同样随 `semantic_compacted` 签名。按旧规则写入的异常记录四个阶段都是 `full`，不迁移、不改写，照常通过校验和读取；以前没有 turn 的记录（四阶段 `full`、`parsed_json_enc` 带回退 conversation、可能有 `reconstruction_failed` 事件）也按原样读取和校验。回滚到旧二进制时，它能照常读取按新规则写入的行（`metadata` 一侧按已释放处理），但这些记录已经没有请求 raw 可以返回，只能下载响应 raw 或读取重建请求。
 
 ## 7. conversation 与 turn 图
 
@@ -205,7 +219,7 @@ parser 只有在上述验证通过后才允许把 raw retention 从 pending 改�
 - data 不是 JSON 的事件以 `text` 保存原文（必须是 UTF-8）；
 - 没有残留时不写 `residue` 键。
 
-残留有上限：canonical JSON 超过 1 MiB 的流不释放 raw。normalizer 放弃这条流，走既有的 `normalization_failed` 路径：解析记为 `partial`，四阶段 raw 保持 `full`，conversation 存回退副本（模块 05 §2.3）。
+残留有上限：canonical JSON 超过 1 MiB 的流不释放响应 raw。normalizer 以 `parser.ErrStreamResidueTooLarge` 放弃这条流的响应，记录得到只有请求的轮次（§6）：解析记为 `ok`、错误码 `response_not_normalized`，响应侧 raw 保持 `full`，请求侧按 §6 释放，回答消息存在 `partial_response_messages`（模块 05 §2.3）。
 
 因此可以复原输出、事件次序和每个事件的全部字段值，但不宣称恢复 TCP frame、HTTP chunk framing、完全相同的 SSE 空白格式、delta 的切分边界，或 JSON 的键序与空白（与所有 content object 一样按 canonical JSON 保存）。SSE 注释行和 `id:`、`retry:` 字段在解码时即被忽略，不在保存范围内。
 

@@ -20,7 +20,10 @@ import (
 var perSideRequest = []byte(`{"model":"model-example","messages":[{"role":"user","content":"per side example"}]}`)
 var perSideResponse = []byte(`{"error":{"message":"upstream example failure"}}`)
 
-func writePerSideAudit(t *testing.T, store *Store, cipher security.Cipher, auditID string, status int, forward, capture string, class *string, mismatch bool) {
+// writePerSideAudit writes one audit with all four bodies. The turn carries
+// the response unless requestOnly is set: a request-only turn (response
+// layout none although a response was captured), saved with parse status.
+func writePerSideAudit(t *testing.T, store *Store, cipher security.Cipher, auditID string, status int, forward, capture string, class *string, mismatch, requestOnly bool, parse string) {
 	t.Helper()
 	ctx := context.Background()
 	if err := store.BeginAudit(ctx, testAudit(auditID)); err != nil {
@@ -85,24 +88,31 @@ func writePerSideAudit(t *testing.T, store *Store, cipher security.Cipher, audit
 	if err != nil || !claimed {
 		t.Fatalf("claim %s = %v, %v", auditID, claimed, err)
 	}
-	var request map[string]any
+	var request, response map[string]any
 	if err := json.Unmarshal(perSideRequest, &request); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := auditmodel.Prepare(auditmodel.Turn{
+	if err := json.Unmarshal(perSideResponse, &response); err != nil {
+		t.Fatal(err)
+	}
+	turn := auditmodel.Turn{
 		AuditID: auditID, Protocol: "openai", ParserName: "openai.chat_completions",
-		RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutNone,
+		RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope,
 		RequestEnvelope: map[string]any{"model": "model-example"},
 		RequestItems:    []auditmodel.Item{{Slot: auditmodel.SlotMessages, Kind: "user_message", Value: request["messages"].([]any)[0]}},
-		RequestOriginal: request, CreatedAtNS: 6,
-	}, cipher)
+		RequestOriginal: request, ResponseEnvelope: response, ResponseOriginal: response, CreatedAtNS: 6,
+	}
+	if requestOnly {
+		turn.ResponseLayout, turn.ResponseEnvelope, turn.ResponseOriginal = auditmodel.LayoutNone, nil, nil
+	}
+	prepared, err := auditmodel.Prepare(turn, cipher)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveParsedAudit(ctx, ParsedAudit{
 		Result: ParsedResult{
 			AuditID: auditID, ParserName: "openai.chat_completions", ParserVersion: "2",
-			Status: ParseOK, UpstreamErrorClass: class, ParsedAtNS: 7,
+			Status: parse, UpstreamErrorClass: class, ParsedAtNS: 7,
 		},
 		Turn: &prepared,
 	}); err != nil {
@@ -135,18 +145,31 @@ func TestRawRetentionIsDecidedPerSide(t *testing.T) {
 		class             *string
 		mismatch          bool
 		request, response string
+		requestOnly       bool
+		parse             string
 	}{
-		{"per-side-200", 200, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionMetadata},
-		{"per-side-503", 503, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionFull},
-		{"per-side-429", 429, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionFull},
-		{"per-side-400-classified", 400, ForwardCompleted, CaptureComplete, &class, false, RetentionMetadata, RetentionFull},
-		{"per-side-400", 400, ForwardCompleted, CaptureComplete, nil, false, RetentionFull, RetentionFull},
-		{"per-side-404", 404, ForwardCompleted, CaptureComplete, nil, false, RetentionFull, RetentionFull},
-		{"per-side-cancelled", 200, ForwardClientCancelled, CapturePartial, nil, false, RetentionMetadata, RetentionFull},
-		{"per-side-mismatch-503", 503, ForwardCompleted, CapturePartial, nil, true, RetentionFull, RetentionFull},
+		{"per-side-200", 200, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionMetadata, false, ""},
+		{"per-side-503", 503, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionFull, false, ""},
+		{"per-side-429", 429, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionFull, false, ""},
+		{"per-side-400-classified", 400, ForwardCompleted, CaptureComplete, &class, false, RetentionMetadata, RetentionFull, false, ""},
+		{"per-side-400", 400, ForwardCompleted, CaptureComplete, nil, false, RetentionFull, RetentionFull, false, ""},
+		{"per-side-404", 404, ForwardCompleted, CaptureComplete, nil, false, RetentionFull, RetentionFull, false, ""},
+		{"per-side-cancelled", 200, ForwardClientCancelled, CapturePartial, nil, false, RetentionMetadata, RetentionFull, false, ""},
+		{"per-side-mismatch-503", 503, ForwardCompleted, CapturePartial, nil, true, RetentionFull, RetentionFull, false, ""},
+		// Request-only turns: the response stays whatever the outcome.
+		{"request-only-residue-200", 200, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionFull, true, ParseOK},
+		{"request-only-partial-200", 200, ForwardCompleted, CaptureComplete, nil, false, RetentionMetadata, RetentionFull, true, ParsePartial},
+		{"request-only-cancelled", 200, ForwardClientCancelled, CapturePartial, nil, false, RetentionMetadata, RetentionFull, true, ParsePartial},
+		{"request-only-400", 400, ForwardCompleted, CaptureComplete, nil, false, RetentionFull, RetentionFull, true, ParsePartial},
+		{"request-only-mismatch", 200, ForwardClientCancelled, CapturePartial, nil, true, RetentionFull, RetentionFull, true, ParsePartial},
+		{"full-turn-partial", 200, ForwardCompleted, CaptureComplete, nil, false, RetentionFull, RetentionFull, false, ParsePartial},
 	}
 	for _, test := range cases {
-		writePerSideAudit(t, store, cipher, test.id, test.status, test.forward, test.capture, test.class, test.mismatch)
+		parse := test.parse
+		if parse == "" {
+			parse = ParseOK
+		}
+		writePerSideAudit(t, store, cipher, test.id, test.status, test.forward, test.capture, test.class, test.mismatch, test.requestOnly, parse)
 	}
 	for _, test := range cases {
 		rows, err := store.readerDB.Query(`

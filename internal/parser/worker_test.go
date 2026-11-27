@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -95,14 +96,56 @@ func TestParsedResultPlaintextOmitsConversationWhenTurnGraphOwnsIt(t *testing.T)
 		ParsedJSON: []byte(`{"status":"ok","model":"model-example"}`),
 	}
 
-	fallback, generated := parsedResultPlaintext(result, true)
+	fallback, generated := parsedResultPlaintext(result, nil)
 	if !generated || !bytes.Contains(fallback, []byte("conversation-canary")) {
 		t.Fatalf("fallback plaintext = %s generated=%v", fallback, generated)
 	}
 	clear(fallback)
-	compacted, generated := parsedResultPlaintext(result, false)
+	full := &auditmodel.PreparedTurn{RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope}
+	compacted, generated := parsedResultPlaintext(result, full)
 	if generated || bytes.Contains(compacted, []byte("conversation-canary")) {
 		t.Fatalf("content-addressed plaintext = %s generated=%v", compacted, generated)
+	}
+	// A turn without a response and a conversation without response
+	// messages: nothing is left for the turn not to rebuild.
+	requestOnly := &auditmodel.PreparedTurn{RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutNone}
+	if plain, _ := parsedResultPlaintext(result, requestOnly); bytes.Contains(plain, []byte("conversation-canary")) || bytes.Contains(plain, []byte(PartialResponseMessagesKey)) {
+		t.Fatalf("request-only plaintext without response messages = %s", plain)
+	}
+}
+
+// A request-only turn rebuilds the request messages; only the response-phase
+// messages of the parsed conversation are kept, under their own key, and the
+// conversation key is not written.
+func TestParsedResultPlaintextKeepsOnlyResponseMessagesOfARequestOnlyTurn(t *testing.T) {
+	t.Parallel()
+	view := conversation.New()
+	view.Append(conversation.Message{
+		Role: conversation.RoleUser, Phase: conversation.PhaseRequest, Direction: conversation.DirectionClientToUpstream,
+		Content: []conversation.Part{conversation.Text("request-canary")},
+	})
+	view.Append(conversation.Message{
+		Role: conversation.RoleAssistant, Phase: conversation.PhaseResponse, Direction: conversation.DirectionUpstreamToClient,
+		Content: []conversation.Part{conversation.Text("half an answer")},
+	})
+	result := Result{Status: StatusPartial, Conversation: view, ParsedJSON: []byte(`{"status":"partial"}`)}
+	plain, _ := parsedResultPlaintext(result, &auditmodel.PreparedTurn{RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutNone})
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := envelope["conversation"]; exists || bytes.Contains(plain, []byte("request-canary")) {
+		t.Fatalf("request-only plaintext stores the conversation: %s", plain)
+	}
+	var messages []conversation.Message
+	if err := json.Unmarshal(envelope[PartialResponseMessagesKey], &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Phase != conversation.PhaseResponse || messages[0].Content[0].Text != "half an answer" {
+		t.Fatalf("partial response messages = %+v", messages)
+	}
+	if string(envelope["status"]) != `"partial"` {
+		t.Fatalf("the parse summary was lost: %s", plain)
 	}
 }
 

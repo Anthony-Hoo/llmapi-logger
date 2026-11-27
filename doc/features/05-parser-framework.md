@@ -120,7 +120,7 @@ Gemini 不带 `alt=sse` 时把同样的 chunk 放在一个 JSON 数组里返回�
 
 **摘要。** envelope 的 `summary` 固定有 `response_id`、`usage`（解析结果的 `Usage`，键为 `Input`/`Output`/`Total`）、`normalized_usage`（不含缓存的输入、缓存读、缓存写、输出、reasoning）、`stop_reason`、`error_type`、`error_code`。raw 释放后，insights 回填只读 `usage`、`normalized_usage`、`stop_reason` 和重建的 conversation（`query.ReconstructBodies`）。`stop_reason` 必须是 insights 停止原因映射读来与读 raw 流结果相同的值：有供应商原值的协议存原值（Anthropic 的 `stop_reason`、Chat/Completions 最后报告的 `finish_reason`、Gemini 最后报告的 `finishReason`），只有状态的协议存映射后的值（Responses，见模块 06 §5）。
 
-**上限与放弃。** 残留的 canonical JSON 超过 `streamevidence.MaxResidueBytes`（1 MiB）时，normalizer 返回 `streamevidence.ErrResidueTooLarge`。worker 对任何 normalizer 错误的处理不变：解析记为 `partial`、`error_code=normalization_failed`，不生成 turn，四阶段 raw 保持 `full`，conversation 作为 `parsed_json_enc` 回退副本保存，并写 `reconstruction_failed` 完整性事件。代价是这条记录在列表里显示为部分解析。
+**上限与放弃。** 残留的 canonical JSON 超过 `streamevidence.MaxResidueBytes`（1 MiB）时，normalizer 返回 `streamevidence.ErrResidueTooLarge`（即 `parser.ErrStreamResidueTooLarge`）。worker 把它与其他 normalizer 错误分开：响应完整且已解析，只是没有被规范化，所以记录得到只有请求的轮次（模块 18 §6）。解析保持 `ok`，错误码为 `response_not_normalized`（解析已带错误码时保留原码），响应侧 raw 保持 `full`，请求侧 raw 按模块 18 §6 释放，回答消息存在 `parsed_json_enc` 的 `partial_response_messages`，写 `semantic_compacted` 事件，不写 `reconstruction_failed`。请求也规范化不了时才走 `normalization_failed` 路径。其他 normalizer 错误的处理不变：解析记为 `partial`、`error_code=normalization_failed`，不生成 turn，四阶段 raw 保持 `full`，conversation 作为 `parsed_json_enc` 回退副本保存，并写 `reconstruction_failed` 完整性事件。
 
 **保真夹具。** `internal/parser/builtin/fidelity_test.go` 对注册表里每个有 normalizer 的 parser，取协议夹具目录（`internal/protofixture`）里所有交给它的交换，加上目录没有协议的 parser 的手写流，各走两条路径：从 raw 解析，以及只用密封后的对象重建（不读 raw）。要求两边的 conversation、用量（`summary.usage`、`summary.normalized_usage` 与解析结果一致，折叠体按非流式 body 重新解析也一致）、工具调用数和停止原因（insights 从 raw 流得到的，与回填从 `summary.stop_reason` 和从折叠体得到的一致）相同，流的事件描述与从 raw 重算的相同。每个 normalizer 至少要有一个交换通过；目录里有流给它的，至少要有一个流通过。新协议注册 normalizer 后自动纳入，不通过则测试失败。`probe_test.go` 给每种已消费事件类型及其嵌套对象注入未知字段，再加未知事件类型和未知 delta 类型，要求所有值都能从重建结果中找回，并要求探针覆盖各协议列出的全部消费事件类型。`dedup_test.go` 要求同一回答流式与非流式存出相同的 response item 对象（Responses 流另有 `instructions`、`tools` 两个 item），并在全量重发历史的两轮会话里要求第二轮请求复用第一轮响应对象的情形与非流式相同、回显的 `instructions`/`tools` 两轮合计只插入一次。
 
@@ -161,7 +161,7 @@ type Result struct {
 明文列只保存窄摘要。`Conversation` 只在 worker 内存使用：
 
 - 有 verified turn 的记录（OpenAI、Anthropic、Gemini）的详情 conversation 从内容对象重建，不再写第二份 conversation；
-- normalization/reconstruction 异常（以及升级前没有 turn 的旧记录），raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化。这份副本动辄数 MB，所以 `parsed_json_enc` 在加密前按需 gzip，格式见[模块 9](09-security-encryption-and-redaction.md) §5.1；
+- 没有 turn 的记录（normalization/reconstruction 异常、请求不可用，以及升级前没有 turn 的旧记录），raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化。这份副本动辄数 MB，所以 `parsed_json_enc` 在加密前按需 gzip，格式见[模块 9](09-security-encryption-and-redaction.md) §5.1；
 - 列表、普通日志和明文 SQLite 列永远不包含消息正文、reasoning、工具参数或结果。
 
 `ErrorType`/`ErrorCode` 保存 parser 看到的原始错误标识；`UpstreamErrorClass` 是由[模块 22](22-content-policy.md)定义的稳定策略拒绝分类（如 `cyber_policy`），只保存枚举、不保存 message，并且是 `parsed_results` 中不参与完整性摘要的派生列。

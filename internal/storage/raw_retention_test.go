@@ -20,6 +20,11 @@ func TestDecideRawRetentionPerSide(t *testing.T) {
 		change(&outcome)
 		return outcome
 	}
+	omitted := func(outcome RawRetentionOutcome, parse string) RawRetentionOutcome {
+		outcome.ResponseOmitted = true
+		outcome.ParseStatus = parse
+		return outcome
+	}
 	both := RawRetention{ReleaseRequest: true, ReleaseResponse: true}
 	requestOnly := RawRetention{ReleaseRequest: true}
 	keep := RawRetention{}
@@ -97,6 +102,36 @@ func TestDecideRawRetentionPerSide(t *testing.T) {
 		{"503 stages not merged", with(abnormal(status(503)), func(o *RawRetentionOutcome) { o.RequestStagesMerged = false }), keep},
 		{"503 no request rebuilt", with(abnormal(status(503)), func(o *RawRetentionOutcome) { o.RequestNormalized = false }), keep},
 		{"cancelled stages not merged", with(abnormal(nil), func(o *RawRetentionOutcome) { o.ForwardStatus = ForwardClientCancelled; o.RequestStagesMerged = false }), keep},
+
+		// A request-only turn (the response was captured, the turn does not
+		// carry it) never releases the response, even for a normal outcome,
+		// and may come with a partial parse. Its request follows the same
+		// rows as above, with merged stages required for a normal outcome too.
+		{"request-only, residue declined, 200 normal", omitted(abnormal(status(200)), ParseOK), requestOnly},
+		{"request-only, terminal event missing, 200 normal", omitted(abnormal(status(200)), ParsePartial), requestOnly},
+		{"request-only, 200 normal, stages not merged", with(omitted(abnormal(status(200)), ParsePartial), func(o *RawRetentionOutcome) { o.RequestStagesMerged = false }), keep},
+		{"request-only, 200 normal, no request rebuilt", with(omitted(abnormal(status(200)), ParseOK), func(o *RawRetentionOutcome) { o.RequestNormalized = false }), keep},
+		{"request-only, cancelled mid-stream", with(omitted(abnormal(status(200)), ParsePartial), func(o *RawRetentionOutcome) {
+			o.ForwardStatus = ForwardClientCancelled
+			o.CaptureStatus = CapturePartial
+		}), requestOnly},
+		{"request-only, cancelled mid-stream, stages not merged", with(omitted(abnormal(status(200)), ParsePartial), func(o *RawRetentionOutcome) {
+			o.ForwardStatus = ForwardClientCancelled
+			o.CaptureStatus = CapturePartial
+			o.RequestStagesMerged = false
+		}), keep},
+		{"request-only, 503 partial", omitted(abnormal(status(503)), ParsePartial), requestOnly},
+		{"request-only, 429 partial", omitted(abnormal(status(429)), ParsePartial), requestOnly},
+		{"request-only, 400 unclassified", omitted(abnormal(status(400)), ParsePartial), keep},
+		{"request-only, 422 unclassified", omitted(abnormal(status(422)), ParsePartial), keep},
+		{"request-only, 400 classified", with(omitted(abnormal(status(400)), ParsePartial), func(o *RawRetentionOutcome) { o.UpstreamErrorClass = class("content_policy") }), requestOnly},
+		{"request-only, 404 unlisted", omitted(abnormal(status(404)), ParsePartial), keep},
+		{"request-only, cancelled after unclassified 400", with(omitted(abnormal(status(400)), ParsePartial), func(o *RawRetentionOutcome) { o.ForwardStatus = ForwardClientCancelled }), keep},
+		{"request-only, 200 forward newapi error unlisted", with(omitted(abnormal(status(200)), ParsePartial), func(o *RawRetentionOutcome) { o.ForwardStatus = ForwardNewAPIError }), keep},
+		{"request-only, 200 capture partial unlisted", with(omitted(abnormal(status(200)), ParsePartial), func(o *RawRetentionOutcome) { o.CaptureStatus = CapturePartial }), keep},
+		{"request-only, parse error", omitted(abnormal(status(200)), ParseError), keep},
+		{"request-only, parse skipped", omitted(abnormal(status(200)), ParseSkipped), keep},
+		{"request-only, no turn", with(omitted(abnormal(status(200)), ParsePartial), func(o *RawRetentionOutcome) { o.TurnVerified = false }), keep},
 	}
 	for _, test := range cases {
 		if got := DecideRawRetention(test.outcome); got != test.want {
