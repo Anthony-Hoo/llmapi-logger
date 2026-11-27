@@ -5,6 +5,7 @@ import (
 	"context"
 	"math/rand/v2"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +180,28 @@ func TestMainRejectsMissingDatabase(t *testing.T) {
 	code = Main(context.Background(), []string{"dist"}, func(string) string { return "" }, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("dist without database: code %d", code)
+	}
+}
+
+func TestSampleOrderIgnoresRunSpecificRequestIDs(t *testing.T) {
+	// Two runs of one workload: the same requests in the same places, with
+	// different random request ids and a different completion order.
+	first := []requestRecord{
+		{order: "00000001/0002", requestID: "zz"},
+		{order: "00000000/0001", requestID: "mm"},
+		{order: "00000001/0001", requestID: "aa"},
+		{order: "00000002/0001", requestID: "", err: ""},
+		{order: "00000003/0001", requestID: "tt", err: "transport"},
+	}
+	second := []requestRecord{
+		{order: "00000001/0001", requestID: "q1"},
+		{order: "00000001/0002", requestID: "b7"},
+		{order: "00000000/0001", requestID: "x3"},
+	}
+	if got, want := sampleOrder(first), []string{"mm", "aa", "zz"}; !slices.Equal(got, want) {
+		t.Fatalf("first run order = %v, want %v", got, want)
+	}
+	if got, want := sampleOrder(second), []string{"x3", "q1", "b7"}; !slices.Equal(got, want) {
+		t.Fatalf("second run order = %v, want %v", got, want)
 	}
 }

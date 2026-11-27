@@ -670,17 +670,30 @@ FROM audit_records`, insights.AnalysisVersion, insights.ProjectIdentityVersion).
 	}
 }
 
+// sampleOrder returns the request ids that may be sampled, sorted by each
+// request's place in the workload. Request ids are random per run, so sorting
+// by them would make the seeded shuffle pick a different mix of audits each
+// time and the read percentiles of two runs would not be comparable.
+func sampleOrder(records []requestRecord) []string {
+	usable := make([]requestRecord, 0, len(records))
+	for _, record := range records {
+		if record.requestID != "" && record.err != "transport" {
+			usable = append(usable, record)
+		}
+	}
+	sort.SliceStable(usable, func(left, right int) bool { return usable[left].order < usable[right].order })
+	ids := make([]string, 0, len(usable))
+	for _, record := range usable {
+		ids = append(ids, record.requestID)
+	}
+	return ids
+}
+
 // readSample picks the audits whose detail and export are read. It runs at
 // the end of the drain phase so the lookup does not touch the reads phase.
 func (bench *bench) readSample(ctx context.Context, records []requestRecord) []string {
 	_, known, _ := bench.tracker.results()
-	ids := make([]string, 0, len(records))
-	for _, record := range records {
-		if record.requestID != "" && record.err != "transport" {
-			ids = append(ids, record.requestID)
-		}
-	}
-	sort.Strings(ids)
+	ids := sampleOrder(records)
 	rng := mathrand.New(mathrand.NewPCG(bench.options.workload.Seed, 0x7eed))
 	rng.Shuffle(len(ids), func(left, right int) { ids[left], ids[right] = ids[right], ids[left] })
 	if len(ids) > bench.options.workload.ReadSamples {

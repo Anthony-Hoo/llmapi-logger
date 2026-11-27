@@ -193,6 +193,10 @@ type requestRecord struct {
 	caseName  string
 	group     string
 	requestID string
+	// order is the request's place in the workload (conversation, then
+	// sequence within it). Unlike requestID it is the same on every run of
+	// one workload, so sampling by it compares like with like.
+	order     string
 	expect    string
 	status    int
 	ttfb      time.Duration
@@ -279,23 +283,28 @@ func (driver *driver) conversation(ctx context.Context, index int, protocol prot
 			abnormal = append(abnormal, scenario)
 		}
 	}
+	sent := 0
+	order := func() string {
+		sent++
+		return fmt.Sprintf("%08d/%04d", index, sent)
+	}
 	for turn := 1; turn <= driver.workload.Turns && ctx.Err() == nil; turn++ {
 		if rng.Float64() < driver.workload.AbnormalShare {
 			if exchange, err := conversation.Abnormal(abnormal[rng.IntN(len(abnormal))]); err == nil {
-				driver.send(ctx, &exchange, rng)
+				driver.send(ctx, &exchange, rng, order())
 			}
 		}
 		if turn == branchAt && conversation.CanBranch() {
 			fork := conversation.Fork()
 			exchange := fork.Next(protofixture.ScenarioBranch, fork.MixedFeatures())
-			driver.send(ctx, &exchange, rng)
+			driver.send(ctx, &exchange, rng, order())
 		}
 		exchange := conversation.Next(protofixture.ScenarioMixed, conversation.MixedFeatures())
-		driver.send(ctx, &exchange, rng)
+		driver.send(ctx, &exchange, rng, order())
 	}
 }
 
-func (driver *driver) send(ctx context.Context, exchange *protofixture.Exchange, rng *rand.Rand) {
+func (driver *driver) send(ctx context.Context, exchange *protofixture.Exchange, rng *rand.Rand, order string) {
 	mode := "json"
 	if exchange.Stream {
 		mode = "sse"
@@ -303,6 +312,7 @@ func (driver *driver) send(ctx context.Context, exchange *protofixture.Exchange,
 	record := requestRecord{
 		caseName:  fmt.Sprintf("%s/%s/%s", exchange.Protocol, exchange.Scenario, mode),
 		group:     fmt.Sprintf("%s/%s", exchange.Protocol, mode),
+		order:     order,
 		expect:    exchange.Expect.Status,
 		sentBytes: len(exchange.RequestBody),
 		tracked:   rng.Float64() < driver.workload.LatencySample,
