@@ -230,7 +230,7 @@ agent_access:
 - **升级**：先部署包含模块 25 的版本，此时配置里没有 `agent_access`，功能关闭，迁移 004 在启动时自动应用；确认运行正常后，再把 `agent_access` 段写进配置并重启。
 - **回滚到不含模块 25 的版本**：
   1. 从配置里删掉整个 `agent_access` 段（包括 `enabled: false` 的写法），否则旧版本因未知键启动失败。
-  2. 停止新版本后，在库里删除 `agent_tokens`、`agent_audit_log` 两张表，并删除 `schema_migrations` 里版本为 4 的行，否则旧版本因 schema 版本过新拒绝启动。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+  2. 停止新版本后，在库里删除 `agent_tokens`、`agent_audit_log` 两张表，并删除 `schema_migrations` 里版本为 4 的行，否则旧版本因 schema 版本过新打不开审计存储（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。库已经是版本 5 时，先按[回滚到 schema 版本 4](postgresql-migration.md#回滚到-schema-版本-4)撤销迁移 005，再做这一步。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
   3. 再启动旧版本。已签发的 Agent 令牌随表一起消失；重新升级后用户需要重新授权。
 
 ~~~sql

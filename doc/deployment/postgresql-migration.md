@@ -145,6 +145,27 @@ SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
 
 先停止新服务并备份 PostgreSQL，再用 v0.6.0 与原 SQLite 备份及匹配密钥启动。PostgreSQL 切换后的新写入不会自动回灌 SQLite；有新流量时必须先决定如何保留这段审计数据，不能宣称无损直接回退。不要用旧版本打开新格式数据库，也不要删除旧备份来腾空间。
 
+### 回滚到 schema 版本 4
+
+迁移 005 删除了没有任何查询使用的索引 `content_objects_semantic_idx`，schema 版本升到 5。它在代理启动时自动应用，不改任何数据，也不需要配置改动。删除索引要短暂独占 `content_objects`，受连接的 5 秒 `lock_timeout` 约束：启动时恰好有 `pg_dump` 之类的会话在读这张表，迁移会失败并整体回滚，代理以审计存储不可用的状态运行（日志 `audit storage unavailable`，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），等那个会话结束后重启即可。
+
+旧版本打开版本 5 的库时同样会因 schema 版本过新（`schema is newer than supported`）而无法使用审计存储，表现与上面相同，不会自动降级 schema。回滚到不含迁移 005 的版本：
+
+1. 停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+2. 在库里重建这个索引，并删除 `schema_migrations` 里版本为 5 的行。代理使用独立 schema 时先 `SET search_path = <schema>;`。
+3. 再启动旧版本。之后重新升级时，迁移 005 会再次删除索引。
+
+~~~sql
+-- 仅在回滚到不含迁移 005 的版本时执行，并且先停止新版本、做好备份
+BEGIN;
+CREATE INDEX IF NOT EXISTS content_objects_semantic_idx
+    ON content_objects(semantic_hash, kind);
+DELETE FROM schema_migrations WHERE version = 5;
+COMMIT;
+~~~
+
+重建索引要读一遍 `content_objects` 并在建好之前挡住对它的写入，表大时需要一段时间；旧版本不会用到这个索引，只是建表脚本里有它，所以重建它只是为了让库与旧版本的 schema 完全一致。同时回滚到不含模块 25 的版本时，再按[部署说明](README.md)第 9.2 节处理版本 4。
+
 ## 验证边界
 
 四阶段原始 hash、字节长度、内容对象身份、AES-GCM AAD、HMAC 完整性链和作用域隔离保持不变。PG WAL/事务提交之前的进程内 capture 缓冲仍会因强制退出丢失。共享对象减少重复内容存储；数据库空页与 WAL 的物理回收受 PostgreSQL 维护机制影响，不等于逻辑泄漏。

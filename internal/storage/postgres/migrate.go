@@ -12,11 +12,12 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-// derivedMigrations add tables on top of the version-1 baseline. Each one is
-// applied independently when its version is missing, so versions need not be
-// contiguous: parallel feature branches can claim different numbers and merge
-// in any order. They run only when the proxy opens the live store, never in
-// the offline import, whose target must hold the baseline tables alone.
+// derivedMigrations change the schema on top of the version-1 baseline: they
+// add tables or drop indexes. Each one is applied independently when its
+// version is missing, so versions need not be contiguous: parallel feature
+// branches can claim different numbers and merge in any order. They run only
+// when the proxy opens the live store, never in the offline import, whose
+// target must hold the baseline tables alone.
 var derivedMigrations = []struct {
 	version int
 	file    string
@@ -24,10 +25,22 @@ var derivedMigrations = []struct {
 	{2, "migrations/002_org_reports.sql"},
 	{3, "migrations/003_session_analysis.sql"},
 	{4, "migrations/004_agent_access.sql"},
+	{5, "migrations/005_drop_content_objects_semantic_idx.sql"},
 }
 
 // latestSchemaVersion is the newest version this binary understands.
-const latestSchemaVersion = 4
+const latestSchemaVersion = 5
+
+var errSchemaTooNew = errors.New("postgres: schema is newer than supported")
+
+// requireSupportedSchema rejects a database whose newest applied migration is
+// beyond what a binary understanding latest can read.
+func requireSupportedSchema(version, latest int) error {
+	if version > latest {
+		return errSchemaTooNew
+	}
+	return nil
+}
 
 func migrate(ctx context.Context, conn *sql.Conn) error {
 	tx, err := conn.BeginTx(ctx, nil)
@@ -89,8 +102,8 @@ func InitializeImportSchema(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
 		return err
 	}
-	if version > latestSchemaVersion {
-		return errors.New("postgres: schema is newer than supported")
+	if err := requireSupportedSchema(version, latestSchemaVersion); err != nil {
+		return err
 	}
 	if version == 0 {
 		body, err := migrationFiles.ReadFile("migrations/001_init.sql")
