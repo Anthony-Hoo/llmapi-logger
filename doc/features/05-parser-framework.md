@@ -35,6 +35,46 @@ type AuditNormalizer interface {
 
 normalizer 返回的 plaintext 只存在于 worker 内存。`auditmodel.Prepare` 会 canonicalize、提取多模态二进制、压缩、加密并本地重建验证，输出不含 provider 明文的 `PreparedTurn`。
 
+### 2.1 协议适配器注册表
+
+每个 parser 名对应一个 `parser.Adapter`，集中放这个协议特有的东西：
+
+~~~go
+type Adapter struct {
+    Parser       Parser                // 摘要解析；实现 AuditNormalizer 时同时负责规范化
+    Conversation ConversationRebuilder // 从重建出的 request/response 生成 conversation，仅 normalizer 有
+    Layouts      []string              // normalizer 现在会写出的全部 request/response layout，仅 normalizer 有
+}
+~~~
+
+`parser.NewRegistry` 按 parser 名建索引，并在构造时拒绝：重名、缺 parser 或版本、有 normalizer 却没有 `Conversation` 或 `Layouts`（以及反过来）、声明了 `auditmodel` 不认识的 layout。
+
+注册表只有一份，由 `internal/parser/builtin` 用显式列表构造；包初始化时构造失败直接 panic，任何二进制在启动时就会停下，不会等到第一次重建才报 unsupported。没有 `init` 注册，也没有可变的全局状态。使用方：
+
+- `builtin.All()` 从注册表取 parser，交给 worker（`internal/app` 以及经它启动的 `audit-bench`）；
+- query 服务重建 turn 时用 `builtin.Registry().RebuildConversation` 按 parser 名取 `Conversation`，不再 import 单个协议包；未注册或没有 normalizer 的 parser 名得到 `ErrUnknownParser`，查询侧仍表现为 `conversation_projection` 完整性错误。
+
+layout 怎么拼回 provider 值不放在适配器里，而是放在 `auditmodel` 的 layout 表（`internal/auditmodel/layout.go`）。原因是 layout 名属于存储格式：`auditmodel.Prepare` 写入前要用它校验，query、`storage/migrate` 的离线导入校验和以后的冷归档读取都要在没有代理、不加载任何 parser 的情况下重建已存的行，而 `auditmodel` 是这些读者都会 import 的底层包，不能反过来 import parser。表里每个 layout 只是数据：
+
+- `none` 原样返回 envelope，`marker_envelope` 把 envelope 里的 item marker 换回 item；
+- 其他 layout 要求 envelope 是 JSON 对象，按 slot 规则写回：`array`（全部 item 组成数组，可为空）、`one`（恰好一个）、`optional`（零或一个，零个时不写键）、`absent`（必须没有）；规则以外的 slot 被忽略；
+- 流式响应 layout 另带 stream 标记，`auditmodel.StreamLayout` 据此判断响应是 SSE 描述加聚合消息，而不是 JSON Body（insights 回填用它决定走流式还是 JSON 路径）。
+
+layout 名一经写入就不能改名或删除；形状变化要新增 layout 名，旧行仍按旧名读取。被新版本取代、不再写出的 layout 从适配器的 `Layouts` 移到 `builtin_test.go` 的 `retiredLayouts`，表里的行保留不动，旧行照常组装，conversation 仍由该 parser 名的适配器还原。`internal/auditmodel/layout_test.go` 钉住全部 layout 名和 stream 标记，`internal/parser/builtin/builtin_test.go` 钉住全部 parser 名与版本，要求表里每个 layout 要么有适配器写出、要么列为 retired，并用协议夹具和手写请求驱动每个 normalizer：写出的 layout 必须在适配器声明里，声明的每个 layout 都要被实际写出过，并且能 Prepare、Assemble、再经注册表还原成 conversation。
+
+### 2.2 新增一个协议
+
+1. 在协议包里实现 `Parser`，需要内容寻址时再实现 `AuditNormalizer` 和从重建值生成 conversation 的函数；
+2. 若 normalizer 需要新的 layout，在 `auditmodel/types.go` 加 layout 名常量，在 `auditmodel/layout.go` 的表里加一行，并把新名加进 layout 钉住测试；
+3. 在协议包里写 `Adapter()`，返回上面三项；
+4. 在 `builtin.adapters()` 加一行，并把 parser 名与版本加进钉住测试。
+
+turn 的重建与还原不需要改 query 或 worker。注册表之外仍有几处按协议区分的逻辑，它们不属于重建，按需单独修改：
+
+- `internal/parser/streamterminal`：采集路径上判断流在逻辑上结束的终止行。它按 parser 名的协议前缀分派，是采集层唯一依赖的 parser 侧叶子包，不引入各协议包；协议有可靠的流内终止标记时在这里加一支；
+- `internal/contentpolicy/extract.go`：内容策略拦截器从请求 Body 取待检文本，按 parser 名分派（模块 22）；
+- `internal/insights`：上下文分析按协议族解析请求和响应（模块 20），是分析口径，不是证据重建。
+
 ## 3. 当前协议范围
 
 | 协议 | 摘要 / conversation | 内容寻址 normalizer | raw 保留 |
@@ -143,7 +183,7 @@ OpenAI 与 Anthropic verified turn 的管理 conversation 由 query 层执行以
 4. 比较 sequence/reconstruction SHA-256；
 5. 再从重建 provider 值生成协议无关 conversation。
 
-这样列表和详情不需要保存第二份消息正文。第 5 步由写入该 turn 的协议 parser 完成（`query.reconstructedConversation` 按 parser 名分发）。Gemini 在当前版本从加密 parsed fallback 读取 conversation，同时 full raw 仍是权威证据；升级前写入的 Anthropic 记录没有 turn graph，读取方式同 Gemini。
+这样列表和详情不需要保存第二份消息正文。第 3 步按 `auditmodel` 的 layout 表执行，第 5 步由写入该 turn 的 parser 的适配器完成（`builtin.Registry().RebuildConversation` 按 parser 名查找，见 §2.1）。Gemini 在当前版本从加密 parsed fallback 读取 conversation，同时 full raw 仍是权威证据；升级前写入的 Anthropic 记录没有 turn graph，读取方式同 Gemini。
 
 ## 10. 最少测试
 
@@ -152,6 +192,7 @@ OpenAI 与 Anthropic verified turn 的管理 conversation 由 query 层执行以
 - OpenAI Chat/Responses/Completions JSON 与 SSE 摘要。
 - developer/system/user/assistant/tool/reasoning/tool result 的顺序和 call id。
 - provider JSON 请求与响应精确重建。
+- layout 名、parser 名与版本钉住；每个 normalizer 写出的 layout 都已声明、可组装，且 conversation 重建已接到注册表（§2.1）。
 - data URL 解码字节去重、inline file data、`file_id` 外部引用。
 - normalization/reconstruction 失败时四阶段 raw 保持 full 且可完整下载。
 - verified OpenAI/Anthropic parsed JSON 不含第二份 conversation；无 normalizer 的协议仍能从加密 fallback 展示 conversation。

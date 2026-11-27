@@ -28,7 +28,7 @@ func (service *Service) ReconstructBodies(ctx context.Context, auditID string) (
 			return parser.Reconstruction{}, err
 		}
 	}
-	if layout := reconstructed.Turn.ResponseLayout; layout == auditmodel.LayoutOpenAIStreamResponse || layout == auditmodel.LayoutAnthropicStreamResponse {
+	if auditmodel.StreamLayout(reconstructed.Turn.ResponseLayout) {
 		result.ResponseIsStream = true
 		result.Conversation = reconstructed.Conversation
 		encoded, err := json.Marshal(reconstructed.Response)

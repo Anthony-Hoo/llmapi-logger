@@ -9,8 +9,7 @@ import (
 
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
-	"llmapi-logger/internal/parser/anthropic"
-	"llmapi-logger/internal/parser/openai"
+	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -126,13 +125,10 @@ func reconstructTurnGraph(cipher security.Cipher, parserName string, graph *stor
 	}, nil
 }
 
-// reconstructedConversation projects rebuilt provider values with the parser
-// that normalized them.
+// reconstructedConversation projects rebuilt provider values with the adapter
+// of the parser that normalized them.
 func reconstructedConversation(parserName string, request, response any, responseLayout string) (*conversation.Conversation, error) {
-	if parserName == anthropic.Messages {
-		return anthropic.ReconstructedConversation(request, response, responseLayout)
-	}
-	return openai.ReconstructedConversation(parserName, request, response, responseLayout)
+	return builtin.Registry().RebuildConversation(parserName, request, response, responseLayout)
 }
 
 func integrityAt(stage string) error {
