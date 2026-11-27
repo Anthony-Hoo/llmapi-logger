@@ -701,10 +701,21 @@ func isScaleGraphTable(table string) bool {
 	return false
 }
 
-// keylessCandidateStatement is chooseTurnParent's protocol-wide search, taken
-// by every turn without a conversation key: all Gemini turns and Anthropic or
-// OpenAI turns whose client sends no session key.
-const keylessCandidateStatement = `SELECT t.turn_id, t.conversation_id FROM turns AS t JOIN conversations AS c ON c.conversation_id = t.conversation_id WHERE c.protocol = $1 AND t.created_at_ns < $2 ORDER BY t.created_at_ns DESC, t.turn_id DESC LIMIT $3`
+// isKeylessCandidateStatement reports whether a captured statement is
+// chooseTurnParent's protocol-wide search, taken by every turn without a
+// conversation key (all Gemini turns and Anthropic or OpenAI turns whose
+// client sends no session key), in its parameterised or per-protocol form.
+func isKeylessCandidateStatement(statement string) bool {
+	if statement == normalizeStatement(keylessCandidateQuery) {
+		return true
+	}
+	for _, query := range keylessCandidateQueries {
+		if statement == normalizeStatement(query) {
+			return true
+		}
+	}
+	return false
+}
 
 func tableRows(t *testing.T, store *Store, table string) float64 {
 	t.Helper()
@@ -839,7 +850,10 @@ func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
 			if strings.HasPrefix(summary.statement, "WITH RECURSIVE ancestors") {
 				walks[summary.phase] += summary.executions
 			}
-			if summary.statement == keylessCandidateStatement {
+			if isKeylessCandidateStatement(summary.statement) {
+				if summary.statement != normalizeStatement(keylessCandidateQueries[probe.value.Turn.Protocol]) {
+					t.Errorf("%s: the protocol-wide search did not use the %s statement: %s", probe.name, probe.value.Turn.Protocol, summary.statement)
+				}
 				// The walk is fixed by the data: the order (created_at_ns,
 				// turn_id) is total and the Limit stops the nested loop at the
 				// 32nd turn of the protocol. On this seed the walk reads a
@@ -939,4 +953,117 @@ func measureCandidateChains(t *testing.T, store *Store, conversation *scaleConve
 		t.Errorf("loading the candidates walked more than the chain once: %v, %d frames", read, len(chains.frames))
 	}
 	runtime.KeepAlive(chains)
+}
+
+// seedFlatTurns writes root turns of protocol at the given times, perConversation
+// turns to a conversation, with the fewest rows the turns table needs: one
+// shared envelope object and one audit per turn.
+func seedFlatTurns(t *testing.T, store *Store, prefix, protocol string, createdAt []int64, perConversation int) {
+	t.Helper()
+	ids := make([]string, len(createdAt))
+	conversations := make([]string, len(createdAt))
+	for index := range createdAt {
+		ids[index] = fmt.Sprintf("%s-%07d", prefix, index)
+		conversations[index] = fmt.Sprintf("conv_%s_%06d", prefix, index/perConversation)
+	}
+	ctx := context.Background()
+	transaction, err := store.writerConn.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transaction.Rollback()
+	statements := []struct {
+		query     string
+		arguments []any
+	}{
+		{`INSERT INTO content_objects (object_hash, semantic_hash, kind, compression, plaintext_length, encoded_length, data_enc, created_at_ns)
+VALUES (decode(repeat('11', 32), 'hex'), decode(repeat('22', 32), 'hex'), 'request_envelope', 'none', 1, 1, '\x5a'::bytea, 1)
+ON CONFLICT DO NOTHING`, nil},
+		{`INSERT INTO audit_records (audit_id, started_at_ns, ended_at_ns, route_id, protocol, parser_name, method, path,
+    request_uri_enc, mode, forward_status, capture_status, parse_status)
+SELECT id, s, s + 1, 'route', $3::text, 'parser', 'POST', '/v1/test', '\x01'::bytea, 'available', 'completed', 'complete', 'ok'
+FROM unnest($1::text[], $2::bigint[]) AS u(id, s)`, []any{ids, createdAt, protocol}},
+		{`INSERT INTO conversations (conversation_id, protocol, key_hash, created_at_ns, updated_at_ns)
+SELECT DISTINCT c, $1::text, NULL::bytea, 1, 1 FROM unnest($2::text[]) AS u(c)`, []any{protocol, conversations}},
+		{`INSERT INTO turns (turn_id, audit_id, conversation_id, parent_turn_id, parent_base, link_reason, link_confidence,
+    request_layout, response_layout, request_envelope_hash, response_envelope_hash,
+    request_item_count, response_item_count, request_sequence_hash, response_sequence_hash,
+    request_reconstruction_hash, response_reconstruction_hash, reconstruction_status, response_id, created_at_ns)
+SELECT id, id, c, NULL, 'root', 'root', 95, 'marker_envelope', 'marker_envelope',
+    decode(repeat('11', 32), 'hex'), decode(repeat('11', 32), 'hex'), 1, 1,
+    sha256(id::bytea), sha256(id::bytea), sha256(id::bytea), sha256(id::bytea), 'verified', NULL, s
+FROM unnest($1::text[], $2::text[], $3::bigint[]) AS u(id, c, s)`, []any{ids, conversations, createdAt}},
+	}
+	for _, statement := range statements {
+		if _, err := transaction.ExecContext(ctx, statement.query, statement.arguments...); err != nil {
+			t.Fatalf("seed flat turns: %v", err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A protocol with fewer than 32 earlier turns cannot stop the newest-first
+// walk of turns_created_idx early. A plan that does not know the protocol, as
+// the generic plan of a parameterised statement does not, walks the whole
+// index then: 317,005 turns and about 140 ms on 317,000 turns, against a
+// 39 ms sequential scan before the index. With the protocol written into the
+// statement, both the custom and the forced generic plan start from the
+// protocol's conversations and read only its turns, and the common protocol
+// still walks the index to its 32nd turn. Row counts are fixed by the seed:
+// the rare protocol's five turns are the oldest, so walking the index would
+// read every turn, and the common protocol's newest 32 turns are contiguous.
+func TestKeylessCandidateSearchKnowsTheProtocolAtScale(t *testing.T) {
+	sizes := []int{20_000, 317_000}
+	if testing.Short() {
+		sizes = sizes[:1]
+	}
+	for _, size := range sizes {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			store, _ := openTestStore(t)
+			const base = int64(1_000_000_000)
+			common := make([]int64, size)
+			for index := range common {
+				common[index] = base + int64(index+10)*1000
+			}
+			for start := 0; start < size; start += 50_000 {
+				seedFlatTurns(t, store, fmt.Sprintf("openai%02d", start/50_000), "openai", common[start:min(start+50_000, size)], 10)
+			}
+			seedFlatTurns(t, store, "gemini", "gemini", []int64{base + 1000, base + 2000, base + 3000, base + 4000, base + 5000}, 5)
+			for _, table := range []string{"turns", "conversations"} {
+				if _, err := store.writerConn.ExecContext(context.Background(), `ANALYZE `+table); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := base + int64(size+100)*1000
+			for _, probe := range []struct {
+				protocol string
+				turns    float64 // what the search must read
+				walk     bool    // along turns_created_idx
+			}{
+				{"gemini", 5, false},
+				{"anthropic", 0, false}, // no turns of it yet
+				{"openai", parentCandidateLimit, true},
+			} {
+				ctx := context.Background()
+				transaction, err := store.writerConn.BeginTx(ctx, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recorder := &planRecorder{t: t, ctx: ctx, tx: transaction, phase: "keyless"}
+				if _, err := listKeylessCandidates(recorder, probe.protocol, before); err != nil {
+					t.Fatal(err)
+				}
+				_ = transaction.Rollback()
+				summary := summarizeStatements(recorder.statements)[0]
+				t.Logf("%d turns, %s: %s", size, probe.protocol, summary)
+				walksIndex := summary.nodeTypes["turns: Index Scan turns_created_idx"] || summary.genericTypes["turns: Index Scan turns_created_idx"]
+				if summary.maxExamined["turns"] != probe.turns || summary.maxGeneric["turns"] != probe.turns || walksIndex != probe.walk {
+					t.Errorf("%d turns, %s: read %.0f (generic %.0f) turns, want %.0f, index walk %v: %s",
+						size, probe.protocol, summary.maxExamined["turns"], summary.maxGeneric["turns"], probe.turns, walksIndex, summary)
+				}
+			}
+		})
+	}
 }

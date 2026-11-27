@@ -937,18 +937,55 @@ LIMIT $4`, turn.Protocol, turn.ConversationKeyHash, turn.CreatedAtNS, parentCand
 		return bestTurnParent(transaction, turn, candidates, linkConversationKey)
 	}
 
-	candidates, err := listTurnCandidates(transaction, `
-SELECT t.turn_id, t.conversation_id
-FROM turns AS t
-JOIN conversations AS c ON c.conversation_id = t.conversation_id
-WHERE c.protocol = $1 AND t.created_at_ns < $2
-ORDER BY t.created_at_ns DESC, t.turn_id DESC
-LIMIT $3`, turn.Protocol, turn.CreatedAtNS, parentCandidateLimit)
+	candidates, err := listKeylessCandidates(transaction, turn.Protocol, turn.CreatedAtNS)
 	if err != nil {
 		return nil, nil, err
 	}
 	return bestTurnParent(transaction, turn, candidates, linkInferred)
 }
+
+// listKeylessCandidates returns the newest turns of protocol created before
+// createdAt, for a turn without a conversation key.
+func listKeylessCandidates(transaction dbTransaction, protocol string, createdAt int64) ([]turnCandidate, error) {
+	if query, ok := keylessCandidateQueries[protocol]; ok {
+		return listTurnCandidates(transaction, query, createdAt, parentCandidateLimit)
+	}
+	return listTurnCandidates(transaction, keylessCandidateQuery, protocol, createdAt, parentCandidateLimit)
+}
+
+// keylessCandidateQuery is the protocol-wide parent search of a turn without
+// a conversation key: the newest earlier turns of the protocol, walked along
+// turns_created_idx.
+const keylessCandidateQuery = `
+SELECT t.turn_id, t.conversation_id
+FROM turns AS t
+JOIN conversations AS c ON c.conversation_id = t.conversation_id
+WHERE c.protocol = $1 AND t.created_at_ns < $2
+ORDER BY t.created_at_ns DESC, t.turn_id DESC
+LIMIT $3`
+
+// keylessCandidateQueries holds the same search with the protocol written
+// into the text, one statement per protocol the parsers produce. pgx caches
+// prepared statements, and a generic plan of the parameterised form does not
+// know the protocol: for a protocol with fewer than 32 earlier turns it walks
+// the whole index, where a plan that knows the protocol is rare starts from
+// its conversations instead. The literals are these compile-time constants,
+// never the turn's value, which is only compared against them; any other
+// protocol uses the parameterised form. Rows and order are the same.
+var keylessCandidateQueries = func() map[string]string {
+	const template = `
+SELECT t.turn_id, t.conversation_id
+FROM turns AS t
+JOIN conversations AS c ON c.conversation_id = t.conversation_id
+WHERE c.protocol = '%s' AND t.created_at_ns < $1
+ORDER BY t.created_at_ns DESC, t.turn_id DESC
+LIMIT $2`
+	queries := map[string]string{}
+	for _, protocol := range []string{"openai", "anthropic", "gemini"} {
+		queries[protocol] = fmt.Sprintf(template, protocol)
+	}
+	return queries
+}()
 
 // evaluateForced evaluates the one candidate a forced link names.
 func evaluateForced(transaction dbTransaction, turn auditmodel.PreparedTurn, candidate turnCandidate, reason string, confidence int) (*turnParent, *candidateChains, error) {

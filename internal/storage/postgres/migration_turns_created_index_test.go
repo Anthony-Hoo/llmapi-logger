@@ -102,11 +102,14 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	requireTurnsCreatedIndex(t, admin, true)
 
 	// A version 5 database on which an operator built the index beforehand,
-	// concurrently, as the deployment document describes for large tables.
+	// as the deployment document describes for large tables. The document
+	// builds it CONCURRENTLY; that leaves the same catalog entry, but here it
+	// waits on every transaction in the shared test database and fails when a
+	// parallel test drops its schema meanwhile, so the test builds it plainly.
 	if _, err := admin.ExecContext(ctx, rollbackToSchemaFiveSQL); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.ExecContext(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS turns_created_idx ON turns(created_at_ns, turn_id)`); err != nil {
+	if _, err := admin.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS turns_created_idx ON turns(created_at_ns, turn_id)`); err != nil {
 		t.Fatal(err)
 	}
 	upgraded, err = Open(ctx, dsn)
@@ -158,8 +161,9 @@ func TestMigrationSixIsIdempotent(t *testing.T) {
 // are fixed by the data alone; walking turns_created_idx backwards yields the
 // same order. This checks it on timestamps shared by several turns of
 // different conversations and protocols, with turn ids unrelated to insertion
-// order: the rows with the index forced equal the rows with no index, for
-// every cut-off, including one equal to a shared timestamp.
+// order: the rows of the writer's per-protocol statement, with the index
+// forced and as planned, equal the rows of the parameterised statement with
+// no index, for every cut-off, including one equal to a shared timestamp.
 func TestKeylessCandidatesAreTheSameWithTurnsCreatedIndex(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openTestStore(t)
@@ -214,16 +218,21 @@ FROM unnest($1::text[], $2::text[], $3::bigint[]) AS u(id, c, s)`, []any{ids, co
 		}
 	}
 
-	candidates := func(withIndex bool, protocol string, before int64) []string {
+	// today runs the parameterised statement with the index dropped, as before
+	// migration 006; forced runs the writer's per-protocol statement with
+	// everything but the index walk priced out; chosen runs it as planned.
+	candidates := func(mode, protocol string, before int64) []string {
 		t.Helper()
 		transaction, err := store.writerConn.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer transaction.Rollback()
-		settings := []string{`DROP INDEX turns_created_idx`}
-		if withIndex {
-			// Everything but the index walk priced out.
+		var settings []string
+		switch mode {
+		case "today":
+			settings = []string{`DROP INDEX turns_created_idx`}
+		case "forced":
 			settings = []string{`SET LOCAL enable_seqscan = off`, `SET LOCAL enable_sort = off`, `SET LOCAL enable_bitmapscan = off`}
 		}
 		for _, setting := range settings {
@@ -231,38 +240,36 @@ FROM unnest($1::text[], $2::text[], $3::bigint[]) AS u(id, c, s)`, []any{ids, co
 				t.Fatal(err)
 			}
 		}
-		var document string
-		if err := transaction.QueryRowContext(ctx, `EXPLAIN (FORMAT JSON) `+keylessCandidateStatement, protocol, before, parentCandidateLimit).Scan(&document); err != nil {
-			t.Fatal(err)
+		var found []turnCandidate
+		if mode == "today" {
+			found, err = listTurnCandidates(transaction, keylessCandidateQuery, protocol, before, parentCandidateLimit)
+		} else {
+			var document string
+			if err := transaction.QueryRowContext(ctx, `EXPLAIN (FORMAT JSON) `+keylessCandidateQueries[protocol], before, parentCandidateLimit).Scan(&document); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "forced" && !strings.Contains(document, `"turns_created_idx"`) {
+				t.Fatalf("forced plan does not walk turns_created_idx: %s", document)
+			}
+			found, err = listKeylessCandidates(transaction, protocol, before)
 		}
-		if usesIndex := strings.Contains(document, `"turns_created_idx"`); usesIndex != withIndex {
-			t.Fatalf("plan with index %v uses turns_created_idx %v: %s", withIndex, usesIndex, document)
-		}
-		rows, err := transaction.QueryContext(ctx, keylessCandidateStatement, protocol, before, parentCandidateLimit)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer rows.Close()
 		var result []string
-		for rows.Next() {
-			var turnID, conversationID string
-			if err := rows.Scan(&turnID, &conversationID); err != nil {
-				t.Fatal(err)
-			}
-			result = append(result, turnID+"/"+conversationID)
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
+		for _, candidate := range found {
+			result = append(result, candidate.turnID+"/"+candidate.conversationID)
 		}
 		return result
 	}
 	cutoffs := []int64{created[len(created)-1] + 1, created[300], created[300] + 1, created[40]}
 	for _, protocol := range protocols {
 		for _, before := range cutoffs {
-			scanned := candidates(false, protocol, before)
-			indexed := candidates(true, protocol, before)
-			if len(scanned) == 0 || !slices.Equal(scanned, indexed) {
-				t.Fatalf("%s before %d: candidates without index %v, with index %v", protocol, before, scanned, indexed)
+			today := candidates("today", protocol, before)
+			for _, mode := range []string{"forced", "chosen"} {
+				if now := candidates(mode, protocol, before); len(today) == 0 || !slices.Equal(today, now) {
+					t.Fatalf("%s before %d: candidates before migration 006 %v, now (%s) %v", protocol, before, today, mode, now)
+				}
 			}
 		}
 	}
