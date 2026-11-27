@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"strings"
 	"testing"
 
@@ -460,7 +461,15 @@ VALUES ($1, $2::bigint, $2::bigint + 1, 'route', $3, 'parser', 'POST', '/v1/test
 		}
 	}
 
-	const graphs, limitedGraphs = 2000, 500
+	// The full run of 2,500 graphs (about 24,000 saves) takes around ten
+	// minutes and was what proved the change; set
+	// LLMAPI_TEST_PARENT_EQUIVALENCE=full to repeat it. The default keeps the
+	// same generator and seeds and runs a prefix that still hits every
+	// outcome, so the package stays quick.
+	graphs, limitedGraphs := 120, 60
+	if os.Getenv("LLMAPI_TEST_PARENT_EQUIVALENCE") == "full" {
+		graphs, limitedGraphs = 2000, 500
+	}
 	for graph := 0; graph < graphs; graph++ {
 		runGraph(graph)
 	}
