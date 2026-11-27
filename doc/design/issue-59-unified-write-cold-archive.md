@@ -61,7 +61,16 @@ Issue #59 描述的链路是：流式捕获 → 一次逻辑归档到热库 → 
 - 采集路径没有并发上限、没有全局内存预算，也没有任何落盘暂存。
 - 解析 worker 只有一个，从库里分页读回 raw、解密、解压后再解析（`parser/evidence.go`）。轮次因此按通知顺序串行提交，`turns.created_at_ns` 是解析时间。
 - 崩溃恢复依赖已经提交的 `audit_records`、`http_stages`、`body_streams` 和 `body_chunks` 行；恢复时对整张 `body_chunks` 做聚合，不带 audit 过滤（`recovery.go:82-89`）。
-- 按 Go `net/http` 的行为，分块响应的结束块在处理函数返回后才写出。如果属实，客户端看到流结束的时刻目前排在终结提交之后。
+- 流结束时刻与终结提交的先后。草案里这一条是未证实的推断，现已由测试锁定（`internal/proxy/stream_end_order_test.go`，P0）。结论取决于响应在线路上的成帧方式，而不是它是否流式：
+
+  | 情形 | Header 与 Body 字节 | 响应结束 |
+  | --- | --- | --- |
+  | HTTP/1.1 分块（SSE，或任何没有 `Content-Length` 的响应） | 先于终结提交 | 晚于终结提交 |
+  | HTTP/1.1 带 `Content-Length` | 先于终结提交 | 先于终结提交 |
+  | 代理自己生成的错误 JSON（上游不可达、拦截器拒绝） | 晚于终结提交，状态行也是 | 晚于终结提交 |
+  | HTTP/2（SSE 和带 `Content-Length` 的响应） | 先于终结提交 | 晚于终结提交 |
+
+  原因：Body 字节每次写入后立即 flush；分块响应的结束块由 `net/http` 在处理函数返回后写出，而处理函数被 `defer session.Finish()` 挡着；带 `Content-Length` 的 HTTP/1.1 响应，客户端收满字节数就知道结束了；HTTP/2 的 `END_STREAM` 同样等处理函数返回。“请求完成”日志也在终结提交之后才写。测试观察的是代理的直接对端（部署里是 Nginx），不是最终客户端。没有覆盖的情形：h2c、无 Body 的响应（204 或 `Content-Length: 0`）；上游返回 4xx/5xx 时走同一条拷贝路径，按其成帧方式落入上表对应行，这一点只读了代码，没有单独测试。
 
 解析与读取：
 
