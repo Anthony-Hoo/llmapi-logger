@@ -155,7 +155,12 @@ func (worker *Worker) projectBackfillLater(auditID string, position *keyset) {
 // the watermark to it. A retry set that is full lowers the
 // watermark instead. Nothing else deletes an identity row without its audit
 // or lowers identity_version; the first pass after a restart covers nothing,
-// which also handles a new ProjectIdentityVersion.
+// which also handles a new ProjectIdentityVersion. A parse whose save
+// failed but may have committed reaches no analyze and writes no analysis
+// row; the insights retry backfillUnsure records writes it later and hands
+// it over through projectBackfillLater. The project analyzer is installed
+// only before Start and must not change afterwards, or audits analysed
+// without it would sit below the watermark with no identity.
 func (worker *Worker) projectBackfill(ctx context.Context) int {
 	analyzer := worker.currentProjectAnalyzer()
 	store, listable := worker.store.(ProjectBackfillStore)

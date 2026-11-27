@@ -312,10 +312,16 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 			// A canceled save may not have been attempted, or may still commit
 			// after submitSync stops waiting. Leave processing for startup
 			// recovery instead of spending the persistence-failure budget.
+			if ctx.Err() == nil {
+				worker.backfillUnsure(audit.AuditID)
+			}
 			return
 		}
 		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", storage.ErrorClass(err))
 		worker.releaseProcessing(ctx, audit.AuditID)
+		// The error may have come back after the save committed; the release
+		// is then a no-op and the audit is ok or partial without an analysis.
+		worker.backfillUnsure(audit.AuditID)
 		return
 	}
 	worker.analyze(ctx, audit, input, result, savedStatus)

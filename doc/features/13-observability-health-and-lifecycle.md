@@ -35,8 +35,10 @@ writer 整批失败、审计 begin/finish、解析保存/release、保留清理�
 | `analysis_save_failed` | `audit_analysis` 写入失败（附 `storage_error` 类别） |
 | `analysis_panic` | 分析器 panic 被捕获 |
 | `request_headers_load_failed` | 解密白名单入站请求 Header 失败；仅丢弃 Agent 标识 Header，不降级解析状态 |
-| `analysis_backfill_skipped` | 回填跳过该 audit，附 `reason`：`audit_missing`、`parser_not_registered`、`no_body`、`raw_unavailable`、`no_turn_graph`、`parse_not_usable`、`no_request_body`；同一进程内不再重试 |
-| `analysis_backfill_failed` | 回填失败，附 `reason`（如 `list_failed`、`audit_load_failed`、`evidence_read_failed`、`reconstruction_failed`、`analysis_failed`、`analysis_save_failed`、`analysis_panic`）与 `storage_error`；同一进程内不再重试 |
+| `analysis_backfill_skipped` | 回填跳过该 audit，附 `reason`：`audit_missing`、`parser_not_registered`、`no_body`、`raw_unavailable`、`no_turn_graph`、`parse_not_usable`、`no_request_body`，以及 `failed`（失败无法靠等待恢复，见下行）；同一进程内不再尝试 |
+| `analysis_backfill_failed` | 回填失败，附 `reason`（如 `horizon_failed`、`list_failed`、`audit_load_failed`、`evidence_read_failed`、`reconstruction_failed`、`analysis_failed`、`analysis_save_failed`、`analysis_panic`）、`storage_error` 与 `retry`：`retry=true` 是存储类失败，按 10、20、40、80 分钟退避重试、不放弃；`retry=false` 随后记一条 `reason=failed` 的跳过。`horizon_failed`、`list_failed` 不针对单条 audit，下一个 tick 再试 |
+| `project_backfill_failed` | 项目标识回填失败，附 `reason`（如 `horizon_failed`、`list_failed`、`audit_load_failed`、`analysis_failed`、`project_identity_panic`）、`storage_error` 与 `retry`，含义同 `analysis_backfill_failed` |
+| `project_backfill_skipped` | 项目标识回填放弃该 audit，`reason=failed`；同一进程内不再尝试 |
 
 回填不引入新的健康状态或指标端点：它只在 parser 队列为空时每个扫描周期最多处理 20 条，不影响 `/readyz`。
 可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别；`/api/status` 换算系数刷新失败只记录 `newapi_status_refresh_failed`。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码；计费相关只记录 `billing_rate_missing`、`billing_backfill_scan_failed`、`billing_backfill_save_failed` 等稳定码。启动配置含已废弃的 `insights.pricing_file` 时输出一次 `deprecated_config` 警告，不记录路径。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。

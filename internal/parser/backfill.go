@@ -332,11 +332,17 @@ func (worker *Worker) bodyReconstructor() Reconstructor {
 //   - covered only advances, at the end of a pass, to the horizon read when
 //     the pass began, and the pass listed every candidate after its start;
 //   - an audit becomes a candidate later only through a live parse in
-//     process, which runs on this goroutine. Every exit of process that saves
-//     ok or partial reaches analyze, and analyze reports each audit it leaves
-//     without an analysis to backfillLater, however old the audit is: a long
+//     process, which runs on this goroutine, however old the audit is: a long
 //     request, a parse retried after a save failure, a pending row picked up
-//     by a later scan or an audit closed by startup recovery all end there;
+//     by a later scan or an audit closed by startup recovery all end there.
+//     After a successful claim, process either reaches analyze, which
+//     reports each audit it leaves without an analysis to backfillLater, or
+//     gets an error from the save. A save error may still have committed
+//     the row (a cancel or timeout after submitSync stops waiting, or an
+//     error returned after the commit, which makes the release a no-op), so
+//     those exits record the audit with backfillUnsure while the worker
+//     runs. Only a cancel of the worker itself skips that; the next process
+//     starts with a full pass;
 //   - a failure recorded while the retry set is full lowers the watermark;
 //   - nothing else writes parse_status ok or partial, deletes an
 //     audit_analysis row without its audit, or lowers analysis_version, and
@@ -346,6 +352,11 @@ func (worker *Worker) bodyReconstructor() Reconstructor {
 // audits imported offline and a parse whose save was cancelled at shutdown
 // but committed are all listed. A store without BackfillHorizonStore never
 // covers anything and every pass lists from the oldest audit.
+//
+// The analyzer (SetAnalyzer) and project analyzer are installed only while
+// the application is assembled, before Start. The watermark is sound only
+// because they do not change after the first pass: audits parsed while no
+// analyzer was installed were never reported to backfillLater.
 func (worker *Worker) backfill(ctx context.Context) int {
 	analyzer := worker.auditAnalyzer()
 	store, listable := worker.store.(BackfillStore)
@@ -476,6 +487,28 @@ func (worker *Worker) backfillLater(auditID string, input Input, err error) {
 	rememberSkip(&worker.backfillSkipped, &worker.backfillMark, auditID, nil)
 }
 
+// backfillUnsure records an audit whose parse save failed in a way that may
+// still have committed it as ok or partial, without analyze running. Its
+// start time is not known here, so it becomes a retry with an unknown
+// position, due at once and not counted as a failure: the next pass loads
+// the audit and drops the retry unless the parse did commit.
+func (worker *Worker) backfillUnsure(auditID string) {
+	if !worker.backfillEnabled() {
+		return
+	}
+	if _, waiting := worker.backfillRetry[auditID]; waiting {
+		return
+	}
+	if len(worker.backfillRetry) >= backfillRetryCap {
+		worker.backfillMark.lower(nil)
+		return
+	}
+	if worker.backfillRetry == nil {
+		worker.backfillRetry = make(map[string]*backfillRetry)
+	}
+	worker.backfillRetry[auditID] = &backfillRetry{}
+}
+
 func (worker *Worker) backfillSkip(auditID, reason string, position *keyset) {
 	delete(worker.backfillRetry, auditID)
 	rememberSkip(&worker.backfillSkipped, &worker.backfillMark, auditID, position)
@@ -514,7 +547,16 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, a
 		}
 		return
 	}
+	if audit.ParseStatus == storage.ParseProcessing {
+		// A save that may still commit (backfillUnsure): look again later.
+		if _, waiting := worker.backfillRetry[auditID]; waiting {
+			recordRetry(&worker.backfillRetry, &worker.backfillMark, auditID, position, worker.now())
+		}
+		return
+	}
 	if audit.ParseStatus != StatusOK && audit.ParseStatus != StatusPartial {
+		// Pending again or settled as error or skipped: a pending audit is
+		// parsed live and reaches analyze or backfillUnsure again.
 		delete(worker.backfillRetry, auditID)
 		return
 	}

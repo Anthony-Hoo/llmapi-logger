@@ -423,3 +423,73 @@ func TestBackfillRetriesABodyLoadThatFailedHalfway(t *testing.T) {
 		t.Fatalf("retry attempted %d, analysed %v", attempted, world.analysed["flaky"])
 	}
 }
+
+// uncertainSaveWorld commits the parse result and then reports err, as a
+// save does when the connection drops after the commit or the caller stops
+// waiting before it lands. With commit false it reports err and leaves the
+// audit processing, so the test can land the commit later.
+type uncertainSaveWorld struct {
+	horizonWorld
+	err    error
+	commit bool
+}
+
+func (world uncertainSaveWorld) SaveParsedAudit(_ context.Context, value sqlite.ParsedAudit) error {
+	if world.commit {
+		if err := world.saveParsed(value.Result); err != nil {
+			return err
+		}
+	}
+	return world.err
+}
+
+// The two error exits of process after a successful claim never reach
+// analyze. When the save in fact committed, the audit is a candidate below
+// the watermark, so those exits must record it for the next pass.
+func TestBackfillWatermarkSaveThatCommittedDespiteAnError(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		err    error
+		commit bool
+	}{
+		{name: "timeout after the commit", err: context.DeadlineExceeded, commit: true},
+		{name: "connection lost after the commit", err: errors.New("connection lost"), commit: true},
+		{name: "timeout, commit lands later", err: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			world := newCostWorld()
+			seedAnalysed(t, world, 10)
+			addInFlight(t, world, "long", 150)
+			store := uncertainSaveWorld{horizonWorld: horizonWorld{world}, err: test.err, commit: test.commit}
+			worker, clock := newCostWorker(t, store, &recordingParser{name: watermarkParser})
+			worker.SetAnalyzer(&worldAnalyzer{world: world})
+			insightsPass(t, worker, clock)
+			if worker.backfillMark.covered == nil || keysetBefore(*worker.backfillMark.covered, keyset{StartedAtNS: 150, AuditID: "long"}) {
+				t.Fatalf("watermark %+v does not cover the audit", worker.backfillMark.covered)
+			}
+			worker.process(context.Background(), "long")
+			if world.analysed["long"] {
+				t.Fatal("analyze ran after a failed save")
+			}
+			if !test.commit {
+				if attempted := insightsPass(t, worker, clock); attempted != 1 || world.analysed["long"] {
+					t.Fatalf("pass before the commit attempted %d", attempted)
+				}
+				world.mu.Lock()
+				audit := world.audits["long"]
+				audit.ParseStatus = StatusOK
+				world.audits["long"] = audit
+				world.mu.Unlock()
+			}
+			attempted := insightsPass(t, worker, clock) + insightsPass(t, worker, clock)
+			if attempted != 1 || !world.analysed["long"] {
+				t.Fatalf("attempted %d, analysed %v", attempted, world.analysed["long"])
+			}
+			if len(worker.backfillRetry) != 0 {
+				t.Fatalf("retries left: %v", worker.backfillRetry)
+			}
+		})
+	}
+}
