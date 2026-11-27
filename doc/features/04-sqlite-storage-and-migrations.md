@@ -167,11 +167,12 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 - **锁与耗时。** 迁移在启动时、拿到 writer 锁之后的迁移事务里执行，对 `audit_records`、`http_stages`、`runtime_settings` 各持有 `ACCESS EXCLUSIVE` 直到提交，受连接的 5 秒 `lock_timeout` 约束，与迁移 005 相同；`http_header_blocks` 的外键另对 `audit_records` 取 `SHARE ROW EXCLUSIVE`。本机测量：30 万条 audit（`audit_records` 67 MiB，`http_stages` 42 MiB）上，迁移语句约 10 毫秒，含迁移的 `Open` 约 23 毫秒，与表大小无关。
 - **完整性。** 已有的 `capture_finalized` 事件仍按版本 1 校验：`capturePayloadDigest` 一个字节都不改，校验按 `capture_version` 分派（D.3）。离线导入的目标只有 001 基线，没有 `capture_version` 列，导入校验直接按版本 1 计算。
 - 与 002 到 006 一样只由运行时 `migrate()` 应用：离线导入的目标仍是 001 基线，导入的行在第一次启动时得到 `capture_version = 1`。001 不改。SQLite 不加迁移，永远只写版本 1。
+- 迁移本身不改变写入：只有 `audit.write_path: unified` 的会话在 PostgreSQL 上写版本 2（§5.1、模块 03 §13）；legacy 照旧写版本 1。
 - `latestSchemaVersion` 为 7。**旧版本遇到版本 7 的库会拒绝打开审计存储**，表现与上面相同。回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-6)；一旦有了版本 2 的行，就没有只用 SQL 的回滚办法。
 
 ## 4. HTTP Body 保存方式
 
-每个阶段仍保存自己的 observed length、SHA-256、状态和时间。流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并：
+每个阶段仍保存自己的 observed length、SHA-256、状态和时间。legacy 写入路径下，流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并（unified 在内存里按同样的条件判定，重复阶段的块不写，见模块 03 §13.3）：
 
 - `request_sent_to_newapi.source_stage` 可以指向入站 request stage；
 - `response_from_newapi_sent_to_nginx.source_stage` 可以指向上游 response stage；
@@ -238,6 +239,33 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 
 任一步失败都回滚该 `SaveParsedAudit` 操作的全部修改，不会出现“raw 已删但 turn 未写完”的中间状态。以局部错误失败时不会撤销同批其他操作；存储级或无法分类的错误仍按本节规则回滚整批。
 
+### 5.1 unified 写入路径的操作
+
+`audit.write_path: unified`（模块 03 §13）不用 `StartStage` 到 `FinishAudit` 那一串操作，而用下面四个。PostgreSQL 和 SQLite 存储都实现它们；SQLite 只写采集版本 1，`SupportsHeaderBlock` 报告 false。每个操作照旧在自己的 SAVEPOINT 里执行。
+
+| 操作 | 等待 | 在一个操作里做什么 |
+| --- | --- | --- |
+| `BeginAudit`，带 `AuditRecord.Inbound` | 同步 | 插入起始行，含 `capture_version` 和 `user_agent_enc`；再在嵌套的 SAVEPOINT 里插入 `request_received` 的阶段行（版本 2 含内容列），然后在另一个嵌套 SAVEPOINT 里插入它的 Header 行（版本 1）或只含这一阶段的块（版本 2）。两部分各自被可隔离的错误拒绝时只回滚那一部分，起始行保留，并按 `markCaptureWriteFailed` 对失败的 `StartStage` 或 `AddHeaders` 的标记方式标记；阶段行被拒绝时，批次提交后返回包着 `storage.ErrInboundStageNotStored` 的错误（模块 03 §13.9）。其他错误使整个操作失败 |
+| `Checkpoint` | 不等待；入队即返回，队列满返回 `ErrQueueFull` | 读 `ended_at_ns`、`capture_status`、`capture_version`：已终结时什么都不写，版本不符是本地错误。然后用多行 INSERT 写新的阶段行、Header 行（版本 1）、Body 行（初值）和块，版本 2 用 `ON CONFLICT (audit_id) DO UPDATE` 覆盖写块；每条语句至多 400 行或约 4 MiB。写出的行与 legacy 在同一时刻已提交的在途行同形，所以 `RecoverInterruptedAudits` 不需要新逻辑 |
+| `CommitAudit` | 同步 | 先做与 `FinishAudit` 相同的前置步骤：补写该 audit 未落库的失败标记，恢复溢出时标 failed（`prepareFinalization`）。读 `audit_records` 并 `FOR UPDATE`：已终结时只读回已提交的终态（`loadFinishedOutcome`），这让重试结果不确定的提交是安全的；版本不符是本地错误。已由先前的写插入的阶段行用现有的 `finishStage` 更新，其余插入终值；在检查点 1 合并、终结时不再合并的重复阶段先 `UPDATE body_streams SET source_stage = stage`；再写时间线、剩下的 Header 行或完整的块（与最后一次检查点相同时不写）、剩下的块；最后调用 `finishAudit`，只合并会话留给库里的那几对（`DedupInDB`），之后的对账、raw 保留、摘要和 `capture_finalized` 事件都不变 |
+| `RestoreStagedChunks` | 同步；PostgreSQL 上总是独占一个事务 | 启动导入暂存用（模块 03 §13.6）。audit 不存在或已终结时什么都不写，只报告；否则读各 Body 行的 `source_stage` 和各阶段已存块的个数与长度之和，只插入接着已存块（seq 等于下一个、offset 等于已存末尾）的块，报告已有的、属于合并了的重复阶段的、没有 Body 行的和接不上的阶段。规则在 `internal/storage` 的 `StagedRestorePlan`，两个存储共用 |
+
+**已标 failed 的 audit。** 失败标记可能意味着某个父行缺失（被拒绝的入站阶段、失败的检查点）。这时检查点和提交只写有父行的部分：Header 行要有阶段行，Body 行要有自己和来源的阶段行，块要有 Body 行；提交时缺行的阶段跳过 `finishStage`，由 `finalizeIncompleteCapture` 对账，与 legacy 下那些操作逐个失败的结果相同。版本 2 的块照样整块写：存储没有密钥，打不开块去掉缺行阶段的段，读取规则见模块 09 §8。已存状态不是 failed 却遇到缺行，`finishStage` 照常报 0 行错误。
+
+**失败记账。** 两个新操作按它们取代的 legacy 操作记账（`markCaptureWriteFailed`、`rememberFailedWrite`）：
+
+| 失败 | `Checkpoint` | `CommitAudit` |
+| --- | --- | --- |
+| 入队时队列满 | 返回 `ErrQueueFull`，什么都不记；会话把内容并入下一次写 | 返回 `ErrQueueFull`；只有最后一次尝试（`FinalAttempt`）把终态记进恢复表 |
+| 可隔离的失败（约束、本地校验，包括读暂存块失败） | 整个检查点回滚；audit 标 `capture_write_failed`，版本 1 带了 Header 行的阶段标 `capture_headers_failed`，有块的阶段按块的末尾记 `capture_chunk_missing`。这些标记只落在先前的写留下的行上，本检查点插入的行已随回滚消失 | 不重试；同一事务里把 audit 标 `capture_write_failed`，并立即把终态记进恢复表 |
+| 批次级失败 | 按其中每个阶段、Body、Header 组和块的末尾记进恢复表，与 legacy 的 `StartStage`、`StartBody`、`AddHeaders`、`AddChunk` 合起来记的相同；版本 2 的块丢了时，把它插入的阶段记为 Header 丢失 | 确认包上 `ErrWriteBatchFailed`，会话可以重试；只有最后一次尝试记进恢复表：阶段、Header 组、块的末尾和终态，版本 2 有新块时把先前写过的阶段都记为 Header 丢失（存储打不开旧块，不知道少了哪些 Trailer） |
+
+块来源读失败（暂存文件读不出来）在 PostgreSQL 上也按本地错误处理，只回滚这一个操作，不让整批失败、writer 变为不健康，与 SQLite 一致。失败记账取块的边界时用 `EachMetadata`，不在恢复锁和提交锁下读暂存文件。
+
+**批次。** PostgreSQL 上，携带密文超过 16 MiB 的检查点或提交独占一个事务；批次里这类载荷累计到 32 MiB 就不再收集新的操作（`aloneWritePayloadBytes`、`batchPayloadBytes`）。legacy 操作的载荷记为 0，分批不变。SQLite 没有这两条。
+
+**语句数。** `internal/storage/postgres/staged_counts_test.go` 的 `TestStagedWriteStatementCounts` 对一条典型流式请求（四个阶段，各 Body 小于 1 MiB，没有 Trailer，两对都合并）逐操作计数，含 SAVEPOINT 和 RELEASE、不含 BEGIN 和 COMMIT，断言 legacy 22 个操作、unified 4 个，且 unified 的语句更少。提交 `6a3d5c5` 时以采集版本 1 量得 legacy 105 条语句、unified 38 条；之后入站阶段改用嵌套 SAVEPOINT、PostgreSQL 改写版本 2，这两个数没有重新记录。批次的提交数取决于并发和时序，不能从代码推出。
+
 ## 6. 读取与重建
 
 管理列表只读取 audit、parsed summary、token link 和单独定向解密的入站 User-Agent。详情在一个只读事务中读取 HTTP 元数据和可选 turn graph；graph reader 会：
@@ -252,7 +280,7 @@ raw API 只对 `retention_state=full` 开放；`pending` 返回未就绪，`meta
 
 ## 7. 启动恢复与完整性链
 
-应用启动顺序为：打开/迁移数据库、加载主密钥、派生 integrity signer、验证既有 event chain、恢复未终结 audit、启动 parser/caller worker、绑定监听器。
+应用启动顺序为：打开/迁移数据库、加载主密钥、派生 integrity signer、验证既有 event chain、导入本地暂存（配置了 `audit.staging.dir` 时，模块 03 §13.6）、恢复未终结 audit、启动 parser/caller worker、绑定监听器。
 
 完整性验证分两段，因为两段的成本上界不同。启动段只做事件数量可界定的检查：整条 chain 的 MAC 链接，以及每个终结 audit 和每个 turn 是否都有对应事件；通过后即接受新的审计写入。第二段重算每个事件覆盖的证据摘要，必须回溯整个 turn graph，成本随会话深度而不是事件数增长，因此放到监听器绑定之后由后台完成，不阻塞转发。
 

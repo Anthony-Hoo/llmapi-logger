@@ -51,7 +51,7 @@ type StageCapture struct {
 }
 ~~~
 
-Session 只持有阶段状态、hash、约 1 MiB 的当前采集缓冲和最多 100,000 个逻辑 SSE 时间点，不保留完整 Body；Stages 是稀疏 map，只包含已经触发的观察点。
+legacy 写入路径下，Session 只持有阶段状态、hash、约 1 MiB 的当前采集缓冲和最多 100,000 个逻辑 SSE 时间点，不保留完整 Body；Stages 是稀疏 map，只包含已经触发的观察点。unified 写入路径在内存预算内保留 Body 明文直到写库，见 §13。
 
 ## 4. interceptor 拒绝终态
 
@@ -79,9 +79,11 @@ Observe 顺序固定：
 4. 为异步写入创建拥有型副本并独立 AES-GCM 加密。
 5. 提交 writer queue；失败则 stage/capture 标 partial 并记录 gap。
 
+第 1 步和 SSE 时间、终止事件探针、写失败标志是观察层，两条写入路径共用；第 2 到 5 步是 legacy 的保留层（`internal/audit/retain.go` 的 `legacyRetainer`）。unified 的保留层见 §13.3、§13.4。两者都经 `sealChunkLocked` 压缩加密，块的密文格式只有一份代码。
+
 只有观察到 EOF 时 hash_complete=true；唯一例外是上节的逻辑 EOF——响应已完整接收且全部写给客户端后的客户端断开按 EOF 封口，此时 hash 覆盖完整 body。除此之外，取消、Read/Write error 或进程退出时，hash 只代表已观察前缀。seq/offset 是应用层采集顺序，不是 TCP 或 HTTP chunk。SSE 另外按完整逻辑 event 记录结束 offset 和时间；总事件超过 100,000 时停止追加时间点，但继续统计实际 event count。
 
-四个观察阶段在流式采集期间先各自保存 owning chunks。`FinishAudit` 的 writer 事务只有在成对阶段都完整、各自 chunk 聚合自洽、observed/stored length 相等且 SHA-256 完全一致时，才删除后一阶段的重复 chunks，并把其 `body_streams.source_stage` 改为前一阶段。若长度或 hash 不一致，后一阶段标记 `body_stage_mismatch`/partial，两个阶段的原始字节都保留，不能因预先共享掩盖短写、取消或代理改写错误。
+legacy 下四个观察阶段在流式采集期间先各自保存 owning chunks（unified 在内存里判定，§13.3）。`FinishAudit` 的 writer 事务只有在成对阶段都完整、各自 chunk 聚合自洽、observed/stored length 相等且 SHA-256 完全一致时，才删除后一阶段的重复 chunks，并把其 `body_streams.source_stage` 改为前一阶段。若长度或 hash 不一致，后一阶段标记 `body_stage_mismatch`/partial，两个阶段的原始字节都保留，不能因预先共享掩盖短写、取消或代理改写错误。
 
 body interceptor 按 route 中最大的模块上限加一个判定字节有界预读，且必须通过 request_for_newapi_received_from_nginx observer，因此它仍计算入站长度/hash并保存原始字节。多个模块共享同一只读缓存；放行时 proxy 使用未修改的缓存字节重建 Body，request_sent_to_newapi observer 再记录实际 replay；两阶段差异视为实现错误。metadata-only chain 不触发预读，继续由 Transport 的正常流式读取驱动两个请求 observer。
 
@@ -91,7 +93,7 @@ http_headers 每个值保存 audit_id、stage、kind、name、value_index、valu
 
 Request-URI 可能包含 key，保存在 audit_records.request_uri_enc。无法保证 Header 原始大小写、全局线缆顺序或 request Trailer 经 Nginx 后仍存在。
 
-第 3 阶段的 Header 块格式已经在 `internal/headerblock` 实现：一个 audit 的全部 Header 和 Trailer 编成一段明文，压缩加密为一个值，另有单独加密的入站 User-Agent；`Expand` 把逐值行和块展开成同一个扁平列表。写入路径还没有用它，会话仍按上面的逐值行写入，格式见模块 09 §5.2。
+以上是采集版本 1。unified 写入路径在 PostgreSQL 上写采集版本 2：一个 audit 的全部 Header 和 Trailer 编成一段明文，压缩加密为一个块（`http_header_blocks`），另有单独加密的入站 User-Agent（`audit_records.user_agent_enc`）和阶段行上的 `content_type`、`content_encoding`。会话在阶段开始时深拷贝该阶段的 Header，在 Trailer 到达时拷贝 Trailer；名称和值按 legacy 逐值写行的同一个循环取（`headerblock.Snapshot`）。格式、读取规则和明文边界见模块 09 §5.2、§8。legacy 写入路径和 SQLite 存储只写版本 1。
 
 ## 7. AES-256-GCM
 
@@ -109,7 +111,7 @@ ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
 
 ## 8. Writer 接口与模式
 
-采集模块提交 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit 和 AddGap；parser 使用 SaveParsedAudit 原子写摘要、turn graph、对象、raw retention 和完整性事件。queue 固定 1024 ops。
+legacy 采集提交 BeginAudit、StartStage、AddHeader、AddChunk、FinishStage、FinishAudit 和 AddGap；unified 只提交 BeginAudit、Checkpoint、CommitAudit 和 AddGap（§13.2）。parser 使用 SaveParsedAudit 原子写摘要、turn graph、对象、raw retention 和完整性事件。queue 固定 1024 ops。
 
 Session 通过 `FinishAuditWithResult` 获取提交后的实际 capture status/error code，再生成不可变的 TerminalSummary。被保存点隔离或整批存储故障丢弃的采集写入，必须在终结事务前标记对应 audit 为 failed；失败终结还会将遗留的 streaming stage/body 修复为 partial，使已提交 raw 可按不完整证据读取。终结本身失败或队列满时，writer 保留有界终态元数据并在恢复后补写；原请求日志记录当时的终结失败，异步恢复不会重写这条日志或原请求结果。队列屏障、恢复容量及进程退出边界见[模块 04](04-sqlite-storage-and-migrations.md)。
 
@@ -132,10 +134,10 @@ audit_gaps 只做进程级运维提示，字段为 id、started_at_ns、ended_at
 非 rejected 的 audit Finalize 后：
 
 1. audit_records.parse_status 设为 pending。
-2. audit_id 非阻塞放入内存 queue；满时只保留 pending。
+2. audit_id 非阻塞放入内存 queue（unified 下交给 `Submit` 的作业可以带着会话手里的明文，§13.8）；满时只保留 pending。
 3. 启动时及每 30 秒扫描少量 pending 记录补入队列。
 4. worker 用条件更新把 pending 改为 processing，未抢到则跳过。
-5. worker 从 SQLite 读取、解密并解析。
+5. worker 从数据库读取、解密并解析；带明文的作业不读回。
 6. 在同一 writer 事务中 UPSERT parsed_results；若 normalizer 可用则保存 verified turn graph，并按结果把请求侧、响应侧的 raw retention 分别更新为 metadata/full（规则见[模块 18](18-content-addressed-conversation-storage.md) §6），再更新 parse_status。
 
 rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启时先把遗留 processing 重置为 pending，再扫描已结束且 pending 的 audit 重新入队；解析结果只保留最新版本。
@@ -148,9 +150,148 @@ worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存
 
 ## 12. 崩溃恢复
 
-启动后先验证 HMAC integrity event chain，再把 ended_at_ns 为空的 audit 改为 forward_status=interrupted：无采集故障的记录写 capture_status=partial、error_code=process_exit，已标记采集失败的记录先复用正常终结的分块对账并保留 failed 状态；仍为 streaming 的 stage/stream 改为 partial，raw retention 强制为 full，并按 owning chunks 修复可证明长度。每条恢复记录写 capture event，随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk、SHA-256 或精确结束时间；SQLite WAL 只保证已提交事务一致。
+启动后先验证 HMAC integrity event chain，配置了暂存目录时导入上次留下的暂存文件（§13.6），再把 ended_at_ns 为空的 audit 改为 forward_status=interrupted：无采集故障的记录写 capture_status=partial、error_code=process_exit，已标记采集失败的记录先复用正常终结的分块对账并保留 failed 状态；仍为 streaming 的 stage/stream 改为 partial，raw retention 强制为 full，并按 owning chunks 修复可证明长度。每条恢复记录写 capture event，随后把遗留 processing 重置为 pending 并重新入队。不补造 Trailer、缺失 chunk、SHA-256 或精确结束时间；SQLite WAL 只保证已提交事务一致。
 
-## 13. 测试
+## 13. unified 写入路径
+
+`audit.write_path`（模块 01 §4 第 18 项）选择会话怎样写库。`legacy`（默认）就是上面各节描述的逐操作写法：每个阶段、每组 Header、每个 1 MiB 块各是一个 writer 操作，一条典型流式请求 22 个。`unified` 把一条 audit 写成最多四个 writer 操作，Body 在内存里留到写库为止。设计与维护者的决定见 [issue #59 第 3 阶段设计](../design/issue-59-stage3-write-path.md)，与设计不同的地方见它的“实施记录”。
+
+开关在构造 `audit.Manager` 时定（`NewManagerWithOptions`），不按请求切换；`Manager.WritePath` 报告会话实际使用的路径。存储声明自己不能承担 unified 时，构造失败，审计不可用。PostgreSQL 存储写采集版本 2（Header 块），SQLite 存储只写版本 1（`captureVersionFor`）。两条路径共用观察层、阶段与 Body 的终态判定（`finishStageLocked`）和时钟读取，所以长度、SHA-256、状态、错误码、`body_stage_mismatch` 和“终止事件之后断开算完成”的规则都相同；不同的只是保留层和写库方式。
+
+### 13.1 阶段开始时做什么
+
+unified 下阶段开始只记在内存里：版本 1 当场按 legacy 的循环和 AAD 把 Header 逐值加密成待写的行组；版本 2 当场深拷贝 Header 字段（§6）。阶段行、Header 和 Body 行由之后的写带上。会话为每个阶段记住哪些已经写过：阶段行、各 Header 组、Body 行、每个块；块版本 2 另记最后一次写出的块覆盖了哪些阶段和 Trailer。每次写只带自上次以来新增的内容，没有新增内容时不发出。
+
+### 13.2 四次写
+
+| 写 | 何时 | 写什么 | 等待 |
+| --- | --- | --- | --- |
+| `BeginAudit` | 路由命中后，拦截器之前 | 起始行；`request_received` 的阶段行和 Header（版本 1 逐值行；版本 2 为 `user_agent_enc` 和只含这一阶段的块） | 同步 |
+| 检查点 1 | `request_sent` 的 Body 结束：EOF（在 Trailer 采到之后）、读错误或 Close（`observedReadCloser` → `readBodyEnded`） | 还没写过的阶段行和 Header；两个请求阶段的 Body 行（初值）；请求侧封好的块；版本 2 为到此为止的整块 | 否 |
+| 检查点 2 | `response_sent` 开始，即响应头转发给客户端的那一刻（`observedResponseWriter.start` → `responseSentStarted`），且 `response_received` 已存在 | 两个响应阶段的行和 Header；检查点 1 还没写到的请求侧内容 | 否 |
+| `CommitAudit` | `Finish` | 其余全部：响应 Body 行和块、未写的 Header 组（主要是 Trailer）或完整的块、各行的终值；然后终结并签名 | 同步，失败时按 §13.5 重试 |
+
+另有一种只在 Body 超出内存预算时才有的检查点，见 §13.4。
+
+- **检查点只写封好的块**：满 1 MiB 的块，或 Body 结束时的尾块。所以块边界与 legacy 相同（全局预算吃紧时的例外见 §13.4）。响应 Body 的块只由 `CommitAudit` 写。
+- **两个检查点都要求 forward 仍在进行**（`forwardInProgressLocked`：没有开始构造提交、`forward_status` 仍是 `in_progress`、请求 context 没有取消）。所以下面的请求没有检查点或只有一个：被拦截器拒绝的（没有 `request_sent`，也没有响应阶段，通常只有 `BeginAudit` 和 `CommitAudit`）；上游不可达、由代理自己回错误 JSON 的（没有 `response_received`，没有检查点 2）；客户端已经取消的（之后的触发点都跳过）。
+- **没有请求 Body 的请求**（例如 GET）不触发检查点 1，`request_sent` 的行和 Header 由检查点 2 带上。
+- **上游在读完请求之前就回了响应头**：检查点 2 先发生，带上请求侧到那时为止的阶段行、Body 行和封好的块；这时请求 Body 还没结束，不能在内存里合并（§13.3），请求对留给终结时在库里合并。请求 Body 之后结束时，检查点 1 照常写剩下的块。
+- **检查点入队时队列满**：内容都还在内存里，并入下一次写；记一条 `audit capture degraded` 日志，`error_code=capture_checkpoint_deferred`，附 `storage_error`；不记 gap，证据不少。版本 2 的块封不出来时同样不发这个检查点、记同一条日志。下一次写会重新封这些块（新的 nonce）。
+
+`BeginAudit` 和 `CommitAudit` 的同步等待与 legacy 的 `BeginAudit`、`FinishAuditWithResult` 一一对应，处理函数路径上仍是两次同步等待；检查点不等待，不影响转发时序。流结束时刻与终结提交的先后（`internal/proxy/stream_end_order_test.go`）在两条路径下相同。writer 内每个操作写什么、失败怎样记账，见[模块 04](04-sqlite-storage-and-migrations.md) §5.1。
+
+### 13.3 成对阶段在内存里的判定
+
+`request_sent` 是 `request_received` 的重复阶段，`response_sent` 是 `response_received` 的重复阶段。
+
+- **借用。** 重复阶段的字节与来源阶段相同时，它不复制字节，只按自己的偏移在来源的字节上延伸块网格。出现第一个不相等的字节，或者来源还没有保留到的字节（重复阶段读到了来源前面），重复阶段从这里起自己保留字节，此前的前缀 `[0, d)` 继续向来源借用。来源阶段在重复阶段比对过一个块之前不释放它；被借用的块只会落暂存，不会丢弃，重复阶段封自己的块时再从暂存读回。
+- **请求对在检查点 1 判定。** 两个请求 Body 都已结束、没有故障、全部保留、长度和 SHA-256 相同时（`mergeableNow`），检查点 1 把 `request_sent` 的 Body 行写成 `source_stage = request_for_newapi_received_from_nginx`，不写它的块。
+- **`Finish` 时按终值再判一次**（`finalMergeable`，即库内合并的条件）。仍然满足：`CommitAudit` 写合并后的终值。不再满足（例如检查点 1 之后 Close 返回错误，记了 `body_close_error`）：`CommitAudit` 把 `source_stage` 改回自身，并写入重复阶段自己的块，块由借用的前缀加上自己的字节按它自己的阶段名和 AAD 重新封成。
+- **响应对在 `Finish` 判定**，规则相同。
+- **留给库内合并**（`AuditCommit.DedupInDB`，由 `deduplicateEquivalentBodyPair` 按 legacy 的方式合并）的情形：重复阶段的 Body 行或块已经按未合并的形态写过（上游先回响应头、请求还没结束时的检查点 2，或重复阶段自己落暂存时的检查点），以及请求对在起始行没有入站阶段时（§13.9）。
+- 合并后的行形态与 legacy 相同；legacy 先写后删的那一份块和 Body 行在 unified 下不写。
+
+**与 legacy 的差别：** legacy 在已存 `capture_status` 为 failed 时跳过成对合并，两份 raw 都保留。unified 在内存里合并时不知道库里的失败标记，所以一条最终 failed 的 audit，其合并了的重复阶段仍以指向来源的形态存储。两份字节已按长度和 SHA-256 证明相同。
+
+### 13.4 内存预算与本地暂存
+
+预算按明文字节计（`internal/audit/budget.go`）。`audit.memory.stage_bytes` 限制每个阶段自己保留的字节，借用的不算；`audit.memory.global_bytes` 是全进程的原子计数，另外计入暂存待写队列里的密文（只加不检查上限）和交给 parser 作业的明文（§13.8），所以它是软上限。
+
+某个阶段或全局预算满了时，会话先释放内存，再接着保留（`stageOneChunkLocked`）：
+
+1. 检查点已经写进库的块，其明文只是留给解析的缓存（重复阶段还在借用的除外），先丢掉；
+2. 否则按 seq 顺序，把这个阶段第一个还没落暂存的块封好交给暂存（`internal/audit/staging`），内存里只留索引项。按 seq 顺序是为了让暂存文件总是接着库里已有的块；
+3. 全局预算吃紧、这个阶段只剩正在攒的块时，提前结束这个块，它短于 1 MiB。这是块边界唯一可能与 legacy 不同的地方。单阶段预算不小于 1 MiB，单靠它不会切出短块。
+
+来源阶段的块还没被重复阶段比对过时不能落暂存。重复阶段最多落后一次读（`ReverseProxy` 的拷贝缓冲 32 KiB），这一次读的字节越过预算照收，不结束保留。
+
+**落暂存时的检查点。** 一个阶段第一次落暂存时，会话排一个只写行的检查点：到此为止的阶段行和 Header，以及这个阶段的 Body 行，不写块，也不写其他阶段的 Body 行，所以请求对仍能在检查点 1 合并。这样进程在检查点 1 或提交之前退出时，暂存的块有它们所属的行可接（§13.6）。这个检查点没能入队时，该阶段下次落暂存再试。
+
+**暂存文件。** 每条 audit 一个文件 `<dir>/<audit_id>.stg`，以 `O_EXCL` 和 0600 创建，文件里只有一个指明 audit 的文件头和逐块记录，块是与 `body_chunks.data_enc` 逐字节相同的密文，带 CRC 帧，可以原样插入库里。后台 writer 每批最多攒 5 ms，写完后对本批涉及的每个文件 fsync 一次，新建文件后再 fsync 目录；暂存从不阻塞调用方。块的密文在写进文件之前留在内存里，写失败的块仍可读。检查点和提交读暂存的块不取会话锁，也不等暂存 writer；读失败是那一次写的本地错误，该 audit 记为 failed（模块 04 §5.1）。构造提交之后不再落暂存。
+
+**保留到何时。** `CommitAudit` 得到确认后，会话丢弃该 audit 还在队列里的记录并删除文件（`Stager.Discard`）；提交最终失败时文件留在目录里（`Stager.Keep`），计入 `max_bytes`，等下次启动导入（§13.5 第三条限制）。
+
+**耗尽。** 暂存拒绝一个块时，该阶段停止保留后续字节，只继续计算哈希、长度、时间和 SSE：
+
+| 原因 | 阶段与 Body 的错误码 |
+| --- | --- |
+| 暂存目录达到 `audit.staging.max_bytes`、待写队列满（4096 条）、磁盘满、暂存已关闭、提交已在构造 | `capture_budget_exhausted` |
+| 这条 audit 的暂存文件此前写入或 fsync 失败 | `staging_write_failed` |
+
+Body 标为故障，阶段 partial，`capture_status` 为 partial，raw 保留 `full`；available 模式记一次 `queue_full` gap（`audit_gaps.reason` 有 CHECK 约束，真实原因在阶段错误码上）。已经保留的部分照常写库。转发不受影响。
+
+### 13.5 `CommitAudit` 的重试与最终失败
+
+`Finish` 构造一个 `AuditCommit` 并等它（`commitWithRetries`）。只重试两类错误：入队时的 `ErrQueueFull`，以及整批回滚的 `ErrWriteBatchFailed`（包括结果不确定的 COMMIT；重试遇到已终结的行只读回已提交的终态，不重复签名）。操作级失败（约束、本地校验、对象完整性）、`ErrRecoveryOverflow`、`ErrClosed` 和输入校验错误不重试。
+
+- **次数**：`Manager.CommitRetries`，取自 `audit.commit_retries` 或管理页面保存的值（模块 10 §11），0 到 5。会话在第一次尝试之前读一次，所以改动对之后开始的提交生效；最后一次尝试带 `FinalAttempt`。
+- **间隔**：第 k 次重试之前等 `min(100 ms × 2^(k-1), 1 s)`，默认 3 次最多多等 0.7 秒，5 次最多 2.5 秒，另加各次尝试本身的时间。等待时不持有会话锁。
+- **与 writer 恢复表的配合**：只有最后一次尝试在批次失败或队列满时把终态交给恢复表；操作级失败不重试，无论第几次都立即交给恢复表，并把 audit 标为 `capture_write_failed`（模块 04 §5.1）。
+- **最终失败**：与 legacy 的 `FinishAudit` 失败相同。完成日志和 `TerminalSummary` 为 `capture_status=partial`、`error_code=audit_finalize_failed`，记一条 `audit capture degraded`（`error_code=finish_audit_failed`）和对应的 gap；writer 恢复把 audit 以 failed 终结，检查点写进去的行收尾为 partial、raw `full`。终态没有提交，不交给 parser（§13.8），由 pending 扫描按现有路径解析。
+
+已知的限制：
+
+1. **重试救不回检查点丢在失败批次里的 audit。** 检查点所在批次失败时，writer 把它记进恢复表；该 audit 的 `CommitAudit` 在终结之前先写这些失败标记（`prepareFinalization`），所以即使重试的提交成功，audit 也以 failed 终结。快请求的检查点常与它的提交同批，故障期间发出的检查点也是这样。
+2. **`Finish` 在 unified 下更慢。** 响应侧保留的块在 `Finish` 时才压缩加密（请求侧已在检查点 1 封好），分块响应和 HTTP/2 响应的结束（晚于终结提交的那几类）随之推后这段时间。实测由编排方补在设计文档的实施记录里。
+3. **最终失败的提交不会补进暂存的块。** 文件留到下次启动，但 writer 恢复在进程里已经把 audit 以 failed 终结；下次启动导入时看到它已终结，只删除文件。所以这类 audit 只有检查点写进库的部分，legacy 在同样故障下保留的是已提交的异步块。
+
+### 13.6 启动导入
+
+启动顺序：验证完整性链 → 导入暂存 → `RecoverInterruptedAudits` → 构造 Manager（`internal/app/app.go` 的 `assembleAuditWithStore`）。只要配置了 `audit.staging.dir` 且目录可用，不论 `write_path` 都导入（`Stager.Import`），所以 unified 留下的文件在切回 legacy 后也会导入。每个文件用一个 writer 操作 `RestoreStagedChunks`（模块 04 §5.1）：
+
+| 情形 | 处理 |
+| --- | --- |
+| audit 已终结（提交之后、删文件之前停了） | 只删文件 |
+| 没有这条 audit | 改名为 `.orphan` |
+| 某个阶段有块却没有 Body 行（落暂存时的检查点丢了） | 导入其他阶段，文件改名为 `.orphan` |
+| 正常 | 逐条校验 CRC、块元数据、AEAD，以及每个阶段的 seq、offset 向前推进；插入接着库里已有块的那些，然后删文件 |
+| 最后一条记录不完整 | 视为进程停下的位置，丢弃 |
+| 中间记录校验失败、文件头指向别的 audit，或块与库里的接不上 | 导入此前校验通过的部分，文件改名为 `.corrupt` |
+| 合并了的重复阶段的块（Body 行指向来源） | 不插入，来源的块就是证据 |
+
+改名的文件不删，计入 `max_bytes`，由运维确认后清理。文件读不出来或存储报错时导入中止，审计不可用：否则之后的恢复会终结这些 audit，下次启动会把完好的文件当作已终结删掉。导入是幂等的，已有的 seq 跳过。之后的 `RecoverInterruptedAudits` 用现有逻辑收尾这些 audit：它按 `source_stage` 聚合块，所以合并了的重复阶段从来源得到长度和块数。
+
+### 13.7 崩溃时留下的证据
+
+以一条流式请求为例，进程在不同时刻退出、重启恢复之后库里有什么。检查点和 legacy 的异步操作一样，入队后几毫秒内提交，下表忽略这段时间。“预算”指 `stage_bytes`（默认 8 MiB）。
+
+| 退出时刻 | legacy | unified | 差别 |
+| --- | --- | --- | --- |
+| 拦截器执行中，包括 body 拦截器预读 | 起始行；`request_received` 的行和 Header；预读超过 1 MiB 时已满的块 | 起始行；`request_received` 的行和 Header（版本 2 含 `user_agent_enc` 和只含入站阶段的块）；预读超过预算时，落暂存的块和它的 Body 行 | 预算以内的预读字节没有 |
+| 请求 Body 正在上传 | 起始行；两个请求阶段的行和 Header；两个阶段各自已满 1 MiB 的块 | 同上一行；请求 Body 超过预算时，另有落暂存时的检查点写的 `request_sent` 行和 Header、`request_received` 的 Body 行和落暂存的块 | `request_sent` 的行和 Header（与入站几乎逐条相同）在没落暂存时没有；预算以内的请求 Body 没有，legacy 只丢最后不足 1 MiB 的部分 |
+| 请求读完，响应头还没到 | 以上全部，加两个请求阶段的尾块和请求 Trailer | 检查点 1：两个请求阶段的行、Header 和请求 Trailer（版本 2 为残缺块），Body 行，请求侧全部块 | 合并了的 `request_sent` 没有自己的块，`source_stage` 指向来源 |
+| 响应流到一半 | 以上全部，加两个响应阶段的行和 Header，各自已满 1 MiB 的块 | 检查点 1 和 2；响应 Body 只有超出预算后落暂存的块 | 预算以内的响应 Body 没有（legacy 只丢最后不足 1 MiB）；随 Body 结束到达的上游 Trailer 在 `Finish` 之前退出时没有，legacy 在 EOF 时已异步写出 |
+| `Finish` 提交之后 | 完整 | 完整 | 无 |
+
+两条路径的恢复都把这些 audit 终结为 `interrupted`，未完成的阶段和 Body 收尾为 partial、`process_exit`，raw `full`，并签名；版本 2 签的是最后一次写出的残缺块（模块 09 §8）。SSE 响应体通常远小于预算，所以响应侧的差别在实际流量里影响小；请求侧的差别是维护者接受的（设计决定 1、4）。
+
+### 13.8 交给 parser
+
+`CommitAudit` 成功、解析状态为 pending 时，会话把 audit 交给 Manager 的交接回调（`internal/audit/handover.go`）。`internal/app` 只在 unified 下把它设为 `parser.Worker.Submit`；没有设时退回 `Notify`。处理函数只等提交，不等解析；`Submit` 不阻塞。
+
+交接的作业要么带着会话手里的明文，要么只有 audit id（id 作业，worker 从库里读）。带明文的条件全部满足：
+
+- 提交返回的终态没有被降级：`capture_status`、`forward_status`、`error_code` 与提交的相同，解析状态仍是 pending。例如检查点失败使 capture 变为 failed 时，库里的证据不是会话手里的那份；
+- 起始行带着入站阶段（§13.9）；
+- 没有任何块落过暂存；
+- `request_received` 和 `response_received` 的每个已存块都完整留在内存里、连续，合起来正好是提交的 `stored_length` 和块数；
+- 全局预算还容得下同样多的字节（只检查，不另占）。
+
+带明文的作业把这份明文在预算里的份额从会话转给作业，作业的 `Release` 恰好调用一次（被拒绝、解析完成或 worker 关闭时）把它还回并清零明文。版本 2 的作业还带着两个接收阶段 Header 字段的明文（parser 从中取内容头和白名单 Header），版本 1 带的是已加密的 Header 行。`Submit` 的队列满时什么都不交，记录留在 pending，由 30 秒一次的扫描接手。worker 怎样从作业构造输入见[模块 05](05-parser-framework.md) §5.1。
+
+### 13.9 起始行没有入站阶段
+
+unified 的 `BeginAudit` 在同一个操作里写起始行和入站阶段，阶段行和 Header 各在一个嵌套 savepoint 里（模块 04 §5.1）。入站阶段行被可隔离的错误拒绝时，起始行照常提交并被标为 failed，`BeginAudit` 返回包着 `storage.ErrInboundStageNotStored` 的错误（批次提交之后才返回）。会话把它当作准入成功，按 legacy 处理 `StartStage` 失败的方式处理这个阶段：
+
+- 阶段标故障，错误码 `start_stage_failed`，会话的采集记为有故障（提交返回的终态是库里已标的 failed），记一条 `audit capture degraded`（`stage=request_for_newapi_received_from_nginx`）；不记 gap，失败已由 writer 记在库里；
+- 这一阶段的行不再提交，也不进任何 Header 块；它的 Body 同样标 `start_stage_failed`；
+- 请求对不在内存里合并（合并的一方指向一个没有行的阶段就存不下），`request_sent` 按未合并的形态写自己的块，请求对交给库内合并；
+- 不交明文作业，只交 id 作业。
+
+Header 插入被拒绝而阶段行保留时 `BeginAudit` 返回 nil；整批失败时 `BeginAudit` 照旧失败，strict 回 `503`。`storage.ErrorClass` 把这个值报告为 `inbound_stage_not_stored`。
+
+## 14. 测试
 
 - audit_id 格式与随机源失败。
 - 四阶段独立 length/hash。
@@ -167,3 +308,9 @@ worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存
 - GCM 随机 nonce、AAD/密文篡改失败。
 - DB/WAL 无测试 token/Header/Body 明文。
 - Finish 幂等、kill 后 partial、pending parser 重启恢复。
+- unified 与 legacy 经真实代理处理函数跑同一组夹具（`internal/protofixture` 全部交换加额外形态），客户端字节、完成日志、提交时与解析后的各表行、查询视图、Agent 门面导出和解析结果逐项相同；SQLite 上比版本 1，PostgreSQL 上比版本 2。
+- 成对判定：检查点 1 合并、`Finish` 时拆开；重复阶段在块中间、开头、更长、更短处分歧；响应超过 1 MiB，完整与截断；上游先回响应头。
+- §13.7 每个退出时刻恢复后的行与 legacy 的差别只在表中所列；版本 2 恢复后签名残缺块并读回 legacy 的 Header。
+- 检查点入队失败并入下一次写、不记 gap；`CommitAudit` 的重试矩阵（批次失败一次后恢复、持续失败、约束失败、0 次、结果不确定的 COMMIT）；页面保存 0 与 2 后同一进程内的尝试次数。
+- 一块的单阶段预算下请求、响应经暂存，请求对在 `Finish` 拆开时重复阶段从来源暂存的字节封块；暂存写满记 `capture_budget_exhausted` 与 `queue_full` gap；上传中、响应中途和提交后删文件前退出时的导入。
+- 起始行没有入站阶段时请求对不在内存里合并，各表与 legacy 在同一触发器下相同。

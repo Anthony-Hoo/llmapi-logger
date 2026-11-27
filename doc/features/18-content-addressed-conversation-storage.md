@@ -72,7 +72,14 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 采集缓冲按实际字节量惰性增长，上限约 1 MiB；即使单次 Read 返回更大的数据也按块处理。Body 结束时立即 flush 尾块并释放暂存容量，避免长 SSE 会话继续持有已结束请求阶段的缓冲。四个观察点仍独立采集，只有终结事务验证长度与 hash 一致后才合并。 同一 Session 在已有互斥锁内复用最多一个 raw/timeline gzip writer，各块仍是独立可解码流；终结采集后立即释放 writer。该 writer 不跨请求共享，私有压缩缓冲只属于当前会话，可能保留部分明文直到复用或 GC，不声称安全擦除。
 
-flush 表示压缩、加密并向异步 writer 入队，不等于数据库事务已经提交，更不等于新增的 fsync 保证。进程崩溃可能丢失尚未 flush 的尾部，以及已经入队但仍未提交的块或批次；启动 recovery 将未完成记录标记 partial。FinishAudit 的同步完成屏障才确认终结事务处理完成，底层持久性仍服从数据库配置。
+legacy 写入路径下，flush 表示压缩、加密并向异步 writer 入队，不等于数据库事务已经提交，更不等于新增的 fsync 保证。进程崩溃可能丢失尚未 flush 的尾部，以及已经入队但仍未提交的块或批次；启动 recovery 将未完成记录标记 partial。FinishAudit 的同步完成屏障才确认终结事务处理完成，底层持久性仍服从数据库配置。
+
+unified 写入路径（模块 03 §13）不改变保留规则：`retention_state` 的取值、按侧判定（下文与 `DecideRawRetention`）和释放 raw 的时机都不变，raw 仍在 `SaveParsedAudit` 里随 verified turn 释放。变的是块什么时候进库，以及解析读什么：
+
+- flush 只结束内存里的块，不入队。块在写库时才压缩加密：请求侧在检查点 1，响应侧在 `CommitAudit`；超出内存预算的块先落本地暂存，再由检查点或提交写进库。崩溃时各阶段留下什么见模块 03 §13.7。
+- 块边界与 legacy 相同：满 1 MiB，或 Body 结束时的尾块；只有全局内存预算吃紧时可能提前结束一个块，它短于 1 MiB（模块 03 §13.4）。边界相同时块行逐行相同，`encoded_length` 随工具链变化的已知差异（§5）不变。
+- 成对阶段在内存里判定（模块 03 §13.3），合并的重复阶段的块从不写入，所以 legacy 先写后删的那一份不再产生。
+- 会话带明文交接时，parser 用这份明文解析，不读回已存的块（模块 05 §5.1）；raw 在库里照旧留到 `SaveParsedAudit`。只交 id、改由 worker 读库，或解析没能完成时，raw 保持 `pending`，按现有路径处理，不预先标 `full`。
 
 canonical Prepare 在同一轮内先以规范化明文 hash 去重，再压缩、加密；每个唯一对象仍检查 kind、明文长度和 semantic hash，完整请求/响应仍做重建校验。一个 Prepare 最多惰性创建一个 gzip writer，在对象之间 Reset，返回时解除输出引用并丢弃，不使用跨请求全局池。Reset 保证独立压缩流但不是安全擦除；压缩器私有缓冲可能保留明文直到覆盖或 GC。编码字节、压缩大小和随机 nonce 不参与对象身份，不能因 Go/codec 版本变化而把同一明文误判为冲突。
 
@@ -245,7 +252,7 @@ parser 只有在上述验证通过后才允许把 raw retention 从 pending 改�
 | 表 | 用途 |
 | --- | --- |
 | audit_records | 请求终态、调用者状态、TTFT 与整体状态 |
-| http_stages/http_headers | 四阶段元数据和加密 Header/Trailer |
+| http_stages/http_headers/http_header_blocks | 四阶段元数据和加密 Header/Trailer（采集版本 2 每条 audit 一个块，模块 09 §5.2） |
 | body_streams/body_chunks | Body hash/保留状态，以及 pending/full 的大块原证据 |
 | parsed_results | 仅窄摘要列，不再复制完整 conversation |
 | content_objects | canonical 文本/JSON/item/envelope 的压缩加密对象 |
