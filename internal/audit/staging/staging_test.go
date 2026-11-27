@@ -120,21 +120,25 @@ func crc32Bytes(data []byte) []byte {
 func TestStageRoundTripAndGroupSync(t *testing.T) {
 	cipher := testCipher(t)
 	budget := &countingBudget{}
-	stager := openStager(t, stagingDir(t), Options{BatchDelay: 20 * time.Millisecond})
+	stager := openStager(t, stagingDir(t), Options{BatchDelay: 300 * time.Millisecond})
 	stager.SetBudget(budget)
 	plaintexts := map[string][][]byte{}
-	var refs []*Ref
+	var chunks []storage.BodyChunk
 	for index := range 6 {
 		for _, stage := range []string{storage.StageRequestReceived, storage.StageResponseReceived} {
 			plaintext := bytes.Repeat([]byte(fmt.Sprintf(`{"n":%d,"s":%q}`, index, stage)), 3000)
-			chunk := sealChunk(t, cipher, "apx_round", stage, int64(index), int64(index*len(plaintext)), plaintext)
-			ref, err := stager.Stage(chunk)
-			if err != nil {
-				t.Fatal(err)
-			}
-			refs = append(refs, ref)
+			chunks = append(chunks, sealChunk(t, cipher, "apx_round", stage, int64(index), int64(index*len(plaintext)), plaintext))
 			plaintexts[stage] = append(plaintexts[stage], plaintext)
 		}
+	}
+	// Staged within one batch window: one write batch, one sync.
+	var refs []*Ref
+	for _, chunk := range chunks {
+		ref, err := stager.Stage(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs = append(refs, ref)
 	}
 	// Queued records are read from memory.
 	if got, err := refs[0].Plaintext(); err != nil || !bytes.Equal(got, plaintexts[storage.StageRequestReceived][0]) {

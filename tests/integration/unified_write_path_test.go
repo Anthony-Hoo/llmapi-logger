@@ -36,6 +36,10 @@ func unifiedConfig(t *testing.T, upstreamURL, writePath string) config.Config {
 	cfg.AdminToken = "integration-admin-token"
 	cfg.RetentionDays = 0
 	cfg.Audit.WritePath = writePath
+	// A one-chunk stage budget sends every body over 1 MiB through local
+	// staging (design F), so the large cases below cover it on PostgreSQL.
+	cfg.Audit.Memory.StageBytes = 1 << 20
+	cfg.Audit.Staging.Dir = filepath.Join(t.TempDir(), "staging")
 	cfg.Routes = []config.RouteConfig{
 		{ID: "chat", Method: http.MethodPost, Path: "/v1/chat/completions", Match: "exact", Parser: "openai.chat_completions"},
 		{ID: "responses", Method: http.MethodPost, Path: "/v1/responses", Match: "exact", Parser: "openai.responses"},
@@ -424,6 +428,27 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 		t.Fatalf("cut answer: response_sent has %d chunks: %v", responseChunks, unifiedShape.Chunks)
 	}
 	cases++
+	// A request over the stage budget: its chunks are staged during the
+	// upload and written by checkpoint 1, merged.
+	heavy, err := protofixture.Build(protofixture.Case{Protocol: protofixture.OpenAIChat, Scenario: protofixture.ScenarioBasic, Stream: true},
+		protofixture.Options{Seed: 98, HistoryItems: 700, ItemBytes: 4000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heavy[0].RequestBody) < 2<<20 {
+		t.Fatalf("heavy request is only %d bytes", len(heavy[0].RequestBody))
+	}
+	legacyStatus, _, legacyID = send(legacy, legacyDB, heavy[0])
+	unifiedStatus, _, unifiedID = send(unified, unifiedDB, heavy[0])
+	legacyShape, unifiedShape = readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
+	requireCaptureVersionsAcross(t, "heavy request", legacyDB, unifiedDB, cipher, unifiedCipher, legacyID, unifiedID)
+	if legacyStatus != unifiedStatus || !reflect.DeepEqual(legacyShape, unifiedShape) || !strings.HasPrefix(unifiedShape.Audit, "completed complete") {
+		t.Fatalf("heavy request: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
+	}
+	cases++
+	if entries, err := os.ReadDir(unifiedConfigValue.Audit.Staging.Dir); err != nil || len(entries) != 0 {
+		t.Fatalf("staging directory holds %v (%v)", entries, err)
+	}
 	for _, running := range []*runningApp{legacy, unified} {
 		if err := running.stop(); err != nil {
 			t.Fatal(err)
