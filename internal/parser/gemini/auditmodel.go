@@ -176,6 +176,14 @@ func normalizeArrayResponse(data []byte) (normalizedSide, error) {
 	if err := auditmodel.CheckReservedMarkers(root); err != nil {
 		return normalizedSide{}, err
 	}
+	// The same completeness rule as for an SSE stream.
+	events, err := arrayEvents(data)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	if fold := foldStream(events); fold.errored || !fold.complete() {
+		return normalizedSide{}, errIncompleteStream
+	}
 	original, err := auditmodel.CloneJSON(root)
 	if err != nil {
 		return normalizedSide{}, err

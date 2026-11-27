@@ -248,7 +248,7 @@ func TestStreamEndings(t *testing.T) {
 			}
 			turn, err := implementation.NormalizeAudit(context.Background(), input, result)
 			if test.status != base.StatusOK {
-				if form == "sse" && err == nil {
+				if err == nil {
 					t.Errorf("%s/%s: an incomplete stream normalized", test.name, form)
 				}
 				continue

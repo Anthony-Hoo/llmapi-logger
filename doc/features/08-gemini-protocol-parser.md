@@ -171,7 +171,7 @@ JSON 数组流（不带 `alt=sse`）：整个数组作为 `marker_envelope` 的 
 
 已知局限：
 
-- system instruction 排在 contents 之后，短历史达不到模块 18 的 70% 公共前缀门槛，每轮成为新的根；content object 照常复用（第二轮请求引用第一轮的回答对象），只是没有血缘。与模块 07 §8 相同。
+- system instruction 排在 contents 之后，短历史达不到模块 18 的 70% 公共前缀门槛：带 system instruction 的会话第二轮成为新的根，第三轮起才接到上一轮（`context_edit`）；没有 system instruction 时第二轮起即接上（`continuation`）。content object 照常复用（第二轮请求引用第一轮的回答对象），只是早期轮次没有血缘。与模块 07 §8 相同。
 - 流式回答与下一轮请求共用对象的前提是客户端按折叠体的写法重发：文本合并成一段、签名留在原处。按 chunk 原样把每段增量各作为一个 part 重发的客户端，下一轮请求的 content 与折叠体不同，各存一份。
 - 带签名的文本段：签名开启新的 part（§5.1）。如果 API 把签名放在最后一个空文本 chunk 上，折叠体里这段签名是单独的一个空文本 part，而非流式响应会把它放在正文 part 上，两者的 content 不同。
 
