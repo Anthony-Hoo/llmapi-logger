@@ -217,6 +217,69 @@ WHERE r.object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
 	return result, nil
 }
 
+// readGraphBinaryDigests returns the same binary objects as readGraphBinaries,
+// in the same order, with the ciphertext replaced by the SHA-256 PostgreSQL
+// computes over it. Payload digests consume nothing else from the ciphertext,
+// so an image-heavy context is hashed in place instead of being fetched.
+func readGraphBinaryDigests(ctx context.Context, transaction dbTransaction, objectHashes [][]byte) ([]integrityBinary, error) {
+	unique := uniqueHashes(objectHashes)
+	binaries := make(map[string]integrityBinary)
+	for start := 0; start < len(unique); start += graphHashQueryBatch {
+		end := min(start+graphHashQueryBatch, len(unique))
+		arguments := make([]any, 0, end-start)
+		for _, hash := range unique[start:end] {
+			arguments = append(arguments, hash)
+		}
+		// binary_hash is the primary key, so the semi-join yields the rows the
+		// DISTINCT join in readGraphBinaries does while hashing each object once.
+		rows, err := transaction.QueryContext(ctx, `
+SELECT b.binary_hash, b.media_type, b.compression,
+       b.plaintext_length, b.encoded_length,
+       CASE WHEN octet_length(b.data_enc) > 0 THEN sha256(b.data_enc) END
+FROM binary_objects AS b
+WHERE b.binary_hash IN (
+    SELECT r.binary_hash FROM content_binary_refs AS r
+    WHERE r.object_hash IN (`+placeholders(len(arguments))+`)
+)`, arguments...)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: read graph binary digests: %w", err)
+		}
+		for rows.Next() {
+			var binary integrityBinary
+			if err := rows.Scan(
+				&binary.Hash,
+				&binary.MediaType,
+				&binary.Compression,
+				&binary.PlaintextLength,
+				&binary.EncodedLength,
+				&binary.DataDigest,
+			); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("postgres: scan graph binary digest: %w", err)
+			}
+			binary.Hash = cloneBytes(binary.Hash)
+			binary.DataDigest = cloneBytes(binary.DataDigest)
+			binaries[hex.EncodeToString(binary.Hash)] = binary
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("postgres: close graph binary digest rows: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("postgres: iterate graph binary digests: %w", err)
+		}
+	}
+	keys := make([]string, 0, len(binaries))
+	for key := range binaries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]integrityBinary, 0, len(binaries))
+	for _, key := range keys {
+		result = append(result, binaries[key])
+	}
+	return result, nil
+}
+
 func uniqueHashes(values [][]byte) [][]byte {
 	seen := make(map[string][]byte, len(values))
 	for _, value := range values {

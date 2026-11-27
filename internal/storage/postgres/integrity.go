@@ -307,10 +307,19 @@ func (cache *integrityGraphCache) reset() {
 	clear(cache.objects)
 }
 
+// Every payload digest binds stored ciphertext only through its SHA-256, so the
+// digest queries ask PostgreSQL for that hash instead of the ciphertext itself
+// and the turn's whole context never travels to the process just to be hashed.
+// The expression keeps the encoding the in-process hash had: a NULL or empty
+// ciphertext yields NULL, which the encoder writes as an absent field rather
+// than as the hash of the empty string. A LEFT JOIN with no matching row yields
+// NULL as well, as a nil column did before.
+//
+//	CASE WHEN octet_length(column) > 0 THEN sha256(column) END
+
 // integrityObject holds only what a payload digest consumes from a content
-// object. The stored ciphertext is reduced to its SHA-256 on read because that
-// is all the encoder writes, so caching a whole conversation's object set costs
-// a digest per object instead of the ciphertext itself.
+// object. DataDigest is the database-computed SHA-256 of the ciphertext, so
+// caching a whole conversation's object set costs a digest per object.
 type integrityObject struct {
 	Hash            []byte
 	SemanticHash    []byte
@@ -321,8 +330,18 @@ type integrityObject struct {
 	DataDigest      []byte
 }
 
+// integrityBinary is the digest-only counterpart of auditmodel.StoredBinary.
+type integrityBinary struct {
+	Hash            []byte
+	MediaType       string
+	Compression     string
+	PlaintextLength int64
+	EncodedLength   int64
+	DataDigest      []byte
+}
+
 // readIntegrityObjects mirrors readGraphObjects, including its sorted unique
-// ordering, but serves repeats from the cache and keeps only digests.
+// ordering, but serves repeats from the cache and reads only digests.
 func readIntegrityObjects(ctx context.Context, transaction dbTransaction, cache *integrityGraphCache, hashes [][]byte) ([]integrityObject, error) {
 	unique := uniqueHashes(hashes)
 	missing := make([][]byte, 0, len(unique))
@@ -339,7 +358,8 @@ func readIntegrityObjects(ctx context.Context, transaction dbTransaction, cache 
 		}
 		rows, err := transaction.QueryContext(ctx, `
 SELECT object_hash, semantic_hash, kind, compression,
-       plaintext_length, encoded_length, data_enc
+       plaintext_length, encoded_length,
+       CASE WHEN octet_length(data_enc) > 0 THEN sha256(data_enc) END
 FROM content_objects
 WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
 		if err != nil {
@@ -347,7 +367,6 @@ WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
 		}
 		for rows.Next() {
 			var object integrityObject
-			var data []byte
 			if err := rows.Scan(
 				&object.Hash,
 				&object.SemanticHash,
@@ -355,19 +374,14 @@ WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
 				&object.Compression,
 				&object.PlaintextLength,
 				&object.EncodedLength,
-				&data,
+				&object.DataDigest,
 			); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("postgres integrity: scan graph content object: %w", err)
 			}
 			object.Hash = cloneBytes(object.Hash)
 			object.SemanticHash = cloneBytes(object.SemanticHash)
-			// Matches digestEncoder.blobDigest: empty ciphertext hashes as an
-			// absent field rather than as the digest of an empty string.
-			if len(data) != 0 {
-				digest := sha256.Sum256(data)
-				object.DataDigest = digest[:]
-			}
+			object.DataDigest = cloneBytes(object.DataDigest)
 			cache.objects[hex.EncodeToString(object.Hash)] = object
 		}
 		if err := closeRows(rows); err != nil {
@@ -439,14 +453,10 @@ func (encoder *digestEncoder) nullableText(value sql.NullString) {
 	encoder.text(value.String)
 }
 
-func (encoder *digestEncoder) blobDigest(value []byte) {
-	if len(value) == 0 {
-		encoder.field(nil)
-		return
-	}
-	digest := sha256.Sum256(value)
-	encoder.field(digest[:])
-}
+// ciphertextDigest writes a ciphertext hash the query already computed with
+// the CASE/sha256 expression above. NULL, for an absent or empty ciphertext,
+// is written as an absent field.
+func (encoder *digestEncoder) ciphertextDigest(digest []byte) { encoder.field(digest) }
 
 func (encoder *digestEncoder) sum() []byte { return encoder.digest.Sum(nil) }
 
@@ -455,18 +465,20 @@ func capturePayloadDigest(ctx context.Context, transaction dbTransaction, auditI
 	encoder.text(auditID)
 	var startedAt, endedAt int64
 	var routeID, protocol, parserName, method, path, mode, forwardStatus, captureStatus string
-	var requestURI []byte
+	var requestURIDigest []byte
 	var statusCode, ttft sql.NullInt64
 	var blockedBy, blockCode, errorCode, requestID sql.NullString
 	if err := transaction.QueryRowContext(ctx, `
 SELECT started_at_ns, ended_at_ns, route_id, protocol, parser_name,
-       method, path, request_uri_enc, mode, status_code, ttft_ns,
+       method, path,
+       CASE WHEN octet_length(request_uri_enc) > 0 THEN sha256(request_uri_enc) END,
+       mode, status_code, ttft_ns,
        forward_status, capture_status, blocked_by, block_code, error_code,
        newapi_request_id
 FROM audit_records
 WHERE audit_id = $1`, auditID).Scan(
 		&startedAt, &endedAt, &routeID, &protocol, &parserName,
-		&method, &path, &requestURI, &mode, &statusCode, &ttft,
+		&method, &path, &requestURIDigest, &mode, &statusCode, &ttft,
 		&forwardStatus, &captureStatus, &blockedBy, &blockCode, &errorCode,
 		&requestID,
 	); err != nil {
@@ -477,7 +489,7 @@ WHERE audit_id = $1`, auditID).Scan(
 	for _, value := range []string{routeID, protocol, parserName, method, path, mode, forwardStatus, captureStatus} {
 		encoder.text(value)
 	}
-	encoder.blobDigest(requestURI)
+	encoder.ciphertextDigest(requestURIDigest)
 	encoder.nullableInteger(statusCode)
 	encoder.nullableInteger(ttft)
 	encoder.nullableText(blockedBy)
@@ -518,7 +530,8 @@ ORDER BY `+stageOrderSQL, auditID)
 	}
 
 	headerRows, err := transaction.QueryContext(ctx, `
-SELECT stage, kind, name, value_index, value_length, value_enc
+SELECT stage, kind, name, value_index, value_length,
+       CASE WHEN octet_length(value_enc) > 0 THEN sha256(value_enc) END
 FROM http_headers
 WHERE audit_id = $1
 ORDER BY `+stageOrderSQL+`, kind, name, value_index`, auditID)
@@ -528,8 +541,8 @@ ORDER BY `+stageOrderSQL+`, kind, name, value_index`, auditID)
 	for headerRows.Next() {
 		var stage, kind, name string
 		var index, length int64
-		var encrypted []byte
-		if err := headerRows.Scan(&stage, &kind, &name, &index, &length, &encrypted); err != nil {
+		var valueDigest []byte
+		if err := headerRows.Scan(&stage, &kind, &name, &index, &length, &valueDigest); err != nil {
 			_ = headerRows.Close()
 			return nil, err
 		}
@@ -539,7 +552,7 @@ ORDER BY `+stageOrderSQL+`, kind, name, value_index`, auditID)
 		encoder.text(name)
 		encoder.integer(index)
 		encoder.integer(length)
-		encoder.blobDigest(encrypted)
+		encoder.ciphertextDigest(valueDigest)
 	}
 	if err := closeRows(headerRows); err != nil {
 		return nil, err
@@ -667,7 +680,7 @@ WHERE audit_id = $1`, auditID).Scan(
 	if err := appendObjectReferenceDigest(ctx, transaction, encoder, objectHashes); err != nil {
 		return nil, err
 	}
-	binaries, err := readGraphBinaries(ctx, transaction, objectHashes)
+	binaries, err := readGraphBinaryDigests(ctx, transaction, objectHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -679,12 +692,13 @@ WHERE audit_id = $1`, auditID).Scan(
 		encoder.text(binary.Compression)
 		encoder.integer(binary.PlaintextLength)
 		encoder.integer(binary.EncodedLength)
-		encoder.blobDigest(binary.DataEnc)
+		encoder.ciphertextDigest(binary.DataDigest)
 	}
 	retentionRows, err := transaction.QueryContext(ctx, `
 SELECT b.stage, b.retention_state, b.stream_event_count,
        b.stream_timeline_complete, t.compression,
-       t.plaintext_length, t.timeline_enc
+       t.plaintext_length,
+       CASE WHEN octet_length(t.timeline_enc) > 0 THEN sha256(t.timeline_enc) END
 FROM body_streams AS b
 LEFT JOIN stream_timelines AS t
   ON t.audit_id = b.audit_id AND t.stage = b.stage
@@ -704,8 +718,8 @@ END`, auditID)
 		var eventCount, complete int64
 		var compression sql.NullString
 		var plaintextLength sql.NullInt64
-		var timeline []byte
-		if err := retentionRows.Scan(&stage, &retention, &eventCount, &complete, &compression, &plaintextLength, &timeline); err != nil {
+		var timelineDigest []byte
+		if err := retentionRows.Scan(&stage, &retention, &eventCount, &complete, &compression, &plaintextLength, &timelineDigest); err != nil {
 			_ = retentionRows.Close()
 			return nil, err
 		}
@@ -716,7 +730,7 @@ END`, auditID)
 		encoder.integer(complete)
 		encoder.nullableText(compression)
 		encoder.nullableInteger(plaintextLength)
-		encoder.blobDigest(timeline)
+		encoder.ciphertextDigest(timelineDigest)
 	}
 	if err := closeRows(retentionRows); err != nil {
 		return nil, err
@@ -765,19 +779,21 @@ func appendParsedResultDigest(ctx context.Context, transaction dbTransaction, en
 	var requestModel, responseModel, responseID, errorType, errorCode sql.NullString
 	var requestedStream, observedStream, usageInput, usageOutput, usageTotal sql.NullInt64
 	var messageCount, toolCallCount, hasToolCall sql.NullInt64
-	var parsedJSON []byte
+	var parsedJSONDigest []byte
 	var parsedAt int64
 	if err := transaction.QueryRowContext(ctx, `
 SELECT parser_name, parser_version, status, request_model, response_model,
        requested_stream, observed_stream, response_id, usage_input,
        usage_output, usage_total, error_type, error_code, message_count,
-       tool_call_count, has_tool_call, parsed_json_enc, parsed_at_ns
+       tool_call_count, has_tool_call,
+       CASE WHEN octet_length(parsed_json_enc) > 0 THEN sha256(parsed_json_enc) END,
+       parsed_at_ns
 FROM parsed_results
 WHERE audit_id = $1`, auditID).Scan(
 		&parserName, &parserVersion, &status, &requestModel, &responseModel,
 		&requestedStream, &observedStream, &responseID, &usageInput,
 		&usageOutput, &usageTotal, &errorType, &errorCode, &messageCount,
-		&toolCallCount, &hasToolCall, &parsedJSON, &parsedAt,
+		&toolCallCount, &hasToolCall, &parsedJSONDigest, &parsedAt,
 	); err != nil {
 		return fmt.Errorf("postgres integrity: read parsed result: %w", err)
 	}
@@ -797,7 +813,7 @@ WHERE audit_id = $1`, auditID).Scan(
 	encoder.nullableInteger(messageCount)
 	encoder.nullableInteger(toolCallCount)
 	encoder.nullableInteger(hasToolCall)
-	encoder.blobDigest(parsedJSON)
+	encoder.ciphertextDigest(parsedJSONDigest)
 	encoder.integer(parsedAt)
 	return nil
 }
@@ -847,7 +863,8 @@ ORDER BY object_hash, json_pointer, binary_hash`, arguments...)
 			return err
 		}
 		externalRows, err := transaction.QueryContext(ctx, `
-SELECT object_hash, json_pointer, ref_kind, value_hash, value_enc
+SELECT object_hash, json_pointer, ref_kind, value_hash,
+       CASE WHEN octet_length(value_enc) > 0 THEN sha256(value_enc) END
 FROM content_external_refs
 WHERE object_hash IN (`+placeholders(len(arguments))+`)
 ORDER BY object_hash, json_pointer, ref_kind`, arguments...)
@@ -855,9 +872,9 @@ ORDER BY object_hash, json_pointer, ref_kind`, arguments...)
 			return err
 		}
 		for externalRows.Next() {
-			var objectHash, valueHash, valueEnc []byte
+			var objectHash, valueHash, valueDigest []byte
 			var pointer, kind string
-			if err := externalRows.Scan(&objectHash, &pointer, &kind, &valueHash, &valueEnc); err != nil {
+			if err := externalRows.Scan(&objectHash, &pointer, &kind, &valueHash, &valueDigest); err != nil {
 				_ = externalRows.Close()
 				return err
 			}
@@ -866,7 +883,7 @@ ORDER BY object_hash, json_pointer, ref_kind`, arguments...)
 			encoder.text(pointer)
 			encoder.text(kind)
 			encoder.field(valueHash)
-			encoder.blobDigest(valueEnc)
+			encoder.ciphertextDigest(valueDigest)
 		}
 		if err := closeRows(externalRows); err != nil {
 			return err
