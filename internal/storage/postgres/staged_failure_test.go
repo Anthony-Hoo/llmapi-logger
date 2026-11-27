@@ -646,10 +646,21 @@ func alignMergedDuplicates(t *testing.T, legacy, unified harnessDump) {
 func TestBeginAuditInboundFailureKeepsTheStartRow(t *testing.T) {
 	cases := []struct {
 		name, table, condition, scenario string
-		adjust                           func(t *testing.T, legacy, unified harnessDump)
+		// lost: BeginAudit reports storage.ErrInboundStageNotStored;
+		// honour: the session then leaves the request pair unmerged.
+		lost, honour bool
+		adjust       func(t *testing.T, legacy, unified harnessDump)
 	}{
-		{"stage row, pair not merged", "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'", "pair with different bytes", nil},
-		{"stage row, merged pair", "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'", "stream both pairs merged",
+		{"stage row, pair not merged", "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'", "pair with different bytes", true, false, nil},
+		{"stage row, mergeable pair, session honours the result", "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'", "stream both pairs merged", true, true,
+			func(t *testing.T, legacy, unified harnessDump) {
+				// request_sent keeps its own body and chunks, as in legacy.
+				if row := stageRow(unified, "body_streams", StageRequestSent); row == nil || row["source_stage"] != StageRequestSent ||
+					countStage(unified, "body_chunks", StageRequestSent) == 0 {
+					t.Fatalf("request_sent body not stored: %v", row)
+				}
+			}},
+		{"stage row, mergeable pair, session ignores the result", "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'", "stream both pairs merged", true, false,
 			func(t *testing.T, legacy, unified harnessDump) {
 				// Checkpoint 1 wrote request_sent merged into a source whose
 				// stage row is missing, so the body row cannot be written
@@ -667,7 +678,7 @@ func TestBeginAuditInboundFailureKeepsTheStartRow(t *testing.T) {
 					dump.dropRows("body_chunks", stageIs(StageRequestSent))
 				}
 			}},
-		{"headers", "http_headers", "NEW.stage = 'request_for_newapi_received_from_nginx' AND NEW.kind = 'header'", "stream both pairs merged", nil},
+		{"headers", "http_headers", "NEW.stage = 'request_for_newapi_received_from_nginx' AND NEW.kind = 'header'", "stream both pairs merged", false, false, nil},
 	}
 	cipher := harnessCipher(t)
 	sealer := harnessSealer{t: t, cipher: cipher}
@@ -679,11 +690,20 @@ func TestBeginAuditInboundFailureKeepsTheStartRow(t *testing.T) {
 			for _, store := range []*Store{legacyStore, unifiedStore} {
 				injectInsertFailure(t, store, test.table, test.condition)
 			}
-			h := buildHarness(t, &harnessClock{now: 1_000_000}, "inbound-"+test.table, test.scenario)
+			h := newHarness(t, &harnessClock{now: 1_000_000}, "inbound-"+test.table)
+			h.noRequestMerge = test.honour
+			scenarioByName(t, test.scenario).build(h)
 			legacyOps, unifiedOps := h.legacyOps(sealer), h.unifiedOps(sealer)
-			// BeginAudit alone: it succeeds and its start row is committed,
-			// already marked failed.
-			runHarnessOps(t, unifiedStore, unifiedOps[:1])
+			// BeginAudit alone: the start row is committed, already marked
+			// failed, before the caller sees the result.
+			err := unifiedStore.BeginAudit(ctx, unifiedOps[0].data.(AuditRecord))
+			if test.lost {
+				if !errors.Is(err, storage.ErrInboundStageNotStored) || ErrorClass(err) != "inbound_stage_not_stored" || storage.ErrorClass(err) != "inbound_stage_not_stored" {
+					t.Fatalf("BeginAudit = %v (%s)", err, ErrorClass(err))
+				}
+			} else if err != nil {
+				t.Fatalf("BeginAudit = %v", err)
+			}
 			var captureStatus, errorCode string
 			if err := unifiedStore.readerDB.QueryRow(`SELECT capture_status, error_code FROM audit_records WHERE audit_id = $1`, h.id).Scan(&captureStatus, &errorCode); err != nil ||
 				captureStatus != CaptureFailed || errorCode != "capture_write_failed" {
@@ -723,7 +743,7 @@ func TestBeginAuditInboundFailureKeepsTheStartRow(t *testing.T) {
 		h := buildHarness(t, &harnessClock{now: 1_000_000}, "inbound-batch", "stream both pairs merged")
 		record := h.unifiedOps(sealer)[0].data.(AuditRecord)
 		setWriterReadOnly(t, store, true)
-		if err := store.BeginAudit(context.Background(), record); ErrorClass(err) != "postgres_read_only" {
+		if err := store.BeginAudit(context.Background(), record); ErrorClass(err) != "postgres_read_only" || errors.Is(err, storage.ErrInboundStageNotStored) {
 			t.Fatalf("BeginAudit = %v", err)
 		}
 		setWriterReadOnly(t, store, false)

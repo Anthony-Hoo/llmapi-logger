@@ -138,6 +138,9 @@ type harness struct {
 	// responseInDB leaves the response pair to the database merge, as a
 	// session does when it cannot decide the pair in memory.
 	responseInDB bool
+	// noRequestMerge never merges the request pair in memory, as a session
+	// does after BeginAudit reported storage.ErrInboundStageNotStored.
+	noRequestMerge bool
 }
 
 func newHarness(t *testing.T, clock *harnessClock, id string) *harness {
@@ -422,7 +425,7 @@ func (h *harness) checkpoint() {
 			}
 			if event.stage == StageRequestSent {
 				source, duplicate := h.stages[StageRequestReceived], h.stages[StageRequestSent]
-				if source.body != nil && bodyQualifies(source.body) && bodyQualifies(duplicate.body) && bodiesEqual(source.body, duplicate.body) {
+				if !h.noRequestMerge && source.body != nil && bodyQualifies(source.body) && bodyQualifies(duplicate.body) && bodiesEqual(source.body, duplicate.body) {
 					h.mergedAtCheckpoint = true
 					plan.mergedSentAt = true
 				} else {
@@ -765,7 +768,7 @@ func (h *harness) unifiedOps(s harnessSealer) []hOp {
 	requestMerged := false
 	var dedup [2]bool
 	switch {
-	case h.requestSentWrittenAsSelf:
+	case h.requestSentWrittenAsSelf, h.noRequestMerge:
 		dedup[0] = true // written with its own chunks: merge as legacy does
 	default:
 		requestMerged = h.pairMergesAtFinish(StageRequestReceived, StageRequestSent)

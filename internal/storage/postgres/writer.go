@@ -65,6 +65,11 @@ type writeRequest struct {
 	// payloadBytes is the ciphertext a checkpoint or commit carries. Legacy
 	// operations leave it zero, so their batching is unchanged.
 	payloadBytes int64
+	// inboundLost is set by a BeginAudit whose start row was written but whose
+	// inbound stage row was rejected on its own. The operation itself
+	// succeeds, so its savepoint is released; the flag only counts once the
+	// batch commits.
+	inboundLost *bool
 }
 
 const (
@@ -107,7 +112,17 @@ func (store *Store) BeginAudit(ctx context.Context, record AuditRecord) error {
 		inbound := cloneInboundStage(*record.Inbound)
 		owned.Inbound = &inbound
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: owned})
+	inboundLost := new(bool)
+	if err := store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: owned, inboundLost: inboundLost}); err != nil {
+		return err
+	}
+	if *inboundLost {
+		// The start row and its failure marks are committed: admitted, but
+		// the session must not merge the request pair into a stage that has
+		// no row (storage.ErrInboundStageNotStored).
+		return fmt.Errorf("postgres: %w", storage.ErrInboundStageNotStored)
+	}
+	return nil
 }
 
 // StartStage non-blockingly appends an observed HTTP stage to the writer
@@ -536,7 +551,11 @@ func (store *Store) applyWrite(transaction dbTransaction, request writeRequest) 
 		if record.Inbound == nil {
 			return nil
 		}
-		return insertInboundStage(transaction, *record.Inbound)
+		stored, err := insertInboundStage(transaction, *record.Inbound)
+		if err == nil && !stored && request.inboundLost != nil {
+			*request.inboundLost = true
+		}
+		return err
 	case writeStartStage:
 		return insertStage(transaction, request.data.(HTTPStage))
 	case writeStartBody:
@@ -634,8 +653,9 @@ WHERE audit_id=$1 AND ended_at_ns IS NULL`, auditID); err != nil {
 // depend on them: when one is rejected with an isolatable error, only that
 // part is rolled back, the start row stays, and the audit is marked as
 // legacy marks it when that operation fails. Any other error fails the
-// whole operation, as it fails BeginAudit today.
-func insertInboundStage(transaction dbTransaction, inbound InboundStage) error {
+// whole operation, as it fails BeginAudit today. stageStored reports whether
+// the request_received row was kept; a rejected header insert keeps it.
+func insertInboundStage(transaction dbTransaction, inbound InboundStage) (stageStored bool, err error) {
 	part := func(write func() error, failed writeRequest) (bool, error) {
 		if _, err := transaction.Exec("SAVEPOINT begin_inbound"); err != nil {
 			return false, fmt.Errorf("postgres writer: inbound savepoint: %w", err)
@@ -662,11 +682,11 @@ func insertInboundStage(transaction dbTransaction, inbound InboundStage) error {
 	if err != nil || !written || len(inbound.Headers) == 0 {
 		// Without the stage row legacy's AddHeaders fails on its parent and
 		// adds no mark beyond the audit's.
-		return err
+		return written, err
 	}
 	_, err = part(func() error { return insertHeaderRows(transaction, inbound.Headers) },
 		writeRequest{kind: writeAddHeaders, data: inbound.Headers})
-	return err
+	return err == nil, err
 }
 
 func insertAudit(transaction dbTransaction, record AuditRecord) error {
