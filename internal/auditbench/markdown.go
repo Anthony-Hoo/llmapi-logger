@@ -238,7 +238,12 @@ func renderMarkdown(result Result) string {
 	}
 	table(&builder, []string{"Measure", "Samples (count)", "p50 (ms)", "p95 (ms)", "Max (ms)"}, latencyRows)
 	builder.WriteString("Queryable means the audit row has a terminal parse status; its resolution is the poll interval. " +
-		"Session.Finish is timed inside the process for every audit session; the client's time to end includes it.\n\n")
+		"Session.Finish is timed inside the process for every audit session; the client's time to end includes it.")
+	if result.WritePath.CountStatements {
+		builder.WriteString(" These latencies include the statement relay's loopback hop on every database round trip, which costs a path with more round trips more; " +
+			"for latency comparisons use runs with --count-statements=false.")
+	}
+	builder.WriteString("\n\n")
 	backlog := client.ParseBacklog
 	fmt.Fprintf(&builder, "Largest pending parse backlog: %d audits (%d samples, one at most every %d ms during load and drain).", backlog.Max, backlog.Samples, backlog.IntervalMS)
 	if backlog.Max > BacklogLimit {

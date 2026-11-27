@@ -240,7 +240,7 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" `
 | WAL outside writer | Cluster WAL 减 writer：读连接的页面修剪、autovacuum、检查点和其他会话 |
 | Commits excl. tool | `pg_stat_database.xact_commit` 减去工具自己的事务数；整个数据库。它包含应用读连接池的每一条只读语句，不等于 writer 的提交数：reads 和 idle 阶段几乎没有 writer WAL，却有上百次提交。减少读回的改动（4.2 第二步）会让这个数下降，但那不是 writer 少提交了 |
 | Writer operations、Writer commits、Writer rollbacks、Writer statements | 协议中继在 writer 连接上数到的 `SAVEPOINT writer_operation` 次数、提交了的 `COMMIT`、结束而未提交的显式事务、全部完成的语句；实时计数，没有统计刷新延迟，与其他会话隔离 |
-| Reader statements、Other statements | 中继在读连接池（`default_transaction_read_only=on`）和其他应用连接上数到的完成语句。Commits excl. tool 里大部分非 writer 的提交就是它们 |
+| Reader statements、Other statements | 中继在读连接池（`default_transaction_read_only=on`）和其他应用连接上数到的完成语句。语句不是事务：显式事务里的 BEGIN、COMMIT 也各算一条，所以它与 Commits excl. tool 不能直接相减；本地 smoke 的 reads 阶段读连接 244 条语句，同阶段数据库提交 55 次 |
 | rows inserted / deleted / updated per audit | 总量阶段 `pg_stat_user_tables` 的差值除以 audit 条数：`body_chunks`、`http_headers`、`http_header_blocks` 的插入与删除，`audit_records`、`http_stages`、`body_streams` 的更新。`body_chunks` 的删除包括成对阶段去重删掉的重复块和解析验证后释放的 raw |
 | Staging written、Staged records、Staging fsyncs、directory syncs | `staging.ProcessStats`：暂存文件写入的字节（含文件头）、记录数、文件 fsync 和目录 fsync 次数 |
 | handler in Session.Finish | 进程内每个审计会话 `Finish` 的耗时分布，毫秒 |
@@ -280,13 +280,13 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" `
 | heavy | `--profile heavy --upstream-first-byte 400ms` | 2（档默认） | 编排会话上一次基线的取值，到可查询 p95 约 0.3 s |
 | small | `--profile small --upstream-first-byte 300ms` | 4（档默认） | 同上 |
 
-本地 smoke（heavy，2 个会话 × 3 轮，上述节奏）两条路径的最大积压都是 2。改了会话数、轮数或并发之后，看结果里的最大积压；超过 100 时降低 `--concurrency` 或加大 `--upstream-first-byte`。
+本地按上述节奏、各档默认的会话数和轮数跑 legacy（解析队列更容易溢出的一侧）：heavy 54 条 audit 最大积压 2，到可查询 p95 0.41 s；small 161 条最大积压 4，p95 0.31 s。heavy 2 个会话 × 3 轮的 smoke 两条路径都是 2。改了会话数、轮数或并发之后，看结果里的最大积压；超过 100 时降低 `--concurrency` 或加大 `--upstream-first-byte`。
 
 中继的代价在本地测过：heavy、legacy、6 个会话 × 4 轮，开关中继各跑两次，`Finish` p50 多 0.7 到 4.7 ms、p95 多 5 到 26 ms，流结束 p50 多约 1.4%。legacy 的往返更多，中继对它更不利，所以只用一对带中继的运行做延迟门槛，会偏向 unified。推荐的步骤：
 
 1. 每条路径一次带中继的运行（默认），得出 writer 操作数、提交数、语句数、各表行数、WAL 和暂存。这些数字不受中继影响。
 2. 每条路径一次 `--count-statements=false` 的运行，得出首字节、流结束、`Finish`、到可查询、详情与导出的延迟。
-3. 两对分别 `compare`。`compare` 遇到只有一边经过中继时会警告。
+3. 两对分别 `compare`。只有一边经过中继时 `compare` 警告延迟不可比；两边都经过中继时也提醒延迟行偏向往返少的路径，`run` 的摘要在延迟表下写同样的提示。
 
 ~~~powershell
 # <scratch> 里放交叉编译好的 audit-bench；连接串只走环境变量

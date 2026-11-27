@@ -47,8 +47,11 @@ func writePathWarnings(a, b Result) []string {
 	if pa.Effective == config.AuditWritePathUnified && pb.Effective == config.AuditWritePathUnified && pa.StageBytes != pb.StageBytes {
 		warnings = append(warnings, fmt.Sprintf("the stage budgets differ (%d vs %d bytes)", pa.StageBytes, pb.StageBytes))
 	}
-	if pa.CountStatements != pb.CountStatements {
+	switch {
+	case pa.CountStatements != pb.CountStatements:
 		warnings = append(warnings, "only one run relayed its connections to count statements; the relay adds a loopback hop to every database round trip, so latencies are not comparable")
+	case pa.CountStatements:
+		warnings = append(warnings, "both runs relayed their connections to count statements: the latency rows include a loopback hop per database round trip, which favours the path with fewer round trips; take latencies from a pair run with --count-statements=false")
 	}
 	return warnings
 }

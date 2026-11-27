@@ -229,7 +229,12 @@ func TestCompareWarnsAboutWritePathLabels(t *testing.T) {
 	base := Result{FormatVersion: FormatVersion, WritePath: WritePathInfo{Requested: "legacy", Effective: "legacy", CountStatements: true}}
 	unified := base
 	unified.WritePath = WritePathInfo{Requested: "unified", Effective: "unified", CountStatements: true}
-	if warnings := writePathWarnings(base, unified); len(warnings) != 0 {
+	if warnings := strings.Join(writePathWarnings(base, unified), "\n"); !strings.Contains(warnings, "both runs relayed") || strings.Count(warnings, "\n") != 0 {
+		t.Fatalf("relayed A/B: %s", warnings)
+	}
+	unrelayedA, unrelayedB := base, unified
+	unrelayedA.WritePath.CountStatements, unrelayedB.WritePath.CountStatements = false, false
+	if warnings := writePathWarnings(unrelayedA, unrelayedB); len(warnings) != 0 {
 		t.Fatalf("clean A/B warned: %v", warnings)
 	}
 	label := base
