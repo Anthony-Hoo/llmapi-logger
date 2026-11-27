@@ -72,7 +72,7 @@ type Result struct {
 明文列只保存窄摘要。`Conversation` 只在 worker 内存使用：
 
 - OpenAI verified turn 的详情 conversation 从内容对象重建，不再写第二份 conversation；
-- 没有 normalizer 的协议或 normalization/reconstruction 异常，raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化；
+- 没有 normalizer 的协议或 normalization/reconstruction 异常，raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化。这份副本动辄数 MB，所以 `parsed_json_enc` 在加密前按需 gzip，格式见[模块 9](09-security-encryption-and-redaction.md) §5.1；
 - 列表、普通日志和明文 SQLite 列永远不包含消息正文、reasoning、工具参数或结果。
 
 `ErrorType`/`ErrorCode` 保存 parser 看到的原始错误标识；`UpstreamErrorClass` 是由[模块 22](22-content-policy.md)定义的稳定策略拒绝分类（如 `cyber_policy`），只保存枚举、不保存 message，并且是 `parsed_results` 中不参与完整性摘要的派生列。

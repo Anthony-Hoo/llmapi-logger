@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
-	"llmapi-logger/internal/security"
 )
 
 // SessionConversation returns the decrypted conversation of one audit for the
@@ -41,11 +41,7 @@ func (service *Service) SessionConversation(ctx context.Context, auditID string)
 	if parsed == nil || len(parsed.ParsedJSONEnc) == 0 {
 		return nil, ErrNotFound
 	}
-	aad, err := security.AAD(auditID, "parsed_json", parsed.ParserName)
-	if err != nil {
-		return nil, ErrIntegrity
-	}
-	plaintext, err := service.cipher.Decrypt(aad, parsed.ParsedJSONEnc)
+	plaintext, err := auditmodel.OpenParsedResult(service.cipher, auditID, parsed.ParserName, parsed.ParsedJSONEnc)
 	if err != nil {
 		return nil, ErrIntegrity
 	}

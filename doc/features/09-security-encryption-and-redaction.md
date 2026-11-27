@@ -66,6 +66,19 @@ AAD 使用 NUL 分隔的受控字段，禁止调用方随意拼接不同格式�
 
 解密后还必须校验 plaintext/encoded length、object hash、semantic hash、binary hash、sequence hash 和 reconstruction hash。GCM 成功不代表结构自动可信。
 
+### 5.1 parsed JSON 的存储形式
+
+`parsed_results.parsed_json_enc` 没有 compression 列，AAD 也不含 compression。解密后的字节自带格式：
+
+- 以 gzip magic `1f 8b` 开头的是 gzip 流，解压后才是 JSON；
+- 其他情况就是 JSON 本身。早期写入的行全部是这种形式，原样可读。
+
+JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`auditmodel.SealParsedResult`）只在明文不小于 4 KiB、压缩后确实变小（沿用 `bodycodec` 的判定），并且不超过 128 MiB 时才压缩，所以窄摘要行仍是明文 JSON。读取端统一走 `auditmodel.OpenParsedResult`，包括详情、会话分析读取和离线导入校验。
+
+解压有上限：先读 gzip 尾部的 ISIZE，超过 128 MiB 直接拒绝，再按 ISIZE 精确限长读取，产出长度必须正好等于 ISIZE。128 MiB 是 parser 单个 Body 解码上限（64 MiB）的两倍，覆盖一份由完整请求和完整响应拼出的回退 conversation。更大的结果写入端不压缩，照旧存明文，因此这个上限不会让任何已写入的行变得不可读。截断、校验和错误、尾随数据、ISIZE 不符或超限，都按解密失败处理，返回同一个通用完整性错误。
+
+完整性事件摘要取的是落库密文的 SHA-256。压缩行按自己的密文签名，摘要格式不变；旧行不回头重写。
+
 ## 6. 内容寻址与密文随机性
 
 内容地址在压缩和加密前计算：

@@ -506,21 +506,18 @@ func (worker *Worker) persistResult(ctx context.Context, audit storage.ParserAud
 	if implementation != nil {
 		parserVersion = implementation.Version()
 	}
-	aad, err := security.AAD(audit.AuditID, "parsed_json", audit.ParserName)
-	if err != nil {
+	plaintext, generatedPlaintext := parsedResultPlaintext(result, prepared == nil)
+	// Large results, chiefly the fallback conversation, are compressed inside
+	// the encrypted payload; see auditmodel.SealParsedResult.
+	encrypted, err := auditmodel.SealParsedResult(worker.cipher, audit.AuditID, audit.ParserName, plaintext)
+	if errors.Is(err, auditmodel.ErrParsedResultAAD) {
 		worker.logger.Warn("parser result AAD failed", "audit_id", audit.AuditID, "error_code", "parsed_json_aad_failed")
 		result.Status = StatusError
 		result.ErrorCode = "parsed_json_aad_failed"
-	}
-	var encrypted []byte
-	plaintext, generatedPlaintext := parsedResultPlaintext(result, prepared == nil)
-	if err == nil {
-		encrypted, err = worker.cipher.Encrypt(aad, plaintext)
-		if err != nil {
-			worker.logger.Warn("parser result encryption failed", "audit_id", audit.AuditID, "error_code", "parsed_json_encryption_failed")
-			result.Status = StatusError
-			result.ErrorCode = "parsed_json_encryption_failed"
-		}
+	} else if err != nil {
+		worker.logger.Warn("parser result encryption failed", "audit_id", audit.AuditID, "error_code", "parsed_json_encryption_failed")
+		result.Status = StatusError
+		result.ErrorCode = "parsed_json_encryption_failed"
 	}
 	if generatedPlaintext {
 		clear(plaintext)

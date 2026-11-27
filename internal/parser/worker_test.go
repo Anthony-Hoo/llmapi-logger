@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
@@ -102,6 +103,64 @@ func TestParsedResultPlaintextOmitsConversationWhenTurnGraphOwnsIt(t *testing.T)
 	compacted, generated := parsedResultPlaintext(result, false)
 	if generated || bytes.Contains(compacted, []byte("conversation-canary")) {
 		t.Fatalf("content-addressed plaintext = %s generated=%v", compacted, generated)
+	}
+}
+
+func TestPersistResultCompressesFallbackConversationOnly(t *testing.T) {
+	t.Parallel()
+	if auditmodel.MaxParsedResultBytes < 2*MaxDecodedBodyBytes {
+		t.Fatal("the parsed result bound must cover a fallback built from two maximal bodies")
+	}
+	cipher := testCipher(t)
+	auditID, parserName := "audit-persist-fallback", "test.parser"
+	store := newFakeStore(auditID, parserName)
+	worker, err := NewWorker(store, cipher, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(worker.Close)
+	view := conversation.New()
+	for index := 0; index < 100; index++ {
+		view.Append(conversation.Message{
+			Role: conversation.RoleUser, Phase: conversation.PhaseRequest,
+			Direction: conversation.DirectionClientToUpstream,
+			Content:   []conversation.Part{conversation.Text(fmt.Sprintf("fallback-canary %d %s", index, bytes.Repeat([]byte("context "), 50)))},
+		})
+	}
+	audit := store.audits[auditID]
+	aad, err := security.AAD(auditID, "parsed_json", parserName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		prepared   *auditmodel.PreparedTurn
+		compressed bool
+	}{
+		// No verified turn: the conversation is embedded and worth compressing.
+		{name: "fallback", compressed: true},
+		// A verified turn owns the conversation; the summary stays plain.
+		{name: "summary", prepared: &auditmodel.PreparedTurn{}},
+	} {
+		result := Result{Status: StatusPartial, Conversation: view, ParsedJSON: []byte(`{"status":"partial"}`)}
+		if _, err := worker.persistResult(context.Background(), audit, nil, result, test.prepared); err != nil {
+			t.Fatal(err)
+		}
+		saved := <-store.saved
+		payload, err := cipher.Decrypt(aad, saved.ParsedJSONEnc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := bytes.HasPrefix(payload, []byte{0x1f, 0x8b}); got != test.compressed {
+			t.Fatalf("%s: stored compressed = %v, want %v", test.name, got, test.compressed)
+		}
+		opened, err := auditmodel.OpenParsedResult(cipher, auditID, parserName, saved.ParsedJSONEnc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(opened, []byte("fallback-canary 99")) != test.compressed {
+			t.Fatalf("%s: opened result = %.80s", test.name, opened)
+		}
 	}
 }
 

@@ -63,6 +63,7 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 - binary object 的压缩选择只依据原始字节 magic，不能信任 occurrence 的 MIME 标签，避免调用方用伪造标签影响压缩行为。存储表示不属于对象身份，同一 binary hash 可以复用其他编码器版本写入的对象。PNG、JPEG、GIF、WebP、ZIP、GZIP、PDF 等已压缩格式使用 `none`；未知格式只在试压缩确实节省空间时使用 gzip。
 - AAD 绑定对象域、object hash、kind 和 compression；数据库只保存 `nonce || ciphertext || tag`。
 - 原始异常证据也先按大块自适应压缩，再独立加密；不再把每个 32 KiB read 写成一行。
+- 没有 verified turn 时存进 `parsed_results.parsed_json_enc` 的回退 conversation 同样先按需 gzip 再加密。该列没有 compression 元数据，靠解密后的 gzip magic 区分新旧两种形式；规则和解压上限见[模块 9](09-security-encryption-and-redaction.md) §5.1。
 
 ## 6. HTTP Body 观察与保留策略
 

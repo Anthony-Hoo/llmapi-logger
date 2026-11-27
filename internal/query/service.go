@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -416,11 +417,7 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 			ParsedAtNS:         parsed.ParsedAtNS,
 		}
 		if len(parsed.ParsedJSONEnc) != 0 {
-			aad, aadErr := security.AAD(auditID, "parsed_json", parsed.ParserName)
-			if aadErr != nil {
-				return Detail{}, ErrIntegrity
-			}
-			plaintext, decryptErr := service.cipher.Decrypt(aad, parsed.ParsedJSONEnc)
+			plaintext, decryptErr := auditmodel.OpenParsedResult(service.cipher, auditID, parsed.ParserName, parsed.ParsedJSONEnc)
 			if decryptErr != nil {
 				return Detail{}, ErrIntegrity
 			}
