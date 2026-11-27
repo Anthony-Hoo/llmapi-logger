@@ -129,7 +129,7 @@ status = ok | partial | error | skipped
 parsed_json_enc = nonce || ciphertext || tag
 ```
 
-`parsed_json_enc` 在写出 verified turn 时只含窄摘要；没有 turn 时才附带 conversation 回退副本。版本 2 写入的记录没有 turn graph，保持 full raw 和带 conversation 的 `parsed_json_enc`，读取路径不变，不做迁移。
+`parsed_json_enc` 在写出带响应的 verified turn 时只含窄摘要；只有请求的轮次（响应不完整、因响应而解析不完整或未被规范化）另存 `partial_response_messages`，即 conversation 里响应一侧的消息（[模块 18](18-content-addressed-conversation-storage.md) §6）；没有 turn 时才附带完整的 conversation 回退副本。版本 2 写入的记录没有 turn graph，保持 full raw 和带 conversation 的 `parsed_json_enc`，读取路径不变，不做迁移。
 
 reparse 直接覆盖当前结果并更新 `audit_records.parse_status`，数据库只保留最新解析结果。
 
