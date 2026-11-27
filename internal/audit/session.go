@@ -77,7 +77,9 @@ type Session struct {
 	gaps            *gapBuffer
 
 	// bodyEncoder is session-local and accessed only while holding mu.
-	bodyEncoder     *bodycodec.Encoder
+	bodyEncoder *bodycodec.Encoder
+	// retainer is the body retention layer; nil is the legacy retainer.
+	retainer        bodyRetainer
 	mu              sync.Mutex
 	stages          map[string]*stageCapture
 	captureFault    bool

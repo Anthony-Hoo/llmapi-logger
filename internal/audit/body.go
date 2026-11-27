@@ -279,6 +279,21 @@ func (session *Session) observeBodyLocked(stage *stageCapture, body *bodyCapture
 		observeStreamEvents(body, data, body.observedLength, observedAtNS)
 	}
 	body.observedLength += int64(len(data))
+	session.retention().retain(session, stage, body, data, observedAtNS)
+}
+
+// flushBodyLocked ends the open chunk of a body: when it is full, or always
+// with force, which every end of the body (EOF, Close, Finish) uses.
+func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, force bool) {
+	if body == nil {
+		return
+	}
+	session.retention().flush(session, stage, body, force)
+}
+
+// retain is the legacy retainer's half of observeBodyLocked: it stages at
+// most one chunk and hands every full one to AddChunk.
+func (legacyRetainer) retain(session *Session, stage *stageCapture, body *bodyCapture, data []byte, observedAtNS int64) {
 	if !body.persistChunks || !body.persisted {
 		return
 	}
@@ -305,10 +320,7 @@ func (session *Session) observeBodyLocked(stage *stageCapture, body *bodyCapture
 	}
 }
 
-func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, force bool) {
-	if body == nil {
-		return
-	}
+func (legacyRetainer) flush(session *Session, stage *stageCapture, body *bodyCapture, force bool) {
 	if force {
 		// Completed request stages must not retain a chunk for the lifetime
 		// of a potentially long-running streaming response.
@@ -331,44 +343,15 @@ func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, 
 	sequence := body.nextSeq
 	offset := body.storedLength
 	body.nextSeq++
-	compression, encoded, err := session.encodeBodyLocked(plaintext, stage.contentType)
-	if err != nil {
+	chunk, failure := session.sealChunkLocked(stage, sequence, offset, plaintext, observedAtNS)
+	if failure != "" {
 		clear(plaintext)
 		body.faulted = true
-		body.errorCode = "body_compression_failed"
+		body.errorCode = failure
 		session.markStageFaultLocked(stage, body.errorCode)
 		return
 	}
-	encodedLength := len(encoded)
-	aad, err := security.AAD(session.auditID, "body_chunk_v2", stage.name, strconv.FormatInt(sequence, 10), compression)
-	if err != nil {
-		clear(plaintext)
-		clear(encoded)
-		body.faulted = true
-		body.errorCode = "body_encryption_failed"
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
-	}
-	encrypted, err := session.cipher.Encrypt(aad, encoded)
-	clear(encoded)
-	if err != nil {
-		clear(plaintext)
-		body.faulted = true
-		body.errorCode = "body_encryption_failed"
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
-	}
-	if err := session.store.AddChunk(session.writeCtx, storage.BodyChunk{
-		AuditID:         session.auditID,
-		Stage:           stage.name,
-		Seq:             sequence,
-		Offset:          offset,
-		PlaintextLength: len(plaintext),
-		EncodedLength:   encodedLength,
-		ObservedAtNS:    observedAtNS,
-		Compression:     compression,
-		DataEnc:         encrypted,
-	}); err != nil {
+	if err := session.store.AddChunk(session.writeCtx, chunk); err != nil {
 		clear(plaintext)
 		body.faulted = true
 		body.errorCode = "add_chunk_failed"
@@ -379,6 +362,38 @@ func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, 
 	body.storedLength += int64(len(plaintext))
 	body.chunkCount++
 	clear(plaintext)
+}
+
+// sealChunkLocked compresses and encrypts one owning chunk of a stage. Both
+// retainers seal through it, so a chunk's ciphertext format is one piece of
+// code. It returns the stable error code of a failure, or "".
+func (session *Session) sealChunkLocked(stage *stageCapture, sequence, offset int64, plaintext []byte, observedAtNS int64) (storage.BodyChunk, string) {
+	compression, encoded, err := session.encodeBodyLocked(plaintext, stage.contentType)
+	if err != nil {
+		return storage.BodyChunk{}, "body_compression_failed"
+	}
+	encodedLength := len(encoded)
+	aad, err := security.AAD(session.auditID, "body_chunk_v2", stage.name, strconv.FormatInt(sequence, 10), compression)
+	if err != nil {
+		clear(encoded)
+		return storage.BodyChunk{}, "body_encryption_failed"
+	}
+	encrypted, err := session.cipher.Encrypt(aad, encoded)
+	clear(encoded)
+	if err != nil {
+		return storage.BodyChunk{}, "body_encryption_failed"
+	}
+	return storage.BodyChunk{
+		AuditID:         session.auditID,
+		Stage:           stage.name,
+		Seq:             sequence,
+		Offset:          offset,
+		PlaintextLength: len(plaintext),
+		EncodedLength:   encodedLength,
+		ObservedAtNS:    observedAtNS,
+		Compression:     compression,
+		DataEnc:         encrypted,
+	}, ""
 }
 
 func (session *Session) encodeBodyLocked(plaintext []byte, contentType string) (string, []byte, error) {
