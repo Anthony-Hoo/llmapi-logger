@@ -150,6 +150,25 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 - 用 `CREATE INDEX IF NOT EXISTS`：库很大时运维可以先手工 `CREATE INDEX CONCURRENTLY` 建好，迁移只记版本（见部署文档）。
 - 某个协议的历史轮次不足 32 个时，沿索引往回找要走完整个索引。为了不让规划器在通用计划下走到这一步，候选查询为 `openai`、`anthropic`、`gemini` 各用一条把协议写成字面量的语句，两种计划形态都按该协议的统计从会话一侧入手：31.7 万轮的库上，只有 5 个历史轮次的协议读 5 行，约 1 毫秒。字面量只取代码里的固定集合，其他取值仍走带参数的语句。数字见方案附录 C.6。
 - `latestSchemaVersion` 为 6。**旧版本遇到版本 6 的库会拒绝打开审计存储**（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-5)。
+
+### 3.9 采集版本 2：Header 块（PostgreSQL migration 007）
+
+`007_header_block.sql` 为采集版本 2 加库表（[issue #59 第 3 阶段设计](../design/issue-59-stage3-write-path.md) C、D、E 节）。版本 2 的 audit 不再逐值写 `http_headers`，而是每条 audit 一个密封的 Header 块；版本 1 的 audit 照旧。
+
+| 改动 | 内容 |
+| --- | --- |
+| `audit_records.capture_version` | `BIGINT NOT NULL DEFAULT 1`，约束 `audit_records_capture_version_check`：只能是 1 或 2。`BeginAudit` 时写定，之后不变，`CommitAudit` 核对输入与它一致 |
+| `audit_records.user_agent_enc` | 版本 2 的入站 User-Agent，单独密封（AAD `(audit_id, "user_agent_v1")`），列表直接读它，不再逐行查 Header。没有 User-Agent 时为 NULL；版本 1 恒为 NULL |
+| `http_stages.content_type`、`content_encoding` | `TEXT COLLATE "C"`，可为 NULL，约束不许空串。版本 2 的阶段行随行写入 parser 选用的值，parser 不必解密块；版本 1 恒为 NULL |
+| `http_header_blocks` | 每条版本 2 audit 一行：`compression`（`none` 或 `gzip`）、`plaintext_length`、`block_enc`，主键 `audit_id`，随 audit `ON DELETE CASCADE` |
+| `runtime_settings` 的分区约束 | `runtime_settings_section_check` 增加 `audit_capture`（`CommitAudit` 重试次数，H.3）。约束名是 003 里内联 CHECK 的默认名，在 `pg_constraint` 中核对过 |
+
+- **不回填，不重写。** 带常量默认值或没有默认值的 `ADD COLUMN` 只改目录。新列上的 CHECK 如果随 `ADD COLUMN` 一起写，PostgreSQL 会扫一遍全表来验证（本机测过：30 万行的表读了 30 万行），所以三个新 CHECK 都单独以 `NOT VALID` 添加：之后写入或更新的行照样受约束，已有的行都是版本 1，新列为 NULL。测试在有行的版本 6 库上确认：`audit_records`、`http_stages`、`runtime_settings` 的 `relfilenode` 不变，迁移事务对 `audit_records` 和 `http_stages` 读了 0 行，旧行读回来都是版本 1、`user_agent_enc` 为 NULL。
+- **锁与耗时。** 迁移在启动时、拿到 writer 锁之后的迁移事务里执行，对 `audit_records`、`http_stages`、`runtime_settings` 各持有 `ACCESS EXCLUSIVE` 直到提交，受连接的 5 秒 `lock_timeout` 约束，与迁移 005 相同；`http_header_blocks` 的外键另对 `audit_records` 取 `SHARE ROW EXCLUSIVE`。本机测量：30 万条 audit（`audit_records` 67 MiB，`http_stages` 42 MiB）上，迁移语句约 10 毫秒，含迁移的 `Open` 约 23 毫秒，与表大小无关。
+- **完整性。** 已有的 `capture_finalized` 事件仍按版本 1 校验：`capturePayloadDigest` 一个字节都不改，校验按 `capture_version` 分派（D.3）。离线导入的目标只有 001 基线，没有 `capture_version` 列，导入校验直接按版本 1 计算。
+- 与 002 到 006 一样只由运行时 `migrate()` 应用：离线导入的目标仍是 001 基线，导入的行在第一次启动时得到 `capture_version = 1`。001 不改。SQLite 不加迁移，永远只写版本 1。
+- `latestSchemaVersion` 为 7。**旧版本遇到版本 7 的库会拒绝打开审计存储**，表现与上面相同。回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-6)；一旦有了版本 2 的行，就没有只用 SQL 的回滚办法。
+
 ## 4. HTTP Body 保存方式
 
 每个阶段仍保存自己的 observed length、SHA-256、状态和时间。流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并：

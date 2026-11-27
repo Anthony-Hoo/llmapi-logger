@@ -145,7 +145,57 @@ SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
 
 先停止新服务并备份 PostgreSQL，再用 v0.6.0 与原 SQLite 备份及匹配密钥启动。PostgreSQL 切换后的新写入不会自动回灌 SQLite；有新流量时必须先决定如何保留这段审计数据，不能宣称无损直接回退。不要用旧版本打开新格式数据库，也不要删除旧备份来腾空间。
 
+### 回滚到 schema 版本 6
+
+迁移 007 为采集版本 2 加库表，schema 版本升到 7：`audit_records` 加 `capture_version`（默认 1）和 `user_agent_enc`，`http_stages` 加 `content_type`、`content_encoding`，新表 `http_header_blocks`，`runtime_settings` 的分区约束加上 `audit_capture`（[模块 04 §3.9](../features/04-sqlite-storage-and-migrations.md#39-采集版本-2header-块postgresql-migration-007)）。它在代理启动时自动应用，不回填、不重写任何已有的行：新列的 CHECK 以 `NOT VALID` 添加，不扫描旧行。迁移对 `audit_records`、`http_stages` 和 `runtime_settings` 短暂持有 `ACCESS EXCLUSIVE`，受连接的 5 秒 `lock_timeout` 约束；本机 30 万条 audit 上约 10 毫秒，与表大小无关。启动时恰好有会话在读这几张表（例如 `pg_dump`）而超过 5 秒时，迁移整体回滚，代理以审计存储不可用的状态运行，等那个会话结束后重启即可。
+
+迁移本身不改变写入：`audit.write_path` 为 `legacy`（默认）时，新写入仍是版本 1。只有切到 `unified` 之后，PostgreSQL 上的新 audit 才按版本 2 写：Header 存成每条 audit 一个密封块，User-Agent 和 parser 用的内容头存在新列里，`capture_finalized` 事件的摘要按版本 2 计算。
+
+**一旦有了版本 2 的行，就没有只用 SQL 就能让旧版本保持健康的回滚办法：**
+
+- 旧版本按版本 1 重算这些行的摘要，结果不等，载荷校验失败并一直保持失败；
+- 版本 2 的行没有 `http_headers` 行，旧版本的详情、列表 User-Agent 和 parser 都读不到它们的 Header；
+- 直接删除这些 audit 会被 `turns.parent_turn_id` 的 `ON DELETE RESTRICT` 挡住。
+
+所以按“先扩展、后启用”的顺序发布：
+
+1. 先发带迁移 007 和版本 2 读取能力的版本，`audit.write_path` 保持默认的 `legacy`。这一步可以按本节回滚。
+2. 确认运行正常后，再把 `audit.write_path` 切到 `unified`。从这一刻起，回滚到不含迁移 007 的版本就只能靠迁移前的备份，并放弃之后的审计数据。
+3. 想退回旧的写法时，把 `audit.write_path` 改回 `legacy` 重启即可：新写入回到版本 1，已经写入的版本 2 行照常可读、可校验，不需要回滚 schema。
+
+旧版本打开版本 7 的库时会因 schema 版本过新（`schema is newer than supported`）而无法使用审计存储，表现与下面两节相同。旧版本的配置加载拒绝不认识的键，配置文件里有 `audit:` 段时会直接拒绝启动，回滚前要先删掉这一段。回滚到不含迁移 007 的版本：
+
+1. 停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+2. 执行下面的 SQL。它先检查有没有版本 2 的 audit 或 Header 块，有就报错、什么都不改；否则删除 `audit_capture` 设置、恢复分区约束，删掉新表和新列，并删除 `schema_migrations` 里版本为 7 的行。代理使用独立 schema 时先 `SET search_path = <schema>;`。
+3. 删掉配置文件里的 `audit:` 段，再启动旧版本。之后重新升级时，迁移 007 会再次加上这些列和表。
+
+~~~sql
+-- 仅在回滚到不含迁移 007 的版本时执行，并且先停止新版本、做好备份
+BEGIN;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM audit_records WHERE capture_version <> 1)
+       OR EXISTS (SELECT 1 FROM http_header_blocks) THEN
+        RAISE EXCEPTION 'capture version 2 audits exist; schema version 7 cannot be rolled back with SQL';
+    END IF;
+END
+$$;
+DELETE FROM runtime_settings WHERE section = 'audit_capture';
+ALTER TABLE runtime_settings DROP CONSTRAINT runtime_settings_section_check;
+ALTER TABLE runtime_settings ADD CONSTRAINT runtime_settings_section_check
+    CHECK (section IN ('session_analysis', 'org_reports'));
+DROP TABLE http_header_blocks;
+ALTER TABLE http_stages DROP COLUMN content_type, DROP COLUMN content_encoding;
+ALTER TABLE audit_records DROP COLUMN user_agent_enc, DROP COLUMN capture_version;
+DELETE FROM schema_migrations WHERE version = 7;
+COMMIT;
+~~~
+
+第一条检查扫一遍 `audit_records`；删列只改目录，不重写表。保存过的 `audit_capture` 设置（`CommitAudit` 的重试次数）随之丢失，旧版本没有这个设置。要回到更早的版本时，先做这一步，再按下一节撤销迁移 006。
+
 ### 回滚到 schema 版本 5
+
+库已经是版本 7 时，先按[回滚到 schema 版本 6](#回滚到-schema-版本-6)撤销迁移 007，再做本节。
 
 迁移 006 给 `turns` 加索引 `turns_created_idx`（`turns(created_at_ns, turn_id)`），schema 版本升到 6。没有会话 key 的轮次找父轮次候选时用它，原来要顺序扫描全部轮次（[设计附录 C.6](../design/issue-59-unified-write-cold-archive.md#c6-图查询在规模上的表现以及现有删除路径)）。它在代理启动时自动应用，不改任何数据，也不需要配置改动。
 
@@ -182,7 +232,7 @@ COMMIT;
 
 ### 回滚到 schema 版本 4
 
-库已经是版本 6 时，先按[回滚到 schema 版本 5](#回滚到-schema-版本-5)撤销迁移 006，再做本节。
+库已经是版本 6 或 7 时，先按[回滚到 schema 版本 6](#回滚到-schema-版本-6)和[回滚到 schema 版本 5](#回滚到-schema-版本-5)依次撤销迁移 007 和 006，再做本节。
 
 迁移 005 删除了没有任何查询使用的索引 `content_objects_semantic_idx`，schema 版本升到 5。它在代理启动时自动应用，不改任何数据，也不需要配置改动。删除索引要短暂独占 `content_objects`，受连接的 5 秒 `lock_timeout` 约束：启动时恰好有 `pg_dump` 之类的会话在读这张表，迁移会失败并整体回滚，代理以审计存储不可用的状态运行（日志 `audit storage unavailable`，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），等那个会话结束后重启即可。
 

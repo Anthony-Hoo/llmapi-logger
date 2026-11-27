@@ -63,7 +63,7 @@ func requireTurnsCreatedIndex(t *testing.T, db rowQueryer, present bool) {
 
 func TestFreshStoreEndsAtVersionSixWithTurnsCreatedIndex(t *testing.T) {
 	store, _ := openTestStore(t)
-	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6)
+	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6, 7)
 	requireTurnsCreatedIndex(t, store.readerDB, true)
 }
 
@@ -79,10 +79,12 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	}
 	defer admin.Close()
 
-	// The documented rollback leaves exactly the version 5 state, which a
-	// binary that understands version 5 accepts.
-	if _, err := admin.ExecContext(ctx, rollbackToSchemaFiveSQL); err != nil {
-		t.Fatalf("documented rollback SQL: %v", err)
+	// The documented rollbacks, 007 and then 006, leave exactly the version 5
+	// state, which a binary that understands version 5 accepts.
+	for _, rollback := range []string{rollbackToSchemaSixSQL, rollbackToSchemaFiveSQL} {
+		if _, err := admin.ExecContext(ctx, rollback); err != nil {
+			t.Fatalf("documented rollback SQL: %v", err)
+		}
 	}
 	versions := appliedSchemaVersions(t, admin)
 	requireVersions(t, versions, 1, 2, 3, 4, 5)
@@ -98,7 +100,7 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	if err := upgraded.Close(); err != nil {
 		t.Fatal(err)
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7)
 	requireTurnsCreatedIndex(t, admin, true)
 
 	// A version 5 database on which an operator built the index beforehand,
@@ -106,8 +108,10 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	// builds it CONCURRENTLY; that leaves the same catalog entry, but here it
 	// waits on every transaction in the shared test database and fails when a
 	// parallel test drops its schema meanwhile, so the test builds it plainly.
-	if _, err := admin.ExecContext(ctx, rollbackToSchemaFiveSQL); err != nil {
-		t.Fatal(err)
+	for _, rollback := range []string{rollbackToSchemaSixSQL, rollbackToSchemaFiveSQL} {
+		if _, err := admin.ExecContext(ctx, rollback); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := admin.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS turns_created_idx ON turns(created_at_ns, turn_id)`); err != nil {
 		t.Fatal(err)
@@ -119,7 +123,7 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	if err := upgraded.Close(); err != nil {
 		t.Fatal(err)
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7)
 	requireTurnsCreatedIndex(t, admin, true)
 }
 
@@ -152,7 +156,7 @@ func TestMigrationSixIsIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7)
 	requireTurnsCreatedIndex(t, admin, true)
 }
 
