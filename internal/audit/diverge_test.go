@@ -48,6 +48,13 @@ type divergeDrive struct {
 
 func runDiverge(t *testing.T, writePath string, drive divergeDrive) (storage.AuditFinish, sqlite.Snapshot) {
 	t.Helper()
+	return runDivergeWith(t, Options{WritePath: writePath}, drive)
+}
+
+// runDivergeWith is runDiverge with the manager's options, the clock and the
+// id source excepted.
+func runDivergeWith(t *testing.T, options Options, drive divergeDrive) (storage.AuditFinish, sqlite.Snapshot) {
+	t.Helper()
 	ctx := context.Background()
 	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
@@ -59,11 +66,9 @@ func runDiverge(t *testing.T, writePath string, drive divergeDrive) (storage.Aud
 		t.Fatal(err)
 	}
 	clock := int64(1_700_000_000_000_000_000)
-	manager, err := NewManagerWithOptions(store, cipher, nil, ModeAvailable, nil, Options{
-		WritePath: writePath,
-		Now:       func() time.Time { clock++; return time.Unix(0, clock) },
-		Random:    rand.NewChaCha8([32]byte{1}),
-	})
+	options.Now = func() time.Time { clock++; return time.Unix(0, clock) }
+	options.Random = rand.NewChaCha8([32]byte{1})
+	manager, err := NewManagerWithOptions(store, cipher, nil, ModeAvailable, nil, options)
 	if err != nil {
 		t.Fatal(err)
 	}

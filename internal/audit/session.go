@@ -50,6 +50,9 @@ type stageCapture struct {
 	// merged: a checkpoint wrote this duplicate's body row pointing at its
 	// source, without chunks of its own.
 	merged bool
+	// spillWritten: the checkpoint of the stage's first spill to staging was
+	// accepted (design F.3).
+	spillWritten bool
 	// Capture version 2: the Header fields snapshotted at stage start and the
 	// Trailer fields when they arrived (hasTrailers).
 	headerFields  []headerblock.Field
@@ -128,6 +131,9 @@ type Session struct {
 	// carried (capture version 2); blockWritten is false before the first.
 	writtenBlock blockShape
 	blockWritten bool
+	// stagedChunks: some chunk of this session went to the stager, whose file
+	// the session releases after the commit.
+	stagedChunks bool
 }
 
 func newSession(manager *Manager, requestContext context.Context, auditID, routeID string, started time.Time) *Session {

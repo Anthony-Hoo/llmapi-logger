@@ -151,7 +151,7 @@ func (session *Session) attachUnifiedBodyLocked(stage *stageCapture, body *bodyC
 		if source := session.stages[sourceName]; source != nil && source.body != nil && source.body.unified != nil {
 			body.unified.source = source.body
 			body.unified.borrowing = true
-			source.body.unified.borrowed = true
+			source.body.unified.duplicate = body
 		}
 	}
 	if stage.name == storage.StageRequestReceived && session.inboundNotStored {
@@ -174,7 +174,7 @@ func (session *Session) readBodyEnded(stageName string) {
 	}
 	session.requestSentEnded = true
 	if session.forwardInProgressLocked() {
-		session.checkpointLocked()
+		session.checkpointLocked(nil)
 	}
 }
 
@@ -187,7 +187,7 @@ func (session *Session) responseSentStarted() {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if session.stages[storage.StageResponseReceived] != nil && session.forwardInProgressLocked() {
-		session.checkpointLocked()
+		session.checkpointLocked(nil)
 	}
 }
 
@@ -196,13 +196,31 @@ func (session *Session) forwardInProgressLocked() bool {
 		(session.request == nil || session.request.Err() == nil)
 }
 
+// spillCheckpointLocked is the checkpoint of a stage's first spill to staging
+// (design F.3): it writes the stage rows and headers written so far and the
+// body row of the spilling stage, so that the staged chunks have the rows
+// they belong to when the process stops before checkpoint 1 or the commit.
+// It writes no chunks and no other body row, so the request pair can still
+// be merged at checkpoint 1. When it cannot be enqueued, the next spill of
+// the stage tries again.
+func (session *Session) spillCheckpointLocked(stage *stageCapture) {
+	if session.committing {
+		return
+	}
+	if session.checkpointLocked(stage) {
+		stage.spillWritten = true
+	}
+}
+
 // checkpointLocked enqueues everything new since the previous write: stage
 // rows, header groups, request body rows and sealed request chunks. Response
-// bodies are left to the commit.
-func (session *Session) checkpointLocked() {
+// bodies are left to the commit. With spill set it is the spill checkpoint
+// of that stage instead: rows only, and of the bodies only the spilling
+// stage's. It reports whether the content was accepted or there was none.
+func (session *Session) checkpointLocked(spill *stageCapture) bool {
 	checkpoint := storage.AuditCheckpoint{AuditID: session.auditID, CaptureVersion: session.manager.captureVersion}
 	versionTwo := session.headerBlockLocked()
-	var chunks storage.ChunkList
+	var chunks chunkSet
 	var newStages, chunkStages, blockStages []*stageCapture
 	var newBodies []*stageCapture
 	merges := map[*stageCapture]bool{}
@@ -225,6 +243,15 @@ func (session *Session) checkpointLocked() {
 			if !group.written {
 				checkpoint.Headers = append(checkpoint.Headers, group.rows...)
 			}
+		}
+		if spill != nil {
+			if stage == spill && stage.body != nil && !stage.bodyRowWritten {
+				checkpoint.Bodies = append(checkpoint.Bodies, storage.BodyStream{AuditID: session.auditID, Stage: name, SourceStage: name,
+					State: storage.StageStateStreaming, RetentionState: storage.RetentionPending})
+				newBodies = append(newBodies, stage)
+				merges[stage] = false
+			}
+			continue
 		}
 		if name != storage.StageRequestReceived && name != storage.StageRequestSent || stage.body == nil {
 			continue
@@ -257,21 +284,19 @@ func (session *Session) checkpointLocked() {
 		block, blockShape, err := session.blockForLocked(blockStages)
 		if err != nil {
 			session.logCheckpointDeferred(err)
-			return
+			return false
 		}
 		checkpoint.HeaderBlock, shape = block, blockShape
 	}
 	if len(checkpoint.Stages) == 0 && len(checkpoint.Headers) == 0 && len(checkpoint.Bodies) == 0 && len(chunks) == 0 && checkpoint.HeaderBlock == nil {
-		return
+		return true
 	}
-	if len(chunks) != 0 {
-		checkpoint.Chunks = chunks
-	}
+	checkpoint.Chunks = chunks.source()
 	if err := session.store.Checkpoint(session.writeCtx, checkpoint); err != nil {
 		// Nothing is lost: the content is still in memory and goes with the
 		// next write. Sealed chunks are sealed again then.
 		session.logCheckpointDeferred(err)
-		return
+		return false
 	}
 	for _, stage := range newStages {
 		stage.rowWritten = true
@@ -291,6 +316,7 @@ func (session *Session) checkpointLocked() {
 	for _, stage := range chunkStages {
 		markSealedWritten(stage)
 	}
+	return true
 }
 
 func (session *Session) logCheckpointDeferred(err error) {

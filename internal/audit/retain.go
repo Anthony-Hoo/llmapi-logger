@@ -1,6 +1,9 @@
 package audit
 
-import "llmapi-logger/internal/storage"
+import (
+	"llmapi-logger/internal/audit/staging"
+	"llmapi-logger/internal/storage"
+)
 
 // Body capture has two layers (design H.1). The observation layer, shared by
 // both write paths, is observeBodyLocked and its callers: hash, length,
@@ -39,7 +42,9 @@ func (session *Session) retention() bodyRetainer {
 // unifiedRetainer keeps body plaintext in memory until a checkpoint or the
 // commit writes it (design B.5, F.2). Chunk boundaries follow the legacy
 // rule: a chunk closes when it holds bodyChunkSize bytes or when the body
-// ends (force), so the chunk rows are the ones legacy writes.
+// ends (force), so the chunk rows are the ones legacy writes. Plaintext the
+// budgets cannot hold is sealed and handed to the stager (F.3); only under
+// global budget pressure is a chunk closed early, shorter than 1 MiB.
 type unifiedRetainer struct{}
 
 // heldChunk is one chunk of a stage's own chunk grid. data holds the bytes
@@ -52,8 +57,9 @@ type heldChunk struct {
 	data    []byte
 	closed  bool
 	written bool
-	// staged is the sealed chunk a ChunkStager took; data is then released.
-	staged *storage.BodyChunk
+	// staged is the index entry of the sealed chunk the stager took; data is
+	// then released.
+	staged *staging.Ref
 }
 
 // unifiedBody is the retention state of one stage body on the unified path.
@@ -63,14 +69,39 @@ type unifiedBody struct {
 	// retained is the length of the retained prefix, borrowed bytes included.
 	retained int64
 	// source is the stage this duplicate compares with and borrows from;
-	// borrowing is true while every byte so far equals the source's.
+	// borrowing is true while every byte so far equals the source's, and
+	// borrowEnd is where it stopped.
 	source    *bodyCapture
 	borrowing bool
-	// borrowed marks a source a duplicate borrows from: its plaintext must
-	// stay in memory until Finish.
-	borrowed  bool
+	borrowEnd int64
+	// duplicate is the stage that borrows from this source.
+	duplicate *bodyCapture
 	ownBytes  int64
 	exhausted bool
+}
+
+// borrowedPrefix is the length of the prefix this duplicate takes from its
+// source.
+func (held *unifiedBody) borrowedPrefix() int64 {
+	if held.borrowing {
+		return held.retained
+	}
+	return held.borrowEnd
+}
+
+// duplicateUse says what the duplicate of this source still needs from one
+// chunk: pending, the duplicate has not compared the chunk's bytes yet;
+// needed, the chunk overlaps the prefix the duplicate borrows, so its
+// plaintext must stay in memory or be staged, never dropped (B.5).
+func (held *unifiedBody) duplicateUse(chunk *heldChunk) (pending, needed bool) {
+	if held.duplicate == nil || held.duplicate.unified == nil {
+		return false, false
+	}
+	duplicate := held.duplicate.unified
+	if duplicate.borrowing && !duplicate.exhausted && !held.duplicate.closed {
+		return chunk.offset+chunk.length > duplicate.retained, true
+	}
+	return false, chunk.offset < duplicate.borrowedPrefix()
 }
 
 func (unifiedRetainer) retain(session *Session, stage *stageCapture, body *bodyCapture, data []byte, observedAtNS int64) {
@@ -85,12 +116,13 @@ func (unifiedRetainer) retain(session *Session, stage *stageCapture, body *bodyC
 	if held.borrowing {
 		same := held.source.unified.matching(position, data)
 		session.appendRetainedLocked(stage, body, data[:same], observedAtNS, false)
-		if same == len(data) {
+		if same == len(data) || held.exhausted {
 			return
 		}
 		// The first byte that cannot be compared with the source starts the
 		// bytes this stage owns; the prefix stays borrowed.
 		held.borrowing = false
+		held.borrowEnd = position + int64(same)
 		data = data[same:]
 	}
 	session.appendRetainedLocked(stage, body, data, observedAtNS, true)
@@ -104,12 +136,14 @@ func (unifiedRetainer) flush(session *Session, stage *stageCapture, body *bodyCa
 	if held.open.length == bodyChunkSize || force && held.open.length > 0 {
 		held.closeOpen(body)
 	} else if force {
+		held.chunks = held.chunks[:len(held.chunks)-1]
 		held.open = nil
 	}
 }
 
 // matching returns how many leading bytes of data equal this body's retained
-// bytes at position.
+// bytes at position. Staged bytes are not compared: a source stages a chunk
+// only after its duplicate compared it.
 func (held *unifiedBody) matching(position int64, data []byte) int {
 	if held == nil {
 		return 0
@@ -146,7 +180,8 @@ func (held *unifiedBody) matching(position int64, data []byte) int {
 	return compared
 }
 
-// read appends the retained bytes [from, to) of a body that owns them.
+// read appends the retained bytes [from, to) of a body that owns them. Bytes
+// that were staged are read back from the stager and opened.
 func (held *unifiedBody) read(destination []byte, from, to int64) ([]byte, bool) {
 	for _, chunk := range held.chunks {
 		if from >= to {
@@ -156,11 +191,21 @@ func (held *unifiedBody) read(destination []byte, from, to int64) ([]byte, bool)
 		if end <= from || chunk.offset >= to {
 			continue
 		}
+		upto := min(end, to)
+		if chunk.staged != nil {
+			plaintext, err := chunk.staged.Plaintext()
+			if err != nil || int64(len(plaintext)) != chunk.length {
+				return destination, false
+			}
+			destination = append(destination, plaintext[from-chunk.offset:upto-chunk.offset]...)
+			clear(plaintext)
+			from = upto
+			continue
+		}
 		ownStart := end - int64(len(chunk.data))
-		if chunk.staged != nil || from < ownStart {
+		if from < ownStart {
 			return destination, false
 		}
-		upto := min(end, to)
 		destination = append(destination, chunk.data[from-ownStart:upto-ownStart]...)
 		from = upto
 	}
@@ -180,18 +225,27 @@ func (held *unifiedBody) closeOpen(body *bodyCapture) {
 func (session *Session) appendRetainedLocked(stage *stageCapture, body *bodyCapture, data []byte, observedAtNS int64, own bool) {
 	held := body.unified
 	for len(data) > 0 && !held.exhausted {
+		room := int64(bodyChunkSize)
+		if held.open != nil {
+			room -= held.open.length
+		}
+		count := int(min(int64(len(data)), room))
+		if own {
+			// Reserving may stage chunks of this stage, and may close the
+			// open chunk early, so the open chunk is taken afterwards.
+			reserved, failure := session.reserveRetainedLocked(stage, body, count)
+			if reserved == 0 {
+				session.exhaustRetentionLocked(stage, body, failure)
+				return
+			}
+			count = reserved
+		}
 		if held.open == nil {
 			held.open = &heldChunk{offset: held.retained, at: observedAtNS}
 			held.chunks = append(held.chunks, held.open)
 		}
 		chunk := held.open
-		count := int(min(int64(len(data)), bodyChunkSize-chunk.length))
 		if own {
-			count = session.reserveRetainedLocked(stage, body, count)
-			if count == 0 {
-				session.exhaustRetentionLocked(stage, body)
-				return
-			}
 			if needed := len(chunk.data) + count; needed > cap(chunk.data) {
 				next := make([]byte, len(chunk.data), min(bodyChunkSize, max(needed, 2*cap(chunk.data))))
 				copy(next, chunk.data)
@@ -209,68 +263,107 @@ func (session *Session) appendRetainedLocked(stage *stageCapture, body *bodyCapt
 }
 
 // reserveRetainedLocked returns how many of count bytes the budgets admit,
-// handing chunks to the stager when the global budget is full.
-func (session *Session) reserveRetainedLocked(stage *stageCapture, body *bodyCapture, count int) int {
+// staging chunks of this stage while the stage or the global budget is
+// full. When nothing is admitted it also returns the error code of the
+// stage's exhaustion.
+//
+// A source whose duplicate has not yet compared its oldest bytes cannot stage
+// them; the duplicate lags by at most one read (B.5), so the bytes of that
+// read are admitted over the budgets instead of ending retention.
+func (session *Session) reserveRetainedLocked(stage *stageCapture, body *bodyCapture, count int) (int, string) {
 	held := body.unified
 	manager := session.manager
 	wanted := int64(count)
-	for min(wanted, manager.stageBytes-held.ownBytes) <= 0 {
-		if !session.stageOneChunkLocked(stage, body) {
-			return 0
+	overshoot := false
+	for !overshoot && min(wanted, manager.stageBytes-held.ownBytes) <= 0 {
+		failure, pending := session.stageOneChunkLocked(stage, body)
+		switch {
+		case pending:
+			overshoot = true
+		case failure != "":
+			return 0, failure
 		}
 	}
-	count = int(min(wanted, manager.stageBytes-held.ownBytes))
+	if !overshoot {
+		count = int(min(wanted, manager.stageBytes-held.ownBytes))
+	}
 	for !manager.budget.reserve(int64(count)) {
-		if !session.stageOneChunkLocked(stage, body) {
-			return 0
+		failure, pending := session.stageOneChunkLocked(stage, body)
+		if pending {
+			queueBudget{budget: manager.budget}.Add(int64(count))
+			break
+		}
+		if failure != "" {
+			return 0, failure
 		}
 	}
 	held.ownBytes += int64(count)
 	session.memoryHeld += int64(count)
-	return count
+	return count, ""
 }
 
-// stageOneChunkLocked hands the oldest closed chunk the stage owns in full to
-// the stager and releases its plaintext. A source a duplicate borrows from
-// keeps its plaintext. It reports whether memory was released.
-func (session *Session) stageOneChunkLocked(stage *stageCapture, body *bodyCapture) bool {
+// stageOneChunkLocked releases memory of one stage: the plaintext of a chunk
+// a checkpoint already wrote, which is only a cache unless the stage's
+// duplicate borrows it; otherwise, in seq order, the first chunk not yet
+// staged is sealed and handed to the stager. The open chunk is closed early
+// when it is all there is (F.2). Staging follows seq order so that what a
+// file holds for a stage continues what the database holds. It returns the
+// error code that ends retention when nothing could be released, or "";
+// pending reports that the next chunk to stage waits for the duplicate.
+func (session *Session) stageOneChunkLocked(stage *stageCapture, body *bodyCapture) (failure string, pending bool) {
 	held := body.unified
-	if held.borrowed {
-		return false
-	}
-	// A chunk a checkpoint already wrote needs no staging: its plaintext is
-	// only a cache once no duplicate borrows from it.
 	for _, chunk := range held.chunks {
-		if chunk.closed && chunk.written && len(chunk.data) > 0 {
-			session.releaseHeldLocked(held, chunk)
-			return true
+		if chunk.closed && chunk.written && chunk.staged == nil && len(chunk.data) > 0 {
+			if _, needed := held.duplicateUse(chunk); !needed {
+				session.releaseHeldLocked(held, chunk)
+				return "", false
+			}
 		}
 	}
-	for _, chunk := range held.chunks {
-		if !chunk.closed || chunk.staged != nil || chunk.written || int64(len(chunk.data)) != chunk.length {
+	for index := 0; index < len(held.chunks); index++ {
+		chunk := held.chunks[index]
+		if chunk.staged != nil || chunk.written && len(chunk.data) == 0 {
 			continue
 		}
-		sealed, failure := session.sealChunkLocked(stage, int64(chunkIndex(held, chunk)), chunk.offset, chunk.data, chunk.at)
+		if waiting, _ := held.duplicateUse(chunk); waiting {
+			return "", true
+		}
+		if !chunk.closed {
+			if chunk != held.open || chunk.length == 0 {
+				return "capture_budget_exhausted", false
+			}
+			held.closeOpen(body)
+		}
+		plaintext, ok := chunkPlaintext(body, chunk)
+		if !ok {
+			return "capture_budget_exhausted", false
+		}
+		sealed, failure := session.sealChunkLocked(stage, int64(index), chunk.offset, plaintext, chunk.at)
+		if int64(len(chunk.data)) != chunk.length {
+			// A copy that includes borrowed bytes.
+			clear(plaintext)
+		}
 		if failure != "" {
-			return false
+			return failure, false
 		}
-		if err := session.manager.stager.StageChunk(sealed); err != nil {
-			return false
+		ref, err := session.manager.stager.Stage(sealed)
+		if err != nil {
+			return stagingFailureCode(err), false
 		}
-		chunk.staged = &sealed
-		session.releaseHeldLocked(held, chunk)
-		return true
+		chunk.staged = ref
+		session.stagedChunks = true
+		freed := len(chunk.data) > 0
+		if freed {
+			session.releaseHeldLocked(held, chunk)
+		}
+		if !stage.spillWritten {
+			session.spillCheckpointLocked(stage)
+		}
+		if freed {
+			return "", false
+		}
 	}
-	return false
-}
-
-func chunkIndex(held *unifiedBody, target *heldChunk) int {
-	for index, chunk := range held.chunks {
-		if chunk == target {
-			return index
-		}
-	}
-	return -1
+	return "capture_budget_exhausted", false
 }
 
 func (session *Session) releaseHeldLocked(held *unifiedBody, chunk *heldChunk) {
@@ -284,8 +377,9 @@ func (session *Session) releaseHeldLocked(held *unifiedBody, chunk *heldChunk) {
 
 // exhaustRetentionLocked is design F.6: the stage keeps observing but stops
 // retaining; what it holds is still written, the body is partial and raw is
-// kept in full.
-func (session *Session) exhaustRetentionLocked(stage *stageCapture, body *bodyCapture) {
+// kept in full. errorCode is capture_budget_exhausted, or
+// staging_write_failed when the staging file could not be written.
+func (session *Session) exhaustRetentionLocked(stage *stageCapture, body *bodyCapture, errorCode string) {
 	held := body.unified
 	held.exhausted = true
 	if held.open != nil {
@@ -296,8 +390,11 @@ func (session *Session) exhaustRetentionLocked(stage *stageCapture, body *bodyCa
 			held.open = nil
 		}
 	}
+	if errorCode == "" {
+		errorCode = "capture_budget_exhausted"
+	}
 	body.faulted = true
-	body.errorCode = "capture_budget_exhausted"
+	body.errorCode = errorCode
 	session.markStageFaultLocked(stage, body.errorCode)
 	session.recordGapReasonLocked(storage.GapReasonQueueFull)
 }
@@ -322,22 +419,23 @@ func chunkPlaintext(body *bodyCapture, chunk *heldChunk) ([]byte, bool) {
 }
 
 // sealUnwrittenLocked seals the closed chunks of a stage no write has taken
-// yet. A chunk that cannot be sealed is lost, like a legacy chunk whose
-// flush failed: the body is faulted and the chunk leaves the stored length.
-// The returned slice is handed to the store, which may keep it.
-func (session *Session) sealUnwrittenLocked(stage *stageCapture) []storage.BodyChunk {
+// yet; a staged chunk is taken by its index entry. A chunk that cannot be
+// sealed is lost, like a legacy chunk whose flush failed: the body is faulted
+// and the chunk leaves the stored length. The returned chunks are handed to
+// the store, which may keep them.
+func (session *Session) sealUnwrittenLocked(stage *stageCapture) chunkSet {
 	body := stage.body
 	if body == nil || body.unified == nil {
 		return nil
 	}
 	held := body.unified
-	var sealed []storage.BodyChunk
+	var sealed chunkSet
 	for index, chunk := range held.chunks {
 		if !chunk.closed || chunk.written {
 			continue
 		}
 		if chunk.staged != nil {
-			sealed = append(sealed, *chunk.staged)
+			sealed = append(sealed, chunkItem{ref: chunk.staged})
 			continue
 		}
 		failure := "body_encryption_failed"
@@ -346,7 +444,7 @@ func (session *Session) sealUnwrittenLocked(stage *stageCapture) []storage.BodyC
 			var value storage.BodyChunk
 			value, failure = session.sealChunkLocked(stage, int64(index), chunk.offset, plaintext, chunk.at)
 			if failure == "" {
-				sealed = append(sealed, value)
+				sealed = append(sealed, chunkItem{chunk: value})
 				continue
 			}
 		}
@@ -373,7 +471,8 @@ func markSealedWritten(stage *stageCapture) {
 	}
 }
 
-// releaseRetainedLocked drops every plaintext the session holds.
+// releaseRetainedLocked drops every plaintext the session holds and its
+// index of staged chunks.
 func (session *Session) releaseRetainedLocked() {
 	for _, stage := range session.stages {
 		if stage.body == nil || stage.body.unified == nil {

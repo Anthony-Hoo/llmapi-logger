@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync/atomic"
 
+	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/storage"
 )
 
@@ -53,19 +54,53 @@ func (budget *memoryBudget) Used() int64 {
 	return budget.used.Load()
 }
 
+// queueBudget is the memory budget as the staging write queue sees it: the
+// ciphertext waiting to be written counts, and is added without a limit
+// check because it replaces plaintext that was just released (design F.2,
+// F.5), so global_bytes is a soft limit.
+type queueBudget struct{ budget *memoryBudget }
+
+func (queue queueBudget) Add(size int64) {
+	if queue.budget != nil && size > 0 {
+		queue.budget.used.Add(size)
+	}
+}
+
+func (queue queueBudget) Release(size int64) { queue.budget.release(size) }
+
 // ErrStagingUnavailable is what a ChunkStager returns when it cannot take a
 // chunk; the stage then stops retaining content (design F.6).
 var ErrStagingUnavailable = errors.New("audit: body staging unavailable")
 
-// ChunkStager is the seam where local staging plugs into the unified write
-// path (design F.3 to F.5). The retainer hands it a sealed chunk whose
-// plaintext the memory budget cannot hold; on success the stager owns the
-// chunk and must yield it again through the commit's chunk source. Without a
-// stager every such chunk is refused with ErrStagingUnavailable.
+// ChunkStager is where local staging plugs into the unified write path
+// (design F.3 to F.5); *staging.Stager implements it. The retainer hands it a
+// sealed chunk whose plaintext the memory budget cannot hold and keeps only
+// the returned index entry, through which a checkpoint or the commit reads
+// the chunk again. After the commit the session calls Discard when it was
+// acknowledged, or Keep when it was not, so that the next start imports what
+// is staged. Without a stager every chunk is refused with
+// ErrStagingUnavailable.
 type ChunkStager interface {
-	StageChunk(chunk storage.BodyChunk) error
+	Stage(chunk storage.BodyChunk) (*staging.Ref, error)
+	Discard(auditID string)
+	Keep(auditID string)
 }
 
 type unavailableStager struct{}
 
-func (unavailableStager) StageChunk(storage.BodyChunk) error { return ErrStagingUnavailable }
+func (unavailableStager) Stage(storage.BodyChunk) (*staging.Ref, error) {
+	return nil, ErrStagingUnavailable
+}
+func (unavailableStager) Discard(string) {}
+func (unavailableStager) Keep(string)    {}
+
+// stagingFailureCode is the stable error code of a stage that stopped
+// retaining because staging refused a chunk (F.6): a write error of the
+// staging file is staging_write_failed; a full directory, a full disk or no
+// staging at all is capture_budget_exhausted.
+func stagingFailureCode(err error) string {
+	if errors.Is(err, staging.ErrWriteFailed) {
+		return "staging_write_failed"
+	}
+	return "capture_budget_exhausted"
+}

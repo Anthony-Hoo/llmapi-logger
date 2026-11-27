@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/parser/handover"
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/routing"
@@ -92,8 +93,9 @@ type Options struct {
 	// memory per stage and for the whole process. Zero means the default.
 	StageBytes  int64
 	GlobalBytes int64
-	// Stager takes sealed chunks the memory budget cannot hold. Nil means no
-	// staging: content beyond the budget is not retained.
+	// Stager takes sealed chunks the memory budget cannot hold
+	// (*staging.Stager). Nil means no staging: content beyond the budget is
+	// not retained (design F.6).
 	Stager ChunkStager
 	// Now and Random replace the clock and the audit id source, for
 	// deterministic tests and tools. Nil means time.Now and crypto/rand.
@@ -199,6 +201,9 @@ func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *se
 	}
 	if manager.stager == nil {
 		manager.stager = unavailableStager{}
+	} else if queue, ok := manager.stager.(interface{ SetBudget(staging.Budget) }); ok {
+		// The staging write queue counts against the same budget (F.5).
+		queue.SetBudget(queueBudget{budget: manager.budget})
 	}
 	if options.Now != nil {
 		manager.now = options.Now

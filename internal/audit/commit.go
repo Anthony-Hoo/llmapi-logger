@@ -39,7 +39,7 @@ func (session *Session) finishUnified() error {
 	// Every body ends here. The chunks of the stages that are nobody's
 	// duplicate are needed whatever the pair decision, so they are sealed
 	// before the stage states are fixed and a sealing failure shows in them.
-	var chunks storage.ChunkList
+	var chunks chunkSet
 	for _, name := range stageNames {
 		stage := session.stages[name]
 		if stage.body != nil {
@@ -142,12 +142,8 @@ func (session *Session) finishUnified() error {
 		}
 		commit.Stages = append(commit.Stages, stageCommit)
 	}
-	if len(chunks) != 0 {
-		commit.Chunks = chunks
-		for _, chunk := range chunks {
-			commit.PayloadBytes += int64(len(chunk.DataEnc))
-		}
-	}
+	commit.Chunks = chunks.source()
+	commit.PayloadBytes += chunks.payloadBytes()
 	// Version 2: the complete block, nil when the last checkpoint wrote the
 	// same one (C.8). A block that cannot be sealed fails the commit before it
 	// is sent; startup recovery then finalizes the audit with the block the
@@ -187,7 +183,9 @@ func (session *Session) finishUnified() error {
 			return storage.AuditFinish{}, fmt.Errorf("seal header block: %w", blockErr)
 		}
 	}
-	if persisted, err := commitWithRetries(commit); err != nil {
+	persisted, commitErr := commitWithRetries(commit)
+	session.releaseStaged(commitErr == nil)
+	if err := commitErr; err != nil {
 		writeErrors = append(writeErrors, fmt.Errorf("commit audit: %w", err))
 		captureStatus = storage.CapturePartial
 		if errorCode == nil {
@@ -228,6 +226,25 @@ func (session *Session) finishUnified() error {
 	session.terminal = &terminal
 	session.mu.Unlock()
 	return errors.Join(writeErrors...)
+}
+
+// releaseStaged ends the session's use of its staging file once the commit
+// is decided: an acknowledged commit holds every staged chunk, so the file is
+// removed (F.5); otherwise it stays for the next start to import before the
+// audit is recovered. It is the one place a session releases staging.
+func (session *Session) releaseStaged(committed bool) {
+	session.mu.Lock()
+	staged := session.stagedChunks
+	session.stagedChunks = false
+	session.mu.Unlock()
+	if !staged {
+		return
+	}
+	if committed {
+		session.manager.stager.Discard(session.auditID)
+	} else {
+		session.manager.stager.Keep(session.auditID)
+	}
 }
 
 // commitWithRetries sends the commit and retries a queue-full rejection or a
