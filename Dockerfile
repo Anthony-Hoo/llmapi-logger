@@ -28,7 +28,7 @@ COPY --from=web-build /src/internal/web/dist/ ./internal/web/dist/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" -o /out/audit-proxy ./cmd/audit-proxy && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/audit-import ./cmd/audit-import && \
-    mkdir -p /out/rootfs/data /out/rootfs/etc/audit-proxy
+    mkdir -p /out/rootfs/data /out/rootfs/staging /out/rootfs/etc/audit-proxy
 
 
 # Agent access Skill packages (doc/features/25-agent-access-contract.md
@@ -47,6 +47,10 @@ COPY --from=go-build /out/audit-proxy /audit-proxy
 COPY --from=go-build /out/audit-import /audit-import
 COPY --from=agent-packages /out/agent-packages /agent-packages
 COPY --from=go-build --chown=65532:65532 /out/rootfs/data /data
+# audit.staging.dir: the start-up check refuses a directory open to group or
+# others, so it is created 0700 for the non-root user. A new named volume
+# mounted here copies this owner and mode.
+COPY --from=go-build --chown=65532:65532 --chmod=0700 /out/rootfs/staging /staging
 COPY --from=go-build --chown=65532:65532 /out/rootfs/etc/audit-proxy /etc/audit-proxy
 
 USER 65532:65532

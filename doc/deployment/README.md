@@ -71,7 +71,7 @@ bin/agent-packages/            # Agent 接入的 Skill 安装包（五个平台�
 - 只有 Nginx 的 `80` 对外发布。
 - 管理端只发布为 `127.0.0.1:8081`。
 - audit-proxy 数据端、PostgreSQL 和 NewAPI 只存在于 Compose 私有 bridge 网络，没有 host 端口；NewAPI 仍可访问外部模型供应商。
-- audit 数据、PostgreSQL 数据和 NewAPI 数据使用不同 volume。
+- audit 数据、本地暂存（3.2）、PostgreSQL 数据和 NewAPI 数据使用不同 volume。
 - PostgreSQL 显式设置了几项内存、检查点和自动清理参数，起点按约 8 GB 内存的单机定，未经实测；各项作用、覆盖变量和改后要看的指标见[数据库参数](postgresql-migration.md#数据库参数)。
 
 首次启动前编辑 `configs/audit-proxy.docker.yaml`，把示例 `admin_token` 替换为随机长 token，并限制文件权限。需要 NewAPI 调用者识别时同时填写 `newapi.access_token` 和正整数 `newapi.user_id`；两项都留空/0 时关闭该功能。正式使用时也应把 `compose.yaml` 中的 NewAPI 镜像固定到自己验证过的 tag 或 digest。
@@ -105,6 +105,31 @@ curl -H 'Authorization: Bearer REPLACE_ME' \
 ~~~
 
 `/healthz` 只表示进程存活。`/readyz` 返回 `healthy`、`degraded` 或 `not_ready`；available 模式下审计依赖不可用会降级但继续转发，strict 模式下会以 `503 not_ready` 拒绝新的白名单请求。
+
+### 3.2 本地暂存目录（`audit.staging`）
+
+`audit.write_path: unified` 把 Body 留在内存里，到请求结束才写库。单个阶段超过 `audit.memory.stage_bytes`（默认 8 MiB），或全进程预算 `global_bytes` 已满时，超出的部分先封成与 `body_chunks` 相同的密文块，写到 `audit.staging.dir` 下每条 audit 一个文件，提交时再读出写库，提交成功后删除文件。进程在提交前退出时，下次启动先把这些文件里的块导入数据库，再做中断恢复。
+
+暂存目录里只有密文和块的元数据（阶段、序号、偏移、长度、时间），没有密钥；但它与数据库一样是证据的一部分，备份和权限按审计数据对待。
+
+放在哪里：
+
+- 用单独的卷。`compose.yaml` 为此加了命名卷 `audit-staging:/staging`，Docker 配置写 `audit.staging.dir: /staging`；镜像里预建了 `/staging`，属主是运行用户 65532，权限 0700。
+- 卷要在与数据库同样可靠的盘上：文件按批 fsync，丢了它，超大 Body 在崩溃时的那部分证据也就没了。
+- 不能放在只读根文件系统上，进程写不进去。
+- 不能放在 `/tmp`：它是 64 MB 的 tmpfs，在内存里，容量不够，重启后清空，崩溃后导入不到任何东西。
+- 不能放在密钥所在的目录 `/data`，也不能包含它或位于其中：配置校验会拒绝。暂存的密文和打开它的密钥不应在同一个卷、同一份备份里。
+
+启动时检查目录：不存在就以 0700 创建；Linux 上要求属主是当前用户，权限不含组和其他用户；还要能在里面创建并删除一个探针文件。检查不通过时，available 模式退回 legacy 写入并告警，日志 `reason` 字段说明原因（`not_directory`、`wrong_owner`、`open_permissions`、`not_writable` 等）；strict 模式下审计不可用，准入回 503。
+
+`audit.staging.max_bytes`（默认 4 GiB）限制目录里全部文件的大小。写满、磁盘满或写文件出错时，该阶段停止保留后续字节，阶段记为 partial，错误码为 `capture_budget_exhausted`（写错误为 `staging_write_failed`），raw 全部保留，转发不受影响。
+
+导入时无法确认的文件不会被删：没有对应 audit、或缺 Body 行的改名为 `<audit_id>.orphan`；中间记录校验失败、文件头不是这条 audit、块与库里的接不上的改名为 `<audit_id>.corrupt`，导入其中校验通过的前半部分。这两类文件计入 `max_bytes`，确认无用后由运维手动清理。
+
+切回 legacy 时：
+
+- 保留 `audit.staging.dir` 的配置，直到目录里没有 `.stg` 文件为止。配置了目录，legacy 启动也会先导入；去掉配置，残留文件就再也不会导入。
+- 回滚到不认识 `audit.staging` 的旧版本前，先等目录变空，再删掉配置文件里的整个 `audit:` 段：旧版本按 `KnownFields` 加载配置，遇到未知字段会拒绝启动。
 
 ## 4. 显式上游代理（Podman/WSL/Clash）
 

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"llmapi-logger/internal/audit"
+	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/newapi"
@@ -37,6 +38,7 @@ type runtimeStore interface {
 	VerifyIntegrityPayloads(context.Context) error
 	IntegrityPayloadState() string
 	RecoverInterruptedAudits(context.Context, int64) (int, error)
+	staging.Restorer
 }
 type storeOpener func(context.Context, string, *slog.Logger) (runtimeStore, error)
 

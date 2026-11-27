@@ -100,15 +100,25 @@ session_analysis:
 # writes an audit in at most four operations: the start record, a checkpoint
 # when the request body ends, one when the response headers are forwarded,
 # and the final commit, which Finish waits for and retries up to
-# commit_retries times (0 to 5). Body content beyond the memory budget stops
-# being retained (the stage is marked partial); forwarding is never affected.
-# Like agent_access, add the section only to a version that knows it.
+# commit_retries times (0 to 5). Body content beyond the per-stage memory
+# budget (or when the process-wide budget is full) is sealed and written to
+# local staging, one encrypted file per audit, and read back by the commit.
+# unified requires staging.dir: an absolute path on a disk as reliable as the
+# database's, not tmpfs, and not the key's directory. When staging is full or
+# fails, the stage stops being retained (marked partial); forwarding is never
+# affected. Whenever staging.dir is set, the start imports files a previous
+# run left there, also on legacy: keep it set after switching back until the
+# directory is empty. Like agent_access, add the section only to a version
+# that knows it.
 # audit:
 #   write_path: legacy
 #   commit_retries: 3
 #   memory:
 #     stage_bytes: 8388608
 #     global_bytes: 268435456
+#   staging:
+#     dir: /var/lib/llmapi-logger/staging
+#     max_bytes: 4294967296
 
 interceptors:
   require-client-credential:

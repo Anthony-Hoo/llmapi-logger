@@ -14,10 +14,10 @@ import (
 // created 0600 in a 0700 directory.
 func checkDirectoryAccess(info os.FileInfo) error {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != os.Geteuid() {
-		return fmt.Errorf("staging: directory is owned by uid %d, not by the process (uid %d)", stat.Uid, os.Geteuid())
+		return &DirectoryError{Reason: "wrong_owner", Err: fmt.Errorf("staging: directory is owned by uid %d, not by the process (uid %d)", stat.Uid, os.Geteuid())}
 	}
 	if permissions := info.Mode().Perm(); permissions&0o077 != 0 {
-		return fmt.Errorf("staging: directory permissions %#o grant access to group or others; want 0700", permissions)
+		return &DirectoryError{Reason: "open_permissions", Err: fmt.Errorf("staging: directory permissions %#o grant access to group or others; want 0700", permissions)}
 	}
 	return nil
 }

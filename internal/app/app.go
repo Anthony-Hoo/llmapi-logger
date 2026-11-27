@@ -15,6 +15,7 @@ import (
 
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/audit"
+	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/insights"
@@ -30,6 +31,7 @@ import (
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/sessionanalysis"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/uaguard"
 	"llmapi-logger/internal/web"
 )
@@ -55,6 +57,7 @@ type App struct {
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
 	auditStore      runtimeStore
+	auditStager     *staging.Stager
 	cipher          security.Cipher
 	newAPIClient    *newapi.Client
 	mode            string
@@ -402,6 +405,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		auditSink:       runtime.sink,
 		auditManager:    runtime.manager,
 		auditStore:      runtime.store,
+		auditStager:     runtime.stager,
 		cipher:          runtime.cipher,
 		newAPIClient:    newAPIClient,
 		userAgentRules:  userAgentRules,
@@ -911,9 +915,11 @@ func developerLoginTransport(configuration config.NewAPIConfig) http.RoundTrippe
 }
 
 type auditRuntime struct {
-	sink         audit.Sink
-	manager      *audit.Manager
-	store        runtimeStore
+	sink    audit.Sink
+	manager *audit.Manager
+	store   runtimeStore
+	// stager is the local staging of the unified write path, nil otherwise.
+	stager       *staging.Stager
 	cipher       security.Cipher
 	fingerprints *security.CredentialFingerprinter
 	// analysisFingerprints is nil when insights are disabled.
@@ -984,8 +990,27 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 			return auditRuntime{sink: manager, manager: manager}
 		}
 	}
+	// Local staging (design F.7): what a previous run staged is imported
+	// before interrupted audits are recovered, whatever the write path, so
+	// that recovery finalizes them with those chunks.
+	stager, stagingErr := openStaging(configuration, cipher, logger)
+	if stager != nil {
+		if _, err := stager.Import(ctx, store); err != nil {
+			_ = stager.Close()
+			_ = store.Close()
+			logger.Warn("audit staging import failed", "mode", configuration.Mode, "error_category", "recovery_failed", "storage_error", storage.ErrorClass(err))
+			manager := audit.NewUnavailable(configuration.Mode, err, logger)
+			return auditRuntime{sink: manager, manager: manager}
+		}
+	}
+	closeStager := func() {
+		if stager != nil {
+			_ = stager.Close()
+		}
+	}
 	recovered, recoveryErr := store.RecoverInterruptedAudits(ctx, time.Now().UnixNano())
 	if recoveryErr != nil {
+		closeStager()
 		_ = store.Close()
 		logger.Warn("interrupted audit recovery failed", "error_category", "recovery_failed")
 		manager := audit.NewUnavailable(configuration.Mode, recoveryErr, logger)
@@ -993,17 +1018,60 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 	} else if recovered > 0 {
 		logger.Info("interrupted audits recovered", "recovered_audits", recovered)
 	}
-	manager, err := audit.NewManagerWithOptions(store, cipher, fingerprints, configuration.Mode, logger, auditOptions(configuration.Audit))
+	options := auditOptions(configuration.Audit)
+	if options.WritePath == audit.WritePathUnified {
+		switch {
+		case stager != nil:
+			options.Stager = stager
+		case configuration.Mode == audit.ModeAvailable:
+			// K item 10: without staging, unified would drop content beyond
+			// the memory budget; available mode keeps capturing on legacy.
+			logger.Warn("audit staging unavailable, using the legacy write path", "mode", configuration.Mode,
+				"error_category", "staging_unavailable", "reason", staging.Reason(stagingErr))
+			options.WritePath = audit.WritePathLegacy
+		default:
+			_ = store.Close()
+			logger.Warn("audit staging unavailable", "mode", configuration.Mode,
+				"error_category", "staging_unavailable", "reason", staging.Reason(stagingErr))
+			manager := audit.NewUnavailable(configuration.Mode, stagingErr, logger)
+			return auditRuntime{sink: manager, manager: manager}
+		}
+	}
+	manager, err := audit.NewManagerWithOptions(store, cipher, fingerprints, configuration.Mode, logger, options)
 	if err != nil {
+		closeStager()
 		_ = store.Close()
-		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable")
+		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable", "reason", err.Error())
 		unavailable := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: unavailable, manager: unavailable}
 	}
+	if options.Stager == nil {
+		// Legacy: the stager was only needed for the import.
+		closeStager()
+		stager = nil
+	}
 	return auditRuntime{
-		sink: manager, manager: manager, store: store, cipher: cipher,
+		sink: manager, manager: manager, store: store, cipher: cipher, stager: stager,
 		fingerprints: fingerprints, analysisFingerprints: analysisFingerprints,
 	}
+}
+
+// openStaging opens audit.staging.dir when it is configured. A directory that
+// is missing, not the process's own, open to others or not writable returns
+// the reason; the caller decides what that means for the write path (F.1).
+func openStaging(configuration config.Config, cipher security.Cipher, logger *slog.Logger) (*staging.Stager, error) {
+	section := configuration.Audit.Staging
+	if section.Dir == "" {
+		return nil, errors.New("audit.staging.dir is not configured")
+	}
+	stager, err := staging.Open(section.Dir, cipher, staging.Options{MaxBytes: section.MaxBytes, Logger: logger})
+	if err != nil {
+		if configuration.Audit.WritePath != audit.WritePathUnified {
+			logger.Warn("audit staging directory unusable, nothing imported", "error_category", "staging_unavailable", "reason", staging.Reason(err))
+		}
+		return nil, err
+	}
+	return stager, nil
 }
 
 // auditOptions maps the audit section onto the capture manager's options.

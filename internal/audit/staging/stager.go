@@ -268,40 +268,62 @@ func Open(dir string, cipher security.Cipher, options Options) (*Stager, error) 
 // (Unix only), and writable.
 func PrepareDirectory(dir string) error {
 	if dir == "" || !filepath.IsAbs(dir) {
-		return fmt.Errorf("staging: directory %q must be an absolute path", dir)
+		return &DirectoryError{Reason: "not_absolute", Err: fmt.Errorf("staging: directory %q must be an absolute path", dir)}
 	}
 	info, err := os.Stat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("staging: create directory: %w", err)
+			return &DirectoryError{Reason: "create_failed", Err: fmt.Errorf("staging: create directory: %w", err)}
 		}
 		info, err = os.Stat(dir)
 	}
 	if err != nil {
-		return fmt.Errorf("staging: inspect directory: %w", err)
+		return &DirectoryError{Reason: "inspect_failed", Err: fmt.Errorf("staging: inspect directory: %w", err)}
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("staging: %s is not a directory", dir)
+		return &DirectoryError{Reason: "not_directory", Err: fmt.Errorf("staging: %s is not a directory", dir)}
 	}
 	if err := checkDirectoryAccess(info); err != nil {
 		return err
 	}
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
-		return fmt.Errorf("staging: probe name: %w", err)
+		return &DirectoryError{Reason: "not_writable", Err: fmt.Errorf("staging: probe name: %w", err)}
 	}
 	probe := filepath.Join(dir, ".probe-"+hex.EncodeToString(suffix))
 	handle, err := os.OpenFile(probe, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("staging: directory is not writable: %w", err)
+		return &DirectoryError{Reason: "not_writable", Err: fmt.Errorf("staging: directory is not writable: %w", err)}
 	}
 	_, writeErr := handle.Write([]byte{0})
 	closeErr := handle.Close()
 	removeErr := os.Remove(probe)
 	if err := errors.Join(writeErr, closeErr, removeErr); err != nil {
-		return fmt.Errorf("staging: directory probe failed: %w", err)
+		return &DirectoryError{Reason: "not_writable", Err: fmt.Errorf("staging: directory probe failed: %w", err)}
 	}
 	return nil
+}
+
+// DirectoryError is why a staging directory cannot be used. Reason is a
+// stable code for logs (not_absolute, create_failed, inspect_failed,
+// not_directory, wrong_owner, open_permissions, not_writable); Err carries
+// the detail, which may name the path.
+type DirectoryError struct {
+	Reason string
+	Err    error
+}
+
+func (err *DirectoryError) Error() string { return err.Err.Error() }
+func (err *DirectoryError) Unwrap() error { return err.Err }
+
+// Reason returns the stable code of a staging directory error, or
+// "staging_unavailable" for any other error.
+func Reason(err error) string {
+	var directory *DirectoryError
+	if errors.As(err, &directory) {
+		return directory.Reason
+	}
+	return "staging_unavailable"
 }
 
 // directoryUsage sums the regular files of dir, all of which count against
