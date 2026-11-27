@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"llmapi-logger/internal/app"
+	"llmapi-logger/internal/audit"
+	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/protofixture"
@@ -44,6 +47,17 @@ type runOptions struct {
 	drainTimeout time.Duration
 	pollInterval time.Duration
 	commit       string
+	capture      captureOptions
+}
+
+// captureOptions select the application's capture write path.
+type captureOptions struct {
+	writePath  string
+	stageBytes int64
+	stagingDir string
+	// countStatements relays the application's PostgreSQL connections
+	// through wireCounter.
+	countStatements bool
 }
 
 var phaseNames = []string{"load", "drain", "reads", "idle"}
@@ -149,7 +163,7 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 	}
 }
 
-func benchConfig(workload Workload, appDSN, keyPath, adminToken, upstreamURL string) (config.Config, error) {
+func benchConfig(workload Workload, capture captureOptions, appDSN, keyPath, adminToken, upstreamURL string) (config.Config, error) {
 	configuration := config.Default()
 	listen, err := reserveAddress()
 	if err != nil {
@@ -170,6 +184,13 @@ func benchConfig(workload Workload, appDSN, keyPath, adminToken, upstreamURL str
 	configuration.Insights.Enabled = workload.Insights
 	configuration.OrgReports.Enabled = workload.OrgReports
 	configuration.SessionAnalysis.Enabled = false
+	if capture.writePath != "" {
+		configuration.Audit.WritePath = capture.writePath
+	}
+	if capture.stageBytes > 0 {
+		configuration.Audit.Memory.StageBytes = capture.stageBytes
+	}
+	configuration.Audit.Staging.Dir = capture.stagingDir
 	if workload.CallerLookups {
 		// Local placeholder credential for the fake NewAPI management API.
 		configuration.NewAPI.AccessToken = "bench-newapi-access-token"
@@ -199,6 +220,19 @@ type bench struct {
 
 	activityMu  sync.Mutex
 	maxActivity []Activity
+
+	// wire relays the application's connections when statements are
+	// counted; nil otherwise.
+	wire *wireCounter
+
+	finishMu sync.Mutex
+	finishes []float64
+}
+
+func (bench *bench) noteFinish(duration time.Duration) {
+	bench.finishMu.Lock()
+	bench.finishes = append(bench.finishes, milliseconds(duration))
+	bench.finishMu.Unlock()
 }
 
 func (bench *bench) warn(format string, arguments ...any) {
@@ -221,7 +255,78 @@ func (bench *bench) snapshot(ctx context.Context) (snapshot, error) {
 	if err != nil {
 		return value, safeError("statistics snapshot", err)
 	}
+	if bench.wire != nil {
+		value.wire = bench.wire.stats(bench.writerPID)
+	}
+	totals := staging.ProcessStats()
+	value.staging = StagingCounts{BytesWritten: totals.BytesWritten, Records: totals.Records, Fsyncs: totals.Fsyncs, DirSyncs: totals.DirSyncs}
 	return value, nil
+}
+
+// relayDSN points the application's connection string at the relay.
+func relayDSN(dsn, address string) (string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		parsed, err := url.Parse(dsn)
+		if err != nil {
+			return "", errors.New("invalid connection URL")
+		}
+		parsed.Host = address
+		query := parsed.Query()
+		query.Del("host")
+		query.Del("port")
+		parsed.RawQuery = query.Encode()
+		return parsed.String(), nil
+	}
+	// Keyword/value form: a later keyword overrides an earlier one.
+	return dsn + " host=" + host + " port=" + port, nil
+}
+
+// relayTarget is the server the relay dials, or why statements cannot be
+// counted: the relay speaks plain TCP only.
+func relayTarget(connectionConfig *pgx.ConnConfig) (string, error) {
+	if strings.HasPrefix(connectionConfig.Host, "/") {
+		return "", errors.New("the connection uses a Unix socket")
+	}
+	if connectionConfig.TLSConfig != nil {
+		plain := false
+		for _, fallback := range connectionConfig.Fallbacks {
+			plain = plain || fallback.TLSConfig == nil
+		}
+		if !plain {
+			return "", errors.New("the connection requires TLS")
+		}
+	}
+	return net.JoinHostPort(connectionConfig.Host, fmt.Sprint(connectionConfig.Port)), nil
+}
+
+// effectiveWritePath asks the running application which write path its
+// sessions use (the capture settings view reports the manager's, not the
+// configuration file's).
+func effectiveWritePath(ctx context.Context, client *http.Client, adminURL, token string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, adminURL+"/api/v1/settings/audit-capture", nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(request)
+	if err != nil {
+		return "", errors.New("read the capture settings failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("read the capture settings: HTTP %d", response.StatusCode)
+	}
+	var view struct {
+		WritePath string `json:"write_path"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&view); err != nil || view.WritePath == "" {
+		return "", errors.New("the capture settings carry no write path")
+	}
+	return view.WritePath, nil
 }
 
 // runBench executes the run subcommand.
@@ -320,6 +425,51 @@ func runBench(ctx context.Context, options runOptions, getenv func(string) strin
 	}
 	defer os.RemoveAll(keyDirectory)
 
+	capture := options.capture
+	if capture.writePath == "" {
+		capture.writePath = config.AuditWritePathLegacy
+	}
+	bench.result.WritePath = WritePathInfo{Requested: capture.writePath, StageBytes: capture.stageBytes,
+		GlobalBytes: config.DefaultAuditMemoryGlobalBytes, StagingMaxBytes: config.DefaultAuditStagingMaxBytes}
+	if capture.stageBytes == 0 {
+		bench.result.WritePath.StageBytes = config.DefaultAuditMemoryStageBytes
+	}
+	switch {
+	case capture.stagingDir != "":
+		bench.result.WritePath.StagingDir = "flag"
+	case capture.writePath == config.AuditWritePathUnified:
+		// A sibling of the key directory: staging must not be inside it.
+		temporary, err := os.MkdirTemp("", "audit-bench-staging-")
+		if err != nil {
+			return errors.New("create staging directory failed")
+		}
+		// Removed after the application stopped: this defer runs after the
+		// one that stops it.
+		defer os.RemoveAll(temporary)
+		capture.stagingDir = temporary
+		bench.result.WritePath.StagingDir = "temporary"
+	}
+
+	if capture.countStatements {
+		target, err := relayTarget(connectionConfig)
+		if err == nil {
+			bench.wire, err = newWireCounter(target)
+		}
+		if err == nil {
+			appDSN, err = relayDSN(appDSN, bench.wire.address())
+		}
+		if err != nil {
+			if bench.wire != nil {
+				bench.wire.close()
+				bench.wire = nil
+			}
+			bench.warn("statements are not counted: %v", err)
+		} else {
+			defer bench.wire.close()
+			bench.result.WritePath.CountStatements = true
+		}
+	}
+
 	// Fake upstream and fake NewAPI management on one local listener.
 	upstream := protofixture.NewUpstream("bench-" + randomToken(4) + "-")
 	upstream.FirstByteDelay = time.Duration(options.workload.FirstByteMS) * time.Millisecond
@@ -337,11 +487,13 @@ func runBench(ctx context.Context, options runOptions, getenv func(string) strin
 	defer upstreamServer.Close()
 
 	adminToken := randomToken(24)
-	configuration, err := benchConfig(options.workload, appDSN, filepath.Join(keyDirectory, "audit.key"), adminToken, "http://"+upstreamListener.Addr().String())
+	configuration, err := benchConfig(options.workload, capture, appDSN, filepath.Join(keyDirectory, "audit.key"), adminToken, "http://"+upstreamListener.Addr().String())
 	if err != nil {
 		return fmt.Errorf("build application configuration: %w", err)
 	}
 	logs := newCountingHandler()
+	audit.SetFinishObserver(bench.noteFinish)
+	defer audit.SetFinishObserver(nil)
 	application, err := app.NewContext(ctx, configuration, slog.New(logs))
 	if err != nil {
 		return errors.New("assemble the application failed; check that the database is reachable and empty")
@@ -372,6 +524,14 @@ func runBench(ctx context.Context, options runOptions, getenv func(string) strin
 	admin := &http.Client{Timeout: 5 * time.Minute}
 	if err := waitReady(ctx, admin, adminURL, adminToken); err != nil {
 		return err
+	}
+	effective, err := effectiveWritePath(ctx, admin, adminURL, adminToken)
+	if err != nil {
+		return err
+	}
+	bench.result.WritePath.Effective = effective
+	if effective != capture.writePath {
+		return fmt.Errorf("the application runs the %s write path, not the requested %s (is the staging directory usable?)", effective, capture.writePath)
 	}
 	for attempt := 0; attempt < 50 && bench.writerPID == 0; attempt++ {
 		pid, err := bench.stats.writerPID(ctx)
@@ -806,6 +966,14 @@ func (bench *bench) summarizeClient(records []requestRecord) {
 		groups[record.group] = values
 	}
 	client.TTFB, client.EndOfStream, client.Queryable = summarize(ttfb), summarize(end), summarize(queryable)
+	bench.finishMu.Lock()
+	client.Finish = summarize(bench.finishes)
+	bench.finishMu.Unlock()
+	client.ParseBacklog = bench.tracker.backlog()
+	if client.ParseBacklog.Max > BacklogLimit {
+		bench.warn("the pending parse backlog reached %d (limit %d): end of response to queryable measures the parser's 30 s rescan, not the write path; lower --concurrency or raise --upstream-first-byte",
+			client.ParseBacklog.Max, BacklogLimit)
+	}
 	for group, values := range groups {
 		client.ByGroup[group] = GroupLatencies{TTFB: summarize(values[0]), EndOfStream: summarize(values[1]), Queryable: summarize(values[2])}
 	}

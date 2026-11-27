@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+
+	"llmapi-logger/internal/config"
 )
 
 type comparedMetric struct {
@@ -14,6 +16,41 @@ type comparedMetric struct {
 	unit   string
 	a, b   float64
 	digits int
+	// missingA and missingB mark a value the result does not carry (an
+	// older format, or statements not counted).
+	missingA, missingB bool
+}
+
+// writePathWarnings flag an A/B whose write paths are not what the labels
+// say, and runs whose backlog makes the queryable latency meaningless.
+func writePathWarnings(a, b Result) []string {
+	warnings := make([]string, 0)
+	for _, run := range []struct {
+		name   string
+		result Result
+	}{{"A", a}, {"B", b}} {
+		if run.result.FormatVersion < 2 || run.result.WritePath.Effective == "" {
+			warnings = append(warnings, fmt.Sprintf("%s does not record the write path the application used (result format %d)", run.name, run.result.FormatVersion))
+			continue
+		}
+		if run.result.WritePath.Effective != run.result.WritePath.Requested {
+			warnings = append(warnings, fmt.Sprintf("%s requested the %s write path but the application used %s", run.name, run.result.WritePath.Requested, run.result.WritePath.Effective))
+		}
+		if backlog := run.result.Client.ParseBacklog.Max; backlog > BacklogLimit {
+			warnings = append(warnings, fmt.Sprintf("%s's pending parse backlog reached %d (limit %d): its end of response to queryable measures the parser's rescan, not the write path", run.name, backlog, BacklogLimit))
+		}
+	}
+	pa, pb := a.WritePath, b.WritePath
+	if pa.Effective != "" && pa.Effective == pb.Effective && pa.Requested != pb.Requested {
+		warnings = append(warnings, fmt.Sprintf("the write paths differ only by label: both runs used %s", pa.Effective))
+	}
+	if pa.Effective == config.AuditWritePathUnified && pb.Effective == config.AuditWritePathUnified && pa.StageBytes != pb.StageBytes {
+		warnings = append(warnings, fmt.Sprintf("the stage budgets differ (%d vs %d bytes)", pa.StageBytes, pb.StageBytes))
+	}
+	if pa.CountStatements != pb.CountStatements {
+		warnings = append(warnings, "only one run relayed its connections to count statements; the relay adds a loopback hop to every database round trip, so latencies are not comparable")
+	}
+	return warnings
 }
 
 func phaseByName(result Result, name string) (PhaseResult, bool) {
@@ -42,7 +79,8 @@ func tableTotals(result Result) map[string]TableFinal {
 // compareResults prints the differences of two result files as Markdown.
 func compareResults(a, b Result, nameA, nameB string, output io.Writer) {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "# audit-bench comparison\n\n- A: `%s`, commit `%s`\n- B: `%s`, commit `%s`\n\n", nameA, a.Build.Commit, nameB, b.Build.Commit)
+	fmt.Fprintf(&builder, "# audit-bench comparison\n\n- A: `%s`, commit `%s`, write path %s\n- B: `%s`, commit `%s`, write path %s\n\n",
+		nameA, a.Build.Commit, orNA(a.WritePath.Effective), nameB, b.Build.Commit, orNA(b.WritePath.Effective))
 	warnings := make([]string, 0)
 	workloadA, _ := json.Marshal(a.Workload)
 	workloadB, _ := json.Marshal(b.Workload)
@@ -59,6 +97,7 @@ func compareResults(a, b Result, nameA, nameB string, output io.Writer) {
 	if a.Contamination.Contaminated || b.Contamination.Contaminated {
 		warnings = append(warnings, "at least one run shared the database with other sessions; compare the per-table and writer-backend rows")
 	}
+	warnings = append(warnings, writePathWarnings(a, b)...)
 	if a.Audits.Count != b.Audits.Count {
 		warnings = append(warnings, fmt.Sprintf("the runs wrote different numbers of audits (%d vs %d)", a.Audits.Count, b.Audits.Count))
 	}
@@ -107,7 +146,39 @@ func compareResults(a, b Result, nameA, nameB string, output io.Writer) {
 	if a.Total.Writer.Available && b.Total.Writer.Available {
 		addCount("writer backend WAL per audit", "kB", perAudit(a.Total.Writer.WALBytes, a.Audits.Count)/1e3, perAudit(b.Total.Writer.WALBytes, b.Audits.Count)/1e3, 1)
 	}
-	addCount("commits per audit", "count", perAudit(a.Total.AppCommits, a.Audits.Count), perAudit(b.Total.AppCommits, b.Audits.Count), 2)
+	addCount("commits per audit, all sessions incl. reader statements", "count", perAudit(a.Total.AppCommits, a.Audits.Count), perAudit(b.Total.AppCommits, b.Audits.Count), 2)
+	addWire := func(name string, value func(WireStats) int64) {
+		wa, wb := a.Total.Statements, b.Total.Statements
+		metrics = append(metrics, comparedMetric{name: name, unit: "count", a: perAudit(value(wa), a.Audits.Count), b: perAudit(value(wb), b.Audits.Count),
+			digits: 2, missingA: !wa.Available, missingB: !wb.Available})
+	}
+	addWire("writer operations per audit", func(stats WireStats) int64 { return stats.Writer.Operations })
+	addWire("writer commits per audit", func(stats WireStats) int64 { return stats.Writer.Commits })
+	addWire("writer statements per audit", func(stats WireStats) int64 { return stats.Writer.Statements })
+	addWire("reader statements per audit", func(stats WireStats) int64 { return stats.Readers.Statements })
+	for _, row := range rowChanges {
+		value := func(delta TableDelta) int64 {
+			switch row.kind {
+			case "updated":
+				return delta.Updated
+			case "deleted":
+				return delta.Deleted
+			}
+			return delta.Inserted
+		}
+		addCount(row.table+" rows "+row.kind+" per audit", "rows", perAudit(value(a.Total.Tables[row.table]), a.Audits.Count),
+			perAudit(value(b.Total.Tables[row.table]), b.Audits.Count), 2)
+	}
+	staged := func(name, unit string, x, y float64, digits int) {
+		metrics = append(metrics, comparedMetric{name: name, unit: unit, a: x, b: y, digits: digits, missingA: a.FormatVersion < 2, missingB: b.FormatVersion < 2})
+	}
+	staged("staging bytes written", "MB", float64(a.Total.Staging.BytesWritten)/1e6, float64(b.Total.Staging.BytesWritten)/1e6, 3)
+	staged("staged records", "count", float64(a.Total.Staging.Records), float64(b.Total.Staging.Records), 0)
+	staged("staging fsyncs", "count", float64(a.Total.Staging.Fsyncs), float64(b.Total.Staging.Fsyncs), 0)
+	staged("largest pending parse backlog", "audits", float64(a.Client.ParseBacklog.Max), float64(b.Client.ParseBacklog.Max), 0)
+	staged("handler Finish p50", "ms", a.Client.Finish.P50, b.Client.Finish.P50, 2)
+	staged("handler Finish p95", "ms", a.Client.Finish.P95, b.Client.Finish.P95, 2)
+	staged("handler Finish max", "ms", a.Client.Finish.Max, b.Client.Finish.Max, 2)
 	for _, idleTable := range []string{"audit_records", "audit_analysis", "audit_project_identity", "body_chunks"} {
 		pa, _ := phaseByName(a, "idle")
 		pb, _ := phaseByName(b, "idle")
@@ -160,6 +231,17 @@ func compareResults(a, b Result, nameA, nameB string, output io.Writer) {
 	rows := make([][]string, 0, len(metrics))
 	for _, metric := range metrics {
 		format := fmt.Sprintf("%%.%df", metric.digits)
+		if metric.missingA || metric.missingB {
+			valueA, valueB := fmt.Sprintf(format, metric.a), fmt.Sprintf(format, metric.b)
+			if metric.missingA {
+				valueA = "n/a"
+			}
+			if metric.missingB {
+				valueB = "n/a"
+			}
+			rows = append(rows, []string{metric.name, metric.unit, valueA, valueB, "n/a", "n/a"})
+			continue
+		}
 		change := "n/a"
 		if metric.a != 0 {
 			change = fmt.Sprintf("%+.1f", (metric.b-metric.a)/metric.a*100)

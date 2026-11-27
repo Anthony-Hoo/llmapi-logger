@@ -26,7 +26,16 @@ type queryTracker struct {
 	pending  map[string]time.Time
 	latency  map[string]time.Duration
 	auditIDs map[string]string
+
+	// The pending parse backlog is sampled in the poll's own transaction
+	// at most every backlogInterval.
+	backlogAt      time.Time
+	backlogMax     int64
+	backlogSamples int64
 }
+
+// backlogInterval is how often the poll also counts the parse backlog.
+const backlogInterval = 250 * time.Millisecond
 
 func newQueryTracker(stats *statsConn) *queryTracker {
 	return &queryTracker{stats: stats, pending: make(map[string]time.Time), latency: make(map[string]time.Duration), auditIDs: make(map[string]string)}
@@ -68,13 +77,25 @@ func (tracker *queryTracker) poll(ctx context.Context) {
 			break
 		}
 	}
+	sampleBacklog := time.Since(tracker.backlogAt) >= backlogInterval
 	tracker.mu.Unlock()
-	if len(ids) == 0 {
+	if len(ids) == 0 && !sampleBacklog {
 		return
 	}
 	found := make(map[string]string)
+	backlog := int64(-1)
 	err := tracker.stats.inTx(ctx, true, func(tx pgx.Tx) error {
 		tracker.stats.latencyPolls++
+		if sampleBacklog {
+			if err := tx.QueryRow(ctx, `
+SELECT count(*) FROM audit_records
+WHERE ended_at_ns IS NOT NULL AND parse_status IN ('pending', 'processing')`).Scan(&backlog); err != nil {
+				return err
+			}
+		}
+		if len(ids) == 0 {
+			return nil
+		}
 		rows, err := tx.Query(ctx, `
 SELECT newapi_request_id, audit_id FROM audit_records
 WHERE newapi_request_id = ANY($1) AND ended_at_ns IS NOT NULL AND parse_status NOT IN ('pending', 'processing')`, ids)
@@ -96,6 +117,11 @@ WHERE newapi_request_id = ANY($1) AND ended_at_ns IS NOT NULL AND parse_status N
 	}
 	now := time.Now()
 	tracker.mu.Lock()
+	if backlog >= 0 {
+		tracker.backlogAt = now
+		tracker.backlogSamples++
+		tracker.backlogMax = max(tracker.backlogMax, backlog)
+	}
 	for requestID, auditID := range found {
 		if end, ok := tracker.pending[requestID]; ok {
 			tracker.latency[requestID] = now.Sub(end)
@@ -104,6 +130,14 @@ WHERE newapi_request_id = ANY($1) AND ended_at_ns IS NOT NULL AND parse_status N
 		}
 	}
 	tracker.mu.Unlock()
+}
+
+// backlog returns the largest pending parse backlog sampled and the number
+// of samples.
+func (tracker *queryTracker) backlog() BacklogSummary {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	return BacklogSummary{Samples: tracker.backlogSamples, Max: tracker.backlogMax, IntervalMS: backlogInterval.Milliseconds()}
 }
 
 func (tracker *queryTracker) results() (map[string]time.Duration, map[string]string, int) {

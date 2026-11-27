@@ -44,6 +44,21 @@ func latencyRow(name string, value LatencySummary) []string {
 	return []string{name, fmt.Sprint(value.Count), fmt.Sprintf("%.1f", value.P50), fmt.Sprintf("%.1f", value.P95), fmt.Sprintf("%.1f", value.Max)}
 }
 
+// rowChanges are the per-audit row counts a write-path A/B reports.
+var rowChanges = []struct{ table, kind string }{
+	{"body_chunks", "inserted"}, {"body_chunks", "deleted"},
+	{"http_headers", "inserted"}, {"http_headers", "deleted"},
+	{"http_header_blocks", "inserted"}, {"http_header_blocks", "deleted"},
+	{"audit_records", "updated"}, {"http_stages", "updated"}, {"body_streams", "updated"},
+}
+
+func orNA(value string) string {
+	if value == "" {
+		return "n/a"
+	}
+	return value
+}
+
 func renderMarkdown(result Result) string {
 	var builder strings.Builder
 	commit := result.Build.Commit
@@ -53,6 +68,9 @@ func renderMarkdown(result Result) string {
 	fmt.Fprintf(&builder, "# audit-bench result\n\n- Commit: `%s` (source: %s), %s\n- Started: %s, finished: %s\n- PostgreSQL schema: `%s` (fresh: %v)\n\n",
 		commit, result.Build.Source, result.Build.GoVersion, result.StartedAt.Format("2006-01-02 15:04:05Z"),
 		result.FinishedAt.Format("2006-01-02 15:04:05Z"), result.Postgres.Schema, result.Postgres.FreshSchema)
+	path := result.WritePath
+	fmt.Fprintf(&builder, "- Write path: **%s** as the application reports it (requested %s); stage bytes %d, global bytes %d, staging directory: %s\n- Statements counted through the protocol relay: %v\n\n",
+		orNA(path.Effective), orNA(path.Requested), path.StageBytes, path.GlobalBytes, orNA(path.StagingDir), path.CountStatements)
 	if len(result.Warnings) > 0 {
 		builder.WriteString("## Warnings\n\n")
 		for _, warning := range result.Warnings {
@@ -111,6 +129,24 @@ func renderMarkdown(result Result) string {
 	builder.WriteString("Cluster WAL and commits cover every session of the server; the writer-backend column is the application's own writer session only. " +
 		"Counters flush with a lag of up to a second for busy sessions, so the load/drain split is approximate; WAL by LSN and load+drain are exact.\n\n")
 
+	builder.WriteString("## Writer, readers and staging by phase\n\n")
+	statementRows := make([][]string, 0, len(result.Phases)+2)
+	for _, phase := range append(append([]PhaseResult(nil), result.Phases...), result.Write, result.Total) {
+		wire := phase.Statements
+		cells := []string{"n/a", "n/a", "n/a", "n/a", "n/a", "n/a"}
+		if wire.Available {
+			cells = []string{fmt.Sprint(wire.Writer.Operations), fmt.Sprint(wire.Writer.Commits), fmt.Sprint(wire.Writer.Transactions - wire.Writer.Commits),
+				fmt.Sprint(wire.Writer.Statements), fmt.Sprint(wire.Readers.Statements), fmt.Sprint(wire.Other.Statements)}
+		}
+		statementRows = append(statementRows, append(append([]string{phase.Name}, cells...),
+			megabytes(phase.Staging.BytesWritten), fmt.Sprint(phase.Staging.Records), fmt.Sprint(phase.Staging.Fsyncs)))
+	}
+	table(&builder, []string{"Phase", "Writer operations (count)", "Writer commits (count)", "Writer rollbacks (count)", "Writer statements (count)",
+		"Reader statements (count)", "Other statements (count)", "Staging written (MB)", "Staged records (count)", "Staging fsyncs (count)"}, statementRows)
+	builder.WriteString("Statements come from the tool's PostgreSQL protocol relay: a writer operation is one `SAVEPOINT writer_operation` executed on the writer's connection, " +
+		"a writer commit one `COMMIT` that committed there; statements count every CommandComplete, BEGIN, SAVEPOINT, RELEASE and COMMIT included. " +
+		"Readers are the sessions opened with default_transaction_read_only=on. Staging counters cover every stager in the process.\n\n")
+
 	audits := result.Audits.Count
 	total := result.Total
 	fpiShare := 0.0
@@ -125,6 +161,27 @@ func renderMarkdown(result Result) string {
 		{"full-page images per WAL record (%)", fmt.Sprintf("%.2f", fpiShare)},
 		{"commits per audit, all sessions but the tool, including read-only statements (count)", fmt.Sprintf("%.2f", perAudit(total.AppCommits, audits))},
 	}
+	if wire := total.Statements; wire.Available {
+		perAuditRows = append(perAuditRows,
+			[]string{"writer operations per audit (count)", fmt.Sprintf("%.2f", perAudit(wire.Writer.Operations, audits))},
+			[]string{"writer commits per audit (count)", fmt.Sprintf("%.2f", perAudit(wire.Writer.Commits, audits))},
+			[]string{"writer statements per audit (count)", fmt.Sprintf("%.2f", perAudit(wire.Writer.Statements, audits))},
+			[]string{"reader statements per audit (count)", fmt.Sprintf("%.2f", perAudit(wire.Readers.Statements, audits))})
+	}
+	for _, row := range rowChanges {
+		delta := total.Tables[row.table]
+		value := delta.Inserted
+		switch row.kind {
+		case "updated":
+			value = delta.Updated
+		case "deleted":
+			value = delta.Deleted
+		}
+		perAuditRows = append(perAuditRows, []string{fmt.Sprintf("%s rows %s per audit (rows)", row.table, row.kind), fmt.Sprintf("%.2f", perAudit(value, audits))})
+	}
+	perAuditRows = append(perAuditRows,
+		[]string{"staging bytes written per audit (kB)", kilobytes(perAudit(total.Staging.BytesWritten, audits))},
+		[]string{"staged records / fsyncs / directory syncs, total (count)", fmt.Sprintf("%d / %d / %d", total.Staging.Records, total.Staging.Fsyncs, total.Staging.DirSyncs)})
 	if total.Writer.Available {
 		perAuditRows = append(perAuditRows,
 			[]string{"writer backend WAL per audit (kB)", kilobytes(perAudit(total.Writer.WALBytes, audits))},
@@ -173,14 +230,21 @@ func renderMarkdown(result Result) string {
 	builder.WriteString("## Client latency\n\n")
 	client := result.Client
 	latencyRows := [][]string{latencyRow("time to first byte", client.TTFB), latencyRow("time to end of response", client.EndOfStream),
-		latencyRow("end of response to queryable", client.Queryable)}
+		latencyRow("end of response to queryable", client.Queryable), latencyRow("handler in Session.Finish (in process)", client.Finish)}
 	for _, group := range sortedKeys(client.ByGroup) {
 		value := client.ByGroup[group]
 		latencyRows = append(latencyRows, latencyRow(group+" first byte", value.TTFB), latencyRow(group+" end", value.EndOfStream),
 			latencyRow(group+" queryable", value.Queryable))
 	}
 	table(&builder, []string{"Measure", "Samples (count)", "p50 (ms)", "p95 (ms)", "Max (ms)"}, latencyRows)
-	builder.WriteString("Queryable means the audit row has a terminal parse status; its resolution is the poll interval.\n\n")
+	builder.WriteString("Queryable means the audit row has a terminal parse status; its resolution is the poll interval. " +
+		"Session.Finish is timed inside the process for every audit session; the client's time to end includes it.\n\n")
+	backlog := client.ParseBacklog
+	fmt.Fprintf(&builder, "Largest pending parse backlog: %d audits (%d samples, one at most every %d ms during load and drain).", backlog.Max, backlog.Samples, backlog.IntervalMS)
+	if backlog.Max > BacklogLimit {
+		fmt.Fprintf(&builder, " **Above %d: end of response to queryable measures the parser's rescan interval, not the write path.**", BacklogLimit)
+	}
+	builder.WriteString("\n\n")
 
 	builder.WriteString("## Management API reads\n\n")
 	reads := result.Reads

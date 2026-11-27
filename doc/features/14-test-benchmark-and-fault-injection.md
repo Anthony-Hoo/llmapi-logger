@@ -167,7 +167,7 @@ fake upstream（`protofixture.Upstream`）是一个 `http.Handler`：客户端�
 逻辑在 `internal/auditbench`，命令只做参数和信号处理。三个子命令：
 
 - `run`：在一个进程里启动 fake upstream、fake NewAPI 管理接口（`/api/status`、`/api/user/`、`/api/log/`）和真实应用，经代理的真实监听地址发送工作负载，按阶段快照统计并写出 `<prefix>.json` 与 `<prefix>.md`。
-- `compare A.json B.json`：把两次结果的差异打印成 Markdown 表。工作负载或 PostgreSQL 参数不同、审计条数不同、任一结果被其他会话污染时先给出警告。
+- `compare A.json B.json`：把两次结果的差异打印成 Markdown 表。工作负载或 PostgreSQL 参数不同、审计条数不同、任一结果被其他会话污染时先给出警告；写入路径方面，两次实际用的是同一条路径而标签不同、某次请求的路径与实际不符、结果没有记录实际路径（格式 1 的旧文件）、两次 unified 的 stage 预算不同、只有一次经过语句计数中继、任一次的待解析积压超过 100 时也警告。旧格式文件缺的数字显示为 `n/a`。
 - `dist`：对已有审计库做只读聚合，给出设计 5.3、5.4 需要的两个分布：每个会话（以及每个会话每个 UTC 日）的轮次数直方图、每个会话的去重对象字节直方图（内容对象加它们引用的二进制对象）、无 turn 的 audit 数与其 Body 字节，以及“各会话分别去重后的对象字节之和”与“全局去重后的对象字节”之比。每个会话的对象集由该会话各轮的两个 envelope、insert 的上下文条目和响应条目组成；父轮次落在别的会话里时这个集合会漏掉继承的条目，所以同时报告这样的轮次数，非零时比值只是下限。只读取计数、长度和哈希，不选任何内容列；在一个只读、可重复读、带语句超时的事务里执行，只输出聚合值。
 
 连接串只从环境变量 `AUDIT_BENCH_DATABASE_URL` 读取，不接受命令行参数，也不打印；错误只给 SQLSTATE 或固定描述。目标 schema 已有审计表时 `run` 拒绝执行；`--fresh-schema` 在目标库里新建 `audit_bench_<时间>_<随机>` schema 使用，`--drop-schema` 在结束后删除它（只删本次创建的那一个）。
@@ -175,6 +175,29 @@ fake upstream（`protofixture.Upstream`）是一个 `http.Handler`：客户端�
 `run` 打开 insights 分析与组织报表，配置一个指向 fake NewAPI 的管理身份，所以调用者回填、insights 回填和项目标识回填都会运行；`retention_days=0`，会话分析关闭。
 
 工作负载参数：`--profile small|heavy`、`--seed`、`--conversations`、`--turns`、`--concurrency`、`--mix`（协议权重）、`--stream-share`、`--abnormal-share`（每轮之前插入一个异常请求的概率；异常请求不推进会话，下一请求是同一轮的重试）、`--branch-share`、`--history-items`、`--item-bytes`、`--delta-bytes`、`--tool-definitions`、`--system-bytes`、`--upstream-first-byte`、`--upstream-chunk-delay`。协议和流式会话数按权重精确分配（最大余数法），同一工作负载两次运行发送相同的流量。
+
+写入路径参数（设计 `issue-59-stage3-write-path.md` I.6）：
+
+- `--write-path legacy|unified`：即 `audit.write_path`，默认 legacy。
+- `--stage-bytes`：即 `audit.memory.stage_bytes`，0 取默认 8 MiB，最小 1 MiB，不超过 `audit.memory.global_bytes`（默认 256 MiB）。
+- `--staging-dir`：即 `audit.staging.dir`，必须是绝对路径。unified 不给时，工具在系统临时目录里新建一个（与密钥目录并列，不在其中），运行结束、应用停止之后删除；只删这一个目录。给了就原样使用，不删。
+- `--count-statements`：默认开，见下文。
+
+结果里的写入路径取自运行中的应用（`GET /api/v1/settings/audit-capture` 的 `write_path`，即 manager 实际使用的路径），不取参数。暂存目录不可用时应用会退回 legacy 并告警，这时实际路径与请求不符，`run` 在发送流量之前失败退出，不写结果文件，所以退回的运行不会被标成 unified。
+
+PostgreSQL 的事务计数只到数据库一级，没有按会话的提交数（PostgreSQL 18 按会话只有 WAL 和 IO），存储也不对外暴露 writer 的批次数。所以 `--count-statements` 让应用的数据库连接经过工具进程内的一个协议中继：字节原样转发，中继只读消息头、Parse 与 Query 里的 SQL 文本和 CommandComplete 的标签，按连接计数。
+
+- writer 连接按 BackendKeyData 里的后端 pid 与持有 writer 锁的会话对上。
+- 读连接池按启动参数 `default_transaction_read_only=on` 识别。
+- writer 操作数是在 writer 连接上执行 `SAVEPOINT writer_operation` 的次数，`commitBatch` 给每个操作包一层。
+- writer 提交数是该连接上真正提交的 `COMMIT`（标签为 COMMIT）。
+- 语句数是 CommandComplete 的个数，BEGIN、SAVEPOINT、RELEASE、COMMIT 都算。
+
+中继对应用回绝 TLS 和 GSS 加密，到服务器用明文 TCP，所以只能用于接受明文连接的库（本地测试库）。连接串要求 TLS 或走 Unix socket 时，计数关闭并告警。中继给每次数据库往返多加一跳本机回环，代价随每条 audit 的往返次数增长，而这正是两条路径的差别（见 9.5）。
+
+`Finish` 的耗时在进程内测：`internal/audit` 的 `SetFinishObserver` 在每个会话第一次 `Finish` 做完后回报一次耗时，生产不设置。客户端量的流结束时间里包含它，但客户端分不出来。暂存的字节、记录和 fsync 取自 `internal/audit/staging` 的 `ProcessStats`，即本进程所有 stager 计数之和。
+
+待解析积压在 load 和 drain 期间采样：结束到可查询的轮询每次检查是否距上次采样已过 250 ms，到了就在同一个只读事务里多执行一次 `count(*)`，统计 `ended_at_ns` 非空且 `parse_status` 为 pending 或 processing 的 audit。结果记录最大值和采样次数，超过 100 时摘要里给出警告。
 
 四个阶段，每个边界一次快照：
 
@@ -216,6 +239,12 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" `
 | Writer backend WAL、reads/hits/writes/extends | PostgreSQL 18 的 `pg_stat_get_backend_wal`、`pg_stat_get_backend_io`，只算应用唯一的 writer 会话（按它持有的 advisory lock 找到），与其他会话隔离 |
 | WAL outside writer | Cluster WAL 减 writer：读连接的页面修剪、autovacuum、检查点和其他会话 |
 | Commits excl. tool | `pg_stat_database.xact_commit` 减去工具自己的事务数；整个数据库。它包含应用读连接池的每一条只读语句，不等于 writer 的提交数：reads 和 idle 阶段几乎没有 writer WAL，却有上百次提交。减少读回的改动（4.2 第二步）会让这个数下降，但那不是 writer 少提交了 |
+| Writer operations、Writer commits、Writer rollbacks、Writer statements | 协议中继在 writer 连接上数到的 `SAVEPOINT writer_operation` 次数、提交了的 `COMMIT`、结束而未提交的显式事务、全部完成的语句；实时计数，没有统计刷新延迟，与其他会话隔离 |
+| Reader statements、Other statements | 中继在读连接池（`default_transaction_read_only=on`）和其他应用连接上数到的完成语句。Commits excl. tool 里大部分非 writer 的提交就是它们 |
+| rows inserted / deleted / updated per audit | 总量阶段 `pg_stat_user_tables` 的差值除以 audit 条数：`body_chunks`、`http_headers`、`http_header_blocks` 的插入与删除，`audit_records`、`http_stages`、`body_streams` 的更新。`body_chunks` 的删除包括成对阶段去重删掉的重复块和解析验证后释放的 raw |
+| Staging written、Staged records、Staging fsyncs、directory syncs | `staging.ProcessStats`：暂存文件写入的字节（含文件头）、记录数、文件 fsync 和目录 fsync 次数 |
+| handler in Session.Finish | 进程内每个审计会话 `Finish` 的耗时分布，毫秒 |
+| Largest pending parse backlog | load 与 drain 期间采样到的最大待解析积压（条），超过 100 时警告 |
 | per audit | 总量除以写入的 audit 条数 |
 | time to first byte、time to end | 客户端从发出请求到读到首字节、读完响应（取消场景为放弃时刻） |
 | end of response to queryable | 客户端读完响应到 audit 行出现终态解析状态；按 `--poll-interval`（默认 100 ms）用一次索引查询轮询全部未决请求，精度就是这个间隔 |
@@ -227,6 +256,7 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" `
 
 - 每次快照是工具的一个只读事务，事务内先调 `pg_stat_force_next_flush()`；工具的每个事务都计数，并从提交数里减去。工具在 load 和 drain 阶段的轮询查询次数单独列出；reads 和 idle 阶段工具不查询任何审计表，只每 2 s 读一次 `pg_stat_activity` 统计其他会话。
 - PostgreSQL 的计数器由各会话自己刷新：忙碌会话最长约 1 s，空闲会话约 10 s。drain、reads、idle 的快照之前等待 `--settle`（默认 11 s）。load 与 drain 之间不等待，所以两者的分界按计数器看是近似的，load+drain 合计和 WAL by LSN 是准确的；短到一两秒的 load 阶段尤其如此。
+- 积压采样是结束到可查询轮询里多出的一次 `audit_records` 计数（每 250 ms 至多一次），算在 latency polls 的同一个事务里，不增加工具的提交数，但增加 `audit_records` 上的扫描。
 - 同一实例上有其他会话时，Cluster WAL、WAL by LSN 和数据库提交数都包含它们的工作。结果记录采样到的其他会话数和 writer 之外的 WAL，超过阈值时标为污染并给出警告；这时只看分表和 writer 会话的数字。
 
 ### 9.4 局限
@@ -234,8 +264,36 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" `
 - 数据是合成的。文本可压缩性、工具定义体积、会话长度分布和协议构成都与真实部署不同，绝对值只能看量级；A/B 的价值在于同一工作负载下两个提交或两种配置的差。
 - 数据库是本地的，参数是谁的就记录谁的（`shared_buffers`、`fsync`、`synchronous_commit`、`max_wal_size`、`checkpoint_timeout`、`wal_compression` 等写进结果）。本地测试库常见 `fsync=off`，提交延迟和检查点行为与生产不同。
 - idle 阶段能否看到回填重扫取决于时长。parser worker 每 30 s 一跳，insights 回填（`backfillRescanInterval`）和项目标识回填（`projectBackfillRescanInterval`）在一次扫描没有候选之后都要等 10 分钟才再扫；计时从最后一次空扫算起，可能落在 drain 里。短于约 10.5 分钟的 idle 可能一次重扫都没有，默认 11 分钟。不重扫时 idle 里也有别的读：本地 smoke 的 idle 阶段 `audit_records` 每秒约一次顺序扫描，推断来自 NewAPI 调用者 worker 每秒一次的待办查询（`ListDueCallerLookups`），这么小的表上规划器选了顺序扫描，大表上未必；组织报表的周快照任务也在 idle 里写入。
-- 到可查询的延迟只有在待解析积压不超过 100 条时才反映写入和解析路径。解析 worker 的内存队列容量是 100（`parser.QueueCapacity`），满了以后的 audit 留在 `pending`，由每 30 秒一次、每次最多 100 条的扫描重新入队；突发超过这个量时，量到的是扫描间隔。要比较写入路径，把并发和会话数调到积压不溢出。
+- 到可查询的延迟只有在待解析积压不超过 100 条时才反映写入和解析路径。解析 worker 的内存队列容量是 100（`parser.QueueCapacity`），满了以后的 audit 留在 `pending`，由每 30 秒一次、每次最多 100 条的扫描重新入队；突发超过这个量时，量到的是扫描间隔。结果报告采样到的最大积压，超过 100 时 `run` 和 `compare` 都警告；要比较写入路径，按 9.5 调慢流量。采样间隔是 250 ms，两次采样之间的尖峰可能漏掉。
+- 中继的写 operation 计数依赖 `commitBatch` 的 `SAVEPOINT writer_operation` 文本；存储改了这条语句，计数就会归零，需要同步改中继。
 - 读取阶段的抽样按请求在工作负载里的位置排序后用种子洗牌，同一工作负载的两次运行读到同一批位置上的 audit，详情与导出的分位数因此可比。
 - 时间到可查询的延迟包含轮询间隔；内存峰值包含压测驱动和 fake upstream 自身。
 - 被中断的 `run`（信号、超时、连接中断）不会删除它用 `--fresh-schema` 建的 schema，名字打印在开头，需要手动删除。
 - `dist` 的“每个会话每天”按 `turns.created_at_ns`（解析时间）的 UTC 日分组，只是归档按天切段时的近似。
+
+### 9.5 写入路径 A/B
+
+工作负载要让待解析积压保持在 100 以内（附录 B.2、I.6）。不加新参数，用现有的上游首字节延迟控制节奏：
+
+| 档 | 参数 | 并发 | 说明 |
+| --- | --- | --- | --- |
+| heavy | `--profile heavy --upstream-first-byte 400ms` | 2（档默认） | 编排会话上一次基线的取值，到可查询 p95 约 0.3 s |
+| small | `--profile small --upstream-first-byte 300ms` | 4（档默认） | 同上 |
+
+本地 smoke（heavy，2 个会话 × 3 轮，上述节奏）两条路径的最大积压都是 2。改了会话数、轮数或并发之后，看结果里的最大积压；超过 100 时降低 `--concurrency` 或加大 `--upstream-first-byte`。
+
+中继的代价在本地测过：heavy、legacy、6 个会话 × 4 轮，开关中继各跑两次，`Finish` p50 多 0.7 到 4.7 ms、p95 多 5 到 26 ms，流结束 p50 多约 1.4%。legacy 的往返更多，中继对它更不利，所以只用一对带中继的运行做延迟门槛，会偏向 unified。推荐的步骤：
+
+1. 每条路径一次带中继的运行（默认），得出 writer 操作数、提交数、语句数、各表行数、WAL 和暂存。这些数字不受中继影响。
+2. 每条路径一次 `--count-statements=false` 的运行，得出首字节、流结束、`Finish`、到可查询、详情与导出的延迟。
+3. 两对分别 `compare`。`compare` 遇到只有一边经过中继时会警告。
+
+~~~powershell
+# <scratch> 里放交叉编译好的 audit-bench；连接串只走环境变量
+$run = 'run --fresh-schema --drop-schema --profile heavy --upstream-first-byte 400ms'
+podman run --rm --network container:<pg-container> -v "<scratch>:/t" -w /t -e "AUDIT_BENCH_DATABASE_URL=..." <go-image> `
+  sh -c "/t/audit-bench $run --write-path legacy --output /t/heavy-legacy && /t/audit-bench $run --write-path unified --output /t/heavy-unified && /t/audit-bench $run --write-path legacy --count-statements=false --output /t/heavy-legacy-lat && /t/audit-bench $run --write-path unified --count-statements=false --output /t/heavy-unified-lat"
+podman run --rm -v "<scratch>:/t" <go-image> sh -c "/t/audit-bench compare /t/heavy-legacy.json /t/heavy-unified.json; /t/audit-bench compare /t/heavy-legacy-lat.json /t/heavy-unified-lat.json"
+~~~
+
+small 档把 `--profile heavy --upstream-first-byte 400ms` 换成 `--profile small --upstream-first-byte 300ms`。unified 不给 `--staging-dir` 时用工具自己的临时目录。默认 8 MiB 的 stage 预算下，heavy 档约 1 MB 的 Body 不会落暂存，暂存计数是 0；要看暂存的代价，另加 `--stage-bytes 1048576 --item-bytes 9200`（约 2 MB 的请求），这是另一个工作负载，不与上面的运行比较。

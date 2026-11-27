@@ -8,7 +8,9 @@ import (
 )
 
 // FormatVersion is the version of the result file layout.
-const FormatVersion = 1
+// Version 2 added the write path, the relayed statement counts, staging,
+// the handler's Finish time and the parse backlog.
+const FormatVersion = 2
 
 // Result is everything one run measured. Sizes are bytes, durations are
 // seconds or milliseconds as the field name says, and counters are counts.
@@ -19,6 +21,7 @@ type Result struct {
 	StartedAt     time.Time     `json:"started_at"`
 	FinishedAt    time.Time     `json:"finished_at"`
 	Workload      Workload      `json:"workload"`
+	WritePath     WritePathInfo `json:"write_path"`
 	Postgres      PostgresInfo  `json:"postgres"`
 	Phases        []PhaseResult `json:"phases"`
 	Total         PhaseResult   `json:"total"`
@@ -44,6 +47,47 @@ type BuildInfo struct {
 	GoVersion string `json:"go_version"`
 	Source    string `json:"source"`
 }
+
+// WritePathInfo is the capture write path of the run. Effective is what the
+// running application reports (GET /api/v1/settings/audit-capture), not the
+// flag, so a fallback to legacy cannot be labelled unified; a run whose
+// effective path differs from the requested one fails.
+type WritePathInfo struct {
+	Requested string `json:"requested"`
+	Effective string `json:"effective"`
+	// StageBytes and GlobalBytes are audit.memory.*; StagingDir is
+	// "temporary" (created by the tool and removed after the run), "flag"
+	// (--staging-dir) or empty.
+	StageBytes      int64  `json:"stage_bytes"`
+	GlobalBytes     int64  `json:"global_bytes"`
+	StagingDir      string `json:"staging_dir"`
+	StagingMaxBytes int64  `json:"staging_max_bytes"`
+	// CountStatements: the application's PostgreSQL connections ran through
+	// the tool's protocol relay, which counts statements per connection.
+	CountStatements bool `json:"count_statements"`
+}
+
+// StagingCounts are the local staging counters of every stager in the
+// process (staging.ProcessStats).
+type StagingCounts struct {
+	BytesWritten int64 `json:"bytes_written"`
+	Records      int64 `json:"records"`
+	Fsyncs       int64 `json:"fsyncs"`
+	DirSyncs     int64 `json:"directory_syncs"`
+}
+
+// BacklogSummary is the pending parse backlog sampled during load and drain:
+// ended audits whose parse status is pending or processing.
+type BacklogSummary struct {
+	Samples    int64 `json:"samples"`
+	Max        int64 `json:"max"`
+	IntervalMS int64 `json:"interval_ms"`
+}
+
+// BacklogLimit is the parser's in-memory queue capacity of the legacy path
+// (parser.QueueCapacity): above it, end of response to queryable measures
+// the 30-second rescan rather than the write path (design appendix B.2).
+const BacklogLimit = 100
 
 // PostgresInfo holds the settings needed to read the numbers.
 type PostgresInfo struct {
@@ -76,6 +120,10 @@ type PhaseResult struct {
 	Activity         Activity      `json:"max_foreign_activity"`
 	LatencyPolls     int64         `json:"tool_latency_polls"`
 	DrainPolls       int64         `json:"tool_drain_polls"`
+	// Statements are the relayed protocol counts of the application's
+	// connections, split into writer, readers and other.
+	Statements WireStats     `json:"statements"`
+	Staging    StagingCounts `json:"staging"`
 }
 
 // TableDelta is the counter difference over a phase plus the sizes at its end.
@@ -127,6 +175,10 @@ type ClientSummary struct {
 	Queryable       LatencySummary            `json:"end_to_queryable_ms"`
 	ByGroup         map[string]GroupLatencies `json:"by_protocol_and_mode"`
 	QueryableMissed int64                     `json:"queryable_not_observed"`
+	// Finish is the time the handler spent in audit Session.Finish, measured
+	// in the process (audit.SetFinishObserver), for every session.
+	Finish       LatencySummary `json:"handler_finish_ms"`
+	ParseBacklog BacklogSummary `json:"parse_backlog"`
 }
 
 // GroupLatencies are the client latencies of one protocol and mode.
@@ -242,6 +294,19 @@ func difference(name string, start, end snapshot) PhaseResult {
 		ToolCommits: end.transactions - start.transactions,
 	}
 	phase.AppCommits = phase.Database.XactCommit - phase.ToolCommits
+	if start.wire.Available && end.wire.Available {
+		phase.Statements = end.wire.minus(start.wire)
+		// Connections count those open at the end, not a difference.
+		phase.Statements.Writer.Connections = end.wire.Writer.Connections
+		phase.Statements.Readers.Connections = end.wire.Readers.Connections
+		phase.Statements.Other.Connections = end.wire.Other.Connections
+	}
+	phase.Staging = StagingCounts{
+		BytesWritten: end.staging.BytesWritten - start.staging.BytesWritten,
+		Records:      end.staging.Records - start.staging.Records,
+		Fsyncs:       end.staging.Fsyncs - start.staging.Fsyncs,
+		DirSyncs:     end.staging.DirSyncs - start.staging.DirSyncs,
+	}
 	if start.writer.Available && end.writer.Available {
 		phase.Writer = BackendStats{
 			Available:     true,

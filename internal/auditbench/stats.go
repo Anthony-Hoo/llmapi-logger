@@ -138,6 +138,10 @@ type snapshot struct {
 	activity     Activity
 	transactions int64
 	walReset     string
+	// wire and staging are read in the process right after the database
+	// statistics.
+	wire    WireStats
+	staging StagingCounts
 }
 
 // takeSnapshot reads every statistic in one read-only transaction, so the
