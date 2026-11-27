@@ -1009,7 +1009,7 @@ agent_access:
 - 升级：先部署包含本模块的版本（此时配置里没有 `agent_access`，功能关闭，迁移 004 已应用）；再把配置段写进去并重启。
 - 回滚到不含本模块的版本：
   1. 删掉配置里的 `agent_access` 段，否则旧版本因未知键启动失败。
-  2. 在库里删除 `agent_tokens`、`agent_audit_log` 两张表和 `schema_migrations` 里版本为 4 的行，否则旧版本因 schema 版本过新打不开审计存储。库已经是版本 5 时先撤销迁移 005（`doc/deployment/postgresql-migration.md`）。
+  2. 在库里删除 `agent_tokens`、`agent_audit_log` 两张表和 `schema_migrations` 里版本为 4 的行，否则旧版本因 schema 版本过新打不开审计存储。库的版本高于 4 时，先按从新到旧的顺序撤销之后的各个迁移（`doc/deployment/postgresql-migration.md`）。
 - 轮换 `admin_token`：全部 Agent 令牌与全部未过期的下载链接失效。
 - 功能关闭（`enabled: false` 或省略）时与不含本模块的版本相比只有两处不同：`/api/agent/*` 对一切方法与路径答 `FEATURE_DISABLED`（以前是普通的 404），以及迁移 004 已应用，退回旧版本仍要做上面第 2 步。`/api/v1/agent-access/*` 的回答与 `/api/v1` 下任何不存在的路径相同（§0.1 第 83 条），`/ui/` 不加防嵌入头。
 

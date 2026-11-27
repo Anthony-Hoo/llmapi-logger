@@ -195,5 +195,6 @@ issue #59 第 1 阶段（方案见 [`doc/design/issue-59-unified-write-cold-arch
 - 保存一轮时只把库里还没有的 content/binary object 发给数据库，已有对象用批量查询核对身份（[模块 18](18-content-addressed-conversation-storage.md)）。
 - 完整性摘要里的密文 SHA-256 由 PostgreSQL 计算，密文不再取回进程；摘要字节与之前完全相同。
 - `parsed_json_enc` 在明文达到 4 KiB 且压缩有收益时先 gzip 再加密，旧行原样可读；旧版本读不了压缩行（[模块 09](09-security-encryption-and-redaction.md)）。
-- 迁移 005 删除无人使用的 `content_objects_semantic_idx`，schema 版本为 5（[模块 04](04-sqlite-storage-and-migrations.md) §3.7）。
+- 迁移 005 删除无人使用的 `content_objects_semantic_idx`（[模块 04](04-sqlite-storage-and-migrations.md) §3.7）。
+- 迁移 006 加索引 `turns (created_at_ns, turn_id)`，让没有会话 key 的轮次找父轮次候选时不再扫描整张 `turns` 表；schema 版本为 6（模块 04）。
 - 四类协议的合成夹具和 A/B 压测工具 `cmd/audit-bench` 见[模块 14](14-test-benchmark-and-fault-injection.md) §9。
