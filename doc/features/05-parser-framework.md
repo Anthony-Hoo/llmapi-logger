@@ -65,7 +65,7 @@ layout 名一经写入就不能改名或删除；形状变化要新增 layout �
 ### 2.2 新增一个协议
 
 1. 在协议包里实现 `Parser`，需要内容寻址时再实现 `AuditNormalizer` 和从重建值生成 conversation 的函数；
-2. 若 normalizer 需要新的 layout，在 `auditmodel/types.go` 加 layout 名常量，在 `auditmodel/layout.go` 的表里加一行，并把新名加进 layout 钉住测试；
+2. 若 normalizer 需要新的 layout，在 `auditmodel` 加 layout 名常量（`types.go`，或像 `LayoutOpenAIStreamResponseV2` 那样紧挨表放在 `layout.go`），在 `auditmodel/layout.go` 的表里加一行，并把新名加进 layout 钉住测试；
 3. 在协议包里写 `Adapter()`，返回上面三项；
 4. 在 `builtin.adapters()` 加一行，并把 parser 名与版本加进钉住测试；
 5. 流式响应的 normalizer 遵守 §2.3：折叠成非流式 body、留残留、写同样的 `summary`。注册后保真夹具测试自动覆盖它。
@@ -80,7 +80,7 @@ turn 的重建与还原不需要改 query 或 worker。注册表之外仍有几�
 
 普通成功的流式响应经验证后释放 raw，此后只剩 envelope 和 item。为了不在这一步丢内容，每个流式 normalizer 遵守同一套约定（实现共用 `internal/parser/streamevidence`）。
 
-**SSE 解码。** 事件按 `parser.DecodeSSEWithStatus` 切分：行以 LF、CRLF 或单独的 CR 结束；以 `:` 开头的行是注释，忽略；`字段: 值` 中值的第一个空格去掉；`event` 字段给事件名，多个 `data` 行以单个 LF 连接成事件的 data；空行派发事件，没有 data 行的事件不派发；`id`、`retry` 等其他字段忽略。事件按派发顺序从 0 编号。残留的 `index` 和事件描述都按这个编号。
+**SSE 解码。** 事件按 `parser.DecodeSSEWithStatus` 从解码后的响应 Body（已去掉 HTTP `Content-Encoding`）切分，全程按字节处理，不做 UTF-8 校验，也不去掉 BOM：行以 LF、CRLF 或单独的 CR 结束；以 `:` 开头的行是注释，忽略；其余行在第一个 `:` 处分成字段名和值，值开头的一个空格去掉，没有 `:` 的行是值为空的字段；`event` 字段设置事件名（同一事件内后出现的覆盖先出现的），每个 `data` 字段贡献一行，多行以单个 LF 连接成事件的 data（末尾不加 LF）；空行派发事件，没有 data 行的事件不派发且其事件名作废；`id`、`retry` 等其他字段忽略；Body 末尾没有空行结束的最后一个事件也派发（这样的流解析为 `partial`，不会被规范化）。事件按派发顺序从 0 编号。残留的 `index` 和事件描述都按这个编号。
 
 **事件描述。** envelope 的 `events` 是整条流的紧凑描述，取代旧的逐事件描述（每个事件一个事件名、data 长度和十六进制 SHA-256）：
 
