@@ -467,7 +467,7 @@ Header 的写入随这一步重写（5.10）：四个阶段的 Header 和 Traile
 | 005 | P0b | 删除 `content_objects_semantic_idx` |
 | 006 | 附录 C.6 | 索引 `turns (created_at_ns, turn_id)`，没有会话 key 的轮次找父轮次候选用 |
 | 007 | P2 | 采集版本 2：`audit_records.capture_version`、`user_agent_enc`，`http_stages.content_type`、`content_encoding`，`http_header_blocks`，`runtime_settings` 的 `audit_capture` 分区 |
-| 008 起 | P3 | 归档目录表 |
+| 之后 | P3 | 归档目录表 |
 
 各迁移的内容见模块 04 §3.7 到 §3.9，回滚见 `doc/deployment/postgresql-migration.md` 的回滚各节。
 

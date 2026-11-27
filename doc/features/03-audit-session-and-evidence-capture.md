@@ -234,7 +234,7 @@ Body 标为故障，阶段 partial，`capture_status` 为 partial，raw 保留 `
 
 1. **重试救不回检查点丢在失败批次里的 audit。** 检查点所在批次失败时，writer 把它记进恢复表；该 audit 的 `CommitAudit` 在终结之前先写这些失败标记（`prepareFinalization`），所以即使重试的提交成功，audit 也以 failed 终结。快请求的检查点常与它的提交同批，故障期间发出的检查点也是这样。
 2. **`Finish` 在 unified 下更慢。** 响应侧保留的块在 `Finish` 时才压缩加密（请求侧已在检查点 1 封好），分块响应和 HTTP/2 响应的结束（晚于终结提交的那几类）随之推后这段时间。实测由编排方补在设计文档的实施记录里。
-3. **最终失败的提交不会补进暂存的块。** 文件留到下次启动，但 writer 恢复在进程里已经把 audit 以 failed 终结；下次启动导入时看到它已终结，只删除文件。所以这类 audit 只有检查点写进库的部分，legacy 在同样故障下保留的是已提交的异步块。
+3. **最终失败的提交通常补不进暂存的块。** 文件留到下次启动（`Stager.Keep`）。但提交是交给 writer 之后失败的，writer 恢复（每 5 秒一轮，`recoverCaptureEntry`）会在进程里把 audit 以 failed 终结；下次启动导入时看到它已终结，只删除文件。只有进程在恢复终结之前退出，或者提交根本没有发出（版本 2 的块封不出来）时，下次启动才把这些块导入。检查点已经写进库的块不受影响。`Stager.Keep` 和 `releaseStaged` 的注释写的是“下次启动导入”，没有提这个前提。
 
 ### 13.6 启动导入
 
@@ -261,7 +261,8 @@ Body 标为故障，阶段 partial，`capture_status` 为 partial，raw 保留 `
 | 拦截器执行中，包括 body 拦截器预读 | 起始行；`request_received` 的行和 Header；预读超过 1 MiB 时已满的块 | 起始行；`request_received` 的行和 Header（版本 2 含 `user_agent_enc` 和只含入站阶段的块）；预读超过预算时，落暂存的块和它的 Body 行 | 预算以内的预读字节没有 |
 | 请求 Body 正在上传 | 起始行；两个请求阶段的行和 Header；两个阶段各自已满 1 MiB 的块 | 同上一行；请求 Body 超过预算时，另有落暂存时的检查点写的 `request_sent` 行和 Header、`request_received` 的 Body 行和落暂存的块 | `request_sent` 的行和 Header（与入站几乎逐条相同）在没落暂存时没有；预算以内的请求 Body 没有，legacy 只丢最后不足 1 MiB 的部分 |
 | 请求读完，响应头还没到 | 以上全部，加两个请求阶段的尾块和请求 Trailer | 检查点 1：两个请求阶段的行、Header 和请求 Trailer（版本 2 为残缺块），Body 行，请求侧全部块 | 合并了的 `request_sent` 没有自己的块，`source_stage` 指向来源 |
-| 响应流到一半 | 以上全部，加两个响应阶段的行和 Header，各自已满 1 MiB 的块 | 检查点 1 和 2；响应 Body 只有超出预算后落暂存的块 | 预算以内的响应 Body 没有（legacy 只丢最后不足 1 MiB）；随 Body 结束到达的上游 Trailer 在 `Finish` 之前退出时没有，legacy 在 EOF 时已异步写出 |
+| 响应流到一半 | 以上全部，加两个响应阶段的行和 Header，各自已满 1 MiB 的块 | 检查点 1 和 2；响应 Body 只有超出预算后落暂存的块 | 预算以内的响应 Body 没有（legacy 只丢最后不足 1 MiB） |
+| 响应已读完，`Finish` 提交之前 | 以上全部，加两个响应阶段的尾块和上游响应 Trailer（EOF 时异步写出） | 同上一行 | 同上一行；随 Body 结束到达的上游响应 Trailer 也没有，它只由 `CommitAudit` 写 |
 | `Finish` 提交之后 | 完整 | 完整 | 无 |
 
 两条路径的恢复都把这些 audit 终结为 `interrupted`，未完成的阶段和 Body 收尾为 partial、`process_exit`，raw `full`，并签名；版本 2 签的是最后一次写出的残缺块（模块 09 §8）。SSE 响应体通常远小于预算，所以响应侧的差别在实际流量里影响小；请求侧的差别是维护者接受的（设计决定 1、4）。

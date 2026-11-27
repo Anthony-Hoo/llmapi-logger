@@ -161,7 +161,7 @@ SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
 
 旧版本打开版本 7 的库时会因 schema 版本过新（`schema is newer than supported`）而无法使用审计存储，表现与下面两节相同。旧版本的配置加载拒绝不认识的键，配置文件里有 `audit:` 段时会直接拒绝启动，回滚前要先删掉这一段。回滚到不含迁移 007 的版本：
 
-1. 先等暂存目录变空（部署说明 3.3 第 4 步），再停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+1. 先按部署说明 3.3 第 4 步处理暂存目录，再停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
 2. 执行下面的 SQL。它先检查有没有版本 2 的 audit 或 Header 块，有就报错、什么都不改；否则删除 `audit_capture` 设置、恢复分区约束，删掉新表和新列，并删除 `schema_migrations` 里版本为 7 的行。代理使用独立 schema 时先 `SET search_path = <schema>;`。
 3. 删掉配置文件里的 `audit:` 段，再启动旧版本。之后重新升级时，迁移 007 会再次加上这些列和表。
 
