@@ -92,15 +92,69 @@ func (store *Store) rememberFailedWrite(request writeRequest, barrier uint64) {
 	case writeFinishAudit:
 		v := request.data.(*AuditFinish)
 		remember(v.AuditID, "", false, false, 0, v)
+	case writeCheckpoint:
+		// The same losses the replaced StartStage, StartBody, AddHeaders and
+		// AddChunk operations would have recorded together.
+		v := request.data.(AuditCheckpoint)
+		for _, stage := range v.Stages {
+			remember(v.AuditID, stage.Stage, false, false, 0, nil)
+		}
+		for _, body := range v.Bodies {
+			remember(v.AuditID, body.Stage, false, false, body.ObservedLength, nil)
+		}
+		for _, header := range v.Headers {
+			remember(v.AuditID, header.Stage, true, false, 0, nil)
+		}
+		for stage, observed := range checkpointChunkBounds(v) {
+			remember(v.AuditID, stage, false, true, observed, nil)
+		}
+	case writeCommitAudit:
+		// Until its final attempt a failed commit is retried by the session;
+		// recovery must not finalize the audit as failed underneath it.
+		v := request.data.(*AuditCommit)
+		if !v.FinalAttempt {
+			return
+		}
+		rememberCommitLosses(v, remember)
 	}
 	store.recoveryPending.Store(int32(len(store.recoveries)))
 	// Queue-full finalization is not seen by the writer until it is woken.
-	if request.kind == writeFinishAudit && request.sequence > barrier {
+	if (request.kind == writeFinishAudit || request.kind == writeCommitAudit) && request.sequence > barrier {
 		select {
 		case store.recoveryWake <- struct{}{}:
 		default:
 		}
 	}
+}
+
+// rememberFailedCommit records the terminal outcome of a commit whose own
+// operation failed inside a committed batch. Such a failure is never retried,
+// so it is remembered on any attempt. As for an isolated FinishAudit failure,
+// only the finish is kept: markCaptureWriteFailed has already failed the
+// audit in that batch, and finalization reconciles the unfinished rows.
+func (store *Store) rememberFailedCommit(commit *AuditCommit, barrier uint64) {
+	store.rememberFailedWrite(writeRequest{kind: writeFinishAudit, data: &commit.Finish, sequence: barrier}, barrier)
+}
+
+// rememberCommitLosses records what a failed final commit loses: the stage
+// and body finalizations, its header groups and chunks, as the FinishStage,
+// AddHeaders and AddChunk operations it replaces would, and the finish itself.
+func rememberCommitLosses(commit *AuditCommit, remember func(id, stage string, headers, chunk bool, observed int64, finish *AuditFinish)) {
+	id := commit.Finish.AuditID
+	for _, stage := range commit.Stages {
+		var observed int64
+		if stage.Body != nil {
+			observed = stage.Body.ObservedLength
+		}
+		remember(id, stage.Stage.Stage, false, false, observed, nil)
+	}
+	for _, header := range commit.Headers {
+		remember(id, header.Stage, true, false, 0, nil)
+	}
+	for stage, observed := range chunkBounds(commit.Chunks) {
+		remember(id, stage, false, true, observed, nil)
+	}
+	remember(id, "", false, false, 0, &commit.Finish)
 }
 
 // Called only by the single writer, including when no new traffic arrives.
