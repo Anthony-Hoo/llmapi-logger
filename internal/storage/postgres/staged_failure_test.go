@@ -626,6 +626,111 @@ func TestFailedCheckpointedAuditRecovers(t *testing.T) {
 	}
 }
 
+// alignMergedDuplicates applies mergeLegacyDuplicate to each pair the
+// unified commit wrote merged while the failed legacy audit kept separate.
+func alignMergedDuplicates(t *testing.T, legacy, unified harnessDump) {
+	t.Helper()
+	for _, pair := range [][2]string{{StageRequestReceived, StageRequestSent}, {StageResponseReceived, StageResponseSent}} {
+		merged := stageRow(unified, "body_streams", pair[1])
+		separate := stageRow(legacy, "body_streams", pair[1])
+		if merged != nil && separate != nil && merged["source_stage"] == pair[0] && separate["source_stage"] == pair[1] {
+			mergeLegacyDuplicate(t, legacy, pair[1], pair[0])
+		}
+	}
+}
+
+// TestBeginAuditInboundFailureKeepsTheStartRow rejects the inbound stage row
+// or its headers at BeginAudit: the start row commits and BeginAudit
+// succeeds, as legacy's does, and the audit ends failed through the later
+// checkpoints and CommitAudit with the rows legacy ends with.
+func TestBeginAuditInboundFailureKeepsTheStartRow(t *testing.T) {
+	cases := []struct {
+		name, table, condition, scenario string
+		adjust                           func(t *testing.T, legacy, unified harnessDump)
+	}{
+		{"stage row, pair not merged", "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'", "pair with different bytes", nil},
+		{"stage row, merged pair", "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'", "stream both pairs merged",
+			func(t *testing.T, legacy, unified harnessDump) {
+				// Checkpoint 1 wrote request_sent merged into a source whose
+				// stage row is missing, so the body row cannot be written
+				// and its own chunks were never sealed: legacy keeps
+				// request_sent's body with its chunks and finishes the stage;
+				// unified leaves the stage to finalizeIncompleteCapture.
+				stage := stageRow(unified, "http_stages", StageRequestSent)
+				if stage["state"] != StageStatePartial || stage["error_code"] != "capture_write_failed" ||
+					stageRow(unified, "body_streams", StageRequestSent) != nil || stageRow(legacy, "body_streams", StageRequestSent) == nil {
+					t.Fatalf("request_sent: unified stage %v", stage)
+				}
+				for _, dump := range []harnessDump{legacy, unified} {
+					dump.dropRows("http_stages", stageIs(StageRequestSent))
+					dump.dropRows("body_streams", stageIs(StageRequestSent))
+					dump.dropRows("body_chunks", stageIs(StageRequestSent))
+				}
+			}},
+		{"headers", "http_headers", "NEW.stage = 'request_for_newapi_received_from_nginx' AND NEW.kind = 'header'", "stream both pairs merged", nil},
+	}
+	cipher := harnessCipher(t)
+	sealer := harnessSealer{t: t, cipher: cipher}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			legacyStore, unifiedStore := openHarnessStore(t), openHarnessStore(t)
+			for _, store := range []*Store{legacyStore, unifiedStore} {
+				injectInsertFailure(t, store, test.table, test.condition)
+			}
+			h := buildHarness(t, &harnessClock{now: 1_000_000}, "inbound-"+test.table, test.scenario)
+			legacyOps, unifiedOps := h.legacyOps(sealer), h.unifiedOps(sealer)
+			// BeginAudit alone: it succeeds and its start row is committed,
+			// already marked failed.
+			runHarnessOps(t, unifiedStore, unifiedOps[:1])
+			var captureStatus, errorCode string
+			if err := unifiedStore.readerDB.QueryRow(`SELECT capture_status, error_code FROM audit_records WHERE audit_id = $1`, h.id).Scan(&captureStatus, &errorCode); err != nil ||
+				captureStatus != CaptureFailed || errorCode != "capture_write_failed" {
+				t.Fatalf("start row after BeginAudit: %s %s %v", captureStatus, errorCode, err)
+			}
+			unifiedOutcome := runHarnessOps(t, unifiedStore, unifiedOps[1:])
+			legacyOutcome := runHarnessOps(t, legacyStore, legacyOps)
+			if derefFinish(legacyOutcome) != derefFinish(unifiedOutcome) || unifiedOutcome.CaptureStatus != CaptureFailed {
+				t.Fatalf("outcomes differ:\nlegacy  %+v\nunified %+v", derefFinish(legacyOutcome), derefFinish(unifiedOutcome))
+			}
+			legacy := dumpAudit(t, legacyStore.readerDB, cipher, h.id)
+			unified := dumpAudit(t, unifiedStore.readerDB, cipher, h.id)
+			if test.table == "http_headers" {
+				if row := stageRow(unified, "http_stages", StageRequestReceived); row["error_code"] != "capture_headers_failed" || row["state"] != StageStatePartial {
+					t.Fatalf("inbound stage not marked: %v", row)
+				}
+			} else if stageRow(unified, "http_stages", StageRequestReceived) != nil {
+				t.Fatal("rejected inbound stage row exists")
+			}
+			if test.adjust != nil {
+				test.adjust(t, legacy, unified)
+			}
+			alignMergedDuplicates(t, legacy, unified)
+			if differences := diffDumps(legacy, unified); len(differences) != 0 {
+				t.Fatalf("unified rows differ from legacy:\n%s", strings.Join(differences, "\n"))
+			}
+			for _, store := range []*Store{legacyStore, unifiedStore} {
+				if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+	t.Run("batch failure still fails BeginAudit", func(t *testing.T) {
+		t.Parallel()
+		store := openHarnessStore(t)
+		h := buildHarness(t, &harnessClock{now: 1_000_000}, "inbound-batch", "stream both pairs merged")
+		record := h.unifiedOps(sealer)[0].data.(AuditRecord)
+		setWriterReadOnly(t, store, true)
+		if err := store.BeginAudit(context.Background(), record); ErrorClass(err) != "postgres_read_only" {
+			t.Fatalf("BeginAudit = %v", err)
+		}
+		setWriterReadOnly(t, store, false)
+		assertTableCount(t, store.readerDB, "audit_records", 0)
+	})
+}
+
 // TestStagedWriteInputs needs no database: version 2 is refused until its
 // migration, and large writes are sized for a transaction of their own.
 func TestStagedWriteInputs(t *testing.T) {

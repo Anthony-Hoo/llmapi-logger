@@ -79,7 +79,8 @@ func requireCaptureVersion(version int) error {
 // in-flight request (B.4): only inserts, never final values.
 func applyCheckpoint(transaction dbTransaction, checkpoint *checkpointWrite) error {
 	var ended sql.NullInt64
-	if err := transaction.QueryRow("SELECT ended_at_ns FROM audit_records WHERE audit_id=$1", checkpoint.AuditID).Scan(&ended); err != nil {
+	var captureStatus string
+	if err := transaction.QueryRow("SELECT ended_at_ns, capture_status FROM audit_records WHERE audit_id=$1", checkpoint.AuditID).Scan(&ended, &captureStatus); err != nil {
 		return fmt.Errorf("postgres writer: read checkpoint audit: %w", err)
 	}
 	if ended.Valid {
@@ -87,16 +88,45 @@ func applyCheckpoint(transaction dbTransaction, checkpoint *checkpointWrite) err
 		// signed evidence.
 		return nil
 	}
+	headers, bodies := checkpoint.Headers, checkpoint.Bodies
+	var keep func(string) bool
+	if captureStatus == CaptureFailed {
+		// A recorded failure may have left a parent row missing (the inbound
+		// stage BeginAudit could not write, or an earlier checkpoint). Write
+		// what still has its parents, as the legacy operations would have
+		// failed one by one on the rest.
+		present, err := loadPresentRows(transaction, checkpoint.AuditID)
+		if err != nil {
+			return err
+		}
+		for _, stage := range checkpoint.Stages {
+			present.stages[stage.Stage] = true
+		}
+		headers = make([]HTTPHeader, 0, len(checkpoint.Headers))
+		for _, header := range checkpoint.Headers {
+			if present.stages[header.Stage] {
+				headers = append(headers, header)
+			}
+		}
+		bodies = make([]BodyStream, 0, len(checkpoint.Bodies))
+		for _, body := range checkpoint.Bodies {
+			if present.stages[body.Stage] && present.stages[body.SourceStage] {
+				bodies = append(bodies, body)
+				present.bodies[body.Stage] = true
+			}
+		}
+		keep = func(stage string) bool { return present.bodies[stage] }
+	}
 	if err := insertStageRows(transaction, checkpoint.Stages); err != nil {
 		return err
 	}
-	if err := insertHeaderRows(transaction, checkpoint.Headers); err != nil {
+	if err := insertHeaderRows(transaction, headers); err != nil {
 		return err
 	}
-	if err := insertBodyRows(transaction, checkpoint.Bodies); err != nil {
+	if err := insertBodyRows(transaction, bodies); err != nil {
 		return err
 	}
-	return insertChunkRows(transaction, checkpoint.AuditID, checkpoint.Chunks, nil)
+	return insertChunkRows(transaction, checkpoint.AuditID, checkpoint.Chunks, keep)
 }
 
 func (checkpoint *checkpointWrite) chunkBounds() [4]int64 {

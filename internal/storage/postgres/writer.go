@@ -536,11 +536,7 @@ func (store *Store) applyWrite(transaction dbTransaction, request writeRequest) 
 		if record.Inbound == nil {
 			return nil
 		}
-		// The rows StartStage and AddHeaders write for request_received.
-		if err := insertStageRows(transaction, []HTTPStage{record.Inbound.Stage}); err != nil {
-			return err
-		}
-		return insertHeaderRows(transaction, record.Inbound.Headers)
+		return insertInboundStage(transaction, *record.Inbound)
 	case writeStartStage:
 		return insertStage(transaction, request.data.(HTTPStage))
 	case writeStartBody:
@@ -631,6 +627,46 @@ WHERE audit_id=$1 AND ended_at_ns IS NULL`, auditID); err != nil {
 		}
 	}
 	return nil
+}
+
+// insertInboundStage writes the rows the legacy StartStage and AddHeaders
+// write for request_received, each in a nested savepoint. Admission must not
+// depend on them: when one is rejected with an isolatable error, only that
+// part is rolled back, the start row stays, and the audit is marked as
+// legacy marks it when that operation fails. Any other error fails the
+// whole operation, as it fails BeginAudit today.
+func insertInboundStage(transaction dbTransaction, inbound InboundStage) error {
+	part := func(write func() error, failed writeRequest) (bool, error) {
+		if _, err := transaction.Exec("SAVEPOINT begin_inbound"); err != nil {
+			return false, fmt.Errorf("postgres writer: inbound savepoint: %w", err)
+		}
+		err := write()
+		if err != nil {
+			if !canIsolateWriteError(err) {
+				return false, err
+			}
+			if _, rollbackErr := transaction.Exec("ROLLBACK TO begin_inbound"); rollbackErr != nil {
+				return false, fmt.Errorf("postgres writer: rollback inbound stage: %w", rollbackErr)
+			}
+			if markErr := markCaptureWriteFailed(transaction, failed); markErr != nil {
+				return false, markErr
+			}
+		}
+		if _, releaseErr := transaction.Exec("RELEASE begin_inbound"); releaseErr != nil {
+			return false, fmt.Errorf("postgres writer: release inbound savepoint: %w", releaseErr)
+		}
+		return err == nil, nil
+	}
+	written, err := part(func() error { return insertStageRows(transaction, []HTTPStage{inbound.Stage}) },
+		writeRequest{kind: writeStartStage, data: inbound.Stage})
+	if err != nil || !written || len(inbound.Headers) == 0 {
+		// Without the stage row legacy's AddHeaders fails on its parent and
+		// adds no mark beyond the audit's.
+		return err
+	}
+	_, err = part(func() error { return insertHeaderRows(transaction, inbound.Headers) },
+		writeRequest{kind: writeAddHeaders, data: inbound.Headers})
+	return err
 }
 
 func insertAudit(transaction dbTransaction, record AuditRecord) error {
