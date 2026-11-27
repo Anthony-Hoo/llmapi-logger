@@ -596,3 +596,26 @@ func TestRestorePlanSkipsBorrowedStage(t *testing.T) {
 		t.Fatalf("inserted %d, result %+v", count, result)
 	}
 }
+
+// TestProcessStatsAddUpStagers: the process totals cmd/audit-bench reads are
+// the sum of every stager's own counters. It is not parallel, so no other
+// test stages meanwhile.
+func TestProcessStatsAddUpStagers(t *testing.T) {
+	cipher := testCipher(t)
+	before := ProcessStats()
+	first := openStager(t, stagingDir(t), Options{})
+	second := openStager(t, stagingDir(t), Options{})
+	for index, stager := range []*Stager{first, second} {
+		chunk := sealChunk(t, cipher, fmt.Sprintf("apx_totals_%d", index), storage.StageRequestReceived, 0, 0, bytes.Repeat([]byte("x"), 4096))
+		if _, err := stager.Stage(chunk); err != nil {
+			t.Fatal(err)
+		}
+		stager.Flush()
+	}
+	after := ProcessStats()
+	a, b := first.Stats(), second.Stats()
+	if after.BytesWritten-before.BytesWritten != a.BytesWritten+b.BytesWritten || after.Records-before.Records != 2 ||
+		after.Fsyncs-before.Fsyncs != a.Fsyncs+b.Fsyncs || after.DirSyncs-before.DirSyncs != a.DirSyncs+b.DirSyncs || after.UsedBytes != 0 {
+		t.Fatalf("process %+v -> %+v, stagers %+v and %+v", before, after, a, b)
+	}
+}

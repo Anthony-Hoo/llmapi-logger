@@ -537,6 +537,29 @@ func (stager *Stager) Close() error {
 	return nil
 }
 
+// processTotals add up the counters of every Stager in the process, so a
+// measurement that runs the application in its own process (cmd/audit-bench)
+// can read them without a handle on the Stager the application opened.
+var processTotals struct {
+	bytesWritten, fsyncs, dirSyncs, records atomic.Int64
+}
+
+// ProcessStats returns the counters of every Stager this process opened,
+// added up; UsedBytes is zero.
+func ProcessStats() Stats {
+	return Stats{
+		BytesWritten: processTotals.bytesWritten.Load(),
+		Fsyncs:       processTotals.fsyncs.Load(),
+		DirSyncs:     processTotals.dirSyncs.Load(),
+		Records:      processTotals.records.Load(),
+	}
+}
+
+func (stager *Stager) countBytes(bytes int64) {
+	stager.bytesWritten.Add(bytes)
+	processTotals.bytesWritten.Add(bytes)
+}
+
 // Stats returns the stager's counters.
 func (stager *Stager) Stats() Stats {
 	stager.mu.Lock()
@@ -612,6 +635,7 @@ func (stager *Stager) writeBatch(batch []*record) {
 	if created {
 		if err := syncDirectory(stager.dir); err == nil {
 			stager.dirSyncs.Add(1)
+			processTotals.dirSyncs.Add(1)
 		}
 	}
 }
@@ -652,7 +676,7 @@ func (stager *Stager) writeRecord(entry *record) (wrote, created bool) {
 				stager.fail(file, err)
 				return false, created
 			}
-			stager.bytesWritten.Add(int64(len(header)))
+			stager.countBytes(int64(len(header)))
 		}
 	}
 	if err := stager.fault("write", file.auditID); err != nil {
@@ -667,8 +691,9 @@ func (stager *Stager) writeRecord(entry *record) (wrote, created bool) {
 		stager.fail(file, err)
 		return false, created
 	}
-	stager.bytesWritten.Add(entry.length)
+	stager.countBytes(entry.length)
 	stager.records.Add(1)
+	processTotals.records.Add(1)
 	size := int64(len(entry.data))
 	entry.data = nil
 	file.held -= size
@@ -687,6 +712,7 @@ func (stager *Stager) syncFile(file *stagedFile) {
 		err = file.handle.Sync()
 	}
 	stager.fsyncs.Add(1)
+	processTotals.fsyncs.Add(1)
 	if err != nil {
 		stager.fail(file, err)
 		return

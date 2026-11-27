@@ -356,7 +356,7 @@ func (session *Session) Finish() error {
 		return nil
 	}
 	session.finishOnce.Do(func() {
-		session.finishErr = session.finish()
+		session.finishErr = session.timedFinish()
 	})
 	return session.finishErr
 }
