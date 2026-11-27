@@ -124,7 +124,9 @@ Issue #59 描述的链路是：流式捕获 → 一次逻辑归档到热库 → 
 ### 4.1 协议适配统一（issue §1）
 
 1. 并入 PR #54 的工作，作为第二个 normalizer：cherry-pick 为 P1 分支的首个提交，保留原作者归属（5.8）。
-2. 把“解析、规范化、从图重建会话”收成一个按 parser 名注册的适配器接口，替换 `query/turn.go`、`parser/backfill.go`、`parser/project.go` 里的协议分支；`auditmodel.Assemble` 的 layout 分支同样改为注册。这一步不改行为，只为第三个协议让路。
+2. 把“解析、规范化、从图重建会话”收成一个按 parser 名注册的适配器接口，替换 `query/turn.go`、`parser/backfill.go`、`parser/project.go` 里的协议分支。这一步不改行为，只为第三个协议让路。
+   - 落地时的一处调整：`auditmodel.Assemble` 的 layout 分支没有改成注册，而是改成 `auditmodel` 包内的一张数据表（每个 layout 一行，写明各 slot 是数组、恰好一个、至多一个还是没有）。原因是已存的 layout 必须能被任何读取方装配，包括只用 `auditmodel`、不引入任何 parser 的离线导入校验、两个存储的测试和以后的归档读取工具；靠注册的话，漏掉一个 import 就会在第一次重建时才报“不支持的 layout”。适配器只声明自己会写出哪些 layout，注册表在进程启动时校验它们都在表里。新增一个 layout 是表里加一行，再在适配器里声明。
+   - 注册表是 `internal/parser/builtin` 里一份显式的列表，包初始化时构建并校验，列表有错进程起不来。没有 `init()` 注册，也没有可变的全局状态。
 3. 新增 Gemini normalizer，覆盖 GenerateContent 与 StreamGenerateContent。请求按 `contents[]` 逐条成 item，`systemInstruction` 比照 #54 的 system 处理。会话 key 的来源需要先调查客户端实际发什么，没有可靠 key 时走无 key 的内容推断。
 4. **流式内容不丢是释放 raw 的前提。** 每个协议定义“已消费事件类型”清单。一条流里只要出现清单外的事件、聚合器没有读走的字段，或聚合结果覆盖不了的内容（工具调用、用量、签名、引用、多模态、扩展字段），就把这些事件的载荷作为 content object 挂在响应 envelope 上；单条超过上限时整条升级为 `full`。
 5. 每个协议配一组保真夹具：同一份 SSE 字节，分别从 raw 和从图重建两条路径导出会话、用量、工具调用和停止原因，结果必须相同。没有通过这组夹具的协议不允许进入 `metadata`。
