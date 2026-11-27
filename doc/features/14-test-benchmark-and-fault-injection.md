@@ -155,10 +155,10 @@ issue #59 的 P0 基线（`doc/design/issue-59-unified-write-cold-archive.md` �
 
 fake upstream（`protofixture.Upstream`）是一个 `http.Handler`：客户端先登记 exchange 拿到 id，请求时带上 `X-Protofixture-Exchange: <id>`。代理原样转发请求头，upstream 据此取出 exchange，核对转发来的方法、路径和请求体，再按块写出并逐块 flush；断流场景在 `CutAt` 处断开或等待客户端离开。响应头 `X-Oneapi-Request-Id` 填 exchange id，它落在带索引的 `audit_records.newapi_request_id` 列上，压测工具因此不用解密任何东西就能找到每个请求的 audit。这个请求头和其他请求头一样被加密记录，每条 audit 多两行 Header。
 
-夹具测试固定了两处现状，作为发现而不是被掩盖：
+夹具最初固定下来的两处现状，已在 issue #59 第 2 阶段解决，对应的测试改成了断言新行为：
 
-- Gemini parser 没有结束事件检查：在两个事件之间干净结束的流解析为 `ok`，与完整的流无法区分（`TestFindingGeminiStreamWithoutTerminalParsesOK`）。
-- Anthropic 流聚合器忽略 `signature_delta` 和 `citations_delta`，两者都进不了解析出的会话（`TestFindingAnthropicDropsSignatureAndCitations`）。这正是设计 4.1 第 4 条要补的未消费事件保真。
+- Gemini 流必须给出结束原因才算完整：每个出现过的 candidate 都报告了 `finishReason`，或者提示被拦截。在两个事件之间干净结束的流现在解析为 `partial`（`missing_finish_reason`），不会被验证，也不会释放 raw（`TestGeminiStreamWithoutFinishReasonIsPartial`，规则见[模块 08](08-gemini-protocol-parser.md)）。
+- Anthropic 流的 `signature_delta` 和 `citations_delta` 折叠进各自的 content block，流式与非流式得到相同的会话（`TestAnthropicStreamKeepsSignatureAndCitations`，见[模块 07](07-anthropic-protocol-parser.md)）。
 
 为了让流量真的到达上游，Responses 夹具使用 `Codex Desktop/…` User-Agent 和 `Originator` 头，Chat 夹具使用非 gpt 模型：迁移内置的默认 UA 规则只允许 Codex 客户端调用 gpt 模型，其他客户端会在本地被拦截。
 

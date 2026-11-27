@@ -771,7 +771,7 @@ A.6 的推断是：回填每一轮都在重试必然失败的记录，并重读�
 
 ### B.5 P0 夹具固定下来的两处现状
 
-夹具测试把两处现状固定成了测试，留给 P1 处理：
+P0 的夹具测试把两处现状固定成了测试，留给 P1 处理。两处都已在第 2 阶段解决：
 
-- Gemini parser 没有结束事件检查：在两个事件之间干净结束的流解析为 `ok`，与完整的流无法区分。
-- Anthropic 流聚合器忽略 `signature_delta` 和 `citations_delta`，两者进不了解析出的会话。这正是 4.1 第 4 条和 5.8 要补的未消费事件保真。
+- Gemini parser 原来没有结束事件检查：在两个事件之间干净结束的流解析为 `ok`，与完整的流无法区分。现在要求每个出现过的 candidate 都报告 `finishReason`（或提示被拦截），否则解析为 `partial`，不验证、不释放 raw。
+- Anthropic 流聚合器原来忽略 `signature_delta` 和 `citations_delta`。现在两者折叠进各自的 content block，流式与非流式得到相同的会话；折叠表达不了的内容按事件存进 envelope 的残余（4.1 第 4 条）。
