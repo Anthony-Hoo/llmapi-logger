@@ -35,6 +35,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { ContentPolicyPanel } from "./components/content-policy-panel";
 import { ReportSettingsPanel } from "./components/settings/report-settings-panel";
 import { SystemSettings, type SettingsSection } from "./components/settings/system-settings";
+import { CaptureSettingsCard } from "./components/settings/capture-settings-form";
 import { ConversationView } from "./components/conversation-view";
 import { AgentAccessView } from "./components/agent-access/agent-access-view";
 import { AgentAuthorizeView } from "./components/agent-access/authorize-view";
@@ -707,12 +708,14 @@ export function Dashboard({
 
 /**
  * The pages of the administrator's "系统配置" menu. Project groups need
- * organisation reports; the report parameters need either feature.
+ * organisation reports; the report parameters need either feature. The
+ * capture write setting is always there.
  */
 export function settingsSections(client: ApiClient, hasOrgReports: boolean, hasSessionAnalysis: boolean): SettingsSection[] {
   const sections: SettingsSection[] = [
     { id: "ua-rules", label: "UA 拦截规则", hint: "按 User-Agent 拒绝请求", render: () => <UserAgentRulesPanel client={client} /> },
     { id: "content-policy", label: "关键词拦截", hint: "按请求内容拦截", render: () => <ContentPolicyPanel client={client} /> },
+    { id: "capture", label: "审计写入", hint: "终结提交失败时的重试", render: () => <CaptureSettingsCard client={client} /> },
   ];
   if (hasOrgReports) {
     sections.push({
