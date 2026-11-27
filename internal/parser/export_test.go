@@ -17,9 +17,13 @@ func (worker *Worker) BackfillForTest(ctx context.Context) int {
 	return worker.backfill(ctx)
 }
 
-// ResetBackfillForTest restarts the backfill scan from the oldest audit and
-// clears the rescan pause, keeping the in-memory skip set.
+// ResetBackfillForTest abandons the open insights pass and clears the rescan
+// pause, keeping the watermark and the in-memory skip and retry sets: the
+// next call starts a pass from the watermark (from the oldest audit with a
+// store that has no horizon).
 func (worker *Worker) ResetBackfillForTest() {
+	worker.backfillMark.abandon()
 	worker.backfillCursor = nil
+	worker.backfillRetryQueue = nil
 	worker.backfillNextScan = time.Time{}
 }

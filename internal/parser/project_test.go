@@ -50,7 +50,7 @@ type projectBackfillStore struct {
 	stageLoads int
 }
 
-func (store *projectBackfillStore) ListProjectIdentityBackfillCandidates(_ context.Context, version int, before *storage.ProjectBackfillCursor, limit int) ([]storage.ProjectBackfillCandidate, error) {
+func (store *projectBackfillStore) ListProjectIdentityBackfillCandidates(_ context.Context, version int, after, before *storage.ProjectBackfillCursor, limit int) ([]storage.ProjectBackfillCandidate, error) {
 	store.listed++
 	if version != insights.ProjectIdentityVersion || limit != projectBackfillBatch {
 		return nil, errors.New("unexpected request")
@@ -58,6 +58,9 @@ func (store *projectBackfillStore) ListProjectIdentityBackfillCandidates(_ conte
 	out := []storage.ProjectBackfillCandidate{}
 	for _, candidate := range store.candidates {
 		if before != nil && (candidate.StartedAtNS > before.StartedAtNS || candidate.StartedAtNS == before.StartedAtNS && candidate.AuditID >= before.AuditID) {
+			continue
+		}
+		if after != nil && (candidate.StartedAtNS < after.StartedAtNS || candidate.StartedAtNS == after.StartedAtNS && candidate.AuditID <= after.AuditID) {
 			continue
 		}
 		out = append(out, candidate)

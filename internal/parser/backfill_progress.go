@@ -4,9 +4,11 @@ import "sync"
 
 // backfillProgress records how far the insights backfill got, so other
 // components can tell "not analysed yet" from "attempted and skipped or
-// failed". The backfill lists candidates oldest first; one pass runs from an
-// empty cursor until the list comes back empty. The parser goroutine writes,
-// any goroutine reads.
+// failed". The backfill lists candidates oldest first; one pass runs from its
+// watermark until the list comes back empty. Everything at or below the
+// watermark was attempted by an earlier pass or by the live analysis, so a
+// pass advances past it as soon as it has retried the audits waiting there.
+// The parser goroutine writes, any goroutine reads.
 type backfillProgress struct {
 	mu sync.Mutex
 	// open is true while a pass is running; startNS is when it began and
@@ -57,10 +59,13 @@ func (progress *backfillProgress) covered(untilNS, sinceNS int64) bool {
 }
 
 // AnalysisBackfillCovered reports whether an insights backfill pass that
-// began at or after sinceNS has attempted every parsed audit without a
-// current analysis that started before untilNS. Audits still without an
-// analysis after that were skipped or failed; waiting longer does not help.
-// It is false while no analyzer is installed.
+// began at or after sinceNS has accounted for every parsed audit without a
+// current analysis that started before untilNS: the pass attempted it, or it
+// lies below the pass's watermark, where every such audit was attempted
+// after it became a candidate and the ones waiting for a retry were retried
+// by this pass first. Audits still without an analysis after that were
+// skipped or failed; waiting longer does not help. It is false while no
+// analyzer is installed.
 func (worker *Worker) AnalysisBackfillCovered(untilNS, sinceNS int64) bool {
 	if worker == nil || worker.auditAnalyzer() == nil {
 		return false

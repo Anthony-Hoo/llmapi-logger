@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"sort"
 	"time"
 
 	"llmapi-logger/internal/conversation"
@@ -18,8 +19,12 @@ const (
 	// backfillSkipCap bounds the in-memory set of audits that cannot be
 	// analysed, so a permanently unusable audit is not retried in a tight loop.
 	backfillSkipCap = 4096
+	// backfillRetryCap bounds the in-memory set of audits waiting for a retry.
+	// An audit that does not fit lowers the watermark instead, so the next
+	// pass lists it again.
+	backfillRetryCap = 1 << 16
 	// backfillRescanInterval is the pause after the candidate list is
-	// exhausted, before the next pass starts again from the oldest audit.
+	// exhausted, before the next pass starts again from the watermark.
 	backfillRescanInterval = 10 * time.Minute
 )
 
@@ -57,10 +62,125 @@ type Reconstructor interface {
 	ReconstructBodies(ctx context.Context, auditID string) (Reconstruction, error)
 }
 
-// BackfillStore lists audits that need (re)analysis. The sqlite store
-// implements it; stores without it simply never backfill.
+// BackfillStore lists audits that need (re)analysis. Stores without it simply
+// never backfill.
 type BackfillStore interface {
 	ListAnalysisBackfillCandidates(ctx context.Context, version int, after *storage.AnalysisBackfillCursor, limit int) ([]storage.AnalysisBackfillCandidate, error)
+}
+
+// BackfillHorizonStore reports the newest audit position, which bounds the
+// steady-state insights backfill (see backfillMark). A store without it, the
+// legacy SQLite one, runs every pass from the oldest audit.
+type BackfillHorizonStore interface {
+	AnalysisBackfillHorizon(ctx context.Context) (storage.AnalysisBackfillCursor, bool, error)
+}
+
+// keyset is a (started_at_ns, audit_id) position: both backfills list their
+// candidates in this order. The project cursor type has the same fields.
+type keyset = storage.AnalysisBackfillCursor
+
+func keysetBefore(a, b keyset) bool {
+	return a.StartedAtNS < b.StartedAtNS || (a.StartedAtNS == b.StartedAtNS && a.AuditID < b.AuditID)
+}
+
+// lowerCovered returns the lower of two covered bounds; nil covers nothing
+// and is the lowest.
+func lowerCovered(a, b *keyset) *keyset {
+	if a == nil || b == nil {
+		return nil
+	}
+	if keysetBefore(*b, *a) {
+		return b
+	}
+	return a
+}
+
+// uncovering returns the highest covered bound that leaves position
+// uncovered: the empty audit id sorts below every real one at that time. A
+// nil position (unknown) uncovers everything.
+func uncovering(position *keyset) *keyset {
+	if position == nil {
+		return nil
+	}
+	return &keyset{StartedAtNS: position.StartedAtNS}
+}
+
+// watermark keeps one backfill from rescanning what it has already proved
+// empty. covered is the watermark: every pass lists only candidates after it,
+// so in the steady state a pass reads the few rows written since the last
+// one instead of the whole table. It is kept in memory only, so the first
+// pass after a restart covers everything, which also handles a version bump.
+//
+// Each backfill states its own invariant for the covered side (backfill and
+// projectBackfill). A code path that may break it calls lower, which uncovers
+// a position for the next pass, or records the audit in the backfill's retry
+// set. When a pass completes, covered becomes the horizon read as the pass
+// began, lowered by everything recorded while the pass was open.
+type watermark struct {
+	covered *keyset
+	// open is set from the first tick of a pass until its list runs empty.
+	open bool
+	// passAfter is the bound the open pass lists after; horizon the newest
+	// row when it began (nil: none, or the store cannot tell).
+	passAfter *keyset
+	horizon   *keyset
+	// lowered/lowerTo accumulate lower calls until they are applied.
+	lowered bool
+	lowerTo *keyset
+}
+
+// lower uncovers position (nil: everything) for the next pass.
+func (mark *watermark) lower(position *keyset) {
+	mark.lowerBound(uncovering(position))
+}
+
+// lowerBound makes the next pass list everything after bound.
+func (mark *watermark) lowerBound(bound *keyset) {
+	if !mark.lowered {
+		mark.lowered, mark.lowerTo = true, bound
+		return
+	}
+	mark.lowerTo = lowerCovered(mark.lowerTo, bound)
+}
+
+func (mark *watermark) takeLowered(bound *keyset) *keyset {
+	if mark.lowered {
+		bound = lowerCovered(bound, mark.lowerTo)
+	}
+	mark.lowered, mark.lowerTo = false, nil
+	return bound
+}
+
+// begin opens a pass that lists after the watermark.
+func (mark *watermark) begin(horizon *keyset) {
+	mark.open = true
+	mark.passAfter = mark.takeLowered(mark.covered)
+	mark.horizon = horizon
+}
+
+// complete closes the open pass: everything up to its horizon was listed.
+func (mark *watermark) complete() {
+	mark.covered = mark.takeLowered(mark.horizon)
+	mark.open, mark.passAfter, mark.horizon = false, nil, nil
+}
+
+// abandon closes the open pass without moving the watermark: the next pass
+// lists again from where this one began.
+func (mark *watermark) abandon() {
+	if mark.open {
+		mark.lowerBound(mark.passAfter)
+	}
+	mark.open, mark.passAfter, mark.horizon = false, nil, nil
+}
+
+func keysetPointer(value keyset) *keyset { return &value }
+
+// backfillRetry is one audit a backfill must try again. position is nil
+// while it is unknown (the audit came from the live path); pass is the pass
+// that last attempted it, so a pass tries it once.
+type backfillRetry struct {
+	position *keyset
+	pass     uint64
 }
 
 // SetReconstructor installs the optional body source for metadata-retention
@@ -86,35 +206,102 @@ func (worker *Worker) bodyReconstructor() Reconstructor {
 // on the parser goroutine, only while the live queue is empty, and stops as
 // soon as live work arrives, so it never delays live parsing. It writes
 // nothing but audit_analysis rows. It returns the number of audits it tried.
+//
+// Invariant: every audit at or below backfillMark.covered has a current
+// analysis, or is not a candidate (not ended, or parse status not ok or
+// partial), or was skipped for good by an attempt in this process, or is in
+// backfillRetry. It holds because:
+//   - covered only advances, at the end of a pass, to the horizon read when
+//     the pass began, and the pass listed every candidate after its start;
+//   - an audit becomes a candidate later only through a live parse in
+//     process, which runs on this goroutine. Every exit of process that saves
+//     ok or partial reaches analyze, and analyze reports each audit it leaves
+//     without an analysis to backfillLater, however old the audit is: a long
+//     request, a parse retried after a save failure, a pending row picked up
+//     by a later scan or an audit closed by startup recovery all end there;
+//   - a failure recorded while the retry set is full lowers the watermark;
+//   - nothing else writes parse_status ok or partial, deletes an
+//     audit_analysis row without its audit, or lowers analysis_version, and
+//     retention only removes audits.
+//
+// The first pass after a restart covers nothing, so a new AnalysisVersion,
+// audits imported offline and a parse whose save was cancelled at shutdown
+// but committed are all listed. A store without BackfillHorizonStore never
+// covers anything and every pass lists from the oldest audit.
 func (worker *Worker) backfill(ctx context.Context) int {
 	analyzer := worker.auditAnalyzer()
 	store, listable := worker.store.(BackfillStore)
-	if analyzer == nil || !listable || ctx.Err() != nil || len(worker.queue) > 0 || worker.now().Before(worker.backfillNextScan) {
+	if analyzer == nil || !listable || ctx.Err() != nil || len(worker.queue) > 0 {
 		return 0
 	}
-	if worker.backfillCursor == nil {
+	mark := &worker.backfillMark
+	if !mark.open {
+		if worker.now().Before(worker.backfillNextScan) {
+			return 0
+		}
+		horizon, err := worker.backfillHorizon(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				worker.logger.Warn("insights backfill failed", "error_code", "analysis_backfill_failed", "reason", "horizon_failed", "storage_error", storage.ErrorClass(err))
+			}
+			return 0
+		}
+		mark.begin(horizon)
+		worker.backfillPass++
+		worker.backfillCursor = mark.passAfter
+		worker.backfillRetryQueue = dueRetries(worker.backfillRetry, mark.passAfter)
 		worker.backfillProgress.begin(worker.now().UnixNano())
 	}
+
+	attempted := 0
+	// Retries the list cannot return come first: their audits lie on the
+	// covered side, or their position is unknown.
+	for len(worker.backfillRetryQueue) > 0 {
+		if ctx.Err() != nil || len(worker.queue) > 0 || attempted >= backfillBatch {
+			return attempted
+		}
+		auditID := worker.backfillRetryQueue[0]
+		worker.backfillRetryQueue = worker.backfillRetryQueue[1:]
+		if retry, waiting := worker.backfillRetry[auditID]; waiting && retry.pass != worker.backfillPass {
+			worker.attemptBackfill(ctx, analyzer, auditID, retry.position)
+			attempted++
+		}
+	}
+	if mark.passAfter != nil {
+		// Everything at or below the watermark is analysed, skipped or was
+		// retried just now.
+		worker.backfillProgress.advance(mark.passAfter.StartedAtNS)
+	}
+	if attempted >= backfillBatch {
+		return attempted
+	}
+
 	candidates, err := store.ListAnalysisBackfillCandidates(ctx, insights.AnalysisVersion, worker.backfillCursor, backfillBatch)
 	if err != nil {
 		if ctx.Err() == nil {
 			worker.logger.Warn("insights backfill failed", "error_code", "analysis_backfill_failed", "reason", "list_failed", "storage_error", storage.ErrorClass(err))
 		}
-		return 0
+		return attempted
 	}
 	if len(candidates) == 0 {
+		mark.complete()
 		worker.backfillCursor = nil
 		worker.backfillNextScan = worker.now().Add(backfillRescanInterval)
 		worker.backfillProgress.complete()
-		return 0
+		return attempted
 	}
-	attempted := 0
 	for _, candidate := range candidates {
 		if ctx.Err() != nil || len(worker.queue) > 0 {
 			return attempted
 		}
-		if _, skipped := worker.backfillSkipped[candidate.AuditID]; !skipped {
-			worker.backfillOne(ctx, analyzer, store, candidate.AuditID)
+		position := keyset{StartedAtNS: candidate.StartedAtNS, AuditID: candidate.AuditID}
+		retry, waiting := worker.backfillRetry[candidate.AuditID]
+		if waiting {
+			retry.position = keysetPointer(position)
+		}
+		_, skipped := worker.backfillSkipped[candidate.AuditID]
+		if !skipped && (!waiting || retry.pass != worker.backfillPass) {
+			worker.attemptBackfill(ctx, analyzer, candidate.AuditID, &position)
 			attempted++
 		}
 		worker.backfillCursor = &storage.AnalysisBackfillCursor{StartedAtNS: candidate.StartedAtNS, AuditID: candidate.AuditID}
@@ -123,14 +310,89 @@ func (worker *Worker) backfill(ctx context.Context) int {
 	return attempted
 }
 
+// backfillHorizon reads the newest audit position; nil when the store cannot
+// tell or holds no audit.
+func (worker *Worker) backfillHorizon(ctx context.Context) (*keyset, error) {
+	store, bounded := worker.store.(BackfillHorizonStore)
+	if !bounded {
+		return nil, nil
+	}
+	horizon, found, err := store.AnalysisBackfillHorizon(ctx)
+	if err != nil || !found {
+		return nil, err
+	}
+	return &horizon, nil
+}
+
+// dueRetries lists the retries a pass listing after bound cannot list itself:
+// their position is unknown or covered.
+func dueRetries(retries map[string]*backfillRetry, after *keyset) []string {
+	var due []string
+	for auditID, retry := range retries {
+		if retry.position == nil || (after != nil && !keysetBefore(*after, *retry.position)) {
+			due = append(due, auditID)
+		}
+	}
+	sort.Strings(due)
+	return due
+}
+
+// attemptBackfill runs backfillOne and marks a remaining retry as tried by
+// this pass.
+func (worker *Worker) attemptBackfill(ctx context.Context, analyzer AuditAnalyzer, auditID string, position *keyset) {
+	worker.backfillOne(ctx, analyzer, auditID, position)
+	if retry, waiting := worker.backfillRetry[auditID]; waiting {
+		retry.pass = worker.backfillPass
+	}
+}
+
+// backfillEnabled reports whether the insights backfill runs at all.
+func (worker *Worker) backfillEnabled() bool {
+	_, listable := worker.store.(BackfillStore)
+	return listable && worker.auditAnalyzer() != nil
+}
+
+// backfillLater records an audit the live path left without an analysis, so
+// the backfill retries it whichever side of the watermark it lies on.
+func (worker *Worker) backfillLater(auditID string) {
+	if worker.backfillEnabled() {
+		worker.rememberBackfillRetry(auditID, nil)
+	}
+}
+
+func (worker *Worker) rememberBackfillRetry(auditID string, position *keyset) {
+	rememberRetry(&worker.backfillRetry, &worker.backfillMark, auditID, position)
+}
+
+// rememberRetry adds auditID to a retry set. When the set is full the
+// audit's position is uncovered instead, so the next pass lists it again.
+func rememberRetry(retries *map[string]*backfillRetry, mark *watermark, auditID string, position *keyset) {
+	if retry, waiting := (*retries)[auditID]; waiting {
+		if position != nil {
+			retry.position = position
+		}
+		return
+	}
+	if len(*retries) >= backfillRetryCap {
+		mark.lower(position)
+		return
+	}
+	if *retries == nil {
+		*retries = make(map[string]*backfillRetry)
+	}
+	(*retries)[auditID] = &backfillRetry{position: position}
+}
+
 func (worker *Worker) backfillSkip(auditID, reason string) {
+	delete(worker.backfillRetry, auditID)
 	worker.rememberBackfillSkip(auditID)
 	worker.logger.Info("insights backfill skipped", "audit_id", auditID, "error_code", "analysis_backfill_skipped", "reason", reason)
 }
 
-func (worker *Worker) backfillFail(auditID, reason string, err error) {
+func (worker *Worker) backfillFail(auditID, reason string, err error, position *keyset) {
 	// Transient failures retry on the next bounded rescan. Only explicit permanent
 	// skips enter backfillSkipped; the cursor and scan interval prevent a hot loop.
+	worker.rememberBackfillRetry(auditID, position)
 	worker.logger.Warn("insights backfill failed", "audit_id", auditID, "error_code", "analysis_backfill_failed", "reason", reason, "storage_error", storage.ErrorClass(err))
 }
 
@@ -145,19 +407,21 @@ func canceled(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, _ BackfillStore, auditID string) {
+// backfillOne analyses one audit; position is nil when it is unknown.
+func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, auditID string, position *keyset) {
 	audit, err := worker.store.LoadParserAudit(ctx, auditID)
 	if errors.Is(err, sql.ErrNoRows) {
 		worker.backfillSkip(auditID, backfillSkipAuditMissing)
 		return
 	}
 	if err != nil {
-		if !canceled(err) {
-			worker.backfillFail(auditID, "audit_load_failed", err)
+		if ctx.Err() == nil {
+			worker.backfillFail(auditID, "audit_load_failed", err, position)
 		}
 		return
 	}
 	if audit.ParseStatus != StatusOK && audit.ParseStatus != StatusPartial {
+		delete(worker.backfillRetry, auditID)
 		return
 	}
 	implementation := worker.parsers[audit.ParserName]
@@ -168,8 +432,8 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, _
 
 	input, evidenceErr, reconstruction, reason, err := worker.backfillInput(ctx, audit)
 	if err != nil {
-		if !canceled(err) {
-			worker.backfillFail(auditID, reason, err)
+		if ctx.Err() == nil {
+			worker.backfillFail(auditID, reason, err, position)
 		}
 		return
 	}
@@ -193,13 +457,20 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, _
 		worker.backfillSkip(auditID, backfillSkipNoRequestBody)
 		return
 	}
-	if err := runAnalyzer(ctx, analyzer, audit, input, result); err != nil && !canceled(err) {
-		reason := insights.ErrorCode(err)
-		if errors.Is(err, errAnalyzerPanic) {
-			reason = "analysis_panic"
+	if err := runAnalyzer(ctx, analyzer, audit, input, result); err != nil {
+		if ctx.Err() == nil {
+			reason := insights.ErrorCode(err)
+			if errors.Is(err, errAnalyzerPanic) {
+				reason = "analysis_panic"
+			}
+			worker.backfillFail(auditID, reason, err, position)
 		}
-		worker.backfillFail(auditID, reason, err)
+		return
 	}
+	delete(worker.backfillRetry, auditID)
+	// The new audit_analysis row makes the audit a project identity
+	// candidate, wherever it lies relative to that backfill's watermark.
+	worker.projectBackfillLater(auditID, position)
 }
 
 // backfillInput loads the evidence of one audit. A non-empty reason means the

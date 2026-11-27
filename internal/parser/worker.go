@@ -40,15 +40,26 @@ type Worker struct {
 	idleTasks       []IdleTask
 	projectAnalyzer ProjectAnalyzer
 
-	// Only the parser goroutine accesses the insights backfill state.
-	backfillCursor   *storage.AnalysisBackfillCursor
-	backfillSkipped  map[string]struct{}
-	backfillNextScan time.Time
+	// Only the parser goroutine accesses the insights backfill state
+	// (backfill.go): the watermark, the open pass's cursor and number, the
+	// audits skipped for good, the audits to retry and the retries the open
+	// pass still has to try first.
+	backfillMark       watermark
+	backfillCursor     *storage.AnalysisBackfillCursor
+	backfillPass       uint64
+	backfillSkipped    map[string]struct{}
+	backfillRetry      map[string]*backfillRetry
+	backfillRetryQueue []string
+	backfillNextScan   time.Time
 	// backfillProgress is readable from any goroutine.
 	backfillProgress backfillProgress
-	// Project identity backfill state, parser goroutine only.
-	projectCursor   *storage.ProjectBackfillCursor
-	projectNextScan time.Time
+	// Project identity backfill state, parser goroutine only (project.go).
+	projectMark       watermark
+	projectCursor     *storage.ProjectBackfillCursor
+	projectPass       uint64
+	projectRetry      map[string]*backfillRetry
+	projectRetryQueue []string
+	projectNextScan   time.Time
 
 	mu      sync.Mutex
 	started bool
@@ -314,18 +325,27 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 // which persistResult may have downgraded. Failures and panics are logged
 // with a stable code and dropped: the parse status is already committed, and
 // the insights backfill recomputes missing rows later instead of retrying
-// here.
+// here. Every saved ok or partial audit left without an analysis, unless the
+// worker is stopping, is reported to backfillLater: the backfill's watermark
+// may already cover it.
 func (worker *Worker) analyze(ctx context.Context, audit storage.ParserAudit, input Input, result Result, savedStatus string) {
 	analyzer := worker.auditAnalyzer()
-	if analyzer == nil || (savedStatus != StatusOK && savedStatus != StatusPartial) ||
-		!input.Request.Present || len(input.Request.Data) == 0 {
+	if analyzer == nil || (savedStatus != StatusOK && savedStatus != StatusPartial) {
+		return
+	}
+	if !input.Request.Present || len(input.Request.Data) == 0 {
+		worker.backfillLater(audit.AuditID)
 		return
 	}
 	// The optional project identity hook is independent of the insights
 	// result; it runs first so an analysis failure cannot skip it.
 	worker.analyzeProject(ctx, audit, input, result)
 	err := runAnalyzer(ctx, analyzer, audit, input, result)
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	worker.backfillLater(audit.AuditID)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	if errors.Is(err, errAnalyzerPanic) {

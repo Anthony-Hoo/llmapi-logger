@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,9 @@ type costWorld struct {
 	analysed  map[string]bool
 	identity  map[string]bool
 	bodyLoads map[string]int
+	// examined counts the rows each list walks: those after its lower bound,
+	// up to the last one it returns, as an ordered index range scan would.
+	examined int
 }
 
 func newCostWorld() *costWorld {
@@ -33,7 +37,36 @@ func newCostWorld() *costWorld {
 		started:   map[string]int64{}, analysed: map[string]bool{}, identity: map[string]bool{}, bodyLoads: map[string]int{},
 	}
 	delete(world.audits, "unused")
+	world.saved = make(chan sqlite.ParsedResult, 1<<16)
 	return world
+}
+
+func (world *costWorld) LoadParserAudit(_ context.Context, auditID string) (sqlite.ParserAudit, error) {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	audit, ok := world.audits[auditID]
+	if !ok {
+		return sqlite.ParserAudit{}, sql.ErrNoRows
+	}
+	return audit, nil
+}
+
+// remove deletes an audit with everything derived from it, as retention does.
+func (world *costWorld) remove(auditID string) {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	delete(world.audits, auditID)
+	delete(world.started, auditID)
+	delete(world.analysed, auditID)
+	delete(world.identity, auditID)
+}
+
+func (world *costWorld) takeExamined() int {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	examined := world.examined
+	world.examined = 0
+	return examined
 }
 
 // add stores one parsed audit with a retained request body.
@@ -65,10 +98,11 @@ func (world *costWorld) ListAnalysisBackfillCandidates(_ context.Context, _ int,
 	for _, id := range world.ordered() {
 		audit, ok := world.audits[id]
 		started := world.started[id]
-		if !ok || world.analysed[id] || (audit.ParseStatus != StatusOK && audit.ParseStatus != StatusPartial) {
+		if after != nil && (started < after.StartedAtNS || started == after.StartedAtNS && id <= after.AuditID) {
 			continue
 		}
-		if after != nil && (started < after.StartedAtNS || started == after.StartedAtNS && id <= after.AuditID) {
+		world.examined++
+		if !ok || world.analysed[id] || (audit.ParseStatus != StatusOK && audit.ParseStatus != StatusPartial) {
 			continue
 		}
 		out = append(out, storage.AnalysisBackfillCandidate{AuditID: id, StartedAtNS: started})
@@ -79,7 +113,7 @@ func (world *costWorld) ListAnalysisBackfillCandidates(_ context.Context, _ int,
 	return out, nil
 }
 
-func (world *costWorld) ListProjectIdentityBackfillCandidates(_ context.Context, _ int, before *storage.ProjectBackfillCursor, limit int) ([]storage.ProjectBackfillCandidate, error) {
+func (world *costWorld) ListProjectIdentityBackfillCandidates(_ context.Context, _ int, after, before *storage.ProjectBackfillCursor, limit int) ([]storage.ProjectBackfillCandidate, error) {
 	world.mu.Lock()
 	defer world.mu.Unlock()
 	ids := world.ordered()
@@ -87,10 +121,17 @@ func (world *costWorld) ListProjectIdentityBackfillCandidates(_ context.Context,
 	for index := len(ids) - 1; index >= 0; index-- {
 		id := ids[index]
 		started := world.started[id]
-		if !world.analysed[id] || world.identity[id] {
+		if before != nil && (started > before.StartedAtNS || started == before.StartedAtNS && id >= before.AuditID) {
 			continue
 		}
-		if before != nil && (started > before.StartedAtNS || started == before.StartedAtNS && id >= before.AuditID) {
+		if after != nil && (started < after.StartedAtNS || started == after.StartedAtNS && id <= after.AuditID) {
+			continue
+		}
+		if !world.analysed[id] {
+			continue
+		}
+		world.examined++
+		if world.identity[id] {
 			continue
 		}
 		out = append(out, storage.ProjectBackfillCandidate{AuditID: id, StartedAtNS: started, Protocol: "anthropic"})
@@ -146,9 +187,9 @@ type testClock struct{ now time.Time }
 
 func (clock *testClock) Now() time.Time { return clock.now }
 
-func newCostWorker(t *testing.T, world *costWorld, parsers ...Parser) (*Worker, *testClock) {
+func newCostWorker(t *testing.T, store Store, parsers ...Parser) (*Worker, *testClock) {
 	t.Helper()
-	worker, err := NewWorker(world, testCipher(t), parsers, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker, err := NewWorker(store, testCipher(t), parsers, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
