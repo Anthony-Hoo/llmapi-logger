@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -70,6 +71,15 @@ func (store *recordingStore) FinishAuditWithResult(_ context.Context, finish sto
 	return finish, nil
 }
 func (store *recordingStore) InsertAuditGaps(context.Context, []storage.AuditGap) error { return nil }
+
+// The cross-check drives the legacy path only.
+func (store *recordingStore) Checkpoint(context.Context, storage.AuditCheckpoint) error {
+	return errors.ErrUnsupported
+}
+func (store *recordingStore) CommitAudit(context.Context, storage.AuditCommit) (storage.AuditFinish, error) {
+	return storage.AuditFinish{}, errors.ErrUnsupported
+}
+func (store *recordingStore) SupportsUnifiedWrite() bool { return false }
 
 type sessionDrive struct {
 	request          []byte

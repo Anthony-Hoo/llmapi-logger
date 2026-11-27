@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"llmapi-logger/internal/parser/streamterminal"
@@ -32,6 +33,12 @@ var ErrUnavailable = errors.New("audit unavailable")
 // Store is the ordered persistence surface used by a Session.
 // FinishAuditWithResult is a barrier for earlier asynchronous writes and
 // returns the effective committed outcome for the completion log.
+//
+// The legacy write path uses StartStage through FinishAuditWithResult. The
+// unified write path uses BeginAudit with the inbound stage, Checkpoint (not
+// waited for) and CommitAudit (waited for; a barrier like
+// FinishAuditWithResult). A store that implements the methods but cannot
+// serve the unified path says so through SupportsUnifiedWrite.
 type Store interface {
 	Healthy() bool
 	BeginAudit(context.Context, storage.AuditRecord) error
@@ -41,7 +48,52 @@ type Store interface {
 	AddChunk(context.Context, storage.BodyChunk) error
 	FinishStage(context.Context, storage.StageFinish) error
 	FinishAuditWithResult(context.Context, storage.AuditFinish) (storage.AuditFinish, error)
+	Checkpoint(context.Context, storage.AuditCheckpoint) error
+	CommitAudit(context.Context, storage.AuditCommit) (storage.AuditFinish, error)
 	InsertAuditGaps(context.Context, []storage.AuditGap) error
+}
+
+// unifiedWriteSupport is implemented by a store that may be unable to serve
+// the unified write path. A store without the method serves it.
+type unifiedWriteSupport interface {
+	SupportsUnifiedWrite() bool
+}
+
+// headerBlockSupport is implemented by a store that can write the version 2
+// header block. A store without the method cannot.
+type headerBlockSupport interface {
+	SupportsHeaderBlock() bool
+}
+
+// Write paths of Options.WritePath.
+const (
+	WritePathLegacy  = "legacy"
+	WritePathUnified = "unified"
+)
+
+// Defaults of the unified write path (design F.1, B.8).
+const (
+	DefaultStageBytes    = 8 << 20
+	DefaultGlobalBytes   = 256 << 20
+	DefaultCommitRetries = 3
+	MaxCommitRetries     = 5
+)
+
+// Options selects the write path of a Manager. The zero value is the legacy
+// path.
+type Options struct {
+	// WritePath is WritePathLegacy (or empty) or WritePathUnified.
+	WritePath string
+	// CommitRetries is the initial retry count of CommitAudit, 0 to 5; see
+	// SetCommitRetries.
+	CommitRetries int
+	// StageBytes and GlobalBytes are the plaintext the unified path keeps in
+	// memory per stage and for the whole process. Zero means the default.
+	StageBytes  int64
+	GlobalBytes int64
+	// Stager takes sealed chunks the memory budget cannot hold. Nil means no
+	// staging: content beyond the budget is not retained.
+	Stager ChunkStager
 }
 
 // Sink is the proxy-facing audit admission interface. A nil Session always
@@ -68,12 +120,31 @@ type Manager struct {
 	notifyMu     sync.RWMutex
 	notify       func(string) bool
 	callerNotify func(string) bool
+
+	// unified selects the unified write path for every session.
+	unified bool
+	// captureVersion is the capture_version the unified path writes.
+	captureVersion int
+	// commitRetries is the live retry count of CommitAudit (SetCommitRetries).
+	commitRetries atomic.Int32
+	stageBytes    int64
+	budget        *memoryBudget
+	stager        ChunkStager
+	// sleep waits between CommitAudit attempts; tests replace it.
+	sleep func(time.Duration)
 }
 
-// NewManager constructs a live audit manager. A nil fingerprinter disables
-// credential scoping: every record is then stored without an API key tag and no
-// developer session can match it.
+// NewManager constructs a live audit manager on the legacy write path. A nil
+// fingerprinter disables credential scoping: every record is then stored
+// without an API key tag and no developer session can match it.
 func NewManager(store Store, cipher security.Cipher, fingerprints *security.CredentialFingerprinter, mode string, logger *slog.Logger) (*Manager, error) {
+	return NewManagerWithOptions(store, cipher, fingerprints, mode, logger, Options{})
+}
+
+// NewManagerWithOptions constructs a live audit manager with an explicit write
+// path. It refuses the unified path at construction, not per request, when
+// the store cannot serve it.
+func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *security.CredentialFingerprinter, mode string, logger *slog.Logger, options Options) (*Manager, error) {
 	if mode != ModeAvailable && mode != ModeStrict {
 		return nil, fmt.Errorf("audit: invalid mode %q", mode)
 	}
@@ -86,6 +157,24 @@ func NewManager(store Store, cipher security.Cipher, fingerprints *security.Cred
 	if logger == nil {
 		logger = slog.Default()
 	}
+	switch options.WritePath {
+	case "", WritePathLegacy, WritePathUnified:
+	default:
+		return nil, fmt.Errorf("audit: invalid write path %q", options.WritePath)
+	}
+	if options.CommitRetries < 0 || options.CommitRetries > MaxCommitRetries {
+		return nil, fmt.Errorf("audit: commit retries must be between 0 and %d, got %d", MaxCommitRetries, options.CommitRetries)
+	}
+	stageBytes, globalBytes := options.StageBytes, options.GlobalBytes
+	if stageBytes == 0 {
+		stageBytes = DefaultStageBytes
+	}
+	if globalBytes == 0 {
+		globalBytes = DefaultGlobalBytes
+	}
+	if stageBytes < bodyChunkSize || stageBytes > globalBytes {
+		return nil, fmt.Errorf("audit: stage memory budget must be at least %d and at most the global budget", bodyChunkSize)
+	}
 	manager := &Manager{
 		store:        store,
 		cipher:       cipher,
@@ -94,9 +183,64 @@ func NewManager(store Store, cipher security.Cipher, fingerprints *security.Cred
 		logger:       logger,
 		now:          time.Now,
 		random:       rand.Reader,
+		stageBytes:   stageBytes,
+		budget:       &memoryBudget{limit: globalBytes},
+		stager:       options.Stager,
+		sleep:        time.Sleep,
+	}
+	if manager.stager == nil {
+		manager.stager = unavailableStager{}
+	}
+	manager.commitRetries.Store(int32(options.CommitRetries))
+	if options.WritePath == WritePathUnified {
+		if support, ok := store.(unifiedWriteSupport); ok && !support.SupportsUnifiedWrite() {
+			return nil, errors.New("audit: the store cannot serve audit.write_path unified")
+		}
+		// The unified session arrives in a later commit of this series.
+		return nil, errors.New("audit: audit.write_path unified is not available in this build")
 	}
 	manager.gaps = newGapBuffer(store, logger, func() time.Time { return manager.now() })
 	return manager, nil
+}
+
+// captureVersionFor is the single place that chooses the capture version of
+// the unified path. Version 2 (the header block) needs a store that writes
+// it; this step writes version 1 only, so the answer is ignored until the
+// version 2 session lands.
+func captureVersionFor(store Store) int {
+	if support, ok := store.(headerBlockSupport); ok && support.SupportsHeaderBlock() {
+		// Version 2 branch point: the header block is not written yet.
+		return storage.CaptureVersion1
+	}
+	return storage.CaptureVersion1
+}
+
+// SetCommitRetries changes how many times a session retries a CommitAudit
+// that failed with a retryable error, from 0 to 5; values outside the range
+// are clamped. Sessions read it once, when their first attempt is prepared,
+// so a change applies to commits that start afterwards. The legacy write path
+// does not use it.
+func (manager *Manager) SetCommitRetries(retries int) {
+	if manager == nil {
+		return
+	}
+	manager.commitRetries.Store(int32(min(max(retries, 0), MaxCommitRetries)))
+}
+
+// CommitRetries returns the current retry count of CommitAudit.
+func (manager *Manager) CommitRetries() int {
+	if manager == nil {
+		return 0
+	}
+	return int(manager.commitRetries.Load())
+}
+
+// WritePath returns the write path the manager's sessions use.
+func (manager *Manager) WritePath() string {
+	if manager != nil && manager.unified {
+		return WritePathUnified
+	}
+	return WritePathLegacy
 }
 
 // NewUnavailable constructs a manager that preserves configured admission

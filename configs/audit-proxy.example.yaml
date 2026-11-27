@@ -95,6 +95,21 @@ session_analysis:
 #   allow_write: false
 #   public_url: ""
 
+# Audit capture write path. legacy writes every stage, header group and 1 MiB
+# body chunk as its own writer operation. unified keeps bodies in memory and
+# writes an audit in at most four operations: the start record, a checkpoint
+# when the request body ends, one when the response headers are forwarded,
+# and the final commit, which Finish waits for and retries up to
+# commit_retries times (0 to 5). Body content beyond the memory budget stops
+# being retained (the stage is marked partial); forwarding is never affected.
+# Like agent_access, add the section only to a version that knows it.
+# audit:
+#   write_path: legacy
+#   commit_retries: 3
+#   memory:
+#     stage_bytes: 8388608
+#     global_bytes: 268435456
+
 interceptors:
   require-client-credential:
     type: require_credential

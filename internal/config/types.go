@@ -44,7 +44,8 @@ type Config struct {
 	OrgReports             OrgReportsConfig             `yaml:"org_reports"`
 	SessionAnalysis        SessionAnalysisConfig        `yaml:"session_analysis"`
 	AgentAccess            AgentAccessConfig            `yaml:"agent_access"`
-	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
+	Audit                  AuditConfig                  `yaml:"audit"`
+	Interceptors          map[string]InterceptorConfig `yaml:"interceptors"`
 	Routes                 []RouteConfig                `yaml:"routes"`
 }
 
@@ -183,7 +184,8 @@ func Default() Config {
 		Insights:               InsightsConfig{Enabled: true},
 		OrgReports:             DefaultOrgReports(),
 		SessionAnalysis:        defaultSessionAnalysis(),
-		Interceptors:           make(map[string]InterceptorConfig),
+		Audit:                  DefaultAudit(),
+		Interceptors:          make(map[string]InterceptorConfig),
 		Routes:                 make([]RouteConfig, 0),
 	}
 }

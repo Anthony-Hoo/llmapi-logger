@@ -89,6 +89,9 @@ func Validate(cfg Config) error {
 	if err := validateAgentAccess(cfg); err != nil {
 		return err
 	}
+	if err := validateAudit(cfg.Audit); err != nil {
+		return err
+	}
 	if err := validateInterceptors(cfg.Interceptors); err != nil {
 		return err
 	}

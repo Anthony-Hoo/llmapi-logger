@@ -982,7 +982,7 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 	} else if recovered > 0 {
 		logger.Info("interrupted audits recovered", "recovered_audits", recovered)
 	}
-	manager, err := audit.NewManager(store, cipher, fingerprints, configuration.Mode, logger)
+	manager, err := audit.NewManagerWithOptions(store, cipher, fingerprints, configuration.Mode, logger, auditOptions(configuration.Audit))
 	if err != nil {
 		_ = store.Close()
 		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable")
@@ -992,6 +992,16 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 	return auditRuntime{
 		sink: manager, manager: manager, store: store, cipher: cipher,
 		fingerprints: fingerprints, analysisFingerprints: analysisFingerprints,
+	}
+}
+
+// auditOptions maps the audit section onto the capture manager's options.
+func auditOptions(section config.AuditConfig) audit.Options {
+	return audit.Options{
+		WritePath:     section.WritePath,
+		CommitRetries: section.CommitRetries,
+		StageBytes:    section.Memory.StageBytes,
+		GlobalBytes:   section.Memory.GlobalBytes,
 	}
 }
 
