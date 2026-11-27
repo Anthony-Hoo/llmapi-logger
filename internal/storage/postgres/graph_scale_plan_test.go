@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -773,14 +774,16 @@ func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
 	gemini := latest("gemini", false)
 	anthropic := latest("anthropic", false)
 
+	// chains is the number of conversations among the parent candidates.
 	probes := []struct {
-		name  string
-		value ParsedAudit
+		name   string
+		value  ParsedAudit
+		chains int
 	}{
-		{"openai turn 201, conversation key", fixture.nextTurn(t, store, openai, "probe-keyed", true, "")},
-		{"openai turn 201, previous_response_id", fixture.nextTurn(t, store, openai, "probe-previous", false, openai.lastResponseID)},
-		{"gemini turn 201, no key", fixture.nextTurn(t, store, gemini, "probe-gemini", false, "")},
-		{"anthropic turn 201, no key", fixture.nextTurn(t, store, anthropic, "probe-anthropic", false, "")},
+		{"openai turn 201, conversation key", fixture.nextTurn(t, store, openai, "probe-keyed", true, ""), 1},
+		{"openai turn 201, previous_response_id", fixture.nextTurn(t, store, openai, "probe-previous", false, openai.lastResponseID), 1},
+		{"gemini turn 201, no key", fixture.nextTurn(t, store, gemini, "probe-gemini", false, ""), 10},
+		{"anthropic turn 201, no key", fixture.nextTurn(t, store, anthropic, "probe-anthropic", false, ""), 10},
 	}
 	var keylessArguments []any
 	for _, probe := range probes {
@@ -837,14 +840,31 @@ func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
 					totals = append(totals, fmt.Sprintf("%s %.0f", table, rows))
 				}
 			}
-			t.Logf("%s, %s total: %d ancestor walks, %.0f buffers, rows %s", probe.name, phase, walks[phase], buffers[phase], strings.Join(totals, ", "))
+			t.Logf("%s, %s total: %d ancestor header queries, %.0f buffers, rows %s", probe.name, phase, walks[phase], buffers[phase], strings.Join(totals, ", "))
+		}
+		// Choosing the parent walks each chain the candidates lie on about
+		// once: one chain for a keyed conversation or a forced link, one per
+		// conversation among the 32 newest turns of the protocol for a keyless
+		// turn (ten here). The keyed candidate list reads its conversation once
+		// more, and reconstruction and the digest add one turn. Walking once per
+		// candidate, as before, read 30 times the chain and fails this.
+		save := perPhase["save"]
+		turnsRead := save["turns"]
+		if probe.chains > 1 {
+			turnsRead -= counts["turns"] // the pinned protocol-wide search
+		}
+		allowed := float64(probe.chains + 2)
+		if turnsRead > allowed*chainBound["turns"] || save["turn_context_ops"] > allowed*chainBound["turn_context_ops"] ||
+			save["turn_response_items"] > allowed*chainBound["turn_response_items"] {
+			t.Errorf("%s: saving read %.0f turns, %.0f context ops and %.0f response items, more than %v walks of a chain",
+				probe.name, turnsRead, save["turn_context_ops"], save["turn_response_items"], allowed)
 		}
 	}
 	if keylessArguments == nil {
 		t.Fatal("no probe took the protocol-wide candidate search")
 	}
 	measureProposedCreatedIndex(t, store, keylessArguments)
-	measureCandidateWalkOrder(t, store, openai)
+	measureCandidateChains(t, store, openai)
 }
 
 // measureProposedCreatedIndex explains the protocol-wide candidate search with
@@ -876,13 +896,11 @@ func measureProposedCreatedIndex(t *testing.T, store *Store, arguments []any) {
 	}
 }
 
-// measureCandidateWalkOrder rebuilds the 32 parent candidates of a keyed
-// 200-turn conversation the way bestTurnParent does, newest first with one
-// memo, and oldest first with one memo. The memo holds only the endpoints
-// asked for, so newest first never meets a cached ancestor and every
-// candidate walks back to the root; oldest first stops each walk at the
-// candidate before it.
-func measureCandidateWalkOrder(t *testing.T, store *Store, conversation *scaleConversation) {
+// measureCandidateChains loads the 32 parent candidates of a keyed 200-turn
+// conversation as bestTurnParent does and reports what that reads and what
+// it holds: the chain is walked once, and the memory is one request per
+// candidate plus one frame per turn of the chain.
+func measureCandidateChains(t *testing.T, store *Store, conversation *scaleConversation) {
 	t.Helper()
 	ctx := context.Background()
 	transaction, err := store.writerConn.BeginTx(ctx, nil)
@@ -890,31 +908,30 @@ func measureCandidateWalkOrder(t *testing.T, store *Store, conversation *scaleCo
 		t.Fatal(err)
 	}
 	defer transaction.Rollback()
-	candidates := conversation.turnIDs[len(conversation.turnIDs)-parentCandidateLimit:]
-	rowsRead := func(order []string) map[string]float64 {
-		recorder := &planRecorder{t: t, ctx: ctx, tx: transaction}
-		memo := make(map[string][]auditmodel.ObjectRef)
-		for _, turnID := range order {
-			if _, err := loadRequestRefs(recorder, turnID, memo, make(map[string]bool)); err != nil {
-				t.Fatal(err)
-			}
+	var candidates []turnCandidate
+	for index := len(conversation.turnIDs) - 1; index >= len(conversation.turnIDs)-parentCandidateLimit; index-- {
+		candidates = append(candidates, turnCandidate{turnID: conversation.turnIDs[index], conversationID: conversation.conversationID})
+	}
+	recorder := &planRecorder{t: t, ctx: ctx, tx: transaction}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	chains := loadCandidateChains(recorder, candidates)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if chains == nil {
+		t.Fatal("the candidate chains fell back")
+	}
+	read := map[string]float64{}
+	for _, explained := range recorder.statements {
+		for table, scan := range explained.custom.scans {
+			read[table] += scan.examined
 		}
-		totals := map[string]float64{}
-		for _, explained := range recorder.statements {
-			for table, scan := range explained.custom.scans {
-				totals[table] += scan.examined
-			}
-		}
-		return totals
 	}
-	oldestFirst := append([]string(nil), candidates...)
-	newestFirst := make([]string, 0, len(candidates))
-	for index := len(candidates) - 1; index >= 0; index-- {
-		newestFirst = append(newestFirst, candidates[index])
+	t.Logf("32 candidates of a 200-turn chain: read %v; hold %d requests of %d refs in all (%.0f per request), %d frames, %d bytes live",
+		read, len(chains.refs), chains.total, float64(chains.total)/float64(len(chains.refs)), len(chains.frames), int64(after.HeapAlloc)-int64(before.HeapAlloc))
+	if read["turn_context_ops"] > float64(conversation.ops+parentCandidateLimit) || len(chains.frames) != len(conversation.turnIDs) {
+		t.Errorf("loading the candidates walked more than the chain once: %v, %d frames", read, len(chains.frames))
 	}
-	current, reversed := rowsRead(newestFirst), rowsRead(oldestFirst)
-	t.Logf("32 candidate walks of a 200-turn chain: newest first (today) %v, oldest first %v", current, reversed)
-	if reversed["turns"] >= current["turns"] {
-		t.Errorf("walking candidates oldest first did not reuse the memo: %v against %v", reversed, current)
-	}
+	runtime.KeepAlive(chains)
 }
