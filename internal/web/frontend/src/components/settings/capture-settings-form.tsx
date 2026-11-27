@@ -163,13 +163,15 @@ export function CaptureSettingsFields({
         <p className="text-label text-subtle">
           0–{MAX_COMMIT_RETRIES}。0 表示只尝试一次，不重试。配置文件的值是 {view.file.commit_retries}（<span className="font-mono">audit.commit_retries</span>），恢复为配置文件的值后回到它。
         </p>
-        {valid ? (
+        {valid && edited === 0 ? <p className="text-label text-subtle">填 0 时只尝试一次，不重试，也不多等。</p> : null}
+        {valid && edited > 0 ? (
           <p className="text-label text-subtle">
             填 {edited} 时最多尝试 {edited + 1} 次，处理这条请求最多多等 {formatWait(worstCaseWaitMS(edited))}，另加各次尝试本身的时间。
           </p>
-        ) : (
+        ) : null}
+        {!valid ? (
           <p className="text-label text-danger-fg">要填 0 到 {MAX_COMMIT_RETRIES} 之间的整数。</p>
-        )}
+        ) : null}
       </div>
       <div>
         <h4 className="text-body-sm font-semibold">每个次数最多多等多久</h4>

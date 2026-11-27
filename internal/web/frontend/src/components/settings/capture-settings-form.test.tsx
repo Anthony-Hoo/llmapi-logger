@@ -68,7 +68,8 @@ describe("audit capture settings form", () => {
     expect(html).not.toContain("当前写入路径是");
 
     const zero = renderToStaticMarkup(<CaptureSettingsFields view={view} draft={{ commit_retries: "0" }} busy={false} onChange={noop} />);
-    expect(zero).toContain("填 0 时最多尝试 1 次，处理这条请求最多多等 不等待");
+    expect(zero).toContain("填 0 时只尝试一次，不重试，也不多等");
+    expect(zero).not.toContain("最多尝试");
     const invalid = renderToStaticMarkup(<CaptureSettingsFields view={view} draft={{ commit_retries: "9" }} busy={false} onChange={noop} />);
     expect(invalid).toContain("要填 0 到 5 之间的整数");
 

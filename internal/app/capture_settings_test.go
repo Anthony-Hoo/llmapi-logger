@@ -35,6 +35,7 @@ func TestCaptureSettingsWithTheUnavailableManager(t *testing.T) {
 	configuration := insightsTestConfig(t, "http://192.0.2.1:3000", false, "")
 	configuration.Mode = "available"
 	configuration.Audit.CommitRetries = 4
+	configuration.Audit.WritePath = config.AuditWritePathUnified
 	application, err := newContextWithStore(context.Background(), configuration, slog.New(slog.NewTextHandler(io.Discard, nil)),
 		func(context.Context, string, *slog.Logger) (runtimeStore, error) {
 			return nil, errors.New("database unavailable")
@@ -50,7 +51,9 @@ func TestCaptureSettingsWithTheUnavailableManager(t *testing.T) {
 		t.Fatalf("manager retries = %d", application.auditManager.CommitRetries())
 	}
 	if status, body := captureSettingsCall(t, application, "app-test-admin-token", http.MethodGet, ""); status != http.StatusOK ||
-		!strings.Contains(body, `"source":"file"`) || !strings.Contains(body, `"commit_retries":4`) {
+		!strings.Contains(body, `"source":"file"`) || !strings.Contains(body, `"commit_retries":4`) ||
+		// No session runs, so the page reports the path in use: legacy.
+		!strings.Contains(body, `"write_path":"legacy"`) {
 		t.Fatalf("GET = %d %s", status, body)
 	}
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
