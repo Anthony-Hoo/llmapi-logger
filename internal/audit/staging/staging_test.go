@@ -447,6 +447,15 @@ func TestImportCases(t *testing.T) {
 					return data
 				}
 			}, inserted: 1, kept: CorruptSuffix},
+		{name: "a stage skips chunks a checkpoint wrote", setup: func(store *fakeRestorer, id string) {
+			store.open(id, stage)
+			store.stored[id][stage] = threeChunks(t, cipher, id, stage)[:2]
+		}, change: func(id string, chunks []storage.BodyChunk) func([]byte) []byte {
+			// Records for seq 0 and 2 only: seq 1 was written by a checkpoint.
+			return func(data []byte) []byte {
+				return append(data[:recordOffset(id, chunks, 1):recordOffset(id, chunks, 1)], data[recordOffset(id, chunks, 2):]...)
+			}
+		}, inserted: 1},
 		{name: "header names another audit", header: "apx_someone_else", setup: func(store *fakeRestorer, id string) { store.open(id, stage) }, kept: CorruptSuffix},
 		{name: "chunks do not continue the stored ones", setup: func(store *fakeRestorer, id string) {
 			store.open(id, stage)

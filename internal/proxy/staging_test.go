@@ -54,7 +54,8 @@ func requireNoStagingFiles(t *testing.T, stager *staging.Stager) {
 // Request and response bodies over the budget, both pairs merged, a request
 // pair that is unmerged at Finish (its duplicate seals its own chunks from
 // bytes its source staged), and a request the body-limit interceptor reads
-// before request_sent exists: every row equals legacy's, and so do the
+// before request_sent exists, and an upstream that answers before reading
+// the whole request: every row equals legacy's, and so do the
 // views and exports.
 func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
 	large := largeStreamExchange(t)
@@ -63,7 +64,11 @@ func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
 	preRead := cloneExchange(large, "pre-read")
 	preRead.path = "/v1/responses"
 	preRead.body = preRead.body[:min(len(preRead.body), 5<<19)]
-	for _, exchange := range []*eqExchange{large, largeResponseExchange(t, 5<<19), unmerged, preRead} {
+	// The upstream answers before the request is read: checkpoint 2 writes
+	// request chunks while others are already staged.
+	early := cloneExchange(large, "early-answer")
+	early.earlyAnswer = 1300 << 10
+	for _, exchange := range []*eqExchange{large, largeResponseExchange(t, 5<<19), unmerged, preRead, early} {
 		t.Run(exchange.name, func(t *testing.T) {
 			stager := openEqStager(t, filepath.Join(t.TempDir(), "staging"), staging.Options{})
 			legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)

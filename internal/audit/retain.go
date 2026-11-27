@@ -312,6 +312,11 @@ func (session *Session) reserveRetainedLocked(stage *stageCapture, body *bodyCap
 // pending reports that the next chunk to stage waits for the duplicate.
 func (session *Session) stageOneChunkLocked(stage *stageCapture, body *bodyCapture) (failure string, pending bool) {
 	held := body.unified
+	if session.committing {
+		// A late read after the commit was built: nothing more is staged,
+		// since the session releases its staging file right after.
+		return "capture_budget_exhausted", false
+	}
 	for _, chunk := range held.chunks {
 		if chunk.closed && chunk.written && chunk.staged == nil && len(chunk.data) > 0 {
 			if _, needed := held.duplicateUse(chunk); !needed {

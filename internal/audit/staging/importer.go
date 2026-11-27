@@ -69,7 +69,8 @@ type ImportReport struct {
 //     another audit, or chunks that do not continue the stored ones: what
 //     comes before is imported and the file is renamed .corrupt.
 //
-// A damaged file is never removed. The import is idempotent: chunks already
+// A damaged file is never removed. A file that cannot be read stops the
+// import with an error, like a store error. The import is idempotent: chunks already
 // stored are skipped, so a crash at any point only repeats work. A store
 // error stops the import and is returned; the caller must not recover
 // interrupted audits then, or a later start would find them finalized and
@@ -150,8 +151,9 @@ const (
 func (stager *Stager) importFile(ctx context.Context, store Restorer, auditID, path string) (importOutcome, int, error) {
 	scan, err := ScanFile(stager.cipher, auditID, path)
 	if err != nil {
-		stager.logger.Warn("audit staging file unreadable", "audit_id", auditID, "error", err.Error())
-		return outcomeUnreadable, 0, nil
+		// A file that cannot be read now may be intact: recovering its audit
+		// without it would make the next start drop it as finalized.
+		return 0, 0, fmt.Errorf("staging: read %s: %w", auditID, err)
 	}
 	if scan.Foreign {
 		return stager.keepFile(auditID, path, CorruptSuffix, "foreign_header", 0)
@@ -228,8 +230,10 @@ type ScannedRecord struct {
 
 // ScanFile reads a staging file and verifies every record: the CRC, the
 // chunk metadata, the AEAD and length of its ciphertext under the audit's
-// AAD, and that each stage's chunks follow each other (seq + 1, offset +
-// length). It stops at the first record that fails. A failing last record
+// AAD, and that each stage's chunks go forward (seq up, offset at or past the
+// previous chunk's end). A stage may skip chunks a checkpoint wrote and
+// released while others were staged; the store checks that the file
+// continues what the database holds. It stops at the first record that fails. A failing last record
 // whose bytes end the file is a torn tail; anything else is damage.
 // Opening every chunk costs one decryption per chunk, once per start.
 func ScanFile(cipher security.Cipher, auditID, path string) (FileScan, error) {
@@ -330,7 +334,7 @@ func ScanFile(cipher security.Cipher, auditID, path string) (FileScan, error) {
 			scan.Damage = "record_metadata"
 			return scan, nil
 		}
-		if want, seen := expected[chunk.Stage]; seen && (chunk.Seq != want.seq || chunk.Offset != want.offset) {
+		if want, seen := expected[chunk.Stage]; seen && (chunk.Seq < want.seq || chunk.Offset < want.offset || chunk.Seq == want.seq && chunk.Offset != want.offset) {
 			scan.Damage = "record_sequence"
 			return scan, nil
 		}
