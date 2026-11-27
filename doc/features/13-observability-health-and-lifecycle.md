@@ -41,6 +41,33 @@ writer 整批失败、审计 begin/finish、解析保存/release、保留清理�
 | `project_backfill_skipped` | 项目标识回填放弃该 audit，`reason=failed`；同一进程内不再尝试 |
 
 回填不引入新的健康状态或指标端点：它只在 parser 队列为空时每个扫描周期最多处理 20 条，不影响 `/readyz`。
+
+parser 两条写入路径共有的两个码：`parser normalization failed`（`error_code=normalize_panic`，normalization 或轮次准备 panic，release 计一次失败）和 `parser job deadline exceeded`（`error_code=parse_deadline_exceeded`，作业从 claim 到保存超过 2 分钟），见模块 05 §5。
+
+### 2.1 unified 写入路径、本地暂存与采集设置
+
+`audit.write_path: unified`（模块 03 §13）增加下面这些日志。gap 的 reason 没有新增：暂存拒绝导致的停止保留复用 `queue_full`，真实原因在阶段错误码上。`storage_error` 多了一个类别 `inbound_stage_not_stored`。
+
+| 日志 | 字段 | 何时 |
+| --- | --- | --- |
+| `audit capture degraded` | `audit_id`、`route_id`、`error_code=capture_checkpoint_deferred`、`storage_error` | 检查点没能入队（写队列满等），或版本 2 的块封不出来；内容并入下一次写，不记 gap |
+| `audit capture degraded` | `audit_id`、`route_id`、`stage`、`error_code=capture_budget_exhausted` 或 `staging_write_failed` | 一个阶段因暂存拒绝而停止保留；available 模式同时记一次 `queue_full` gap（模块 03 §13.4） |
+| `audit capture degraded` | `audit_id`、`route_id`、`stage=request_for_newapi_received_from_nginx`、`error_code=start_stage_failed` | 起始行已提交、入站阶段行被拒绝（`ErrInboundStageNotStored`，模块 03 §13.9） |
+| `audit capture degraded` | `audit_id`、`route_id`、`error_code=finish_audit_failed` | `CommitAudit` 连同重试最终失败，与 legacy 的 `FinishAudit` 失败是同一条 |
+| `audit staging write failed` | `audit_id`、`error_code=staging_full`（磁盘满）或 `staging_write_failed` | 暂存 writer 写或 fsync 一个文件失败。阶段上的错误码分别是 `capture_budget_exhausted` 和 `staging_write_failed`，与这里的码不完全一致 |
+| `audit staging file not removed` | `audit_id`、`error` | 提交后或导入后删除暂存文件失败 |
+| `audit staging import completed` | `files`、`removed`、`orphaned`、`corrupt`、`unreadable`、`inserted_chunks`、`ignored_entries` | 启动导入结束，目录里有文件时（Info） |
+| `audit staging file imported` | `audit_id`、`outcome`、`inserted_chunks`、`present_chunks`、`torn_tail` | 一个文件导入完并删除（Info） |
+| `audit staging file kept` | `audit_id`、`reason`、`kept_as`、`inserted_chunks` | 文件改名保留：`reason` 为 `no_audit`、`no_body_row`（`.orphan`），或 `foreign_header`、`discontinuous_chunks`、`record_length`、`record_crc`、`record_metadata`、`record_sequence`、`record_authentication`（`.corrupt`） |
+| `audit staging file not renamed` | `audit_id`、`reason`、`error` | 改名失败，文件留在原处 |
+| `audit staging import failed` | `mode`、`error_category=recovery_failed`、`storage_error` | 导入时存储报错或文件读不出来；审计不可用 |
+| `audit staging unavailable, using the legacy write path`、`audit staging unavailable`、`audit staging directory unusable, nothing imported` | `error_category=staging_unavailable`、`reason`，前两条另有 `mode` | 暂存目录检查不通过时，分别对应 unified 加 available、unified 加 strict、legacy（模块 01 §4 第 18 项） |
+| `audit manager unavailable` | `mode`、`error_category=audit_unavailable`、`reason` | 审计管理器构造失败，例如存储不能承担 unified |
+| `saved audit capture settings ignored` | `error_category=runtime_settings_invalid` | 启动时保存的重试次数读不出来或不合法，按配置文件运行 |
+| `audit capture settings saved`、`audit capture settings reset to the configuration file` | `commit_retries` | 管理页面保存或重置重试次数（Info） |
+| `audit capture settings request failed` | `error_code=settings_unavailable` | 设置接口遇到未归类的错误 |
+
+`audit staging file not removed`、`audit staging file not renamed` 的 `error` 和 `audit manager unavailable` 的 `reason` 现在是底层错误的原文，可能带文件路径，与本节开头的规则不一致。
 可选 NewAPI 用户目录刷新成功时只记录用户数；失败时只记录固定 `newapi_user_catalog_refresh_failed` 类别；`/api/status` 换算系数刷新失败只记录 `newapi_status_refresh_failed`。调用者查询失败只记录 audit ID 和固定 `caller_*` 错误码；计费相关只记录 `billing_rate_missing`、`billing_backfill_scan_failed`、`billing_backfill_save_failed` 等稳定码。启动配置含已废弃的 `insights.pricing_file` 时输出一次 `deprecated_config` 警告，不记录路径。任何日志都不得包含管理 access token、用户 API Key、用户目录行、完整管理 URL、响应体、NewAPI 日志行或底层错误文本。
 
 `/v1/models` 等安全非 LLM 请求即使经本程序 passthrough，也不创建 audit、不执行 interceptor，并且不写 `llm request completed`。错误 Method、受保护路径族和危险路径在分发边界 fail-closed，也不伪装成 LLM audit。
@@ -80,13 +107,13 @@ health、ready、详情 JSON、错误 JSON 和 raw Body 响应统一使用 `Cach
 | `degraded` | 200 | parser/caller worker 不可用；或 available 模式下审计依赖不可用但代理仍可转发 |
 | `not_ready` | 503 | strict 模式下审计依赖不可用，新白名单请求会被 admission 拒绝 |
 
-gap flush 或单次用户目录刷新失败不改变 readiness；retention 批的存储级失败与其他 writer 批一样把 database 报为不可用，直到下一次写入成功；已配置 caller worker 无法启动时 readiness 降级。首版没有 `/metrics` 实现。
+`parser_queue` 是 parser FIFO 的长度，unified 写入路径下最多到 4096（模块 05 §5）。gap flush 或单次用户目录刷新失败不改变 readiness；retention 批的存储级失败与其他 writer 批一样把 database 报为不可用，直到下一次写入成功；已配置 caller worker 无法启动时 readiness 降级。首版没有 `/metrics` 实现。
 
 Store 的采集恢复积压尚未清空时 database 不报告 ok；恢复溢出会锁定不健康状态直到重启恢复。正常恢复必须成功提交实际变更，回滚过的修改和只读幂等重试不能使既有写入故障变成 healthy。strict 准入继续要求本次 BeginAudit 同步提交；恢复溢出时明确拒绝新审计。
 
 ## 4. 启动恢复
 
-SQLite migration/open 成功后、parser 扫描 pending 记录前，应用调用一次恢复：
+migration/open 和完整性链验证成功后、parser 扫描 pending 记录前，应用调用一次恢复。配置了 `audit.staging.dir` 时，恢复之前先导入上次留下的暂存文件，导入失败按恢复失败处理（模块 03 §13.6）。恢复本身：
 
 - `ended_at_ns IS NULL` 的 audit 设为 `forward_status=interrupted`，结束时间使用本次恢复时间。无采集故障的记录写 `capture_status=partial`、`error_code=process_exit`；已标记采集失败的记录保留 `failed` 与原错误码（缺省 `capture_write_failed`）。
 - 已标记采集失败的 audit 先复用正常终结的分块对账：子记录写 `capture_write_failed` 或 `capture_chunk_missing`，保留采集器已记录的 stage 错误码和已封存时间线标志。其余仍为 streaming 的 stage 和 body 设为 partial，并写稳定 `process_exit`。

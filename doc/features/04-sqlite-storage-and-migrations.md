@@ -149,7 +149,7 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 - 与 002 到 005 一样只由运行时 `migrate()` 应用：离线导入的目标仍是 001 基线，没有这个索引，导入后第一次启动代理时建上。001 不改。旧 SQLite 存储不受影响。
 - 用 `CREATE INDEX IF NOT EXISTS`：库很大时运维可以先手工 `CREATE INDEX CONCURRENTLY` 建好，迁移只记版本（见部署文档）。
 - 某个协议的历史轮次不足 32 个时，沿索引往回找要走完整个索引。为了不让规划器在通用计划下走到这一步，候选查询为 `openai`、`anthropic`、`gemini` 各用一条把协议写成字面量的语句，两种计划形态都按该协议的统计从会话一侧入手：31.7 万轮的库上，只有 5 个历史轮次的协议读 5 行，约 1 毫秒。字面量只取代码里的固定集合，其他取值仍走带参数的语句。数字见方案附录 C.6。
-- `latestSchemaVersion` 为 6。**旧版本遇到版本 6 的库会拒绝打开审计存储**（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-5)。
+- 迁移 006 之后 `latestSchemaVersion` 为 6。**旧版本遇到版本 6 的库会拒绝打开审计存储**（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-5)。
 
 ### 3.9 采集版本 2：Header 块（PostgreSQL migration 007）
 

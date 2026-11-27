@@ -43,7 +43,8 @@ internal/
   routing/                      # LLM 白名单及安全直通边界
   interceptor/                  # 入站拦截器、注册表和执行链
   proxy/                        # 审计代理与无审计 passthrough 代理
-  audit/                        # 审计会话、阶段与 Body 采集
+  audit/                        # 审计会话、阶段与 Body 采集；legacy 与 unified 两条写入路径
+  audit/staging/                # unified 超出内存预算的 Body 块的加密本地暂存与启动导入
   auditmodel/                   # canonical object、hash、delta 与重建
   bodycodec/                    # raw/timeline 自适应压缩
   headerblock/                  # 每条 audit 一个 Header 块的编码、密封与读取（capture_version 2）
@@ -53,6 +54,7 @@ internal/
   storage/sqlite/               # 旧格式离线导入验证与兼容测试
   storage/migrate/              # 只读 SQLite 到空 PostgreSQL 的离线迁移
   parser/                       # OpenAI/Anthropic/Gemini 摘要与 conversation 聚合
+  parser/handover/              # 采集会话交给 parser 的已提交 audit 与明文证据（只有数据类型）
   security/                     # 本地 AES-GCM 加密
   query/                        # 受保护的查询与证据解密
   retention/                    # 简单保留清理
@@ -80,7 +82,7 @@ tests/                          # 跨模块集成测试
 - `interceptor` 只在 route match 后、访问 NewAPI 前运行；首个拒绝立即短路，模块异常默认拒绝。interceptor 不能扩大路由范围。
 - 默认拦截器只读请求元数据；需要 Body 的模块必须声明上限，由框架统一预读并原字节回放，超限固定为 `413` 和 `block_code=body_too_large`。
 - passthrough 与审计代理共享 NewAPI rewrite 和显式上游代理设置，但 passthrough 不创建 audit、不解析、不执行 interceptor，也不写 LLM 请求完成日志。
-- `audit` 采集层只处理字节、长度、哈希、时间和完整性状态；四阶段先独立采集，只有终结事务确认成对 Body 完全一致才合并 `source_stage`。parser 在请求完成后异步生成摘要；OpenAI、Anthropic 与 Gemini normalizer 再写可分支 turn、content/binary object、重建 hash 和 raw retention，失败不影响转发。
+- `audit` 采集层只处理字节、长度、哈希、时间和完整性状态；四阶段先独立采集，只有确认成对 Body 完全一致才合并 `source_stage`。默认的 `legacy` 写入路径逐操作写库、在终结事务里合并；可选的 `unified`（`audit.write_path`，模块 03 §13）把一条 audit 写成至多四个 writer 操作，Body 在内存预算内保留、超出的加密落本地暂存，成对阶段在内存里判定，PostgreSQL 上每条 audit 的 Header 存成一个密封块（采集版本 2）。parser 在请求完成后异步生成摘要（unified 下可直接用会话交来的明文）；OpenAI、Anthropic 与 Gemini normalizer 再写可分支 turn、content/binary object、重建 hash 和 raw retention，失败不影响转发。
 - 可选的 `newapi` 集成只读同步安全用户目录，并用上游 `X-Oneapi-Request-Id` 查询全站日志回填用户与 Token 身份；不读取或保存完整 API Key，解析失败不影响转发。
 - PostgreSQL 使用持有 session advisory lock 的固定连接和单 writer goroutine，查询使用独立只读连接；多语句证据快照使用 repeatable read。启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
 - 管理 API、health 和 ready 在任何监听地址都必须鉴权：CLI 使用静态 Admin Token，Web UI 使用由该 Token 登录换取的七天 HttpOnly Cookie。可选的 `developer_login` 提供第二种身份：NewAPI 用户用自己的 API Key 登录，以同等只读深度只能看到该 Key 产生的记录；管理端点返回 403，他人记录与本地策略拦截记录返回 404。作用域由主密钥派生的 keyed 指纹加既有 token 关联判定，系统仍不保存完整或打码 API Key。审计主列表只展示调用者、时间、模型、入站 User-Agent、会话归属标识与 scope 内轮次计数；普通列表会逐条只解密该 User-Agent 供展示和子串筛选，不读取其他 Header、Request-URI、Body 或 conversation 内容。详情按需重建 verified conversation/provider JSON；raw request/response Body 只对 `retention_state=full` 开放；assistant 文本使用禁用原始 HTML 的安全 Markdown 展示。

@@ -26,7 +26,7 @@ GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 
 支持时间、协议、路径、模型、User-Agent、NewAPI 用户、用户名、Token ID/名称、状态码、状态段（`status_class`：`4xx`/`5xx`/`error`）、转发状态、阻断组件/代码、捕获状态，以及上游策略拒绝分类（`upstream_error_class`：`cyber_policy`/`misalignment_policy`/`content_policy`/`content_filter`/`moderation_blocked`/`safety_policy`）等窄筛选。列表 DTO 增加 `parsed_error_type`、`parsed_error_code`、`upstream_error_class` 三个可空字段用于展示上游拒绝。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `started_at_ns + audit_id` keyset cursor，默认 50、最大 200；`conversation`/`collapse` 筛选不改变排序和分页语义。`status_class=error` 匹配 `status_code` 在 400–599 的记录；`status_code` 为空的记录（例如在收到上游响应头之前就取消的请求）不计入，收到上游响应头后取消仍保留上游状态码。任何上述行级筛选生效时会话折叠（`collapse`）都被忽略，按轮次逐条列出，避免命中的较早轮次被同会话更新的轮次隐藏；User-Agent 也在不折叠的候选集上过滤。分页 cursor 和开发者身份 scope 不关闭折叠。
 
-列表 SQL 只读取 audit、parsed summary 和 token link 窄列；query 层为每个候选 audit 单独读取并认证解密入站 User-Agent。User-Agent 筛选是不区分大小写的子串匹配，每次最多扫描 2000 个候选。列表不会读取 Request-URI、其他 Header、Body、parsed conversation 或 content/binary objects。
+列表 SQL 只读取 audit、parsed summary 和 token link 窄列；query 层为每个候选 audit 认证解密入站 User-Agent，按 `capture_version` 分派（`query.Service.readUserAgent`）：版本 2 的行直接打开列表查询已经带回的 `user_agent_enc`，版本 1 的行照旧每行查一次 `http_headers`。两者语义相同：显示第一个值，任一值包含子串就算匹配，没有 User-Agent 时不匹配。User-Agent 筛选是不区分大小写的子串匹配，每次最多扫描 2000 个候选。列表不会读取 Request-URI、其他 Header、Body、parsed conversation 或 content/binary objects。
 
 列表 DTO 包含 TTFT、request/response model、caller status、可选用户/Token 元数据、入站 User-Agent 和所属 conversation。Web 层使用安全用户目录按 user ID 补充 `display_name`；前端优先显示显示名，不暴露完整用户名作为主标签，Token 名称和 ID 分行显示。
 
@@ -224,7 +224,7 @@ type AuditQuery interface {
 
 “周报与分析”里，会话分析的运行时间和模型阶段（地址、模型名、Key、并发、输出上限等）可以直接修改并保存，保存的值覆盖配置文件、从下一轮分析起生效，并提供“测试连接”和“恢复为配置文件的值”；可改的项、接口和生效规则见 24 §4.1。项目周报的合并间隔、排名客户端（从词表能识别的客户端里勾选，不能手输）和两个标记阈值同样可以修改并保存，保存后未冻结的周立即按新值计算，已冻结的周要“重新生成”；时区和每周起始日只读（23 §3）。developer 登录看不到“系统配置”。
 
-“审计写入”只有一项：unified 写入路径的终结提交（`CommitAudit`）因写入队列已满或整批事务失败而没有成功时重试几次，取值 0 到 5，0 表示只尝试一次。配置文件的 `audit.commit_retries`（默认 3）是底，页面保存的值覆盖它、立即生效：之后开始的终结提交按新值重试，不用重启；“恢复为配置文件的值”删掉保存的值。第 k 次重试之前等 `min(100 ms × 2^(k-1), 1 s)`，所以 3 次最多多等 0.7 秒、5 次最多多等 2.5 秒，另加各次尝试本身的时间；页面按每个取值列出这个时间。legacy 写入路径不用这个值，页面在 `audit.write_path` 不是 unified 时会提示。生效的值放在审计管理器的原子变量里，请求不为它读库。接口：
+“审计写入”只有一项：unified 写入路径的终结提交（`CommitAudit`）因写入队列已满或整批事务失败而没有成功时重试几次，取值 0 到 5，0 表示只尝试一次。配置文件的 `audit.commit_retries`（默认 3）是底，页面保存的值覆盖它、立即生效：之后开始的终结提交按新值重试，不用重启；“恢复为配置文件的值”删掉保存的值。第 k 次重试之前等 `min(100 ms × 2^(k-1), 1 s)`，所以 3 次最多多等 0.7 秒、5 次最多多等 2.5 秒，另加各次尝试本身的时间；页面按每个取值列出这个时间。legacy 写入路径不用这个值，页面在实际使用的写入路径不是 unified 时会提示：接口返回的 `write_path` 是审计管理器的会话实际使用的路径，不是配置文件写的值，管理器不可用、或因暂存目录不可用退回 legacy 时它是 `legacy`（模块 01 §4 第 18 项）。生效的值放在审计管理器的原子变量里，请求不为它读库。接口：
 
 | 端点 | 说明 |
 | --- | --- |
@@ -232,7 +232,7 @@ type AuditQuery interface {
 | `PUT /api/v1/settings/audit-capture` | 请求体只接受 `{"commit_retries": n}`，n 必须是整数；缺字段、`null`、小数、字符串、未知字段一律 `400 invalid_settings`；超出范围 `400 invalid_settings`，消息为 `audit.commit_retries must be between 0 and 5` |
 | `DELETE /api/v1/settings/audit-capture` | 恢复为配置文件的值 |
 
-三个方法只对管理员开放，developer 会话 `403`；保存的值读不出来时（包括审计存储没有打开）写入一律 `503 settings_unavailable`，什么都不保存。启动时读一次保存的值；读不出来或不再合法时告警并按配置文件运行。审计管理器不可用时页面照样能读，但这时没有打开的存储，写入同样 `503`。这组路由不对应 Agent 门面的命令，列在路由表的例外里（采集写入的运行参数，只在管理界面修改）。
+三个方法只对管理员开放，developer 会话 `403`；保存的值读不出来时写入一律 `503 settings_unavailable`，什么都不保存。启动时读一次保存的值；读不出来或不再合法时告警并按配置文件运行。审计存储打不开（或因审计管理器不可用而被关闭）时，这一节照样装配：页面能读，显示配置文件的值，但不能保存，写入同样 `503`。这组路由不对应 Agent 门面的命令，列在路由表的例外里（采集写入的运行参数，只在管理界面修改）。
 
 ## 12. 最少测试
 

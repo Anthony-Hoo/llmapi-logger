@@ -382,7 +382,7 @@ insights:
 - **缺 `X-Agent-Session-Id`** 时，根在分析时由父链上溯得到，且分析行一旦写入不再改写（晚到的父节点只在查询时按指纹连接）。两层树不受顺序影响：子请求先分析时根取父指纹，父请求后分析时根取自身指纹，二者相同。三层及以上的树则有顺序要求：孙节点若在中间节点之前被分析，其根只能是中间节点的指纹，之后不会改成真正的根，这棵孙子树会一直显示为独立的树（直到某次 `AnalysisVersion` 升级触发的从旧到新回填重算）。父 Agent 的请求已过期或不在作用域内时，子树显示占位父节点（§5.8）。所以三层及以上的框架请总是带 `X-Agent-Session-Id`。
 - **附属请求**（压缩、生成标题、总结）带发起它的那个 Agent 的 `X-Agent-Id`，并把 `X-Agent-Role` 设为对应类别。这样它们挂在该节点下，不会被当成子 Agent。
 - **透明转发**：代理不删除、不改写这些 Header，NewAPI 和上游会照常收到。上游若对未知 Header 敏感，请在 Nginx 之后、NewAPI 之前自行处理；代理本身不提供剥离功能。
-- **安全**：Header 值与其他 Header 一样逐个 AES-256-GCM 加密存储。明文列中只出现 keyed HMAC 指纹，指纹不可反查，所以填 UUID 或业务 ID 都可以。但不要放密钥、Token 或个人信息。
+- **安全**：Header 值与其他 Header 一样只以 AES-256-GCM 密文存储（采集版本 1 逐值加密，版本 2 每条 audit 整块加密，[模块 09](09-security-encryption-and-redaction.md) §5.2）。明文列中只出现 keyed HMAC 指纹，指纹不可反查，所以填 UUID 或业务 ID 都可以。但不要放密钥、Token 或个人信息。
 - **`prompt_cache_key` 的影响**：若把根会话 ID 写进 OpenAI 的 `prompt_cache_key`，OpenAI 轮次图会把父子 Agent 归入同一个 conversation（按内容各成一条链，见 §5.8“与 OpenAI 轮次图的关系”），`conversation_turns` 计数也会包含子 Agent。Agent 树与洞察统计按本节 Header 区分，不受影响。
 - **识别优先级**：内置客户端的原生 Header → 本节通用 Header → Body 回链 → 内容推断。框架若本身就是 Codex/Claude Code 等客户端的封装，无需重复设置。
 

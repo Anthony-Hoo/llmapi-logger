@@ -1,6 +1,6 @@
 # Issue #59 第 3 阶段详细设计：阶段性提交、单一 Header 块、解析不读回
 
-状态：已定稿，待实施。基于提交 `0faae0a`（分支 `claude/issue-59-stage3-ca432f`）。迁移编号取 007，因为 006 是另一项改动加的 `turns (created_at_ns, turn_id)` 索引。
+状态：已实施（提交 `0faae0a` 之后的第 3 阶段提交，到 `008f3fc` 为止）。正文是实施前的定稿，保留原样；代码与正文不同的地方列在文末“实施记录”，以那里和模块文档为准：会话见模块 03 §13，writer 操作见模块 04 §5.1，迁移见模块 04 §3.8、§3.9，parser 见模块 05 §5，Header 块与明文边界见模块 09。迁移编号取 007，因为 006 是另一项改动加的 `turns (created_at_ns, turn_id)` 索引。
 
 本阶段对应方案 `doc/design/issue-59-unified-write-cold-archive.md` 第 6 节的 P2：4.2 的第一步和第二步、决策 5.10、`audit.write_path` 开关。4.2 第三步不在范围内。
 
@@ -1132,3 +1132,68 @@ Body 采集拆成两层：
 3. **v2 写入之后没有只用 SQL 的回滚办法**（E.2）。
 4. **parser 在进程内解密整块。** 这是维护者接受的明文边界改变（决定 2），要写进模块 09。
 5. **最终失败时比 legacy 多丢一些。** `CommitAudit` 最终失败时，响应侧证据没有进库；legacy 在同样的故障下，至少有已提交的那些异步块。重试缩小了这个窗口，但没有消除。
+
+---
+
+## 实施记录
+
+下面是代码与正文不同、或正文没有写到的地方，取自代码和各提交的说明（`git log 0faae0a..008f3fc`）。每条给出正文的位置和代码的位置。
+
+### R.1 会话
+
+1. **重试次数在第一次尝试之前读。** B.8、H.3 写的是“第一次失败时读一次”。`commitWithRetries` 在第一次尝试之前读 `Manager.CommitRetries()`，这样即使次数为 0，那一次尝试也能带上 `FinalAttempt`；正常路径多一次原子读。改动对之后开始的提交生效。
+2. **没有前瞻缓冲。** B.5 写重复阶段读到来源前面时把超出部分放进前瞻缓冲。`unifiedRetainer.retain` 里，重复阶段遇到来源还没保留到的字节就从那里起自己保留，前缀照旧借用。按代理的读写顺序，来源总是先读到，这种情形不常见。
+3. **来源可能越过预算一次读。** F.2 没有写：来源阶段的块在重复阶段比对过之前不能落暂存，`reserveRetainedLocked` 把这一次读的字节越过单阶段和全局预算照收，而不是结束保留。
+4. **短块只在全局预算吃紧时出现。** F.1 说 `stage_bytes` 的下限 1 MiB 保证落暂存的块总是整块。实际上单阶段预算总是先让已关闭的整块落暂存，只有全局预算吃紧、阶段只剩正在攒的块时，`stageOneChunkLocked` 才提前结束它。
+5. **落暂存时的检查点只写行。** F.3 写“写入阶段行、Header 和 Body 行”。`spillCheckpointLocked` 只写到此为止的阶段行和 Header，以及落暂存那个阶段自己的 Body 行，不写块、不写其他 Body 行，好让请求对仍能在检查点 1 合并；没能入队时下次落暂存再试。
+6. **失败 capture 上的合并。** B.5 表的第 8 条写检查点失败使 audit 成为 failed 时“与 legacy 一样不合并”。会话不知道库里的失败标记：在检查点 1 合并的请求对和在 `Finish` 时内存里合并的响应对，在最终 failed 的 audit 里也以指向来源的形态存储（模块 03 §13.3）。legacy 在这种情况下两份 raw 都保留。
+7. **起始行没有入站阶段。** K.1 的修正让 `BeginAudit` 带上入站阶段，正文没有写它被拒绝时怎样。实现：阶段行和 Header 各在一个嵌套 SAVEPOINT 里，被可隔离的错误拒绝时只回滚那一部分，起始行保留并标 failed；阶段行被拒绝时 `BeginAudit` 在批次提交后返回 `storage.ErrInboundStageNotStored`，会话按 legacy 的 `StartStage` 失败处理，请求对不在内存里合并（模块 03 §13.9）。
+8. **交接的条件更严。** G.2 第 1 条之外，还要求起始行带着入站阶段、没有任何块落过暂存，以及两个接收阶段的块全部完整留在内存里、与提交的长度和块数相符。“全局预算容得下”是只检查不另占（`handover.go` 的 `jobLocked`）。
+9. **落了暂存的内容只交 id。** F.2、G.2 设想终结器可以读回暂存的明文。`evidenceLocked` 遇到落过暂存的块就只交 id 作业，由 worker 读库；接口留了位置（`internal/audit/handover.go` 的注释）。
+10. **版本 2 的块封不出来时。** 检查点不发出，记 `capture_checkpoint_deferred`；`CommitAudit` 在发送前就失败、不重试，按最终失败处理，启动恢复以检查点写过的块终结。正文没有写。
+
+### R.2 存储与读取
+
+1. **失败 capture 上的检查点过滤。** B.3 没有写：检查点碰到已标 failed 的 audit 时，只写有父行的部分（Header 要有阶段行，Body 要有自己和来源的阶段行，块要有 Body 行），与 B.6 第 2 步对提交的处理相同；块照样整块写（`applyCheckpoint`、`loadPresentRows`）。之前一个缺失的入站阶段行会让整个检查点因外键失败而丢失。
+2. **阶段集合检查的例外。** C.7、C.8 写块的阶段集合与阶段行不等一律按完整性错误。写失败时会话并不知道，两者可能对不上；`headerblock.Expand` 对已存 `capture_status = failed` 和 `forward_status = interrupted` 的 audit 放宽这一条，其余 audit 不变（模块 09 §8）。被拒绝的入站块会留下有阶段行、没有块的 failed audit。
+3. **块来源读失败是本地错误。** PostgreSQL 起初把读暂存块失败当作整批失败；`insertChunkRows` 改为本地错误，只回滚那一个操作，与 SQLite 一致（F.4 本来就这么要求）。失败记账取块边界用 `EachMetadata`，不在锁下读文件。
+4. **`RestoreStagedChunks` 总是独占一个事务**，它报告已有的、借用的（合并了的重复阶段）、没有 Body 行的和接不上的阶段，规则在 `storage.StagedRestorePlan`，两个存储共用。
+5. **迁移 007 的三个 CHECK 都是 `NOT VALID`。** E.1 只把 `capture_version` 的那个写成 `NOT VALID`；随 `ADD COLUMN` 一起写的 CHECK 会扫全表，所以两个内容列的也单独以 `NOT VALID` 添加（模块 04 §3.9）。
+6. **版本 2 提交的批次失败记账。** 存储打不开旧块，不知道少了哪些 Trailer，所以带新块的提交丢在失败批次里时，先前写过的阶段都记为 Header 丢失。
+7. **语句数。** B.9 是按代码数的估计。`TestStagedWriteStatementCounts` 在提交 `6a3d5c5` 时以版本 1 量得：一条典型流式请求 legacy 22 个操作、105 条语句，unified 4 个操作、38 条语句（含 SAVEPOINT 与 RELEASE，不含 BEGIN 与 COMMIT）。之后入站阶段改用嵌套 SAVEPOINT、PostgreSQL 改写版本 2，数字没有重新记录；测试只断言操作数和 unified 更少。
+
+### R.3 暂存
+
+1. **文件格式与 F.4 相同**，只有文件头和块记录；CRC 是 CRC-32C（Castagnoli）。F.5 写的 `fdatasync` 实际是 `File.Sync`（fsync），新建文件的那一批写完后 fsync 一次目录。待写队列另有 4096 条的上限，满了按耗尽处理。
+2. **导入的情形比 F.7 多。** 文件读不出来时导入中止并返回错误，审计不可用（否则恢复会终结这些 audit，下次启动把完好的文件当已终结删掉）；导入时存储报错同样使审计在两种模式下都不可用；文件头指向别的 audit、块与库里的接不上时改名为 `.corrupt`；合并了的重复阶段的块不插入。扫描允许一个阶段的暂存块跳过检查点已写并释放的那些（上游先回响应时会这样），由存储核对文件接着库里的块。
+3. **构造提交之后不再落暂存**，迟到的读按耗尽处理（`capture_budget_exhausted`），以免会话释放暂存之后又建出文件。
+4. **legacy 下暂存目录不可用只记告警**，不影响启动；配置了目录且可用时，不论写入路径都导入。
+5. **`max_bytes` 必须为正**，是新增的配置校验；它计入目录里的全部普通文件，包括导入改名保留的文件。
+6. **日志码。** 暂存 writer 写失败的日志在磁盘满时记 `staging_full`，阶段上的错误码是 `capture_budget_exhausted`，两处不一致（模块 13 §2.1）。
+
+### R.4 parser
+
+1. **recover 只包 normalization 和轮次准备。** `Parse` 原本就有 recover（`parser_panic`）；新增的 `prepareSafely` 包住 `NormalizeAudit` 和 `PrepareWithLookup`，panic 记 `normalize_panic` 并 release，计一次失败。
+2. **期限的范围。** 2 分钟从读审计行、claim 开始到保存为止，保存之后的分析不受约束；对 `Notify`、扫描和 `Submit` 的作业都生效。claim 的等待到期时同样显式 release。
+3. **队列上限。** `Notify` 的 100 比较的是整个队列的长度，不只是 `Notify` 进来的作业，所以队列里有 100 个 `Submit` 作业时扫描和 `Notify` 也被拒绝。
+
+### R.5 设置
+
+1. **`write_path` 是实际使用的路径。** H.3 写设置视图显示配置文件的值。`assembleCaptureSettings` 传的是 `Manager.WritePath()`：管理器不可用或退回 legacy 时为 `legacy`。`internal/audit/settings.go` 里 `CaptureSettingsView.WritePath` 和 `CaptureSettingsOptions.WritePath` 的注释仍写“from the configuration file”。
+2. **审计存储打不开时不能保存。** H.3 写 Manager 是 `NewUnavailable` 时页面照常读写。实际上这时存储已关闭或没有打开，服务没有存储：读按配置文件回答，写一律 `503 settings_unavailable`。
+3. **`PUT` 拒绝缺字段。** 0 是合法值，缺字段或 `null` 按 400 拒绝，不取默认。
+
+### R.6 已知限制
+
+正文没有写、实施时确认的限制，模块 03 §13.5、§13.7 有详细说明：
+
+1. 检查点丢在失败批次里的 audit，即使重试的提交成功也以 failed 终结：`CommitAudit` 先写恢复表里的失败标记。快请求的检查点常与提交同批，故障期间发出的检查点也是这样。
+2. 提交最终失败时暂存文件保留到下次启动，但 writer 恢复已在进程里把 audit 以 failed 终结，下次启动只删除文件，暂存的块不进库。
+3. 随 Body 结束到达的上游响应 Trailer 只由 `CommitAudit` 写；进程在 `Finish` 之前退出时没有，legacy 在 EOF 时已异步写出。
+4. `Finish` 在 unified 下更慢：响应侧的块在这时才压缩加密。
+5. 设置页在审计存储打不开时只能读（R.5 第 2 条）。
+6. `cmd/audit-bench` 的 `--write-path`、`--staging-dir`、`--stage-bytes`（I.6）在 `008f3fc` 时还没有。
+
+### R.7 实测
+
+留给编排方补上：A/B 对照（I.6）、`Finish` 时长、暂存写入量与 fsync 次数、内存峰值。

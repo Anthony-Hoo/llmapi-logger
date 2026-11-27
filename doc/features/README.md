@@ -105,13 +105,13 @@ PostgreSQL 使用独立 schema 版本，并保留旧证据模型的关系约束�
 
 存量对象及引用身份不匹配会触发进程内不可自动清除的完整性失败；隔离该次解析写入不意味着数据库仍可报告健康。
 
-key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
+key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值（采集版本 2 为每条 audit 一个 Header 块和一个入站 User-Agent）、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 
 详细设计见 [03](03-audit-session-and-evidence-capture.md) 与 [04](04-sqlite-storage-and-migrations.md)。
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；Anthropic Messages 同样按 message 拆成 turn 与 content object；Gemini GenerateContent 按 Content 拆分，`inlineData` 按解码字节存为 binary object；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建；有 verified turn 的异常记录按侧决定，通常释放请求侧、保留响应侧（模块 18 §6）。Gemini 流只有带 finish reason（或提示词被拦截）才算完整，截断的流保持 `partial` 和 full raw（模块 08 §5）。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue（unified 写入路径下条件满足时连同会话手里的明文一起交给 worker，不再读回，模块 05 §5.1）。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；Anthropic Messages 同样按 message 拆成 turn 与 content object；Gemini GenerateContent 按 Content 拆分，`inlineData` 按解码字节存为 binary object；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建；有 verified turn 的异常记录按侧决定，通常释放请求侧、保留响应侧（模块 18 §6）。Gemini 流只有带 finish reason（或提示词被拦截）才算完整，截断的流保持 `partial` 和 full raw（模块 08 §5）。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
 
 管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。raw Body 按侧提供：只有 `retention_state=full` 的一侧可下载，同一条异常记录可能请求侧已释放、响应侧仍可下载；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域；汇总端点只读明文派生列，只有单条审计的上下文构成和 Agent 树节点名字按需解密 `detail_enc`。所有管理证据响应禁止缓存。
 
@@ -196,5 +196,12 @@ issue #59 第 1 阶段（方案见 [`doc/design/issue-59-unified-write-cold-arch
 - 完整性摘要里的密文 SHA-256 由 PostgreSQL 计算，密文不再取回进程；摘要字节与之前完全相同。
 - `parsed_json_enc` 在明文达到 4 KiB 且压缩有收益时先 gzip 再加密，旧行原样可读；旧版本读不了压缩行（[模块 09](09-security-encryption-and-redaction.md)）。
 - 迁移 005 删除无人使用的 `content_objects_semantic_idx`（[模块 04](04-sqlite-storage-and-migrations.md) §3.7）。
-- 迁移 006 加索引 `turns (created_at_ns, turn_id)`，让没有会话 key 的轮次找父轮次候选时不再扫描整张 `turns` 表；schema 版本为 6（模块 04）。
+- 迁移 006 加索引 `turns (created_at_ns, turn_id)`，让没有会话 key 的轮次找父轮次候选时不再扫描整张 `turns` 表（模块 04 §3.8）。
 - 四类协议的合成夹具和 A/B 压测工具 `cmd/audit-bench` 见[模块 14](14-test-benchmark-and-fault-injection.md) §9。
+
+issue #59 第 3 阶段（设计与实施记录见 [`doc/design/issue-59-stage3-write-path.md`](../design/issue-59-stage3-write-path.md)）加了第二条写入路径，默认不启用：
+
+- `audit.write_path: unified`（默认 `legacy`，[模块 01](01-configuration-and-route-boundary.md) §4 第 18 项）把一条 audit 写成至多四个 writer 操作：`BeginAudit` 带上入站阶段，请求 Body 读完时和响应头转发时各一个不等待的检查点，`Finish` 等待的 `CommitAudit`。Body 在内存预算（默认每阶段 8 MiB、全进程 256 MiB）内留到写库，超出的部分加密写入本地暂存，启动时导入；成对阶段在内存里判定。`CommitAudit` 在队列满或整批失败时重试，次数可在管理页面修改（[模块 10](10-query-api-and-minimal-web-ui.md) §11）。会话行为与崩溃时留下的证据见[模块 03](03-audit-session-and-evidence-capture.md) §13，writer 操作见模块 04 §5.1。
+- PostgreSQL 上 unified 写采集版本 2（迁移 007，schema 版本 7）：每条 audit 一个密封的 Header 块、单独密封的入站 User-Agent、阶段行上的内容类型与编码两列、版本 2 的 capture 摘要；版本 1 的行照常读取和校验（模块 04 §3.9、[模块 09](09-security-encryption-and-redaction.md) §5.2）。SQLite 只写版本 1。
+- parser 只有一个 4096 个作业的 FIFO。unified 下已提交的 audit 交给 `Submit`，条件满足时带着会话手里的明文，解析不读回 raw；两条路径都给 normalization 加了 recover，给每个作业加了 2 分钟期限（[模块 05](05-parser-framework.md) §5）。
+- 先发带迁移 007、仍用 legacy 的版本，再启用 unified；回滚顺序见[部署说明](../deployment/README.md) 3.3。

@@ -186,7 +186,7 @@ session_analysis:
 | 轮次图（OpenAI、Anthropic）：`turns`、`turn_context_ops`、`turn_response_items`、`content_objects` | 每轮 `insert` 操作新增的条目、响应条目 | `content_objects` 解密 | 包：有轮次图的记录（含 Codex、Claude Code）的用户轮次、助手文本、工具调用与结果状态。只读增量条目，不重建整段历史 | 只进 `pack_enc` |
 | `content_binary_refs`、`binary_objects` | 前者的 `media_type`、后者的 `plaintext_length` | 明文；**二进制正文不解密** | 包：图片和附件的占位符 | 不落库 |
 | `body_chunks`（raw，仅 `retention_state=full`） | provider 原始 JSON | 解密 | 兜底：Conversation DTO 不保留的字段，目前只有 Anthropic `tool_result.is_error` | 不落库；raw 不在时该失败状态记为"未知" |
-| `http_headers` | — | 不直接读 | 客户端、Agent 身份已在 `audit_analysis`；项目标识由 23 的提取器负责 | — |
+| `http_headers`、`http_header_blocks` | — | 不直接读 | 客户端、Agent 身份已在 `audit_analysis`；项目标识由 23 的提取器负责 | — |
 | `http_stages`、`body_streams`（除 `retention_state`）、`stream_timelines`、`integrity_events` | — | 不读 | — | — |
 | 模块 23（启用时） | 归属结果（`project_id`、信号级别、分桶）、`projects.name`、`principal_class`、`group_members` | 明文管理数据。归属由 23 的服务计算，`identity_enc` 在它内部解密；本模块只拿到项目 id、项目名、级别和是否 service，**拿不到仓库地址和路径** | 包：`[会话]` 的项目名与信号级别；L0：service 排除；聚合：项目、项目组 | `session_signals.project_id`、`bucket`；`session_text_fprs.project_id` |
 
