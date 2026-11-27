@@ -76,6 +76,8 @@ canonical Prepare 在同一轮内先以规范化明文 hash 去重，再压缩�
 
 跨轮次复用采用一次批量 lookup（数据库内部按参数上限分批），不逐对象往返查询。当前请求仍完整规范化、计算 hash 并校验重建，再读取已存在对象的密文与身份元数据。命中必须通过 AEAD/AAD、kind、semantic hash、明文/编码长度及完整逐字节比对；gzip 必须读到 EOF 并通过校验和，不能只信存在标志。验证后复用原压缩格式与密文，未命中才压缩加密。数据库查询失败或任何损坏都中止 normalized turn，不能静默退化为可信命中。验证 decoder 同样限于单次 Prepare，使用 32 KiB 暂存比较缓冲，没有全局明文缓存。
 
+写入时只发送库里还没有的对象。lookup 在事务开始前走读连接，retention 的对象 GC 可能在这之间删掉未被引用的对象，因此是否已存在由 writer 事务自己判定：按 hash 分批（每批 400 个）查询 `content_objects`、`binary_objects` 和已存在对象的 `content_binary_refs`、`content_external_refs`，只取键和身份列，不取 `data_enc`、`value_enc`。GC 与对象写入都在同一个 writer 上执行，事务内读到的结果在提交前不会变，不需要行锁。已存在的行按原规则核对身份（content 为 `semantic_hash`、`kind`、`plaintext_length`；binary 为 `media_type`、`plaintext_length`；binary 引用为 `media_type`、`encoding`；external 引用为 `value_hash`），不一致按存储对象完整性故障处理，已存在的行不改写。缺失的对象和引用行用多行 INSERT 写入，每条最多 400 行、对象密文合计约 4 MiB；对象还在而引用行缺失时补写该行。所以一轮引用 N 个已存在对象时，往返次数只随批数增长，不再随 N 增长，也不再把整段上下文的密文发回数据库。
+
 `retention_state`：
 
 | 状态 | 含义 |
