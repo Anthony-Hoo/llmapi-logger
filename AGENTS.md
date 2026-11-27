@@ -46,6 +46,7 @@ internal/
   audit/                        # 审计会话、阶段与 Body 采集
   auditmodel/                   # canonical object、hash、delta 与重建
   bodycodec/                    # raw/timeline 自适应压缩
+  headerblock/                  # 每条 audit 一个 Header 块的编码、密封与读取（capture_version 2）
   newapi/                       # NewAPI 安全用户目录与 request-id 调用者解析
   conversation/                 # 协议无关的消息、reasoning、工具调用与结果 DTO
   storage/postgres/             # PostgreSQL 读写和内嵌 migration
