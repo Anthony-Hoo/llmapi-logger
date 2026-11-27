@@ -8,6 +8,8 @@ import (
 	"fmt"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/conversation"
+	"llmapi-logger/internal/parser/anthropic"
 	"llmapi-logger/internal/parser/openai"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -112,7 +114,7 @@ func reconstructTurnGraph(cipher security.Cipher, parserName string, graph *stor
 	if err != nil {
 		return ReconstructedTurn{}, integrityAt("response_binary_restore")
 	}
-	view, err := openai.ReconstructedConversation(parserName, request, response, graph.ResponseLayout)
+	view, err := reconstructedConversation(parserName, request, response, graph.ResponseLayout)
 	if err != nil || !validConversation(view) {
 		return ReconstructedTurn{}, integrityAt("conversation_projection")
 	}
@@ -122,6 +124,15 @@ func reconstructTurnGraph(cipher security.Cipher, parserName string, graph *stor
 		Response:     response,
 		Conversation: view,
 	}, nil
+}
+
+// reconstructedConversation projects rebuilt provider values with the parser
+// that normalized them.
+func reconstructedConversation(parserName string, request, response any, responseLayout string) (*conversation.Conversation, error) {
+	if parserName == anthropic.Messages {
+		return anthropic.ReconstructedConversation(request, response, responseLayout)
+	}
+	return openai.ReconstructedConversation(parserName, request, response, responseLayout)
 }
 
 func integrityAt(stage string) error {

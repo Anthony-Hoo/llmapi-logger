@@ -13,7 +13,7 @@ import (
 
 // SessionConversation returns the decrypted conversation of one audit for the
 // session analysis batch (doc/features/24-session-analysis.md section 6.1):
-// the verified turn graph projection for OpenAI records, otherwise the
+// the verified turn graph projection when the audit has one, otherwise the
 // encrypted parser conversation. Headers, the request URI and raw bodies are
 // not decrypted. Callers must keep the result in memory only.
 func (service *Service) SessionConversation(ctx context.Context, auditID string) (*conversation.Conversation, error) {

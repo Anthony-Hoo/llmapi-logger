@@ -73,9 +73,29 @@ func Assemble(layout string, envelope any, items []Item) (any, error) {
 		}
 		root[SlotPrompt] = prompts[0]
 		return root, nil
+	case LayoutAnthropicMessagesRequestSystemNone, LayoutAnthropicMessagesRequestSystemSingle, LayoutAnthropicMessagesRequestSystemArray:
+		if root == nil {
+			return nil, ErrReconstruction
+		}
+		root[SlotMessages] = valuesForSlot(items, values, SlotMessages)
+		system := valuesForSlot(items, values, SlotSystem)
+		switch layout {
+		case LayoutAnthropicMessagesRequestSystemArray:
+			root[SlotSystem] = system
+		case LayoutAnthropicMessagesRequestSystemSingle:
+			if len(system) != 1 {
+				return nil, ErrReconstruction
+			}
+			root[SlotSystem] = system[0]
+		case LayoutAnthropicMessagesRequestSystemNone:
+			if len(system) != 0 {
+				return nil, ErrReconstruction
+			}
+		}
+		return root, nil
 	case LayoutMarkerEnvelope:
 		return replaceItemMarkers(cloned, values)
-	case LayoutOpenAIStreamResponse:
+	case LayoutOpenAIStreamResponse, LayoutAnthropicStreamResponse:
 		if root == nil {
 			return nil, ErrReconstruction
 		}

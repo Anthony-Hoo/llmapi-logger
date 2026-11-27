@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/parser"
 )
 
@@ -27,7 +28,7 @@ func (service *Service) ReconstructBodies(ctx context.Context, auditID string) (
 			return parser.Reconstruction{}, err
 		}
 	}
-	if reconstructed.Turn.ResponseLayout == auditmodel.LayoutOpenAIStreamResponse {
+	if layout := reconstructed.Turn.ResponseLayout; layout == auditmodel.LayoutOpenAIStreamResponse || layout == auditmodel.LayoutAnthropicStreamResponse {
 		result.ResponseIsStream = true
 		result.Conversation = reconstructed.Conversation
 		encoded, err := json.Marshal(reconstructed.Response)
@@ -41,10 +42,14 @@ func (service *Service) ReconstructBodies(ctx context.Context, auditID string) (
 					Output *int64
 					Total  *int64
 				}
+				Normalized *insights.Usage `json:"normalized_usage"`
+				StopReason string          `json:"stop_reason"`
 			}
 		}
 		if err := json.Unmarshal(encoded, &envelope); err == nil {
 			result.StreamUsage = parser.Usage{Input: envelope.Summary.Usage.Input, Output: envelope.Summary.Usage.Output, Total: envelope.Summary.Usage.Total}
+			result.StreamNormalized = envelope.Summary.Normalized
+			result.StreamStopReason = envelope.Summary.StopReason
 		}
 		return result, nil
 	}

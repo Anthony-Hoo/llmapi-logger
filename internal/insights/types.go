@@ -167,12 +167,15 @@ type Input struct {
 	Response         []byte
 	ResponseComplete bool
 	ResponseIsStream bool
-	Headers          http.Header
-	RequestModel     string
-	ResponseModel    string
-	Usage            Usage
-	FirstEventNS     *int64 // relative to StartedAtNS, from the stream timeline
-	LastEventNS      *int64
+	// StopReason is the provider stop reason kept with a released stream
+	// response. It is read only when Response does not yield one.
+	StopReason    string
+	Headers       http.Header
+	RequestModel  string
+	ResponseModel string
+	Usage         Usage
+	FirstEventNS  *int64 // relative to StartedAtNS, from the stream timeline
+	LastEventNS   *int64
 	// Conversation is the protocol parser's DTO. Its response-phase messages
 	// describe this response (already decoded from SSE); the request side is
 	// re-read from Request because the DTO drops tool definitions and media.

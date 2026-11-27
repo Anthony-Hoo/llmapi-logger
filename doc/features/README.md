@@ -8,7 +8,7 @@
 
 本项目是部署在 Nginx 与 NewAPI 之间的个人审计代理：单用户、单机、一个 Go 二进制、一个 NewAPI 后端、一个 PostgreSQL 数据库和一个本地主密钥文件。
 
-数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI 成功记录经重建验证后释放长期 raw；异常记录保留 full 原字节。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
+数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI 与 Anthropic 成功记录经重建验证后释放长期 raw；异常记录保留 full 原字节。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
 
 ~~~text
 Client -> Nginx -> Data-plane dispatcher
@@ -111,7 +111,7 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建。Anthropic/Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；Anthropic Messages 同样按 message 拆成 turn 与 content object；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建。Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
 
 管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。只有 `retention_state=full` 的异常记录提供 raw Body；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域；汇总端点只读明文派生列，只有单条审计的上下文构成和 Agent 树节点名字按需解密 `detail_enc`。所有管理证据响应禁止缓存。
 
@@ -151,7 +151,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。关键词/模型拦截规则与上游策略拒绝分类见[模块 22](22-content-policy.md)。可选的组织项目周报（`org_reports.enabled`，默认关闭，[模块 23](23-org-project-reports.md)）在 parser 内按请求提取加密的项目标识，按管理员配置的项目组与规则归属，按 Agent 树根会话计算 AI 活跃时长并冻结周快照；关闭时不提取、不跑作业、`/api/v1/org/*` 全部 404。可选的会话记录分析（`session_analysis.enabled`，默认关闭，[模块 24](24-session-analysis.md)）每日批处理按 Agent 树根会话计算确定性信号、生成加密的输入包，并可调用只允许本机或内网地址的模型做逐会话标注和周度复盘；管理员可以按用户查看，开发者只看自己 Key 的会话。配置类页面集中在管理页面的“系统配置”里，其中周报与会话分析的部分运行参数可以在页面上修改并覆盖配置文件（[模块 10](10-query-api-and-minimal-web-ui.md) §11）；管理页面有亮色和暗色两套主题（[设计 Token 规范](../design/tokens.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址的 OpenAI/Anthropic conversation/turn 与 multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。关键词/模型拦截规则与上游策略拒绝分类见[模块 22](22-content-policy.md)。可选的组织项目周报（`org_reports.enabled`，默认关闭，[模块 23](23-org-project-reports.md)）在 parser 内按请求提取加密的项目标识，按管理员配置的项目组与规则归属，按 Agent 树根会话计算 AI 活跃时长并冻结周快照；关闭时不提取、不跑作业、`/api/v1/org/*` 全部 404。可选的会话记录分析（`session_analysis.enabled`，默认关闭，[模块 24](24-session-analysis.md)）每日批处理按 Agent 树根会话计算确定性信号、生成加密的输入包，并可调用只允许本机或内网地址的模型做逐会话标注和周度复盘；管理员可以按用户查看，开发者只看自己 Key 的会话。配置类页面集中在管理页面的“系统配置”里，其中周报与会话分析的部分运行参数可以在页面上修改并覆盖配置文件（[模块 10](10-query-api-and-minimal-web-ui.md) §11）；管理页面有亮色和暗色两套主题（[设计 Token 规范](../design/tokens.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 

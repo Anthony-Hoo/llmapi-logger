@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/sqlite"
@@ -35,6 +36,21 @@ func (analyzer *fakeProjectAnalyzer) Save(_ context.Context, input insights.Inpu
 
 func (*fakeProjectAnalyzer) Strong(input insights.Input) bool {
 	return input.Headers.Get("X-Codex-Turn-Metadata") != ""
+}
+
+// rebuiltRequestReconstructor stands in for the query service: it returns a
+// request body that names the audit it was asked for.
+type rebuiltRequestReconstructor struct{}
+
+func (rebuiltRequestReconstructor) ReconstructBodies(_ context.Context, auditID string) (Reconstruction, error) {
+	return Reconstruction{Request: []byte(`{"rebuilt":"` + auditID + `"}`)}, nil
+}
+
+// normalizingParser marks a parser as one whose turns can be rebuilt.
+type normalizingParser struct{ *recordingParser }
+
+func (normalizingParser) NormalizeAudit(context.Context, Input, Result) (auditmodel.Turn, error) {
+	return auditmodel.Turn{}, errors.New("not used")
 }
 
 type failingInsights struct{}
@@ -124,15 +140,17 @@ func TestProjectBackfillReadsTheBodyOnlyWhenHeadersAreWeak(t *testing.T) {
 	for _, id := range []string{"weak", "released"} {
 		base.audits[id] = sqlite.ParserAudit{AuditID: id, Protocol: "anthropic", ParserName: "anthropic.messages", ParseStatus: sqlite.ParseOK}
 	}
+	base.audits["unsupported"] = sqlite.ParserAudit{AuditID: "unsupported", Protocol: "gemini", ParserName: "gemini.generate_content", ParseStatus: sqlite.ParseOK}
 	strong := base.audits["strong"]
 	strong.ParseStatus = sqlite.ParseOK
 	base.audits["strong"] = strong
 	store.candidates = []storage.ProjectBackfillCandidate{
 		{AuditID: "strong", StartedAtNS: 30}, {AuditID: "weak", StartedAtNS: 20}, {AuditID: "released", StartedAtNS: 10},
+		{AuditID: "unsupported", StartedAtNS: 5},
 	}
-	for _, id := range []string{"strong", "weak", "released"} {
+	for _, id := range []string{"strong", "weak", "released", "unsupported"} {
 		stage, chunks := encryptedStage(t, cipher, id, sqlite.StageRequestReceived, "application/json", "", []byte(`{"id":"`+id+`"}`))
-		if id == "released" {
+		if id == "released" || id == "unsupported" {
 			stage.Body.RetentionState = sqlite.RetentionMetadata
 			chunks = nil
 		}
@@ -140,7 +158,9 @@ func TestProjectBackfillReadsTheBodyOnlyWhenHeadersAreWeak(t *testing.T) {
 		base.stages[key], base.chunks[key] = stage, chunks
 	}
 	base.headers = []sqlite.HeaderEvidence{encryptedRequestHeader(t, cipher, "strong", "X-Codex-Turn-Metadata", 0, `{"workspaces":{}}`)}
-	worker, err := NewWorker(store, cipher, nil, nil)
+	worker, err := NewWorker(store, cipher, []Parser{
+		normalizingParser{&recordingParser{name: "anthropic.messages"}}, &recordingParser{name: "gemini.generate_content"},
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,9 +168,10 @@ func TestProjectBackfillReadsTheBodyOnlyWhenHeadersAreWeak(t *testing.T) {
 	project := &fakeProjectAnalyzer{}
 	worker.SetProjectAnalyzer(project)
 	worker.SetHeaderAllowlist([]string{"x-codex-turn-metadata"})
+	worker.SetReconstructor(rebuiltRequestReconstructor{})
 
-	if got := worker.projectBackfill(context.Background()); got != 3 {
-		t.Fatalf("attempted %d, want 3", got)
+	if got := worker.projectBackfill(context.Background()); got != 4 {
+		t.Fatalf("attempted %d, want 4", got)
 	}
 	byID := map[string]projectCall{}
 	for _, call := range project.calls {
@@ -164,10 +185,15 @@ func TestProjectBackfillReadsTheBodyOnlyWhenHeadersAreWeak(t *testing.T) {
 	if call := byID["weak"]; !call.bodyScanned || string(call.input.Request) != `{"id":"weak"}` {
 		t.Fatalf("weak headers must read the retained body: %+v", call)
 	}
-	if call := byID["released"]; call.bodyScanned || call.input.Request != nil {
-		t.Fatalf("released anthropic body must be skipped: %+v", call)
+	// A released body is rebuilt from the turn graph for the protocols that
+	// have a normalizer, and skipped for the others.
+	if call := byID["released"]; !call.bodyScanned || string(call.input.Request) != `{"rebuilt":"released"}` {
+		t.Fatalf("released anthropic body must be rebuilt: %+v", call)
 	}
-	if worker.projectCursor == nil || worker.projectCursor.AuditID != "released" {
+	if call := byID["unsupported"]; call.bodyScanned || call.input.Request != nil {
+		t.Fatalf("released body of a protocol without a normalizer must be skipped: %+v", call)
+	}
+	if worker.projectCursor == nil || worker.projectCursor.AuditID != "unsupported" {
 		t.Fatalf("cursor = %+v", worker.projectCursor)
 	}
 	// The next pass finds nothing below the cursor and pauses.

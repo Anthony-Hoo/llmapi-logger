@@ -42,13 +42,24 @@ var ErrReconstructionUnavailable = errors.New("parser: reconstruction unavailabl
 // content-addressed turn graph of a metadata-retention audit. Response is the
 // JSON body of a non-stream response. A stream response cannot be rebuilt as
 // SSE, so ResponseIsStream is set, Response stays empty and the usage summary
-// and the full conversation DTO stand in for it.
+// and the full conversation DTO stand in for it. StreamNormalized is the
+// cache-aware usage and StreamStopReason the provider stop reason; both are
+// set only when the stream envelope recorded them.
 type Reconstruction struct {
 	Request          []byte
 	Response         []byte
 	ResponseIsStream bool
 	StreamUsage      Usage
+	StreamNormalized *insights.Usage
+	StreamStopReason string
 	Conversation     *conversation.Conversation
+}
+
+// reconstructable reports whether the parser of an audit is a normalizer, so
+// a released raw body can be rebuilt from the turn graph it wrote.
+func (worker *Worker) reconstructable(audit storage.ParserAudit) bool {
+	_, ok := worker.parsers[audit.ParserName].(AuditNormalizer)
+	return ok
 }
 
 // Reconstructor rebuilds bodies whose raw chunks were released after verified
@@ -64,7 +75,7 @@ type BackfillStore interface {
 }
 
 // SetReconstructor installs the optional body source for metadata-retention
-// OpenAI audits; nil, the default, skips them during backfill. Call it before
+// audits; nil, the default, skips them during backfill. Call it before
 // Start.
 func (worker *Worker) SetReconstructor(reconstructor Reconstructor) {
 	if worker == nil {
@@ -218,7 +229,7 @@ func (worker *Worker) backfillInput(ctx context.Context, audit storage.ParserAud
 	}
 
 	reconstructor := worker.bodyReconstructor()
-	if reconstructor == nil || audit.Protocol != "openai" {
+	if reconstructor == nil || !worker.reconstructable(audit) {
 		return Input{}, nil, nil, backfillSkipRawReleased, nil
 	}
 	reconstruction, err := reconstructor.ReconstructBodies(ctx, audit.AuditID)
@@ -249,14 +260,20 @@ func (worker *Worker) backfillInput(ctx context.Context, audit storage.ParserAud
 // applyStreamReconstruction fills the response-derived fields of a stream
 // whose SSE bytes are gone: the usage summary kept in the response envelope
 // and the conversation DTO rebuilt from the content graph. Cache buckets are
-// not recoverable and stay unreported.
+// and the stop reason are recoverable only when the envelope recorded them;
+// otherwise they stay unreported.
 func applyStreamReconstruction(result *Result, reconstruction Reconstruction) {
 	observed := true
 	result.ObservedStream = &observed
 	result.Usage = reconstruction.StreamUsage
-	result.Normalized = insights.Usage{
-		UncachedInput: cloneInt64(reconstruction.StreamUsage.Input),
-		Output:        cloneInt64(reconstruction.StreamUsage.Output),
+	result.StopReason = reconstruction.StreamStopReason
+	if reconstruction.StreamNormalized != nil {
+		result.Normalized = *reconstruction.StreamNormalized
+	} else {
+		result.Normalized = insights.Usage{
+			UncachedInput: cloneInt64(reconstruction.StreamUsage.Input),
+			Output:        cloneInt64(reconstruction.StreamUsage.Output),
+		}
 	}
 	if reconstruction.Conversation != nil {
 		result.Conversation = reconstruction.Conversation

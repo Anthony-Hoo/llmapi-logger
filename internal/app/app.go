@@ -430,7 +430,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 			return nil, fmt.Errorf("assemble insights analyzer: %w", err)
 		}
 		if vocabulary != nil {
-			// Metadata-retention OpenAI audits are backfilled from the
+			// Metadata-retention audits are backfilled from the
 			// verified turn graph instead of released raw chunks.
 			application.parserWorker.SetReconstructor(queryService)
 		}

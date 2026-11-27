@@ -27,6 +27,11 @@ const (
 	LayoutMarkerEnvelope                = "marker_envelope"
 	LayoutOpenAIStreamResponse          = "openai.stream.response"
 
+	LayoutAnthropicMessagesRequestSystemNone   = "anthropic.messages.request.system_none"
+	LayoutAnthropicMessagesRequestSystemSingle = "anthropic.messages.request.system_single"
+	LayoutAnthropicMessagesRequestSystemArray  = "anthropic.messages.request.system_array"
+	LayoutAnthropicStreamResponse              = "anthropic.stream.response"
+
 	SlotInstructions = "instructions"
 	SlotMessages     = "messages"
 	SlotInput        = "input"
@@ -34,6 +39,8 @@ const (
 	SlotOutput       = "output"
 	SlotChoice       = "choice"
 	SlotAggregate    = "aggregate"
+	SlotSystem       = "system"
+	SlotContent      = "content"
 
 	OperationRetain = "retain"
 	OperationDelete = "delete"
@@ -148,7 +155,12 @@ type Turn struct {
 	// keeps (a Responses conversation), so it carries only the new input and
 	// cannot be matched to its parent by repeated content.
 	ServerManagedContext bool
-	CreatedAtNS          int64
+	// SkipInlineFileData turns off the file_data/file_content/attachment_data
+	// key heuristic. It is set for protocols that never carry inline files
+	// under those keys, where a matching key is caller-defined data, such as a
+	// tool argument, and must stay a plain string.
+	SkipInlineFileData bool
+	CreatedAtNS        int64
 }
 
 type ObjectRef struct {
