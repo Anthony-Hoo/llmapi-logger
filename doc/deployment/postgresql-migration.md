@@ -54,6 +54,75 @@ PostgreSQL 的默认值是按很小的机器定的。本项目的负载有三个
 - 清理是否跟得上：`SELECT relname, n_live_tup, n_dead_tup, last_autovacuum FROM pg_stat_all_tables WHERE relname IN ('body_chunks', 'audit_records', 'http_headers') ORDER BY n_dead_tup DESC;`，以及各表总大小是否在没有新增保留数据时持续上涨。
 - 容器内存（`docker stats` 或 `podman stats`）不应接近宿主机上限。
 
+## 一次性回收 `audit_analysis` 的空间
+
+早期分析版本的大明细存放在 `audit_analysis` 的 TOAST 里。后台回填按新版本重算时整行替换，旧值变成死元组。普通 `VACUUM`（包括 autovacuum）把这些空间标为可复用，但只把表末尾的空页还给操作系统，所以表文件不会变小。实测一个部署里这张表总共 6.6 GB，活数据最多 135 MB。要把空间还回去需要一次 `VACUUM FULL`。这是一次性的运维操作，代码不会自动执行。
+
+### 判断是否需要
+
+~~~sql
+SELECT pg_size_pretty(pg_total_relation_size(c.oid)) AS total,
+       pg_size_pretty(pg_relation_size(c.oid)) AS heap,
+       pg_size_pretty(pg_total_relation_size(c.reltoastrelid)) AS toast,
+       pg_size_pretty(pg_indexes_size(c.oid)) AS indexes,
+       pg_size_pretty((SELECT sum(pg_column_size(a.*)) FROM audit_analysis AS a)) AS live_rows
+FROM pg_class AS c
+WHERE c.oid = 'audit_analysis'::regclass;
+~~~
+
+`live_rows` 是现存各行（连同 TOAST 里的明细）的大小，`total` 是表、TOAST 和索引的总占用。`total` 远大于 `live_rows` 加 `indexes`，比如差出几个 GB，才值得做；差得不多就不用做。代理使用独立 schema 时先 `SET search_path = <schema>;`。这条查询会把整张表读一遍，但只读活数据，量级与 `live_rows` 相同。
+
+再确认回填已经追上当前的分析版本：
+
+~~~sql
+SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
+~~~
+
+只剩一行、且是当前版本（`internal/insights/types.go` 的 `AnalysisVersion`）时再做。还有旧版本的行时，回填会继续替换它们，`VACUUM FULL` 之后空洞又会长回来。以后升级到提高了分析版本的发布，回填重算完同样会留下新的空洞，届时重新按本节判断。
+
+### `VACUUM FULL` 做什么
+
+它把表的活数据连同 TOAST 写成全新的文件，重建这张表的全部索引，提交后删除旧文件。整个过程持有 `ACCESS EXCLUSIVE` 锁，期间任何对这张表的读写都要等它结束。新文件写完之前旧文件还在，所以磁盘要先空出约等于 `live_rows` 加 `indexes` 的空间；新文件同样会写进 WAL，`pg_wal` 也会临时多出差不多的量。执行失败或被取消时整体回滚，旧表不受影响。
+
+### 代理在锁住期间会怎样
+
+以下按代码梳理，没有在真实流量下实测。
+
+代理的所有数据库连接都设了 `lock_timeout` 5 秒、`statement_timeout` 30 秒。等这张表的锁超过 5 秒的语句报锁超时（SQLSTATE `55P03`）。
+
+- **唯一 writer。** 写入在一条固定连接上按顺序执行，5 毫秒内到达的最多 64 个操作合成一个事务。碰到这张表的写操作有两个：
+  - 洞察分析的保存（读旧的 `detail_root`，upsert 这一行，必要时裁剪旧明细链）。实时分析在保存之前先做关联：带 API Key 指纹、又能归入某个会话或父 Agent 的请求，关联时会经只读连接读这张表，在那一步就失败（见下面的只读连接），走不到保存；其余请求（没有 Key 指纹、也认不出会话的）以及锁落下时已经过了关联这一步的请求会走到保存。保存等 5 秒后失败。锁超时不属于能单独回滚的错误（只有约束冲突和本地校验错误可以），所以**整个事务回滚**：同一批里新请求的 `BeginAudit`、进行中请求的 Header、Body 块和终结写入、其他解析结果一起失败。失败的采集写入会被记下，由恢复逻辑补记标记，这些 audit 最后是 `capture_status=failed`（`capture_write_failed`），raw 按异常记录保留，但证据不完整。在下一批成功提交、失败写入的标记补完之前，`/readyz` 显示 `degraded`。
+  - retention（`retention_days > 0` 时）：删除到期 audit 前先读这张表的 `detail_root`，删除 `audit_records` 时级联删除这张表的行。它等 5 秒后失败，整批回滚，下一轮重试。retention 单独一个事务，不会拖累其他写入的结果，但这 5 秒里 writer 什么也做不了。
+  - 每次这样的等待，排在后面的写入都跟着等最多 5 秒。
+- **转发。** 代理在转发 LLM 请求之前同步提交 `BeginAudit`，这个等待只受请求本身的生命周期限制，没有更短的超时。所以 writer 卡住时，新的 LLM 请求要晚最多约 5 秒才发往 NewAPI。`BeginAudit` 随整批失败时，`available` 模式照常转发但不留 audit 记录，只计入 audit gap；`strict` 模式直接回 `503`。passthrough 请求不经过审计，不受影响。已经在转发的流照常转发，但它们排队中的采集写入可能落在失败的批里，结果同上。
+- **只读连接（共 4 条）。** 洞察页面、组织周报、会话分析、分析回填和项目标识回填的候选查询，以及实时分析里的关联查询，都读这张表，等 5 秒后报错。实时分析在关联这一步失败时不保存分析行，之后由回填补算。这些等待会占住只读连接，列表和详情等其他读请求可能要排队。
+
+结论：只要有流量、洞察开着，新完成的请求里凡是走到保存这一步的，每一条都会让 writer 卡 5 秒并让同批的采集写入失败；开着 retention 时每一轮清理也会卡 5 秒。其余请求的分析在关联时失败，只是丢给回填补算。所以不要在代理照常运行时执行。
+
+### 推荐步骤
+
+1. 用上面两条查询确认确实需要、回填已经追上，并记下 `live_rows`、`indexes` 和 `SELECT count(*) FROM audit_analysis;` 的结果。
+2. 确认数据库所在磁盘的剩余空间至少是 `live_rows` 加 `indexes` 的两倍（新文件一份，WAL 一份）。照常的数据库与 `audit.key` 联合备份流程不变（[备份与恢复](backup-and-restore.md)）。
+3. 选一个维护窗口，停止 audit-proxy，例如 `docker compose stop audit-proxy`。停止期间数据面请求无法转发。
+   - 不能停止转发时的替代做法：在私有配置里临时设 `insights.enabled: false`、`org_reports.enabled: false`、`session_analysis.enabled: false`（后两者依赖洞察，必须一起关）和 `retention_days: 0`，重启代理，此时代理不再访问这张表；做完后恢复配置再重启。期间完成的请求缺少分析行，重新开启洞察后由回填补算。两次重启各有一次短暂中断。
+4. 连上数据库，例如 `docker compose exec postgres psql -U <数据库用户> -d <数据库名>`，执行：
+
+   ~~~sql
+   \timing on
+   SET lock_timeout = '5s';
+   VACUUM (FULL, ANALYZE, VERBOSE) audit_analysis;
+   ~~~
+
+   `lock_timeout` 防止它排在某个长查询（例如正在运行的 `pg_dump`）后面等锁；等锁期间它会挡住其他所有访问这张表的语句。报锁超时就找出并结束那个占锁的会话，再重试。`ANALYZE` 顺带刷新这张表的规划器统计。
+5. 执行完后验证，再启动代理或恢复配置。
+
+### 验证
+
+- 再跑一次大小查询：`total` 应接近 `live_rows` 加 `indexes`，`live_rows` 与执行前基本相同。
+- `SELECT count(*) FROM audit_analysis;` 与执行前相同。
+- 启动代理后 `/readyz` 返回 `healthy`，洞察页面能正常打开。
+- 数据库日志里没有锁超时以外的错误；`pg_wal` 的大小在之后的检查点里回落。
+
 ## 从 v0.6.0 SQLite 迁移
 
 迁移是显式停机操作，不是在线双写。先在副本演练，并保留旧版本可执行文件/镜像。
