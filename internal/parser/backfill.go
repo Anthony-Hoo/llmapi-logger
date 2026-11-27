@@ -349,13 +349,16 @@ func (worker *Worker) bodyReconstructor() Reconstructor {
 //     retried after a save failure, a pending row picked up by a later scan
 //     and an audit closed by startup recovery.
 //     After a successful claim, parseClaimed either reaches analyze, which
-//     reports each audit it leaves without an analysis to backfillLater, or
-//     gets an error from the save. A save error may still have committed
-//     the row (a cancel or timeout after submitSync stops waiting, or an
-//     error returned after the commit, which makes the release a no-op), so
-//     those exits record the audit with backfillUnsure while the worker
-//     runs. Only a cancel of the worker itself skips that; the next process
-//     starts with a full pass;
+//     reports each audit it leaves without an analysis to backfillLater,
+//     releases the claim before any save is attempted (a panic in
+//     normalization or preparation, or the job deadline), which leaves the
+//     audit pending and so not a candidate, or gets an error from the save.
+//     A save error may still have committed the row (a cancel, the job
+//     deadline or a timeout after submitSync stops waiting, or an error
+//     returned after the commit, which makes the release a no-op), so those
+//     exits record the audit with backfillUnsure while the worker runs.
+//     Only a cancel of the worker itself skips that; the next process starts
+//     with a full pass;
 //   - a failure recorded while the retry set is full lowers the watermark;
 //   - nothing else writes parse_status ok or partial, deletes an
 //     audit_analysis row without its audit, or lowers analysis_version, and

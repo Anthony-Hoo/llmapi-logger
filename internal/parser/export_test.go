@@ -25,6 +25,12 @@ func (worker *Worker) InputFromEvidenceForTest(audit storage.ParserAudit, eviden
 	return worker.inputFromEvidence(audit, evidence)
 }
 
+// SetJobDeadlineForTest replaces the deadline of one queued job; call it
+// before Start.
+func (worker *Worker) SetJobDeadlineForTest(deadline time.Duration) {
+	worker.jobDeadline = deadline
+}
+
 // ScanForTest runs one pending scan, as the 30-second ticker does.
 func (worker *Worker) ScanForTest(ctx context.Context) {
 	worker.scan(ctx)

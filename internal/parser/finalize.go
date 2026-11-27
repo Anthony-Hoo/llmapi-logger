@@ -23,12 +23,12 @@ import (
 
 // finalize parses a committed audit from the evidence its session handed
 // over.
-func (worker *Worker) finalize(ctx context.Context, audit storage.ParserAudit, evidence *handover.Evidence) {
-	if !worker.mayClaim(audit.AuditID) || !worker.claim(ctx, audit.AuditID) {
+func (worker *Worker) finalize(ctx, jobCtx context.Context, audit storage.ParserAudit, evidence *handover.Evidence) {
+	if !worker.mayClaim(audit.AuditID) || !worker.claim(ctx, jobCtx, audit.AuditID) {
 		return
 	}
 	input, evidenceErr := worker.inputFromEvidence(audit, evidence)
-	worker.parseClaimed(ctx, audit, input, evidenceErr)
+	worker.parseClaimed(ctx, jobCtx, audit, input, evidenceErr)
 }
 
 // inputFromEvidence builds the Input loadInput builds from the stored rows of

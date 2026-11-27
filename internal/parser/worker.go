@@ -38,6 +38,7 @@ type Worker struct {
 	pendingReleases map[string]struct{}
 
 	scanInterval time.Duration
+	jobDeadline  time.Duration
 	now          func() time.Time
 
 	// Guarded by mu; read once per audit by the parser goroutine.
@@ -105,6 +106,7 @@ func NewWorker(store Store, cipher security.Cipher, parsers []Parser, logger *sl
 		queue:           make(chan FinalizeJob, FinalizeQueueCapacity),
 		pendingReleases: make(map[string]struct{}),
 		scanInterval:    defaultScanInterval,
+		jobDeadline:     defaultJobDeadline,
 		now:             time.Now,
 	}, nil
 }
@@ -319,31 +321,49 @@ func (worker *Worker) scan(ctx context.Context) {
 	}
 }
 
+// defaultJobDeadline bounds one parse, from the claim to the save (design
+// G.2). It cannot interrupt a parser that computes without looking at its
+// context; it bounds every wait on the store and is checked before the save.
+const defaultJobDeadline = 2 * time.Minute
+
+// errJobDeadline is the cause of a job context whose deadline passed, which
+// tells it apart from the worker stopping.
+var errJobDeadline = errors.New("parser: job deadline exceeded")
+
 // serve processes one queued job and then releases its plaintext.
 func (worker *Worker) serve(ctx context.Context, job FinalizeJob) {
 	defer releaseJob(job)
+	jobCtx, cancel := context.WithTimeoutCause(ctx, worker.jobDeadline, errJobDeadline)
+	defer cancel()
 	if job.Evidence == nil {
-		worker.process(ctx, job.Audit.AuditID)
+		worker.processWithin(ctx, jobCtx, job.Audit.AuditID)
 		return
 	}
-	worker.finalize(ctx, job.Audit, job.Evidence)
+	worker.finalize(ctx, jobCtx, job.Audit, job.Evidence)
 }
 
-// process parses an audit from its stored evidence.
+// process parses an audit from its stored evidence, without a deadline.
 func (worker *Worker) process(ctx context.Context, auditID string) {
+	worker.processWithin(ctx, ctx, auditID)
+}
+
+// processWithin parses an audit from its stored evidence. ctx is the
+// worker's; jobCtx is ctx with the job's deadline, which bounds everything up
+// to the save.
+func (worker *Worker) processWithin(ctx, jobCtx context.Context, auditID string) {
 	if !worker.mayClaim(auditID) {
 		return
 	}
-	audit, err := worker.store.LoadParserAudit(ctx, auditID)
+	audit, err := worker.store.LoadParserAudit(jobCtx, auditID)
 	if err != nil {
 		worker.logger.Warn("parser audit load failed", "audit_id", auditID, "error_code", "audit_load_failed")
 		return
 	}
-	if !worker.claim(ctx, auditID) {
+	if !worker.claim(ctx, jobCtx, auditID) {
 		return
 	}
-	input, evidenceErr := worker.loadInput(ctx, audit)
-	worker.parseClaimed(ctx, audit, input, evidenceErr)
+	input, evidenceErr := worker.loadInput(jobCtx, audit)
+	worker.parseClaimed(ctx, jobCtx, audit, input, evidenceErr)
 }
 
 // mayClaim reports whether the worker may claim the audit now.
@@ -354,18 +374,31 @@ func (worker *Worker) mayClaim(auditID string) bool {
 	return !waiting && len(worker.pendingReleases) < QueueCapacity
 }
 
-func (worker *Worker) claim(ctx context.Context, auditID string) bool {
-	claimed, err := worker.store.ClaimPendingParse(ctx, auditID)
+func (worker *Worker) claim(ctx, jobCtx context.Context, auditID string) bool {
+	claimed, err := worker.store.ClaimPendingParse(jobCtx, auditID)
 	if err != nil {
 		worker.logger.Warn("parser claim failed", "audit_id", auditID, "error_code", "parse_claim_failed")
+		if ctx.Err() == nil && jobExpired(jobCtx) {
+			// The claim may still commit after the wait ended; the release
+			// is queued behind it, and is a no-op when it did not.
+			worker.releaseProcessing(ctx, auditID)
+		}
 		return false
 	}
 	return claimed
 }
 
+func jobExpired(jobCtx context.Context) bool {
+	return errors.Is(context.Cause(jobCtx), errJobDeadline)
+}
+
 // parseClaimed parses, normalizes, prepares, saves and analyzes a claimed
-// audit; every path into the parser ends here.
-func (worker *Worker) parseClaimed(ctx context.Context, audit storage.ParserAudit, input Input, evidenceErr error) {
+// audit; every path into the parser ends here. ctx is the worker's: the
+// analysis after the save runs under it, as before. jobCtx carries the job's
+// deadline. After the claim it either saves and reaches analyze, or releases
+// the claim (a panic in normalization or preparation, the deadline, a failed
+// save), or leaves it processing for startup recovery when the worker stops.
+func (worker *Worker) parseClaimed(ctx, jobCtx context.Context, audit storage.ParserAudit, input Input, evidenceErr error) {
 	implementation := worker.parsers[audit.ParserName]
 	result := Result{}
 	if implementation == nil {
@@ -375,19 +408,38 @@ func (worker *Worker) parseClaimed(ctx context.Context, audit storage.ParserAudi
 		result.Status = StatusSkipped
 		result.ErrorCode = "no_body"
 	} else {
-		result = parseSafely(ctx, implementation, input)
+		result = parseSafely(jobCtx, implementation, input)
 	}
-	worker.normalizeResult(&result, input, evidenceErr)
-	prepared := worker.prepareTurn(ctx, audit, implementation, input, &result)
-	savedStatus, err := worker.persistResult(ctx, audit, implementation, result, prepared)
+	prepared, panicked := worker.prepareSafely(jobCtx, audit, implementation, input, evidenceErr, &result)
+	if panicked {
+		// Nothing was saved. The release counts as a failed attempt, so an
+		// audit that panics every time ends as parsed_result_save_failed.
+		worker.logger.Warn("parser normalization failed", "audit_id", audit.AuditID, "error_code", "normalize_panic")
+		worker.releaseProcessing(ctx, audit.AuditID)
+		return
+	}
+	if ctx.Err() == nil && jobExpired(jobCtx) {
+		worker.logger.Warn("parser job deadline exceeded", "audit_id", audit.AuditID, "error_code", "parse_deadline_exceeded")
+		worker.releaseProcessing(ctx, audit.AuditID)
+		return
+	}
+	savedStatus, err := worker.persistResult(jobCtx, audit, implementation, result, prepared)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			// A canceled save may not have been attempted, or may still commit
-			// after submitSync stops waiting. Leave processing for startup
-			// recovery instead of spending the persistence-failure budget.
-			if ctx.Err() == nil {
-				worker.backfillUnsure(audit.AuditID)
+			if ctx.Err() != nil {
+				// The worker is stopping. A canceled save may not have been
+				// attempted, or may still commit after submitSync stops
+				// waiting. Leave processing for startup recovery instead of
+				// spending the persistence-failure budget.
+				return
 			}
+			if jobExpired(jobCtx) {
+				// The save may still commit after the wait ended; the release
+				// is queued behind it and is then a no-op.
+				worker.logger.Warn("parser job deadline exceeded", "audit_id", audit.AuditID, "error_code", "parse_deadline_exceeded")
+				worker.releaseProcessing(ctx, audit.AuditID)
+			}
+			worker.backfillUnsure(audit.AuditID)
 			return
 		}
 		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", storage.ErrorClass(err))
@@ -398,6 +450,18 @@ func (worker *Worker) parseClaimed(ctx context.Context, audit storage.ParserAudi
 		return
 	}
 	worker.analyze(ctx, audit, input, result, savedStatus)
+}
+
+// prepareSafely normalizes the result and prepares the turn, reporting a
+// panic in either instead of letting it end the process.
+func (worker *Worker) prepareSafely(ctx context.Context, audit storage.ParserAudit, implementation Parser, input Input, evidenceErr error, result *Result) (prepared *auditmodel.PreparedTurn, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			prepared, panicked = nil, true
+		}
+	}()
+	worker.normalizeResult(result, input, evidenceErr)
+	return worker.prepareTurn(ctx, audit, implementation, input, result), false
 }
 
 // analyze runs the optional insights analyzer for a saved ok or partial
