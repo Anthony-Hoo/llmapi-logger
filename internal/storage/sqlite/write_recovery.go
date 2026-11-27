@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -24,6 +26,9 @@ type captureRecovery struct {
 	stages  [4]captureStageLoss
 	finish  *AuditFinish
 	barrier uint64
+	// staged refers to the staged chunks of a commit that failed for good
+	// (storage.StagedChunkHolder): file positions, never ciphertext.
+	staged storage.StagedChunkHolder
 }
 
 type captureStageLoss struct {
@@ -116,6 +121,12 @@ func (store *Store) rememberFailedWrite(request writeRequest, barrier uint64) {
 			return
 		}
 		rememberCommitLosses(v, remember)
+		if holder, ok := v.Chunks.(storage.StagedChunkHolder); ok {
+			if entry, exists := store.recoveries[v.Finish.AuditID]; exists {
+				entry.staged = holder
+				store.recoveries[v.Finish.AuditID] = entry
+			}
+		}
 	}
 	store.recoveryPending.Store(int32(len(store.recoveries)))
 	// Queue-full finalization is not seen by the writer until it is woken.
@@ -134,6 +145,7 @@ func (store *Store) rememberFailedWrite(request writeRequest, barrier uint64) {
 // audit in that batch, and finalization reconciles the unfinished rows.
 func (store *Store) rememberFailedCommit(commit *AuditCommit, barrier uint64) {
 	store.rememberFailedWrite(writeRequest{kind: writeFinishAudit, data: &commit.Finish, sequence: barrier}, barrier)
+	store.holdStaged(commit.Finish.AuditID, commit.Chunks)
 }
 
 // rememberCommitLosses records what a failed final commit loses: the stage
@@ -241,6 +253,7 @@ func (store *Store) recoverCaptureWrites() {
 	}
 	store.recoveryMu.Lock()
 	completed := 0
+	var releases []storage.StagedChunkHolder
 	for id, finished := range done {
 		entry, exists := store.recoveries[id]
 		if !exists || entry.version != entries[id].version {
@@ -249,6 +262,10 @@ func (store *Store) recoverCaptureWrites() {
 		if finished {
 			delete(store.recoveries, id)
 			completed++
+			if entry.staged != nil && !store.stagedNotRecovered[id] {
+				releases = append(releases, entry.staged)
+			}
+			delete(store.stagedNotRecovered, id)
 		} else {
 			entry.marked = true
 			store.recoveries[id] = entry
@@ -256,6 +273,11 @@ func (store *Store) recoverCaptureWrites() {
 	}
 	store.recoveryPending.Store(int32(len(store.recoveries)))
 	store.recoveryMu.Unlock()
+	// The staged chunks are committed with the finalization: their staging
+	// files can go.
+	for _, holder := range releases {
+		holder.ReleaseStaged()
+	}
 	if wrote {
 		store.healthy.Store(true)
 	}
@@ -323,9 +345,62 @@ WHERE audit_id=? AND stage=?`, loss.observed, loss.chunk, id, captureStageNames[
 	if entry.barrier > store.processedSequence {
 		return false, nil
 	}
+	if entry.staged != nil {
+		if err := store.insertRecoveredStaged(tx, id, entry.staged); err != nil {
+			return false, err
+		}
+	}
 	finish := cloneAuditFinish(*entry.finish)
 	if err := finishAudit(tx, &finish, store.integrity.Load()); err != nil {
 		return false, fmt.Errorf("sqlite: recover finalization: %w", err)
 	}
 	return true, nil
+}
+
+// holdStaged attaches the staged chunks of a commit that failed for good to
+// the audit's recovery entry, when the commit's chunk source has any
+// (storage.StagedChunkHolder). Without an entry (recovery overflow) the
+// staging file stays for the next start's import.
+func (store *Store) holdStaged(auditID string, source ChunkSource) {
+	holder, ok := source.(storage.StagedChunkHolder)
+	if !ok {
+		return
+	}
+	store.recoveryMu.Lock()
+	defer store.recoveryMu.Unlock()
+	if entry, exists := store.recoveries[auditID]; exists {
+		entry.staged = holder
+		store.recoveries[auditID] = entry
+	}
+}
+
+// insertRecoveredStaged inserts the staged chunks of a failed final commit
+// under their body rows, before the audit is finalized as failed, so that
+// finalizeIncompleteCapture accounts for them like any stored chunk. Only
+// chunks that continue a body's stored chunks are inserted. When that fails
+// on its own (a rejected chunk), the audit is finalized without them and
+// the staging file is kept, so the next start keeps it as an orphan.
+func (store *Store) insertRecoveredStaged(tx *sql.Tx, auditID string, holder storage.StagedChunkHolder) error {
+	if _, err := tx.Exec("SAVEPOINT capture_staged"); err != nil {
+		return err
+	}
+	_, err := insertStagedChunks(tx, auditID, holder.StagedChunks())
+	if err != nil {
+		if !canIsolateWriteError(err) {
+			return err
+		}
+		if _, rollbackErr := tx.Exec("ROLLBACK TO capture_staged"); rollbackErr != nil {
+			return rollbackErr
+		}
+		if store.stagedNotRecovered == nil {
+			store.stagedNotRecovered = make(map[string]bool)
+		}
+		store.stagedNotRecovered[auditID] = true
+		if store.logger != nil {
+			store.logger.Warn("audit staged chunks not recovered", "audit_id", auditID,
+				"error_category", "staged_recovery_failed", "storage_error", ErrorClass(err))
+		}
+	}
+	_, err = tx.Exec("RELEASE capture_staged")
+	return err
 }

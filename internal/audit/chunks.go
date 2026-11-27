@@ -31,6 +31,19 @@ func (set chunkSet) source() storage.ChunkSource {
 	return list
 }
 
+// commitSource is source for a commit: when some chunks are staged it also
+// hands the store what it needs if the commit fails for good
+// (storage.StagedChunkHolder): the staged chunks alone, read from the
+// staging file, and release, which removes that file once the store has
+// written them.
+func (set chunkSet) commitSource(release func()) storage.ChunkSource {
+	source := set.source()
+	if staged, ok := source.(stagedChunkSource); ok {
+		return commitChunkSource{stagedChunkSource: staged, release: release}
+	}
+	return source
+}
+
 // payloadBytes sizes the ciphertext of the set; a staged chunk counts with
 // its record size.
 func (set chunkSet) payloadBytes() int64 {
@@ -81,6 +94,53 @@ func (source stagedChunkSource) EachMetadata(visit func(storage.BodyChunk) error
 			chunk = item.ref.Metadata()
 		}
 		if err := visit(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// commitChunkSource is the chunk source of a commit with staged chunks.
+type commitChunkSource struct {
+	stagedChunkSource
+	release func()
+}
+
+// StagedChunks returns the staged chunks of the commit only. A chunk that
+// can no longer be read is skipped; the store then stops that stage at the
+// gap.
+func (source commitChunkSource) StagedChunks() storage.ChunkSource {
+	return stagedOnlySource(source.stagedChunkSource)
+}
+
+// ReleaseStaged removes the staging file after the store committed the
+// staged chunks with the failed audit's finalization.
+func (source commitChunkSource) ReleaseStaged() { source.release() }
+
+type stagedOnlySource []chunkItem
+
+func (source stagedOnlySource) Each(visit func(storage.BodyChunk) error) error {
+	for _, item := range source {
+		if item.ref == nil {
+			continue
+		}
+		chunk, err := item.ref.Chunk()
+		if err != nil {
+			continue
+		}
+		if err := visit(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (source stagedOnlySource) EachMetadata(visit func(storage.BodyChunk) error) error {
+	for _, item := range source {
+		if item.ref == nil {
+			continue
+		}
+		if err := visit(item.ref.Metadata()); err != nil {
 			return err
 		}
 	}

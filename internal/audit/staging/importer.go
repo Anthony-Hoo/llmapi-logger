@@ -56,7 +56,10 @@ type ImportReport struct {
 // is staged, whatever the write path: a file left by a unified run is
 // imported by a legacy run too. Each file is handled on its own:
 //
-//   - audit finalized (stopped after its commit, before cleanup): removed;
+//   - audit finalized with every chunk stored (stopped after its commit, or
+//     after recovery stored the chunks of a failed commit, before cleanup):
+//     removed; finalized without some of them: renamed .orphan, as a
+//     finalized audit is never changed;
 //   - no audit row: renamed .orphan;
 //   - a stage whose body row is missing (the checkpoint written when the
 //     stage first spilled was lost): the other stages are imported and the
@@ -173,11 +176,16 @@ func (stager *Stager) importFile(ctx context.Context, store Restorer, auditID, p
 		return stager.keepFile(auditID, path, CorruptSuffix, damage, result.Inserted)
 	case result.Outcome == storage.StagedRestoreNoAudit:
 		return stager.keepFile(auditID, path, OrphanSuffix, "no_audit", 0)
+	case result.Outcome == storage.StagedRestoreFinalized && (result.Missing != 0 || len(result.NoBody) != 0 || len(result.Discontinuous) != 0):
+		// The audit was finalized without some of these chunks (their
+		// insertion at recovery was rejected). A finalized audit is never
+		// changed, so the file is the only copy: keep it.
+		return stager.keepFile(auditID, path, OrphanSuffix, "finalized_without_chunks", 0)
 	case result.Outcome == storage.StagedRestoreImported && len(result.NoBody) != 0:
 		return stager.keepFile(auditID, path, OrphanSuffix, "no_body_row", result.Inserted)
 	}
-	if err := os.Remove(path); err != nil {
-		stager.logger.Warn("audit staging file not removed", "audit_id", auditID, "error", err.Error())
+	if err := stager.removeFile(path); err != nil {
+		stager.logger.Warn("audit staging file not removed", "audit_id", auditID, "error_category", "staging_remove_failed", "reason", fileErrorReason(err))
 		return outcomeUnreadable, result.Inserted, nil
 	}
 	stager.logger.Info("audit staging file imported", "audit_id", auditID, "outcome", result.Outcome,
@@ -195,8 +203,8 @@ func (stager *Stager) keepFile(auditID, path, suffix, reason string, inserted in
 		}
 		target = base + "." + strconv.Itoa(index)
 	}
-	if err := os.Rename(path, target); err != nil {
-		stager.logger.Warn("audit staging file not renamed", "audit_id", auditID, "reason", reason, "error", err.Error())
+	if err := stager.renameFile(path, target); err != nil {
+		stager.logger.Warn("audit staging file not renamed", "audit_id", auditID, "kept_reason", reason, "error_category", "staging_rename_failed", "reason", fileErrorReason(err))
 		return outcomeUnreadable, inserted, nil
 	}
 	stager.logger.Warn("audit staging file kept", "audit_id", auditID, "reason", reason,

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -338,9 +339,6 @@ func (store *fakeRestorer) RestoreStagedChunks(_ context.Context, restore storag
 	if !ok {
 		return storage.StagedChunkRestoreResult{Outcome: storage.StagedRestoreNoAudit}, nil
 	}
-	if finalized {
-		return storage.StagedChunkRestoreResult{Outcome: storage.StagedRestoreFinalized}, nil
-	}
 	runs := map[string]storage.StoredChunkRun{}
 	for stage, chunks := range store.stored[restore.AuditID] {
 		var end int64
@@ -350,6 +348,15 @@ func (store *fakeRestorer) RestoreStagedChunks(_ context.Context, restore storag
 		runs[stage] = storage.StoredChunkRun{Next: int64(len(chunks)), End: end}
 	}
 	plan := storage.NewStagedRestorePlan(store.bodies[restore.AuditID], runs)
+	if finalized {
+		missing := 0
+		if err := plan.Filter(restore.Chunks).Each(func(storage.BodyChunk) error { missing++; return nil }); err != nil {
+			return storage.StagedChunkRestoreResult{}, err
+		}
+		result := plan.Result()
+		result.Outcome, result.Missing = storage.StagedRestoreFinalized, missing
+		return result, nil
+	}
 	var inserted []storage.BodyChunk
 	if err := plan.Filter(restore.Chunks).Each(func(chunk storage.BodyChunk) error {
 		chunk.DataEnc = bytes.Clone(chunk.DataEnc)
@@ -418,7 +425,12 @@ func TestImportCases(t *testing.T) {
 			store.open(id, stage)
 			store.stored[id][stage] = threeChunks(t, cipher, id, stage)[:2]
 		}, inserted: 1},
-		{name: "audit finalized", setup: func(store *fakeRestorer, id string) { store.open(id, stage); store.audits[id] = true }},
+		{name: "audit finalized with its chunks", setup: func(store *fakeRestorer, id string) {
+			store.open(id, stage)
+			store.stored[id][stage] = threeChunks(t, cipher, id, stage)
+			store.audits[id] = true
+		}},
+		{name: "audit finalized without its chunks", setup: func(store *fakeRestorer, id string) { store.open(id, stage); store.audits[id] = true }, kept: OrphanSuffix},
 		{name: "no audit row", setup: func(*fakeRestorer, string) {}, kept: OrphanSuffix},
 		{name: "no body row", setup: func(store *fakeRestorer, id string) { store.open(id) }, kept: OrphanSuffix},
 		{name: "torn tail: half a record", setup: func(store *fakeRestorer, id string) { store.open(id, stage) },
@@ -617,5 +629,59 @@ func TestProcessStatsAddUpStagers(t *testing.T) {
 	if after.BytesWritten-before.BytesWritten != a.BytesWritten+b.BytesWritten || after.Records-before.Records != 2 ||
 		after.Fsyncs-before.Fsyncs != a.Fsyncs+b.Fsyncs || after.DirSyncs-before.DirSyncs != a.DirSyncs+b.DirSyncs || after.UsedBytes != 0 {
 		t.Fatalf("process %+v -> %+v, stagers %+v and %+v", before, after, a, b)
+	}
+}
+
+// Logs carry stable codes, never the error text, which names paths
+// (AGENTS.md, module 13): removing and renaming files that fails.
+func TestFileErrorsAreLoggedWithoutErrorText(t *testing.T) {
+	const canary = "/secret/path/that-must-not-be-logged"
+	cipher := testCipher(t)
+	var logs bytes.Buffer
+	dir := stagingDir(t)
+	stager := openStager(t, dir, Options{Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	failure := &os.PathError{Op: "remove", Path: canary, Err: syscall.EACCES}
+	stager.removeFile = func(string) error { return failure }
+	stager.renameFile = func(string, string) error {
+		return &os.LinkError{Op: "rename", Old: canary, New: canary, Err: syscall.EIO}
+	}
+	if _, err := stager.Stage(sealChunk(t, cipher, "apx_logged", storage.StageRequestReceived, 0, 0, []byte("x"))); err != nil {
+		t.Fatal(err)
+	}
+	stager.Flush()
+	stager.Discard("apx_logged")
+	store := newFakeRestorer()
+	store.open("apx_removed", storage.StageRequestReceived)
+	writeFile(t, dir, "apx_removed"+Suffix, "apx_removed", threeChunks(t, cipher, "apx_removed", storage.StageRequestReceived), nil)
+	writeFile(t, dir, "apx_orphan"+Suffix, "apx_orphan", threeChunks(t, cipher, "apx_orphan", storage.StageRequestReceived), nil)
+	fresh := openStager(t, dir, Options{Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	fresh.removeFile, fresh.renameFile = stager.removeFile, stager.renameFile
+	if _, err := fresh.Import(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	text := logs.String()
+	if strings.Contains(text, canary) || strings.Contains(text, "permission denied") || strings.Contains(text, "input/output") {
+		t.Fatalf("logs carry error text: %s", text)
+	}
+	for _, want := range []string{`"msg":"audit staging file not removed"`, `"reason":"permission_denied"`,
+		`"msg":"audit staging file not renamed"`, `"reason":"io_error"`, `"kept_reason":"no_audit"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("logs lack %s: %s", want, text)
+		}
+	}
+}
+
+// The writer's log names a full disk with the stage error code (F.6).
+func TestWriteFailureLogUsesTheStageCode(t *testing.T) {
+	cipher := testCipher(t)
+	var logs bytes.Buffer
+	stager := openStager(t, stagingDir(t), Options{Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Fault: func(operation, _ string) error { return syscall.ENOSPC }})
+	if _, err := stager.Stage(sealChunk(t, cipher, "apx_disk", storage.StageRequestReceived, 0, 0, []byte("x"))); err != nil {
+		t.Fatal(err)
+	}
+	stager.Flush()
+	if !strings.Contains(logs.String(), `"error_code":"capture_budget_exhausted"`) {
+		t.Fatalf("log %s", logs.String())
 	}
 }

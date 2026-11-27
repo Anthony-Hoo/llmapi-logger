@@ -44,46 +44,78 @@ func restoreStagedChunks(transaction *sql.Tx, write *stagedRestoreWrite) error {
 	case err != nil:
 		return fmt.Errorf("sqlite writer: read staged audit: %w", err)
 	case ended.Valid:
+		// A finalized audit is never changed. Say what it lacks, so the
+		// import keeps a file whose chunks never reached the database.
+		plan, err := loadStagedRestorePlan(transaction, auditID)
+		if err != nil {
+			return err
+		}
+		missing := 0
+		if err := plan.Filter(write.restore.Chunks).Each(func(BodyChunk) error { missing++; return nil }); err != nil {
+			return localWriteError("sqlite writer: read staged chunks failed")
+		}
+		write.result = plan.Result()
 		write.result.Outcome = storage.StagedRestoreFinalized
+		write.result.Missing = missing
 		return nil
 	}
+	result, err := insertStagedChunks(transaction, auditID, write.restore.Chunks)
+	if err != nil {
+		return err
+	}
+	write.result = result
+	return nil
+}
+
+// insertStagedChunks inserts, into an open audit, the staged chunks that
+// continue each owning body's stored chunks (storage.StagedRestorePlan).
+// The start-up import and the recovery of a failed final commit use it.
+func insertStagedChunks(transaction *sql.Tx, auditID string, source ChunkSource) (storage.StagedChunkRestoreResult, error) {
+	plan, err := loadStagedRestorePlan(transaction, auditID)
+	if err != nil {
+		return storage.StagedChunkRestoreResult{}, err
+	}
+	if err := insertOwnedChunks(transaction, auditID, plan.Filter(source), nil); err != nil {
+		return storage.StagedChunkRestoreResult{}, err
+	}
+	return plan.Result(), nil
+}
+
+// loadStagedRestorePlan reads which bodies own their chunks and how far each
+// body's stored chunks go.
+func loadStagedRestorePlan(transaction *sql.Tx, auditID string) (*storage.StagedRestorePlan, error) {
 	bodies := map[string]string{}
 	rows, err := transaction.Query("SELECT stage, source_stage FROM body_streams WHERE audit_id = ?", auditID)
 	if err != nil {
-		return fmt.Errorf("sqlite writer: list staged bodies: %w", err)
+		return nil, fmt.Errorf("sqlite writer: list staged bodies: %w", err)
 	}
 	for rows.Next() {
 		var stage, source string
 		if err := rows.Scan(&stage, &source); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("sqlite writer: scan staged body: %w", err)
+			return nil, fmt.Errorf("sqlite writer: scan staged body: %w", err)
 		}
 		bodies[stage] = source
 	}
 	if err := closeRows(rows); err != nil {
-		return fmt.Errorf("sqlite writer: close staged bodies: %w", err)
+		return nil, fmt.Errorf("sqlite writer: close staged bodies: %w", err)
 	}
 	stored := map[string]storage.StoredChunkRun{}
 	rows, err = transaction.Query("SELECT stage, COUNT(*), COALESCE(SUM(plaintext_length), 0) FROM body_chunks WHERE audit_id = ? GROUP BY stage", auditID)
 	if err != nil {
-		return fmt.Errorf("sqlite writer: list staged chunk runs: %w", err)
+		return nil, fmt.Errorf("sqlite writer: list staged chunk runs: %w", err)
 	}
 	for rows.Next() {
 		var stage string
 		var run storage.StoredChunkRun
 		if err := rows.Scan(&stage, &run.Next, &run.End); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("sqlite writer: scan staged chunk run: %w", err)
+			return nil, fmt.Errorf("sqlite writer: scan staged chunk run: %w", err)
 		}
 		stored[stage] = run
 	}
 	if err := closeRows(rows); err != nil {
-		return fmt.Errorf("sqlite writer: close staged chunk runs: %w", err)
+		return nil, fmt.Errorf("sqlite writer: close staged chunk runs: %w", err)
 	}
-	plan := storage.NewStagedRestorePlan(bodies, stored)
-	if err := insertOwnedChunks(transaction, auditID, plan.Filter(write.restore.Chunks), nil); err != nil {
-		return err
-	}
-	write.result = plan.Result()
-	return nil
+	return storage.NewStagedRestorePlan(bodies, stored), nil
 }

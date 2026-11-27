@@ -102,6 +102,10 @@ type Stager struct {
 	stop     chan struct{}
 	done     chan struct{}
 	imported bool
+	// removeFile and renameFile are os.Remove and os.Rename; tests replace
+	// them to make the file system fail.
+	removeFile func(string) error
+	renameFile func(string, string) error
 
 	bytesWritten atomic.Int64
 	fsyncs       atomic.Int64
@@ -246,14 +250,16 @@ func Open(dir string, cipher security.Cipher, options Options) (*Stager, error) 
 		logger = slog.Default()
 	}
 	stager := &Stager{
-		dir:     filepath.Clean(dir),
-		cipher:  cipher,
-		options: options,
-		logger:  logger,
-		files:   make(map[string]*stagedFile),
-		wake:    make(chan struct{}, 1),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		dir:        filepath.Clean(dir),
+		cipher:     cipher,
+		options:    options,
+		logger:     logger,
+		files:      make(map[string]*stagedFile),
+		removeFile: os.Remove,
+		renameFile: os.Rename,
+		wake:       make(chan struct{}, 1),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	used, err := directoryUsage(stager.dir)
 	if err != nil {
@@ -449,7 +455,7 @@ func (stager *Stager) Discard(auditID string) {
 	file.held = 0
 	removeErr := error(nil)
 	if file.created {
-		removeErr = os.Remove(file.path)
+		removeErr = stager.removeFile(file.path)
 	}
 	file.mu.Unlock()
 	stager.used -= file.reserved
@@ -460,39 +466,31 @@ func (stager *Stager) Discard(auditID string) {
 		budget.Release(held)
 	}
 	if removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-		stager.logger.Warn("audit staging file not removed", "audit_id", auditID, "error", removeErr.Error())
+		stager.logger.Warn("audit staging file not removed", "audit_id", auditID, "error_category", "staging_remove_failed", "reason", fileErrorReason(removeErr))
 	}
 }
 
 // Keep ends the session's use of an audit's file but leaves it on disk: the
-// commit did not succeed, and the next start imports what the file holds
-// before the audit is recovered. Queued records are still written; records
-// whose write failed are dropped. The file keeps counting against MaxBytes.
-// It is idempotent.
+// commit did not succeed. The store that remembered the failure inserts the
+// staged chunks when it finalizes the audit and then calls Discard; if the
+// process stops first, the next start imports them. Queued records are still
+// written, and records whose write failed keep their ciphertext in memory, so
+// every staged chunk stays readable until Discard. The file keeps counting
+// against MaxBytes. It is idempotent.
 func (stager *Stager) Keep(auditID string) {
 	stager.mu.Lock()
 	file := stager.files[auditID]
-	delete(stager.files, auditID)
-	budget := stager.currentBudget()
 	stager.mu.Unlock()
 	if file == nil {
 		return
 	}
 	file.mu.Lock()
 	file.detached = true
-	var dropped int64
-	if file.failure != nil {
-		dropped = file.held
-		file.held = 0
-	}
 	if file.pending == 0 && file.handle != nil {
 		_ = file.handle.Close()
 		file.handle = nil
 	}
 	file.mu.Unlock()
-	if budget != nil {
-		budget.Release(dropped)
-	}
 }
 
 // Flush waits until every record staged before the call is written and
@@ -740,11 +738,29 @@ func (stager *Stager) fail(file *stagedFile, err error) {
 	stager.logger.Warn("audit staging write failed", "audit_id", file.auditID, "error_code", stagingErrorCode(file.failure))
 }
 
+// stagingErrorCode names a file failure with the stage error code it leads
+// to (design F.6), so the writer's log and the stage agree: a full directory
+// or disk is capture_budget_exhausted, anything else staging_write_failed.
 func stagingErrorCode(err error) string {
 	if errors.Is(err, ErrFull) {
-		return "staging_full"
+		return "capture_budget_exhausted"
 	}
 	return "staging_write_failed"
+}
+
+// fileErrorReason is a stable code for a file system error, for logs, which
+// never carry the error text: it may name paths.
+func fileErrorReason(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "not_found"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission_denied"
+	case noSpace(err):
+		return "no_space"
+	default:
+		return "io_error"
+	}
 }
 
 func (stager *Stager) release(size int64) {

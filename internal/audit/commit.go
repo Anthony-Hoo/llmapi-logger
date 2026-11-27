@@ -142,7 +142,8 @@ func (session *Session) finishUnified() error {
 		}
 		commit.Stages = append(commit.Stages, stageCommit)
 	}
-	commit.Chunks = chunks.source()
+	auditID, stager := session.auditID, session.manager.stager
+	commit.Chunks = chunks.commitSource(func() { stager.Discard(auditID) })
 	commit.PayloadBytes += chunks.payloadBytes()
 	// Version 2: the complete block, nil when the last checkpoint wrote the
 	// same one (C.8). A block that cannot be sealed fails the commit before it
@@ -229,9 +230,12 @@ func (session *Session) finishUnified() error {
 }
 
 // releaseStaged ends the session's use of its staging file once the commit
-// is decided: an acknowledged commit holds every staged chunk, so the file is
-// removed (F.5); otherwise it stays for the next start to import before the
-// audit is recovered. It is the one place a session releases staging.
+// is decided. An acknowledged commit holds every staged chunk, so the file is
+// removed (F.5). When the commit failed for good, the file stays: the store
+// remembered the staged chunks with the failure (storage.StagedChunkHolder)
+// and inserts them when its recovery finalizes the audit as failed, then
+// removes the file; if the process stops first, the next start imports
+// them before recovering the audit.
 func (session *Session) releaseStaged(committed bool) {
 	session.mu.Lock()
 	staged := session.stagedChunks

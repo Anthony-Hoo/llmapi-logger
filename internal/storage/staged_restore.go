@@ -43,6 +43,24 @@ type StagedChunkRestoreResult struct {
 	// chunks (seq and offset); that chunk and the rest of the stage are not
 	// inserted.
 	Discontinuous []string
+	// Missing, for a finalized audit, counts the chunks the database lacks
+	// that an open audit would have received. Nothing is written: a
+	// finalized audit is never changed, so the import keeps such a file.
+	Missing int
+}
+
+// StagedChunkHolder is implemented by the chunk source of a commit some of
+// whose chunks are staged locally (internal/audit). When the commit fails for
+// good, the store remembers the holder with the failure and, when its
+// recovery finalizes the audit as failed, first inserts StagedChunks under
+// their body rows by the rules of StagedRestorePlan, in the same
+// transaction; once that transaction has committed it calls ReleaseStaged,
+// which removes the staging file. StagedChunks reads the chunks from the
+// staging file (positions, not ciphertext held by the store) and skips any
+// it cannot read.
+type StagedChunkHolder interface {
+	StagedChunks() ChunkSource
+	ReleaseStaged()
 }
 
 // StoredChunkRun is what a body already has in body_chunks: the next seq

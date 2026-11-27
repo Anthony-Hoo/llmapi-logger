@@ -235,6 +235,7 @@ func (store *Store) submitAsync(ctx context.Context, request writeRequest) error
 			// Only the last attempt hands the outcome to recovery; an earlier
 			// one leaves the audit open for the session's retry (B.8).
 			store.rememberFailedWrite(commit.finishRequest(request.sequence), store.submittedSequence)
+			store.holdStaged(commit.Finish.AuditID, commit.Chunks)
 		}
 		return ErrQueueFull
 	}
@@ -343,6 +344,7 @@ func (store *Store) runWriter() {
 					commit := request.data.(*commitWrite)
 					if results[index] != nil && !errors.Is(results[index], sql.ErrNoRows) {
 						store.rememberFailedWrite(commit.finishRequest(request.sequence), request.sequence)
+						store.holdStaged(commit.Finish.AuditID, commit.Chunks)
 					} else if results[index] == nil {
 						store.forgetFinishedRecovery(commit.Finish.AuditID)
 					}
