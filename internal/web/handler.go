@@ -110,6 +110,9 @@ type Options struct {
 	SessionAnalysis SessionAnalysisQuery
 	// SessionAnalysisSettings is nil unless session_analysis.enabled.
 	SessionAnalysisSettings SessionAnalysisSettings
+	// CaptureSettings is the audit capture setting (the CommitAudit retry
+	// count). App always sets it; nil keeps its route at 404.
+	CaptureSettings CaptureSettings
 
 	// InjectedUserTextPrefixes is the effective vocabulary list of lower-cased
 	// prefixes that mark client-injected user text
@@ -162,6 +165,7 @@ func NewHandler(options Options) (http.Handler, error) {
 		sessionAnalysis: options.SessionAnalysis,
 
 		sessionAnalysisSettings: options.SessionAnalysisSettings,
+		captureSettings:         options.CaptureSettings,
 
 		injectedUserTextPrefixes: append([]string(nil), options.InjectedUserTextPrefixes...),
 
@@ -202,6 +206,7 @@ type managementHandler struct {
 	sessionAnalysis SessionAnalysisQuery
 
 	sessionAnalysisSettings SessionAnalysisSettings
+	captureSettings         CaptureSettings
 
 	injectedUserTextPrefixes []string
 
@@ -296,6 +301,8 @@ func (handler *managementHandler) serveProtected(writer http.ResponseWriter, req
 		handler.serveSessionAnalysisSettingsTest(writer, request)
 	case request.URL.Path == orgReportsSettingsPath:
 		handler.serveOrgReportsSettings(writer, request)
+	case request.URL.Path == captureSettingsPath:
+		handler.serveCaptureSettings(writer, request)
 	case request.URL.Path == "/api/v1/user-agent-rules":
 		handler.serveUserAgentRuleCollection(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/user-agent-rules/"):

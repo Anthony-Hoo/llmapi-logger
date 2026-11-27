@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/newapi"
 	"llmapi-logger/internal/orgreport"
@@ -247,6 +249,124 @@ func TestOrgReportsSettingsRoutes(t *testing.T) {
 	off := newDeveloperHandler(t, Options{Developer: developerOptions(t, newapi.TokenIdentity{}, nil)})
 	if response := serveBody(off, http.MethodGet, path, "", nil); response.Code != http.StatusNotFound {
 		t.Fatalf("disabled = %d", response.Code)
+	}
+}
+
+// retrySink records the retry count the capture settings hand to the manager.
+type retrySink struct {
+	mu     sync.Mutex
+	values []int
+}
+
+func (sink *retrySink) SetCommitRetries(retries int) {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.values = append(sink.values, retries)
+}
+
+func (sink *retrySink) last() int {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	return sink.values[len(sink.values)-1]
+}
+
+func TestCaptureSettingsRoutes(t *testing.T) {
+	t.Parallel()
+	rows := &settingsRows{}
+	sink := &retrySink{}
+	service, err := audit.NewCaptureSettings(context.Background(), audit.CaptureSettingsOptions{FileRetries: 3, WritePath: audit.WritePathUnified, Store: rows, Manager: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newDeveloperHandler(t, Options{Developer: developerOptions(t, newapi.TokenIdentity{UserID: 7}, nil), CaptureSettings: service})
+	cookie := developerSignIn(t, handler)
+	const path = "/api/v1/settings/audit-capture"
+
+	// Site-wide configuration: a developer session gets the 403 the other
+	// settings routes give it, and nothing reaches the service.
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		if response := serveBody(handler, method, path, `{"commit_retries":1}`, cookie); response.Code != http.StatusForbidden {
+			t.Fatalf("developer %s = %d", method, response.Code)
+		}
+	}
+	if len(rows.rows) != 0 || len(sink.values) != 1 {
+		t.Fatal("a refused request reached the settings service")
+	}
+
+	response := serveBody(handler, http.MethodGet, path, "", nil)
+	initial := decodeOrg[audit.CaptureSettingsView](t, response)
+	if response.Code != http.StatusOK || initial.Source != audit.CaptureSettingsSourceFile || initial.Settings.CommitRetries != 3 ||
+		initial.File.CommitRetries != 3 || initial.WritePath != audit.WritePathUnified || strings.Contains(response.Body.String(), "updated_ns") {
+		t.Fatalf("initial = %d %s", response.Code, response.Body.String())
+	}
+	assertNoStore(t, response, "capture settings")
+
+	response = serveBody(handler, http.MethodPut, path, `{"commit_retries":0}`, nil)
+	saved := decodeOrg[audit.CaptureSettingsView](t, response)
+	if response.Code != http.StatusOK || saved.Source != audit.CaptureSettingsSourceSaved || saved.Settings.CommitRetries != 0 || saved.UpdatedNS == 0 ||
+		len(rows.rows) != 1 || sink.last() != 0 || !strings.Contains(response.Body.String(), `"updated_ns":"`) {
+		t.Fatalf("saved = %d %s", response.Code, response.Body.String())
+	}
+	if view := decodeOrg[audit.CaptureSettingsView](t, serveBody(handler, http.MethodGet, path, "", nil)); view.Source != audit.CaptureSettingsSourceSaved || view.Settings.CommitRetries != 0 {
+		t.Fatalf("after save = %+v", view)
+	}
+
+	// Out of range: 400 with the field message; nothing changes.
+	for _, body := range []string{`{"commit_retries":6}`, `{"commit_retries":-1}`} {
+		rejected := serveBody(handler, http.MethodPut, path, body, nil)
+		if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), `"invalid_settings"`) ||
+			!strings.Contains(rejected.Body.String(), "audit.commit_retries must be between 0 and 5") || strings.Contains(rejected.Body.String(), "audit:") {
+			t.Fatalf("%s = %d %s", body, rejected.Code, rejected.Body.String())
+		}
+	}
+	// Malformed: a missing or null field (0 is a valid value, so it is never
+	// defaulted), a fraction, a string, an unknown field, trailing data.
+	for _, bad := range []string{``, `{`, `{}`, `{"commit_retries":null}`, `{"commit_retries":1.5}`, `{"commit_retries":"2"}`,
+		`{"commit_retries":1,"write_path":"legacy"}`, `{"commit_retries":1}{}`} {
+		rejected := serveBody(handler, http.MethodPut, path, bad, nil)
+		if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), `"invalid_settings"`) {
+			t.Errorf("body %q = %d %s", bad, rejected.Code, rejected.Body.String())
+		}
+	}
+	if view := decodeOrg[audit.CaptureSettingsView](t, serveBody(handler, http.MethodGet, path, "", nil)); view.Settings.CommitRetries != 0 || sink.last() != 0 {
+		t.Fatalf("after rejected changes = %+v (manager %d)", view, sink.last())
+	}
+
+	reset := serveBody(handler, http.MethodDelete, path, "", nil)
+	if view := decodeOrg[audit.CaptureSettingsView](t, reset); reset.Code != http.StatusOK || view.Source != audit.CaptureSettingsSourceFile ||
+		view.Settings.CommitRetries != 3 || len(rows.rows) != 0 || sink.last() != 3 {
+		t.Fatalf("reset = %d %s", reset.Code, reset.Body.String())
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		if response := serveBody(handler, method, path, `{"commit_retries":1}`, nil); response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s = %d", method, response.Code)
+		}
+	}
+
+	// The store cannot be read: the page still reads the file's value, and a
+	// write answers 503 and saves nothing.
+	rows.setFailLoad(errors.New("transient: reader pool exhausted"))
+	if response := serveBody(handler, http.MethodGet, path, "", nil); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"source":"file"`) {
+		t.Fatalf("read during the error = %d %s", response.Code, response.Body.String())
+	}
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		if response := serveBody(handler, method, path, `{"commit_retries":1}`, nil); response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), "settings_unavailable") || strings.Contains(response.Body.String(), "reader pool") {
+			t.Fatalf("%s during the error = %d %s", method, response.Code, response.Body.String())
+		}
+	}
+	rows.setFailLoad(nil)
+	if len(rows.rows) != 0 || sink.last() != 3 {
+		t.Fatal("a refused write changed something")
+	}
+
+	// Not assembled: the route answers 404, and still 405 for other methods.
+	off := newDeveloperHandler(t, Options{Developer: developerOptions(t, newapi.TokenIdentity{}, nil)})
+	if response := serveBody(off, http.MethodGet, path, "", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("not assembled = %d", response.Code)
+	}
+	if response := serveBody(off, http.MethodPost, path, "", nil); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("not assembled POST = %d", response.Code)
 	}
 }
 

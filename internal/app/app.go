@@ -517,6 +517,11 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	// token revocation) ends before the store is closed.
 	application.agentAccess = agentAccess
 	agentDist := assembleAgentDist(configuration, agentAccess, seams.agentPackageDir, logger)
+	captureSettings, err := assembleCaptureSettings(ctx, configuration, runtime, logger)
+	if err != nil {
+		_ = application.closeComponents()
+		return nil, err
+	}
 
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
@@ -533,6 +538,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 
 		SessionAnalysis:         sessionAnalysisService,
 		SessionAnalysisSettings: sessionAnalysisSettings,
+		CaptureSettings:         captureSettings,
 
 		InjectedUserTextPrefixes: uiVocabulary(vocabulary).InjectedUserTextPrefixes(),
 
