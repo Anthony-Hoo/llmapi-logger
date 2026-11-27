@@ -59,6 +59,14 @@ type writeRequest struct {
 	policy   *policyWrite
 }
 
+// alone reports whether the request gets a transaction of its own. A policy
+// write has its own deadline. A retention batch is a write whose cost grows
+// with the stored data, and a storage error fails a whole batch, so it must
+// not share its fate with audit writes that happened to queue beside it.
+func (request writeRequest) alone() bool {
+	return request.policy != nil || request.kind == writeDeleteExpired
+}
+
 // BeginAudit enqueues a parent audit row and waits until its batch commits.
 func (store *Store) BeginAudit(ctx context.Context, record AuditRecord) error {
 	record.Defaults()
@@ -221,14 +229,14 @@ func (store *Store) runWriter() {
 		queueClosed := false
 
 	collect:
-		for first.policy == nil && len(batch) < writerBatchSize {
+		for !first.alone() && len(batch) < writerBatchSize {
 			select {
 			case request, open := <-store.queue:
 				if !open {
 					queueClosed = true
 					break collect
 				}
-				if request.policy != nil {
+				if request.alone() {
 					pending = &request
 					break collect
 				}

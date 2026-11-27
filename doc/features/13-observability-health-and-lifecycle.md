@@ -78,7 +78,7 @@ health、ready、详情 JSON、错误 JSON 和 raw Body 响应统一使用 `Cach
 | `degraded` | 200 | parser/caller worker 不可用；或 available 模式下审计依赖不可用但代理仍可转发 |
 | `not_ready` | 503 | strict 模式下审计依赖不可用，新白名单请求会被 admission 拒绝 |
 
-retention、gap flush 或单次用户目录刷新失败不改变 readiness；已配置 caller worker 无法启动时 readiness 降级。首版没有 `/metrics` 实现。
+gap flush 或单次用户目录刷新失败不改变 readiness；retention 批的存储级失败与其他 writer 批一样把 database 报为不可用，直到下一次写入成功；已配置 caller worker 无法启动时 readiness 降级。首版没有 `/metrics` 实现。
 
 Store 的采集恢复积压尚未清空时 database 不报告 ok；恢复溢出会锁定不健康状态直到重启恢复。正常恢复必须成功提交实际变更，回滚过的修改和只读幂等重试不能使既有写入故障变成 healthy。strict 准入继续要求本次 BeginAudit 同步提交；恢复溢出时明确拒绝新审计。
 
