@@ -215,6 +215,12 @@ func TestFinalizerFailuresLeaveTheAuditToTheDatabasePath(t *testing.T) {
 			if _, _, backoff := store.parseState(t, id); !backoff {
 				t.Fatal("a released audit has no backoff")
 			}
+			// K item 19: the retention state is not touched; the raw stays
+			// pending for the parse from the database.
+			var touched int
+			if err := store.database(t).QueryRow(`SELECT COUNT(*) FROM body_streams WHERE audit_id = ? AND retention_state <> 'pending'`, id).Scan(&touched); err != nil || touched != 0 {
+				t.Fatalf("%d body rows had their retention changed (%v)", touched, err)
+			}
 			// The process is alive and the pending path picks the audit up
 			// once its backoff has elapsed, reading it from the database.
 			store.endBackoff(t, id)
