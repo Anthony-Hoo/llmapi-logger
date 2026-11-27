@@ -157,15 +157,11 @@ SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
 - 版本 2 的行没有 `http_headers` 行，旧版本的详情、列表 User-Agent 和 parser 都读不到它们的 Header；
 - 直接删除这些 audit 会被 `turns.parent_turn_id` 的 `ON DELETE RESTRICT` 挡住。
 
-所以按“先扩展、后启用”的顺序发布：
-
-1. 先发带迁移 007 和版本 2 读取能力的版本，`audit.write_path` 保持默认的 `legacy`。这一步可以按本节回滚。
-2. 确认运行正常后，再把 `audit.write_path` 切到 `unified`。从这一刻起，回滚到不含迁移 007 的版本就只能靠迁移前的备份，并放弃之后的审计数据。
-3. 想退回旧的写法时，把 `audit.write_path` 改回 `legacy` 重启即可：新写入回到版本 1，已经写入的版本 2 行照常可读、可校验，不需要回滚 schema。
+所以按“先扩展、后启用”的顺序发布：先发带迁移 007 的版本、`audit.write_path` 保持默认的 `legacy`，这时还可以按本节回滚；确认正常后再切到 `unified`。想退回旧的写法，把 `write_path` 改回 `legacy` 即可，不需要回滚 schema。完整步骤，包括暂存目录和配置段的处理，见[部署说明](README.md) 3.3。
 
 旧版本打开版本 7 的库时会因 schema 版本过新（`schema is newer than supported`）而无法使用审计存储，表现与下面两节相同。旧版本的配置加载拒绝不认识的键，配置文件里有 `audit:` 段时会直接拒绝启动，回滚前要先删掉这一段。回滚到不含迁移 007 的版本：
 
-1. 停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+1. 先等暂存目录变空（部署说明 3.3 第 4 步），再停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
 2. 执行下面的 SQL。它先检查有没有版本 2 的 audit 或 Header 块，有就报错、什么都不改；否则删除 `audit_capture` 设置、恢复分区约束，删掉新表和新列，并删除 `schema_migrations` 里版本为 7 的行。代理使用独立 schema 时先 `SET search_path = <schema>;`。
 3. 删掉配置文件里的 `audit:` 段，再启动旧版本。之后重新升级时，迁移 007 会再次加上这些列和表。
 

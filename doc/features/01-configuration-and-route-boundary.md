@@ -45,6 +45,15 @@ agent_access:              # 可选，默认关闭（模块 25）；整段可省
   enabled: false
   allow_write: false
   public_url: ""
+audit:                     # 可选，采集写入路径（模块 03 §13）；整段可省略
+  write_path: legacy
+  commit_retries: 3
+  memory:
+    stage_bytes: 8388608
+    global_bytes: 268435456
+  staging:
+    dir: ""
+    max_bytes: 4294967296
 
 interceptors:
   require-client-credential:
@@ -87,6 +96,9 @@ routes:
 | writer queue / batch | 1024 ops / 64 ops 或 5 ms |
 | PostgreSQL lock timeout | 5 s |
 | parser workers | 1 |
+| parser 队列 | 一个 FIFO：`Notify` 与 pending 扫描在已有 100 个作业时拒绝，unified 的 `Submit` 在 4096 个时拒绝；每个作业从 claim 到保存最多 2 min（模块 05 §5） |
+| unified 终结提交重试间隔 | 第 k 次重试前等 `min(100 ms × 2^(k-1), 1 s)` |
+| unified 本地暂存写盘 | 每批最多攒 5 ms，每个文件每批 fsync 一次；待写队列 4096 条 |
 | NewAPI 管理请求 / 用户目录刷新 | 10 s / 5 min |
 | graceful shutdown | 30 s，可配置 1–86400 s |
 
@@ -113,6 +125,24 @@ routes:
 15. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
 16. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
 17. match 只能是 exact 或 template，规则不得重叠。
+18. `audit` 段选择采集写入路径（模块 03 §13），整段可省略；加载从默认值开始解码，只写部分字段时其余取默认（`internal/config/audit.go`）：
+
+    | 键 | 默认 | 校验 |
+    | --- | --- | --- |
+    | `write_path` | `legacy` | 只能是 `legacy` 或 `unified` |
+    | `commit_retries` | 3 | 0–5；unified 的 `CommitAudit` 失败后重试几次，管理页面保存的值覆盖它（模块 10 §11）；legacy 不用 |
+    | `memory.stage_bytes` | 8 MiB（8388608） | 不小于 1 MiB（1048576），不大于 `memory.global_bytes` |
+    | `memory.global_bytes` | 256 MiB（268435456） | 只受上一行约束 |
+    | `staging.dir` | 空 | unified 时必填；非空时必须是绝对路径，不能是 `key_path` 所在的目录，也不能包含它或位于其中 |
+    | `staging.max_bytes` | 4 GiB（4294967296） | 必须为正；限制暂存目录里全部普通文件的大小，包括导入时改名保留的文件 |
+
+    `staging.dir` 只在启动时检查（`internal/audit/staging` 的 `PrepareDirectory`），validate-config 不检查：不存在就以 0700 创建；Unix 上要求属主是进程用户、组和其他用户没有任何权限，Windows 上交给目录 ACL；还要能在里面创建并删除一个探针文件。检查不通过时：
+
+    - `unified` 且 `available`：退回 legacy 写入，日志 `audit staging unavailable, using the legacy write path`；
+    - `unified` 且 `strict`：审计不可用，白名单请求在准入时回 `503`，日志 `audit staging unavailable`；
+    - `legacy`：照常运行，日志 `audit staging directory unusable, nothing imported`。
+
+    三条日志都带 `error_category=staging_unavailable` 和 `reason`（`not_absolute`、`create_failed`、`inspect_failed`、`not_directory`、`wrong_owner`、`open_permissions`、`not_writable`）。只要配置了 `staging.dir` 且目录可用，不论 `write_path`，启动都先导入上次留下的暂存文件（模块 03 §13.6）；导入时存储报错或有文件读不出来，审计在两种模式下都不可用（日志 `audit staging import failed`）。所以切回 legacy 之后要保留这一项，直到目录里没有 `.stg` 文件。配置加载是严格模式，不认识这一段的旧版本会拒绝启动：升级时先部署新版本再写这一段，回滚前先删掉整段（[部署说明](../deployment/README.md) 3.3）。
 
 validate-config 只检查配置，不要求 DB 或 NewAPI 在线。
 
