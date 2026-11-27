@@ -183,9 +183,12 @@ type AuditCommit struct {
 
 // StageCommit is the final state of one stage at CommitAudit.
 type StageCommit struct {
-	Stage           HTTPStage // final values
-	StageWritten    bool      // a checkpoint inserted the stage row: update it, otherwise insert
-	ContentType     *string   // version 2 only
+	Stage HTTPStage // final values
+	// StageWritten: an earlier write inserted the stage row, a checkpoint or,
+	// for request_received, BeginAudit (InboundStage); update it, otherwise
+	// insert it.
+	StageWritten    bool
+	ContentType     *string // version 2 only
 	ContentEncoding *string
 	Body            *BodyStream // final values; the duplicate of a merged pair is already in merged form
 	BodyWritten     bool        // a checkpoint inserted the body row

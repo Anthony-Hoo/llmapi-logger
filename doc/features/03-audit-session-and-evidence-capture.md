@@ -91,6 +91,8 @@ http_headers 每个值保存 audit_id、stage、kind、name、value_index、valu
 
 Request-URI 可能包含 key，保存在 audit_records.request_uri_enc。无法保证 Header 原始大小写、全局线缆顺序或 request Trailer 经 Nginx 后仍存在。
 
+第 3 阶段的 Header 块格式已经在 `internal/headerblock` 实现：一个 audit 的全部 Header 和 Trailer 编成一段明文，压缩加密为一个值，另有单独加密的入站 User-Agent；`Expand` 把逐值行和块展开成同一个扁平列表。写入路径还没有用它，会话仍按上面的逐值行写入，格式见模块 09 §5.2。
+
 ## 7. AES-256-GCM
 
 key_path 指向一个 32-byte 主密钥：存在则读取；不存在且数据库尚无审计数据时用 crypto/rand 原子生成。Unix 创建权限为 0600；Windows 使用当前用户私有数据目录的 ACL。

@@ -63,6 +63,8 @@ AAD 使用 NUL 分隔的受控字段，禁止调用方随意拼接不同格式�
 | binary object | `binary_object`、binary hash、compression |
 | external ref | `external_ref`、content hash、JSON pointer、ref kind |
 | stream timeline | audit id、`stream_timeline_v1`、stage、compression |
+| Header 块（`capture_version=2`，尚未启用） | audit id、`header_block_v1`、compression |
+| 入站 User-Agent（`capture_version=2`，尚未启用） | audit id、`user_agent_v1` |
 
 解密后还必须校验 plaintext/encoded length、object hash、semantic hash、binary hash、sequence hash 和 reconstruction hash。GCM 成功不代表结构自动可信。
 
@@ -78,6 +80,17 @@ JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`
 解压有上限：先读 gzip 尾部的 ISIZE，超过 128 MiB 直接拒绝，再按 ISIZE 精确限长读取，产出长度必须正好等于 ISIZE。128 MiB 是 parser 单个 Body 解码上限（64 MiB）的两倍，覆盖一份由完整请求和完整响应拼出的回退 conversation。更大的结果写入端不压缩，照旧存明文，因此这个上限不会让任何已写入的行变得不可读。截断、校验和错误、尾随数据、ISIZE 不符或超限，都按解密失败处理，返回同一个通用完整性错误。
 
 完整性事件摘要取的是落库密文的 SHA-256。压缩行按自己的密文签名，摘要格式不变；旧行不回头重写。
+
+### 5.2 Header 块与入站 User-Agent
+
+`internal/headerblock` 实现第 3 阶段设计（`doc/design/issue-59-stage3-write-path.md` C.3 到 C.8）的存储格式。写入路径和读取方还没有用它，现有记录都是逐值加密的 `http_headers` 行（`capture_version=1`）。
+
+- **块明文：** `"LLHB" 0x01`，之后每个已写入的阶段一段：阶段码（1 到 4，按阶段顺序严格递增），header 段，trailer 段。每段是 `u32be(名称数)`，每个名称是 `u32be(长度) 名称 u32be(值数) (u32be(长度) 值)+`，整数都是大端。名称按字节序严格递增，值数至少为 1，明文不超过 64 MiB。解码逐条校验这些规则和长度，不允许尾随字节，所以一段明文只有一种解码。
+- **存储：** 明文经 `bodycodec` 按 `application/x-llmapi-header-block` 判定是否 gzip，再 AES-GCM 加密，存 `compression`、`plaintext_length` 和密文三项。读取时依次认证解密、按 `plaintext_length` 解压核对长度、严格解码。
+- **残缺块：** 块里只含到那时为止已写入的阶段；读取时块里的阶段集合必须等于该 audit 的阶段行集合，否则按完整性错误处理。
+- **User-Agent：** `0x01 (u32be(长度) 值)+`，取 `request_received` 中名称与 `user-agent` 不区分大小写相等的全部值，不压缩。没有这个 Header 时存 NULL，与“有一个空值”区分。
+- **读取入口：** `headerblock.Expand` 按 `capture_version` 分派：1 用上表的逐值 AAD 解密各行，2 打开整块；两者输出同一个扁平列表（阶段顺序、header 先于 trailer、名称字节序、value index）。
+- **测试向量：** `internal/headerblock/testdata/vectors.json` 固定块明文、拒绝样例、两个 AAD、User-Agent 编码，以及用合成密钥封好的块和 User-Agent，供另一份实现对照。
 
 ## 6. 内容寻址与密文随机性
 
