@@ -2,10 +2,109 @@ package auditmodel
 
 import (
 	"fmt"
+	"sort"
 )
 
 func ItemMarker(index int) map[string]any {
 	return map[string]any{ItemMarkerKey: index}
+}
+
+// layoutKind selects how a layout puts items back into its envelope.
+type layoutKind int
+
+const (
+	// layoutEnvelope returns the envelope unchanged; items are not used.
+	layoutEnvelope layoutKind = iota
+	// layoutMarkers replaces every item marker in the envelope with its item.
+	layoutMarkers
+	// layoutSlots sets one envelope key per slot rule; the envelope must be
+	// a JSON object.
+	layoutSlots
+)
+
+// slotArity is how many items of one slot a layout accepts and how they are
+// written back under the slot's key.
+type slotArity int
+
+const (
+	// slotArray writes every item of the slot as an array, possibly empty.
+	slotArray slotArity = iota
+	// slotOne requires exactly one item and writes it as the value.
+	slotOne
+	// slotOptional accepts zero or one item and writes the key only for one.
+	slotOptional
+	// slotAbsent requires no item and leaves the key unset.
+	slotAbsent
+)
+
+type slotRule struct {
+	slot  string
+	arity slotArity
+}
+
+// layoutSpec describes one stored layout. Items whose slot has no rule are
+// ignored, as they always were.
+type layoutSpec struct {
+	kind  layoutKind
+	slots []slotRule
+	// stream marks a stream response: the envelope describes the SSE events
+	// and its summary, and SlotAggregate holds the aggregated messages.
+	stream bool
+}
+
+func slots(rules ...slotRule) layoutSpec { return layoutSpec{kind: layoutSlots, slots: rules} }
+
+// layouts holds every layout name that has ever been stored. The names are
+// part of the stored format: a name is never renamed or removed, and a new
+// protocol or a changed shape adds a new name. Every reader of a turn graph
+// (the query service, the offline import check, an archive reader) imports
+// this package, so a stored layout can always be assembled without any
+// registration step.
+var layouts = map[string]layoutSpec{
+	LayoutNone:           {kind: layoutEnvelope},
+	LayoutMarkerEnvelope: {kind: layoutMarkers},
+
+	LayoutOpenAIChatRequest: slots(slotRule{SlotMessages, slotArray}),
+	LayoutOpenAIResponsesRequestArray: slots(
+		slotRule{SlotInstructions, slotOptional}, slotRule{SlotInput, slotArray}),
+	LayoutOpenAIResponsesRequestSingle: slots(
+		slotRule{SlotInstructions, slotOptional}, slotRule{SlotInput, slotOne}),
+	LayoutOpenAIResponsesRequestNone: slots(
+		slotRule{SlotInstructions, slotOptional}, slotRule{SlotInput, slotAbsent}),
+	LayoutOpenAICompletionsPromptArray:  slots(slotRule{SlotPrompt, slotArray}),
+	LayoutOpenAICompletionsPromptSingle: slots(slotRule{SlotPrompt, slotOne}),
+	LayoutOpenAIStreamResponse:          {kind: layoutSlots, slots: []slotRule{{SlotAggregate, slotArray}}, stream: true},
+
+	LayoutAnthropicMessagesRequestSystemNone: slots(
+		slotRule{SlotMessages, slotArray}, slotRule{SlotSystem, slotAbsent}),
+	LayoutAnthropicMessagesRequestSystemSingle: slots(
+		slotRule{SlotMessages, slotArray}, slotRule{SlotSystem, slotOne}),
+	LayoutAnthropicMessagesRequestSystemArray: slots(
+		slotRule{SlotMessages, slotArray}, slotRule{SlotSystem, slotArray}),
+	LayoutAnthropicStreamResponse: {kind: layoutSlots, slots: []slotRule{{SlotAggregate, slotArray}}, stream: true},
+}
+
+// KnownLayout reports whether Assemble can rebuild layout.
+func KnownLayout(layout string) bool {
+	_, ok := layouts[layout]
+	return ok
+}
+
+// StreamLayout reports whether layout is a stream response: its value is the
+// SSE event description and summary, with the aggregated messages under
+// SlotAggregate, not a provider JSON body.
+func StreamLayout(layout string) bool {
+	return layouts[layout].stream
+}
+
+// LayoutNames lists every known layout, sorted.
+func LayoutNames() []string {
+	names := make([]string, 0, len(layouts))
+	for name := range layouts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Assemble rebuilds the normalized provider value without restoring binary
@@ -23,87 +122,44 @@ func Assemble(layout string, envelope any, items []Item) (any, error) {
 		}
 	}
 
-	root, _ := cloned.(map[string]any)
-	switch layout {
-	case LayoutNone:
-		return cloned, nil
-	case LayoutOpenAIChatRequest:
-		if root == nil {
-			return nil, ErrReconstruction
-		}
-		root[SlotMessages] = valuesForSlot(items, values, SlotMessages)
-		return root, nil
-	case LayoutOpenAIResponsesRequestArray, LayoutOpenAIResponsesRequestSingle, LayoutOpenAIResponsesRequestNone:
-		if root == nil {
-			return nil, ErrReconstruction
-		}
-		instructions := valuesForSlot(items, values, SlotInstructions)
-		if len(instructions) > 1 {
-			return nil, ErrReconstruction
-		}
-		if len(instructions) == 1 {
-			root[SlotInstructions] = instructions[0]
-		}
-		inputs := valuesForSlot(items, values, SlotInput)
-		switch layout {
-		case LayoutOpenAIResponsesRequestArray:
-			root[SlotInput] = inputs
-		case LayoutOpenAIResponsesRequestSingle:
-			if len(inputs) != 1 {
-				return nil, ErrReconstruction
-			}
-			root[SlotInput] = inputs[0]
-		case LayoutOpenAIResponsesRequestNone:
-			if len(inputs) != 0 {
-				return nil, ErrReconstruction
-			}
-		}
-		return root, nil
-	case LayoutOpenAICompletionsPromptArray, LayoutOpenAICompletionsPromptSingle:
-		if root == nil {
-			return nil, ErrReconstruction
-		}
-		prompts := valuesForSlot(items, values, SlotPrompt)
-		if layout == LayoutOpenAICompletionsPromptArray {
-			root[SlotPrompt] = prompts
-			return root, nil
-		}
-		if len(prompts) != 1 {
-			return nil, ErrReconstruction
-		}
-		root[SlotPrompt] = prompts[0]
-		return root, nil
-	case LayoutAnthropicMessagesRequestSystemNone, LayoutAnthropicMessagesRequestSystemSingle, LayoutAnthropicMessagesRequestSystemArray:
-		if root == nil {
-			return nil, ErrReconstruction
-		}
-		root[SlotMessages] = valuesForSlot(items, values, SlotMessages)
-		system := valuesForSlot(items, values, SlotSystem)
-		switch layout {
-		case LayoutAnthropicMessagesRequestSystemArray:
-			root[SlotSystem] = system
-		case LayoutAnthropicMessagesRequestSystemSingle:
-			if len(system) != 1 {
-				return nil, ErrReconstruction
-			}
-			root[SlotSystem] = system[0]
-		case LayoutAnthropicMessagesRequestSystemNone:
-			if len(system) != 0 {
-				return nil, ErrReconstruction
-			}
-		}
-		return root, nil
-	case LayoutMarkerEnvelope:
-		return replaceItemMarkers(cloned, values)
-	case LayoutOpenAIStreamResponse, LayoutAnthropicStreamResponse:
-		if root == nil {
-			return nil, ErrReconstruction
-		}
-		root[SlotAggregate] = valuesForSlot(items, values, SlotAggregate)
-		return root, nil
-	default:
+	spec, known := layouts[layout]
+	if !known {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedLayout, layout)
 	}
+	switch spec.kind {
+	case layoutEnvelope:
+		return cloned, nil
+	case layoutMarkers:
+		return replaceItemMarkers(cloned, values)
+	}
+	root, _ := cloned.(map[string]any)
+	if root == nil {
+		return nil, ErrReconstruction
+	}
+	for _, rule := range spec.slots {
+		slotValues := valuesForSlot(items, values, rule.slot)
+		switch rule.arity {
+		case slotArray:
+			root[rule.slot] = slotValues
+		case slotOne:
+			if len(slotValues) != 1 {
+				return nil, ErrReconstruction
+			}
+			root[rule.slot] = slotValues[0]
+		case slotOptional:
+			if len(slotValues) > 1 {
+				return nil, ErrReconstruction
+			}
+			if len(slotValues) == 1 {
+				root[rule.slot] = slotValues[0]
+			}
+		case slotAbsent:
+			if len(slotValues) != 0 {
+				return nil, ErrReconstruction
+			}
+		}
+	}
+	return root, nil
 }
 
 func valuesForSlot(items []Item, values []any, slot string) []any {
