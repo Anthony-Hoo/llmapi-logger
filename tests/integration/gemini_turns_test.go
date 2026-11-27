@@ -92,26 +92,34 @@ func TestGeminiGenerateContentIsStoredAsContentAddressedTurns(t *testing.T) {
 
 	database := openAuditDatabase(t, cfg.DatabaseURL)
 	defer database.Close()
-	var turns, linked, released, truncatedRetained, modelObjects, userObjects int
+	var turns, linked, released, truncatedRetained, truncatedReleased, modelObjects, userObjects int
 	var largestParsedJSON int64
-	var truncatedStatus string
+	var truncatedStatus, truncatedResponseLayout string
 	if err := database.QueryRow(`
 SELECT
     (SELECT COUNT(*) FROM turns),
     (SELECT COUNT(*) FROM turns WHERE parent_turn_id IS NOT NULL),
     (SELECT COUNT(*) FROM body_streams WHERE audit_id IN ($1, $2) AND retention_state = 'metadata'),
-    (SELECT COUNT(*) FROM body_streams WHERE audit_id = $3 AND retention_state = 'full'),
+    (SELECT COUNT(*) FROM body_streams WHERE audit_id = $3 AND retention_state = 'full'
+       AND stage IN ('response_received_from_newapi', 'response_from_newapi_sent_to_nginx')),
+    (SELECT COUNT(*) FROM body_streams WHERE audit_id = $3 AND retention_state = 'metadata'
+       AND stage IN ('request_for_newapi_received_from_nginx', 'request_sent_to_newapi')),
     (SELECT COUNT(*) FROM content_objects WHERE kind = 'model_content'),
     (SELECT COUNT(*) FROM content_objects WHERE kind = 'user_content'),
 
     (SELECT MAX(octet_length(parsed_json_enc)) FROM parsed_results WHERE audit_id IN ($1, $2)),
-    (SELECT parse_status FROM audit_records WHERE audit_id = $3)
-`, auditIDs[0], auditIDs[1], auditIDs[2]).Scan(&turns, &linked, &released, &truncatedRetained, &modelObjects, &userObjects,
-		&largestParsedJSON, &truncatedStatus); err != nil {
+    (SELECT parse_status FROM audit_records WHERE audit_id = $3),
+    (SELECT response_layout FROM turns WHERE audit_id = $3)
+`, auditIDs[0], auditIDs[1], auditIDs[2]).Scan(&turns, &linked, &released, &truncatedRetained, &truncatedReleased, &modelObjects, &userObjects,
+		&largestParsedJSON, &truncatedStatus, &truncatedResponseLayout); err != nil {
 		t.Fatal(err)
 	}
-	if turns != 2 || released < 4 || truncatedRetained < 2 || truncatedStatus != "partial" {
-		t.Fatalf("turns %d, released bodies %d, truncated stream: %d full bodies, parse %q", turns, released, truncatedRetained, truncatedStatus)
+	// The stream without a finish reason is not verified as a response: it
+	// gets a turn that carries only the request, keeps its response raw and
+	// stays partial.
+	if turns != 3 || released < 4 || truncatedRetained != 2 || truncatedReleased != 2 || truncatedStatus != "partial" || truncatedResponseLayout != "none" {
+		t.Fatalf("turns %d, released bodies %d, truncated stream: %d full response bodies, %d released request bodies, parse %q, response layout %q",
+			turns, released, truncatedRetained, truncatedReleased, truncatedStatus, truncatedResponseLayout)
 	}
 	// The first answer is stored once, shared by the first response and the
 	// second request; the stream adds its own answer. The first user content

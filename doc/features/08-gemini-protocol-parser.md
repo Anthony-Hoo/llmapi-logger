@@ -147,7 +147,7 @@ status = ok | partial | error | skipped
 parsed_json_enc = nonce || ciphertext || tag
 ```
 
-版本 3 增加 normalizer、从折叠体读流式 conversation，并要求流以 §5 的方式结束才为 `ok`。`parsed_json_enc` 在写出 verified turn 时只含窄摘要；没有 turn 时才附带 conversation 回退副本。版本 2 写入的记录没有 turn graph，保持 full raw 和带 conversation 的 `parsed_json_enc`，读取路径不变，不做迁移；parser 版本只随记录保存，不触发重新解析。
+版本 3 增加 normalizer、从折叠体读流式 conversation，并要求流以 §5 的方式结束才为 `ok`。`parsed_json_enc` 在写出带响应的 verified turn 时只含窄摘要；没有结束原因的流得到只有请求的轮次（[模块 18](18-content-addressed-conversation-storage.md) §6）：响应侧 raw 保持 `full`，请求侧按规则释放，已收到的回答存在 `partial_response_messages`；没有 turn 时才附带完整的 conversation 回退副本。版本 2 写入的记录没有 turn graph，保持 full raw 和带 conversation 的 `parsed_json_enc`，读取路径不变，不做迁移；parser 版本只随记录保存，不触发重新解析。
 
 reparse 覆盖当前结果并更新 `audit_records.parse_status`，数据库只保留最新解析结果。
 
