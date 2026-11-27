@@ -18,7 +18,7 @@ func Adapter(name string) (base.Adapter, error) {
 			return ReconstructedConversation(name, request, response, responseLayout)
 		},
 		Layouts: append(requestLayouts(name),
-			auditmodel.LayoutNone, auditmodel.LayoutMarkerEnvelope, auditmodel.LayoutOpenAIStreamResponse),
+			auditmodel.LayoutNone, auditmodel.LayoutMarkerEnvelope, auditmodel.LayoutOpenAIStreamResponseV2),
 	}, nil
 }
 

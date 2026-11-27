@@ -181,12 +181,32 @@ parser 只有在上述验证通过后才允许把 raw retention 从 pending 改�
 
 网络 read/write chunk 只用于临时采集，不作为长期事件模型。成功 SSE 响应保存：
 
-- 聚合后的 assistant/reasoning/tool output items；
-- 内容对象中的有序 event descriptors（事件名、数据长度和 SHA-256）及聚合终态，用于语义复核；不额外复制每个 event payload；
+- 折叠体：normalizer 把全部事件折叠成该端点的非流式响应 body，作为唯一的 `aggregate` item（content object）。同一回答流式与非流式得到的 conversation 相同；
+- 残留（residue）：事件里折叠体给不回来的内容，见下；
+- 事件描述与摘要，放在响应 envelope 里；
 - TTFT、首事件、末事件、事件数量；
 - 必要时保存 delta 编码的事件时间/字节偏移 timeline，而不是每个 token 一行。
 
-因此可以复原输出和事件次序，但不宣称恢复 TCP frame、HTTP chunk framing 或完全相同的 SSE 空白格式。
+**raw 释放后不丢内容。** 每个协议在模块 06、07 列出折叠器消费的事件类型和各类型读取的字段。下列内容进入 envelope 的 `residue` 数组：清单外的事件（整条 data），已消费事件里折叠器不读的字段，以及折叠体装不下的值（例如被后一事件覆盖的旧值、与折叠体不一致的 delta）。判断某个值是否已由折叠体持有的规则见模块 05 §2.3。`residue` 的格式：
+
+~~~json
+[
+  {"index": 0, "data": {"message": {"usage": {"output_tokens": 1}}}},
+  {"index": 4, "count": 3, "data": {"obfuscation": "..."}},
+  {"index": 9, "text": "not json"}
+]
+~~~
+
+- `index` 是事件在流中的序号（从 0 起，按模块 05 §2.3 的 SSE 解码规则计）；`count` 表示从 `index` 起连续 `count` 个事件的残留相同，省略时为 1；
+- `data` 只含该事件留下的字段，嵌套位置照原样，数组写成以元素下标（十进制字符串）为键的对象，只列有残留的元素；整条保留的事件，`data` 就是它的完整 JSON；
+- data 不是 JSON 的事件以 `text` 保存原文（必须是 UTF-8）；
+- 没有残留时不写 `residue` 键。
+
+残留有上限：canonical JSON 超过 1 MiB 的流不释放 raw。normalizer 放弃这条流，走既有的 `normalization_failed` 路径：解析记为 `partial`，四阶段 raw 保持 `full`，conversation 存回退副本（模块 05 §2.3）。
+
+因此可以复原输出、事件次序和每个事件的全部字段值，但不宣称恢复 TCP frame、HTTP chunk framing、完全相同的 SSE 空白格式、delta 的切分边界，或 JSON 的键序与空白（与所有 content object 一样按 canonical JSON 保存）。SSE 注释行和 `id:`、`retry:` 字段在解码时即被忽略，不在保存范围内。
+
+重建响应（模块 10 §5 的 `reconstructed/response`）的形状是：`format`（`sse`）、`events`、`summary`、可选的 `residue`，以及 `aggregate`（折叠体）。OpenAI parser 版本 2 写入的旧行（layout `openai.stream.response`）没有 `residue`，`aggregate` 是展示用的 message 数组，按原方式读取。
 
 ## 11. 防篡改链
 

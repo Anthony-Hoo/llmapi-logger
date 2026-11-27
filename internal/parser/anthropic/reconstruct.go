@@ -18,24 +18,13 @@ func ReconstructedConversation(request, response any, responseLayout string) (*c
 		appendRequestConversation(root, &result)
 	}
 	if responseLayout == auditmodel.LayoutAnthropicStreamResponse {
-		root := protocolutil.Map(response)
-		if root == nil {
-			return nil, errors.New("anthropic reconstruction: stream response is not an object")
+		// The aggregate is the folded Message body, read like a non-stream
+		// response.
+		message := protocolutil.Map(protocolutil.Map(response)[auditmodel.SlotAggregate])
+		if message == nil {
+			return nil, errors.New("anthropic reconstruction: stream response has no aggregate message")
 		}
-		for _, value := range protocolutil.Slice(root[auditmodel.SlotAggregate]) {
-			encoded, err := auditmodel.CanonicalJSON(value)
-			if err != nil {
-				return nil, err
-			}
-			var display auditmodel.DisplayMessage
-			if err := auditmodel.DecodeJSON(encoded, &display); err != nil {
-				return nil, err
-			}
-			conversation.Ensure(&result.Conversation).Append(display.ConversationMessage(
-				conversation.PhaseResponse,
-				conversation.DirectionUpstreamToClient,
-			))
-		}
+		appendResponseConversation(message, &result)
 	} else if root := protocolutil.Map(response); root != nil {
 		appendResponseConversation(root, &result)
 	}

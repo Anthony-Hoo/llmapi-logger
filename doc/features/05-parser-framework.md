@@ -58,7 +58,7 @@ layout 怎么拼回 provider 值不放在适配器里，而是放在 `auditmodel
 
 - `none` 原样返回 envelope，`marker_envelope` 把 envelope 里的 item marker 换回 item；
 - 其他 layout 要求 envelope 是 JSON 对象，按 slot 规则写回：`array`（全部 item 组成数组，可为空）、`one`（恰好一个）、`optional`（零或一个，零个时不写键）、`absent`（必须没有）；规则以外的 slot 被忽略；
-- 流式响应 layout 另带 stream 标记，`auditmodel.StreamLayout` 据此判断响应是 SSE 描述加聚合消息，而不是 JSON Body（insights 回填用它决定走流式还是 JSON 路径）。
+- 流式响应 layout 另带 stream 标记，`auditmodel.StreamLayout` 据此判断响应是 SSE 描述加聚合结果，而不是 JSON Body（insights 回填用它决定走流式还是 JSON 路径）。现行的流式 layout（`openai.stream.response.v2`、`anthropic.stream.response`）的 `aggregate` slot 恰好一个 item，即折叠出的非流式 body（§2.3）；最早的 `openai.stream.response` 是展示用 message 的数组。
 
 layout 名一经写入就不能改名或删除；形状变化要新增 layout 名，旧行仍按旧名读取。被新版本取代、不再写出的 layout 从适配器的 `Layouts` 移到 `builtin_test.go` 的 `retiredLayouts`，表里的行保留不动，旧行照常组装，conversation 仍由该 parser 名的适配器还原。`internal/auditmodel/layout_test.go` 钉住全部 layout 名和 stream 标记，`internal/parser/builtin/builtin_test.go` 钉住全部 parser 名与版本，要求表里每个 layout 要么有适配器写出、要么列为 retired，并用协议夹具和手写请求驱动每个 normalizer：写出的 layout 必须在适配器声明里，声明的每个 layout 都要被实际写出过，并且能 Prepare、Assemble、再经注册表还原成 conversation。
 
@@ -67,13 +67,39 @@ layout 名一经写入就不能改名或删除；形状变化要新增 layout �
 1. 在协议包里实现 `Parser`，需要内容寻址时再实现 `AuditNormalizer` 和从重建值生成 conversation 的函数；
 2. 若 normalizer 需要新的 layout，在 `auditmodel/types.go` 加 layout 名常量，在 `auditmodel/layout.go` 的表里加一行，并把新名加进 layout 钉住测试；
 3. 在协议包里写 `Adapter()`，返回上面三项；
-4. 在 `builtin.adapters()` 加一行，并把 parser 名与版本加进钉住测试。
+4. 在 `builtin.adapters()` 加一行，并把 parser 名与版本加进钉住测试；
+5. 流式响应的 normalizer 遵守 §2.3：折叠成非流式 body、留残留、写同样的 `summary`。注册后保真夹具测试自动覆盖它。
 
 turn 的重建与还原不需要改 query 或 worker。注册表之外仍有几处按协议区分的逻辑，它们不属于重建，按需单独修改：
 
 - `internal/parser/streamterminal`：采集路径上判断流在逻辑上结束的终止行。它按 parser 名的协议前缀分派，是采集层唯一依赖的 parser 侧叶子包，不引入各协议包；协议有可靠的流内终止标记时在这里加一支；
 - `internal/contentpolicy/extract.go`：内容策略拦截器从请求 Body 取待检文本，按 parser 名分派（模块 22）；
 - `internal/insights`：上下文分析按协议族解析请求和响应（模块 20），是分析口径，不是证据重建。
+
+### 2.3 流式响应的折叠与保真
+
+普通成功的流式响应经验证后释放 raw，此后只剩 envelope 和 item。为了不在这一步丢内容，每个流式 normalizer 遵守同一套约定（实现共用 `internal/parser/streamevidence`）。
+
+**SSE 解码。** 事件按 `parser.DecodeSSEWithStatus` 切分：行以 LF、CRLF 或单独的 CR 结束；以 `:` 开头的行是注释，忽略；`字段: 值` 中值的第一个空格去掉；`event` 字段给事件名，多个 `data` 行以单个 LF 连接成事件的 data；空行派发事件，没有 data 行的事件不派发；`id`、`retry` 等其他字段忽略。事件按派发顺序从 0 编号。残留的 `index` 和事件描述都按这个编号。
+
+**折叠体。** normalizer 把事件折叠成该端点的非流式响应 body，作为 `aggregate` slot 的唯一 item。parser 自己的 conversation 也从折叠体读出（与非流式响应走同一段代码），所以 raw 解析得到的 conversation 与从图重建的完全一致，同一回答流式与非流式的 conversation 也一致。折叠体能装下的内容优先装进去（例如 Anthropic 的 `signature`、`citations` 本来就是 content block 的字段）。各协议消费的事件类型和字段见模块 06 §5、模块 07 §5。
+
+**残留。** 事件里折叠体给不回来的内容进入 envelope 的 `residue`（格式见模块 18 §10）。一个事件的值是否已由折叠体持有，按以下规则判断，对象逐键递归：
+
+1. 与折叠体同一位置的值相等，视为持有；
+2. `null` 在折叠体有该位置时视为持有：它表示“尚未报告”，折叠体保存后来报告的值；
+3. 空字符串、空数组、空对象在折叠体同一位置是同类型的值时视为持有：这是该字段的起始值，后续事件填充；
+4. 拼接类字段（文本 delta、参数片段）按顺序拼接，拼接结果等于折叠体中的值时，各片段视为持有；不相等时片段全部进残留；
+5. 位置类字段（事件序号、`output_index`、`content_index`、`item_id` 等）能由折叠体位置推出时视为持有，推不出（例如 `sequence_number` 不等于事件编号）时进残留；
+6. 其余一律进残留：清单外的事件整条保留，已消费事件中不读的字段按原嵌套位置保留，被后一事件覆盖的旧值留在发出它的事件下。
+
+折叠体中的块或 item 位置不连续时（例如 content block 下标跳号），流无法无损表示，normalizer 返回错误。事件中出现保留 marker 键同样返回错误。
+
+**摘要。** envelope 的 `summary` 固定有 `response_id`、`usage`（解析结果的 `Usage`，键为 `Input`/`Output`/`Total`）、`normalized_usage`（不含缓存的输入、缓存读、缓存写、输出、reasoning）、`stop_reason`、`error_type`、`error_code`。raw 释放后，insights 回填只读 `usage`、`normalized_usage`、`stop_reason` 和重建的 conversation（`query.ReconstructBodies`）。`stop_reason` 必须是 insights 停止原因映射读来与读 raw 流结果相同的值：有供应商原值的协议存原值（Anthropic 的 `stop_reason`、Chat/Completions 最后报告的 `finish_reason`），只有状态的协议存映射后的值（Responses，见模块 06 §5）。
+
+**上限与放弃。** 残留的 canonical JSON 超过 `streamevidence.MaxResidueBytes`（1 MiB）时，normalizer 返回 `streamevidence.ErrResidueTooLarge`。worker 对任何 normalizer 错误的处理不变：解析记为 `partial`、`error_code=normalization_failed`，不生成 turn，四阶段 raw 保持 `full`，conversation 作为 `parsed_json_enc` 回退副本保存，并写 `reconstruction_failed` 完整性事件。代价是这条记录在列表里显示为部分解析。
+
+**保真夹具。** `internal/parser/builtin/fidelity_test.go` 对注册表里每个有 normalizer 的 parser，取协议夹具目录（`internal/protofixture`）里所有交给它的交换，加上目录没有协议的 parser 的手写流，各走两条路径：从 raw 解析，以及只用密封后的对象重建（不读 raw）。要求两边的 conversation、用量（`summary.usage`、`summary.normalized_usage` 与解析结果一致，折叠体按非流式 body 重新解析也一致）、工具调用数和停止原因（insights 从 raw 流得到的，与回填从 `summary.stop_reason` 和从折叠体得到的一致）相同。每个 normalizer 至少要有一个交换通过；目录里有流给它的，至少要有一个流通过。新协议注册 normalizer 后自动纳入，不通过则测试失败。`probe_test.go` 给每种已消费事件类型及其嵌套对象注入未知字段，再加未知事件类型和未知 delta 类型，要求所有值都能从重建结果中找回，并要求探针覆盖各协议列出的全部消费事件类型。
 
 ## 3. 当前协议范围
 
@@ -154,7 +180,7 @@ OpenAI 请求拆分规则：
 - `previous_response_id`、conversation/thread/cache key 作为父轮次关联证据；
 - `metadata` 中可能的 conversation/session 标识只用于域分离 hash，不进入普通日志。
 
-非流式响应把 choices message/text 或 Responses output item 替换为受控 marker。SSE 响应保存 event 类型、data 长度与 SHA-256 描述，以及 parser 聚合后的 assistant/reasoning/tool output items；不复制每个网络 chunk。
+非流式响应把 choices message/text 或 Responses output item 替换为受控 marker。SSE 响应按 §2.3 折叠成非流式 body（layout `openai.stream.response.v2`，parser 版本 3），envelope 保存事件描述、摘要和残留；不复制每个网络 chunk。parser 版本 2 写入的流（layout `openai.stream.response`，每个事件一个描述、展示用 message 作为聚合）按原方式读取。
 
 provider 输入若包含保留 marker 名、畸形 JSON、错误 data URL/Base64、未知重建布局或重建 hash 不一致，normalizer 必须失败并保留 full raw。
 
@@ -193,6 +219,7 @@ OpenAI 与 Anthropic verified turn 的管理 conversation 由 query 层执行以
 - developer/system/user/assistant/tool/reasoning/tool result 的顺序和 call id。
 - provider JSON 请求与响应精确重建。
 - layout 名、parser 名与版本钉住；每个 normalizer 写出的 layout 都已声明、可组装，且 conversation 重建已接到注册表（§2.1）。
+- 流式保真（§2.3）：每个 normalizer 过保真夹具；每种已消费事件类型的未知字段、未知事件类型和未知 delta 类型在 raw 释放后仍可找回；残留超限时放弃并保留 raw；退役 layout 的旧行按捕获的夹具原样重建。
 - data URL 解码字节去重、inline file data、`file_id` 外部引用。
 - normalization/reconstruction 失败时四阶段 raw 保持 full 且可完整下载。
 - verified OpenAI/Anthropic parsed JSON 不含第二份 conversation；无 normalizer 的协议仍能从加密 fallback 展示 conversation。

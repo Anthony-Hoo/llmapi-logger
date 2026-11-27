@@ -66,7 +66,7 @@ GET /api/v1/audits/{audit_id}/reconstructed/response
 
 只对 verified turn 可用。返回从 envelope、有序 item refs 和 binary objects 重建的 provider JSON，而不是从 UI conversation 反向生成。data URL 与 inline file data 使用原始二进制恢复；`file_id` 等外部引用保留。
 
-OpenAI 与 Anthropic 的 JSON 请求/非流式响应要求 canonical 语义与原 Body 一致。SSE 响应返回可审计的聚合语义对象和 event descriptors，不宣称返回原始 SSE wire bytes；需要原字节时只有 `retention_state=full` 的一侧才提供；raw 按侧保留，有 verified turn 的异常记录通常只剩响应侧 raw（[模块 18](18-content-addressed-conversation-storage.md) §6）。
+OpenAI 与 Anthropic 的 JSON 请求/非流式响应要求 canonical 语义与原 Body 一致。SSE 响应返回一个对象：`format`（`sse`）、`events`（事件描述）、`summary`、`aggregate`（折叠出的非流式 body）和可选的 `residue`（折叠体给不回来的事件内容，格式见模块 18 §10）；不宣称返回原始 SSE wire bytes，需要原字节时只有 `retention_state=full` 的一侧才提供；raw 按侧保留，有 verified turn 的异常记录通常只剩响应侧 raw（[模块 18](18-content-addressed-conversation-storage.md) §6）。OpenAI parser 版本 2 写入的流式记录没有 `residue`，`aggregate` 是展示用 message 数组。
 
 UI 提供“下载重建请求 JSON”和“下载重建响应 JSON”，不会把页面渲染文本重新编码作为证据。
 

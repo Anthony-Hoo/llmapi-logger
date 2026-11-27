@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image/png"
 	"net/url"
-	"strings"
 	"testing"
 
 	"llmapi-logger/internal/auditmodel"
-	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/security"
@@ -242,32 +241,127 @@ func TestFindingGeminiStreamWithoutTerminalParsesOK(t *testing.T) {
 	}
 }
 
-// TestFindingAnthropicDropsSignatureAndCitations pins current behaviour: the
-// stream aggregator ignores signature_delta and citations_delta, so neither
-// reaches the parsed conversation.
-func TestFindingAnthropicDropsSignatureAndCitations(t *testing.T) {
+// TestAnthropicStreamKeepsSignatureAndCitations: the stream fold carries
+// signature_delta and citations_delta into the content blocks, as the
+// non-stream body has them, so both survive the release of the raw bytes:
+// the response rebuilt from the sealed objects holds the same thinking and
+// text blocks as the non-stream answer of the same seed, and both yield the
+// same conversation.
+func TestAnthropicStreamKeepsSignatureAndCitations(t *testing.T) {
 	t.Parallel()
-	exchanges, err := Build(Case{Protocol: AnthropicMessages, Scenario: ScenarioReasoning, Stream: true}, Options{Seed: 4})
+	streamed, err := Build(Case{Protocol: AnthropicMessages, Scenario: ScenarioReasoning, Stream: true}, Options{Seed: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := exchanges[0].Response.Body()
+	plain, err := Build(Case{Protocol: AnthropicMessages, Scenario: ScenarioReasoning, Stream: false}, Options{Seed: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := streamed[0].Response.Body()
 	if !bytes.Contains(body, []byte("signature_delta")) || !bytes.Contains(body, []byte("citations_delta")) {
 		t.Fatal("fixture lacks signature_delta or citations_delta")
 	}
-	result := parsers()[exchanges[0].ParserName].Parse(context.Background(), parserInput(exchanges[0]))
-	encoded := fmt.Sprintf("%+v", result.Conversation)
-	for _, message := range result.Conversation.Messages {
-		if message.Phase != conversation.PhaseResponse {
-			continue
-		}
-		for _, part := range message.Content {
-			if part.Type == conversation.PartUnknown {
-				t.Fatalf("unexpected unknown part %+v", part)
+	cipher, err := security.NewAESGCM(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := parserInput(streamed[0])
+	implementation := parsers()[streamed[0].ParserName]
+	result := implementation.Parse(context.Background(), input)
+	turn, err := implementation.(base.AuditNormalizer).NormalizeAudit(context.Background(), input, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn.AuditID, turn.Protocol, turn.ParserName, turn.CreatedAtNS = input.AuditID, input.Protocol, streamed[0].ParserName, 1
+	prepared, err := auditmodel.Prepare(turn, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := rebuildResponse(t, cipher, prepared)
+
+	var want map[string]any
+	if err := auditmodel.DecodeJSON(plain[0].Response.Body(), &want); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, _ := response.(map[string]any)[auditmodel.SlotAggregate].(map[string]any)
+	got, _ := auditmodel.CanonicalJSON(aggregate["content"])
+	expected, _ := auditmodel.CanonicalJSON(want["content"])
+	if !bytes.Contains(got, []byte(`"signature":"`)) || !bytes.Contains(got, []byte(`"citations":[{`)) || !bytes.Equal(got, expected) {
+		t.Fatalf("rebuilt stream content = %s\nnon-stream content   = %s", got, expected)
+	}
+	view, err := builtin.Registry().RebuildConversation(streamed[0].ParserName, nil, response, prepared.ResponseLayout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainResult := implementation.Parse(context.Background(), base.Input{Response: parserInput(plain[0]).Response})
+	streamView, _ := json.Marshal(view)
+	plainView, _ := json.Marshal(plainResult.Conversation)
+	if !bytes.Equal(streamView, plainView) {
+		t.Fatalf("stream conversation = %s\nnon-stream conversation = %s", streamView, plainView)
+	}
+}
+
+// TestStreamAndJSONAnswersYieldTheSameConversation: a stream is folded into
+// the non-stream body, so the same answer streamed or not parses to the same
+// response conversation, for every normal scenario of the protocols with a
+// stream fold.
+func TestStreamAndJSONAnswersYieldTheSameConversation(t *testing.T) {
+	t.Parallel()
+	indexed := parsers()
+	for _, protocol := range []Protocol{OpenAIResponses, OpenAIChat, AnthropicMessages} {
+		for _, scenario := range NormalScenarios() {
+			if protocol == AnthropicMessages && scenario == ScenarioExtensions {
+				// The streamed answer adds a server_tool_use block the JSON
+				// answer does not have.
+				continue
+			}
+			streamed, err := Build(Case{Protocol: protocol, Scenario: scenario, Stream: true}, Options{Seed: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			plain, err := Build(Case{Protocol: protocol, Scenario: scenario, Stream: false}, Options{Seed: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index := range streamed {
+				implementation := indexed[streamed[index].ParserName]
+				fromStream := implementation.Parse(context.Background(), base.Input{Response: parserInput(streamed[index]).Response})
+				fromJSON := implementation.Parse(context.Background(), base.Input{Response: parserInput(plain[index]).Response})
+				got, _ := json.Marshal(fromStream.Conversation)
+				want, _ := json.Marshal(fromJSON.Conversation)
+				if !bytes.Equal(got, want) {
+					t.Errorf("%s/%s#%d: stream conversation = %s\njson conversation = %s", protocol, scenario, index, got, want)
+				}
 			}
 		}
 	}
-	if strings.Contains(encoded, "char_location") || strings.Contains(encoded, "signature") {
-		t.Fatal("signature or citation reached the conversation; the finding no longer holds")
+}
+
+// rebuildResponse assembles the response of a prepared turn from its sealed
+// objects alone.
+func rebuildResponse(t *testing.T, cipher security.Cipher, prepared auditmodel.PreparedTurn) any {
+	t.Helper()
+	objects := map[string]auditmodel.ContentObject{}
+	for _, object := range prepared.Objects {
+		objects[fmt.Sprintf("%x", object.Hash)] = object
 	}
+	open := func(hash []byte) auditmodel.DecodedObject {
+		object := objects[fmt.Sprintf("%x", hash)]
+		decoded, err := auditmodel.OpenObject(cipher, auditmodel.StoredContent{Hash: object.Hash, SemanticHash: object.SemanticHash, Kind: object.Kind,
+			Compression: object.Compression, PlaintextLength: object.PlaintextLength, EncodedLength: object.EncodedLength, DataEnc: object.DataEnc})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+	items := make([]auditmodel.Item, 0, len(prepared.ResponseRefs))
+	for _, ref := range prepared.ResponseRefs {
+		decoded := open(ref.ObjectHash)
+		items = append(items, auditmodel.Item{Slot: ref.Slot, Kind: decoded.Kind, Value: decoded.Value})
+	}
+	response, err := auditmodel.Assemble(prepared.ResponseLayout, open(prepared.ResponseEnvelopeHash).Value, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }

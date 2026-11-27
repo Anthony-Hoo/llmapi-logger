@@ -172,7 +172,9 @@ func parseStream(data []byte, result *base.Result) error {
 			}
 		}
 	}
-	appendStreamConversation(events, result)
+	// The conversation is read from the folded message, so a stream and the
+	// same answer without streaming yield the same conversation.
+	appendResponseConversation(foldStream(events).message, result)
 	return nil
 }
 

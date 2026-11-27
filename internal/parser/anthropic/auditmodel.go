@@ -8,7 +8,6 @@ import (
 	"fmt"
 
 	"llmapi-logger/internal/auditmodel"
-	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
@@ -172,25 +171,26 @@ func normalizeJSONResponse(root map[string]any) (normalizedSide, error) {
 	return normalizedSide{layout: auditmodel.LayoutMarkerEnvelope, envelope: envelope, items: items, original: original}, nil
 }
 
-// normalizeStreamResponse keeps one descriptor per SSE event and the
-// aggregated response messages, as the OpenAI stream layout does. The summary
-// also holds the cache-aware usage and the stop reason, which the descriptors
-// no longer yield once the raw body is released.
+// normalizeStreamResponse stores a stream as its event description, its
+// summary, the folded Message body (slot aggregate, the same body the answer
+// has without streaming, signatures and citations included) and the residue:
+// whatever the events carry that the folded body does not. The summary keeps
+// the cache-aware usage and the stop reason for the insights backfill.
 func normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, error) {
 	events, _ := base.DecodeSSEWithStatus(data)
 	if len(events) == 0 {
-		return normalizedSide{}, errors.New("anthropic normalizer: empty SSE")
+		return normalizedSide{}, errEmptyStream
+	}
+	fold := foldStream(events)
+	if fold.problem != nil {
+		return normalizedSide{}, fold.problem
+	}
+	residue, err := fold.residue.Entries()
+	if err != nil {
+		return normalizedSide{}, err
 	}
 	descriptors := make([]any, 0, len(events))
-	stopReason := ""
 	for _, event := range events {
-		if root, err := protocolutil.Object(event.Data); err == nil {
-			for _, holder := range []any{root["delta"], root["message"]} {
-				if reason := protocolutil.String(protocolutil.Map(holder)["stop_reason"]); reason != "" {
-					stopReason = reason
-				}
-			}
-		}
 		digest := sha256.Sum256(event.Data)
 		descriptors = append(descriptors, map[string]any{
 			"event":       event.Event,
@@ -198,33 +198,26 @@ func normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, e
 			"data_sha256": hex.EncodeToString(digest[:]),
 		})
 	}
-	items := make([]auditmodel.Item, 0)
-	aggregateValues := make([]any, 0)
-	if result.Conversation != nil {
-		for _, message := range result.Conversation.Messages {
-			if message.Phase != conversation.PhaseResponse {
-				continue
-			}
-			value, err := auditmodel.CloneJSON(auditmodel.DisplayFromConversation(message))
-			if err != nil {
-				return normalizedSide{}, err
-			}
-			items = append(items, auditmodel.Item{Slot: auditmodel.SlotAggregate, Kind: "stream_" + message.Role, Value: value})
-			aggregateValues = append(aggregateValues, value)
-		}
-	}
-	envelope, err := cloneMap(map[string]any{
+	fields := map[string]any{
 		"format": "sse",
 		"events": descriptors,
 		"summary": map[string]any{
 			"response_id":      result.ResponseID,
 			"usage":            result.Usage,
 			"normalized_usage": result.Normalized,
-			"stop_reason":      stopReason,
+			"stop_reason":      fold.stopReason(),
 			"error_type":       result.ErrorType,
 			"error_code":       result.ErrorCode,
 		},
-	})
+	}
+	if len(residue) > 0 {
+		fields["residue"] = residue
+	}
+	envelope, err := cloneMap(fields)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	aggregate, err := cloneMap(fold.message)
 	if err != nil {
 		return normalizedSide{}, err
 	}
@@ -232,7 +225,8 @@ func normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, e
 	if err != nil {
 		return normalizedSide{}, err
 	}
-	original[auditmodel.SlotAggregate] = aggregateValues
+	original[auditmodel.SlotAggregate] = aggregate
+	items := []auditmodel.Item{{Slot: auditmodel.SlotAggregate, Kind: "stream_body", Value: aggregate}}
 	return normalizedSide{layout: auditmodel.LayoutAnthropicStreamResponse, envelope: envelope, items: items, original: original}, nil
 }
 

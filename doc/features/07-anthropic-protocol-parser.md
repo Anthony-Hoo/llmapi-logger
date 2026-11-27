@@ -4,9 +4,9 @@
 
 首版只解析明确配置进 LLM API 白名单的 `/v1/messages`，支持非流式 JSON 和 Messages SSE。NewAPI health、login、admin、models、UI 和其他安全非 LLM 路径走 passthrough，不进入本 parser。
 
-parser 异步读取已落盘证据，不进入 HTTP 转发链，不修改 content block 或事件。未知普通字段/event 忽略；未知 content block 只在 conversation 中保存有界占位；完整对象在 raw Body（异常记录）或请求与非流式响应的 content object（verified 记录）中，verified 流式响应的保留范围见 §8。
+parser 异步读取已落盘证据，不进入 HTTP 转发链，不修改 content block 或事件。未知普通字段/event 不进入 conversation；未知 content block 只在 conversation 中保存有界占位；完整对象在 raw Body（异常记录）或 content object（verified 记录）中，verified 流式响应的保留范围见 §5.1 与 §8。
 
-本 parser 同时实现内容寻址 normalizer（§8）：普通成功记录的请求与非流式响应可从加密 content object 精确重建 provider JSON，流式响应保留事件摘要和聚合结果，raw 释放为 `metadata`；异常记录的响应侧仍保留 full raw，请求侧按[模块 18](18-content-addressed-conversation-storage.md) §6 决定。
+本 parser 同时实现内容寻址 normalizer（§8）：普通成功记录的请求与非流式响应可从加密 content object 精确重建 provider JSON，流式响应保留事件描述、折叠出的 Message body 和残留，raw 释放为 `metadata`；异常记录的响应侧仍保留 full raw，请求侧按[模块 18](18-content-addressed-conversation-storage.md) §6 决定。
 
 对应包：`internal/parser/anthropic`。
 
@@ -77,14 +77,37 @@ message_start
 处理规则：
 
 - 以 content block `index` 关联事件。
-- `text_delta` 按 content block index 拼接文本。
-- `input_json_delta.partial_json` 按 tool block index 拼接原始字符串，conversation 保留 call id/name/arguments。
-- `thinking_delta` 拼接为独立 reasoning part；signature delta 不复制进 conversation。
+- 事件折叠成非流式的 Message body（§5.1），conversation 从折叠体读出，与非流式响应走同一段代码。
 - `message_delta` 更新 stop reason 和最后一个有效 usage snapshot，不累加多个 snapshot。
 - `ping` 忽略语义但允许存在。
-- 未知 event/delta 保存或忽略，并继续后续事件。
+- 未知 event/delta 进入残留，并继续后续事件。
 - `error` event 设协议错误；已有内容可以保存为 `partial`。
 - clean EOF 没有 `message_stop` 时设 `partial`。
+
+### 5.1 折叠与残留
+
+按模块 05 §2.3 折叠。下表是折叠器消费的事件类型和字段（代码里是 `anthropic.ConsumedStreamEvents`、`ConsumedDeltaTypes`）；表外的事件整条、已消费事件中表外的字段按原位置进入残留（envelope 的 `residue`，格式见模块 18 §10）。
+
+| 事件类型 | 读取的字段 | 折叠方式 |
+| --- | --- | --- |
+| `message_start` | `type` `message` | `message` 除 `content` 外的字段原样成为折叠体；`content` 中已有的块占据下标 0 起的位置。第二个 `message_start` 整条进残留 |
+| `content_block_start` | `type` `index` `content_block` | `content_block` 原样成为 `content[index]`；同一下标再次出现时整条进残留 |
+| `content_block_delta` | `type` `index` `delta` | 按 delta 类型，见下；未知 delta 类型或块不存在时整条进残留 |
+| `content_block_stop` | `type` `index` | 无内容 |
+| `message_delta` | `type` `delta`（`stop_reason` `stop_sequence`） `usage` | 写到折叠体同名字段；`usage` 逐键合并，后报告的值覆盖先报告的 |
+| `message_stop`、`ping` | `type` | 无内容 |
+
+| delta 类型 | 读取的字段 | 折叠方式 |
+| --- | --- | --- |
+| `text_delta` | `type` `text` | 拼接到块的 `text` |
+| `thinking_delta` | `type` `thinking` | 拼接到块的 `thinking` |
+| `signature_delta` | `type` `signature` | 拼接到块的 `signature` |
+| `input_json_delta` | `type` `partial_json` | 拼接；结果是 JSON 对象时解析后成为块的 `input`，否则（例如 `max_tokens` 截断）原文字符串成为 `input`；全部为空时保留起始的 `input` |
+| `citations_delta` | `type` `citation` | 追加到块的 `citations` 数组 |
+
+因此 thinking 块的 `signature`、text 块的 `citations` 与非流式响应一样留在 content block 里，同一回答流式与非流式重建出的 content 和 conversation 相同。`input` 按 canonical JSON 保存，流里 JSON 文本的键序与空白不保留，与非流式 body 和请求 body 的口径一致；conversation 中的工具参数因此与非流式响应的写法相同（键排序的紧凑 JSON），不再是流里的原文。
+
+每条流通常只留一条残留：`message_start` 里 `usage.output_tokens` 的起始值（通常是 1）被 `message_delta` 的最终值覆盖，该旧值留在事件 0 下。`input` 起始为 `{}`、流出的文本不是 JSON 对象时，`{}` 留在对应的 `content_block_start` 下。
 
 ## 6. 限额与错误行为
 
@@ -125,9 +148,11 @@ reparse 直接覆盖当前结果并更新 `audit_records.parse_status`，数据�
 
 非流式响应（布局 `marker_envelope`）：`content` 数组的每个 block 是一个 slot `content` 的 item，envelope 中换成受控 marker；没有 `content` 数组的错误体整体留在 envelope。
 
-流式响应（布局 `anthropic.stream.response`）：与 OpenAI 流式相同，envelope 保存每个 SSE event 的事件名、data 长度和 SHA-256，items 是 parser 聚合出的响应 message（slot `aggregate`）。`summary` 除 `response_id`、`usage`、错误码外还保存 `normalized_usage`（不含缓存的输入、缓存读、缓存写、输出）和 `stop_reason`，raw 释放后这两项无处可取，洞察回填靠它们恢复。
+流式响应（布局 `anthropic.stream.response`）：与 OpenAI 流式相同（模块 05 §2.3），唯一的 item 是折叠出的 Message body（slot `aggregate`，kind `stream_body`），envelope 保存事件描述、`summary` 和残留 `residue`（§5.1）。`summary` 除 `response_id`、`usage`、错误码外还保存 `normalized_usage`（不含缓存的输入、缓存读、缓存写、输出）和 `stop_reason`（折叠体的 `stop_reason`），洞察回填靠它们恢复。
 
-流式响应不是逐字节重建：重建校验比较的是 envelope 与聚合结果自身。raw 释放后可得的是每个事件的名称、长度、SHA-256 和 parser 聚合出的文本、thinking、工具调用；`signature_delta`、`citations_delta`、未识别的 delta，以及未知 block 超出 4 KiB 占位的部分不再可得。这与 OpenAI 流式的保留范围一致（模块 18 §10）。
+流式响应不是逐字节重建：重建校验比较的是 envelope 与折叠体自身。raw 释放后可得的是事件描述、折叠体（文本、thinking 与 signature、citations、工具调用、未知 block 的完整内容、usage）和残留中每个事件折叠体给不回来的字段值。
+
+这一 layout 随 `anthropic.messages` 版本 3 首次发布，形状在发布前定稿，没有需要兼容的旧形状（设计文档 5.8）。
 
 已知局限：
 
@@ -147,6 +172,7 @@ reparse 直接覆盖当前结果并更新 `audit_records.parse_status`，数据�
 - usage snapshot 不被错误累加。
 - gzip、64 MiB/50:1 限额和敏感字段明文泄漏扫描。
 - normalizer：system 缺失/null/字符串/数组各布局精确重建，保留 marker 与非数组 `messages` 被拒绝；声明的会话 ID 成为 conversation key 而单独的用户 ID 不是；名为 `file_content` 等的工具参数保持原文；流式 summary 含缓存用量与 `stop_reason`；重发历史复用对象且 message 前缀不受 system 变化影响；JSON 与 SSE 响应重建出的 conversation 与 parser 解析结果一致；多轮会话的对象数随唯一 message 数增长。
+- 流式折叠：`signature_delta`、`citations_delta` 进入 content block，从密封对象重建的流式 content 与同一回答的非流式 content 相同；每种已消费事件类型的未知字段、未知事件和未知 delta 类型在 raw 释放后可找回；残留超限时放弃并保留 raw（模块 05 §2.3）。
 
 ## 10. 实施任务
 

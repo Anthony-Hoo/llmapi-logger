@@ -237,6 +237,14 @@ func (implementation *Parser) normalizeStreamResponse(data []byte, result base.R
 	if len(events) == 0 {
 		return normalizedSide{}, errors.New("openai normalizer: empty SSE")
 	}
+	fold := foldStream(events, implementation.name)
+	if fold.problem != nil {
+		return normalizedSide{}, fold.problem
+	}
+	residue, err := fold.residue.Entries()
+	if err != nil {
+		return normalizedSide{}, err
+	}
 	descriptors := make([]any, 0, len(events))
 	for _, event := range events {
 		digest := sha256.Sum256(event.Data)
@@ -246,41 +254,36 @@ func (implementation *Parser) normalizeStreamResponse(data []byte, result base.R
 			"data_sha256": hex.EncodeToString(digest[:]),
 		})
 	}
-	items := make([]auditmodel.Item, 0)
-	aggregateValues := make([]any, 0)
-	if result.Conversation != nil {
-		for _, message := range result.Conversation.Messages {
-			if message.Phase != conversation.PhaseResponse {
-				continue
-			}
-			display := auditmodel.DisplayFromConversation(message)
-			value, err := displayJSONValue(display)
-			if err != nil {
-				return normalizedSide{}, err
-			}
-			items = append(items, auditmodel.Item{
-				Slot: auditmodel.SlotAggregate, Kind: "stream_" + message.Role,
-				Value: value, Display: []auditmodel.DisplayMessage{display},
-			})
-			aggregateValues = append(aggregateValues, value)
-		}
-	}
-	envelope := map[string]any{
+	fields := map[string]any{
 		"format": "sse",
 		"events": descriptors,
 		"summary": map[string]any{
-			"response_id": result.ResponseID,
-			"usage":       result.Usage,
-			"error_type":  result.ErrorType,
-			"error_code":  result.ErrorCode,
+			"response_id":      result.ResponseID,
+			"usage":            result.Usage,
+			"normalized_usage": result.Normalized,
+			"stop_reason":      fold.stopReason,
+			"error_type":       result.ErrorType,
+			"error_code":       result.ErrorCode,
 		},
+	}
+	if len(residue) > 0 {
+		fields["residue"] = residue
+	}
+	envelope, err := cloneMap(fields)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	aggregate, err := cloneMap(fold.body)
+	if err != nil {
+		return normalizedSide{}, err
 	}
 	original, err := cloneMap(envelope)
 	if err != nil {
 		return normalizedSide{}, err
 	}
-	original[auditmodel.SlotAggregate] = aggregateValues
-	return normalizedSide{layout: auditmodel.LayoutOpenAIStreamResponse, envelope: envelope, items: items, original: original}, nil
+	original[auditmodel.SlotAggregate] = aggregate
+	items := []auditmodel.Item{{Slot: auditmodel.SlotAggregate, Kind: "stream_body", Value: aggregate}}
+	return normalizedSide{layout: auditmodel.LayoutOpenAIStreamResponseV2, envelope: envelope, items: items, original: original}, nil
 }
 
 func responseInputItem(value any) auditmodel.Item {
@@ -334,18 +337,6 @@ func displayFromResult(result base.Result) []auditmodel.DisplayMessage {
 		display = append(display, auditmodel.DisplayFromConversation(message))
 	}
 	return display
-}
-
-func displayJSONValue(display auditmodel.DisplayMessage) (any, error) {
-	encoded, err := auditmodel.CanonicalJSON(display)
-	if err != nil {
-		return nil, err
-	}
-	var value any
-	if err := auditmodel.DecodeJSON(encoded, &value); err != nil {
-		return nil, err
-	}
-	return value, nil
 }
 
 func itemKind(value map[string]any, fallback string) string {

@@ -23,10 +23,10 @@ import (
 func TestParserNamesAndVersionsArePinned(t *testing.T) {
 	t.Parallel()
 	want := []string{
-		"openai.chat_completions@2",
-		"openai.completions@2",
-		"openai.responses@2",
-		"openai.responses_compact@2",
+		"openai.chat_completions@3",
+		"openai.completions@3",
+		"openai.responses@3",
+		"openai.responses_compact@3",
 		"anthropic.messages@3",
 		"gemini.generate_content@2",
 		"gemini.stream_generate_content@2",
@@ -56,7 +56,11 @@ func TestParserNamesAndVersionsArePinned(t *testing.T) {
 // them still assemble from the auditmodel table and are projected by the
 // adapter of their parser name; a layout moves here when a new layout version
 // replaces it.
-var retiredLayouts = []string{}
+var retiredLayouts = []string{
+	// OpenAI parser version 2 streams: per-event descriptors and display
+	// messages, replaced by openai.stream.response.v2 in version 3.
+	"openai.stream.response",
+}
 
 // TestEveryLayoutHasAnOwner keeps the auditmodel layout table and the adapters
 // in step: every layout in the table is written by some adapter today or is

@@ -48,7 +48,8 @@ type layoutSpec struct {
 	kind  layoutKind
 	slots []slotRule
 	// stream marks a stream response: the envelope describes the SSE events
-	// and its summary, and SlotAggregate holds the aggregated messages.
+	// and holds their summary, and SlotAggregate holds the aggregate (display
+	// messages in the oldest layout, the folded provider body in the others).
 	stream bool
 }
 
@@ -81,8 +82,17 @@ var layouts = map[string]layoutSpec{
 		slotRule{SlotMessages, slotArray}, slotRule{SlotSystem, slotOne}),
 	LayoutAnthropicMessagesRequestSystemArray: slots(
 		slotRule{SlotMessages, slotArray}, slotRule{SlotSystem, slotArray}),
-	LayoutAnthropicStreamResponse: {kind: layoutSlots, slots: []slotRule{{SlotAggregate, slotArray}}, stream: true},
+	// The stream layouts below hold the folded provider body as their single
+	// aggregate item, with the event description, summary and residue in
+	// the envelope.
+	LayoutAnthropicStreamResponse: {kind: layoutSlots, slots: []slotRule{{SlotAggregate, slotOne}}, stream: true},
+	LayoutOpenAIStreamResponseV2:  {kind: layoutSlots, slots: []slotRule{{SlotAggregate, slotOne}}, stream: true},
 }
+
+// LayoutOpenAIStreamResponseV2 replaces LayoutOpenAIStreamResponse, whose
+// aggregate items are display messages and whose envelope describes every
+// event; rows stored with the old name keep assembling with its own row.
+const LayoutOpenAIStreamResponseV2 = "openai.stream.response.v2"
 
 // KnownLayout reports whether Assemble can rebuild layout.
 func KnownLayout(layout string) bool {

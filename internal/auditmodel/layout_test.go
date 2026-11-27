@@ -27,6 +27,7 @@ func TestLayoutNamesArePinned(t *testing.T) {
 		"openai.responses.request.input_none",
 		"openai.responses.request.input_single",
 		"openai.stream.response",
+		"openai.stream.response.v2",
 	}
 	if got := LayoutNames(); !slices.Equal(got, want) {
 		t.Fatalf("layout names = %q, want %q", got, want)
@@ -37,7 +38,7 @@ func TestLayoutNamesArePinned(t *testing.T) {
 			streams = append(streams, name)
 		}
 	}
-	if wantStreams := []string{"anthropic.stream.response", "openai.stream.response"}; !slices.Equal(streams, wantStreams) {
+	if wantStreams := []string{"anthropic.stream.response", "openai.stream.response", "openai.stream.response.v2"}; !slices.Equal(streams, wantStreams) {
 		t.Fatalf("stream layouts = %q, want %q", streams, wantStreams)
 	}
 	if KnownLayout("openai.unknown") || StreamLayout("openai.unknown") {
@@ -132,7 +133,7 @@ func assembleLegacy(layout string, envelope any, items []Item) (any, error) {
 		return root, nil
 	case LayoutMarkerEnvelope:
 		return replaceItemMarkers(cloned, values)
-	case LayoutOpenAIStreamResponse, LayoutAnthropicStreamResponse:
+	case LayoutOpenAIStreamResponse:
 		if root == nil {
 			return nil, ErrReconstruction
 		}
@@ -140,6 +141,38 @@ func assembleLegacy(layout string, envelope any, items []Item) (any, error) {
 		return root, nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedLayout, layout)
+	}
+}
+
+// aggregateIsBody are the stream layouts whose aggregate became one folded
+// provider body after the switch was replaced; the switch never knew them in
+// that form, so TestStreamBodyLayoutsTakeOneAggregate covers them instead.
+var aggregateIsBody = map[string]bool{
+	LayoutAnthropicStreamResponse: true,
+	LayoutOpenAIStreamResponseV2:  true,
+}
+
+func TestStreamBodyLayoutsTakeOneAggregate(t *testing.T) {
+	t.Parallel()
+	for layout := range aggregateIsBody {
+		envelope := map[string]any{"format": "sse", "residue": []any{}}
+		got, err := Assemble(layout, envelope, []Item{{Slot: SlotAggregate, Kind: "kind", Value: map[string]any{"id": "x"}}, {Slot: SlotOutput, Kind: "kind", Value: 1}})
+		want := map[string]any{"format": "sse", "residue": []any{}, SlotAggregate: map[string]any{"id": "x"}}
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: assemble = %#v, %v", layout, got, err)
+		}
+		for _, count := range []int{0, 2} {
+			items := make([]Item, count)
+			for index := range items {
+				items[index] = Item{Slot: SlotAggregate, Kind: "kind", Value: index}
+			}
+			if _, err := Assemble(layout, envelope, items); !errors.Is(err, ErrReconstruction) {
+				t.Fatalf("%s with %d aggregates: error = %v", layout, count, err)
+			}
+		}
+		if _, err := Assemble(layout, "not an object", nil); !errors.Is(err, ErrReconstruction) {
+			t.Fatalf("%s: a non-object envelope assembled", layout)
+		}
 	}
 }
 
@@ -161,6 +194,9 @@ func TestAssembleMatchesLegacySwitch(t *testing.T) {
 	layoutNames := append(LayoutNames(), "openai.unknown", "")
 	cases := 0
 	for _, layout := range layoutNames {
+		if aggregateIsBody[layout] {
+			continue
+		}
 		for envelopeName, envelope := range envelopes {
 			// Two slots with 0, 1 or 2 items each, interleaved, covers every
 			// pair of slots a layout reads and items in slots it ignores.

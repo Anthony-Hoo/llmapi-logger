@@ -20,7 +20,16 @@ func ReconstructedConversation(parserName string, request, response any, respons
 	if root := protocolutil.Map(request); root != nil {
 		appendRequestConversation(root, parserName, &result)
 	}
-	if responseLayout == auditmodel.LayoutOpenAIStreamResponse {
+	switch responseLayout {
+	case auditmodel.LayoutOpenAIStreamResponseV2:
+		// The aggregate is the folded non-stream body.
+		body := protocolutil.Map(protocolutil.Map(response)[auditmodel.SlotAggregate])
+		if body == nil {
+			return nil, errors.New("openai reconstruction: stream response has no aggregate body")
+		}
+		appendResponseConversation(body, parserName, &result)
+	case auditmodel.LayoutOpenAIStreamResponse:
+		// Parser version 2 stored display messages as the aggregate.
 		root := protocolutil.Map(response)
 		if root == nil {
 			return nil, errors.New("openai reconstruction: stream response is not an object")
@@ -39,8 +48,10 @@ func ReconstructedConversation(parserName string, request, response any, respons
 				conversation.DirectionUpstreamToClient,
 			))
 		}
-	} else if root := protocolutil.Map(response); root != nil {
-		appendResponseConversation(root, parserName, &result)
+	default:
+		if root := protocolutil.Map(response); root != nil {
+			appendResponseConversation(root, parserName, &result)
+		}
 	}
 	return result.Conversation, nil
 }

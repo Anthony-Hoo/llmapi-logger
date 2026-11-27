@@ -1,0 +1,2184 @@
+[
+  {
+    "label": "openai.chat_completions/basic",
+    "parser": "openai.chat_completions",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 305,
+          "data_sha256": "ed6945165f80ff62712ee76592c904d9f195eb4bf02c279c645b6a254c235fda",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "02e67ebd1a292d1f6f232ac7e6cfc2d8c4e997a79f60db5aeececb6965721ae9",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "8ef06c843d169eec185c32c50e367806683fd68e77b410a1006bb1547d954ac4",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "8f06a6eefb50e10ab0c9bc200517728dee780ff938d1bd1857a17e8a3240ef6d",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "3064c890bd8c65157ed4995756bc188a5e9f25ee98c3165dee25c04ace8b2a25",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "3624b3a6e59520d8c0eb18a5770a573e7012a5623ed96a6f2031b638d26a65d4",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "b57b5998b3121f8e1e21ccae31b383139ab1310c5e27c039daf147b6b590a4cc",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "54e1178c69ab896ec1f114621c20faf4243d5656ee39be9dfb449bdae8243d0e",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "d94a09d08417a8fbc34a3e280103b3062699f8bf86ed82f2c2cb863d20e20b1b",
+          "event": ""
+        },
+        {
+          "data_length": 297,
+          "data_sha256": "6639d9493e6585f213027c037e03273439653c8b25b4c882299c62eadc2fe722",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "6b4d4fceb99cd79f10e72412f62a586388e3d73b583ed6462b4682e5255f32b9",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "2ab6a930cf1223ba64d49764cff0351bf11880daa3c483ac51438808d0b806fe",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "bedb554b4f9976d7cfcb85c06f6017cdb3ba1641d2800b39f79245a9556eb171",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "770fe19db65bdcdef1a2a4eba510e7c8c5f8791edd159643a53fb8cefee8beec",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "d6e949da51d86450d9ad2309f237867becea424716668da8b4041a98728d9b1f",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "a79657b2054ba703d4a57a7c0bc855189cde8c8a5240aaa87271e5b9e02ce014",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "284f2f6c1514b0ac9642c535bea3ca532afa72ff77baeddcdb4d74a5c5a78d51",
+          "event": ""
+        },
+        {
+          "data_length": 292,
+          "data_sha256": "e414bd9a8348fc38154166744c8e2669c8ff334c7a5988858fb9cb42110afa47",
+          "event": ""
+        },
+        {
+          "data_length": 261,
+          "data_sha256": "db5ac079f77bef8e8c4090849029eb1b4ad67251b16d5cf9736d1417717654de",
+          "event": ""
+        },
+        {
+          "data_length": 464,
+          "data_sha256": "562e41d216e3ae6a24e3d807601509d410674b8fcc2bdb0bac67d442aee13600",
+          "event": ""
+        },
+        {
+          "data_length": 6,
+          "data_sha256": "7073e6d8763d986cda350de95e9d76e781824ce759283548dfaa1d2ca32e8c81",
+          "event": ""
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "chatcmpl-9i3Yuh3PpcNU3q3iLtHMRTz9",
+        "usage": {
+          "Input": 441,
+          "Output": 104,
+          "Total": 545
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Mite dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su berlan.\n\nDal lo rok. Fa supe favin ber. Ranodi karok. Lo lolote vinfa quisu mes dalfafa telo rokrok. Lo pefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi sudi daltelan.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "text",
+              "text": "Mite dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su berlan.\n\nDal lo rok. Fa supe favin ber. Ranodi karok. Lo lolote vinfa quisu mes dalfafa telo rokrok. Lo pefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi sudi daltelan."
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "0b57b120ed41e4c463c777fcc1f1b20e70ec359a69eb201c3e4425b3839622bd"
+  },
+  {
+    "label": "openai.chat_completions/tool_calls",
+    "parser": "openai.chat_completions",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 305,
+          "data_sha256": "cb191dc1c7a723533304b8eb33e0dacda6416c72867444893b0cb12854e2c3c6",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "114f7990092aa9afc6204945d95f4342ccbd26d87130116595523afdbedfc4ba",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "d7b29dd1f7cf142259fe250ff78c3db5b961fbb6ded0772ad71d4707ec8258e6",
+          "event": ""
+        },
+        {
+          "data_length": 294,
+          "data_sha256": "b243f49d8db0bd39bcc1d6d7a9346f43f2464fc5973427c1e0b603cd41bd9e69",
+          "event": ""
+        },
+        {
+          "data_length": 393,
+          "data_sha256": "a40bff8b7fd6f9333a3cad131fea2ae11410667ab14ae50fa1911f78b603abe0",
+          "event": ""
+        },
+        {
+          "data_length": 340,
+          "data_sha256": "09ee3ad5c5b7cf44bdf42935a881b11b545bccebbf0934029f1fb9bc2f349941",
+          "event": ""
+        },
+        {
+          "data_length": 337,
+          "data_sha256": "3e1c70eaef98be035228d7ab3fa0181430893ca7c5df762948ed500c43a0937a",
+          "event": ""
+        },
+        {
+          "data_length": 340,
+          "data_sha256": "41df2bcb237a08d8d3c6214d4d4907d0e7e711fc1e8ce092c052b0e967d2fe2c",
+          "event": ""
+        },
+        {
+          "data_length": 316,
+          "data_sha256": "c03a22fba3b4c26ce7f70405911a163d497b015604c678173519fcda2aa4cfe4",
+          "event": ""
+        },
+        {
+          "data_length": 393,
+          "data_sha256": "1270b3955beb8ba1801da8bedd6a5aa0a2fcb7d6f49865ea7c01b93e58c2f04d",
+          "event": ""
+        },
+        {
+          "data_length": 340,
+          "data_sha256": "0c449f705824b824f5f2ffeccd19f145846ade76c0c442c0b6c1badaf7d9d416",
+          "event": ""
+        },
+        {
+          "data_length": 337,
+          "data_sha256": "157c726537c5a08592ef07934230e34a7139c9ee983ca7f332da1b41b1912111",
+          "event": ""
+        },
+        {
+          "data_length": 340,
+          "data_sha256": "3327281799cd6f5f01ceaabd6bfd47ccde5196ad3ce42ce52b9b3e94ba33ab11",
+          "event": ""
+        },
+        {
+          "data_length": 316,
+          "data_sha256": "1080e8de4b993bf44d668e3f8f41cbe52c2191c0fc501c4dc3919499bc644e28",
+          "event": ""
+        },
+        {
+          "data_length": 267,
+          "data_sha256": "d1513f00b1c65df04ab6d033d6a490250f66c7b3abec1eac11b22798098052cb",
+          "event": ""
+        },
+        {
+          "data_length": 463,
+          "data_sha256": "98efc59192101060952bb3f557a8a5997043d22604dd51f6a5e5906fccd416d3",
+          "event": ""
+        },
+        {
+          "data_length": 6,
+          "data_sha256": "7073e6d8763d986cda350de95e9d76e781824ce759283548dfaa1d2ca32e8c81",
+          "event": ""
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "chatcmpl-9i3Yuh3PpcNU3q3iLtHMRTz9",
+        "usage": {
+          "Input": 441,
+          "Output": 58,
+          "Total": 499
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Mite dallan di di dal pe. Meslan lo milober ber notefa lan lo roksumes.",
+              "type": "text"
+            },
+            {
+              "arguments": "{\"mirok\":\"Nodi daltordal minolo lanlope tedalmes loka farator.\",\"limit\":38}",
+              "id": "call_DFGFMyG1zRgtgRDuextmrdBp",
+              "name": "vinqui_mestorra",
+              "type": "tool_call"
+            },
+            {
+              "arguments": "{\"mirok\":\"Daltorvin dal qui zomi berlan dal lo rok ka vape pe.\",\"limit\":48}",
+              "id": "call_Cb7gueU0fdpNN3KxFLqRbYg8",
+              "name": "vinqui_mestorra",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "text",
+              "text": "Mite dallan di di dal pe. Meslan lo milober ber notefa lan lo roksumes."
+            },
+            {
+              "index": 1,
+              "type": "tool_call",
+              "id": "call_DFGFMyG1zRgtgRDuextmrdBp",
+              "name": "vinqui_mestorra",
+              "arguments": "{\"mirok\":\"Nodi daltordal minolo lanlope tedalmes loka farator.\",\"limit\":38}"
+            },
+            {
+              "index": 2,
+              "type": "tool_call",
+              "id": "call_Cb7gueU0fdpNN3KxFLqRbYg8",
+              "name": "vinqui_mestorra",
+              "arguments": "{\"mirok\":\"Daltorvin dal qui zomi berlan dal lo rok ka vape pe.\",\"limit\":48}"
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "afd27b1932f7db46508d7b9d3b63e232b5ae4d5cd4c3f88f662d73684640bf01"
+  },
+  {
+    "label": "openai.chat_completions/reasoning",
+    "parser": "openai.chat_completions",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 305,
+          "data_sha256": "f3886de2e82a8c4963252df787bfd8997340b7f7930fcc462310dfa4fe6df69c",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "2d091378093e45696c9ba0b8c4268ca1f7e34b11109e66ca62fdd69131022ddd",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "e53ef72d1bb5c7d470d5645329242fff63ca206280aa04711d846921a3f1957d",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "de78b45729a481655ad1c094b5d58ef63601bd7df2f0ccf4c9b7796e252d8b94",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "94815935b4f08bfeb1e6a14d1facbc49b4301a8fa605117b1ee4f57586e7fb1a",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "dafb837adb011c954c0e5f5063507b6caf33b25eb29b6907d1ae6aa3dbf0b0c7",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "bbe78b5e16a9ccb3fce8364fb6bf5822298713d040cfbf08b1aa4e3950baeabe",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "4dc414a47af05619035a93634dc764088d81d9ff44932a56bd38c1328de716c4",
+          "event": ""
+        },
+        {
+          "data_length": 305,
+          "data_sha256": "679bc9cb9202839d776bdaffcba0f1a1e912e3f1c4d4672def149884d670ee28",
+          "event": ""
+        },
+        {
+          "data_length": 290,
+          "data_sha256": "3af2fbdd2eb58744ffc0980903fc00da9aad0dc4beaf4f67124cc4d4c0abd673",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "1d022e31a3d9ddaa0e4c6b7ba244332ef45e680eed429465e8fff554dcb0e8b7",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "7ea51656b3539b96c09af63261ffc559991cad377109527d95f3743450fee5f2",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "844608ead1fd0b5088ec65c255fb43ec1d199504fec815680c0282f408be77a3",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "c2561422192c01e8bb6d301671032c088b4438409b61fd2c375caa5a93f32229",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "9bef0bfce3d4d15e976d31bf0f627860d8469334d525c4be070265d15c343a69",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "a6058db4361d401d480d3bcd38d9ff255fc6377a201698846a47b40eef2d876d",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "d528df83e24d758086edc47c9ae5c0edf2816088bc273f0c524178d83782530c",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "21e3828f336e9f30458c674cb114a4cde60d6d19ee6c0d34114e974f8375735c",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "7001ac7b3d0bde1212906d8ab270ebcd710b1564092efb02ec557ada1684548a",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "9a3e22073ac4507d635ad610434f094ec1ad319e52a0a1b2f8e19ee6946a3875",
+          "event": ""
+        },
+        {
+          "data_length": 297,
+          "data_sha256": "b256619a0d873e930e77f99bb62757cdd96d25ec4c3d02850cb5212e220803b6",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "e6bcaa4f0c03a78a37cf5b5787429c8c008be328b64f8deac2acbe20eee85798",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "19555fe46111bdb695d88d42238985082dad584a18995a332fa07385b3869900",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "9201148cb8a556412db3e6f3cb936c32c5591e1836cf7cac7714b75bbc782563",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "ee5fa152a032719cdbf76203b75e8bb42f95c1aed48cf636b31b2aecc2e78764",
+          "event": ""
+        },
+        {
+          "data_length": 295,
+          "data_sha256": "28392f2be77b2bdcfddddead47d0bfc2c371830ecce5704dc1a48e45861e3317",
+          "event": ""
+        },
+        {
+          "data_length": 289,
+          "data_sha256": "effa2e4cb5297a7500652f697a05e4c1881063c6f4d87cffe995f3960668a0a9",
+          "event": ""
+        },
+        {
+          "data_length": 261,
+          "data_sha256": "597aa6b447537f3e25bab3b507f492006ea2e07983632d0b0623e0cde9fa5324",
+          "event": ""
+        },
+        {
+          "data_length": 465,
+          "data_sha256": "a5463bc0f889f83507bc825870744240e121934f9486b7855122bacbb52cb064",
+          "event": ""
+        },
+        {
+          "data_length": 6,
+          "data_sha256": "7073e6d8763d986cda350de95e9d76e781824ce759283548dfaa1d2ca32e8c81",
+          "event": ""
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "chatcmpl-9i3Yuh3PpcNU3q3iLtHMRTz9",
+        "usage": {
+          "Input": 441,
+          "Output": 153,
+          "Total": 594
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Losu lo ravinpe di. Fa lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor notedal.",
+              "type": "reasoning"
+            },
+            {
+              "text": "Rokkara. Vapefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote dimes kapete.\n\nLanlo fazo dal fazoka dalpedal suber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava. Kadal fatorno. Peka vano ra mi.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "reasoning",
+              "text": "Losu lo ravinpe di. Fa lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor notedal."
+            },
+            {
+              "index": 1,
+              "type": "text",
+              "text": "Rokkara. Vapefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote dimes kapete.\n\nLanlo fazo dal fazoka dalpedal suber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava. Kadal fatorno. Peka vano ra mi."
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "20f6350c6d2b5f5ef01544007e715091a503aab4b25d9c03bd41dd488f68a921"
+  },
+  {
+    "label": "openai.chat_completions/extensions",
+    "parser": "openai.chat_completions",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 328,
+          "data_sha256": "5934add14f4908fe14df77f3844c69a26169c6a36d6698074d15af736c95e619",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "f6160fce7f6cc1045b7b3ebe4e14a2b95f7d5a2794ce3fb4be1732409dd2cf89",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "ca487ab1ca73b49b48cf7318fa2082097019eed4c7ba6c7d66aaf7f054517b5d",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "86451a64abe982c2549266476786aecede0610493136410c302bfe19a5948493",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "c9282ebfafdbe81d67c03c22223350cc3c24848b049a028a3e5ade097933f10b",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "88e6d1b35c7d2a4ec68f5f7f9a079e6e1f0159fbbc9f14dcefa3ca7315f0c0a4",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "be0661f42b78f877208e4ad2633989cdd49d28eb1af5c2aef4aae526d2288f30",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "5a1127987165fff85d5d82ebdb750c29cd5053b783a183485c1a7f3ef22a6541",
+          "event": ""
+        },
+        {
+          "data_length": 328,
+          "data_sha256": "7c5da2410a21b2bb62082ae009e7cbb67d4531d87fb038681ad8b464c8c19837",
+          "event": ""
+        },
+        {
+          "data_length": 313,
+          "data_sha256": "a841ece2b0e41e80c09290f7a65aa8b1160ae738d31f50cac0a3562129697892",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "0b3f54ce0ddf56ae84cd5b1f234fcb442e4ae11c2e419b2611e20ce516bc9465",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "23c6e86c6643b56bf895ec69aa559879745953cd19a10ab059ea387a5c812bc2",
+          "event": ""
+        },
+        {
+          "data_length": 313,
+          "data_sha256": "d6947f765564822f8576dd64e81720febe381de2cb053b98d27f732759884147",
+          "event": ""
+        },
+        {
+          "data_length": 410,
+          "data_sha256": "a9d1b9724029aecf82a8d817544ef7d8915c36d82bff4139d15deba3e96f2eb3",
+          "event": ""
+        },
+        {
+          "data_length": 363,
+          "data_sha256": "f6e5821da439fb4f3ea0a69d8b022112b86c712426b84fb3b4cd321479a1ad21",
+          "event": ""
+        },
+        {
+          "data_length": 360,
+          "data_sha256": "2f4f8a5a7fe5e4aad173d91763452bfc9aae40b5ecd76bd40160055b4019271b",
+          "event": ""
+        },
+        {
+          "data_length": 362,
+          "data_sha256": "bf13135f48a02246391180da20cc6fb12f11501918f2ba8989f994ed900a5d24",
+          "event": ""
+        },
+        {
+          "data_length": 343,
+          "data_sha256": "4322d8e023f0359f13e5150a74ea31fe5756682ab20e13e5f6f73f77fffff005",
+          "event": ""
+        },
+        {
+          "data_length": 189,
+          "data_sha256": "aa16b65ba7d9dc24b3f69aa7754465c5a22d43b141abec6b99d3492aa65484d7",
+          "event": ""
+        },
+        {
+          "data_length": 290,
+          "data_sha256": "a9a5612701344d06242825f88a755b6fcee2dbdec21411c99abb50ca3b5201c7",
+          "event": ""
+        },
+        {
+          "data_length": 464,
+          "data_sha256": "1a8f52c229ab162c3162281e89ef52a8fb53476e6967bc17c2857ec2a7dd722a",
+          "event": ""
+        },
+        {
+          "data_length": 6,
+          "data_sha256": "7073e6d8763d986cda350de95e9d76e781824ce759283548dfaa1d2ca32e8c81",
+          "event": ""
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "chatcmpl-9i3Yuh3PpcNU3q3iLtHMRTz9",
+        "usage": {
+          "Input": 441,
+          "Output": 89,
+          "Total": 530
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Losu lo ravinpe di. Fa lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor notedal.",
+              "type": "reasoning"
+            },
+            {
+              "text": "Rokkara. Vapefa dalrokno ka vaber qui qui. Tezolo miteno tor mespe.",
+              "type": "text"
+            },
+            {
+              "arguments": "{\"ramimi\":\"Zo mimesqui ra roktordal su dal mesvadi sudi daltelan.\",\"limit\":43}",
+              "id": "call_hQB6tHvv5GN6MNvlfHyhjvKu",
+              "name": "tor_nolan",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "reasoning",
+              "text": "Losu lo ravinpe di. Fa lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor notedal."
+            },
+            {
+              "index": 1,
+              "type": "text",
+              "text": "Rokkara. Vapefa dalrokno ka vaber qui qui. Tezolo miteno tor mespe."
+            },
+            {
+              "index": 2,
+              "type": "tool_call",
+              "id": "call_hQB6tHvv5GN6MNvlfHyhjvKu",
+              "name": "tor_nolan",
+              "arguments": "{\"ramimi\":\"Zo mimesqui ra roktordal su dal mesvadi sudi daltelan.\",\"limit\":43}"
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "5a644c23530f6576a7e0fd6a280f744ecb57f5cd5393156fb8c892d4c8e694ca"
+  },
+  {
+    "label": "openai.chat_completions/usage_shapes",
+    "parser": "openai.chat_completions",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 318,
+          "data_sha256": "87223974a738e678825437130cb9a2c4a3042e3243b0a9fa0664667de7ce1e05",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "06526130bf8ad5148f7a82cdc4679a45ad741f77e45a9daadb1693631b691230",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "15aeea7956eef8f2b122d7b3bea730103194204515aeef80bec4f793316a3354",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "448955f57d4f62f3a0b4fcf915692ac9760e3bd7402c4bdd838382b3bdec6216",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "03ff6ca516056820bb30a638d6f0c397b123692111f8c73fd3efbf0d15d958aa",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "2932f85049fc24bf0e9b12b09e1e32de1ea9783251e8f334781359bbd6fab42e",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "b515a1e7d797e38c1583262d8329c32c652d76e526d3ea1b6795105b4d9ef5b5",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "010af22cf9f391b0050b3175bed4021a638e4abdb7e0dbb11e18332bec83bed9",
+          "event": ""
+        },
+        {
+          "data_length": 318,
+          "data_sha256": "ba1fc2f89b911ca09891334e0478103231124ab7bc9edcd9a27300491fd4cdc7",
+          "event": ""
+        },
+        {
+          "data_length": 303,
+          "data_sha256": "ffb324b95270fb6b3d9f7b9e09246a414a3e5c7c37472980dd79a826cf23dee5",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "6f4fd89604fc0d6cf5d4f98213701f469f05aa672e651b3d5c72c8586147ffd1",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "4647f700e408befc9a1d8df456b02506ff21e15b2b267440c699a574fed9d82b",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "afe12f3e4647b56be9c3576abe78aacb09a034bbde46b20d92df80322464a403",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "ffab7b1d7554c65fa6d45151b0699fa49e3773182919b3591113e09f4093b911",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "a1662995cbd5622799a7c7c93e49a16dfd776b1d830b2e7d90fb9cb0252a3861",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "4f4e63a421f2d661ab53b81c89919f281326ca5a2d3dd60993f88927fc22d4f8",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "c69b4b2da2d49d2355de5e0ce378b052cc7a583865dc99a57b3ea45b102397e0",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "aaeeb28d2fdd08042d0c2f428cc63f977323ec885a5560ab2702f2078741e9fe",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "634b7d9a8b8d0ceed066d97451f69cf909f1fbe59e6b8b76c9ae8baa88b1d328",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "d08248876651520573cd5c8de296ea475e90ae25b2b60991356dc878844d6a1a",
+          "event": ""
+        },
+        {
+          "data_length": 310,
+          "data_sha256": "beb0c3426e1f5e7dcd1fc189ac8e24dce159a202b22b8da70a8084e3892be331",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "9960a66529d6592e9081911dbc47936878465ac66763ee0f56f6ef8c7c3778a9",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "ad4bdbd08c818487772bb17987b9460c5e57e20b41ac59115a908b607097a73e",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "19f3f76d8c7b49139c667e1d1b34a290467fe17e54c4ac0ff6f6556f46d689e4",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "8cdbb3a4331946d309cca21448788d1aff2c3b177272c6afe8b5725f5bcf18ed",
+          "event": ""
+        },
+        {
+          "data_length": 308,
+          "data_sha256": "ae0f0c774f1a996368545ad6fc92452cc06dd12e86db8937443279b27f90a8d0",
+          "event": ""
+        },
+        {
+          "data_length": 302,
+          "data_sha256": "05c15abab99ea4196744be0bb2700b367eb00b28457163ee65be397c8b878947",
+          "event": ""
+        },
+        {
+          "data_length": 274,
+          "data_sha256": "4091a25b57f53dde316e6d61f7b79e0bfdf495d93a5f7ad2b9154021aeb74f45",
+          "event": ""
+        },
+        {
+          "data_length": 465,
+          "data_sha256": "a5463bc0f889f83507bc825870744240e121934f9486b7855122bacbb52cb064",
+          "event": ""
+        },
+        {
+          "data_length": 6,
+          "data_sha256": "7073e6d8763d986cda350de95e9d76e781824ce759283548dfaa1d2ca32e8c81",
+          "event": ""
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "chatcmpl-9i3Yuh3PpcNU3q3iLtHMRTz9",
+        "usage": {
+          "Input": 441,
+          "Output": 153,
+          "Total": 594
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Losu lo ravinpe di. Fa lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor notedal.",
+              "type": "reasoning"
+            },
+            {
+              "text": "Rokkara. Vapefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote dimes kapete.\n\nLanlo fazo dal fazoka dalpedal suber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava. Kadal fatorno. Peka vano ra mi.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "reasoning",
+              "text": "Losu lo ravinpe di. Fa lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor notedal."
+            },
+            {
+              "index": 1,
+              "type": "text",
+              "text": "Rokkara. Vapefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote dimes kapete.\n\nLanlo fazo dal fazoka dalpedal suber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava. Kadal fatorno. Peka vano ra mi."
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "1320dcb0c68278677080793cafbdfc8d22a00da44d592f0fb95941eaa5588ff2"
+  },
+  {
+    "label": "openai.responses/basic",
+    "parser": "openai.responses",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 3971,
+          "data_sha256": "9bcfe35786c05f6fe6116562e309e5ed0dc8fd8a889402397d58766f5f0aa8a9",
+          "event": "response.created"
+        },
+        {
+          "data_length": 3975,
+          "data_sha256": "49dcee557c284bac73aa1049343a8eb721f88f3dc44d0843fd8ac376dfc8951a",
+          "event": "response.in_progress"
+        },
+        {
+          "data_length": 191,
+          "data_sha256": "6f25e83c3c8d3273729916f71a8ae3c5c66cd5b4c3d2a7cc42cf4fa8593988d6",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 205,
+          "data_sha256": "049f143a9348041eceb77884ddcd43b9d2a5d1f826afd7c42d70c54d8fa6e85c",
+          "event": "response.content_part.added"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "191ec5a49f5df14cfac99fb5063f4f23a208de5bfe16604fd0f3e478a68268ee",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "3082091bd59c9b709ac4918162e8a2bb4db49dc50c896e87eb61cb31bb574490",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "750ef715ecde67c8927204180bc5c83a3c5650bcc66fb2a5bf109bad0f8914ae",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "e9491905b309522c5e90e8ade24db83289bae64120ffada809ebc3888d4765ea",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "8b3f092ea12e42350b875af516fa41f88cd3c27905cacf2589a46eaee4ff1f1d",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "890ae106ec4dbe06a7e6831f61a235bda21994d103cc8beb6487fabc9778e7b7",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "859804c875994c6948308d9b592ae0d2ae0dde00342bb2247ccfa2d259cf3faa",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "e27f7209aa22ccd021eb0872f5c1a69a9ad8c539fa19aa7f5e3bab41d522c19a",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "b6f6bc1ecddc6332cde16613b5036ae2ac976ca4d1e91a630c1ca9f0e3eac4a0",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 185,
+          "data_sha256": "4008478e95e077973f6d095d5cd75dcd6dbe7410b4cebc481ac2368b929ee038",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "eac902aef8e19e66f812da9f8d9a5d6e1838d459c23e2646d79a39938996d979",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "ee6eb6edb91be89db6d1a4a8ff3a150b28210d70b1b70cd73f3a73c60cac825e",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "5769a5a1a5a6b88ec91eff1f0ed64932d478ce13a3e9f5adcdd90cd88fc4d712",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "31c2e3cfa73be327001c7a5f7b291911b52211c8cb5b38bc69e26c6aff8bd305",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "c6cb9c19c9504f756327ab0627eb5b604c55bfeb070c28a8bd1d2f2bc9515dc6",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "e7ab7f6e383565145b3c5633579adb37dfd5e1d94782b06820921381cfa872b4",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 180,
+          "data_sha256": "bf5a7916f8b8957126d48038aff8f3e0061484164c1d85a2e619c597b4c95e77",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 564,
+          "data_sha256": "77311aaedb4ab778cbe3aa273f59cb581974ae6443642a87d7221ece53d15f42",
+          "event": "response.output_text.done"
+        },
+        {
+          "data_length": 612,
+          "data_sha256": "862605217f3c89d18313fc06e9748ee0504f36108ca867c6066633d1111efddc",
+          "event": "response.content_part.done"
+        },
+        {
+          "data_length": 659,
+          "data_sha256": "36586dc314ae6dae75f61c1745151cfba87eeb30ea19340768803c80178b4127",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 4694,
+          "data_sha256": "afff573d58b7afb66036a788f71358e3ed9b6eecfeed02e7733dfcfcba4bbe8b",
+          "event": "response.completed"
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "resp_h3PpcNU3q3iLtHMRTz9Jfqqm",
+        "usage": {
+          "Input": 441,
+          "Output": 104,
+          "Total": 545
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui zomi berlan dal lo rok. Fa pesu mifa.\n\nQuilober. Ranodi karok. Lo lolote vinfa quisu mes dalfafa telo rokrok. Lo pefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi nokava.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "text",
+              "text": "Lanberlo tedi dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui zomi berlan dal lo rok. Fa pesu mifa.\n\nQuilober. Ranodi karok. Lo lolote vinfa quisu mes dalfafa telo rokrok. Lo pefa dalrokno ka vaber qui qui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi nokava."
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "0a0e198a6fd5689dc6d34e08aa711a48d05d17b1c8a646109b1fd5c32b197c80"
+  },
+  {
+    "label": "openai.responses/tool_calls",
+    "parser": "openai.responses",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 3971,
+          "data_sha256": "9bcfe35786c05f6fe6116562e309e5ed0dc8fd8a889402397d58766f5f0aa8a9",
+          "event": "response.created"
+        },
+        {
+          "data_length": 3975,
+          "data_sha256": "49dcee557c284bac73aa1049343a8eb721f88f3dc44d0843fd8ac376dfc8951a",
+          "event": "response.in_progress"
+        },
+        {
+          "data_length": 236,
+          "data_sha256": "1ad473e8d0854651e6b736e4e0cab0529ff9dffb1467c4d5e087f974b3f368e0",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 164,
+          "data_sha256": "b02dc381abd399b0b08ca2e63612cc11c1244d229352ec652460f4896556e3a5",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 161,
+          "data_sha256": "196c952752852eec4ddc4ed38bfe2a5cf333ef298d01ceac7a4000b2577cb54d",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 164,
+          "data_sha256": "534e696ffcdbb0b6c058d2709c934a21088c9939e23bfa9cb9eccd825dfb213d",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 140,
+          "data_sha256": "ae447c79468b61239084edfafa179e51b327bf2d1fcedbfbe7b150a94b868203",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 221,
+          "data_sha256": "a4c20dc642d8006666709d29cf794bbff921ae03b565fae6511470d9fc5ceac0",
+          "event": "response.function_call_arguments.done"
+        },
+        {
+          "data_length": 314,
+          "data_sha256": "428e1cf2711f44381e429fe00a443dc9adede17ca906470993d5632373cc9c49",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 246,
+          "data_sha256": "9c48d0b0e2acfae96f33807a8927b1d44259999c163b74c509972f6dbaa4d445",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 165,
+          "data_sha256": "185386ebe17609b06c11ab23a7ce9687bbe68838ae6b317a93ae4b7108789d3c",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 162,
+          "data_sha256": "bdc79b8d5b5301d8ff17e69c2cc14a24da270cb8b6e49c98e3eab9d8e21daf40",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 165,
+          "data_sha256": "37b1c764136766873583a9b0e83c4b08dccb246019fbe58d9637f5ed52db721c",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 219,
+          "data_sha256": "adf703d05c2956286ea568c95fe85dd1effb94843f48caef4b2838745c4e0cf1",
+          "event": "response.function_call_arguments.done"
+        },
+        {
+          "data_length": 322,
+          "data_sha256": "19dd7d70df472c5f7ce3002df4635b897cef26848c52ce0eb61ccbfdf97c5cd7",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 4590,
+          "data_sha256": "1fdd30ae2f20f8c147ee6db469675e0724f164eef27365fd2b285d70c74a54e0",
+          "event": "response.completed"
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "resp_h3PpcNU3q3iLtHMRTz9Jfqqm",
+        "usage": {
+          "Input": 441,
+          "Output": 39,
+          "Total": 480
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "arguments": "{\"tordal\":\"Ravinpe di. Fa lanberlo tedi dal pe. Meslan ra fa.\",\"limit\":217}",
+              "id": "call_Skd26qY9ItCoZ4U45Tgue7ZS",
+              "name": "te_zo",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant"
+        }
+      },
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "arguments": "{\"vin\":\"Vinrok mesquilo. Farator. Kazosu diteno ra dizozo.\",\"limit\":120}",
+              "id": "call_extmrdBp7R4U2sn5FuMyOFhr",
+              "name": "lanlora_sudalva",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "tool_call",
+              "id": "call_Skd26qY9ItCoZ4U45Tgue7ZS",
+              "name": "te_zo",
+              "arguments": "{\"tordal\":\"Ravinpe di. Fa lanberlo tedi dal pe. Meslan ra fa.\",\"limit\":217}"
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "tool_call",
+              "id": "call_extmrdBp7R4U2sn5FuMyOFhr",
+              "name": "lanlora_sudalva",
+              "arguments": "{\"vin\":\"Vinrok mesquilo. Farator. Kazosu diteno ra dizozo.\",\"limit\":120}"
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "aaab5ab46407a6497af052247a906b0baa99f83104a690d083ed1314c5cd04cb"
+  },
+  {
+    "label": "openai.responses/reasoning",
+    "parser": "openai.responses",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 3971,
+          "data_sha256": "9bcfe35786c05f6fe6116562e309e5ed0dc8fd8a889402397d58766f5f0aa8a9",
+          "event": "response.created"
+        },
+        {
+          "data_length": 3975,
+          "data_sha256": "49dcee557c284bac73aa1049343a8eb721f88f3dc44d0843fd8ac376dfc8951a",
+          "event": "response.in_progress"
+        },
+        {
+          "data_length": 150,
+          "data_sha256": "90959a355364b17bf5c1f24578fd43bc06978d4d0755b88961c0e09c19ab6713",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 184,
+          "data_sha256": "cd2f29fec39ee29dc8553862dc4e9c02ec7aac225d9c812091835b75d2f85df2",
+          "event": "response.reasoning_summary_part.added"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "ccbb756537c4ce5014b6d3042dd629fa85eda0a36ec6112240b345b504032bfe",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "ce50d54c219bafd48f5fcd87915488cc257600a9528a0349ef656ca879a781f0",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "110ac4a6b8feebad6651bce2d8d1711f45a6179eb807d5a2954c8f5877927a06",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "c1ef6f8be048128a5218009578fb7a08c1fa59453724df43f43ac07e0474a962",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "cf06e9295c90c05f9a0c22d7b3629504f58e3cff57bb89045c51330c1854a25d",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "d1edb17c1f03df2155a7db22db1d947e25c9a26e4bbe8bec300207950021b925",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 179,
+          "data_sha256": "066db029469583d805399bf44125ea306bcfe1dde444727f0c131344c98db64a",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 179,
+          "data_sha256": "cbc839a5b2a90f22fa58bf7f3a57491b27706a31ec15b5d03d29fc553342e877",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 164,
+          "data_sha256": "7f7d68a4e415894b45ee764e13034869abdc55eced0e8d9e28926eb2e08626ff",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 354,
+          "data_sha256": "d0d25c735f5555b7147f5c5312c87a4abd8d7f53fcf97ea0ab3df94c9f53d441",
+          "event": "response.reasoning_summary_text.done"
+        },
+        {
+          "data_length": 385,
+          "data_sha256": "0d0286c85f789a51b7eeb223fb3537032af036cf0fea671e3840b111aa4f7a05",
+          "event": "response.reasoning_summary_part.done"
+        },
+        {
+          "data_length": 535,
+          "data_sha256": "3c6b56cc2fb637e3ce2df5da40095530055838b6b86f69d77a9c4af177d45766",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 192,
+          "data_sha256": "ebc4e060933d48a055a7ce36b2d700ebab9fa4b18a48242904bfece8a3d0e5b9",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 206,
+          "data_sha256": "a603212266fa09af77f0abd6f53c5bad8a116e4151737e72f2e5a692490d5aa8",
+          "event": "response.content_part.added"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "4309fd7e9c43106d782a476f5655da64f8fd7abfe16634ce046ae1ef951ee545",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "6fad025e86b36fcb4e81c30793b3c6320298acdfcb5fc696407d703777a4b4f5",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "2646e8f057bf4f6923364d9a2d70afb0461d83dbf47012bff76ebe83628810cd",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "41263892f992ff4fafbf573b57b576a16e51be930d679ccfb90b18d3581a16a5",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "87a6d2de3ad3cf24beef307a4b2e9f4c6522da7d8938c01a0e1efa25117263cf",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "5d3416d6e3338f2eba3e197e40a68d6d4b8fc934fbecafd5e4e15c386e101be0",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "2f9ea46a237083c30057b4d18a57651a28fad0fd2a59dc2f54290b0b4212035c",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "1f7985dec1122ef090a42a613d3cc50f94477817ce102e790a67ed2452796f52",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "f0e41ecf5af8fbe7d906e40f9f26000874e15368b0818f2f36c9e570b3a5236d",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 185,
+          "data_sha256": "e463127c66be55dfcf7b07d51b4d283fc2ecf22fbb3252496d515187063122a2",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "886efcff9ba207e052191edf3f3e4ba343ae008a7d3df97cc1933dddd6220713",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "9050b733efdbb59b7e09e547c584c6e1b156e3f28ab2244bc221b914c919ac93",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "29f5d7fb625213cec4d47551627b7e4fa31179ad340b474aacbdedae64d11945",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "5992e52b60cbf8e5f1658fd4aa31e33e259f357d513d766c5a97947ceb44d5fd",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "928fb4952ab4ef59c5da94c936468c7a48dcd7e2cc0bfb392bb24e49bf255cc8",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 185,
+          "data_sha256": "28e3559c7d7992ff5370be7df9a1aabb3fc72059159a9e77c920c33f4d17064f",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "f798003dac93b1a2b7657ce7d2759a5cb3387f6f38695cbcf41438aa921f0d29",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 568,
+          "data_sha256": "a2b5bef3e110fdaba11bf480ebb8d76d39db33a0110a870b6929b50d1f64de01",
+          "event": "response.output_text.done"
+        },
+        {
+          "data_length": 616,
+          "data_sha256": "92734221e573c340101c0e67f3841f40c23b4915cc44293683d48017c17195c8",
+          "event": "response.content_part.done"
+        },
+        {
+          "data_length": 663,
+          "data_sha256": "cba02c265b4821ee725df043dd1b753c725fe3d32966b3befec38b379f47f0d0",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 5153,
+          "data_sha256": "c82cda894016d8a2078bb545b776b8b6d992594a712ad201f7ae2cba92a037ab",
+          "event": "response.completed"
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "resp_h3PpcNU3q3iLtHMRTz9Jfqqm",
+        "usage": {
+          "Input": 441,
+          "Output": 155,
+          "Total": 596
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Tor vin su te dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su.",
+              "type": "reasoning"
+            }
+          ],
+          "role": "assistant"
+        }
+      },
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Rokmes norami. Qui rokmi kaqui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote fa meslan.\n\nTevin lozodi rokno lanfa lan pedalfa ber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava pe dal lanfa.\n\nLo kaqui ra mi lanvin mes karok.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "reasoning",
+              "text": "Tor vin su te dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su."
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "text",
+              "text": "Rokmes norami. Qui rokmi kaqui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote fa meslan.\n\nTevin lozodi rokno lanfa lan pedalfa ber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava pe dal lanfa.\n\nLo kaqui ra mi lanvin mes karok."
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "759598b21e8d863cc5f55b2f03ef1b9d651cc0288459f80a9b703de5bd59c033"
+  },
+  {
+    "label": "openai.responses/extensions",
+    "parser": "openai.responses",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 3971,
+          "data_sha256": "9bcfe35786c05f6fe6116562e309e5ed0dc8fd8a889402397d58766f5f0aa8a9",
+          "event": "response.created"
+        },
+        {
+          "data_length": 3975,
+          "data_sha256": "49dcee557c284bac73aa1049343a8eb721f88f3dc44d0843fd8ac376dfc8951a",
+          "event": "response.in_progress"
+        },
+        {
+          "data_length": 150,
+          "data_sha256": "90959a355364b17bf5c1f24578fd43bc06978d4d0755b88961c0e09c19ab6713",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 184,
+          "data_sha256": "cd2f29fec39ee29dc8553862dc4e9c02ec7aac225d9c812091835b75d2f85df2",
+          "event": "response.reasoning_summary_part.added"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "ccbb756537c4ce5014b6d3042dd629fa85eda0a36ec6112240b345b504032bfe",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "ce50d54c219bafd48f5fcd87915488cc257600a9528a0349ef656ca879a781f0",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "110ac4a6b8feebad6651bce2d8d1711f45a6179eb807d5a2954c8f5877927a06",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "c1ef6f8be048128a5218009578fb7a08c1fa59453724df43f43ac07e0474a962",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "cf06e9295c90c05f9a0c22d7b3629504f58e3cff57bb89045c51330c1854a25d",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "d1edb17c1f03df2155a7db22db1d947e25c9a26e4bbe8bec300207950021b925",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 179,
+          "data_sha256": "066db029469583d805399bf44125ea306bcfe1dde444727f0c131344c98db64a",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 179,
+          "data_sha256": "cbc839a5b2a90f22fa58bf7f3a57491b27706a31ec15b5d03d29fc553342e877",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 164,
+          "data_sha256": "7f7d68a4e415894b45ee764e13034869abdc55eced0e8d9e28926eb2e08626ff",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 354,
+          "data_sha256": "d0d25c735f5555b7147f5c5312c87a4abd8d7f53fcf97ea0ab3df94c9f53d441",
+          "event": "response.reasoning_summary_text.done"
+        },
+        {
+          "data_length": 385,
+          "data_sha256": "0d0286c85f789a51b7eeb223fb3537032af036cf0fea671e3840b111aa4f7a05",
+          "event": "response.reasoning_summary_part.done"
+        },
+        {
+          "data_length": 535,
+          "data_sha256": "3c6b56cc2fb637e3ce2df5da40095530055838b6b86f69d77a9c4af177d45766",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 192,
+          "data_sha256": "ed65029696f1b6eb05f0e41fb590937afef7c3df720e063834bd9f950e5e8a90",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 206,
+          "data_sha256": "e524b0be1ca509e79c8958bebae5986d56b534a28355e7ca66cb49e54ea0fb38",
+          "event": "response.content_part.added"
+        },
+        {
+          "data_length": 205,
+          "data_sha256": "c2ec4e6f80fe96ea2c1aa6c88c9707383b3d1dc522003abaef5a55a6a6a32f03",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 205,
+          "data_sha256": "529bff7c0f04233a5fcf281fb74c9335099017351c98f1f96a1d6bd5bd448619",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 204,
+          "data_sha256": "ce7df3f5b8df9e2968ddf41207f7311a77614eac61bab5ede9ac5d4b0ac6effb",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 279,
+          "data_sha256": "ed1fb043fac162a16d9021a3f399a43c48a4ddc4de4afaca986c9df362046ebc",
+          "event": "response.output_text.annotation.added"
+        },
+        {
+          "data_length": 130,
+          "data_sha256": "2784b007330b3363478b58bee8035ffc3b46d1d87aea104eb13d0bfda82ea171",
+          "event": "response.x_bench_extension.added"
+        },
+        {
+          "data_length": 228,
+          "data_sha256": "97516f209136f05aa11ed3deb12d31b0e578167d8fa3c5770cb39d15a62f3122",
+          "event": "response.output_text.done"
+        },
+        {
+          "data_length": 276,
+          "data_sha256": "c08510e0fb8ab596449979161637d679244087f3b1b09670c689003741be8be7",
+          "event": "response.content_part.done"
+        },
+        {
+          "data_length": 323,
+          "data_sha256": "16d944ee3ba9a027d3783e2d3f007ce9565ca317d2c84837493205f1d76f7fb6",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 237,
+          "data_sha256": "2648fe1501c383c72b24b45e36730cb9efe0be6e3b7e07ea190b41c223399b8a",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 165,
+          "data_sha256": "a8373003899072f6355a8b92cbc02ed2e369c2467f38000ef983f0dc1b20a1e2",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 162,
+          "data_sha256": "7bebb0e9e758b3c4ee7b62178ed6e74b9ab8766d76c74ec313ea1f9fa8b00a86",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 165,
+          "data_sha256": "dc5ab56c1d0066ff0b9b3e6a1fea735a918a87712267cd7578d8ca0eb5400319",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 142,
+          "data_sha256": "538a90196ad057b67983ff5b7fba14c2966626f3bb8a36341971c3a85024d748",
+          "event": "response.function_call_arguments.delta"
+        },
+        {
+          "data_length": 223,
+          "data_sha256": "52ea89dfe59ed890720c190ac199901decbb3af6b8e710c3d05f72d74c527e3d",
+          "event": "response.function_call_arguments.done"
+        },
+        {
+          "data_length": 316,
+          "data_sha256": "a7ea91719c2cd5be0c796ca5cfda81ef2d57f1fb5078783b1fb755590d163423",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 5047,
+          "data_sha256": "53bd18b69caa4ace5e3f7f9a69e2d70dbc976291f64c3c9dc5413af5cb70655e",
+          "event": "response.completed"
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "resp_h3PpcNU3q3iLtHMRTz9Jfqqm",
+        "usage": {
+          "Input": 441,
+          "Output": 90,
+          "Total": 531
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Tor vin su te dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su.",
+              "type": "reasoning"
+            }
+          ],
+          "role": "assistant"
+        }
+      },
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Rokmes norami. Qui rokmi kaqui. Tezolo miteno bermespe tezosu mimesqui.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      },
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "arguments": "{\"rok\":\"Ra roktordal su dal mesvadi di telanmi nokava lomessu.\",\"limit\":117}",
+              "id": "call_GN6MNvlfHyhjvKu7AsyOk4PT",
+              "name": "lo_zo",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "reasoning",
+              "text": "Tor vin su te dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su."
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "text",
+              "text": "Rokmes norami. Qui rokmi kaqui. Tezolo miteno bermespe tezosu mimesqui."
+            }
+          ]
+        },
+        {
+          "index": 2,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "tool_call",
+              "id": "call_GN6MNvlfHyhjvKu7AsyOk4PT",
+              "name": "lo_zo",
+              "arguments": "{\"rok\":\"Ra roktordal su dal mesvadi di telanmi nokava lomessu.\",\"limit\":117}"
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "76c8d6d1148a6d1f0abd2d99a0abc7389cd22cc20007d9b12d77c60d5cf150ef"
+  },
+  {
+    "label": "openai.responses/usage_shapes",
+    "parser": "openai.responses",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 3971,
+          "data_sha256": "9bcfe35786c05f6fe6116562e309e5ed0dc8fd8a889402397d58766f5f0aa8a9",
+          "event": "response.created"
+        },
+        {
+          "data_length": 3975,
+          "data_sha256": "49dcee557c284bac73aa1049343a8eb721f88f3dc44d0843fd8ac376dfc8951a",
+          "event": "response.in_progress"
+        },
+        {
+          "data_length": 150,
+          "data_sha256": "90959a355364b17bf5c1f24578fd43bc06978d4d0755b88961c0e09c19ab6713",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 184,
+          "data_sha256": "cd2f29fec39ee29dc8553862dc4e9c02ec7aac225d9c812091835b75d2f85df2",
+          "event": "response.reasoning_summary_part.added"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "ccbb756537c4ce5014b6d3042dd629fa85eda0a36ec6112240b345b504032bfe",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "ce50d54c219bafd48f5fcd87915488cc257600a9528a0349ef656ca879a781f0",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "110ac4a6b8feebad6651bce2d8d1711f45a6179eb807d5a2954c8f5877927a06",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "c1ef6f8be048128a5218009578fb7a08c1fa59453724df43f43ac07e0474a962",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "cf06e9295c90c05f9a0c22d7b3629504f58e3cff57bb89045c51330c1854a25d",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 178,
+          "data_sha256": "d1edb17c1f03df2155a7db22db1d947e25c9a26e4bbe8bec300207950021b925",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 179,
+          "data_sha256": "066db029469583d805399bf44125ea306bcfe1dde444727f0c131344c98db64a",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 179,
+          "data_sha256": "cbc839a5b2a90f22fa58bf7f3a57491b27706a31ec15b5d03d29fc553342e877",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 164,
+          "data_sha256": "7f7d68a4e415894b45ee764e13034869abdc55eced0e8d9e28926eb2e08626ff",
+          "event": "response.reasoning_summary_text.delta"
+        },
+        {
+          "data_length": 354,
+          "data_sha256": "d0d25c735f5555b7147f5c5312c87a4abd8d7f53fcf97ea0ab3df94c9f53d441",
+          "event": "response.reasoning_summary_text.done"
+        },
+        {
+          "data_length": 385,
+          "data_sha256": "0d0286c85f789a51b7eeb223fb3537032af036cf0fea671e3840b111aa4f7a05",
+          "event": "response.reasoning_summary_part.done"
+        },
+        {
+          "data_length": 535,
+          "data_sha256": "3c6b56cc2fb637e3ce2df5da40095530055838b6b86f69d77a9c4af177d45766",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 192,
+          "data_sha256": "ebc4e060933d48a055a7ce36b2d700ebab9fa4b18a48242904bfece8a3d0e5b9",
+          "event": "response.output_item.added"
+        },
+        {
+          "data_length": 206,
+          "data_sha256": "a603212266fa09af77f0abd6f53c5bad8a116e4151737e72f2e5a692490d5aa8",
+          "event": "response.content_part.added"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "4309fd7e9c43106d782a476f5655da64f8fd7abfe16634ce046ae1ef951ee545",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "6fad025e86b36fcb4e81c30793b3c6320298acdfcb5fc696407d703777a4b4f5",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "2646e8f057bf4f6923364d9a2d70afb0461d83dbf47012bff76ebe83628810cd",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "41263892f992ff4fafbf573b57b576a16e51be930d679ccfb90b18d3581a16a5",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "87a6d2de3ad3cf24beef307a4b2e9f4c6522da7d8938c01a0e1efa25117263cf",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "5d3416d6e3338f2eba3e197e40a68d6d4b8fc934fbecafd5e4e15c386e101be0",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "2f9ea46a237083c30057b4d18a57651a28fad0fd2a59dc2f54290b0b4212035c",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "1f7985dec1122ef090a42a613d3cc50f94477817ce102e790a67ed2452796f52",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "f0e41ecf5af8fbe7d906e40f9f26000874e15368b0818f2f36c9e570b3a5236d",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 185,
+          "data_sha256": "e463127c66be55dfcf7b07d51b4d283fc2ecf22fbb3252496d515187063122a2",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "886efcff9ba207e052191edf3f3e4ba343ae008a7d3df97cc1933dddd6220713",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "9050b733efdbb59b7e09e547c584c6e1b156e3f28ab2244bc221b914c919ac93",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "29f5d7fb625213cec4d47551627b7e4fa31179ad340b474aacbdedae64d11945",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "5992e52b60cbf8e5f1658fd4aa31e33e259f357d513d766c5a97947ceb44d5fd",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 183,
+          "data_sha256": "928fb4952ab4ef59c5da94c936468c7a48dcd7e2cc0bfb392bb24e49bf255cc8",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 185,
+          "data_sha256": "28e3559c7d7992ff5370be7df9a1aabb3fc72059159a9e77c920c33f4d17064f",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 182,
+          "data_sha256": "f798003dac93b1a2b7657ce7d2759a5cb3387f6f38695cbcf41438aa921f0d29",
+          "event": "response.output_text.delta"
+        },
+        {
+          "data_length": 568,
+          "data_sha256": "a2b5bef3e110fdaba11bf480ebb8d76d39db33a0110a870b6929b50d1f64de01",
+          "event": "response.output_text.done"
+        },
+        {
+          "data_length": 616,
+          "data_sha256": "92734221e573c340101c0e67f3841f40c23b4915cc44293683d48017c17195c8",
+          "event": "response.content_part.done"
+        },
+        {
+          "data_length": 663,
+          "data_sha256": "cba02c265b4821ee725df043dd1b753c725fe3d32966b3befec38b379f47f0d0",
+          "event": "response.output_item.done"
+        },
+        {
+          "data_length": 5153,
+          "data_sha256": "c82cda894016d8a2078bb545b776b8b6d992594a712ad201f7ae2cba92a037ab",
+          "event": "response.completed"
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "resp_h3PpcNU3q3iLtHMRTz9Jfqqm",
+        "usage": {
+          "Input": 441,
+          "Output": 155,
+          "Total": 596
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Tor vin su te dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su.",
+              "type": "reasoning"
+            }
+          ],
+          "role": "assistant"
+        }
+      },
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "Rokmes norami. Qui rokmi kaqui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote fa meslan.\n\nTevin lozodi rokno lanfa lan pedalfa ber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava pe dal lanfa.\n\nLo kaqui ra mi lanvin mes karok.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "reasoning",
+              "text": "Tor vin su te dallan di di dal pe. Meslan lo milober ber notefa. Ralovin mes nodi daltordal minolo lanlope tedalmes ka rator. Kazosu diteno tor zozo zovin minolo nolo ra pe landaltor te noqui berzo su."
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "text",
+              "text": "Rokmes norami. Qui rokmi kaqui. Tezolo miteno bermespe zo mimesqui ra roktordal su dal mesvadi di telanmi ka lomessu vin ber nozova zoquidal nora. Vami fano suva dal vasurok fames lanka ra roklanno ra. Tor zosusu. Di lanlote fa meslan.\n\nTevin lozodi rokno lanfa lan pedalfa ber. Lo vavinrok ber di torsulo fasufa di tor vintorrok kalo su lo farokka torzo vava pe dal lanfa.\n\nLo kaqui ra mi lanvin mes karok."
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "759598b21e8d863cc5f55b2f03ef1b9d651cc0288459f80a9b703de5bd59c033"
+  },
+  {
+    "label": "openai.completions/hand",
+    "parser": "openai.completions",
+    "layout": "openai.stream.response",
+    "envelope": {
+      "events": [
+        {
+          "data_length": 82,
+          "data_sha256": "d296fb51cb38cf0b9c1c77589b6944ffed7a0cbaa9272c2fdf2b0067830f65db",
+          "event": ""
+        },
+        {
+          "data_length": 172,
+          "data_sha256": "1e2e8fbcdd6e83ba90b8a0a6239d7a7fb3436739d2a16f96538c7741658f4e8d",
+          "event": ""
+        },
+        {
+          "data_length": 6,
+          "data_sha256": "7073e6d8763d986cda350de95e9d76e781824ce759283548dfaa1d2ca32e8c81",
+          "event": ""
+        }
+      ],
+      "format": "sse",
+      "summary": {
+        "error_code": "",
+        "error_type": "",
+        "response_id": "cmpl-example",
+        "usage": {
+          "Input": 3,
+          "Output": 2,
+          "Total": 5
+        }
+      }
+    },
+    "items": [
+      {
+        "kind": "stream_assistant",
+        "slot": "aggregate",
+        "value": {
+          "content": [
+            {
+              "text": "answer",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "conversation": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "assistant",
+          "phase": "response",
+          "direction": "upstream_to_client",
+          "content": [
+            {
+              "index": 0,
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruction_sha256": "0eb418c5fc875be6289ff3954c0db19d3a040e2b3b08be4f5bbc92bb75365cba"
+  }
+]
