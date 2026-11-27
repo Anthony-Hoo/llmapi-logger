@@ -20,6 +20,7 @@ import (
 	"llmapi-logger/internal/agentaccess"
 	"llmapi-logger/internal/agentaccess/agentaccesstest"
 	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights/models"
@@ -172,7 +173,13 @@ func (audits *scopedAudits) ReconstructTurn(_ context.Context, auditID string) (
 	if record.detail.Turn == nil {
 		return query.ReconstructedTurn{}, query.ErrNoTurnGraph
 	}
-	return query.ReconstructedTurn{Request: map[string]any{"model": "gpt-test", "owner": auditID}, Response: map[string]any{"id": "resp-" + auditID}}, nil
+	// A turn whose response layout is none rebuilds no response: the
+	// assembled envelope is null, as auditmodel.Assemble gives it.
+	var response any = map[string]any{"id": "resp-" + auditID}
+	if record.detail.Turn.ResponseLayout == auditmodel.LayoutNone {
+		response = nil
+	}
+	return query.ReconstructedTurn{Turn: *record.detail.Turn, Request: map[string]any{"model": "gpt-test", "owner": auditID}, Response: response}, nil
 }
 
 func (audits *scopedAudits) Timeline(_ context.Context, auditID string, side query.Side) (query.StreamTimeline, error) {

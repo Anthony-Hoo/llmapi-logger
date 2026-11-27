@@ -630,6 +630,13 @@ func (worker *Worker) backfillOne(ctx context.Context, analyzer AuditAnalyzer, a
 
 // backfillInput loads the evidence of one audit. A non-empty reason means the
 // audit is skipped; a non-nil error means the load failed.
+//
+// Raw retention is decided per side (doc/features/18 section 6): an abnormal
+// audit can have its request released and its response retained. Each side
+// is read from its raw chunks when they were retained and rebuilt from the
+// turn graph when they were released. The returned reconstruction is non-nil
+// only when the response was rebuilt, since only then must its stream summary
+// stand in for SSE bytes that are gone.
 func (worker *Worker) backfillInput(ctx context.Context, audit storage.ParserAudit) (Input, error, *Reconstruction, string, error) {
 	stage, err := worker.store.LoadParserStage(ctx, audit.AuditID, storage.StageRequestReceived)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && stage.Body == nil) {
@@ -638,7 +645,12 @@ func (worker *Worker) backfillInput(ctx context.Context, audit storage.ParserAud
 	if err != nil {
 		return Input{}, nil, nil, "evidence_read_failed", err
 	}
-	if stage.Body.RetentionState != storage.RetentionMetadata {
+	requestReleased := stage.Body.RetentionState == storage.RetentionMetadata
+	responseReleased, err := worker.responseReleased(ctx, audit.AuditID)
+	if err != nil {
+		return Input{}, nil, nil, "evidence_read_failed", err
+	}
+	if !requestReleased && !responseReleased {
 		input, evidenceErr := worker.loadInput(ctx, audit)
 		return input, evidenceErr, nil, "", nil
 	}
@@ -663,13 +675,40 @@ func (worker *Worker) backfillInput(ctx context.Context, audit storage.ParserAud
 		AuditID:  audit.AuditID,
 		Protocol: audit.Protocol,
 		Endpoint: audit.Path,
-		Request:  BodySource{Present: true, Complete: true, ContentType: "application/json", Data: reconstruction.Request},
 		Headers:  headers,
+	}
+	var evidenceErrors []error
+	if requestReleased {
+		input.Request = BodySource{Present: true, Complete: true, ContentType: "application/json", Data: reconstruction.Request}
+	} else {
+		request, _, requestErr := worker.loadBody(ctx, audit.AuditID, storage.StageRequestReceived)
+		input.Request = request
+		evidenceErrors = append(evidenceErrors, requestErr)
+	}
+	if !responseReleased {
+		response, statusCode, responseErr := worker.loadBody(ctx, audit.AuditID, storage.StageResponseReceived)
+		input.Response, input.StatusCode = response, statusCode
+		evidenceErrors = append(evidenceErrors, responseErr)
+		return input, errors.Join(evidenceErrors...), nil, "", nil
 	}
 	if len(reconstruction.Response) > 0 {
 		input.Response = BodySource{Present: true, Complete: true, ContentType: "application/json", Data: reconstruction.Response}
 	}
-	return input, nil, &reconstruction, "", nil
+	return input, errors.Join(evidenceErrors...), &reconstruction, "", nil
+}
+
+// responseReleased reports whether the response raw of an audit was released
+// after verified reconstruction. An audit without a response body has nothing
+// released.
+func (worker *Worker) responseReleased(ctx context.Context, auditID string) (bool, error) {
+	stage, err := worker.store.LoadParserStage(ctx, auditID, storage.StageResponseReceived)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return stage.Body != nil && stage.Body.RetentionState == storage.RetentionMetadata, nil
 }
 
 // applyStreamReconstruction fills the response-derived fields of a stream

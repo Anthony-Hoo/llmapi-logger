@@ -48,6 +48,8 @@ type insightsHarness struct {
 type upstreamResponse struct {
 	contentType string
 	body        string
+	// status is the upstream HTTP status; zero means 200.
+	status int
 }
 
 func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher security.Cipher, fp *security.AnalysisFingerprinter) parser.AuditAnalyzer) *insightsHarness {
@@ -89,6 +91,9 @@ func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher 
 		next := harness.response
 		harness.mu.Unlock()
 		response.Header().Set("Content-Type", next.contentType)
+		if next.status != 0 {
+			response.WriteHeader(next.status)
+		}
 		_, _ = io.WriteString(response, next.body)
 	}))
 	t.Cleanup(upstream.Close)
@@ -150,7 +155,11 @@ func (harness *insightsHarness) send(path string, headers http.Header, body stri
 	}
 	recorder := httptest.NewRecorder()
 	harness.handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
+	want := http.StatusOK
+	if response.status != 0 {
+		want = response.status
+	}
+	if recorder.Code != want {
 		harness.t.Fatalf("proxy status = %d body=%q", recorder.Code, recorder.Body.String())
 	}
 	ctx := context.Background()

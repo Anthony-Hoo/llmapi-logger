@@ -351,7 +351,9 @@ func saveProjectSafely(ctx context.Context, analyzer ProjectAnalyzer, input insi
 }
 
 // projectRequestBody returns the decoded request body when it can be had
-// cheaply and verifiably.
+// cheaply and verifiably. It reads the request side only, so per-side raw
+// retention needs nothing more: the request stage's own retention says
+// whether the body comes from raw or from the turn.
 func (worker *Worker) projectRequestBody(ctx context.Context, audit storage.ParserAudit) ([]byte, bool) {
 	stage, err := worker.store.LoadParserStage(ctx, audit.AuditID, storage.StageRequestReceived)
 	if err != nil || stage.Body == nil {

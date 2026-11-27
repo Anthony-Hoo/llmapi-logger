@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/storage"
@@ -800,11 +801,17 @@ func agentExportStates(detail query.Detail) map[string]agentExportState {
 	if detail.Conversation == nil {
 		states["conversation"] = parsed(exportReasonNoConversation)
 	}
+	// The two reconstructions, like the two raw bodies below, are reported
+	// per side: raw retention is decided per side, and a turn whose response
+	// layout is none (no response arrived) rebuilds a request but no response.
 	reconstruction := available
 	if detail.Turn == nil {
 		reconstruction = parsed(exportReasonNotReconstructed)
 	}
 	states["request"], states["response"] = reconstruction, reconstruction
+	if detail.Turn != nil && detail.Turn.ResponseLayout == auditmodel.LayoutNone {
+		states["response"] = never(exportReasonNoBody)
+	}
 	for _, side := range []string{"request", "response"} {
 		body := agentSideBody(detail.Bodies, side)
 		var timeline, raw agentExportState
