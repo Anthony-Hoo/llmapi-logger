@@ -246,9 +246,16 @@ func handStreams() []normalizeCase {
 	compact := "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp-hand\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"model-example\",\"output\":[]}}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp-hand\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"model-example\",\"output\":" + compactOutput +
 		",\"usage\":{\"input_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":4},\"output_tokens\":2,\"total_tokens\":11}}}\n\n"
+	// streamGenerateContent without alt=sse answers with one JSON array of
+	// chunks, which the catalogue does not render.
+	geminiArray := input("gemini", "/v1beta/models/model-example:streamGenerateContent", `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`, "")
+	geminiArray.Response = jsonBody(`[{"candidates":[{"content":{"role":"model","parts":[{"text":"thinking","thought":true}]},"index":0}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1,"totalTokenCount":5}},` +
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"ans"},{"functionCall":{"name":"lookup","args":{"q":"x"}}}]},"index":0}]},` +
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"wer"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":6,"thoughtsTokenCount":2,"totalTokenCount":12},"modelVersion":"model-example","responseId":"gem-array"}]`)
 	return []normalizeCase{
 		{"completions/sse", "openai.completions", input("openai", "/v1/completions", `{"model":"model-example","prompt":"hello","stream":true}`, completions)},
 		{"responses_compact/sse", "openai.responses_compact", input("openai", "/v1/responses/compact", `{"model":"model-example","input":[{"role":"user","content":"hello"}],"stream":true}`, compact)},
+		{"gemini/json array", "gemini.stream_generate_content", geminiArray},
 	}
 }
 
@@ -319,7 +326,7 @@ func TestNormalizersKeepFidelity(t *testing.T) {
 func TestStreamResidueCarriesFixtureExtensions(t *testing.T) {
 	t.Parallel()
 	cipher := testCipher(t)
-	for _, protocol := range []protofixture.Protocol{protofixture.OpenAIResponses, protofixture.OpenAIChat, protofixture.AnthropicMessages} {
+	for _, protocol := range []protofixture.Protocol{protofixture.OpenAIResponses, protofixture.OpenAIChat, protofixture.AnthropicMessages, protofixture.Gemini} {
 		exchanges, err := protofixture.Build(protofixture.Case{Protocol: protocol, Scenario: protofixture.ScenarioExtensions, Stream: true}, protofixture.Options{Seed: 42})
 		if err != nil {
 			t.Fatal(err)
@@ -340,17 +347,32 @@ func TestStreamResidueCarriesFixtureExtensions(t *testing.T) {
 			if auditmodel.DecodeJSON(event.Data, &root) != nil {
 				continue
 			}
-			for key, field := range root {
-				if !strings.HasPrefix(key, "x_bench") && key != "obfuscation" && key != "detail" && key != "annotation" {
-					continue
+			// A Gemini chunk carries its extensions on the candidate.
+			holders := []map[string]any{root}
+			for _, candidate := range asSlice(root["candidates"]) {
+				if object, ok := candidate.(map[string]any); ok {
+					holders = append(holders, object)
 				}
-				encoded, _ := auditmodel.CanonicalJSON(field)
-				if !bytes.Contains(rebuilt, encoded) {
-					t.Errorf("%s: extension %s=%s is lost", protocol, key, encoded)
+			}
+			for _, holder := range holders {
+				for key, field := range holder {
+					if !strings.HasPrefix(key, "x_bench") && key != "obfuscation" && key != "detail" && key != "annotation" &&
+						key != "avgLogprobs" && key != "citationMetadata" {
+						continue
+					}
+					encoded, _ := auditmodel.CanonicalJSON(field)
+					if !bytes.Contains(rebuilt, encoded) {
+						t.Errorf("%s: extension %s=%s is lost", protocol, key, encoded)
+					}
 				}
 			}
 		}
 	}
+}
+
+func asSlice(value any) []any {
+	values, _ := value.([]any)
+	return values
 }
 
 func TestOverLimitResidueKeepsTheRawBody(t *testing.T) {
@@ -369,5 +391,13 @@ func TestOverLimitResidueKeepsTheRawBody(t *testing.T) {
 	_, err := storeAndRebuild(t, testCipher(t), "anthropic.messages", input)
 	if !errors.Is(err, streamevidence.ErrResidueTooLarge) || !errors.Is(err, base.ErrStreamResidueTooLarge) {
 		t.Fatalf("error = %v, want ErrResidueTooLarge", err)
+	}
+
+	gemini := "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"h\"}]},\"index\":0}],\"x_unknown\":\"" + padding + "\"}\r\n\r\n" +
+		"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"i\"}]},\"finishReason\":\"STOP\",\"index\":0}]}\r\n\r\n"
+	input = base.Input{AuditID: "apx_big", Protocol: "gemini", Endpoint: "/v1beta/models/m:streamGenerateContent", StatusCode: &status,
+		Request: jsonBody(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`), Response: sseBody(gemini)}
+	if _, err := storeAndRebuild(t, testCipher(t), "gemini.stream_generate_content", input); !errors.Is(err, streamevidence.ErrResidueTooLarge) {
+		t.Fatalf("gemini error = %v, want ErrResidueTooLarge", err)
 	}
 }

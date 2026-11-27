@@ -17,6 +17,12 @@ func (worker *Worker) BackfillForTest(ctx context.Context) int {
 	return worker.backfill(ctx)
 }
 
+// ProjectBackfillForTest runs one project identity backfill pass and returns
+// how many audits it attempted.
+func (worker *Worker) ProjectBackfillForTest(ctx context.Context) int {
+	return worker.projectBackfill(ctx)
+}
+
 // BackfillInputForTest loads the evidence backfill would analyse for one
 // audit: the input, whether a rebuilt stream summary stands in for the
 // response, and the skip reason or error.

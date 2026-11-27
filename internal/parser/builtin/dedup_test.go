@@ -78,7 +78,7 @@ func TestStreamAndJSONResponsesShareItemObjects(t *testing.T) {
 	// streamed or not. Its Chat answers differ on purpose (a non-stream
 	// message carries "annotations": [] and a null content where a stream
 	// sends ""), as real ones do, so Chat and Completions use hand pairs.
-	for _, protocol := range []protofixture.Protocol{protofixture.OpenAIResponses, protofixture.AnthropicMessages} {
+	for _, protocol := range []protofixture.Protocol{protofixture.OpenAIResponses, protofixture.AnthropicMessages, protofixture.Gemini} {
 		for _, scenario := range protofixture.NormalScenarios() {
 			if protocol == protofixture.AnthropicMessages && scenario == protofixture.ScenarioExtensions {
 				continue // the streamed answer has an extra server_tool_use block
@@ -88,6 +88,12 @@ func TestStreamAndJSONResponsesShareItemObjects(t *testing.T) {
 			for index := range streamed {
 				pairs = append(pairs, pair{fmt.Sprintf("%s/%s#%d", protocol, scenario, index), streamed[index].ParserName,
 					exchangeInput(streamed[index]), exchangeInput(plain[index])})
+				if plain[index].ParserName != streamed[index].ParserName {
+					// Gemini's two operations are two parsers that store
+					// either form the same way.
+					pairs = append(pairs, pair{fmt.Sprintf("%s/%s#%d/%s", protocol, scenario, index, plain[index].ParserName), plain[index].ParserName,
+						exchangeInput(streamed[index]), exchangeInput(plain[index])})
+				}
 			}
 		}
 	}
@@ -231,13 +237,16 @@ func TestStreamedConversationSharesObjectsWithTheNextRequest(t *testing.T) {
 		wantEchoesOnce bool
 	}
 	var cases []turnPair
-	for _, protocol := range []protofixture.Protocol{protofixture.OpenAIResponses, protofixture.OpenAIChat, protofixture.AnthropicMessages} {
+	for _, protocol := range []protofixture.Protocol{protofixture.OpenAIResponses, protofixture.OpenAIChat, protofixture.AnthropicMessages, protofixture.Gemini} {
 		streamed, _ := protofixture.Build(protofixture.Case{Protocol: protocol, Scenario: protofixture.ScenarioMultiTurn, Stream: true}, protofixture.Options{Seed: 13})
 		plain, _ := protofixture.Build(protofixture.Case{Protocol: protocol, Scenario: protofixture.ScenarioMultiTurn, Stream: false}, protofixture.Options{Seed: 13})
 		cases = append(cases, turnPair{label: string(protocol) + "/catalogue", parser: streamed[0].ParserName,
 			stream:         [2]base.Input{exchangeInput(streamed[0]), exchangeInput(streamed[1])},
 			plain:          [2]base.Input{exchangeInput(plain[0]), exchangeInput(plain[1])},
-			wantEchoesOnce: protocol == protofixture.OpenAIResponses})
+			wantEchoesOnce: protocol == protofixture.OpenAIResponses,
+			// The catalogue client resends a Gemini answer's content as it
+			// came, which is the object the response stored.
+			wantReuse: protocol == protofixture.Gemini})
 	}
 	status := 200
 	input := func(path, request, response string) base.Input {

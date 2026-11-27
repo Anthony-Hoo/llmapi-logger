@@ -12,6 +12,7 @@ import (
 
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
+	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/sqlite"
 )
@@ -118,6 +119,55 @@ func TestParsedResultReadersAcceptLegacyAndCompressedRows(t *testing.T) {
 	} {
 		if got != string(want) {
 			t.Fatalf("%s conversation differs from the stored one", name)
+		}
+	}
+}
+
+// TestGeminiRowsWithoutATurnReadTheirFallback: a Gemini audit parsed before
+// Gemini had a normalizer (parser version 2: ok, full raw, no turn graph, the
+// conversation in parsed_json_enc) reads exactly as it did. Registering a
+// conversation rebuild for the parser name changes nothing for it: the
+// detail and the session view return the stored conversation, and the
+// backfill is told there is no turn to rebuild.
+func TestGeminiRowsWithoutATurnReadTheirFallback(t *testing.T) {
+	t.Parallel()
+	cipher := testCipher(t)
+	for _, parserName := range []string{"gemini.generate_content", "gemini.stream_generate_content"} {
+		auditID := "audit-gemini-v2-" + parserName
+		plaintext, err := json.Marshal(map[string]any{"protocol": "gemini", "status": "ok", "conversation": largeFallbackConversation()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		aad, err := security.AAD(auditID, "parsed_json", parserName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sealed, err := cipher.Encrypt(aad, plaintext)
+		if err != nil {
+			t.Fatal(err)
+		}
+		detail := parsedResultDetail(t, cipher, auditID, parserName, sealed)
+		detail.Audit.CaptureStatus, detail.Audit.ParseStatus, detail.ParsedResult.Status = sqlite.CaptureComplete, sqlite.ParseOK, sqlite.ParseOK
+		service, err := New(&fakeStore{healthy: true, detail: detail}, cipher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := service.Get(context.Background(), auditID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := service.SessionConversation(context.Background(), auditID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := json.Marshal(largeFallbackConversation())
+		fromDetail, _ := json.Marshal(got.Conversation)
+		fromSession, _ := json.Marshal(session)
+		if string(fromDetail) != string(want) || string(fromSession) != string(want) {
+			t.Fatalf("%s: the stored conversation does not read back", parserName)
+		}
+		if _, err := service.ReconstructBodies(context.Background(), auditID); !errors.Is(err, parser.ErrReconstructionUnavailable) {
+			t.Fatalf("%s: reconstruct = %v, want ErrReconstructionUnavailable", parserName, err)
 		}
 	}
 }

@@ -32,6 +32,13 @@ const (
 	LayoutAnthropicMessagesRequestSystemArray  = "anthropic.messages.request.system_array"
 	LayoutAnthropicStreamResponse              = "anthropic.stream.response"
 
+	LayoutGeminiRequestSystemNone   = "gemini.generate_content.request.system_none"
+	LayoutGeminiRequestSystemSingle = "gemini.generate_content.request.system_single"
+	LayoutGeminiStreamResponse      = "gemini.stream.response"
+
+	SlotContents          = "contents"
+	SlotSystemInstruction = "systemInstruction"
+
 	SlotInstructions = "instructions"
 	SlotMessages     = "messages"
 	SlotInput        = "input"
@@ -160,7 +167,13 @@ type Turn struct {
 	// under those keys, where a matching key is caller-defined data, such as a
 	// tool argument, and must stay a plain string.
 	SkipInlineFileData bool
-	CreatedAtNS        int64
+	// InlineDataParts turns on the Gemini inline part rule: the base64 "data"
+	// string of an inlineData (or inline_data) object is stored as a binary
+	// object by its decoded bytes. It applies only when the string is the
+	// canonical padded standard encoding of those bytes, so rebuilding it
+	// gives the same string; any other string stays as it is.
+	InlineDataParts bool
+	CreatedAtNS     int64
 }
 
 type ObjectRef struct {

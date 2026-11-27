@@ -18,6 +18,9 @@ func TestLayoutNamesArePinned(t *testing.T) {
 		"anthropic.messages.request.system_none",
 		"anthropic.messages.request.system_single",
 		"anthropic.stream.response",
+		"gemini.generate_content.request.system_none",
+		"gemini.generate_content.request.system_single",
+		"gemini.stream.response",
 		"marker_envelope",
 		"none",
 		"openai.chat.request.messages",
@@ -38,7 +41,7 @@ func TestLayoutNamesArePinned(t *testing.T) {
 			streams = append(streams, name)
 		}
 	}
-	if wantStreams := []string{"anthropic.stream.response", "openai.stream.response", "openai.stream.response.v2"}; !slices.Equal(streams, wantStreams) {
+	if wantStreams := []string{"anthropic.stream.response", "gemini.stream.response", "openai.stream.response", "openai.stream.response.v2"}; !slices.Equal(streams, wantStreams) {
 		t.Fatalf("stream layouts = %q, want %q", streams, wantStreams)
 	}
 	if KnownLayout("openai.unknown") || StreamLayout("openai.unknown") {
@@ -131,6 +134,26 @@ func assembleLegacy(layout string, envelope any, items []Item) (any, error) {
 			}
 		}
 		return root, nil
+	case LayoutGeminiRequestSystemNone, LayoutGeminiRequestSystemSingle:
+		// Added after the switch was replaced, in its style, so the table rows
+		// of the Gemini request layouts are held to the same check.
+		if root == nil {
+			return nil, ErrReconstruction
+		}
+		root[SlotContents] = valuesForSlot(items, values, SlotContents)
+		system := valuesForSlot(items, values, SlotSystemInstruction)
+		switch layout {
+		case LayoutGeminiRequestSystemSingle:
+			if len(system) != 1 {
+				return nil, ErrReconstruction
+			}
+			root[SlotSystemInstruction] = system[0]
+		case LayoutGeminiRequestSystemNone:
+			if len(system) != 0 {
+				return nil, ErrReconstruction
+			}
+		}
+		return root, nil
 	case LayoutMarkerEnvelope:
 		return replaceItemMarkers(cloned, values)
 	case LayoutOpenAIStreamResponse:
@@ -151,6 +174,7 @@ func assembleLegacy(layout string, envelope any, items []Item) (any, error) {
 var aggregateIsBody = map[string]bool{
 	LayoutAnthropicStreamResponse: true,
 	LayoutOpenAIStreamResponseV2:  true,
+	LayoutGeminiStreamResponse:    true,
 }
 
 func TestStreamBodyLayoutsAssembleMarkers(t *testing.T) {
@@ -190,7 +214,8 @@ func TestStreamBodyLayoutsAssembleMarkers(t *testing.T) {
 // every slot, and requires the same value and the same error.
 func TestAssembleMatchesLegacySwitch(t *testing.T) {
 	t.Parallel()
-	allSlots := []string{SlotInstructions, SlotMessages, SlotInput, SlotPrompt, SlotOutput, SlotChoice, SlotAggregate, SlotSystem, SlotContent}
+	allSlots := []string{SlotInstructions, SlotMessages, SlotInput, SlotPrompt, SlotOutput, SlotChoice, SlotAggregate, SlotSystem, SlotContent,
+		SlotContents, SlotSystemInstruction}
 	envelopes := map[string]func() any{
 		"object": func() any { return map[string]any{"model": "model-example", "kept": []any{"a"}} },
 		"markers": func() any {

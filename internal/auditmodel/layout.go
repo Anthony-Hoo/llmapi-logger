@@ -89,6 +89,12 @@ var layouts = map[string]layoutSpec{
 	// instructions and tools), exactly like marker_envelope.
 	LayoutAnthropicStreamResponse: {kind: layoutMarkers, stream: true},
 	LayoutOpenAIStreamResponseV2:  {kind: layoutMarkers, stream: true},
+	LayoutGeminiStreamResponse:    {kind: layoutMarkers, stream: true},
+
+	LayoutGeminiRequestSystemNone: slots(
+		slotRule{SlotContents, slotArray}, slotRule{SlotSystemInstruction, slotAbsent}),
+	LayoutGeminiRequestSystemSingle: slots(
+		slotRule{SlotContents, slotArray}, slotRule{SlotSystemInstruction, slotOne}),
 }
 
 // SlotTools holds the tool definitions a Responses stream's terminal

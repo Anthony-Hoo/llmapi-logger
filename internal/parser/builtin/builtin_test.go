@@ -28,8 +28,8 @@ func TestParserNamesAndVersionsArePinned(t *testing.T) {
 		"openai.responses@3",
 		"openai.responses_compact@3",
 		"anthropic.messages@3",
-		"gemini.generate_content@2",
-		"gemini.stream_generate_content@2",
+		"gemini.generate_content@3",
+		"gemini.stream_generate_content@3",
 	}
 	var got []string
 	for _, implementation := range builtin.All() {
@@ -47,7 +47,8 @@ func TestParserNamesAndVersionsArePinned(t *testing.T) {
 			normalizers = append(normalizers, adapter.Name())
 		}
 	}
-	if wantNormalizers := []string{"openai.chat_completions", "openai.completions", "openai.responses", "openai.responses_compact", "anthropic.messages"}; !slices.Equal(normalizers, wantNormalizers) {
+	if wantNormalizers := []string{"openai.chat_completions", "openai.completions", "openai.responses", "openai.responses_compact", "anthropic.messages",
+		"gemini.generate_content", "gemini.stream_generate_content"}; !slices.Equal(normalizers, wantNormalizers) {
 		t.Fatalf("normalizers = %q, want %q", normalizers, wantNormalizers)
 	}
 }
@@ -85,7 +86,7 @@ func TestEveryLayoutHasAnOwner(t *testing.T) {
 
 func TestRebuildConversationRejectsAParserWithoutRebuild(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"gemini.generate_content", "openai.unknown", ""} {
+	for _, name := range []string{"gemini.unknown", "openai.unknown", ""} {
 		if _, err := builtin.Registry().RebuildConversation(name, map[string]any{}, nil, auditmodel.LayoutNone); !errors.Is(err, base.ErrUnknownParser) {
 			t.Errorf("%q: error = %v, want ErrUnknownParser", name, err)
 		}
@@ -95,13 +96,15 @@ func TestRebuildConversationRejectsAParserWithoutRebuild(t *testing.T) {
 func TestNewRegistryRejectsInconsistentAdapters(t *testing.T) {
 	t.Parallel()
 	chat := builtin.Registry().Adapters()[0]
-	gemini := builtin.Registry().Adapters()[5]
+	// Every built-in parser normalizes; wrapping one hides NormalizeAudit.
+	summaryOnly := summaryParser{chat.Parser}
 	cases := map[string][]base.Adapter{
 		"duplicate":              {chat, chat},
 		"no parser":              {{}},
 		"normalizer no rebuild":  {{Parser: chat.Parser, Layouts: chat.Layouts}},
 		"normalizer no layouts":  {{Parser: chat.Parser, Conversation: chat.Conversation}},
-		"rebuild w/o normalizer": {{Parser: gemini.Parser, Conversation: chat.Conversation}},
+		"rebuild w/o normalizer": {{Parser: summaryOnly, Conversation: chat.Conversation}},
+		"layouts w/o normalizer": {{Parser: summaryOnly, Layouts: chat.Layouts}},
 		"unknown layout":         {{Parser: chat.Parser, Conversation: chat.Conversation, Layouts: []string{"openai.unknown"}}},
 	}
 	for name, adapters := range cases {
@@ -109,7 +112,14 @@ func TestNewRegistryRejectsInconsistentAdapters(t *testing.T) {
 			t.Errorf("%s: registry accepted", name)
 		}
 	}
+	if _, err := base.NewRegistry(base.Adapter{Parser: summaryOnly}); err != nil {
+		t.Errorf("a parser without normalizer and without rebuild or layouts: %v", err)
+	}
 }
+
+// summaryParser is a parser that keeps only a summary: it exposes Parse but
+// not NormalizeAudit.
+type summaryParser struct{ base.Parser }
 
 type normalizeCase struct {
 	label  string
@@ -158,6 +168,24 @@ func handCases() []normalizeCase {
 		normalizeCase{"anthropic/system single", "anthropic.messages", input("anthropic", "/v1/messages", jsonBody(`{"model":"model-example","max_tokens":16,"system":"be brief","messages":[{"role":"user","content":"hello"}]}`), base.BodySource{})},
 		normalizeCase{"anthropic/system array", "anthropic.messages", input("anthropic", "/v1/messages", jsonBody(`{"model":"model-example","max_tokens":16,"system":[{"type":"text","text":"be brief"}],"messages":[{"role":"user","content":"hello"}]}`), base.BodySource{})},
 	)
+	// Both Gemini parsers read a response by its form, not by the operation,
+	// so each is driven with every form.
+	geminiJSON := jsonBody(`{"candidates":[{"content":{"role":"model","parts":[{"text":"answer"}]},"finishReason":"STOP","index":0}],"responseId":"gem-hand"}`)
+	geminiSSE := sseBody("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ans\"}]},\"index\":0}],\"responseId\":\"gem-hand\"}\r\n\r\n" +
+		"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"wer\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"responseId\":\"gem-hand\"}\r\n\r\n")
+	geminiArray := jsonBody(`[{"candidates":[{"content":{"role":"model","parts":[{"text":"ans"}]},"index":0}]},{"candidates":[{"content":{"role":"model","parts":[{"text":"wer"}]},"finishReason":"STOP","index":0}]}]`)
+	for _, name := range []string{"gemini.generate_content", "gemini.stream_generate_content"} {
+		path := "/v1beta/models/model-example:generateContent"
+		if name == "gemini.stream_generate_content" {
+			path = "/v1beta/models/model-example:streamGenerateContent"
+		}
+		cases = append(cases,
+			normalizeCase{name + "/system none", name, input("gemini", path, jsonBody(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`), geminiJSON)},
+			normalizeCase{name + "/system null", name, input("gemini", path, jsonBody(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"systemInstruction":null}`), geminiSSE)},
+			normalizeCase{name + "/system single", name, input("gemini", path, jsonBody(`{"systemInstruction":{"parts":[{"text":"be brief"}]},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`), geminiArray)},
+			normalizeCase{name + "/no response", name, input("gemini", path, jsonBody(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`), base.BodySource{})},
+		)
+	}
 	return cases
 }
 

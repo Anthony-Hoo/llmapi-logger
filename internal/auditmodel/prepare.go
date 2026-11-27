@@ -36,6 +36,7 @@ func PrepareWithLookup(turn Turn, cipher security.Cipher, lookup ObjectLookup) (
 	}
 	accumulator := newBinaryAccumulator()
 	accumulator.skipInlineFileData = turn.SkipInlineFileData
+	accumulator.inlineDataParts = turn.InlineDataParts
 	encoder := &contentEncoder{}
 	defer encoder.release()
 	objects := make(map[string]plainContentCandidate)

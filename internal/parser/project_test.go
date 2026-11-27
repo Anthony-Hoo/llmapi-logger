@@ -143,7 +143,7 @@ func TestProjectBackfillReadsTheBodyOnlyWhenHeadersAreWeak(t *testing.T) {
 	for _, id := range []string{"weak", "released"} {
 		base.audits[id] = sqlite.ParserAudit{AuditID: id, Protocol: "anthropic", ParserName: "anthropic.messages", ParseStatus: sqlite.ParseOK}
 	}
-	base.audits["unsupported"] = sqlite.ParserAudit{AuditID: "unsupported", Protocol: "gemini", ParserName: "gemini.generate_content", ParseStatus: sqlite.ParseOK}
+	base.audits["unsupported"] = sqlite.ParserAudit{AuditID: "unsupported", Protocol: "example", ParserName: "example.summary_only", ParseStatus: sqlite.ParseOK}
 	strong := base.audits["strong"]
 	strong.ParseStatus = sqlite.ParseOK
 	base.audits["strong"] = strong
@@ -162,7 +162,7 @@ func TestProjectBackfillReadsTheBodyOnlyWhenHeadersAreWeak(t *testing.T) {
 	}
 	base.headers = []sqlite.HeaderEvidence{encryptedRequestHeader(t, cipher, "strong", "X-Codex-Turn-Metadata", 0, `{"workspaces":{}}`)}
 	worker, err := NewWorker(store, cipher, []Parser{
-		normalizingParser{&recordingParser{name: "anthropic.messages"}}, &recordingParser{name: "gemini.generate_content"},
+		normalizingParser{&recordingParser{name: "anthropic.messages"}}, &recordingParser{name: "example.summary_only"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

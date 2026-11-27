@@ -52,6 +52,7 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 - `file_id` 等外部引用保留在 canonical item 中，并记录引用类型和 JSON pointer；代理没有读取到文件字节时不得伪造本地 binary object。
 - `file_data`、明确的 Base64 附件或 data URL 中实际出现的文件字节按 binary object 保存。
+- Gemini 的 inline part（`inlineData`/`inline_data` 对象的 `data`）按解码字节保存为 binary object，只由 Gemini normalizer 启用（`Turn.InlineDataParts`），其他协议不受影响。只有标准带 padding 的 Base64 才提取，重建出的字符串与原文逐字节相同；其他写法原样留在 content object 里（模块 08 §8）。
 - 一个 content object 到 binary/external object 的引用单独建表，既用于审计展示，也用于 retention 后的可达性清理。
 
 ## 5. 压缩与加密
@@ -129,6 +130,8 @@ canonical Prepare 在同一轮内先以规范化明文 hash 去重，再压缩�
 父轮次优先按协议显式字段关联，例如 `previous_response_id`，命中即链接。其次使用稳定 conversation/thread key 的域分离 hash；没有显式 id 时，只在最近候选中存在强内容关系时使用 item sequence 推断；证据不足则创建新根轮次（无 key 时即新 conversation），禁止为了形成线性链而强行关联。
 
 Anthropic Messages 的 key 取客户端声明的会话 ID（`insights.DeclaredSessionID`：`metadata.session_id`/`conversation_id`/`thread_id`，或 Claude Code 放在 `metadata.user_id` 里的会话 ID）。`metadata.user_id` 本身标识的是用户而不是会话，只有用户 ID 时不作 key，否则一个用户的全部会话会并进同一个 conversation；这类请求走上一段末尾的内容推断，规则与无 key 的 OpenAI 请求相同。Anthropic 的 conversation 用于主列表的折叠、筛选和轮次计数；[模块 20](20-context-insights.md) 的会话归属不使用它（`insights.Link` 只对 OpenAI 采用 turn conversation），Anthropic 记录在洞察中的会话规则不变。
+
+Gemini GenerateContent 没有 key：请求里没有会话标识，`cachedContent` 是可共用的上下文缓存，不是会话（模块 08 §8）。Gemini 请求一律走上一段末尾的内容推断，规则与无 key 的 OpenAI 请求相同。
 
 conversation key 只确定“属于哪个客户端会话”，不确定“接在哪一轮后面”。OpenAI 的 key 依次取 `conversation_id`、`conversation`/`conversation.id`、`prompt_cache_key`、`thread_id`、`metadata.*`。上游托管的会话 ID 排在前面，因为多个托管会话可能复用同一个 `prompt_cache_key`。而 Codex 会把根会话 ID 同时填进主 Agent 与所有子 Agent 的 `prompt_cache_key`，OpenCode ≥ v2.0.10 则把直接父会话 ID 填进子 Agent 的 `prompt_cache_key`，所以同一 key 下可能并发跑着多条 Agent 链。
 
@@ -245,7 +248,7 @@ retention 删除 audit/turn 引用后，在同一 writer 事务中删除已不�
 
 本模块在生产切换前必须通过：
 
-- OpenAI Responses/Chat Completions 与 Anthropic Messages 的 JSON 与 SSE 单元/集成测试；
+- OpenAI Responses/Chat Completions、Anthropic Messages 与 Gemini GenerateContent 的 JSON 与 SSE 单元/集成测试；
 - data URL 按解码字节去重、外部 file id 保留、已压缩二进制不重复 gzip；
 - 复用由另一套编码器产物写入的既有对象（`compression`/`encoded_length`/`data_enc` 整体不同而明文一致）不被判为冲突，两轮保存后每个对象仍可 `OpenObject`/`OpenBinary` 打开且完整性 payload 校验通过；
 - 身份字段（content 的 `kind`/`plaintext_length`/`semantic_hash`，binary 的 `media_type`/`plaintext_length`）被逐一篡改时，再次保存同一内容必须报冲突并整体回滚；

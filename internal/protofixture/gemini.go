@@ -160,7 +160,7 @@ func (geminiRenderer) answer(conversation *Conversation, reply answer, features 
 			candidate = candidateExtras(candidate.with("finishReason", "STOP"))
 		}
 		payload := obj("candidates", []any{candidate})
-		extra := effect{model: conversation.responseModel, id: responseID, closing: last}
+		extra := effect{model: conversation.responseModel, id: responseID, closing: last, terminal: last}
 		if current.tool {
 			extra.toolKeys = []string{fmt.Sprintf("piece:%d", index)}
 		}

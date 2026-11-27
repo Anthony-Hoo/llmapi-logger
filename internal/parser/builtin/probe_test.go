@@ -11,6 +11,7 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/anthropic"
+	"llmapi-logger/internal/parser/gemini"
 	"llmapi-logger/internal/parser/openai"
 )
 
@@ -191,6 +192,51 @@ func responsesProbeStream(terminal string) *probes {
 	return stream
 }
 
+// geminiProbeStream covers every chunk, candidate and content field the
+// Gemini fold consumes, two candidates, joined and separate text parts, and a
+// chunk of a shape no parser knows. Gemini chunks have no event name and are
+// framed with CRLF, as the API frames them.
+func geminiProbeStream() *probes {
+	stream := newProbes()
+	chunk := func(fields m) {
+		fields["x_probe"] = stream.next()
+		encoded, err := json.Marshal(fields)
+		if err != nil {
+			panic(err)
+		}
+		stream.body.WriteString("data: " + string(encoded) + "\r\n\r\n")
+	}
+	usage := func(candidates int) m {
+		return stream.probed(m{"promptTokenCount": 3, "candidatesTokenCount": candidates, "totalTokenCount": 3 + candidates})
+	}
+	head := func(fields m) m {
+		fields["modelVersion"], fields["responseId"] = "model-example", "gem-probe"
+		return fields
+	}
+	chunk(head(m{"candidates": []any{stream.probed(m{"index": 0, "content": stream.probed(m{"role": "model", "parts": []any{
+		stream.probed(m{"text": "consider", "thought": true})}}),
+		"safetyRatings": []any{m{"category": "HARM_CATEGORY_HARASSMENT", "probability": "NEGLIGIBLE"}}})},
+		"usageMetadata": usage(1), "createTime": "2026-01-01T00:00:00Z", "modelStatus": stream.probed(m{"modelStage": "STABLE"})}))
+	chunk(head(m{"candidates": []any{m{"index": 0, "content": m{"role": "model", "parts": []any{
+		m{"text": "more", "thought": true}, m{"text": "Hel", "thoughtSignature": "c2lnbmF0dXJl"}}}}},
+		"usageMetadata": usage(2), "promptFeedback": stream.probed(m{"safetyRatings": []any{}})}))
+	chunk(head(m{"candidates": []any{m{"index": 0, "content": m{"role": "model", "parts": []any{m{"text": "lo"},
+		stream.probed(m{"functionCall": stream.probed(m{"name": "lookup", "args": m{"q": "x"}}), "thoughtSignature": "Y2FsbA=="})}}},
+		m{"index": 1, "content": m{"role": "model", "parts": []any{m{"text": "other"}}}}},
+		"usageMetadata": usage(4)}))
+	// A chunk of a shape no parser knows.
+	chunk(m{"type": "x_probe_event", "value": stream.next()})
+	chunk(head(m{"candidates": []any{
+		m{"index": 0, "content": m{"role": "model", "parts": []any{}}, "finishReason": "STOP", "finishMessage": "done",
+			"citationMetadata": stream.probed(m{"citations": []any{m{"startIndex": 0, "endIndex": 3, "uri": "https://example.com/"}}}),
+			"tokenCount":       6, "groundingAttributions": []any{}, "groundingMetadata": stream.probed(m{"webSearchQueries": []any{"x"}}),
+			"avgLogprobs": -0.25, "logprobsResult": stream.probed(m{"topCandidates": []any{}}), "urlContextMetadata": stream.probed(m{"urlMetadata": []any{}}),
+			"continuationToken": stream.next()},
+		m{"index": 1, "finishReason": "MAX_TOKENS"}},
+		"usageMetadata": usage(7)}))
+	return stream
+}
+
 // TestUnknownFieldsSurviveRelease puts a field no parser reads on every
 // event type each stream fold consumes (and on the nested objects it reads),
 // adds an event type and a delta type it does not know, and requires every
@@ -208,6 +254,10 @@ func TestUnknownFieldsSurviveRelease(t *testing.T) {
 		{"anthropic", "anthropic.messages", "anthropic", "/v1/messages", `{"model":"model-example","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, anthropicProbeStream()},
 		{"chat", "openai.chat_completions", "openai", "/v1/chat/completions", `{"model":"model-example","stream":true,"messages":[{"role":"user","content":"hi"}]}`, chatProbeStream()},
 		{"completions", "openai.completions", "openai", "/v1/completions", `{"model":"model-example","stream":true,"prompt":"hi"}`, completionsProbeStream()},
+	}
+	for _, parser := range []string{"gemini.stream_generate_content", "gemini.generate_content"} {
+		cases = append(cases, probeCase{parser, parser, "gemini", "/v1beta/models/model-example:streamGenerateContent",
+			`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"systemInstruction":{"parts":[{"text":"be brief"}]}}`, geminiProbeStream()})
 	}
 	for _, terminal := range []string{"response.completed", "response.incomplete", "response.failed"} {
 		for _, parser := range []string{"openai.responses", "openai.responses_compact"} {
@@ -251,6 +301,19 @@ func TestUnknownFieldsSurviveRelease(t *testing.T) {
 				if delta, _ := root["delta"].(map[string]any); delta != nil {
 					if typed, _ := delta["type"].(string); typed != "" {
 						coveredAnthropic["delta:"+typed] = true
+					}
+				}
+			}
+		}
+		if strings.HasPrefix(test.parser, "gemini.") {
+			// The one Gemini event type is the chunk; the probe must send
+			// every field the fold consumes, except error, which ends a
+			// stream as partial and so is never released.
+			body := test.stream.body.String()
+			for _, fields := range [][]string{gemini.ConsumedChunkFields, gemini.ConsumedCandidateFields, gemini.ConsumedContentFields} {
+				for _, field := range fields {
+					if field != "error" && !strings.Contains(body, `"`+field+`":`) {
+						t.Errorf("%s: probe stream never sends consumed field %q", test.label, field)
 					}
 				}
 			}

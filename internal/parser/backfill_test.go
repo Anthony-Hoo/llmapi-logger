@@ -47,12 +47,16 @@ func (harness *insightsHarness) sendMessages(user string) string {
 		messagesResponse("model-example", `{"type":"text","text":"ok"}`))
 }
 
-// sendGemini sends a request of a protocol without a normalizer, whose raw
-// bodies therefore stay fully retained.
-func (harness *insightsHarness) sendGemini(user string) string {
+// sendFullyRetained sends a Gemini request whose turn cannot be stored: its
+// text starts like a data URL but is not one, so preparing the turn fails
+// (doc/features/18 section 4.1), the parse is partial with
+// reconstruction_failed, and both raw bodies stay fully retained. Every
+// protocol has a normalizer now, so a declined turn is how an audit keeps its
+// raw on the success path.
+func (harness *insightsHarness) sendFullyRetained(user string) string {
 	h := headers("User-Agent", "example-agent/1.0", "X-Goog-Api-Key", "sk-backfillkey")
 	return harness.send("/v1beta/models/model-example:generateContent", h,
-		`{"contents":[{"role":"user","parts":[{"text":"`+user+`"}]}]}`,
+		`{"contents":[{"role":"user","parts":[{"text":"data:`+user+`"}]}]}`,
 		upstreamResponse{contentType: "application/json", body: `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],` +
 			`"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":3,"totalTokenCount":23}}`})
 }
@@ -65,13 +69,18 @@ func (harness *insightsHarness) sendChat(user string, response upstreamResponse)
 func TestInsightsBackfillFullRetentionGemini(t *testing.T) {
 	t.Parallel()
 	harness := newInsightsHarness(t, nil)
-	older := harness.sendGemini("first task")
-	newer := harness.sendGemini("second task")
+	older := harness.sendFullyRetained("first task")
+	newer := harness.sendFullyRetained("second task")
 	ctx := context.Background()
 	for _, id := range []string{older, newer} {
-		stage, err := harness.store.LoadParserStage(ctx, id, sqlite.StageRequestReceived)
-		if err != nil || stage.Body == nil || stage.Body.RetentionState != sqlite.RetentionFull {
-			t.Fatalf("audit %s must be fully retained: %+v %v", id, stage.Body, err)
+		for _, side := range []string{sqlite.StageRequestReceived, sqlite.StageResponseReceived} {
+			stage, err := harness.store.LoadParserStage(ctx, id, side)
+			if err != nil || stage.Body == nil || stage.Body.RetentionState != sqlite.RetentionFull {
+				t.Fatalf("audit %s %s must be fully retained: %+v %v", id, side, stage.Body, err)
+			}
+		}
+		if audit, err := harness.store.LoadParserAudit(ctx, id); err != nil || audit.ParseStatus != sqlite.ParsePartial {
+			t.Fatalf("audit %s parse status = %q, %v; want partial", id, audit.ParseStatus, err)
 		}
 	}
 	if harness.hasAnalysis(older) || harness.hasAnalysis(newer) {

@@ -13,7 +13,12 @@ type Matcher func(line []byte) bool
 
 // MatcherFor returns the terminal-line matcher for a parser name such as
 // "openai.chat_completions" or "anthropic.messages", or nil when the protocol
-// has no reliable in-stream terminal marker (for example Gemini).
+// has no terminal marker a short line probe can see. Gemini has none: its
+// stream ends with the chunk whose candidate carries finishReason, inside a
+// long data line the capture probe truncates and never matches, and no event
+// line or [DONE] follows. A client that hangs up after that chunk but before
+// transport EOF is therefore recorded as a cancellation, and the raw stays;
+// the parser decides completeness from the finish reason instead.
 func MatcherFor(parserName string) Matcher {
 	protocol, _, _ := strings.Cut(parserName, ".")
 	switch protocol {

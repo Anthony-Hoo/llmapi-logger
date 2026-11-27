@@ -58,7 +58,7 @@ layout 怎么拼回 provider 值不放在适配器里，而是放在 `auditmodel
 
 - `none` 原样返回 envelope，`marker_envelope` 把 envelope 里的 item marker 换回 item；
 - 其他 layout 要求 envelope 是 JSON 对象，按 slot 规则写回：`array`（全部 item 组成数组，可为空）、`one`（恰好一个）、`optional`（零或一个，零个时不写键）、`absent`（必须没有）；规则以外的 slot 被忽略；
-- 流式响应 layout 另带 stream 标记，`auditmodel.StreamLayout` 据此判断响应是 SSE 描述加聚合结果，而不是 JSON Body（insights 回填用它决定走流式还是 JSON 路径）。现行的流式 layout（`openai.stream.response.v2`、`anthropic.stream.response`）属于 marker 类：envelope 的 `aggregate` 键下是折叠出的非流式 body，其中的 item 换成 marker，组装方式与 `marker_envelope` 相同（§2.3）；最早的 `openai.stream.response` 的 `aggregate` 是展示用 message 的数组。
+- 流式响应 layout 另带 stream 标记，`auditmodel.StreamLayout` 据此判断响应是 SSE 描述加聚合结果，而不是 JSON Body（insights 回填用它决定走流式还是 JSON 路径）。现行的流式 layout（`openai.stream.response.v2`、`anthropic.stream.response`、`gemini.stream.response`）属于 marker 类：envelope 的 `aggregate` 键下是折叠出的非流式 body，其中的 item 换成 marker，组装方式与 `marker_envelope` 相同（§2.3）；最早的 `openai.stream.response` 的 `aggregate` 是展示用 message 的数组。
 
 layout 名一经写入就不能改名或删除；形状变化要新增 layout 名，旧行仍按旧名读取。被新版本取代、不再写出的 layout 从适配器的 `Layouts` 移到 `builtin_test.go` 的 `retiredLayouts`，表里的行保留不动，旧行照常组装，conversation 仍由该 parser 名的适配器还原。`internal/auditmodel/layout_test.go` 钉住全部 layout 名和 stream 标记，`internal/parser/builtin/builtin_test.go` 钉住全部 parser 名与版本，要求表里每个 layout 要么有适配器写出、要么列为 retired，并用协议夹具和手写请求驱动每个 normalizer：写出的 layout 必须在适配器声明里，声明的每个 layout 都要被实际写出过，并且能 Prepare、Assemble、再经注册表还原成 conversation。
 
@@ -72,7 +72,7 @@ layout 名一经写入就不能改名或删除；形状变化要新增 layout �
 
 turn 的重建与还原不需要改 query 或 worker。注册表之外仍有几处按协议区分的逻辑，它们不属于重建，按需单独修改：
 
-- `internal/parser/streamterminal`：采集路径上判断流在逻辑上结束的终止行。它按 parser 名的协议前缀分派，是采集层唯一依赖的 parser 侧叶子包，不引入各协议包；协议有可靠的流内终止标记时在这里加一支；
+- `internal/parser/streamterminal`：采集路径上判断流在逻辑上结束的终止行。它按 parser 名的协议前缀分派，是采集层唯一依赖的 parser 侧叶子包，不引入各协议包；协议有可靠的流内终止标记时在这里加一支。Gemini 没有这一支：它的结束标志是 candidate 的 `finishReason`，位于很长的 data 行内，采集探针只看 48 字节的行首，见模块 08 §5；
 - `internal/contentpolicy/extract.go`：内容策略拦截器从请求 Body 取待检文本，按 parser 名分派（模块 22）；
 - `internal/insights`：上下文分析按协议族解析请求和响应（模块 20），是分析口径，不是证据重建。
 
@@ -103,7 +103,7 @@ SHA-256( "llmapi-logger/sse-events/v1" || 0x00 ||
   其中 name 是事件名的 UTF-8 字节，data 是上面解码规则得到的 data 字节（多个 data 行以 LF 连接，不含最后的换行），`uint64be` 是 8 字节大端无符号长度。前缀和逐字段长度使哈希同时绑定事件顺序、事件个数、事件名和 data 字节，任意两个字段之间的边界都无歧义。持有 raw SSE 的读者按上面的解码规则切出事件即可重算；上例是四个事件 `message_start`/`{"a":1}`、`content_block_delta`/`{"b":2}`、`content_block_delta`/`{"c":3}`、无名/`[DONE]` 的结果（`internal/parser/streamevidence` 的测试钉住，并在 Go 之外按此定义独立算过）。
 - 注释行、`id`/`retry` 字段、行结束符的写法和 HTTP 分块不在哈希内；整条 raw Body 的字节另有 `body_streams.sha256`。
 
-**折叠体。** normalizer 把事件折叠成该端点的非流式响应 body，再交给该协议的非流式响应拆分代码（`normalizeJSONResponse`）按同样的方式拆成 envelope 与 item：Chat 每个 choice 的 `message`、Completions 每个 choice 的 `text`、Responses 每个 `output` 元素、Anthropic 每个 content block 各是一个 item，body 中换成 marker。拆分后的 body 放在流 envelope 的 `aggregate` 键下，事件描述、摘要和残留在它旁边。因此同一回答流式与非流式存出的 response item 是同一批 content object，下一轮请求复用它们的情形与非流式完全相同（例如客户端原样重发 Responses 的 output item 或 Chat 的 assistant message）。Responses 的终态 response 还回显请求的 `instructions` 和 `tools`，流式 layout 把它们各存为一个 item（slot `instructions`/`tools`，kind 同名）：`instructions` 与请求里的 instructions item 是同一个对象，`tools` 在同一会话的各轮之间去重。parser 自己的 conversation 也从折叠体读出（与非流式响应走同一段代码），所以 raw 解析得到的 conversation 与从图重建的完全一致，同一回答流式与非流式的 conversation 也一致。折叠体能装下的内容优先装进去（例如 Anthropic 的 `signature`、`citations` 本来就是 content block 的字段）。各协议消费的事件类型和字段见模块 06 §5、模块 07 §5。
+**折叠体。** normalizer 把事件折叠成该端点的非流式响应 body，再交给该协议的非流式响应拆分代码（`normalizeJSONResponse`）按同样的方式拆成 envelope 与 item：Chat 每个 choice 的 `message`、Completions 每个 choice 的 `text`、Responses 每个 `output` 元素、Anthropic 每个 content block、Gemini 每个 candidate 的 `content` 各是一个 item，body 中换成 marker。拆分后的 body 放在流 envelope 的 `aggregate` 键下，事件描述、摘要和残留在它旁边。因此同一回答流式与非流式存出的 response item 是同一批 content object，下一轮请求复用它们的情形与非流式完全相同（例如客户端原样重发 Responses 的 output item 或 Chat 的 assistant message）。Responses 的终态 response 还回显请求的 `instructions` 和 `tools`，流式 layout 把它们各存为一个 item（slot `instructions`/`tools`，kind 同名）：`instructions` 与请求里的 instructions item 是同一个对象，`tools` 在同一会话的各轮之间去重。parser 自己的 conversation 也从折叠体读出（与非流式响应走同一段代码），所以 raw 解析得到的 conversation 与从图重建的完全一致，同一回答流式与非流式的 conversation 也一致。折叠体能装下的内容优先装进去（例如 Anthropic 的 `signature`、`citations` 本来就是 content block 的字段）。各协议消费的事件类型和字段见模块 06 §5、模块 07 §5、模块 08 §5.1。
 
 **残留。** 事件里折叠体给不回来的内容进入 envelope 的 `residue`（格式见模块 18 §10）。一个事件的值是否已由折叠体持有，按以下规则判断，对象逐键递归：
 
@@ -114,9 +114,11 @@ SHA-256( "llmapi-logger/sse-events/v1" || 0x00 ||
 5. 位置类字段（事件序号、`output_index`、`content_index`、`item_id` 等）能由折叠体位置推出时视为持有，推不出（例如 `sequence_number` 不等于事件编号）时进残留；
 6. 其余一律进残留：清单外的事件整条保留，已消费事件中不读的字段按原嵌套位置保留，被后一事件覆盖的旧值留在发出它的事件下。
 
+Gemini 不带 `alt=sse` 时把同样的 chunk 放在一个 JSON 数组里返回。它不是 SSE，事件描述和残留无从定义，按 JSON body 整体存入 envelope（模块 08 §8）。
+
 折叠体中的块或 item 位置不连续时（例如 content block 下标跳号），流无法无损表示，normalizer 返回错误。事件中出现保留 marker 键同样返回错误。
 
-**摘要。** envelope 的 `summary` 固定有 `response_id`、`usage`（解析结果的 `Usage`，键为 `Input`/`Output`/`Total`）、`normalized_usage`（不含缓存的输入、缓存读、缓存写、输出、reasoning）、`stop_reason`、`error_type`、`error_code`。raw 释放后，insights 回填只读 `usage`、`normalized_usage`、`stop_reason` 和重建的 conversation（`query.ReconstructBodies`）。`stop_reason` 必须是 insights 停止原因映射读来与读 raw 流结果相同的值：有供应商原值的协议存原值（Anthropic 的 `stop_reason`、Chat/Completions 最后报告的 `finish_reason`），只有状态的协议存映射后的值（Responses，见模块 06 §5）。
+**摘要。** envelope 的 `summary` 固定有 `response_id`、`usage`（解析结果的 `Usage`，键为 `Input`/`Output`/`Total`）、`normalized_usage`（不含缓存的输入、缓存读、缓存写、输出、reasoning）、`stop_reason`、`error_type`、`error_code`。raw 释放后，insights 回填只读 `usage`、`normalized_usage`、`stop_reason` 和重建的 conversation（`query.ReconstructBodies`）。`stop_reason` 必须是 insights 停止原因映射读来与读 raw 流结果相同的值：有供应商原值的协议存原值（Anthropic 的 `stop_reason`、Chat/Completions 最后报告的 `finish_reason`、Gemini 最后报告的 `finishReason`），只有状态的协议存映射后的值（Responses，见模块 06 §5）。
 
 **上限与放弃。** 残留的 canonical JSON 超过 `streamevidence.MaxResidueBytes`（1 MiB）时，normalizer 返回 `streamevidence.ErrResidueTooLarge`。worker 对任何 normalizer 错误的处理不变：解析记为 `partial`、`error_code=normalization_failed`，不生成 turn，四阶段 raw 保持 `full`，conversation 作为 `parsed_json_enc` 回退副本保存，并写 `reconstruction_failed` 完整性事件。代价是这条记录在列表里显示为部分解析。
 
@@ -130,9 +132,9 @@ SHA-256( "llmapi-logger/sse-events/v1" || 0x00 ||
 | OpenAI Completions | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
 | OpenAI Responses / Compact | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
 | Anthropic Messages | 支持 JSON/SSE | 支持 | verified 的 2xx/3xx 成功为 metadata |
-| Gemini GenerateContent | 保持既有 JSON/SSE 解析和对话展示 | 尚未实现 | full |
+| Gemini GenerateContent / StreamGenerateContent | 支持 JSON/SSE/JSON 数组流 | 支持 | verified 的 2xx/3xx 成功为 metadata |
 
-当前生产容量优化覆盖 OpenAI Responses、Chat Completions 和 Anthropic Messages。Gemini 仍保持代理协议兼容和审计可读性，但在没有 normalizer 前不会删除 raw evidence，也不宣称获得 item/binary 级 O(n) 增长。Anthropic 的 `source.data` 图片/文档目前随所在 message 对象整体去重，不单独提取为 binary object。
+当前生产容量优化覆盖全部内置协议：OpenAI Responses、Chat Completions、Completions、Anthropic Messages 和 Gemini GenerateContent（parser 版本 3 起，见模块 08 §8）。Anthropic 的 `source.data` 图片/文档目前随所在 message 对象整体去重，不单独提取为 binary object；Gemini 的 `inlineData.data` 按解码字节存为 binary object。
 
 ## 4. Result 与敏感数据
 
@@ -158,8 +160,8 @@ type Result struct {
 
 明文列只保存窄摘要。`Conversation` 只在 worker 内存使用：
 
-- OpenAI 与 Anthropic verified turn 的详情 conversation 从内容对象重建，不再写第二份 conversation；
-- 没有 normalizer 的协议或 normalization/reconstruction 异常，raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化。这份副本动辄数 MB，所以 `parsed_json_enc` 在加密前按需 gzip，格式见[模块 9](09-security-encryption-and-redaction.md) §5.1；
+- 有 verified turn 的记录（OpenAI、Anthropic、Gemini）的详情 conversation 从内容对象重建，不再写第二份 conversation；
+- normalization/reconstruction 异常（以及升级前没有 turn 的旧记录），raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化。这份副本动辄数 MB，所以 `parsed_json_enc` 在加密前按需 gzip，格式见[模块 9](09-security-encryption-and-redaction.md) §5.1；
 - 列表、普通日志和明文 SQLite 列永远不包含消息正文、reasoning、工具参数或结果。
 
 `ErrorType`/`ErrorCode` 保存 parser 看到的原始错误标识；`UpstreamErrorClass` 是由[模块 22](22-content-policy.md)定义的稳定策略拒绝分类（如 `cyber_policy`），只保存枚举、不保存 message，并且是 `parsed_results` 中不参与完整性摘要的派生列。
@@ -205,7 +207,7 @@ OpenAI 请求拆分规则：
 
 provider 输入若包含保留 marker 名、畸形 JSON、错误 data URL/Base64、未知重建布局或重建 hash 不一致，normalizer 必须失败并保留 full raw。
 
-Anthropic Messages 的拆分规则见[模块 07](07-anthropic-protocol-parser.md) §8，失败语义与上一段相同。
+Anthropic Messages 的拆分规则见[模块 07](07-anthropic-protocol-parser.md) §8，Gemini 的见[模块 08](08-gemini-protocol-parser.md) §8，失败语义与上一段相同。
 
 ## 8. 状态语义
 
@@ -222,7 +224,7 @@ Anthropic Messages 的拆分规则见[模块 07](07-anthropic-protocol-parser.md
 
 ## 9. 查询派生
 
-OpenAI 与 Anthropic verified turn 的管理 conversation 由 query 层执行以下步骤后生成：
+有 verified turn 的记录的管理 conversation 由 query 层执行以下步骤后生成：
 
 1. 恢复 request/response refs；
 2. 解密并验证 content/binary objects；
@@ -230,7 +232,7 @@ OpenAI 与 Anthropic verified turn 的管理 conversation 由 query 层执行以
 4. 比较 sequence/reconstruction SHA-256；
 5. 再从重建 provider 值生成协议无关 conversation。
 
-这样列表和详情不需要保存第二份消息正文。第 3 步按 `auditmodel` 的 layout 表执行，第 5 步由写入该 turn 的 parser 的适配器完成（`builtin.Registry().RebuildConversation` 按 parser 名查找，见 §2.1）。Gemini 在当前版本从加密 parsed fallback 读取 conversation，同时 full raw 仍是权威证据；升级前写入的 Anthropic 记录没有 turn graph，读取方式同 Gemini。
+这样列表和详情不需要保存第二份消息正文。第 3 步按 `auditmodel` 的 layout 表执行，第 5 步由写入该 turn 的 parser 的适配器完成（`builtin.Registry().RebuildConversation` 按 parser 名查找，见 §2.1）。升级前写入、没有 turn graph 的记录（Anthropic 版本 2、Gemini 版本 2）从加密 parsed fallback 读取 conversation，full raw 仍是权威证据，读取方式不变。
 
 ## 10. 最少测试
 

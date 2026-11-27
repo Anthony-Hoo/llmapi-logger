@@ -202,17 +202,22 @@ func fold(protocol Protocol, chunks []chunk, stream, tailClosed, malformed bool,
 	if !stream {
 		return expect
 	}
-	needsTerminal := protocol != Gemini
 	switch {
 	case malformed:
 		expect.Status, expect.ErrorCode = "partial", "invalid_sse_event"
 	case !tailClosed:
 		expect.Status, expect.ErrorCode = "partial", "unterminated_sse_event"
-	case needsTerminal && !terminal:
+	case !terminal:
 		expect.Status = "partial"
-		expect.ErrorCode = "missing_terminal_event"
-		if protocol == AnthropicMessages {
+		switch protocol {
+		case AnthropicMessages:
 			expect.ErrorCode = "missing_message_stop"
+		case Gemini:
+			// A Gemini stream ends with the chunk that carries the
+			// candidate's finishReason.
+			expect.ErrorCode = "missing_finish_reason"
+		default:
+			expect.ErrorCode = "missing_terminal_event"
 		}
 	}
 	return expect

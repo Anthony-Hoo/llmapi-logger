@@ -126,8 +126,12 @@ func TestCatalogParsesAsExpected(t *testing.T) {
 			if _, err := auditmodel.PrepareWithLookup(turn, cipher, nil); err != nil {
 				t.Errorf("%s: prepare: %v", label, err)
 			}
-			if turn.ConversationKey == "" {
-				t.Errorf("%s: OpenAI fixture has no conversation key", label)
+			// OpenAI and Anthropic fixtures declare a session the turn is
+			// keyed by. A Gemini request has no conversation identifier to
+			// declare (doc/features/08 section 8), so its turn has no key and
+			// its parent is inferred from content.
+			if keyless := exchange.Protocol == Gemini; (turn.ConversationKey == "") != keyless {
+				t.Errorf("%s: conversation key %q, want keyless=%v", label, turn.ConversationKey, keyless)
 			}
 		}
 	}
@@ -226,18 +230,40 @@ func TestHeavyProfileSize(t *testing.T) {
 	}
 }
 
-// TestFindingGeminiStreamWithoutTerminalParsesOK pins current behaviour: the
-// Gemini parser has no terminal-event check, so a stream that stops cleanly
-// between two events is indistinguishable from a complete one.
-func TestFindingGeminiStreamWithoutTerminalParsesOK(t *testing.T) {
+// TestGeminiStreamWithoutFinishReasonIsPartial: a Gemini stream that stops
+// cleanly between two chunks, before the chunk carrying the finish reason,
+// parses as partial, so it is never verified and its raw is never released.
+// It used to parse as ok, indistinguishable from a complete stream (design
+// appendix B.5). The complete stream of the same seed parses as ok and
+// normalizes; the truncated one is refused by the normalizer as well.
+func TestGeminiStreamWithoutFinishReasonIsPartial(t *testing.T) {
 	t.Parallel()
 	exchanges, err := Build(Case{Protocol: Gemini, Scenario: ScenarioNoTerminal, Stream: true}, Options{Seed: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := parsers()[exchanges[0].ParserName].Parse(context.Background(), parserInput(exchanges[0]))
-	if result.Status != base.StatusOK {
-		t.Fatalf("status = %q; the finding no longer holds, update the expectation and the documentation", result.Status)
+	implementation := parsers()[exchanges[0].ParserName]
+	input := parserInput(exchanges[0])
+	if bytes.Contains(input.Response.Data, []byte(`"finishReason"`)) {
+		t.Fatal("the truncated fixture still carries a finish reason")
+	}
+	result := implementation.Parse(context.Background(), input)
+	if result.Status != base.StatusPartial || result.ErrorCode != "missing_finish_reason" {
+		t.Fatalf("status = %q (%s), want partial (missing_finish_reason)", result.Status, result.ErrorCode)
+	}
+	result.Status = base.StatusOK
+	if _, err := implementation.(base.AuditNormalizer).NormalizeAudit(context.Background(), input, result); err == nil {
+		t.Fatal("the normalizer accepted a stream without a finish reason")
+	}
+	complete, err := Build(Case{Protocol: Gemini, Scenario: ScenarioBasic, Stream: true}, Options{Seed: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeInput := parserInput(complete[0])
+	if got := implementation.Parse(context.Background(), completeInput); got.Status != base.StatusOK {
+		t.Fatalf("complete stream status = %q (%s)", got.Status, got.ErrorCode)
+	} else if _, err := implementation.(base.AuditNormalizer).NormalizeAudit(context.Background(), completeInput, got); err != nil {
+		t.Fatalf("complete stream: normalize: %v", err)
 	}
 }
 
@@ -308,7 +334,7 @@ func TestAnthropicStreamKeepsSignatureAndCitations(t *testing.T) {
 func TestStreamAndJSONAnswersYieldTheSameConversation(t *testing.T) {
 	t.Parallel()
 	indexed := parsers()
-	for _, protocol := range []Protocol{OpenAIResponses, OpenAIChat, AnthropicMessages} {
+	for _, protocol := range []Protocol{OpenAIResponses, OpenAIChat, AnthropicMessages, Gemini} {
 		for _, scenario := range NormalScenarios() {
 			if protocol == AnthropicMessages && scenario == ScenarioExtensions {
 				// The streamed answer adds a server_tool_use block the JSON
