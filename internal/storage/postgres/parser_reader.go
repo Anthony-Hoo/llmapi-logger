@@ -322,14 +322,15 @@ func (store *Store) LoadParserHeaderSource(ctx context.Context, auditID string, 
 	}
 	defer transaction.Rollback()
 	var source HeaderSource
-	var captureStatus string
-	if err := transaction.QueryRowContext(ctx, `SELECT capture_version, capture_status FROM audit_records WHERE audit_id = $1`, auditID).Scan(&source.CaptureVersion, &captureStatus); err != nil {
+	var captureStatus, forwardStatus string
+	if err := transaction.QueryRowContext(ctx, `SELECT capture_version, capture_status, forward_status FROM audit_records WHERE audit_id = $1`, auditID).Scan(&source.CaptureVersion, &captureStatus, &forwardStatus); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return HeaderSource{}, sql.ErrNoRows
 		}
 		return HeaderSource{}, fmt.Errorf("postgres: read parser capture version: %w", err)
 	}
 	source.CaptureFailed = captureStatus == CaptureFailed
+	source.Interrupted = forwardStatus == ForwardInterrupted
 	if source.CaptureVersion == CaptureVersion2 {
 		if source.Block, err = readHeaderBlockEvidence(ctx, transaction, auditID); err != nil {
 			return HeaderSource{}, err

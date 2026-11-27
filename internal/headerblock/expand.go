@@ -33,7 +33,7 @@ func Expand(c security.Cipher, auditID string, src storage.HeaderSource) ([]Valu
 		if len(src.Rows) != 0 {
 			return nil, fmt.Errorf("%w: version 2 audit with header rows", ErrIntegrity)
 		}
-		return expandBlock(c, auditID, src.Block, src.StageSet, src.CaptureFailed)
+		return expandBlock(c, auditID, src.Block, src.StageSet, src.CaptureFailed || src.Interrupted)
 	default:
 		return nil, fmt.Errorf("%w: unknown capture version %d", ErrIntegrity, src.CaptureVersion)
 	}
@@ -79,8 +79,12 @@ func expandRows(c security.Cipher, auditID string, rows []storage.HeaderEvidence
 // failed the block's stages must be exactly the stage rows; anything else is
 // an integrity error.
 //
-// For a failed capture (captureFailed) a rejected write may have left the
-// two apart, and the audit must stay readable as it does on the legacy path:
+// For a failed capture, or an audit startup recovery finalized as
+// interrupted (loose), a rejected or lost write may have left the two apart:
+// a write the writer rejected marks the audit failed; a write lost to a
+// failed batch is marked failed only later, from the writer's in-memory
+// recovery table, and that mark is lost when the process exits first. The
+// audit must stay readable as it does on the legacy path:
 //   - a stage row without a section, or no block at all: that stage's Headers
 //     are absent, as legacy shows no rows for a header write that failed;
 //   - a section for a stage without a row: kept. Legacy has no rows there
@@ -90,14 +94,14 @@ func expandRows(c security.Cipher, auditID string, rows []storage.HeaderEvidence
 //
 // Authentication, decompression and strict decoding are never relaxed, and
 // the stage set itself must still be valid (known stages, no repeats).
-func expandBlock(c security.Cipher, auditID string, block *storage.HeaderBlockEvidence, stageSet []string, captureFailed bool) ([]Value, error) {
-	if captureFailed {
+func expandBlock(c security.Cipher, auditID string, block *storage.HeaderBlockEvidence, stageSet []string, loose bool) ([]Value, error) {
+	if loose {
 		if err := validStageSet(stageSet); err != nil {
 			return nil, err
 		}
 	}
 	if block == nil {
-		if captureFailed {
+		if loose {
 			return []Value{}, nil
 		}
 		// No block means no stage has a section, which matches only an audit
@@ -111,7 +115,7 @@ func expandBlock(c security.Cipher, auditID string, block *storage.HeaderBlockEv
 	if err != nil {
 		return nil, err
 	}
-	if !captureFailed {
+	if !loose {
 		if err := CheckStageSet(stages, stageSet); err != nil {
 			clearStages(stages)
 			return nil, err

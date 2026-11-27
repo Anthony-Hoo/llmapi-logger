@@ -55,6 +55,13 @@ func TestExpandOfAFailedCapture(t *testing.T) {
 			if len(stages) != len(test.stages) || (len(stages) > 0 && stages[len(stages)-1] != test.stages[len(test.stages)-1]) {
 				t.Fatalf("stages %v, want %v", stages, test.stages)
 			}
+			// An audit startup recovery finalized as interrupted reads the
+			// same way.
+			interrupted := source
+			interrupted.CaptureFailed, interrupted.Interrupted = false, true
+			if again, err := Expand(c, auditID, interrupted); err != nil || len(again) != len(values) {
+				t.Fatalf("interrupted: %d values, %v", len(again), err)
+			}
 			source.CaptureFailed = false
 			if _, err := Expand(c, auditID, source); test.name != "matching" && !errors.Is(err, ErrIntegrity) {
 				t.Fatalf("capture not failed: %v", err)

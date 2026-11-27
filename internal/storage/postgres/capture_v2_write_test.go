@@ -566,6 +566,14 @@ func TestCaptureV2TamperIsDetected(t *testing.T) {
 			`DELETE FROM http_header_blocks WHERE audit_id = 'v2-tamper'`,
 			`UPDATE audit_records SET capture_status = 'failed' WHERE audit_id = 'v2-tamper'`}},
 		{"version 1 capture_status flipped to failed", []string{`UPDATE audit_records SET capture_status = 'failed' WHERE audit_id = 'v1-tamper'`}},
+		// forward_status is a field of both digests too: marking a healthy
+		// audit interrupted, the other way into the relaxed read, fails
+		// payload verification as well.
+		{"forward_status flipped to interrupted", []string{`UPDATE audit_records SET forward_status = 'interrupted' WHERE audit_id = 'v2-tamper'`}},
+		{"block deleted and forward_status flipped", []string{
+			`DELETE FROM http_header_blocks WHERE audit_id = 'v2-tamper'`,
+			`UPDATE audit_records SET forward_status = 'interrupted' WHERE audit_id = 'v2-tamper'`}},
+		{"version 1 forward_status flipped to interrupted", []string{`UPDATE audit_records SET forward_status = 'interrupted' WHERE audit_id = 'v1-tamper'`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

@@ -118,7 +118,7 @@ type HeaderBlockEvidence struct {
 // audit through headerblock.Expand, whichever capture version wrote them.
 // Version 1 fills Rows; version 2 fills Block. StageSet names the stages that
 // have an http_stages row, which a version 2 block must match exactly unless
-// CaptureFailed is set.
+// CaptureFailed or Interrupted is set.
 type HeaderSource struct {
 	CaptureVersion int
 	Rows           []HeaderEvidence
@@ -128,6 +128,12 @@ type HeaderSource struct {
 	// a write was rejected, so its block and its stage rows may legitimately
 	// disagree. capture_status is covered by the capture payload digest.
 	CaptureFailed bool
+	// Interrupted is set when the audit's stored forward_status is
+	// interrupted, which only startup recovery writes: the process exited
+	// with the audit open, and a failure mark still held in the writer's
+	// in-memory recovery table may have been lost with it. forward_status is
+	// covered by the capture payload digest.
+	Interrupted bool
 }
 
 // ParsedResultSummary is the narrow, non-secret projection of parsed_results.
@@ -205,6 +211,7 @@ func (detail AuditQueryDetail) HeaderSource() HeaderSource {
 		Block:          detail.HeaderBlock,
 		StageSet:       stages,
 		CaptureFailed:  detail.Audit.CaptureStatus == CaptureFailed,
+		Interrupted:    detail.Audit.ForwardStatus == ForwardInterrupted,
 	}
 }
 
