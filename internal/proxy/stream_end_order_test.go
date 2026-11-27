@@ -50,6 +50,9 @@ type blockingFinishStore struct {
 	release     chan struct{}
 	releaseOnce sync.Once
 	released    atomic.Bool
+
+	checkpointsDone     atomic.Int64
+	checkpointsAtCommit atomic.Int64
 }
 
 func newBlockingFinishStore(store *sqlite.Store) *blockingFinishStore {
@@ -60,6 +63,21 @@ func (store *blockingFinishStore) FinishAuditWithResult(ctx context.Context, fin
 	store.enteredOnce.Do(func() { close(store.entered) })
 	<-store.release
 	return store.Store.FinishAuditWithResult(ctx, finish)
+}
+
+// CommitAudit is the terminal commit of the unified write path. Checkpoints
+// are not blocked; checkpointsDone counts the ones that returned.
+func (store *blockingFinishStore) CommitAudit(ctx context.Context, commit sqlite.AuditCommit) (sqlite.AuditFinish, error) {
+	store.checkpointsAtCommit.Store(store.checkpointsDone.Load())
+	store.enteredOnce.Do(func() { close(store.entered) })
+	<-store.release
+	return store.Store.CommitAudit(ctx, commit)
+}
+
+func (store *blockingFinishStore) Checkpoint(ctx context.Context, checkpoint sqlite.AuditCheckpoint) error {
+	err := store.Store.Checkpoint(ctx, checkpoint)
+	store.checkpointsDone.Add(1)
+	return err
 }
 
 func (store *blockingFinishStore) releaseFinish() {
@@ -237,13 +255,19 @@ func TestClientObservedResponseEndRelativeToTerminalAuditCommit(t *testing.T) {
 			endBeforeCommit:      false,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			runStreamOrderCase(t, test)
-		})
+		for _, writePath := range []string{audit.WritePathLegacy, audit.WritePathUnified} {
+			name := test.name
+			if writePath == audit.WritePathUnified {
+				name += " unified"
+			}
+			t.Run(name, func(t *testing.T) {
+				runStreamOrderCase(t, test, writePath)
+			})
+		}
 	}
 }
 
-func runStreamOrderCase(t *testing.T, test streamOrderCase) {
+func runStreamOrderCase(t *testing.T, test streamOrderCase, writePath string) {
 	ctx := context.Background()
 	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
@@ -257,7 +281,7 @@ func runStreamOrderCase(t *testing.T, test streamOrderCase) {
 	blocking := newBlockingFinishStore(store)
 	logs := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, nil))
-	manager, err := audit.NewManager(blocking, cipher, nil, audit.ModeAvailable, logger)
+	manager, err := audit.NewManagerWithOptions(blocking, cipher, nil, audit.ModeAvailable, logger, audit.Options{WritePath: writePath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,6 +380,18 @@ func runStreamOrderCase(t *testing.T, test streamOrderCase) {
 		}
 		if observed[next] == nil {
 			break
+		}
+	}
+	// On the unified path the checkpoints ran before the commit and were not
+	// held by it: an upstream that answered has both request and response
+	// checkpoints; the proxy's own error response has none (design B.1).
+	if writePath == audit.WritePathUnified {
+		want := int64(2)
+		if test.wantStatus == http.StatusBadGateway {
+			want = 0
+		}
+		if got := blocking.checkpointsAtCommit.Load(); got != want {
+			t.Fatalf("checkpoints returned before the commit = %d, want %d", got, want)
 		}
 	}
 	// The completion log line is written after Finish returns, so it never

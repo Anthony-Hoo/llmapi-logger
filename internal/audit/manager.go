@@ -94,6 +94,12 @@ type Options struct {
 	// Stager takes sealed chunks the memory budget cannot hold. Nil means no
 	// staging: content beyond the budget is not retained.
 	Stager ChunkStager
+	// Now and Random replace the clock and the audit id source, for
+	// deterministic tests and tools. Nil means time.Now and crypto/rand.
+	Now    func() time.Time
+	Random io.Reader
+	// Sleep replaces the wait between CommitAudit attempts. Nil is time.Sleep.
+	Sleep func(time.Duration)
 }
 
 // Sink is the proxy-facing audit admission interface. A nil Session always
@@ -191,13 +197,22 @@ func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *se
 	if manager.stager == nil {
 		manager.stager = unavailableStager{}
 	}
+	if options.Now != nil {
+		manager.now = options.Now
+	}
+	if options.Random != nil {
+		manager.random = options.Random
+	}
+	if options.Sleep != nil {
+		manager.sleep = options.Sleep
+	}
 	manager.commitRetries.Store(int32(options.CommitRetries))
 	if options.WritePath == WritePathUnified {
 		if support, ok := store.(unifiedWriteSupport); ok && !support.SupportsUnifiedWrite() {
 			return nil, errors.New("audit: the store cannot serve audit.write_path unified")
 		}
-		// The unified session arrives in a later commit of this series.
-		return nil, errors.New("audit: audit.write_path unified is not available in this build")
+		manager.unified = true
+		manager.captureVersion = captureVersionFor(store)
 	}
 	manager.gaps = newGapBuffer(store, logger, func() time.Time { return manager.now() })
 	return manager, nil
@@ -233,6 +248,15 @@ func (manager *Manager) CommitRetries() int {
 		return 0
 	}
 	return int(manager.commitRetries.Load())
+}
+
+// MemoryInUse returns the body plaintext the unified path's sessions hold in
+// the global memory budget.
+func (manager *Manager) MemoryInUse() int64 {
+	if manager == nil {
+		return 0
+	}
+	return manager.budget.Used()
 }
 
 // WritePath returns the write path the manager's sessions use.
@@ -400,6 +424,9 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		// Tagging the credential here, before interceptors run, is what lets a
 		// developer session see its own rejected requests too.
 		APIKeyFPR: manager.fingerprints.FingerprintRequest(request.Header, query),
+	}
+	if manager.unified {
+		return manager.beginUnified(ctx, request, match, record, started)
 	}
 	if err := manager.store.BeginAudit(ctx, record); err != nil {
 		manager.recordGap(gapReasonForWrite(err))

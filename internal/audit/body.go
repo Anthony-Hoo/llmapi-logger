@@ -70,6 +70,10 @@ type bodyCapture struct {
 	// longer than the probe, which must never match.
 	streamLine         []byte
 	streamLineOverflow bool
+
+	// unified is the retention state of the unified write path, nil on the
+	// legacy path.
+	unified *unifiedBody
 }
 
 type observedReadCloser struct {
@@ -100,6 +104,9 @@ func (reader *observedReadCloser) Read(buffer []byte) (int, error) {
 	if err == io.EOF {
 		reader.captureTrailers()
 	}
+	if err != nil {
+		reader.session.readBodyEnded(reader.stage)
+	}
 	return count, err
 }
 
@@ -108,6 +115,7 @@ func (reader *observedReadCloser) Close() error {
 		reader.closeErr = reader.underlying.Close()
 		reader.session.closeReadBody(reader.stage, reader.closeErr)
 		reader.captureTrailers()
+		reader.session.readBodyEnded(reader.stage)
 	})
 	return reader.closeErr
 }
@@ -243,6 +251,10 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 		}
 	}
 	stage.body = body
+	if session.manager != nil {
+		session.attachUnifiedBodyLocked(stage, body)
+		return body
+	}
 	if !stage.persisted {
 		body.faulted = true
 		body.errorCode = "start_stage_failed"

@@ -1,0 +1,519 @@
+package proxy
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"llmapi-logger/internal/audit"
+	"llmapi-logger/internal/protofixture"
+	"llmapi-logger/internal/storage"
+	"llmapi-logger/internal/storage/sqlite"
+)
+
+// largeStreamExchange is a streamed chat turn whose request body spans
+// several 1 MiB chunks.
+func largeStreamExchange(t *testing.T) *eqExchange {
+	t.Helper()
+	built, err := protofixture.Build(protofixture.Case{Protocol: protofixture.OpenAIChat, Scenario: protofixture.ScenarioBasic, Stream: true},
+		protofixture.Options{Seed: 501, HistoryItems: 700, ItemBytes: 4000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := fromFixture("large-stream", built[0], 128<<10)
+	if len(exchange.body) < 2<<20 {
+		t.Fatalf("request is only %d bytes", len(exchange.body))
+	}
+	return exchange
+}
+
+func sendBoth(t *testing.T, legacy, unified *eqRun, exchange *eqExchange) (eqClientView, eqClientView) {
+	t.Helper()
+	var legacyView, unifiedView eqClientView
+	var wait sync.WaitGroup
+	wait.Go(func() { legacyView, _ = legacy.send(copyChunks(exchange)) })
+	unifiedView, _ = unified.send(copyChunks(exchange))
+	wait.Wait()
+	if legacyView.status != unifiedView.status || string(legacyView.body) != string(unifiedView.body) {
+		t.Fatalf("client saw %d %q and %d %q", legacyView.status, legacyView.body, unifiedView.status, unifiedView.body)
+	}
+	return legacyView, unifiedView
+}
+
+func compareRuns(t *testing.T, legacy, unified *eqRun, delta func(map[string][]eqRow)) map[string][]eqRow {
+	t.Helper()
+	legacy.worker.Close()
+	unified.worker.Close()
+	legacyDump := dumpEqDatabase(t, legacy.dbPath, legacy.cipher)
+	unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
+	if delta != nil {
+		delta(legacyDump)
+	}
+	if diffs := diffEqDumps(legacyDump, unifiedDump); len(diffs) != 0 {
+		t.Fatalf("rows differ:\n%s", strings.Join(diffs[:min(len(diffs), 30)], "\n"))
+	}
+	return unifiedDump
+}
+
+// A checkpoint the queue refuses is folded into the next write: the stored
+// rows are those of a run without the fault, no gap is recorded, and one
+// stable log line says what happened (design B.8, K item 4).
+func TestCheckpointQueueFullIsFoldedIntoTheNextWrite(t *testing.T) {
+	for _, refuse := range []int{1, 2} {
+		t.Run(fmt.Sprintf("checkpoint %d refused", refuse), func(t *testing.T) {
+			legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
+			var counting *countingStore
+			unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, func(store *sqlite.Store) audit.Store {
+				counting = &countingStore{Store: store}
+				var calls atomic.Int64
+				counting.checkpoint = func(storage.AuditCheckpoint) error {
+					if calls.Add(1) == int64(refuse) {
+						return storage.ErrQueueFull
+					}
+					return nil
+				}
+				return counting
+			})
+			sendBoth(t, legacy, unified, largeStreamExchange(t))
+			dump := compareRuns(t, legacy, unified, nil)
+			if len(dump["audit_gaps"]) != 0 || counting.checkpoints.Load() != 2 {
+				t.Fatalf("gaps %d, checkpoints %d", len(dump["audit_gaps"]), counting.checkpoints.Load())
+			}
+			if !strings.Contains(string(unified.logs.Bytes()), `"error_code":"capture_checkpoint_deferred"`) {
+				t.Fatal("deferred checkpoint was not logged")
+			}
+		})
+	}
+}
+
+type commitScript struct {
+	attempts []bool // FinalAttempt of each attempt
+	fail     func(attempt int) error
+}
+
+func scriptedCommitRun(t *testing.T, retries int, script *commitScript, sleeps *[]time.Duration) *eqRun {
+	t.Helper()
+	options := audit.Options{CommitRetries: retries, Sleep: func(delay time.Duration) { *sleeps = append(*sleeps, delay) }}
+	return newEqRun(t, audit.WritePathUnified, options, func(store *sqlite.Store) audit.Store {
+		counting := &countingStore{Store: store}
+		counting.commit = func(commit sqlite.AuditCommit) (sqlite.AuditFinish, error, bool) {
+			attempt := len(script.attempts)
+			script.attempts = append(script.attempts, commit.FinalAttempt)
+			if err := script.fail(attempt); err != nil {
+				return sqlite.AuditFinish{}, err, true
+			}
+			return sqlite.AuditFinish{}, nil, false
+		}
+		return counting
+	})
+}
+
+func TestCommitAuditRetries(t *testing.T) {
+	batch := fmt.Errorf("commit: %w", storage.ErrWriteBatchFailed)
+	constraint := errors.New("constraint failed")
+	for _, test := range []struct {
+		name       string
+		retries    int
+		fail       func(attempt int) error
+		attempts   []bool
+		sleeps     []time.Duration
+		finalError bool
+	}{
+		{"batch failure once, then success", 3, func(attempt int) error {
+			if attempt == 0 {
+				return batch
+			}
+			return nil
+		}, []bool{false, false}, []time.Duration{100 * time.Millisecond}, false},
+		{"queue full once, then success", 3, func(attempt int) error {
+			if attempt == 0 {
+				return storage.ErrQueueFull
+			}
+			return nil
+		}, []bool{false, false}, []time.Duration{100 * time.Millisecond}, false},
+		{"batch failure every time", 3, func(int) error { return batch }, []bool{false, false, false, true},
+			[]time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}, true},
+		{"five retries cap at one second", 5, func(int) error { return storage.ErrQueueFull }, []bool{false, false, false, false, false, true},
+			[]time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, time.Second}, true},
+		{"constraint failure is not retried", 3, func(int) error { return constraint }, []bool{false}, nil, true},
+		{"zero retries", 0, func(int) error { return storage.ErrQueueFull }, []bool{true}, nil, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			script := &commitScript{fail: test.fail}
+			var sleeps []time.Duration
+			unified := scriptedCommitRun(t, test.retries, script, &sleeps)
+			unified.noParse = test.finalError
+			view, id := unified.send(copyChunks(largeStreamExchange(t)))
+			if view.status != 200 {
+				t.Fatalf("status %d", view.status)
+			}
+			if fmt.Sprint(script.attempts) != fmt.Sprint(test.attempts) || fmt.Sprint(sleeps) != fmt.Sprint(test.sleeps) {
+				t.Fatalf("attempts %v sleeps %v, want %v %v", script.attempts, sleeps, test.attempts, test.sleeps)
+			}
+			record := completionLogRecords(t, unified.logs.Bytes())[0]
+			snapshot, err := unified.store.Snapshot(context.Background(), id)
+			// A failed commit is no barrier: wait for the checkpoints.
+			for deadline := time.Now().Add(5 * time.Second); err == nil && test.finalError && len(snapshot.Stages) < 4 && time.Now().Before(deadline); {
+				time.Sleep(5 * time.Millisecond)
+				snapshot, err = unified.store.Snapshot(context.Background(), id)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.finalError {
+				// The same outcome as a failed FinishAudit on the legacy path.
+				assertLogField(t, record, "capture_status", "partial")
+				assertLogField(t, record, "error_code", "audit_finalize_failed")
+				if !strings.Contains(string(unified.logs.Bytes()), `"error_code":"finish_audit_failed"`) || snapshot.Audit.EndedAtNS != nil {
+					t.Fatalf("final failure: log %s, ended %v", unified.logs.Bytes(), snapshot.Audit.EndedAtNS)
+				}
+				// The checkpoints' rows are in the database all the same.
+				if len(snapshot.Stages) != 4 || len(snapshot.Chunks) == 0 {
+					t.Fatalf("checkpointed rows: %d stages, %d chunks", len(snapshot.Stages), len(snapshot.Chunks))
+				}
+				return
+			}
+			assertLogField(t, record, "capture_status", "complete")
+			if snapshot.Audit.CaptureStatus != "complete" || snapshot.Audit.EndedAtNS == nil {
+				t.Fatalf("audit %+v", snapshot.Audit)
+			}
+		})
+	}
+}
+
+// Content beyond the memory budget is not retained: the stage is partial
+// with capture_budget_exhausted, the audit keeps raw in full for what it
+// has, a queue_full gap is recorded and forwarding is unchanged (F.6).
+func TestMemoryBudgetExhaustion(t *testing.T) {
+	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
+	unified := newEqRun(t, audit.WritePathUnified, audit.Options{StageBytes: 1 << 20, GlobalBytes: 1 << 20}, nil)
+	exchange := largeStreamExchange(t)
+	legacyView, unifiedView := sendBoth(t, legacy, unified, exchange)
+	if string(legacyView.body) != string(unifiedView.body) {
+		t.Fatal("forwarded bytes changed")
+	}
+	unified.manager.CloseGaps(context.Background())
+	snapshot, err := unified.store.Snapshot(context.Background(), unified.lastAuditID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Audit.CaptureStatus != "partial" {
+		t.Fatalf("capture status %s", snapshot.Audit.CaptureStatus)
+	}
+	exhausted := 0
+	for _, body := range snapshot.Bodies {
+		if body.ErrorCode != nil && *body.ErrorCode == "capture_budget_exhausted" {
+			exhausted++
+			if body.State != "partial" || body.StoredLength >= body.ObservedLength || body.RetentionState != "full" {
+				t.Fatalf("exhausted body %+v", body)
+			}
+		}
+	}
+	if exhausted == 0 {
+		t.Fatalf("no exhausted body: %+v", snapshot.Bodies)
+	}
+	for _, stage := range snapshot.Stages {
+		if stage.Stage == storage.StageRequestReceived && (stage.State != "partial" || stage.ErrorCode == nil || *stage.ErrorCode != "capture_budget_exhausted") {
+			t.Fatalf("request stage %+v", stage)
+		}
+	}
+	dump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
+	if len(dump["audit_gaps"]) != 1 || dump["audit_gaps"][0]["reason"] != `"queue_full"` {
+		t.Fatalf("gaps %v", dump["audit_gaps"])
+	}
+	if used := unifiedBudgetUsed(unified); used != 0 {
+		t.Fatalf("budget still holds %d bytes", used)
+	}
+}
+
+func unifiedBudgetUsed(run *eqRun) int64 { return run.manager.MemoryInUse() }
+
+// A start row committed without its inbound stage (a trigger rejects the
+// request_received stage row on both paths): the audit is admitted, ends
+// failed, and its rows equal legacy's except that the response pair is
+// merged in memory where legacy, for a failed capture, keeps both copies.
+func TestInboundStageNotStoredMatchesLegacy(t *testing.T) {
+	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
+	unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, nil)
+	for _, run := range []*eqRun{legacy, unified} {
+		execSQL(t, run.dbPath, `CREATE TRIGGER reject_inbound BEFORE INSERT ON http_stages
+			WHEN NEW.stage = 'request_for_newapi_received_from_nginx' BEGIN SELECT RAISE(ABORT, 'rejected by test'); END`)
+	}
+	sendBoth(t, legacy, unified, largeStreamExchange(t))
+	for _, run := range []*eqRun{legacy, unified} {
+		record := completionLogRecords(t, run.logs.Bytes())[0]
+		assertLogField(t, record, "forward_status", "completed")
+		assertLogField(t, record, "capture_status", "failed")
+	}
+	// The unified session learns of the lost stage from BeginAudit and says
+	// so as legacy does for a StartStage it is told failed; a legacy session
+	// whose StartStage is rejected inside the writer never learns of it.
+	if !strings.Contains(string(unified.logs.Bytes()), `"error_code":"start_stage_failed"`) {
+		t.Fatal("unified: no start_stage_failed log")
+	}
+	dump := compareRuns(t, legacy, unified, func(legacy map[string][]eqRow) {
+		mergeResponsePair(t, legacy)
+	})
+	for _, row := range dump["body_streams"] {
+		if row["stage"] == `"`+storage.StageRequestSent+`"` && row["source_stage"] != row["stage"] {
+			t.Fatalf("request_sent merged: %v", row)
+		}
+	}
+	if dump["audit_records"][0]["capture_status"] != `"failed"` {
+		t.Fatalf("audit %v", dump["audit_records"][0])
+	}
+}
+
+// mergeResponsePair rewrites legacy's unmerged response pair into the
+// merged shape: response_sent points at response_received, takes its stored
+// length and chunk count, and has no chunks of its own.
+func mergeResponsePair(t *testing.T, dump map[string][]eqRow) {
+	t.Helper()
+	sent, received := `"`+storage.StageResponseSent+`"`, `"`+storage.StageResponseReceived+`"`
+	var source eqRow
+	for _, row := range dump["body_streams"] {
+		if row["stage"] == received {
+			source = row
+		}
+	}
+	for _, row := range dump["body_streams"] {
+		if row["stage"] == sent {
+			row["source_stage"] = received
+			for _, column := range []string{"stored_length", "chunk_count", "stream_event_count", "stream_timeline_complete"} {
+				row[column] = source[column]
+			}
+		}
+	}
+	dropEqRows(dump, "body_chunks", func(row eqRow) bool { return row["stage"] == sent })
+}
+
+func dropEqRows(dump map[string][]eqRow, table string, match func(eqRow) bool) int {
+	kept := dump[table][:0]
+	dropped := 0
+	for _, row := range dump[table] {
+		if match(row) {
+			dropped++
+			continue
+		}
+		kept = append(kept, row)
+	}
+	dump[table] = kept
+	return dropped
+}
+
+func execSQL(t *testing.T, path, statement string) {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(statement); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// freezingStore stops every write once frozen, as a process that dies does:
+// what was enqueued before still commits, nothing after does.
+type freezingStore struct {
+	*sqlite.Store
+	frozen atomic.Bool
+}
+
+func (store *freezingStore) StartStage(ctx context.Context, value sqlite.HTTPStage) error {
+	if store.frozen.Load() {
+		return nil
+	}
+	return store.Store.StartStage(ctx, value)
+}
+func (store *freezingStore) StartBody(ctx context.Context, value sqlite.BodyStream) error {
+	if store.frozen.Load() {
+		return nil
+	}
+	return store.Store.StartBody(ctx, value)
+}
+func (store *freezingStore) AddHeaders(ctx context.Context, value []sqlite.HTTPHeader) error {
+	if store.frozen.Load() {
+		return nil
+	}
+	return store.Store.AddHeaders(ctx, value)
+}
+func (store *freezingStore) AddChunk(ctx context.Context, value sqlite.BodyChunk) error {
+	if store.frozen.Load() {
+		return nil
+	}
+	return store.Store.AddChunk(ctx, value)
+}
+func (store *freezingStore) FinishStage(ctx context.Context, value sqlite.StageFinish) error {
+	if store.frozen.Load() {
+		return nil
+	}
+	return store.Store.FinishStage(ctx, value)
+}
+func (store *freezingStore) Checkpoint(ctx context.Context, value sqlite.AuditCheckpoint) error {
+	if store.frozen.Load() {
+		return nil
+	}
+	return store.Store.Checkpoint(ctx, value)
+}
+func (store *freezingStore) FinishAuditWithResult(ctx context.Context, value sqlite.AuditFinish) (sqlite.AuditFinish, error) {
+	if store.frozen.Load() {
+		return sqlite.AuditFinish{}, storage.ErrClosed
+	}
+	return store.Store.FinishAuditWithResult(ctx, value)
+}
+func (store *freezingStore) CommitAudit(ctx context.Context, value sqlite.AuditCommit) (sqlite.AuditFinish, error) {
+	if store.frozen.Load() {
+		return sqlite.AuditFinish{}, storage.ErrClosed
+	}
+	return store.Store.CommitAudit(ctx, value)
+}
+
+func crashRun(t *testing.T, writePath string, at func(event string, count int) bool) (*eqRun, *freezingStore) {
+	t.Helper()
+	var frozen *freezingStore
+	run := newEqRun(t, writePath, audit.Options{}, func(store *sqlite.Store) audit.Store {
+		frozen = &freezingStore{Store: store}
+		return frozen
+	})
+	run.noParse = true
+	run.upstream.hook = func(event string, count int) {
+		if at(event, count) {
+			frozen.frozen.Store(true)
+		}
+	}
+	return run, frozen
+}
+
+// recoverRun discards the process state and runs the store's recovery, as a
+// restart does.
+func recoverRun(t *testing.T, run *eqRun) {
+	t.Helper()
+	run.worker.Close()
+	if err := run.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := sqlite.Open(context.Background(), run.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.EnableIntegrity(context.Background(), eqKey); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := reopened.RecoverInterruptedAudits(context.Background(), eqClockOrigin+10_000_000); err != nil || count != 1 {
+		t.Fatalf("%s: recovered %d: %v", run.path, count, err)
+	}
+	if err := reopened.VerifyIntegrityPayloads(context.Background()); err != nil {
+		t.Fatalf("%s: integrity after recovery: %v", run.path, err)
+	}
+	run.store = reopened
+}
+
+// Design I.2 without staging: at each crash point of B.7 the recovered audit
+// has the rows the unified column promises and the shape of the legacy audit
+// interrupted at the same point, apart from the listed differences.
+func TestCrashPointsMatchLegacyAfterRecovery(t *testing.T) {
+	stage := func(name string) string { return `"` + name + `"` }
+	dropStage := func(dump map[string][]eqRow, table, name string) int {
+		return dropEqRows(dump, table, func(row eqRow) bool { return row["stage"] == stage(name) })
+	}
+	mergedRequest := func(t *testing.T, dump map[string][]eqRow) {
+		for _, row := range dump["body_streams"] {
+			if row["stage"] == stage(storage.StageRequestSent) {
+				row["source_stage"] = stage(storage.StageRequestReceived)
+			}
+		}
+		if dropStage(dump, "body_chunks", storage.StageRequestSent) == 0 {
+			t.Fatal("legacy request_sent had no chunks")
+		}
+	}
+	for _, test := range []struct {
+		name  string
+		at    func(event string, count int) bool
+		delta func(t *testing.T, legacy map[string][]eqRow)
+		// stages and chunks the recovered unified audit has.
+		stages, chunks int
+	}{
+		{
+			// K item 1: BeginAudit wrote the inbound stage and its headers;
+			// request_sent's row and headers are not written yet.
+			name: "before the request body is read",
+			at:   func(event string, _ int) bool { return event == "roundtrip" },
+			delta: func(t *testing.T, legacy map[string][]eqRow) {
+				dropStage(legacy, "http_stages", storage.StageRequestSent)
+				dropStage(legacy, "http_headers", storage.StageRequestSent)
+			},
+			stages: 1,
+		},
+		{
+			// B.7 row 2: a request body under the memory budget leaves nothing
+			// while it is uploading.
+			name: "while the request body is uploading",
+			at:   func(event string, count int) bool { return event == "request-read" && count >= 1536<<10 },
+			delta: func(t *testing.T, legacy map[string][]eqRow) {
+				dropStage(legacy, "http_stages", storage.StageRequestSent)
+				dropStage(legacy, "http_headers", storage.StageRequestSent)
+				dropStage(legacy, "body_streams", storage.StageRequestSent)
+				dropStage(legacy, "body_streams", storage.StageRequestReceived)
+				dropStage(legacy, "body_chunks", storage.StageRequestSent)
+				dropStage(legacy, "body_chunks", storage.StageRequestReceived)
+			},
+			stages: 1,
+		},
+		{
+			// B.7 row 3: checkpoint 1 wrote the request side, merged.
+			name:   "after the request, before the response headers",
+			at:     func(event string, _ int) bool { return event == "request-done" },
+			delta:  mergedRequest,
+			stages: 2, chunks: 3,
+		},
+		{
+			// B.7 row 4: checkpoint 2 wrote the response stages and headers;
+			// the response bodies come only with the commit.
+			name: "mid-stream",
+			at:   func(event string, count int) bool { return event == "response-read" && count > 200 },
+			delta: func(t *testing.T, legacy map[string][]eqRow) {
+				mergedRequest(t, legacy)
+				dropStage(legacy, "body_streams", storage.StageResponseReceived)
+				dropStage(legacy, "body_streams", storage.StageResponseSent)
+				dropStage(legacy, "body_chunks", storage.StageResponseReceived)
+				dropStage(legacy, "body_chunks", storage.StageResponseSent)
+			},
+			stages: 4, chunks: 3,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			legacy, _ := crashRun(t, audit.WritePathLegacy, test.at)
+			unified, _ := crashRun(t, audit.WritePathUnified, test.at)
+			sendBoth(t, legacy, unified, largeStreamExchange(t))
+			// Let the writes enqueued before the freeze commit, as they would
+			// have within milliseconds of the crash.
+			time.Sleep(50 * time.Millisecond)
+			recoverRun(t, legacy)
+			recoverRun(t, unified)
+			legacyDump := dumpEqDatabase(t, legacy.dbPath, legacy.cipher)
+			unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
+			test.delta(t, legacyDump)
+			if diffs := diffEqDumps(legacyDump, unifiedDump); len(diffs) != 0 {
+				t.Fatalf("recovered rows differ beyond B.7:\n%s", strings.Join(diffs[:min(len(diffs), 30)], "\n"))
+			}
+			if got := len(unifiedDump["http_stages"]); got != test.stages {
+				t.Fatalf("unified stages %d, want %d", got, test.stages)
+			}
+			if got := len(unifiedDump["body_chunks"]); got != test.chunks {
+				t.Fatalf("unified chunks %d, want %d", got, test.chunks)
+			}
+			if forward := unifiedDump["audit_records"][0]["forward_status"]; forward != `"interrupted"` {
+				t.Fatalf("forward %s", forward)
+			}
+		})
+	}
+}

@@ -40,6 +40,15 @@ type stageCapture struct {
 	body            *bodyCapture
 	faulted         bool
 	errorCode       string
+
+	// Unified write path bookkeeping (design B.1): what earlier writes took.
+	// groups are the sealed header groups in capture order.
+	groups         []headerGroup
+	rowWritten     bool
+	bodyRowWritten bool
+	// merged: a checkpoint wrote this duplicate's body row pointing at its
+	// source, without chunks of its own.
+	merged bool
 }
 
 // TerminalSummary is the immutable, non-sensitive request outcome available
@@ -94,6 +103,18 @@ type Session struct {
 
 	finishOnce sync.Once
 	finishErr  error
+
+	// manager is set only on the unified write path.
+	manager *Manager
+	// memoryHeld is the plaintext this session holds in the global budget.
+	memoryHeld int64
+	// requestSentEnded: checkpoint 1's trigger has fired (or was skipped).
+	requestSentEnded bool
+	// committing is set when Finish builds the commit; no checkpoint follows.
+	committing bool
+	// inboundNotStored: BeginAudit kept the start row without the inbound
+	// stage (storage.ErrInboundStageNotStored).
+	inboundNotStored bool
 }
 
 func newSession(manager *Manager, requestContext context.Context, auditID, routeID string, started time.Time) *Session {
@@ -114,6 +135,10 @@ func newSession(manager *Manager, requestContext context.Context, auditID, route
 	}
 	if manager.mode == ModeAvailable {
 		session.gaps = manager.gaps
+	}
+	if manager.unified {
+		session.manager = manager
+		session.retainer = unifiedRetainer{}
 	}
 	return session
 }
@@ -318,6 +343,9 @@ func (session *Session) Finish() error {
 }
 
 func (session *Session) finish() error {
+	if session.manager != nil {
+		return session.finishUnified()
+	}
 	session.mu.Lock()
 	if session.forwardStatus == storage.ForwardInProgress {
 		if session.request != nil && session.request.Err() != nil && !session.responseLogicallyCompleteLocked() {
@@ -580,6 +608,13 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 		session.statusCode = cloneInt(statusCode)
 	}
 
+	if session.manager != nil {
+		// Unified: the stage is written by a later checkpoint or the commit;
+		// its headers are sealed now, as legacy seals them at stage start.
+		stage.persisted = true
+		session.addHeadersLocked(stage, storage.HeaderKindHeader, headers)
+		return stage
+	}
 	write := storage.HTTPStage{
 		AuditID:       session.auditID,
 		Stage:         name,
@@ -619,6 +654,10 @@ func (session *Session) addHeaders(stageName, kind string, headers http.Header) 
 
 func (session *Session) addHeadersLocked(stage *stageCapture, kind string, headers http.Header) {
 	if len(headers) == 0 || !stage.persisted {
+		return
+	}
+	if session.manager != nil {
+		session.addHeaderGroupLocked(stage, kind, headers)
 		return
 	}
 	names := make([]string, 0, len(headers))
