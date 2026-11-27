@@ -102,7 +102,16 @@ func TestStreamResidueOverLimitKeepsRawEvidence(t *testing.T) {
 			t.Fatalf("declined stream has a reconstruction_failed event: %v", events)
 		}
 	}
-	// The response raw downloads as it was sent.
+	// The detail shows the request and the assistant answer; the response
+	// raw downloads as it was sent.
+	view, err := service.Get(ctx, large, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := view.Conversation.Messages
+	if len(messages) != 3 || messages[2].Content[0].Text != "ok" || messages[2].Index != 2 {
+		t.Fatalf("declined stream conversation = %+v", messages)
+	}
 	var raw bytes.Buffer
 	if err := service.StreamRaw(ctx, large, query.SideResponse, &raw); err != nil || !bytes.Contains(raw.Bytes(), []byte(padding)) {
 		t.Fatalf("declined stream response raw: %v", err)

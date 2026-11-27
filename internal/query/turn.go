@@ -31,7 +31,7 @@ func (service *Service) ReconstructTurn(ctx context.Context, auditID string) (Re
 	if detail.TurnGraph == nil {
 		return ReconstructedTurn{}, ErrNoTurnGraph
 	}
-	return reconstructTurnGraph(service.cipher, detail.Audit.ParserName, detail.TurnGraph)
+	return reconstructAuditTurn(service.cipher, detail)
 }
 
 func reconstructTurnGraph(cipher security.Cipher, parserName string, graph *storage.TurnGraph) (ReconstructedTurn, error) {

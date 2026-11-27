@@ -4,14 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -416,24 +414,14 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 			HasToolCall:        parsed.HasToolCall,
 			ParsedAtNS:         parsed.ParsedAtNS,
 		}
-		if len(parsed.ParsedJSONEnc) != 0 {
-			plaintext, decryptErr := auditmodel.OpenParsedResult(service.cipher, auditID, parsed.ParserName, parsed.ParsedJSONEnc)
-			if decryptErr != nil {
-				return Detail{}, ErrIntegrity
-			}
-			var envelope struct {
-				Conversation *conversation.Conversation `json:"conversation"`
-			}
-			decodeErr := json.Unmarshal(plaintext, &envelope)
-			clear(plaintext)
-			if decodeErr != nil || !validConversation(envelope.Conversation) {
-				return Detail{}, ErrIntegrity
-			}
-			detail.Conversation = envelope.Conversation
+		envelope, envelopeErr := openParsedEnvelope(service.cipher, auditID, parsed)
+		if envelopeErr != nil {
+			return Detail{}, envelopeErr
 		}
+		detail.Conversation = envelope.Conversation
 	}
 	if storageDetail.TurnGraph != nil {
-		reconstructed, reconstructErr := reconstructTurnGraph(service.cipher, storageDetail.Audit.ParserName, storageDetail.TurnGraph)
+		reconstructed, reconstructErr := reconstructAuditTurn(service.cipher, storageDetail)
 		if reconstructErr != nil {
 			return Detail{}, ErrIntegrity
 		}

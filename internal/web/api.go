@@ -596,8 +596,9 @@ func (handler *managementHandler) serveReconstructed(writer http.ResponseWriter,
 		return
 	}
 	if reconstructed.Turn.ResponseLayout == auditmodel.LayoutNone {
-		// The turn holds no response (none arrived, or the client went away
-		// first): there is nothing to rebuild, which is not a null body.
+		// The turn holds no response: none arrived, or the turn is
+		// request-only and the response stays as raw only (its raw route
+		// serves it). There is nothing to rebuild, which is not a null body.
 		writeError(writer, http.StatusNotFound, "not_available", "this turn has no response to rebuild")
 		return
 	}

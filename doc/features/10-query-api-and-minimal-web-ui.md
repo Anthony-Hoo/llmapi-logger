@@ -118,7 +118,7 @@ UI 默认只显示 TTFT、Body 首末观测、SSE event count 和 complete 状�
 - 工具流量内联图片：tool call 参数与 tool result 中的 base64 图片（data URL、Anthropic `source.data`、Gemini `inline_data` 三种形态）在展示层渲染为缩略图，点击进入全屏查看器：滚轮以光标为中心缩放、拖动平移、双击在适应屏幕与原始大小间切换，多图时两侧箭头按钮与 ←/→ 方向键循环切换（切换时重置缩放），Esc 或点击背景关闭；展示用 JSON 中的 base64 载荷替换为「[图片 #n 类型 大小]」占位符以保持可读。图片全部来自 data: URL，渲染不发起网络请求；该替换只作用于展示副本，不改写存储值。未识别内容块沿用同一提取逻辑，但用户消息中的图片块在 DTO 中被截断到 4 KiB，通常无法完整渲染。
 - 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载；在详情中位于「存储与原始证据」下，默认折叠。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后清除所有行级筛选及其输入草稿，再对列表应用该 conversation 筛选，保留折叠偏好与服务端身份 scope；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作。清除会话筛选仅移除 conversation；若在会话视图中重新应用了行级筛选，仍按轮次展示，否则按已保存的折叠偏好展示。
 - 流式响应时序：TTFT、event count、首末观测、timeline complete 和按需 timeline 校验。
-- 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。轮次面板按请求侧、响应侧分别说明 raw 是否保留、重建 JSON 是否可下载；turn 的 response layout 为 `none`（没有响应可重建）时响应侧重建按钮不可用，`reconstructed/response` 返回 `404 not_available`，不返回 `200 null`。
+- 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。轮次面板按请求侧、响应侧分别说明 raw 是否保留、重建 JSON 是否可下载；turn 的 response layout 为 `none`（没有响应可重建）时响应侧重建按钮不可用，`reconstructed/response` 返回 `404 not_available`，不返回 `200 null`。这包括只有请求的轮次（模块 18 §6）：响应侧标明“轮次未收录响应，以原始 Body 为准”，响应 raw 完整保留、可下载；详情的 conversation 是重建出的请求消息加上 `parsed_json_enc` 里的残缺回答消息，`Index` 连续。
 - UA 规则：Go RE2 正则的新增、编辑、启停和删除，持久化后热生效。
 - 关键词拦截规则（[模块 22](22-content-policy.md)）：模型 RE2、动作（拦截/仅记录）、关键词逐行编辑、扫描范围复选（默认全部 7 类）；新增、编辑、启停和删除后立即生效。规则命中在访问 NewAPI 前返回本地 `400`，审计记录稳定 block code；开发者视图隐藏该入口。
 

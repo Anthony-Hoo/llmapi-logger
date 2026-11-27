@@ -237,6 +237,7 @@
 192. **下载审计行的测试等待写入**：`package_downloaded` 行是处理函数在送完文件之后写的，而测试里的请求在收到响应时就返回，随后立刻数行数，偶尔会少一行（整包运行时出现过 29 行）。测试改为在限定时间内等到预期的行数再断言；产品代码不变。
 193. **`--pretty` 的表头与单元格一样截短**（补第 178 条；来自对第 191–192 条的修改的复审，一条意见）：表格把每一行填充到各列最宽的宽度，单元格已截到 60 个字符，表头却没有；对象数组里一个很长的键会让其后每一行都填充到同样宽，18 KB 的数据渲染成 10 MB。现在表头也截到 60 个字符；普通长度的表头不变。截短之后表格仍会把只有几个字节的一行填充到八列的宽度（几百字节），所以再加一个总量上限：`--pretty` 渲染的数据达到 8 MiB（`maxPrettyBytes`）就停止，补一行说明“输出已截断，去掉 `--pretty` 可得到完整结果”，其后的 `meta`、网页地址等几行照常输出。JSON 输出才是接口，不截断。测试 `TestPrettyTableHeaderIsBounded`、`TestPrettyOutputIsBounded`。
 194. **`--pretty` 的单个表格限制行数**（补第 193 条；来自对它的复审，一条意见）：第 193 条的总量上限只作用在表格写出的地方，而表格要等全部行都格式化并缓存之后才写出；1.5 MB、50 万个空对象的结果在输出被截到 8 MiB 之前分配了约 300 MiB。现在一个表格最多渲染 5000 行（`maxPrettyTableRows`），多出的行用一行说明“还有 N 行未显示，去掉 `--pretty` 可得到全部”；服务端的列表一页最多 200 条，真实结果不会被截。渲染所需的内存于是有界。到此为止的界线：解码后的响应本身占用的内存与响应大小成正比，响应上限是 256 MiB，这是有意的上限，不因 `--pretty` 另设。测试 `TestPrettyTableRowsAreBounded`。
+195. **`response` 重建也可能是 `no_body`**（补第 118 条；issue #59 设计 5.9）：第 118 条把 `request`/`response` 缺重建写成 `not_reconstructed`，那时只有带 normalizer 的解析器在两端 Body 完整时写重建。现在 turn 的 response layout 可以是 `none`：响应到达之前客户端就走了，或者记录是只有请求的轮次（响应不完整、因响应而解析为 `partial`、或响应未被规范化，模块 18 §6）。这时 `request` 可导出，`response` 答 `NOT_AVAILABLE`、`reason: no_body`：这一轮没有可重建的响应 Body。只有请求的轮次的响应原文仍完整保留，`raw-response` 可导出；`conversation` 导出含请求消息和接在后面的残缺回答消息。测试 `TestAgentExportStatesPredictTheExport` 的 `request-only` 记录。
 
 ## 1. 目录与归属
 
@@ -530,7 +531,7 @@
 | `raw-request`、`raw-response` | `GET …/raw/{side}` | 二进制流；元数据在 `X-Audit-*` 响应头里，原样透传 |
 | `timeline-request`、`timeline-response` | `GET …/timeline/{side}` | JSON |
 
-记录没有、也不会有某种内容时，导出答 `NOT_AVAILABLE`；内容还会出现时答 `NOT_READY`；原始 Body 已释放答 `NOT_RETAINED`（§0.1 第 118 条）。
+记录没有、也不会有某种内容时，导出答 `NOT_AVAILABLE`；内容还会出现时答 `NOT_READY`；原始 Body 已释放答 `NOT_RETAINED`（§0.1 第 118 条）。`response` 缺重建时 `reason` 是 `not_reconstructed`（没有 turn），或 `no_body`（turn 不含响应：响应前就取消，或只有请求的轮次，此时响应原文见 `raw-response`；§0.1 第 195 条）。
 
 导出接口返回内容本身，不包信封（错误时仍是失败信封）。命令行把它写入 `--out` 指定的文件，然后在标准输出打印成功信封，`data` 为 `{path, bytes, sha256, complete, missing_chunks?}`。每种导出都带 `X-Audit-Complete`（不完整时另带 `X-Audit-Incomplete-Reason`）：由解析产生的导出（`conversation`、`request`、`response`）与 `timeline-response` 取值与 `requests get` 对同一记录给出的 `meta.complete`/`incomplete_reason` 相同；其余采集到的内容（`headers`、原始 Body、`timeline-request`）跟随采集，不看 `parse_partial`，时间线与原始 Body 再与内容自身的完整性相与；`complete` 取 `X-Audit-Complete`（§0.1 第 96、140 条）。
 

@@ -50,6 +50,9 @@ type upstreamResponse struct {
 	body        string
 	// status is the upstream HTTP status; zero means 200.
 	status int
+	// sent, when set, is closed once the body was written and flushed; the
+	// upstream then holds the stream open until the request is cancelled.
+	sent chan struct{}
 }
 
 func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher security.Cipher, fp *security.AnalysisFingerprinter) parser.AuditAnalyzer) *insightsHarness {
@@ -95,6 +98,11 @@ func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher 
 			response.WriteHeader(next.status)
 		}
 		_, _ = io.WriteString(response, next.body)
+		if next.sent != nil {
+			response.(http.Flusher).Flush()
+			close(next.sent)
+			<-request.Context().Done()
+		}
 	}))
 	t.Cleanup(upstream.Close)
 	routes := []config.RouteConfig{

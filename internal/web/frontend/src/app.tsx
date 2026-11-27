@@ -1840,12 +1840,19 @@ export function TurnStoragePanel({
   const verified = turn.reconstruction_status === "verified";
   // Raw retention is decided per side, so each side reports on its own whether
   // its raw body is still there and whether it can be rebuilt.
-  const sides = (["request", "response"] as RawSide[]).map((side) => ({
-    side,
-    raw: rawSideLabel(bodyForSide(detail, side)),
-    // A turn with response layout "none" holds no response to rebuild.
-    rebuildable: verified && (side === "request" || turn.response_layout !== "none"),
-  }));
+  const sides = (["request", "response"] as RawSide[]).map((side) => {
+    const body = bodyForSide(detail, side);
+    // A turn with response layout "none" holds no response to rebuild:
+    // either none arrived, or the turn is request-only (the response was
+    // incomplete or not normalized) and its raw body is the only evidence.
+    const omitted = side === "response" && turn.response_layout === "none";
+    return {
+      side,
+      raw: rawSideLabel(body),
+      rebuildable: verified && !omitted,
+      unavailable: omitted ? (body ? "轮次未收录响应，以原始 Body 为准" : "无响应可重建") : "不可用",
+    };
+  });
 
   return (
     <div className="space-y-4">
@@ -1871,9 +1878,9 @@ export function TurnStoragePanel({
           ["响应序列 SHA-256", hashValue(turn.response_sequence_sha256)],
           ["请求重建 SHA-256", hashValue(turn.request_reconstruction_sha256)],
           ["响应重建 SHA-256", hashValue(turn.response_reconstruction_sha256)],
-          ...sides.map(({ side, raw, rebuildable }): [string, ReactNode] => [
+          ...sides.map(({ side, raw, rebuildable, unavailable }): [string, ReactNode] => [
             side === "request" ? "请求侧证据" : "响应侧证据",
-            `原始 Body：${raw} · 重建 JSON：${rebuildable ? "可下载" : side === "response" && turn.response_layout === "none" ? "无响应可重建" : "不可用"}`,
+            `原始 Body：${raw} · 重建 JSON：${rebuildable ? "可下载" : unavailable}`,
           ]),
         ]}
       />

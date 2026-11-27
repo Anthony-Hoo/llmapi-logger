@@ -182,7 +182,7 @@ session_analysis:
 | `agent_spawn_hints` | `hint_fpr` | 明文指纹 | 子 Agent 连边（沿用 20 §5.8） | 不另存 |
 | `token_links` | `newapi_user_id`、`newapi_token_id`、`quota`、`quota_per_unit`、`billing_state` | 明文 | L0：成本与归属人；聚合范围 | `session_signals` 存 `newapi_user_id` 和成本。**`username`、`token_name` 不读入包**：模型不需要知道是谁 |
 | `parsed_results` 明文列 | `request_model`、`response_model`、`error_type`、`error_code`、`upstream_error_class`、`status` | 明文 | L0：上游错误、策略拒绝计数 | 计数 |
-| `parsed_results.parsed_json_enc` | 其中的 `conversation`（[Conversation DTO](../../internal/conversation/types.go)：消息角色、text / reasoning / tool_call / tool_result / unknown 五类 part） | 解密 | 包：没有轮次图的记录（Gemini、normalization 失败的记录、升级前写入的 Anthropic 记录）的用户轮次、助手文本、工具调用 | 只进 `pack_enc` |
+| `parsed_results.parsed_json_enc` | 其中的 `conversation`（[Conversation DTO](../../internal/conversation/types.go)：消息角色、text / reasoning / tool_call / tool_result / unknown 五类 part），以及只有请求的轮次的 `partial_response_messages` | 解密 | 包：没有轮次图的记录（Gemini、normalization 失败的记录、升级前写入的 Anthropic 记录）的用户轮次、助手文本、工具调用；只有请求的轮次（模块 18 §6）的残缺回答，接在轮次图重建出的请求消息之后（`query.MergePartialResponse`） | 只进 `pack_enc` |
 | 轮次图（OpenAI、Anthropic）：`turns`、`turn_context_ops`、`turn_response_items`、`content_objects` | 每轮 `insert` 操作新增的条目、响应条目 | `content_objects` 解密 | 包：有轮次图的记录（含 Codex、Claude Code）的用户轮次、助手文本、工具调用与结果状态。只读增量条目，不重建整段历史 | 只进 `pack_enc` |
 | `content_binary_refs`、`binary_objects` | 前者的 `media_type`、后者的 `plaintext_length` | 明文；**二进制正文不解密** | 包：图片和附件的占位符 | 不落库 |
 | `body_chunks`（raw，仅 `retention_state=full`） | provider 原始 JSON | 解密 | 兜底：Conversation DTO 不保留的字段，目前只有 Anthropic `tool_result.is_error` | 不落库；raw 不在时该失败状态记为"未知" |

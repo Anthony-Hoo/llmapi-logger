@@ -128,7 +128,7 @@ http://127.0.0.1:8081/ui/
 
 管理页面中的“UA 拦截规则”支持新增、编辑、启停和删除。模型与 User-Agent 均使用 Go RE2 正则并默认区分大小写；一条规则的模型正则命中后，请求 User-Agent 必须命中该规则，多条命中规则全部需要通过。无效正则不会保存，也不会替换当前运行中的有效规则。
 
-普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 content object。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值和窄解析摘要。OpenAI、Anthropic 与 Gemini 的 verified conversation 从 turn graph、content object 和 binary object 重建，不再复制进 `parsed_json_enc`；异常记录和升级前没有 turn 的旧记录仍可在该密文中保存 conversation 回退副本。verified provider request/response 通过 reconstructed API 下载；raw API 仅对 `retention_state=full` 开放，`metadata` 返回 `410 raw_not_retained`。所有管理证据响应均带 `Cache-Control: no-store`。
+普通列表 API 会为每条候选记录只读取并认证解密入站 `User-Agent`，用于主列表展示和不区分大小写的子串筛选；它不读取其他 Header、Request-URI、Body、parsed JSON 或 content object。详情 API 会在鉴权后解密 Request-URI、每个已保存的 Header/Trailer 值和窄解析摘要。OpenAI、Anthropic 与 Gemini 的 verified conversation 从 turn graph、content object 和 binary object 重建，不再复制进 `parsed_json_enc`；没有 turn 的异常记录和升级前没有 turn 的旧记录仍可在该密文中保存 conversation 回退副本；只有请求的轮次只在该密文中另存残缺的回答消息，读取时接在重建出的请求消息之后。verified provider request/response 通过 reconstructed API 下载；raw API 仅对 `retention_state=full` 开放，`metadata` 返回 `410 raw_not_retained`。所有管理证据响应均带 `Cache-Control: no-store`。
 
 NewAPI 相关配置统一放在 `newapi` 下：`url` 是唯一上游，`proxy_url` 是可选显式 HTTP(S) 代理。`response_header_timeout_seconds` 控制等待 NewAPI 响应头/流式首包的时间，默认 `300` 秒；超长推理部署应设置为高于 NewAPI 自身超时。`preserve_host` 默认关闭，启用后审计与 passthrough 分支都会保留客户端面向的 Host，同时仍使用 `newapi.url` 建立上游连接。若 audit-proxy 所在环境不能直接访问远程 NewAPI，宿主机二进制通常可填写 `http://127.0.0.1:7897`；Podman/WSL 要访问仅监听 Windows loopback 的 Clash，则使用 host network 并填写同一地址，而不是 `host.containers.internal`。空值表示直接连接，程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
 

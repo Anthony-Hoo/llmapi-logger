@@ -50,3 +50,13 @@ func (worker *Worker) ResetBackfillForTest() {
 func (worker *Worker) SetNowForTest(now func() time.Time) {
 	worker.now = now
 }
+
+// ProjectRequestBodyForTest returns the request body the project identity
+// backfill would read for one audit, and whether it could be had.
+func (worker *Worker) ProjectRequestBodyForTest(ctx context.Context, auditID string) ([]byte, bool) {
+	audit, err := worker.store.LoadParserAudit(ctx, auditID)
+	if err != nil {
+		return nil, false
+	}
+	return worker.projectRequestBody(ctx, audit)
+}

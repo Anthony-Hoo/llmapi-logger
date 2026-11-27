@@ -161,6 +161,7 @@ type Result struct {
 明文列只保存窄摘要。`Conversation` 只在 worker 内存使用：
 
 - 有 verified turn 的记录（OpenAI、Anthropic、Gemini）的详情 conversation 从内容对象重建，不再写第二份 conversation；
+- 只有请求的轮次（响应不完整、因响应而解析为 `partial`，或响应未被规范化，模块 18 §6）只把 conversation 中 `phase=response` 的消息存进 `parsed_json_enc` 的 `partial_response_messages`，读取时接在重建出的请求消息之后（`query.MergePartialResponse`），不存第二份完整 conversation；
 - 没有 turn 的记录（normalization/reconstruction 异常、请求不可用，以及升级前没有 turn 的旧记录），raw 本来就会保留 full，此时可把 conversation 作为 `parsed_json_enc` 内的加密回退副本保存，避免现有详情能力退化。这份副本动辄数 MB，所以 `parsed_json_enc` 在加密前按需 gzip，格式见[模块 9](09-security-encryption-and-redaction.md) §5.1；
 - 列表、普通日志和明文 SQLite 列永远不包含消息正文、reasoning、工具参数或结果。
 

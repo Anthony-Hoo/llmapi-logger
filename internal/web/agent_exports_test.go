@@ -56,6 +56,13 @@ func addExportRecords(fixture *readFixture) {
 		detail.Bodies = detail.Bodies[:1]
 		detail.Bodies[0].RetentionState, detail.Bodies[0].StoredLength = storage.RetentionMetadata, 0
 	})
+	// A client that went away mid-stream: the request-only turn rebuilds the
+	// request, the half response stays as raw only and is not rebuilt.
+	add("request-only", 28*time.Second, func(detail *query.Detail) {
+		detail.Audit.ForwardStatus, detail.Audit.ParseStatus, detail.ParsedResult.Status = storage.ForwardClientCancelled, storage.ParsePartial, storage.ParsePartial
+		detail.Turn.RequestLayout, detail.Turn.ResponseLayout = auditmodel.LayoutOpenAIChatRequest, auditmodel.LayoutNone
+		detail.Bodies[0].RetentionState, detail.Bodies[0].StoredLength = storage.RetentionMetadata, 0
+	})
 	add("retention-pending", 24*time.Second, func(detail *query.Detail) {
 		detail.Bodies[0].RetentionState = storage.RetentionPending
 	})
@@ -98,6 +105,9 @@ func TestAgentExportStatesPredictTheExport(t *testing.T) {
 			"request": {State: exportAvailable}, "response": {State: exportAvailable}},
 		"no-response": {"request": {State: exportAvailable}, "response": {exportNotAvailable, exportReasonNoBody},
 			"raw-request": {exportNotRetained, exportReasonReleased}, "raw-response": {exportNotAvailable, exportReasonNoBody}},
+		"request-only": {"request": {State: exportAvailable}, "response": {exportNotAvailable, exportReasonNoBody},
+			"raw-request": {exportNotRetained, exportReasonReleased}, "raw-response": {State: exportAvailable},
+			"conversation": {State: exportAvailable}, "timeline-response": {State: exportAvailable}},
 		"retention-pending": {"raw-request": {exportPending, exportReasonRetentionPending}},
 		"capturing":         {"timeline-response": {exportPending, exportReasonCapturing}, "raw-response": {exportPending, exportReasonCapturing}, "request": {exportPending, exportReasonInProgress}},
 		"blocked-own": {"conversation": {exportNotAvailable, exportReasonBlocked}, "request": {exportNotAvailable, exportReasonBlocked},

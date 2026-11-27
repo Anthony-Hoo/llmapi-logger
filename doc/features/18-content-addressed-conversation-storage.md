@@ -123,6 +123,8 @@ normalizer 没有为此单独实现：去掉响应后，每个 normalizer 都只
 
 解析状态和错误码照实保存：响应不完整或解析为 `partial` 的记录仍是 `partial`，错误码与以前相同（例如中途取消为采集给出的 `body_read_error`，缺终止事件为 `missing_message_stop`），不因有了 turn 改标为完整。残留超限的记录响应完整、也已解析，只是没有被规范化：解析记为 `ok`、错误码 `response_not_normalized`（`parser.ErrorCodeResponseNotNormalized`；解析已带错误码时保留原码），不写 `reconstruction_failed` 事件，写 `semantic_compacted` 事件。
 
+**残缺响应的消息。** 有 turn 时 `parsed_json_enc` 不存 `conversation`；response layout 为 `none` 的 turn 只重建出请求消息。所以只有请求的轮次把解析出的 conversation 中 `phase=response` 的消息单独存在 `parsed_json_enc` 的 `partial_response_messages` 键下（`parser.PartialResponseMessagesKey`），不再保存整份回退 conversation。读取时由 `query.MergePartialResponse` 把它们接在重建出的请求消息之后，按顺序重排 `Index`，结果仍须通过 `validConversation`。详情、会话分析的会话、Agent 导出和 `ReconstructTurn` 都经 `reconstructAuditTurn` 走这一个合并；以后的冷归档读取也调用它。洞察和项目身份的回填读的是 raw：请求侧从 turn 重建，响应侧读保留的 raw 再解析，与实时分析的输入一致，不需要合并。
+
 下一轮请求照常以只有请求的轮次为父轮次候选，父上下文基准只能是它的请求序列（没有响应 item）。
 
 `upstream_error_class` 是不签名的派生列，判定只在保存解析结果时读取一次；之后改写该列不影响已定的保留状态。每一侧的 `retention_state` 进入 `semantic_compacted` 事件的摘要，新行按写入时的状态签名，摘要格式、schema 和约束都不变；`partial_response_messages` 在 `parsed_json_enc` 的密文里，同样随 `semantic_compacted` 签名。按旧规则写入的异常记录四个阶段都是 `full`，不迁移、不改写，照常通过校验和读取；以前没有 turn 的记录（四阶段 `full`、`parsed_json_enc` 带回退 conversation、可能有 `reconstruction_failed` 事件）也按原样读取和校验。回滚到旧二进制时，它能照常读取按新规则写入的行（`metadata` 一侧按已释放处理），但这些记录已经没有请求 raw 可以返回，只能下载响应 raw 或读取重建请求。

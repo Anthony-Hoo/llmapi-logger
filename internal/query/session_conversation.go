@@ -3,11 +3,9 @@ package query
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 
-	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 )
 
@@ -31,7 +29,7 @@ func (service *Service) SessionConversation(ctx context.Context, auditID string)
 		return nil, fmt.Errorf("query: read session conversation: %w", err)
 	}
 	if detail.TurnGraph != nil {
-		reconstructed, err := reconstructTurnGraph(service.cipher, detail.Audit.ParserName, detail.TurnGraph)
+		reconstructed, err := reconstructAuditTurn(service.cipher, detail)
 		if err != nil {
 			return nil, err
 		}
@@ -41,16 +39,9 @@ func (service *Service) SessionConversation(ctx context.Context, auditID string)
 	if parsed == nil || len(parsed.ParsedJSONEnc) == 0 {
 		return nil, ErrNotFound
 	}
-	plaintext, err := auditmodel.OpenParsedResult(service.cipher, auditID, parsed.ParserName, parsed.ParsedJSONEnc)
+	envelope, err := openParsedEnvelope(service.cipher, auditID, parsed)
 	if err != nil {
-		return nil, ErrIntegrity
-	}
-	defer clear(plaintext)
-	var envelope struct {
-		Conversation *conversation.Conversation `json:"conversation"`
-	}
-	if err := json.Unmarshal(plaintext, &envelope); err != nil || !validConversation(envelope.Conversation) {
-		return nil, ErrIntegrity
+		return nil, err
 	}
 	return envelope.Conversation, nil
 }

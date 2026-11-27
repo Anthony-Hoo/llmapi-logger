@@ -343,6 +343,15 @@ describe("content-addressed turn evidence", () => {
     const requestButton = noResponseHTML.match(/<button[^>]*>(?:(?!<\/button>).)*下载重建请求 JSON/)?.[0] ?? "";
     expect(requestButton).toContain("<button");
     expect(requestButton).not.toContain('disabled=""');
+
+    // A request-only turn: the response arrived only in part, so the turn
+    // does not carry it; its raw body is kept and is the evidence.
+    const requestOnly: AuditDetail = { ...mixed, turn: { ...turnDetail.turn!, response_layout: "none" } };
+    const requestOnlyHTML = renderToStaticMarkup(
+      <TurnStoragePanel detail={requestOnly} loading={null} note={null} onDownload={() => undefined} />,
+    );
+    expect(requestOnlyHTML).toContain("原始 Body：完整保留 · 重建 JSON：轮次未收录响应，以原始 Body 为准");
+    expect(requestOnlyHTML.match(/<button[^>]*>(?:(?!<\/button>).)*下载重建响应 JSON/)?.[0] ?? "").toContain('disabled=""');
   });
 
   it("shows TTFT and verifies first/last logical SSE event times", () => {
