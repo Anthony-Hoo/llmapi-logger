@@ -12,6 +12,7 @@ import (
 
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 )
 
 const parentCandidateLimit = 32
@@ -46,24 +47,15 @@ func saveParsedAudit(transaction dbTransaction, value ParsedAudit, signer *secur
 		graphVerified = true
 	}
 
-	discardRaw, err := shouldDiscardRawEvidence(transaction, value.Result, graphVerified)
+	decision, err := decideRawRetention(transaction, value, graphVerified)
 	if err != nil {
 		return err
 	}
-	retention := RetentionFull
-	if discardRaw {
-		retention = RetentionMetadata
-		if _, err := transaction.Exec(`DELETE FROM body_chunks WHERE audit_id = $1`, value.Result.AuditID); err != nil {
-			return fmt.Errorf("postgres writer: delete compacted raw chunks: %w", err)
-		}
+	if err := applySideRetention(transaction, value.Result.AuditID, decision.ReleaseRequest, StageRequestReceived, StageRequestSent); err != nil {
+		return err
 	}
-	if _, err := transaction.Exec(`
-UPDATE body_streams
-SET retention_state = $1,
-    stored_length = CASE WHEN $2 = 'metadata' THEN 0 ELSE stored_length END,
-    chunk_count = CASE WHEN $3 = 'metadata' THEN 0 ELSE chunk_count END
-WHERE audit_id = $4`, retention, retention, retention, value.Result.AuditID); err != nil {
-		return fmt.Errorf("postgres writer: update raw retention: %w", err)
+	if err := applySideRetention(transaction, value.Result.AuditID, decision.ReleaseResponse, StageResponseReceived, StageResponseSent); err != nil {
+		return err
 	}
 
 	parent, err := transaction.Exec(`
@@ -158,19 +150,68 @@ ON CONFLICT(audit_id) DO UPDATE SET
 	return nil
 }
 
-func shouldDiscardRawEvidence(transaction dbTransaction, result ParsedResult, graphVerified bool) (bool, error) {
+// rawRetentionDecision is the rule saveParsedAudit applies. Tests replace it
+// to write rows the way an older binary did.
+var rawRetentionDecision = storage.DecideRawRetention
+
+// decideRawRetention reads the outcome of the audit and decides, per side,
+// whether its raw is released (storage.DecideRawRetention).
+func decideRawRetention(transaction dbTransaction, value ParsedAudit, graphVerified bool) (storage.RawRetention, error) {
+	result := value.Result
 	if result.Status != ParseOK || !graphVerified {
-		return false, nil
+		return storage.RawRetention{}, nil
 	}
-	var forwardStatus, captureStatus string
+	outcome := storage.RawRetentionOutcome{
+		ParseStatus:        result.Status,
+		TurnVerified:       graphVerified,
+		RequestNormalized:  value.Turn != nil && value.Turn.RequestLayout != auditmodel.LayoutNone,
+		UpstreamErrorClass: result.UpstreamErrorClass,
+	}
 	var statusCode sql.NullInt64
 	if err := transaction.QueryRow(`
 SELECT forward_status, capture_status, status_code
 FROM audit_records
-WHERE audit_id = $1`, result.AuditID).Scan(&forwardStatus, &captureStatus, &statusCode); err != nil {
-		return false, fmt.Errorf("postgres writer: read raw retention outcome: %w", err)
+WHERE audit_id = $1`, result.AuditID).Scan(&outcome.ForwardStatus, &outcome.CaptureStatus, &statusCode); err != nil {
+		return storage.RawRetention{}, fmt.Errorf("postgres writer: read raw retention outcome: %w", err)
 	}
-	return forwardStatus == ForwardCompleted && captureStatus == CaptureComplete && statusCode.Valid && statusCode.Int64 >= 200 && statusCode.Int64 < 400, nil
+	if statusCode.Valid {
+		outcome.StatusCode = &statusCode.Int64
+	}
+	var mergedStages int
+	if err := transaction.QueryRow(`
+SELECT COUNT(*)
+FROM body_streams
+WHERE audit_id = $1
+  AND ((stage = $2 AND source_stage = $2) OR (stage = $3 AND source_stage = $2))
+  AND state = 'complete'
+  AND (error_code IS NULL OR error_code <> 'body_stage_mismatch')`,
+		result.AuditID, StageRequestReceived, StageRequestSent).Scan(&mergedStages); err != nil {
+		return storage.RawRetention{}, fmt.Errorf("postgres writer: read request stage merge: %w", err)
+	}
+	outcome.RequestStagesMerged = mergedStages == 2
+	return rawRetentionDecision(outcome), nil
+}
+
+// applySideRetention sets the retention of one side's two stages. Releasing
+// deletes the side's chunks, which belong to whichever of its stages is the
+// source_stage (merging never crosses sides), and zeroes the stored counters.
+func applySideRetention(transaction dbTransaction, auditID string, release bool, first, second string) error {
+	retention := RetentionFull
+	if release {
+		retention = RetentionMetadata
+		if _, err := transaction.Exec(`DELETE FROM body_chunks WHERE audit_id = $1 AND stage IN ($2, $3)`, auditID, first, second); err != nil {
+			return fmt.Errorf("postgres writer: delete compacted raw chunks: %w", err)
+		}
+	}
+	if _, err := transaction.Exec(`
+UPDATE body_streams
+SET retention_state = $1,
+    stored_length = CASE WHEN $2 = 'metadata' THEN 0 ELSE stored_length END,
+    chunk_count = CASE WHEN $3 = 'metadata' THEN 0 ELSE chunk_count END
+WHERE audit_id = $4 AND stage IN ($5, $6)`, retention, retention, retention, auditID, first, second); err != nil {
+		return fmt.Errorf("postgres writer: update raw retention: %w", err)
+	}
+	return nil
 }
 
 func persistPreparedTurn(transaction dbTransaction, turn auditmodel.PreparedTurn) error {
