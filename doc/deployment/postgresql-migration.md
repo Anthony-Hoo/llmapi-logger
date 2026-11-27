@@ -145,7 +145,44 @@ SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
 
 先停止新服务并备份 PostgreSQL，再用 v0.6.0 与原 SQLite 备份及匹配密钥启动。PostgreSQL 切换后的新写入不会自动回灌 SQLite；有新流量时必须先决定如何保留这段审计数据，不能宣称无损直接回退。不要用旧版本打开新格式数据库，也不要删除旧备份来腾空间。
 
+### 回滚到 schema 版本 5
+
+迁移 006 给 `turns` 加索引 `turns_created_idx`（`turns(created_at_ns, turn_id)`），schema 版本升到 6。没有会话 key 的轮次找父轮次候选时用它，原来要顺序扫描全部轮次（[设计附录 C.6](../design/issue-59-unified-write-cold-archive.md#c6-图查询在规模上的表现以及现有删除路径)）。它在代理启动时自动应用，不改任何数据，也不需要配置改动。
+
+建索引的代价：迁移在启动时、拿到 writer 锁之后，在迁移事务里执行 `CREATE INDEX`。建的过程中 `turns` 的写入被挡住（读不受影响），代理这时还没开始写审计，所以挡住的只是启动。这条语句跑在 writer 连接上，受连接的 30 秒 `statement_timeout` 和 5 秒 `lock_timeout` 约束；这两个值由代码作为连接参数设定，覆盖连接串和数据库角色上的同名设置；启动流程本身不另设期限。只读 `turns` 的会话（包括 `pg_dump`）不会挡住它；正在处理 `turns` 的手工 `VACUUM`、`ANALYZE`、防回卷的自动 vacuum，以及 `VACUUM FULL`、手工 `ALTER TABLE` 这类会话会让它等锁，超过 5 秒就失败（普通的自动 vacuum 会被它取消，不算在内）。本机测量：31.7 万个轮次（堆 118 MB），建索引约 0.11 秒，索引 12 MB；量过的部署约 31.7 万个轮次，离 30 秒很远。超时或等锁超时时迁移整体回滚，代理以审计存储不可用的状态运行（日志 `audit storage unavailable`，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），每次重启都会重试同一迁移。
+
+库大到可能超过 30 秒时（例如几千万个轮次或磁盘很慢），先在旧版本还在运行时手工并发建好索引，不挡写入，旧版本不受这个多出来的索引影响；之后启动新版本，迁移看到索引已存在，只记版本 6。代理使用独立 schema 时先 `SET search_path = <schema>;`。
+
+~~~sql
+-- 单独执行，不能放在事务里；会话内取消语句超时
+SET statement_timeout = 0;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS turns_created_idx
+    ON turns(created_at_ns, turn_id);
+-- 必须返回 true；返回 false 说明并发建索引中途失败，留下了无效索引
+SELECT indisvalid FROM pg_index WHERE indexrelid = 'turns_created_idx'::regclass;
+~~~
+
+返回 `false` 时先 `DROP INDEX CONCURRENTLY turns_created_idx;` 再重建，否则迁移会把无效索引当作已建好。
+
+旧版本打开版本 6 的库时会因 schema 版本过新（`schema is newer than supported`）而无法使用审计存储：进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`，不会自动降级 schema。回滚到不含迁移 006 的版本：
+
+1. 停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+2. 在库里删除这个索引，并删除 `schema_migrations` 里版本为 6 的行。代理使用独立 schema 时先 `SET search_path = <schema>;`。
+3. 再启动旧版本。之后重新升级时，迁移 006 会再次建索引。
+
+~~~sql
+-- 仅在回滚到不含迁移 006 的版本时执行，并且先停止新版本、做好备份
+BEGIN;
+DROP INDEX IF EXISTS turns_created_idx;
+DELETE FROM schema_migrations WHERE version = 6;
+COMMIT;
+~~~
+
+删除索引只短暂独占 `turns`，不读表。旧版本不用这个索引，回滚后没有会话 key 的轮次找父轮次又回到顺序扫描。要回到更早的版本时，先做这一步，再按下一节撤销迁移 005。
+
 ### 回滚到 schema 版本 4
+
+库已经是版本 6 时，先按[回滚到 schema 版本 5](#回滚到-schema-版本-5)撤销迁移 006，再做本节。
 
 迁移 005 删除了没有任何查询使用的索引 `content_objects_semantic_idx`，schema 版本升到 5。它在代理启动时自动应用，不改任何数据，也不需要配置改动。删除索引要短暂独占 `content_objects`，受连接的 5 秒 `lock_timeout` 约束：启动时恰好有 `pg_dump` 之类的会话在读这张表，迁移会失败并整体回滚，代理以审计存储不可用的状态运行（日志 `audit storage unavailable`，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），等那个会话结束后重启即可。
 

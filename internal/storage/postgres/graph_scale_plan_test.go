@@ -715,12 +715,47 @@ func tableRows(t *testing.T, store *Store, table string) float64 {
 	return count
 }
 
+// keylessCandidateWalk is how many turns the protocol-wide candidate search
+// must read when it walks turns newest first: every seeded turn, by
+// (created_at_ns, turn_id) descending, up to and including the 32nd one of the
+// protocol. It depends on the seed alone.
+func (fixture *scaleFixture) keylessCandidateWalk(protocol string, before int64) int {
+	type seeded struct {
+		createdAt int64
+		turnID    string
+		protocol  string
+	}
+	var turns []seeded
+	for _, conversation := range fixture.conversations {
+		for index, turnID := range conversation.turnIDs {
+			if conversation.createdAt[index] < before {
+				turns = append(turns, seeded{conversation.createdAt[index], turnID, conversation.protocol})
+			}
+		}
+	}
+	sort.Slice(turns, func(a, b int) bool {
+		if turns[a].createdAt != turns[b].createdAt {
+			return turns[a].createdAt > turns[b].createdAt
+		}
+		return turns[a].turnID > turns[b].turnID
+	})
+	found := 0
+	for index, turn := range turns {
+		if turn.protocol == protocol {
+			if found++; found == parentCandidateLimit {
+				return index + 1
+			}
+		}
+	}
+	return len(turns)
+}
+
 // Every statement on the write, lookup, rebuild and verification paths of one
 // audit reads only what belongs to the turn: its own conversation's chain, or
 // the 32 parent candidates chooseTurnParent evaluates and their chains. The
-// single exception is the protocol-wide candidate search, which has no index
-// to stop at 32 rows and reads every turn: it is pinned below so that adding
-// the index makes this test fail and be updated.
+// protocol-wide candidate search walks turns_created_idx (migration 006)
+// newest first and stops at the 32nd turn of the protocol; it is held to
+// exactly the turns that walk must read.
 //
 // The assertions are on executed row counts, not timing, buffers or
 // statistics counters, which depend on caching and on when the collector
@@ -785,14 +820,10 @@ func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
 		{"gemini turn 201, no key", fixture.nextTurn(t, store, gemini, "probe-gemini", false, ""), 10},
 		{"anthropic turn 201, no key", fixture.nextTurn(t, store, anthropic, "probe-anthropic", false, ""), 10},
 	}
-	var keylessArguments []any
+	keylessSearches := 0
 	for _, probe := range probes {
 		statements := probeTurnWrite(t, store, probe.value)
-		for _, explained := range statements {
-			if explained.statement == keylessCandidateStatement && keylessArguments == nil {
-				keylessArguments = explained.arguments
-			}
-		}
+		keylessTurns := 0.0
 		perPhase := map[string]map[string]float64{}
 		buffers := map[string]float64{}
 		walks := map[string]int{}
@@ -809,13 +840,20 @@ func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
 				walks[summary.phase] += summary.executions
 			}
 			if summary.statement == keylessCandidateStatement {
-				// Pinned finding: no index leads with created_at_ns, so the
-				// newest 32 turns of the protocol are found by reading every
-				// turn and conversation and sorting. Its cost grows with the
-				// table, not with the conversation.
-				if summary.maxExamined["turns"] < counts["turns"] || summary.maxGeneric["turns"] < counts["turns"] {
-					t.Errorf("%s: the protocol-wide candidate search now reads %.0f of %.0f turns; update the finding: %s",
-						probe.name, summary.maxExamined["turns"], counts["turns"], summary)
+				// The walk is fixed by the data: the order (created_at_ns,
+				// turn_id) is total and the Limit stops the nested loop at the
+				// 32nd turn of the protocol. On this seed the walk reads a
+				// hundredth of the table, against a scan of all of it plus a
+				// sort, so neither plan form flips between runs. Each turn
+				// read joins one conversation, which bounds that side.
+				walk := float64(fixture.keylessCandidateWalk(probe.value.Turn.Protocol, probe.value.Turn.CreatedAtNS))
+				keylessSearches++
+				keylessTurns += summary.totalExamined["turns"]
+				if !summary.nodeTypes["turns: Index Scan turns_created_idx"] || !summary.genericTypes["turns: Index Scan turns_created_idx"] ||
+					summary.maxExamined["turns"] != walk || summary.maxGeneric["turns"] != walk ||
+					summary.maxExamined["conversations"] > walk || summary.maxGeneric["conversations"] > walk {
+					t.Errorf("%s: the protocol-wide candidate search does not walk turns_created_idx to the 32nd %s turn (%.0f of %.0f turns): %s",
+						probe.name, probe.value.Turn.Protocol, walk, counts["turns"], summary)
 				}
 				continue
 			}
@@ -849,10 +887,7 @@ func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
 		// more, and reconstruction and the digest add one turn. Walking once per
 		// candidate, as before, read 30 times the chain and fails this.
 		save := perPhase["save"]
-		turnsRead := save["turns"]
-		if probe.chains > 1 {
-			turnsRead -= counts["turns"] // the pinned protocol-wide search
-		}
+		turnsRead := save["turns"] - keylessTurns // the protocol-wide search, held above
 		allowed := float64(probe.chains + 2)
 		if turnsRead > allowed*chainBound["turns"] || save["turn_context_ops"] > allowed*chainBound["turn_context_ops"] ||
 			save["turn_response_items"] > allowed*chainBound["turn_response_items"] {
@@ -860,40 +895,10 @@ func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
 				probe.name, turnsRead, save["turn_context_ops"], save["turn_response_items"], allowed)
 		}
 	}
-	if keylessArguments == nil {
-		t.Fatal("no probe took the protocol-wide candidate search")
+	if keylessSearches != 2 {
+		t.Fatalf("%d probes took the protocol-wide candidate search, want the two keyless ones", keylessSearches)
 	}
-	measureProposedCreatedIndex(t, store, keylessArguments)
 	measureCandidateChains(t, store, openai)
-}
-
-// measureProposedCreatedIndex explains the protocol-wide candidate search with
-// the index the report proposes, inside a transaction that is rolled back.
-// Walking turns newest first stops once 32 turns of the protocol are found,
-// so the rows read follow the protocol's share of recent turns instead of the
-// table size.
-func measureProposedCreatedIndex(t *testing.T, store *Store, arguments []any) {
-	t.Helper()
-	ctx := context.Background()
-	transaction, err := store.writerConn.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer transaction.Rollback()
-	for _, statement := range []string{`CREATE INDEX turns_created_probe_idx ON turns (created_at_ns, turn_id)`, `ANALYZE turns`} {
-		if _, err := transaction.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	recorder := &planRecorder{t: t, ctx: ctx, tx: transaction, phase: "proposed index"}
-	if _, err := listTurnCandidates(recorder, keylessCandidateStatement, arguments...); err != nil {
-		t.Fatal(err)
-	}
-	summary := summarizeStatements(recorder.statements)[0]
-	t.Logf("with turns (created_at_ns, turn_id): %s", summary)
-	if summary.maxExamined["turns"] >= 2000 || !summary.nodeTypes["turns: Index Scan turns_created_probe_idx"] {
-		t.Errorf("the proposed index does not bound the candidate search: %s", summary)
-	}
 }
 
 // measureCandidateChains loads the 32 parent candidates of a keyed 200-turn

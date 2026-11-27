@@ -140,7 +140,16 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 
 `005_drop_content_objects_semantic_idx.sql` 删除 001 建的 `content_objects_semantic_idx`（`content_objects(semantic_hash, kind)`）。所有读写 `content_objects` 的语句都按主键 `object_hash` 查找，没有语句按它的 `semantic_hash` 过滤、关联或排序；`turn_context_ops`、`turn_response_items` 上的同名列是另外的列。这个索引的键是随机哈希，每插入一个对象都要弄脏一个随机索引页。它与 002 到 004 一样只由运行时 `migrate()` 应用：离线导入的目标仍是带这个索引的 001 基线，导入后第一次启动代理时删除。001 不改，已经应用过它的库靠 005 升级。旧 SQLite 存储不受影响。
 
-- `latestSchemaVersion` 为 5。**旧版本遇到版本 5 的库会拒绝打开审计存储**（进程照常起来，但审计不可用），回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-4)。
+- 迁移 005 之后 `latestSchemaVersion` 为 5。**旧版本遇到版本 5 的库会拒绝打开审计存储**（进程照常起来，但审计不可用），回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-4)。
+
+### 3.8 按创建时间索引轮次（PostgreSQL migration 006）
+
+`006_turns_created_idx.sql` 建索引 `turns_created_idx`（`turns(created_at_ns, turn_id)`）。没有会话 key 的轮次（所有 Gemini 轮次，以及不带会话 key 的 Anthropic 和 OpenAI 轮次）找父轮次时，取同协议、创建时间更早的最近 32 个轮次（`ORDER BY t.created_at_ns DESC, t.turn_id DESC LIMIT 32`）。原来 `turns` 上没有以 `created_at_ns` 开头的索引，这条查询要顺序扫描全部轮次再排序，开销随表线性增长，而且发生在唯一 writer 的事务里。有了这个索引，查询从最新的轮次往回走，找到 32 个同协议轮次就停。`turn_id` 是主键，排序是全序，索引给出的顺序与原来排序的结果相同，选中的候选和父轮次不变。数字见 [issue #59 设计附录 C.6](../design/issue-59-unified-write-cold-archive.md#c6-图查询在规模上的表现以及现有删除路径)。
+
+- 与 002 到 005 一样只由运行时 `migrate()` 应用：离线导入的目标仍是 001 基线，没有这个索引，导入后第一次启动代理时建上。001 不改。旧 SQLite 存储不受影响。
+- 用 `CREATE INDEX IF NOT EXISTS`：库很大时运维可以先手工 `CREATE INDEX CONCURRENTLY` 建好，迁移只记版本（见部署文档）。
+- 某个协议的历史轮次不足 32 个时，往回走要走完整个索引。规划器用带参数值的计划时按协议的统计选会话那一侧，不受影响；用通用计划时才会走完整个索引，比原来的顺序扫描慢。测过的库上默认的计划缓存都留在带参数值的计划，见附录 C.6。
+- `latestSchemaVersion` 为 6。**旧版本遇到版本 6 的库会拒绝打开审计存储**（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`），回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-5)。
 ## 4. HTTP Body 保存方式
 
 每个阶段仍保存自己的 observed length、SHA-256、状态和时间。流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并：

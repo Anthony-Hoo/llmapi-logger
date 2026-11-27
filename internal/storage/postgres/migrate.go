@@ -13,7 +13,7 @@ import (
 var migrationFiles embed.FS
 
 // derivedMigrations change the schema on top of the version-1 baseline: they
-// add tables or drop indexes. Each one is applied independently when its
+// add tables, add indexes or drop them. Each one is applied independently when its
 // version is missing, so versions need not be contiguous: parallel feature
 // branches can claim different numbers and merge in any order. They run only
 // when the proxy opens the live store, never in the offline import, whose
@@ -26,10 +26,11 @@ var derivedMigrations = []struct {
 	{3, "migrations/003_session_analysis.sql"},
 	{4, "migrations/004_agent_access.sql"},
 	{5, "migrations/005_drop_content_objects_semantic_idx.sql"},
+	{6, "migrations/006_turns_created_idx.sql"},
 }
 
 // latestSchemaVersion is the newest version this binary understands.
-const latestSchemaVersion = 5
+const latestSchemaVersion = 6
 
 var errSchemaTooNew = errors.New("postgres: schema is newer than supported")
 

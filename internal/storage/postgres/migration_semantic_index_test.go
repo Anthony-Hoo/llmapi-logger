@@ -11,7 +11,8 @@ import (
 
 // rollbackToSchemaFourSQL is the rollback documented in
 // doc/deployment/postgresql-migration.md for returning to a binary that only
-// understands schema version 4. The upgrade test runs it verbatim.
+// understands schema version 4. The upgrade test runs it verbatim, after the
+// rollback to version 5 that a version 6 database needs first.
 const rollbackToSchemaFourSQL = `
 BEGIN;
 CREATE INDEX IF NOT EXISTS content_objects_semantic_idx
@@ -67,9 +68,9 @@ func requireVersions(t *testing.T, got []int, want ...int) {
 	}
 }
 
-func TestFreshStoreEndsAtVersionFiveWithoutSemanticIndex(t *testing.T) {
+func TestFreshStoreHasNoSemanticIndex(t *testing.T) {
 	store, _ := openTestStore(t)
-	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5)
+	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6)
 	if semanticIndexExists(t, store.readerDB) {
 		t.Fatal("content_objects_semantic_idx survived migration 5")
 	}
@@ -92,9 +93,12 @@ func TestMigrationFiveUpgradesVersionFourDatabase(t *testing.T) {
 	}
 	defer admin.Close()
 
-	// The documented rollback leaves exactly the version 4 state.
-	if _, err := admin.ExecContext(ctx, rollbackToSchemaFourSQL); err != nil {
-		t.Fatalf("documented rollback SQL: %v", err)
+	// The documented rollbacks, 006 first and then 005, leave exactly the
+	// version 4 state.
+	for _, rollback := range []string{rollbackToSchemaFiveSQL, rollbackToSchemaFourSQL} {
+		if _, err := admin.ExecContext(ctx, rollback); err != nil {
+			t.Fatalf("documented rollback SQL: %v", err)
+		}
 	}
 	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4)
 	if !semanticIndexExists(t, admin) {
@@ -108,12 +112,15 @@ func TestMigrationFiveUpgradesVersionFourDatabase(t *testing.T) {
 	if err := upgraded.Close(); err != nil {
 		t.Fatal(err)
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
 	if semanticIndexExists(t, admin) {
 		t.Fatal("upgrade from version 4 kept content_objects_semantic_idx")
 	}
 
 	// A version 4 database whose index an operator already dropped by hand.
+	if _, err := admin.ExecContext(ctx, rollbackToSchemaFiveSQL); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := admin.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = 5`); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +131,7 @@ func TestMigrationFiveUpgradesVersionFourDatabase(t *testing.T) {
 	if err := upgraded.Close(); err != nil {
 		t.Fatal(err)
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
 }
 
 func TestMigrationFiveIsIdempotent(t *testing.T) {
@@ -156,7 +163,7 @@ func TestMigrationFiveIsIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
 	if semanticIndexExists(t, admin) {
 		t.Fatal("index reappeared")
 	}
@@ -169,12 +176,14 @@ func TestOlderSchemaCheckRejectsNewerDatabase(t *testing.T) {
 	if err := store.readerDB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
+	if version != 6 {
 		t.Fatalf("fresh store version = %d", version)
 	}
-	// A binary from before migration 5 understands version 4 only.
-	if err := requireSupportedSchema(version, 4); !errors.Is(err, errSchemaTooNew) {
-		t.Fatalf("version 4 binary accepted a version %d database: %v", version, err)
+	// Binaries from before migrations 6 and 5 understand versions 5 and 4 only.
+	for _, older := range []int{5, 4} {
+		if err := requireSupportedSchema(version, older); !errors.Is(err, errSchemaTooNew) {
+			t.Fatalf("version %d binary accepted a version %d database: %v", older, version, err)
+		}
 	}
 	if err := requireSupportedSchema(version, latestSchemaVersion); err != nil {
 		t.Fatalf("current binary rejected its own schema: %v", err)
@@ -213,7 +222,7 @@ func TestOlderSchemaCheckRejectsNewerDatabase(t *testing.T) {
 	}
 }
 
-func TestImportBaselineKeepsSemanticIndexUntilStoreOpens(t *testing.T) {
+func TestImportBaselineKeepsVersionOneIndexesUntilStoreOpens(t *testing.T) {
 	ctx := context.Background()
 	dsn := newTestDSN(t)
 	db, err := sql.Open("pgx", dsn)
@@ -243,6 +252,7 @@ func TestImportBaselineKeepsSemanticIndexUntilStoreOpens(t *testing.T) {
 	if !semanticIndexExists(t, conn) {
 		t.Fatal("import baseline lacks the 001 index")
 	}
+	requireTurnsCreatedIndex(t, conn, false)
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_unlock_all()`); err != nil {
 		t.Fatal(err)
 	}
@@ -255,8 +265,9 @@ func TestImportBaselineKeepsSemanticIndexUntilStoreOpens(t *testing.T) {
 		t.Fatalf("open imported baseline: %v", err)
 	}
 	defer store.Close()
-	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5)
+	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6)
 	if semanticIndexExists(t, store.readerDB) {
 		t.Fatal("first open of an import target kept the index")
 	}
+	requireTurnsCreatedIndex(t, store.readerDB, true)
 }
