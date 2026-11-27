@@ -183,7 +183,7 @@ parser 只有在上述验证通过后才允许把 raw retention 从 pending 改�
 
 - 折叠体：normalizer 把全部事件折叠成该端点的非流式响应 body，作为唯一的 `aggregate` item（content object）。同一回答流式与非流式得到的 conversation 相同；
 - 残留（residue）：事件里折叠体给不回来的内容，见下；
-- 事件描述与摘要，放在响应 envelope 里；
+- 事件描述与摘要，放在响应 envelope 里。事件描述是紧凑形式：事件名的游程编码、data 长度序列和一个按顺序覆盖全部事件名与 data 的 SHA-256（定义见模块 05 §2.3），不再为每个事件存一个 SHA-256；整条 Body 的字节另有 `body_streams.sha256`；
 - TTFT、首事件、末事件、事件数量；
 - 必要时保存 delta 编码的事件时间/字节偏移 timeline，而不是每个 token 一行。
 

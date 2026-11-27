@@ -148,7 +148,7 @@ reparse 直接覆盖当前结果并更新 `audit_records.parse_status`，数据�
 
 非流式响应（布局 `marker_envelope`）：`content` 数组的每个 block 是一个 slot `content` 的 item，envelope 中换成受控 marker；没有 `content` 数组的错误体整体留在 envelope。
 
-流式响应（布局 `anthropic.stream.response`）：与 OpenAI 流式相同（模块 05 §2.3），唯一的 item 是折叠出的 Message body（slot `aggregate`，kind `stream_body`），envelope 保存事件描述、`summary` 和残留 `residue`（§5.1）。`summary` 除 `response_id`、`usage`、错误码外还保存 `normalized_usage`（不含缓存的输入、缓存读、缓存写、输出）和 `stop_reason`（折叠体的 `stop_reason`），洞察回填靠它们恢复。
+流式响应（布局 `anthropic.stream.response`）：与 OpenAI 流式相同（模块 05 §2.3），唯一的 item 是折叠出的 Message body（slot `aggregate`，kind `stream_body`），envelope 保存紧凑事件描述（事件名游程编码、data 长度序列和覆盖全部事件的 SHA-256，定义见模块 05 §2.3）、`summary` 和残留 `residue`（§5.1）。`summary` 除 `response_id`、`usage`、错误码外还保存 `normalized_usage`（不含缓存的输入、缓存读、缓存写、输出）和 `stop_reason`（折叠体的 `stop_reason`），洞察回填靠它们恢复。
 
 流式响应不是逐字节重建：重建校验比较的是 envelope 与折叠体自身。raw 释放后可得的是事件描述、折叠体（文本、thinking 与 signature、citations、工具调用、未知 block 的完整内容、usage）和残留中每个事件折叠体给不回来的字段值。
 

@@ -3,6 +3,9 @@ package anthropic
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -265,7 +268,7 @@ func TestNormalizeJSONResponseItemizesContentBlocks(t *testing.T) {
 	}
 }
 
-func TestNormalizeStreamResponseKeepsDescriptorsAggregateAndCacheUsage(t *testing.T) {
+func TestNormalizeStreamResponseKeepsDescriptionAggregateResidueAndCacheUsage(t *testing.T) {
 	t.Parallel()
 	const request = `{"model":"model-example","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"question"}]}`
 	turn, _, result := normalize(t, messagesInput("audit-stream", request, streamFixture, "text/event-stream"))
@@ -290,10 +293,10 @@ func TestNormalizeStreamResponseKeepsDescriptorsAggregateAndCacheUsage(t *testin
 	}
 	var envelope struct {
 		Format string `json:"format"`
-		Events []struct {
-			Event  string `json:"event"`
-			Length int    `json:"data_length"`
-			SHA256 string `json:"data_sha256"`
+		Events struct {
+			Names   [][2]any `json:"names"`
+			Lengths []int    `json:"data_lengths"`
+			SHA256  string   `json:"sha256"`
 		} `json:"events"`
 		Summary struct {
 			ResponseID string `json:"response_id"`
@@ -309,9 +312,25 @@ func TestNormalizeStreamResponseKeepsDescriptorsAggregateAndCacheUsage(t *testin
 	if err := json.Unmarshal(encoded, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Format != "sse" || len(envelope.Events) != 7 || envelope.Events[0].Event != "message_start" ||
-		envelope.Events[6].Length != len(`{"type":"message_stop"}`) || len(envelope.Events[6].SHA256) != 64 {
+	names, _ := json.Marshal(envelope.Events.Names)
+	if envelope.Format != "sse" || string(names) != `[["message_start",1],["content_block_start",1],["content_block_delta",2],["content_block_stop",1],["message_delta",1],["message_stop",1]]` ||
+		len(envelope.Events.Lengths) != 7 || envelope.Events.Lengths[6] != len(`{"type":"message_stop"}`) {
 		t.Fatalf("stream envelope = %s", encoded)
+	}
+	// A reader holding the raw SSE recomputes the hash from the decoded
+	// events by the documented framing.
+	digest := sha256.New()
+	digest.Write([]byte("llmapi-logger/sse-events/v1\x00"))
+	for _, event := range base.DecodeSSE([]byte(streamFixture)) {
+		for _, field := range [][]byte{[]byte(event.Event), event.Data} {
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+			digest.Write(length[:])
+			digest.Write(field)
+		}
+	}
+	if want := hex.EncodeToString(digest.Sum(nil)); envelope.Events.SHA256 != want {
+		t.Fatalf("events sha256 = %s, recomputed %s", envelope.Events.SHA256, want)
 	}
 	usage := envelope.Summary.Normalized
 	if envelope.Summary.StopReason != "max_tokens" {

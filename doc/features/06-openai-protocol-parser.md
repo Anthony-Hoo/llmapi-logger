@@ -154,7 +154,7 @@ parsed_json_enc = nonce || ciphertext || tag
 turn/content/binary objects = verified provider request/response
 ```
 
-版本 3 改的只是流式响应的存储形状（§5.1，layout `openai.stream.response.v2`）和从流读出 conversation 的方式（改为读折叠体）。版本号只写进 `parsed_results.parser_version`，进入新写入行的完整性摘要，并在详情里显示；没有任何逻辑按版本号重新解析、回填或迁移，已有行不改写。版本 2 写入的流式行保留 layout `openai.stream.response`，按原方式组装和还原 conversation（`internal/parser/openai/testdata/legacy_stream_response.json` 钉住）。
+版本 3 改的只是流式响应的存储形状（§5.1，layout `openai.stream.response.v2`：紧凑事件描述、折叠体和残留）和从流读出 conversation 的方式（改为读折叠体）。版本号只写进 `parsed_results.parser_version`，进入新写入行的完整性摘要，并在详情里显示；没有任何逻辑按版本号重新解析、回填或迁移，已有行不改写。版本 2 写入的流式行保留 layout `openai.stream.response`，按原方式组装和还原 conversation（`internal/parser/openai/testdata/legacy_stream_response.json` 钉住）。
 
 `SaveParsedAudit` 原子覆盖该 audit 的最新摘要、保存或复用内容对象、写 turn delta、验证 reconstruction hash，再按侧切换 raw retention：普通成功两侧 metadata，有 verified turn 的异常记录按模块 18 §6 通常只释放请求侧。任何一步失败都保留 full raw。
 

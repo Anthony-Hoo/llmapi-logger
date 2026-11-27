@@ -2,8 +2,6 @@ package anthropic
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -11,6 +9,7 @@ import (
 	"llmapi-logger/internal/insights"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
+	"llmapi-logger/internal/parser/streamevidence"
 )
 
 // NormalizeAudit splits a Messages request and response into envelopes and
@@ -171,10 +170,10 @@ func normalizeJSONResponse(root map[string]any) (normalizedSide, error) {
 	return normalizedSide{layout: auditmodel.LayoutMarkerEnvelope, envelope: envelope, items: items, original: original}, nil
 }
 
-// normalizeStreamResponse stores a stream as its event description, its
-// summary, the folded Message body (slot aggregate, the same body the answer
-// has without streaming, signatures and citations included) and the residue:
-// whatever the events carry that the folded body does not. The summary keeps
+// normalizeStreamResponse stores a stream as the compact description of its
+// events, its summary, the folded Message body (slot aggregate: the body the
+// answer has without streaming, signatures and citations included) and the
+// residue: whatever the events carry that the folded body does not. The summary keeps
 // the cache-aware usage and the stop reason for the insights backfill.
 func normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, error) {
 	events, _ := base.DecodeSSEWithStatus(data)
@@ -189,18 +188,10 @@ func normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, e
 	if err != nil {
 		return normalizedSide{}, err
 	}
-	descriptors := make([]any, 0, len(events))
-	for _, event := range events {
-		digest := sha256.Sum256(event.Data)
-		descriptors = append(descriptors, map[string]any{
-			"event":       event.Event,
-			"data_length": len(event.Data),
-			"data_sha256": hex.EncodeToString(digest[:]),
-		})
-	}
 	fields := map[string]any{
 		"format": "sse",
-		"events": descriptors,
+		"events": streamevidence.Describe(events),
+
 		"summary": map[string]any{
 			"response_id":      result.ResponseID,
 			"usage":            result.Usage,

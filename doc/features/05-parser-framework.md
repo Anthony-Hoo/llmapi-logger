@@ -82,6 +82,27 @@ turn 的重建与还原不需要改 query 或 worker。注册表之外仍有几�
 
 **SSE 解码。** 事件按 `parser.DecodeSSEWithStatus` 切分：行以 LF、CRLF 或单独的 CR 结束；以 `:` 开头的行是注释，忽略；`字段: 值` 中值的第一个空格去掉；`event` 字段给事件名，多个 `data` 行以单个 LF 连接成事件的 data；空行派发事件，没有 data 行的事件不派发；`id`、`retry` 等其他字段忽略。事件按派发顺序从 0 编号。残留的 `index` 和事件描述都按这个编号。
 
+**事件描述。** envelope 的 `events` 是整条流的紧凑描述，取代旧的逐事件描述（每个事件一个事件名、data 长度和十六进制 SHA-256）：
+
+~~~json
+{"names": [["message_start", 1], ["content_block_delta", 2], ["", 1]],
+ "data_lengths": [7, 7, 7, 6],
+ "sha256": "3f21d1539f9e9828f6fb8859dd7fc9e917b028b6ae46fe8b726422ad37c16c86"}
+~~~
+
+- `names` 是事件名按顺序的游程编码：每段是 `[事件名, 连续个数]`，没有 `event` 字段的事件名为空字符串；各段个数之和等于事件数；
+- `data_lengths` 是每个事件 data 的字节数，按顺序；
+- `sha256` 是覆盖全部事件的哈希，小写十六进制：
+
+~~~text
+SHA-256( "llmapi-logger/sse-events/v1" || 0x00 ||
+         对每个事件按顺序：
+             uint64be(len(name)) || name || uint64be(len(data)) || data )
+~~~
+
+  其中 name 是事件名的 UTF-8 字节，data 是上面解码规则得到的 data 字节（多个 data 行以 LF 连接，不含最后的换行），`uint64be` 是 8 字节大端无符号长度。前缀和逐字段长度使哈希同时绑定事件顺序、事件个数、事件名和 data 字节，任意两个字段之间的边界都无歧义。持有 raw SSE 的读者按上面的解码规则切出事件即可重算；上例是四个事件 `message_start`/`{"a":1}`、`content_block_delta`/`{"b":2}`、`content_block_delta`/`{"c":3}`、无名/`[DONE]` 的结果（`internal/parser/streamevidence` 的测试钉住，并在 Go 之外按此定义独立算过）。
+- 注释行、`id`/`retry` 字段、行结束符的写法和 HTTP 分块不在哈希内；整条 raw Body 的字节另有 `body_streams.sha256`。
+
 **折叠体。** normalizer 把事件折叠成该端点的非流式响应 body，作为 `aggregate` slot 的唯一 item。parser 自己的 conversation 也从折叠体读出（与非流式响应走同一段代码），所以 raw 解析得到的 conversation 与从图重建的完全一致，同一回答流式与非流式的 conversation 也一致。折叠体能装下的内容优先装进去（例如 Anthropic 的 `signature`、`citations` 本来就是 content block 的字段）。各协议消费的事件类型和字段见模块 06 §5、模块 07 §5。
 
 **残留。** 事件里折叠体给不回来的内容进入 envelope 的 `residue`（格式见模块 18 §10）。一个事件的值是否已由折叠体持有，按以下规则判断，对象逐键递归：
@@ -99,7 +120,7 @@ turn 的重建与还原不需要改 query 或 worker。注册表之外仍有几�
 
 **上限与放弃。** 残留的 canonical JSON 超过 `streamevidence.MaxResidueBytes`（1 MiB）时，normalizer 返回 `streamevidence.ErrResidueTooLarge`。worker 对任何 normalizer 错误的处理不变：解析记为 `partial`、`error_code=normalization_failed`，不生成 turn，四阶段 raw 保持 `full`，conversation 作为 `parsed_json_enc` 回退副本保存，并写 `reconstruction_failed` 完整性事件。代价是这条记录在列表里显示为部分解析。
 
-**保真夹具。** `internal/parser/builtin/fidelity_test.go` 对注册表里每个有 normalizer 的 parser，取协议夹具目录（`internal/protofixture`）里所有交给它的交换，加上目录没有协议的 parser 的手写流，各走两条路径：从 raw 解析，以及只用密封后的对象重建（不读 raw）。要求两边的 conversation、用量（`summary.usage`、`summary.normalized_usage` 与解析结果一致，折叠体按非流式 body 重新解析也一致）、工具调用数和停止原因（insights 从 raw 流得到的，与回填从 `summary.stop_reason` 和从折叠体得到的一致）相同。每个 normalizer 至少要有一个交换通过；目录里有流给它的，至少要有一个流通过。新协议注册 normalizer 后自动纳入，不通过则测试失败。`probe_test.go` 给每种已消费事件类型及其嵌套对象注入未知字段，再加未知事件类型和未知 delta 类型，要求所有值都能从重建结果中找回，并要求探针覆盖各协议列出的全部消费事件类型。
+**保真夹具。** `internal/parser/builtin/fidelity_test.go` 对注册表里每个有 normalizer 的 parser，取协议夹具目录（`internal/protofixture`）里所有交给它的交换，加上目录没有协议的 parser 的手写流，各走两条路径：从 raw 解析，以及只用密封后的对象重建（不读 raw）。要求两边的 conversation、用量（`summary.usage`、`summary.normalized_usage` 与解析结果一致，折叠体按非流式 body 重新解析也一致）、工具调用数和停止原因（insights 从 raw 流得到的，与回填从 `summary.stop_reason` 和从折叠体得到的一致）相同，流的事件描述与从 raw 重算的相同。每个 normalizer 至少要有一个交换通过；目录里有流给它的，至少要有一个流通过。新协议注册 normalizer 后自动纳入，不通过则测试失败。`probe_test.go` 给每种已消费事件类型及其嵌套对象注入未知字段，再加未知事件类型和未知 delta 类型，要求所有值都能从重建结果中找回，并要求探针覆盖各协议列出的全部消费事件类型。
 
 ## 3. 当前协议范围
 

@@ -2,8 +2,6 @@ package openai
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -11,6 +9,7 @@ import (
 	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
+	"llmapi-logger/internal/parser/streamevidence"
 )
 
 func (implementation *Parser) NormalizeAudit(_ context.Context, input base.Input, result base.Result) (auditmodel.Turn, error) {
@@ -232,6 +231,11 @@ func (implementation *Parser) normalizeJSONResponse(root map[string]any) (normal
 	return normalizedSide{layout: auditmodel.LayoutMarkerEnvelope, envelope: envelope, items: items, original: original}, nil
 }
 
+// normalizeStreamResponse stores a stream as the compact description of its
+// events, its summary, the folded non-stream body (slot aggregate) and the
+// residue: whatever the events carry that the folded body does not. The
+// summary keeps the cache-aware usage and the stop reason for the insights
+// backfill.
 func (implementation *Parser) normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, error) {
 	events, _ := base.DecodeSSEWithStatus(data)
 	if len(events) == 0 {
@@ -245,18 +249,10 @@ func (implementation *Parser) normalizeStreamResponse(data []byte, result base.R
 	if err != nil {
 		return normalizedSide{}, err
 	}
-	descriptors := make([]any, 0, len(events))
-	for _, event := range events {
-		digest := sha256.Sum256(event.Data)
-		descriptors = append(descriptors, map[string]any{
-			"event":       event.Event,
-			"data_length": len(event.Data),
-			"data_sha256": hex.EncodeToString(digest[:]),
-		})
-	}
 	fields := map[string]any{
 		"format": "sse",
-		"events": descriptors,
+		"events": streamevidence.Describe(events),
+
 		"summary": map[string]any{
 			"response_id":      result.ResponseID,
 			"usage":            result.Usage,

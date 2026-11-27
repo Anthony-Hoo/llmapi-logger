@@ -192,6 +192,11 @@ func checkFidelity(t *testing.T, label, parserName string, input base.Input, val
 		return
 	}
 	root, _ := value.response.(map[string]any)
+	// The event description is recomputable from the raw SSE alone.
+	wantEvents, _ := auditmodel.CanonicalJSON(streamevidence.Describe(base.DecodeSSE(input.Response.Data)))
+	if gotEvents, _ := auditmodel.CanonicalJSON(root["events"]); !bytes.Equal(gotEvents, wantEvents) {
+		t.Errorf("%s: event description %s, recomputed %s", label, gotEvents, wantEvents)
+	}
 	encoded, _ := json.Marshal(root["summary"])
 	var summary struct {
 		Usage      base.Usage

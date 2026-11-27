@@ -119,3 +119,50 @@ func TestDecodeEventsReportsReservedMarkers(t *testing.T) {
 		t.Fatalf("decoded = %+v, %v", decoded, err)
 	}
 }
+
+func TestDescribeAndEventsHash(t *testing.T) {
+	t.Parallel()
+	events := []base.SSEEvent{
+		{Event: "message_start", Data: []byte(`{"a":1}`)},
+		{Event: "content_block_delta", Data: []byte(`{"b":2}`)},
+		{Event: "content_block_delta", Data: []byte(`{"c":3}`)},
+		{Event: "", Data: []byte("[DONE]")},
+	}
+	description := Describe(events)
+	if got := encode(t, description); got != `{"data_lengths":[7,7,7,6],"names":[["message_start",1],["content_block_delta",2],["",1]],"sha256":"`+
+		description["sha256"].(string)+`"}` {
+		t.Fatalf("description = %s", got)
+	}
+	// Pinned, and recomputed outside Go from the documented framing: the
+	// framing is part of the stored format.
+	const pinned = "3f21d1539f9e9828f6fb8859dd7fc9e917b028b6ae46fe8b726422ad37c16c86"
+	if got := description["sha256"]; got != pinned {
+		t.Errorf("events hash = %s, pinned %s", got, pinned)
+	}
+	if empty := Describe(nil); encode(t, empty) != `{"data_lengths":[],"names":[],"sha256":"`+empty["sha256"].(string)+`"}` {
+		t.Fatalf("empty description = %s", encode(t, empty))
+	}
+	changed := func(mutate func([]base.SSEEvent) []base.SSEEvent) bool {
+		copied := make([]base.SSEEvent, len(events))
+		copy(copied, events)
+		return encode(t, Describe(mutate(copied))["sha256"]) != encode(t, description["sha256"])
+	}
+	cases := map[string]func([]base.SSEEvent) []base.SSEEvent{
+		"order": func(values []base.SSEEvent) []base.SSEEvent {
+			values[1], values[2] = values[2], values[1]
+			return values
+		},
+		"name": func(values []base.SSEEvent) []base.SSEEvent { values[0].Event = "message_stop"; return values },
+		"data": func(values []base.SSEEvent) []base.SSEEvent { values[3].Data = []byte("[DONE] "); return values },
+		"name/data boundary": func(values []base.SSEEvent) []base.SSEEvent {
+			values[0] = base.SSEEvent{Event: "message_start{", Data: []byte(`"a":1}`)}
+			return values
+		},
+		"one event less": func(values []base.SSEEvent) []base.SSEEvent { return values[:3] },
+	}
+	for name, mutate := range cases {
+		if !changed(mutate) {
+			t.Errorf("%s: the hash does not bind it", name)
+		}
+	}
+}
