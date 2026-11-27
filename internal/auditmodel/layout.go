@@ -82,12 +82,18 @@ var layouts = map[string]layoutSpec{
 		slotRule{SlotMessages, slotArray}, slotRule{SlotSystem, slotOne}),
 	LayoutAnthropicMessagesRequestSystemArray: slots(
 		slotRule{SlotMessages, slotArray}, slotRule{SlotSystem, slotArray}),
-	// The stream layouts below hold the folded provider body as their single
-	// aggregate item, with the event description, summary and residue in
-	// the envelope.
-	LayoutAnthropicStreamResponse: {kind: layoutSlots, slots: []slotRule{{SlotAggregate, slotOne}}, stream: true},
-	LayoutOpenAIStreamResponseV2:  {kind: layoutSlots, slots: []slotRule{{SlotAggregate, slotOne}}, stream: true},
+	// The stream layouts below hold the event description, summary and
+	// residue in the envelope, and under its aggregate key the folded
+	// provider body split the way the non-stream response is: the body's
+	// items are replaced by item markers (plus, for Responses, the echoed
+	// instructions and tools), exactly like marker_envelope.
+	LayoutAnthropicStreamResponse: {kind: layoutMarkers, stream: true},
+	LayoutOpenAIStreamResponseV2:  {kind: layoutMarkers, stream: true},
 }
+
+// SlotTools holds the tool definitions a Responses stream's terminal
+// response echoes, stored as an item so they deduplicate across turns.
+const SlotTools = "tools"
 
 // LayoutOpenAIStreamResponseV2 replaces LayoutOpenAIStreamResponse, whose
 // aggregate items are display messages and whose envelope describes every

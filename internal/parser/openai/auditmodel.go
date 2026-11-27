@@ -232,10 +232,13 @@ func (implementation *Parser) normalizeJSONResponse(root map[string]any) (normal
 }
 
 // normalizeStreamResponse stores a stream as the compact description of its
-// events, its summary, the folded non-stream body (slot aggregate) and the
-// residue: whatever the events carry that the folded body does not. The
-// summary keeps the cache-aware usage and the stop reason for the insights
-// backfill.
+// events, its summary, the residue (whatever the events carry that the
+// folded body does not) and, under the aggregate key, the folded non-stream
+// body split exactly as normalizeJSONResponse splits a non-stream response,
+// so a streamed answer and the same answer without streaming share their
+// item objects, and the next request shares them as it does for a
+// non-stream answer. A Responses body also stores its echoed instructions
+// and tools as items, which repeat on every turn of a conversation.
 func (implementation *Parser) normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, error) {
 	events, _ := base.DecodeSSEWithStatus(data)
 	if len(events) == 0 {
@@ -249,10 +252,34 @@ func (implementation *Parser) normalizeStreamResponse(data []byte, result base.R
 	if err != nil {
 		return normalizedSide{}, err
 	}
+	split, err := implementation.normalizeJSONResponse(fold.body)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	body, ok := split.envelope.(map[string]any)
+	if !ok {
+		return normalizedSide{}, errors.New("openai normalizer: folded body is not an object")
+	}
+	items := split.items
+	if implementation.name == Responses || implementation.name == ResponsesCompact {
+		for _, echo := range []struct{ key, slot string }{{"instructions", auditmodel.SlotInstructions}, {"tools", auditmodel.SlotTools}} {
+			value, exists := body[echo.key]
+			if !exists || value == nil {
+				continue
+			}
+			item := auditmodel.Item{Slot: echo.slot, Kind: echo.key, Value: value}
+			if echo.key == "instructions" {
+				// The same kind and value as the request's instructions item,
+				// so both are one object.
+				item.Display = displayForInstructions(value)
+			}
+			body[echo.key] = auditmodel.ItemMarker(len(items))
+			items = append(items, item)
+		}
+	}
 	fields := map[string]any{
 		"format": "sse",
 		"events": streamevidence.Describe(events),
-
 		"summary": map[string]any{
 			"response_id":      result.ResponseID,
 			"usage":            result.Usage,
@@ -265,23 +292,18 @@ func (implementation *Parser) normalizeStreamResponse(data []byte, result base.R
 	if len(residue) > 0 {
 		fields["residue"] = residue
 	}
+	original, err := cloneMap(fields)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	original[auditmodel.SlotAggregate] = split.original
+	fields[auditmodel.SlotAggregate] = body
 	envelope, err := cloneMap(fields)
 	if err != nil {
 		return normalizedSide{}, err
 	}
-	aggregate, err := cloneMap(fold.body)
-	if err != nil {
-		return normalizedSide{}, err
-	}
-	original, err := cloneMap(envelope)
-	if err != nil {
-		return normalizedSide{}, err
-	}
-	original[auditmodel.SlotAggregate] = aggregate
-	items := []auditmodel.Item{{Slot: auditmodel.SlotAggregate, Kind: "stream_body", Value: aggregate}}
 	return normalizedSide{layout: auditmodel.LayoutOpenAIStreamResponseV2, envelope: envelope, items: items, original: original}, nil
 }
-
 func responseInputItem(value any) auditmodel.Item {
 	if text, ok := value.(string); ok {
 		return auditmodel.Item{

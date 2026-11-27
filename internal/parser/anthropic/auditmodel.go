@@ -204,21 +204,23 @@ func normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, e
 	if len(residue) > 0 {
 		fields["residue"] = residue
 	}
+	// The folded body is split as a non-stream response is, so a streamed
+	// answer and the same answer without streaming share their block items.
+	split, err := normalizeJSONResponse(fold.message)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	original, err := cloneMap(fields)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	original[auditmodel.SlotAggregate] = split.original
+	fields[auditmodel.SlotAggregate] = split.envelope
 	envelope, err := cloneMap(fields)
 	if err != nil {
 		return normalizedSide{}, err
 	}
-	aggregate, err := cloneMap(fold.message)
-	if err != nil {
-		return normalizedSide{}, err
-	}
-	original, err := cloneMap(envelope)
-	if err != nil {
-		return normalizedSide{}, err
-	}
-	original[auditmodel.SlotAggregate] = aggregate
-	items := []auditmodel.Item{{Slot: auditmodel.SlotAggregate, Kind: "stream_body", Value: aggregate}}
-	return normalizedSide{layout: auditmodel.LayoutAnthropicStreamResponse, envelope: envelope, items: items, original: original}, nil
+	return normalizedSide{layout: auditmodel.LayoutAnthropicStreamResponse, envelope: envelope, items: split.items, original: original}, nil
 }
 
 func messageKind(value any) string {

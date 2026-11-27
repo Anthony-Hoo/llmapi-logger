@@ -144,34 +144,43 @@ func assembleLegacy(layout string, envelope any, items []Item) (any, error) {
 	}
 }
 
-// aggregateIsBody are the stream layouts whose aggregate became one folded
-// provider body after the switch was replaced; the switch never knew them in
-// that form, so TestStreamBodyLayoutsTakeOneAggregate covers them instead.
+// aggregateIsBody are the stream layouts whose aggregate became the folded
+// provider body, split by item markers, after the switch was replaced; the
+// switch never knew them in that form, so TestStreamBodyLayoutsAssembleMarkers
+// covers them instead.
 var aggregateIsBody = map[string]bool{
 	LayoutAnthropicStreamResponse: true,
 	LayoutOpenAIStreamResponseV2:  true,
 }
 
-func TestStreamBodyLayoutsTakeOneAggregate(t *testing.T) {
+func TestStreamBodyLayoutsAssembleMarkers(t *testing.T) {
 	t.Parallel()
+	envelope := func() any {
+		return map[string]any{"format": "sse", "residue": []any{}, SlotAggregate: map[string]any{
+			"output": []any{ItemMarker(0)}, "tools": ItemMarker(1), "id": "x"}}
+	}
+	items := []Item{{Slot: SlotOutput, Kind: "message", Value: map[string]any{"text": "hi"}}, {Slot: SlotTools, Kind: "tools", Value: []any{"t"}}}
 	for layout := range aggregateIsBody {
-		envelope := map[string]any{"format": "sse", "residue": []any{}}
-		got, err := Assemble(layout, envelope, []Item{{Slot: SlotAggregate, Kind: "kind", Value: map[string]any{"id": "x"}}, {Slot: SlotOutput, Kind: "kind", Value: 1}})
-		want := map[string]any{"format": "sse", "residue": []any{}, SlotAggregate: map[string]any{"id": "x"}}
+		if !StreamLayout(layout) {
+			t.Fatalf("%s is not a stream layout", layout)
+		}
+		got, err := Assemble(layout, envelope(), items)
+		want := map[string]any{"format": "sse", "residue": []any{}, SlotAggregate: map[string]any{
+			"output": []any{map[string]any{"text": "hi"}}, "tools": []any{"t"}, "id": "x"}}
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s: assemble = %#v, %v", layout, got, err)
 		}
-		for _, count := range []int{0, 2} {
-			items := make([]Item, count)
-			for index := range items {
-				items[index] = Item{Slot: SlotAggregate, Kind: "kind", Value: index}
-			}
-			if _, err := Assemble(layout, envelope, items); !errors.Is(err, ErrReconstruction) {
-				t.Fatalf("%s with %d aggregates: error = %v", layout, count, err)
+		for _, broken := range [][]Item{items[:1], nil} {
+			if _, err := Assemble(layout, envelope(), broken); !errors.Is(err, ErrReconstruction) {
+				t.Fatalf("%s with a missing item: error = %v", layout, err)
 			}
 		}
-		if _, err := Assemble(layout, "not an object", nil); !errors.Is(err, ErrReconstruction) {
-			t.Fatalf("%s: a non-object envelope assembled", layout)
+		for name, value := range map[string]func() any{"nil": func() any { return nil }, "string": func() any { return "s" }} {
+			got, err := Assemble(layout, value(), nil)
+			want, wantErr := Assemble(LayoutMarkerEnvelope, value(), nil)
+			if !reflect.DeepEqual(got, want) || (err == nil) != (wantErr == nil) {
+				t.Fatalf("%s %s envelope differs from marker_envelope", layout, name)
+			}
 		}
 	}
 }

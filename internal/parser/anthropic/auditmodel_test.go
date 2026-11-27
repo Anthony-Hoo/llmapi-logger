@@ -273,13 +273,18 @@ func TestNormalizeStreamResponseKeepsDescriptionAggregateResidueAndCacheUsage(t 
 	const request = `{"model":"model-example","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"question"}]}`
 	turn, _, result := normalize(t, messagesInput("audit-stream", request, streamFixture, "text/event-stream"))
 	if turn.ResponseLayout != auditmodel.LayoutAnthropicStreamResponse || len(turn.ResponseItems) != 1 ||
-		turn.ResponseItems[0].Slot != auditmodel.SlotAggregate || turn.ResponseItems[0].Kind != "stream_body" {
+		turn.ResponseItems[0].Slot != auditmodel.SlotContent || turn.ResponseItems[0].Kind != "text" {
 		t.Fatalf("layout/items = %s / %+v", turn.ResponseLayout, turn.ResponseItems)
 	}
-	// The aggregate is the body the answer has without streaming.
+	// The aggregate is the body the answer has without streaming, its
+	// content blocks split into items as for a non-stream response.
+	assembled, err := auditmodel.Assemble(turn.ResponseLayout, turn.ResponseEnvelope, turn.ResponseItems)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wantBody := `{"content":[{"text":"hello world","type":"text"}],"id":"msg_stream","model":"model-example","role":"assistant",` +
 		`"stop_reason":"max_tokens","type":"message","usage":{"cache_creation_input_tokens":40,"cache_read_input_tokens":500,"input_tokens":7,"output_tokens":9}}`
-	if got := canonical(t, turn.ResponseItems[0].Value); got != wantBody {
+	if got := canonical(t, assembled.(map[string]any)[auditmodel.SlotAggregate]); got != wantBody {
 		t.Fatalf("aggregate = %s", got)
 	}
 	// message_delta replaced the start usage's output_tokens; the residue

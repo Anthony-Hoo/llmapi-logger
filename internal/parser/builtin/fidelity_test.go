@@ -367,7 +367,7 @@ func TestOverLimitResidueKeepsTheRawBody(t *testing.T) {
 	input := base.Input{AuditID: "apx_big", Protocol: "anthropic", Endpoint: "/v1/messages", StatusCode: &status,
 		Request: jsonBody(`{"model":"m","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`), Response: sseBody(stream)}
 	_, err := storeAndRebuild(t, testCipher(t), "anthropic.messages", input)
-	if !errors.Is(err, streamevidence.ErrResidueTooLarge) {
+	if !errors.Is(err, streamevidence.ErrResidueTooLarge) || !errors.Is(err, base.ErrStreamResidueTooLarge) {
 		t.Fatalf("error = %v, want ErrResidueTooLarge", err)
 	}
 }

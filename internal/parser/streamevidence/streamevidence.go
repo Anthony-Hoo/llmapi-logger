@@ -11,7 +11,6 @@
 package streamevidence
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -28,7 +27,8 @@ import (
 const MaxResidueBytes = 1 << 20
 
 // ErrResidueTooLarge declines a stream whose residue exceeds MaxResidueBytes.
-var ErrResidueTooLarge = errors.New("streamevidence: stream residue exceeds the limit")
+// It is parser.ErrStreamResidueTooLarge, which the worker can recognise.
+var ErrResidueTooLarge = base.ErrStreamResidueTooLarge
 
 // Event is one decoded SSE event. Object is set when Data is a JSON object.
 type Event struct {

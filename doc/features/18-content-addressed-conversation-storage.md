@@ -181,7 +181,7 @@ parser 只有在上述验证通过后才允许把 raw retention 从 pending 改�
 
 网络 read/write chunk 只用于临时采集，不作为长期事件模型。成功 SSE 响应保存：
 
-- 折叠体：normalizer 把全部事件折叠成该端点的非流式响应 body，作为唯一的 `aggregate` item（content object）。同一回答流式与非流式得到的 conversation 相同；
+- 折叠体：normalizer 把全部事件折叠成该端点的非流式响应 body，并按非流式响应的同一套拆分存成 envelope 内的 marker 和各个 item（模块 05 §2.3）。同一回答流式与非流式得到相同的 conversation 和相同的 response item 对象，下一轮请求复用它们的情形也相同；Responses 回显的 `instructions`、`tools` 另存为 item，跨轮去重；
 - 残留（residue）：事件里折叠体给不回来的内容，见下；
 - 事件描述与摘要，放在响应 envelope 里。事件描述是紧凑形式：事件名的游程编码、data 长度序列和一个按顺序覆盖全部事件名与 data 的 SHA-256（定义见模块 05 §2.3），不再为每个事件存一个 SHA-256；整条 Body 的字节另有 `body_streams.sha256`；
 - TTFT、首事件、末事件、事件数量；
@@ -206,7 +206,7 @@ parser 只有在上述验证通过后才允许把 raw retention 从 pending 改�
 
 因此可以复原输出、事件次序和每个事件的全部字段值，但不宣称恢复 TCP frame、HTTP chunk framing、完全相同的 SSE 空白格式、delta 的切分边界，或 JSON 的键序与空白（与所有 content object 一样按 canonical JSON 保存）。SSE 注释行和 `id:`、`retry:` 字段在解码时即被忽略，不在保存范围内。
 
-重建响应（模块 10 §5 的 `reconstructed/response`）的形状是：`format`（`sse`）、`events`、`summary`、可选的 `residue`，以及 `aggregate`（折叠体）。OpenAI parser 版本 2 写入的旧行（layout `openai.stream.response`）没有 `residue`，`aggregate` 是展示用的 message 数组，按原方式读取。
+重建响应（模块 10 §5 的 `reconstructed/response`）的形状是：`format`（`sse`）、`events`、`summary`、可选的 `residue`，以及 `aggregate`（重建后的完整折叠体，item 已放回原位）。OpenAI parser 版本 2 写入的旧行（layout `openai.stream.response`）没有 `residue`，`aggregate` 是展示用的 message 数组，按原方式读取。
 
 ## 11. 防篡改链
 

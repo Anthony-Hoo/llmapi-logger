@@ -96,7 +96,7 @@ Chat Completions 与 Completions 只有一种事件，即 chunk，外加终止�
 | choice | `delta` | 见下 |
 | delta | `role` `name` | 最后一次报告的非 null 值 |
 | delta | `content` `refusal` `reasoning_content` `reasoning` `thinking` | 各自拼接到 message 的同名字段 |
-| delta | `tool_calls[]` | 按 `index`（缺省为数组位置）归入 message 的 `tool_calls[]`，按首次出现排序，每个元素保留 `index`；`id`、`type` 取最后报告值，`function.name`、`function.arguments` 拼接 |
+| delta | `tool_calls[]` | 按 `index`（缺省为数组位置）归入 message 的 `tool_calls[]`，按首次出现排序；下标恰为 0、1、2… 时省略 `index`（与非流式 body 相同），否则每个元素保留 `index`；`id`、`type` 取最后报告值，`function.name`、`function.arguments` 拼接 |
 | delta | `function_call` | `name`、`arguments` 拼接到 message 的 `function_call` |
 
 Responses 消费以下事件类型，每种只读列出的顶层字段：
@@ -122,6 +122,8 @@ Responses 消费以下事件类型，每种只读列出的顶层字段：
 - 清单外的事件，例如 `response.output_text.annotation.added`、托管工具的 `response.*_call.*` 进度事件，整条保留。
 
 `summary.stop_reason`：Chat 与 Completions 存最后一个报告了 `finish_reason` 的 chunk 中第一个非空的 `finish_reason`；Responses 没有供应商停止原因，存终态映射后的值：`completed` 为 `end_turn`，`incomplete` 为 `incomplete_details.reason`（没有时为 `other`），`failed`、`cancelled` 为 `other`。两者都是 insights 读 raw 流会得到的停止原因，回填据此恢复（模块 05 §2.3）。
+
+折叠体按非流式响应的同一套拆分存储（模块 05 §2.3）：Chat 的 choice message、Completions 的 choice text、Responses 的 output item 各为一个 item，与同一回答的非流式响应共用对象。Responses 流另把终态回显的 `instructions` 和 `tools` 存为 item（slot 与 kind 同名），前者与请求的 instructions item 是同一对象，后者跨轮去重；非流式 Responses 的 layout（`marker_envelope`）已发布，回显仍留在 envelope 里。
 
 管理端可重建折叠体、事件次序和每个事件的全部字段值，但不宣称重建原始 SSE 空白、delta 切分、HTTP chunk framing 或 TCP frame；异常时 full raw 仍保留原字节。
 

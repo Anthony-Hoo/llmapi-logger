@@ -161,8 +161,18 @@ func foldChatStream(events []base.SSEEvent) streamFold {
 			target.value["message"] = streamevidence.Clone(target.snapshot)
 		} else {
 			if len(target.toolOrder) > 0 {
+				// A tool call's index is its position when the calls came as
+				// 0, 1, 2, ...; the body then omits it, like a non-stream
+				// body. Any other order keeps every index.
+				positional := true
+				for position, toolIndex := range target.toolOrder {
+					positional = positional && toolIndex == position
+				}
 				tools := make([]any, 0, len(target.toolOrder))
 				for _, toolIndex := range target.toolOrder {
+					if positional {
+						delete(target.tools[toolIndex], "index")
+					}
 					tools = append(tools, target.tools[toolIndex])
 				}
 				target.message["tool_calls"] = tools
