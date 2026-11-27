@@ -93,7 +93,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 PostgreSQL 使用独立 schema 版本，并保留旧证据模型的关系约束。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines、integrity events、动态关键词规则表 `content_policy_rules`，以及不在完整性链内的派生数据 `audit_analysis`、`agent_spawn_hints`（上下文洞察）与 `parsed_results.upstream_error_class`（上游策略拒绝分类）。当前表定义以 `internal/storage/postgres/migrations/001_init.sql` 为准；SQLite 模块仅记录离线导入源格式。迁移边界见 [PostgreSQL 方案](../design/postgres-history-storage.md) 和 [部署迁移](../deployment/postgresql-migration.md)。
 
-采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw；以局部错误失败时不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
+采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw；以局部错误失败时不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝打开审计存储（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
 
 局部或整批失败丢失的采集写入必须在终结前标记对应 audit 为 failed，终结时修复仍在 streaming 的子记录，并将提交后的实际状态回传 Session。Store 在单 writer 内有界恢复失败标记和终态，不缓存正文，队列屏障保证恢复不越过已接受的采集写入；已提交终态不会被重放覆盖或重复签名。恢复积压或容量溢出会使 Store 不报告健康，溢出需要修复存储后重启恢复。正常停机取消不会消耗解析保存重试预算。
 

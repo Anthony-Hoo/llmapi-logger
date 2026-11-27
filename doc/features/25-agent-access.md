@@ -112,7 +112,7 @@ CREATE TABLE agent_audit_log (
 要点：
 
 - `internal/storage/postgres/migrate.go` 的 `derivedMigrations` 加一项，`latestSchemaVersion` 改为 4。
-- **旧版本遇到版本 4 的库会拒绝启动**（“schema is newer than supported”）。回滚步骤写进部署文档：先删这两张表和 `schema_migrations` 里的 4 号行，再换回旧版本。
+- **旧版本遇到版本 4 的库打不开审计存储**（“schema is newer than supported”；进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。回滚步骤写进部署文档：先删这两张表和 `schema_migrations` 里的 4 号行，再换回旧版本。
 - 有两个测试断言“版本恰好是 1、2、3”（`org_reports_test.go`、`session_analysis_test.go`），要一起改。
 - 令牌的签发与撤销走“有确定结果”的写入路径（`submitPolicySync`，关键词规则现在用的那条）。`last_used_at_ns` 限频写入，同一令牌每分钟最多一次，写失败只记日志。
 - 审计写入失败只记日志，不影响业务请求。唯一的例外是输入包与分面的读取：既有的查看日志仍然是“写不进就不返回内容”，本模块不改这条规则。
