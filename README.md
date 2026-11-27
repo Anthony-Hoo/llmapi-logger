@@ -13,10 +13,10 @@ Client -> Nginx -> llmapi-logger
 
 ## 主要用途
 
-- 在四个代理观察点流式采集客户端请求和 NewAPI 响应；普通成功请求经重建验证后只长期保留对象图、长度、SHA-256、时间和完整性链，异常请求保留完整 raw 证据。
+- 在四个代理观察点流式采集客户端请求和 NewAPI 响应；普通成功请求经重建验证后只长期保留对象图、长度、SHA-256、时间和完整性链；异常请求按侧保留 raw：响应侧保留完整 raw，已通过重建校验的请求侧按状态码规则释放或保留（[模块 18](doc/features/18-content-addressed-conversation-storage.md) §6）。
 - 在请求发往 NewAPI 前运行可配置的本地拦截链，拒绝不符合要求的 LLM 请求。
 - 对常见 OpenAI、Anthropic、Gemini JSON/SSE 生成便于检索的摘要和协议无关对话；OpenAI Chat/Completions/Responses 与 Anthropic Messages 进一步使用可分支 turn 图和内容寻址的文本、JSON、图片、文件对象。
-- 通过本地 React + shadcn/ui 页面查看对话、轮次、重建 JSON、SSE 时序和 HTTP 元数据；只有异常 `full` 记录提供原始请求/响应 Body。
+- 通过本地 React + shadcn/ui 页面查看对话、轮次、重建 JSON、SSE 时序和 HTTP 元数据；只有 `retention_state=full` 的一侧提供原始请求/响应 Body。
 - 在个人单机环境中辅助排查请求差异、流式中断、上游错误和审计缺口。
 
 ## 核心能力
@@ -154,11 +154,11 @@ Compose 默认只公开 Nginx 的 `80` 端口；管理端发布到宿主机 `127
 
 - 运行时必须配置 PostgreSQL `database_url`，数据库和 `audit.key` 必须作为同一个备份集保存。
 - PostgreSQL 使用一致快照备份；旧 SQLite 迁移见 [PostgreSQL 迁移指南](doc/deployment/postgresql-migration.md)，不要直接复制活动主 DB 文件。
-- OpenAI 与 Anthropic verified 2xx/3xx 请求在对象重建校验和语义完整性事件写入成功后删除 raw chunks；拦截、4xx/5xx、采集、解析、上游或重建异常保留 `full` raw。
+- OpenAI 与 Anthropic verified 2xx/3xx 请求在对象重建校验和语义完整性事件写入成功后删除 raw chunks；拦截、解析或重建异常以及没有 turn 的记录两侧保留 `full` raw；有 verified turn 的 4xx/5xx 与客户端取消保留响应侧 `full` raw，请求侧按模块 18 §6 释放或保留（`upstream_error_class` 为空的 400/422 保留）。
 - 普通请求完成日志不记录 Query、Header value、Body、token、key 或底层错误文本。
 - 管理端即使只监听 loopback，也必须鉴权；支持 Bearer token 和 Web UI 的七天 HttpOnly Cookie。启用 Agent 接入后另有 Agent 令牌，只能调用 `/api/agent/v1/*`；匿名可达的只有用一次性授权码兑换令牌、凭 30 分钟签名链接下载安装包这两条路径。轮换 `admin_token` 会让 Cookie、Agent 令牌和下载链接全部失效。
 - 审计列表只额外返回解密后的入站 User-Agent，不返回其他 Header、Request-URI、Body 或 conversation；详情、reconstructed、timeline 和 full raw 都受 Admin Token 或管理 Cookie 保护并禁止缓存。
-- metadata 记录的权威校验依据是四阶段长度/SHA-256、有序对象引用、provider reconstruction hash 和 HMAC 完整性链；full 异常记录另保留可认证解密的原始字节。
+- metadata 记录的权威校验依据是四阶段长度/SHA-256、有序对象引用、provider reconstruction hash 和 HMAC 完整性链；`full` 的一侧另保留可认证解密的原始字节。
 - 配置文件、数据库和 key 应只允许运行账户访问。
 
 备份流程见[备份与恢复](doc/deployment/backup-and-restore.md)。

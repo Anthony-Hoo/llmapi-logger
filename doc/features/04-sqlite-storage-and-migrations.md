@@ -156,7 +156,7 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 
 - `pending`：等待 parser、normalizer 和重建验证；
 - `metadata`：普通 2xx/3xx 成功且重建已验证，删除 raw chunks，`stored_length/chunk_count` 归零；
-- `full`：拦截、采集不完整、4xx/5xx、解析/normalization/重建失败或其他异常，保留完整 raw。
+- `full`：拦截、采集不完整、4xx/5xx、解析/normalization/重建失败或其他异常，保留完整 raw。状态按侧决定：有 verified turn 的异常记录响应侧 `full`，请求侧按[模块 18](18-content-addressed-conversation-storage.md) §6 的状态码规则可以是 `metadata`。
 
 `metadata` 仍保留原始 observed length、SHA-256、Content-Type、阶段时间、SSE 统计和完整性链。管理端通过 reconstructed API 读取语义对象，不把 metadata 状态误报为“没有捕获 Body”。
 
@@ -255,7 +255,7 @@ GC 使用 `NOT EXISTS` 可达性检查和对象引用索引，不维护可漂移
 
 - 新库最终表集合和 schema generation 正确；migration 005 明确清除旧 audit 数据并保留 UA 规则职责。
 - 同一 HTTP Body 的两个观察阶段只在终结校验后保存一份 owning chunks；不一致阶段各自保留并标记异常。
-- 普通成功请求 verified 后 raw chunks 被删除，异常、拦截、解析和重建失败保留 full raw。
+- 普通成功请求 verified 后 raw chunks 被删除，拦截、解析和重建失败保留 full raw；有 verified turn 的上游异常保留响应侧 full raw，请求侧按模块 18 §6 决定。
 - OpenAI Responses/Chat/Completions 的 provider request/response 可精确重建。
 - data URL 按解码字节复用；相同二进制在不同 MIME/Base64 写法下仍只有一个 binary object。
 - retry、branch、truncate、edit、rollback、summary 和并行工具调用的 parent/delta 正确。

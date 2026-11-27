@@ -6,7 +6,7 @@
 
 parser 异步读取已落盘证据，不进入 HTTP 转发链，不修改 content block 或事件。未知普通字段/event 忽略；未知 content block 只在 conversation 中保存有界占位；完整对象在 raw Body（异常记录）或请求与非流式响应的 content object（verified 记录）中，verified 流式响应的保留范围见 §8。
 
-本 parser 同时实现内容寻址 normalizer（§8）：普通成功记录的请求与非流式响应可从加密 content object 精确重建 provider JSON，流式响应保留事件摘要和聚合结果，raw 释放为 `metadata`；异常记录仍保留 full raw。
+本 parser 同时实现内容寻址 normalizer（§8）：普通成功记录的请求与非流式响应可从加密 content object 精确重建 provider JSON，流式响应保留事件摘要和聚合结果，raw 释放为 `metadata`；异常记录的响应侧仍保留 full raw，请求侧按[模块 18](18-content-addressed-conversation-storage.md) §6 决定。
 
 对应包：`internal/parser/anthropic`。
 

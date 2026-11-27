@@ -8,7 +8,7 @@
 
 本项目是部署在 Nginx 与 NewAPI 之间的个人审计代理：单用户、单机、一个 Go 二进制、一个 NewAPI 后端、一个 PostgreSQL 数据库和一个本地主密钥文件。
 
-数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI 与 Anthropic 成功记录经重建验证后释放长期 raw；异常记录保留 full 原字节。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
+数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI 与 Anthropic 成功记录经重建验证后释放长期 raw；异常记录按侧保留：响应侧保留 full 原字节，已通过重建校验的请求侧按[模块 18](18-content-addressed-conversation-storage.md) §6 的状态码规则释放或保留。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
 
 ~~~text
 Client -> Nginx -> Data-plane dispatcher
@@ -111,9 +111,9 @@ key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚�
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；Anthropic Messages 同样按 message 拆成 turn 与 content object；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建。Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；Anthropic Messages 同样按 message 拆成 turn 与 content object；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建；有 verified turn 的异常记录按侧决定，通常释放请求侧、保留响应侧（模块 18 §6）。Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。只有 `retention_state=full` 的异常记录提供 raw Body；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域；汇总端点只读明文派生列，只有单条审计的上下文构成和 Agent 树节点名字按需解密 `detail_enc`。所有管理证据响应禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。raw Body 按侧提供：只有 `retention_state=full` 的一侧可下载，同一条异常记录可能请求侧已释放、响应侧仍可下载；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域；汇总端点只读明文派生列，只有单条审计的上下文构成和 Agent 树节点名字按需解密 `detail_enc`。所有管理证据响应禁止缓存。
 
 受保护页面另提供动态 User-Agent 规则管理：模型与 User-Agent 使用 Go RE2 正则，保存时编译校验，持久化成功后以原子快照立即替换；初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则在访问 NewAPI 前返回通用 `401 unauthorized`，精确拦截码仅保留在审计数据中。规则不会扩大 Matcher 的 LLM 路由范围。
 
@@ -163,7 +163,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - available 记录失败仍转发，并存在日志或 audit_gaps。
 - `/v1/models` 等安全非 LLM 请求透明到达 NewAPI，且不建 audit、不执行 interceptor；错误 Method、编码近似、受保护 LLM 路径族与危险路径返回 404，NewAPI 零调用。
 - OpenAI Responses/Chat/Completions 可从 envelope、有序 item 和 binary object 精确重建；重复历史和 PNG 复用，turn delta 随轮次近似线性增长。
-- 普通成功 verified 后 raw chunks 删除；拦截、解析、上游、采集或重建异常保留 full raw。
+- 普通成功 verified 后 raw chunks 删除；拦截、解析或重建异常以及没有 turn 的记录两侧保留 full raw；有 verified turn 的上游异常、客户端取消等保留响应侧 full raw，请求侧按模块 18 §6 释放或保留（两个请求阶段不完整或不一致时保留）。
 - SSE 网络小块不逐行长期保存；TTFT、逻辑 event count、首末事件和最多 100,000 个时间点可校验。
 - DB/WAL 无测试 secret、Body、图片或主密钥明文。
 - 拦截链首个 reject 会在调用 NewAPI 前返回；记录 blocked_by/block_code，后续 NewAPI 阶段不存在。

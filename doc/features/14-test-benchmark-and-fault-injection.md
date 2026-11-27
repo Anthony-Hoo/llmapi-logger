@@ -81,7 +81,7 @@ Windows 脚本输出 Windows/Linux amd64，均使用 `CGO_ENABLED=0`。若本机
 - 最终镜像不含 Node、pnpm、Go 源码或构建工具；
 - fake/upstream 环境下一个非流式请求、一个 SSE 请求、一个 `/v1/models` passthrough 和一个 fail-closed 路径；
 - 管理 API 缺凭证为 401，登录 Cookie 可读取列表；
-- verified 请求 reconstructed JSON 可下载、raw 返回 410；异常请求 raw 可下载；
+- verified 请求 reconstructed JSON 可下载、raw 返回 410；异常请求按侧验证：有 verified turn 的 5xx/429 等记录请求 raw 返回 410、响应 raw 可下载，`upstream_error_class` 为空的 400/422、未列出的状态和没有 turn 的记录两侧 raw 可下载；
 - 重启后数据库 quick check、integrity chain 和历史重建正常。
 
 没有可用容器运行时或 Nginx 时，应明确记录“未执行”，不能写成已通过。

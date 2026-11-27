@@ -193,7 +193,7 @@ docker compose exec nginx nginx -t
 
 PostgreSQL 数据库与 `audit.key` 必须作为一个备份集保存，使用一致快照备份与已验证的恢复流程。具体流程见 [备份与恢复](backup-and-restore.md)。
 
-普通 OpenAI 与 Anthropic 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、4xx/5xx、采集不完整、解析/normalization/重建失败和其他异常保持 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw 返回 410 误判为丢失。
+普通 OpenAI 与 Anthropic 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、解析/normalization/重建失败和没有 turn 的异常保持两侧 `full`；两个请求阶段不完整或不一致时请求侧也保持 `full`。有 verified turn 的上游异常按侧保留（模块 18 §6）：响应侧 `full`；5xx、401、403、408、409、429、499、客户端取消，以及带 `upstream_error_class` 的 400/422，在两个请求阶段一致时请求侧释放为 `metadata`；`upstream_error_class` 为空的 400/422 和其他未列出的状态请求侧仍 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw、或异常记录的请求 raw 返回 410 误判为丢失。回滚到旧二进制能照常读取这些行，但按新规则写入的记录没有请求 raw 可以返回。
 
 Anthropic Messages 自解析器版本 3 起写 turn 并释放 raw。写出这类记录后不能回退到更早的版本：旧版本不认识 `anthropic.*` 重建布局，这些记录的详情会报完整性错误，而 raw 已经释放。升级只能前滚。
 

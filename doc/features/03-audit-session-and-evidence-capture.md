@@ -134,7 +134,7 @@ audit_gaps 只做进程级运维提示，字段为 id、started_at_ns、ended_at
 3. 启动时及每 30 秒扫描少量 pending 记录补入队列。
 4. worker 用条件更新把 pending 改为 processing，未抢到则跳过。
 5. worker 从 SQLite 读取、解密并解析。
-6. 在同一 writer 事务中 UPSERT parsed_results；若 normalizer 可用则保存 verified turn graph，并按结果把 raw retention 更新为 metadata/full，再更新 parse_status。
+6. 在同一 writer 事务中 UPSERT parsed_results；若 normalizer 可用则保存 verified turn graph，并按结果把请求侧、响应侧的 raw retention 分别更新为 metadata/full（规则见[模块 18](18-content-addressed-conversation-storage.md) §6），再更新 parse_status。
 
 rejected audit 在 FinishAudit 时直接设为 skipped，永不入队。重启时先把遗留 processing 重置为 pending，再扫描已结束且 pending 的 audit 重新入队；解析结果只保留最新版本。
 

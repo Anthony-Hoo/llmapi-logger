@@ -9,7 +9,7 @@
 3. 内容寻址的文本、JSON、reasoning、工具调用和工具结果对象；
 4. 按解码后原始字节寻址的图片、文件和附件对象。
 
-普通成功请求只长期保留 Body 的原始长度、SHA-256、Content-Type、阶段状态、流式时间信息、语义重建哈希和防篡改链。被拦截、采集不完整、解析失败、上游异常或重建验证失败时，升级为完整原始证据保留。
+普通成功请求只长期保留 Body 的原始长度、SHA-256、Content-Type、阶段状态、流式时间信息、语义重建哈希和防篡改链。raw 的保留按请求侧、响应侧分别决定（§6）：上游异常时，已通过重建校验且两个请求阶段一致的请求体同样只保留上述元数据，响应侧保留完整原始证据；被拦截、解析失败、重建验证失败或没有 turn 时，两侧都保留完整原始证据；两个请求阶段不完整或不一致时，请求侧也保留。
 
 目标是在 Agent 连续对话反复携带完整历史时，让大对象增长由请求级近似 O(n²) 降为“唯一内容对象 + 每轮小增量”的近似 O(n)，同时避免把 SSE/network read 的小块各自写成 SQLite 行。
 
@@ -84,10 +84,33 @@ canonical Prepare 在同一轮内先以规范化明文 hash 去重，再压缩�
 | 状态 | 含义 |
 | --- | --- |
 | pending | 等待 parser/normalizer 和重建验证，raw chunk 暂存 |
-| metadata | 普通成功请求已验证；删除 raw chunk，只保留长度/hash/类型/时间/链 |
+| metadata | 该侧已由 verified turn 覆盖；删除 raw chunk，只保留长度/hash/类型/时间/链 |
 | full | 异常证据；保留可认证解密的完整 raw chunk |
 
-升级为 `full` 的条件至少包括：interceptor 拒绝、forward/capture 非完整成功、非 2xx/3xx HTTP 结果、解析 error/partial/skipped、内容编码不支持、binary/data URL 解码失败、对象写入失败、重建 hash 不一致和完整性链失败。
+保留状态按侧决定。请求侧是 `request_for_newapi_received_from_nginx` 和 `request_sent_to_newapi`，响应侧是另外两个阶段；同一侧的两个阶段状态相同。释放一侧时删除该侧的 chunks（合并后它们属于 `source_stage` 指向的那个阶段，合并不跨侧），并把该侧两行的 `stored_length`、`chunk_count` 置 0。判定规则是 `internal/storage` 的 `DecideRawRetention`，PostgreSQL 与 SQLite 两个存储调用同一个函数：
+
+1. 没有 verified turn，或解析结果不是 `ok`：两侧都 `full`。这包括 interceptor 拒绝、解析 error/partial/skipped、内容编码不支持、超过解码上限、binary/data URL 解码失败、normalization 或重建失败、对象写入失败；也包括 turn 已准备好、但解析结果在保存前因加密失败降为 error 的记录。
+2. 正常结果（forward `completed`、capture `complete`、状态 2xx/3xx）：两侧都 `metadata`。
+3. 其余结果：响应侧一律 `full`。请求侧只有同时满足下面三条才 `metadata`，否则 `full`：
+   - turn 重建出了请求（request layout 不是 `none`）。重建校验比较的是重建结果与解码后 `request_for_newapi_received_from_nginx` Body 的 canonical JSON 哈希，再加上落库后请求序列哈希的复读比较。它保证语义 JSON 一致，不复原键序、空白和 Content-Encoding，与普通成功请求释放 raw 时得到的保证相同；
+   - `request_sent_to_newapi.source_stage = request_for_newapi_received_from_nginx`：两个请求阶段长度与 SHA-256 一致并已合并，两个阶段都是 `complete`，没有 `body_stage_mismatch`。不一致时两份请求 raw 都保留；
+   - 结果在下表中为“释放”。
+
+| 结果 | 请求侧 |
+| --- | --- |
+| 5xx | 释放 |
+| 401、403、408、409、429、499 | 释放 |
+| 400、422，`upstream_error_class` 非空 | 释放 |
+| 400、422，`upstream_error_class` 为空 | 保留：可能是请求本身畸形，需要逐字节检查 |
+| 客户端中途取消（forward `client_cancelled`），没有状态码或状态为 2xx/3xx | 释放 |
+| 402、404、405、413、415 等其他非 2xx/3xx 状态 | 保留（待维护者确认） |
+| 2xx/3xx 但 forward 或 capture 异常（不是客户端取消）；没有状态码且不是客户端取消 | 保留（待维护者确认） |
+
+保留优先于取消：客户端在一个上表判为保留的状态之后取消，请求侧仍保留。表中“待维护者确认”的两行是设计 5.9 没有点名的情形，问题已提交维护者；在答复之前按原规则保留请求 raw，不丢任何证据。答复只需改 `abnormalRequestRelease` 里的一行。
+
+没有 turn 的异常记录（例如客户端在流中途断开、响应不完整）两侧都保留 `full`，“只有请求的轮次”另行实现。
+
+`upstream_error_class` 是不签名的派生列，判定只在保存解析结果时读取一次；之后改写该列不影响已定的保留状态。每一侧的 `retention_state` 进入 `semantic_compacted` 事件的摘要，新行按写入时的状态签名，摘要格式、schema 和约束都不变。按旧规则写入的异常记录四个阶段都是 `full`，不迁移、不改写，照常通过校验和读取。回滚到旧二进制时，它能照常读取按新规则写入的行（`metadata` 一侧按已释放处理），但这些记录已经没有请求 raw 可以返回，只能下载响应 raw 或读取重建请求。
 
 ## 7. conversation 与 turn 图
 
