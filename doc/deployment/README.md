@@ -66,12 +66,13 @@ bin/agent-packages/            # Agent 接入的 Skill 安装包（五个平台�
 
 ## 3. Docker Compose
 
-仓库根目录的 `compose.yaml` 提供 Nginx、audit-proxy 和 NewAPI 的最小组合：
+仓库根目录的 `compose.yaml` 提供 Nginx、audit-proxy、PostgreSQL 和 NewAPI 的最小组合：
 
 - 只有 Nginx 的 `80` 对外发布。
 - 管理端只发布为 `127.0.0.1:8081`。
-- audit-proxy 数据端和 NewAPI 只存在于 Compose 私有 bridge 网络，没有 host 端口；NewAPI 仍可访问外部模型供应商。
-- audit 数据和 NewAPI 数据使用不同 volume。
+- audit-proxy 数据端、PostgreSQL 和 NewAPI 只存在于 Compose 私有 bridge 网络，没有 host 端口；NewAPI 仍可访问外部模型供应商。
+- audit 数据、PostgreSQL 数据和 NewAPI 数据使用不同 volume。
+- PostgreSQL 显式设置了几项内存、检查点和自动清理参数，起点按约 8 GB 内存的单机定，未经实测；各项作用、覆盖变量和改后要看的指标见[数据库参数](postgresql-migration.md#数据库参数)。
 
 首次启动前编辑 `configs/audit-proxy.docker.yaml`，把示例 `admin_token` 替换为随机长 token，并限制文件权限。需要 NewAPI 调用者识别时同时填写 `newapi.access_token` 和正整数 `newapi.user_id`；两项都留空/0 时关闭该功能。正式使用时也应把 `compose.yaml` 中的 NewAPI 镜像固定到自己验证过的 tag 或 digest。
 

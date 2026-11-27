@@ -40,6 +40,29 @@ services:
   postgres:
     image: postgres:18.6-alpine
     restart: unless-stopped
+    # Starting values for one machine with about 8 GB of memory, not measured
+    # for this project. What each one does and how to size it:
+    # doc/deployment/postgresql-migration.md, section on database parameters.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${LLMAPI_PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - maintenance_work_mem=${LLMAPI_PG_MAINTENANCE_WORK_MEM:-256MB}
+      - -c
+      - max_wal_size=${LLMAPI_PG_MAX_WAL_SIZE:-4GB}
+      - -c
+      - checkpoint_timeout=${LLMAPI_PG_CHECKPOINT_TIMEOUT:-15min}
+      - -c
+      - wal_compression=${LLMAPI_PG_WAL_COMPRESSION:-lz4}
+      - -c
+      - autovacuum_vacuum_scale_factor=${LLMAPI_PG_AUTOVACUUM_VACUUM_SCALE_FACTOR:-0.05}
+    # Parallel queries and parallel VACUUM allocate in /dev/shm, which a
+    # container caps at 64 MB by default.
+    shm_size: 256mb
+    # A fast shutdown writes every dirty buffer in a final checkpoint; give it
+    # time instead of being killed and replaying WAL on the next start.
+    stop_grace_period: 60s
     environment:
       POSTGRES_DB: audit_proxy
       POSTGRES_USER: audit_proxy

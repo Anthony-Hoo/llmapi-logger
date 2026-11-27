@@ -12,6 +12,48 @@
 
 每个数据库/schema 仅允许一个代理写者。代理在固定数据库连接上持有 session advisory lock；第二个实例不可写入。连接丢失后不能换连接无锁继续写，必须重新启动。数据库端不要终止锁连接后继续保留旧服务；按正常服务停止、启动流程操作。只读查询的多语句证据快照使用 repeatable read。
 
+## 数据库参数
+
+PostgreSQL 的默认值是按很小的机器定的。本项目的负载有三个特点：大的加密 Body 先写入、请求结束和解析通过后再删掉；只有一个写者；WAL 持续不断地产生。一个实测部署库约 74 GB，按 5 分钟窗口推算每天约 20 GB WAL，而当时全部用默认值。
+
+`compose.yaml` 给 PostgreSQL 显式传了下面几项。**这些只是起点，没有在本项目上测过效果**，不保证会更快或更省；改动后按本节末尾的方法观察，再按自己的机器调整。宿主机自建的 PostgreSQL 可以把同样的值写进 `postgresql.conf`。
+
+| 参数 | 默认值 | Compose 起点 | 覆盖用的变量 |
+| --- | --- | --- | --- |
+| `shared_buffers` | 128MB | 1GB | `LLMAPI_PG_SHARED_BUFFERS` |
+| `maintenance_work_mem` | 64MB | 256MB | `LLMAPI_PG_MAINTENANCE_WORK_MEM` |
+| `max_wal_size` | 1GB | 4GB | `LLMAPI_PG_MAX_WAL_SIZE` |
+| `checkpoint_timeout` | 5min | 15min | `LLMAPI_PG_CHECKPOINT_TIMEOUT` |
+| `wal_compression` | off | lz4 | `LLMAPI_PG_WAL_COMPRESSION` |
+| `autovacuum_vacuum_scale_factor` | 0.2 | 0.05 | `LLMAPI_PG_AUTOVACUUM_VACUUM_SCALE_FACTOR` |
+
+变量在运行 `docker compose` 的 shell 环境或项目目录的 `.env` 里设置，不设时用表里的起点。容器另外设了 `shm_size: 256mb` 和 `stop_grace_period: 60s`，原因见下。这些值在 PostgreSQL 18.6 上都能被接受（`wal_compression=lz4` 需要编译时带 lz4，官方镜像带了）。
+
+每一项的作用和缩放方法：
+
+- **`shared_buffers`**：PostgreSQL 自己的页缓存。回填和候选查询反复扫 `audit_records`、`audit_analysis` 这类表，放得进缓存就不用每次向内核要页。起点 1GB 按约 8 GB 内存、同一台机器上还跑 NewAPI 和代理来定；独占数据库的机器一般取内存的 25%，和其他服务共用时取 10% 到 15%。超过几个 GB 后收益通常变小。
+- **`maintenance_work_mem`**：`VACUUM`、`VACUUM FULL` 重建索引和建索引时可用的内存。下面的 `audit_analysis` 回收和大表的清理都靠它。autovacuum 默认也用这个值（`autovacuum_work_mem` 为 -1），最多 3 个 worker 同时运行，最坏约占 3 倍；PostgreSQL 17 起死元组记录是按需分配的，平时用不满。内存小于 4 GB 时降到 128MB。
+- **`max_wal_size`** 与 **`checkpoint_timeout`**：一起决定检查点多久发生一次。检查点之后每个页面第一次被修改时，WAL 里要写一份整页镜像；检查点越密，整页镜像越多。按平均速率，每天 20 GB 约合每 5 分钟 70 MB，默认的 1 GB 平时并不会先到；但每个请求约写 2.5 MB WAL，一阵密集的请求就会让 WAL 量提前触发检查点（实际触发点约为 `max_wal_size / (1 + checkpoint_completion_target)`，默认约 540 MB）。4 GB 给这类突发留出余量，让检查点主要按 15 分钟的时间触发。代价是两样：`pg_wal` 目录平时可能涨到接近 `max_wal_size`（它是软上限，偶尔会超过），磁盘要留出这么多空间；崩溃后启动要重放上一个检查点以来的 WAL，最长约 15 分钟的量。磁盘紧张时先把 `max_wal_size` 降到 2GB，而不是缩短 `checkpoint_timeout`。
+- **`wal_compression`**：只压缩 WAL 里的整页镜像，不压缩普通 WAL 记录。这里大部分 WAL 是加密的 Body 本身，加密后的页压不动，所以收益只来自索引页和普通表页的镜像，可能很小；lz4 的 CPU 开销低，所以默认打开。CPU 紧张时可以设回 `off`。
+- **`autovacuum_vacuum_scale_factor`**：表里死元组超过行数的这个比例（加 50 行）才触发自动清理。`body_chunks` 留着大量异常请求的 raw，正常请求的块又不断被删掉，`audit_records` 每行平均被非 HOT 更新两三次；默认 0.2 意味着这类表要先攒下约五分之一的死空间才清理，之后才能复用。0.05 让清理更早、每次更小。它是全局设置，也作用于这些表的 TOAST 表；本项目不在表上单独设存储参数。
+- **`shm_size`**（容器设置，不是 PostgreSQL 参数）：并行查询和手工 `VACUUM` 的并行索引清理在 `/dev/shm` 里分配共享内存，容器默认只给 64 MB，调大内存参数后可能不够用而报错。
+- **`stop_grace_period`**（容器设置）：快速关闭时 PostgreSQL 要把全部脏页写进最后一个检查点。`shared_buffers` 变大、检查点间隔变长以后，这一步可能超过 Compose 默认的 10 秒而被强制杀掉；数据不会丢，但下次启动要重放 WAL。60 秒给它留出时间。
+
+没有改的：
+
+- `effective_cache_size`（默认 4GB）只是给查询规划器的估计，不分配内存。约 8 GB 内存的机器上默认值合适；内存明显更大或更小时，设为内存的一半左右。
+- `checkpoint_completion_target` 的默认值已经是 0.9，即把检查点的写入摊到整个间隔里，不需要改。
+- **不要**为了速度关闭 `fsync`、`full_page_writes` 或 `synchronous_commit`。这是审计库，这几项任何一个关掉，断电或崩溃后都可能丢掉已经确认提交的证据，或者让库损坏。代理自己的连接固定 `synchronous_commit=on`。`wal_level` 也保持默认的 `replica`，改成 `minimal` 会让基于 WAL 的备份不可用。
+
+改完之后观察这些（需要超级用户或 `pg_monitor` 角色）：
+
+- 检查点是按时间还是按 WAL 量触发的：`SELECT num_timed, num_requested FROM pg_stat_checkpointer;`。`num_requested` 占大头，说明 `max_wal_size` 仍然偏小。默认开启的 `log_checkpoints` 也会在日志里写出每次的原因（`time` 或 `wal`）和耗时。
+- WAL 量与整页镜像：`SELECT wal_records, wal_fpi, wal_bytes FROM pg_stat_wal;`，隔一段时间取两次求差。
+- `pg_wal` 的大小：`SELECT pg_size_pretty(sum(size)) FROM pg_ls_waldir();`，与磁盘剩余空间对照。
+- 缓存命中：`SELECT blks_hit, blks_read FROM pg_stat_database WHERE datname = current_database();`，同样取差值看。
+- 清理是否跟得上：`SELECT relname, n_live_tup, n_dead_tup, last_autovacuum FROM pg_stat_all_tables WHERE relname IN ('body_chunks', 'audit_records', 'http_headers') ORDER BY n_dead_tup DESC;`，以及各表总大小是否在没有新增保留数据时持续上涨。
+- 容器内存（`docker stats` 或 `podman stats`）不应接近宿主机上限。
+
 ## 从 v0.6.0 SQLite 迁移
 
 迁移是显式停机操作，不是在线双写。先在副本演练，并保留旧版本可执行文件/镜像。
