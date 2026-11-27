@@ -21,12 +21,18 @@ const defaultScanInterval = 30 * time.Second
 
 // Worker owns one bounded queue and one parser goroutine. Queue saturation is
 // intentionally non-blocking; pending rows are picked up by later scans.
+//
+// The queue is one FIFO for both inputs: audits Notify enqueues (at most
+// QueueCapacity waiting) and jobs Submit enqueues (at most
+// FinalizeQueueCapacity waiting), so audits are parsed in the order they were
+// handed over. Enqueueing happens under mu, as Close's drain does, so every
+// job's plaintext is released exactly once.
 type Worker struct {
 	store   Store
 	cipher  security.Cipher
 	parsers map[string]Parser
 	logger  *slog.Logger
-	queue   chan string
+	queue   chan FinalizeJob
 	// Only the parser goroutine accesses this bounded recovery backlog.
 	// A failed release must be retried before the same audit can be claimed.
 	pendingReleases map[string]struct{}
@@ -96,7 +102,7 @@ func NewWorker(store Store, cipher security.Cipher, parsers []Parser, logger *sl
 		cipher:          cipher,
 		parsers:         indexed,
 		logger:          logger,
-		queue:           make(chan string, QueueCapacity),
+		queue:           make(chan FinalizeJob, FinalizeQueueCapacity),
 		pendingReleases: make(map[string]struct{}),
 		scanInterval:    defaultScanInterval,
 		now:             time.Now,
@@ -198,17 +204,47 @@ func (worker *Worker) Notify(auditID string) bool {
 	if worker == nil || strings.TrimSpace(auditID) == "" {
 		return false
 	}
+	return worker.enqueue(FinalizeJob{Audit: storage.ParserAudit{AuditID: auditID}}, QueueCapacity)
+}
+
+// Submit hands a committed audit to the parser goroutine without waiting
+// (design G.1). A job with evidence is parsed from that evidence instead of
+// the stored rows; an id-only job is parsed like a notified audit. Submit
+// takes the job's plaintext: its Release runs exactly once, when the job is
+// refused, after it is processed, or when the worker stops before reaching
+// it. False means the queue is full or the worker is closed; the row then
+// stays pending for the scan, as after a refused Notify.
+func (worker *Worker) Submit(job FinalizeJob) bool {
+	if worker == nil || strings.TrimSpace(job.Audit.AuditID) == "" {
+		releaseJob(job)
+		return false
+	}
+	if !worker.enqueue(job, FinalizeQueueCapacity) {
+		releaseJob(job)
+		return false
+	}
+	return true
+}
+
+// enqueue adds a job unless the worker is closed or limit jobs are already
+// waiting.
+func (worker *Worker) enqueue(job FinalizeJob, limit int) bool {
 	worker.mu.Lock()
-	closed := worker.closed
-	worker.mu.Unlock()
-	if closed {
+	defer worker.mu.Unlock()
+	if worker.closed || len(worker.queue) >= limit {
 		return false
 	}
 	select {
-	case worker.queue <- auditID:
+	case worker.queue <- job:
 		return true
 	default:
 		return false
+	}
+}
+
+func releaseJob(job FinalizeJob) {
+	if job.Release != nil {
+		job.Release()
 	}
 }
 
@@ -238,6 +274,16 @@ func (worker *Worker) Close() {
 		cancel()
 	}
 	worker.wait.Wait()
+	// No job can be enqueued any more (closed is set); release the plaintext
+	// of those the goroutine did not reach. Their rows stay pending.
+	for {
+		select {
+		case job := <-worker.queue:
+			releaseJob(job)
+		default:
+			return
+		}
+	}
 }
 
 func (worker *Worker) run(ctx context.Context) {
@@ -248,8 +294,8 @@ func (worker *Worker) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case auditID := <-worker.queue:
-			worker.process(ctx, auditID)
+		case job := <-worker.queue:
+			worker.serve(ctx, job)
 		case <-ticker.C:
 			worker.retryProcessingReleases(ctx)
 			worker.scan(ctx)
@@ -273,10 +319,19 @@ func (worker *Worker) scan(ctx context.Context) {
 	}
 }
 
+// serve processes one queued job and then releases its plaintext.
+func (worker *Worker) serve(ctx context.Context, job FinalizeJob) {
+	defer releaseJob(job)
+	if job.Evidence == nil {
+		worker.process(ctx, job.Audit.AuditID)
+		return
+	}
+	worker.finalize(ctx, job.Audit, job.Evidence)
+}
+
+// process parses an audit from its stored evidence.
 func (worker *Worker) process(ctx context.Context, auditID string) {
-	if _, waiting := worker.pendingReleases[auditID]; waiting || len(worker.pendingReleases) >= QueueCapacity {
-		// Pending rows remain discoverable after storage recovers. Do not
-		// claim more work than this worker can remember to release safely.
+	if !worker.mayClaim(auditID) {
 		return
 	}
 	audit, err := worker.store.LoadParserAudit(ctx, auditID)
@@ -284,17 +339,34 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 		worker.logger.Warn("parser audit load failed", "audit_id", auditID, "error_code", "audit_load_failed")
 		return
 	}
+	if !worker.claim(ctx, auditID) {
+		return
+	}
+	input, evidenceErr := worker.loadInput(ctx, audit)
+	worker.parseClaimed(ctx, audit, input, evidenceErr)
+}
+
+// mayClaim reports whether the worker may claim the audit now.
+func (worker *Worker) mayClaim(auditID string) bool {
+	// Pending rows remain discoverable after storage recovers. Do not claim
+	// more work than this worker can remember to release safely.
+	_, waiting := worker.pendingReleases[auditID]
+	return !waiting && len(worker.pendingReleases) < QueueCapacity
+}
+
+func (worker *Worker) claim(ctx context.Context, auditID string) bool {
 	claimed, err := worker.store.ClaimPendingParse(ctx, auditID)
 	if err != nil {
 		worker.logger.Warn("parser claim failed", "audit_id", auditID, "error_code", "parse_claim_failed")
-		return
+		return false
 	}
-	if !claimed {
-		return
-	}
+	return claimed
+}
 
+// parseClaimed parses, normalizes, prepares, saves and analyzes a claimed
+// audit; every path into the parser ends here.
+func (worker *Worker) parseClaimed(ctx context.Context, audit storage.ParserAudit, input Input, evidenceErr error) {
 	implementation := worker.parsers[audit.ParserName]
-	input, evidenceErr := worker.loadInput(ctx, audit)
 	result := Result{}
 	if implementation == nil {
 		result.Status = StatusSkipped

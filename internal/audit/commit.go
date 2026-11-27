@@ -198,8 +198,8 @@ func (session *Session) finishUnified() error {
 	} else {
 		captureStatus = persisted.CaptureStatus
 		errorCode = cloneString(persisted.ErrorCode)
-		if parseStatus == storage.ParsePending && session.notify != nil {
-			_ = session.notify(session.auditID)
+		if parseStatus == storage.ParsePending {
+			session.handOver(&commit, persisted)
 		}
 	}
 	if newAPIRequestID != nil && session.callerNotify != nil && len(writeErrors) == 0 {

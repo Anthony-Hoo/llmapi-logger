@@ -65,7 +65,12 @@ func (worker *Worker) loadRequestHeaders(ctx context.Context, auditID string, na
 	if source.CaptureVersion == storage.CaptureVersion2 {
 		return worker.filterBlockHeaders(auditID, source, names)
 	}
-	evidence := source.Rows
+	return worker.decryptRequestHeaderRows(auditID, source.Rows)
+}
+
+// decryptRequestHeaderRows decrypts the version 1 rows the allowlist
+// selected, in the order given. Any failure discards the partial set.
+func (worker *Worker) decryptRequestHeaderRows(auditID string, evidence []storage.HeaderEvidence) (http.Header, error) {
 	if len(evidence) == 0 {
 		return nil, nil
 	}
@@ -91,15 +96,22 @@ func (worker *Worker) loadRequestHeaders(ctx context.Context, auditID string, na
 // name is on the allowlist, in the query's order (lower-case name, then
 // value_index; the stored name breaks a tie).
 func (worker *Worker) filterBlockHeaders(auditID string, source storage.HeaderSource, names []string) (http.Header, error) {
+	values, err := headerblock.Expand(worker.cipher, auditID, source)
+	if err != nil {
+		return nil, errors.New("parser: request header integrity failure")
+	}
+	return selectAllowlisted(values, names), nil
+}
+
+// selectAllowlisted keeps, from a flat list of Header values, the
+// request_received Headers whose lower-case name is on the allowlist, in the
+// version 1 query's order. It clears every value it was given.
+func selectAllowlisted(values []headerblock.Value, names []string) http.Header {
 	allowed := make(map[string]bool, len(names))
 	for _, name := range names {
 		if lowered := strings.ToLower(strings.TrimSpace(name)); lowered != "" {
 			allowed[lowered] = true
 		}
-	}
-	values, err := headerblock.Expand(worker.cipher, auditID, source)
-	if err != nil {
-		return nil, errors.New("parser: request header integrity failure")
 	}
 	selected := make([]headerblock.Value, 0, len(allowed))
 	for _, value := range values {
@@ -110,7 +122,7 @@ func (worker *Worker) filterBlockHeaders(auditID string, source storage.HeaderSo
 		clear(value.Value)
 	}
 	if len(selected) == 0 {
-		return nil, nil
+		return nil
 	}
 	sort.SliceStable(selected, func(left, right int) bool {
 		leftName, rightName := strings.ToLower(selected[left].Name), strings.ToLower(selected[right].Name)
@@ -127,7 +139,7 @@ func (worker *Worker) filterBlockHeaders(auditID string, source storage.HeaderSo
 		headers.Add(value.Name, string(value.Value))
 		clear(value.Value)
 	}
-	return headers, nil
+	return headers
 }
 
 func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (BodySource, *int, error) {
@@ -160,10 +172,17 @@ func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (
 	}
 
 	raw, complete, errorCode, err := worker.readRawBody(ctx, auditID, stageName, *stage.Body)
+	source, err = decodeBody(source, raw, complete, errorCode, err)
+	return source, statusCode, err
+}
+
+// decodeBody completes a body source from the assembled raw bytes: it records
+// their completeness and code, then removes the HTTP content encoding.
+func decodeBody(source BodySource, raw []byte, complete bool, errorCode string, err error) (BodySource, error) {
 	source.Complete = complete
 	source.ErrorCode = errorCode
 	if err != nil && len(raw) == 0 {
-		return source, statusCode, err
+		return source, err
 	}
 
 	decoded, decodeCode, decodeErr := decodeContent(raw, source.ContentEncoding)
@@ -172,7 +191,7 @@ func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (
 		source.Complete = false
 		source.ErrorCode = selectEvidenceCode(source.ErrorCode, decodeCode)
 	}
-	return source, statusCode, errors.Join(err, decodeErr)
+	return source, errors.Join(err, decodeErr)
 }
 
 func (worker *Worker) decryptContentHeaders(auditID, stageName string, headers []storage.HTTPHeader, source *BodySource) error {

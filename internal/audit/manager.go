@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"llmapi-logger/internal/parser/handover"
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
@@ -126,6 +127,8 @@ type Manager struct {
 	notifyMu     sync.RWMutex
 	notify       func(string) bool
 	callerNotify func(string) bool
+	// handover takes committed audits on the unified write path (handover.go).
+	handover func(handover.Job) bool
 
 	// unified selects the unified write path for every session.
 	unified bool

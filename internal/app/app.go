@@ -436,6 +436,11 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		}
 		if runtime.manager != nil {
 			runtime.manager.SetCompletionNotifier(application.parserWorker.Notify)
+			if runtime.manager.WritePath() == audit.WritePathUnified {
+				// The parse does not read back: committed audits go to the
+				// worker with the plaintext their session still holds.
+				runtime.manager.SetHandover(application.parserWorker.Submit)
+			}
 		}
 		if newAPIClient != nil {
 			application.callerWorker, err = newapi.NewWorker(runtime.store, newAPIClient, logger)

@@ -343,10 +343,12 @@ func (worker *Worker) bodyReconstructor() Reconstructor {
 //   - covered only advances, at the end of a pass, to the horizon read when
 //     the pass began, and the pass listed every candidate after its start;
 //   - an audit becomes a candidate later only through a live parse in
-//     process, which runs on this goroutine, however old the audit is: a long
-//     request, a parse retried after a save failure, a pending row picked up
-//     by a later scan or an audit closed by startup recovery all end there.
-//     After a successful claim, process either reaches analyze, which
+//     parseClaimed, which runs on this goroutine, however old the audit is:
+//     a notified audit (process) and a job Submit took from the capture
+//     session (finalize) both end there, and so do a long request, a parse
+//     retried after a save failure, a pending row picked up by a later scan
+//     and an audit closed by startup recovery.
+//     After a successful claim, parseClaimed either reaches analyze, which
 //     reports each audit it leaves without an analysis to backfillLater, or
 //     gets an error from the save. A save error may still have committed
 //     the row (a cancel or timeout after submitSync stops waiting, or an

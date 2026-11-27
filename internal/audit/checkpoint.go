@@ -36,6 +36,7 @@ type headerGroup struct {
 func (manager *Manager) beginUnified(ctx context.Context, request *http.Request, match routing.Match, record storage.AuditRecord, started time.Time) (*Session, error) {
 	session := newSession(manager, ctx, record.AuditID, match.RouteID, started)
 	session.terminalMatcher = streamterminal.MatcherFor(match.Parser)
+	session.identity = storage.ParserAudit{AuditID: record.AuditID, Protocol: record.Protocol, ParserName: record.ParserName, Path: record.Path}
 	stage := session.startStage(storage.StageRequestReceived, request.Proto, request.Method, request.Host, nil, contentLengthPointer(request.ContentLength), request.Header, hasBody(request.Body))
 	session.mu.Lock()
 	inbound := storage.InboundStage{Stage: stageStartValues(session.auditID, stage)}

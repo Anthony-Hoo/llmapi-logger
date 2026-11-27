@@ -219,7 +219,7 @@ func TestProjectBackfillYieldsToLiveWork(t *testing.T) {
 	}
 	defer worker.Close()
 	worker.SetProjectAnalyzer(&fakeProjectAnalyzer{})
-	worker.queue <- "live"
+	worker.Notify("live")
 	if got := worker.projectBackfill(context.Background()); got != 0 || store.listed != 0 {
 		t.Fatalf("backfill ran with live work queued: %d", got)
 	}

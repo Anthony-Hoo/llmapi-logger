@@ -9,6 +9,7 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights"
+	"llmapi-logger/internal/parser/handover"
 	"llmapi-logger/internal/storage"
 )
 
@@ -20,8 +21,17 @@ const (
 
 	MaxDecodedBodyBytes = 64 << 20
 	MaxGzipRatio        = 50
-	QueueCapacity       = 100
+	// QueueCapacity bounds the audits Notify (and so the pending scan) may
+	// have waiting in the worker's queue.
+	QueueCapacity = 100
+	// FinalizeQueueCapacity bounds the jobs Submit may have waiting in the
+	// same queue (design G.2).
+	FinalizeQueueCapacity = 4096
 )
+
+// FinalizeJob is what Submit takes: a committed audit and, unless it is an
+// id-only job, the plaintext evidence the capture session still held.
+type FinalizeJob = handover.Job
 
 // Parser extracts only fields useful for the local audit list and detail UI.
 type Parser interface {

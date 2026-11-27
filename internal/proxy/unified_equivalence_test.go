@@ -43,6 +43,7 @@ import (
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/builtin"
+	"llmapi-logger/internal/parser/handover"
 	"llmapi-logger/internal/protofixture"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/routing"
@@ -265,6 +266,72 @@ type eqRun struct {
 	noParse  bool
 	// captured holds each audit's capture rows as committed, before the parse.
 	captured map[string]map[string][]eqRow
+	// parserReads counts what the parser worker reads back of the evidence.
+	parserReads *parserReadCounter
+	// handover, when set, takes each committed audit's job from the session
+	// (design G.2) and holds it until send has read the committed rows; send
+	// then submits it to the worker.
+	handover bool
+	heldMu   sync.Mutex
+	held     map[string]handover.Job
+	// idOnlyJobs counts the held jobs that carried no evidence.
+	idOnlyJobs int
+}
+
+// parserReadCounter is the parser worker's store, counting the reads of
+// stored evidence. It embeds the concrete store, so every optional interface
+// the worker looks for is still there.
+type parserReadCounter struct {
+	*sqlite.Store
+	stages, chunks atomic.Int64
+}
+
+// ListPendingParseIDs hides pending audits from the worker's 30-second scan:
+// send starts every parse itself, after it has read the committed rows, and a
+// scan that came first would parse from the database and change what the two
+// runs compare.
+func (store *parserReadCounter) ListPendingParseIDs(context.Context, int) ([]string, error) {
+	return nil, nil
+}
+
+func (store *parserReadCounter) LoadParserStage(ctx context.Context, auditID, stage string) (sqlite.ParserStage, error) {
+	store.stages.Add(1)
+	return store.Store.LoadParserStage(ctx, auditID, stage)
+}
+
+func (store *parserReadCounter) ReadParserChunks(ctx context.Context, auditID, stage string, afterSeq int64, limit int) ([]sqlite.BodyChunk, error) {
+	store.chunks.Add(1)
+	return store.Store.ReadParserChunks(ctx, auditID, stage, afterSeq, limit)
+}
+
+// enableHandover installs the hand-over on a unified run.
+func (run *eqRun) enableHandover() {
+	run.handover = true
+	run.held = map[string]handover.Job{}
+	run.manager.SetHandover(func(job handover.Job) bool {
+		run.heldMu.Lock()
+		defer run.heldMu.Unlock()
+		run.held[job.Audit.AuditID] = job
+		return true
+	})
+}
+
+// submitHeld submits the job held for id and reports whether there was one.
+func (run *eqRun) submitHeld(id string) bool {
+	run.heldMu.Lock()
+	job, ok := run.held[id]
+	delete(run.held, id)
+	run.heldMu.Unlock()
+	if !ok {
+		return false
+	}
+	if job.Evidence == nil {
+		run.idOnlyJobs++
+	}
+	if !run.worker.Submit(job) {
+		run.t.Fatalf("audit %s: the worker refused its job", id)
+	}
+	return true
 }
 
 func eqRoutes() []config.RouteConfig {
@@ -313,7 +380,8 @@ func newEqRun(t *testing.T, writePath string, options audit.Options, wrap func(*
 	if run.manager, err = audit.NewManagerWithOptions(sessionStore, run.cipher, credentials, audit.ModeAvailable, logger, options); err != nil {
 		t.Fatal(err)
 	}
-	if run.worker, err = parser.NewWorker(store, run.cipher, builtin.All(), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	run.parserReads = &parserReadCounter{Store: store}
+	if run.worker, err = parser.NewWorker(run.parserReads, run.cipher, builtin.All(), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatal(err)
 	}
 	// The parse is started by send, after the committed capture rows were
@@ -392,7 +460,11 @@ func (run *eqRun) send(exchange *eqExchange) (eqClientView, string) {
 	}
 	run.captured[id] = dumpEqAudit(run.t, run.dbPath, run.cipher, id)
 	if !run.noParse {
-		run.waitParsed(id)
+		if run.handover && run.submitHeld(id) {
+			run.waitParsedWithoutNotify(id)
+		} else {
+			run.waitParsed(id)
+		}
 	}
 	return view, id
 }
@@ -409,6 +481,18 @@ func (run *eqRun) lastAuditID() string {
 
 func (run *eqRun) waitParsed(id string) {
 	run.t.Helper()
+	run.waitParse(id, true)
+}
+
+// waitParsedWithoutNotify waits for a submitted job: a Notify could make the
+// worker parse the audit from the database before it reaches the job.
+func (run *eqRun) waitParsedWithoutNotify(id string) {
+	run.t.Helper()
+	run.waitParse(id, false)
+}
+
+func (run *eqRun) waitParse(id string, notify bool) {
+	run.t.Helper()
 	if id == "" {
 		return
 	}
@@ -421,7 +505,9 @@ func (run *eqRun) waitParsed(id string) {
 		if status := snapshot.Audit.ParseStatus; status != "pending" && status != "processing" {
 			return
 		}
-		run.worker.Notify(id)
+		if notify {
+			run.worker.Notify(id)
+		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	run.t.Fatalf("audit %s was not parsed", id)
@@ -525,6 +611,9 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 		counting = &countingStore{Store: store}
 		return counting
 	})
+	// Design G: on the unified path the parse takes the plaintext the session
+	// held; the results below must still equal legacy's.
+	unified.enableHandover()
 	var ids []string
 	for _, exchange := range eqExchanges(t) {
 		var legacyView, unifiedView eqClientView
@@ -572,7 +661,13 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 		t.Fatalf("unified store saw %d legacy operations, %d commits for %d audits, %d checkpoints",
 			counting.legacyOps.Load(), counting.commits.Load(), len(ids), counting.checkpoints.Load())
 	}
-	t.Logf("%d exchanges, %d clock reads per run, %d checkpoints", len(ids), legacy.reads.Load(), counting.checkpoints.Load())
+	// The legacy parse read every body back; the unified parse read none.
+	if legacy.parserReads.chunks.Load() == 0 || unified.parserReads.chunks.Load() != 0 || unified.parserReads.stages.Load() != 0 || unified.idOnlyJobs != 0 {
+		t.Fatalf("parser reads: legacy %d chunk pages, unified %d chunk pages and %d stage loads, %d id-only jobs",
+			legacy.parserReads.chunks.Load(), unified.parserReads.chunks.Load(), unified.parserReads.stages.Load(), unified.idOnlyJobs)
+	}
+	t.Logf("%d exchanges, %d clock reads per run, %d checkpoints; legacy parse read %d chunk pages, unified none",
+		len(ids), legacy.reads.Load(), counting.checkpoints.Load(), legacy.parserReads.chunks.Load())
 }
 
 // The completion log line is identical except for the measured durations.

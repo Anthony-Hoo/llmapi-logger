@@ -3,12 +3,31 @@ package parser
 import (
 	"context"
 	"time"
+
+	"llmapi-logger/internal/parser/handover"
+	"llmapi-logger/internal/storage"
 )
 
 // ProcessForTest runs one synchronous parse of auditID for external tests
 // that drive the worker against a real store.
 func (worker *Worker) ProcessForTest(ctx context.Context, auditID string) {
 	worker.process(ctx, auditID)
+}
+
+// LoadInputForTest builds the Input of an audit from its stored rows.
+func (worker *Worker) LoadInputForTest(ctx context.Context, audit storage.ParserAudit) (Input, error) {
+	return worker.loadInput(ctx, audit)
+}
+
+// InputFromEvidenceForTest builds the Input of an audit from handed-over
+// evidence.
+func (worker *Worker) InputFromEvidenceForTest(audit storage.ParserAudit, evidence *handover.Evidence) (Input, error) {
+	return worker.inputFromEvidence(audit, evidence)
+}
+
+// ScanForTest runs one pending scan, as the 30-second ticker does.
+func (worker *Worker) ScanForTest(ctx context.Context) {
+	worker.scan(ctx)
 }
 
 // BackfillForTest runs one insights backfill pass and returns how many audits

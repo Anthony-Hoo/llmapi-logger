@@ -112,6 +112,9 @@ type Session struct {
 
 	// manager is set only on the unified write path.
 	manager *Manager
+	// identity is what the parser needs of the audit row (Protocol,
+	// ParserName, Path), for the hand-over; unified write path only.
+	identity storage.ParserAudit
 	// memoryHeld is the plaintext this session holds in the global budget.
 	memoryHeld int64
 	// requestSentEnded: checkpoint 1's trigger has fired (or was skipped).

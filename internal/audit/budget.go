@@ -30,6 +30,14 @@ func (budget *memoryBudget) reserve(size int64) bool {
 	}
 }
 
+// fits reports whether size more bytes would fit now, without taking them.
+func (budget *memoryBudget) fits(size int64) bool {
+	if budget == nil || size <= 0 {
+		return true
+	}
+	return budget.used.Load()+size <= budget.limit
+}
+
 func (budget *memoryBudget) release(size int64) {
 	if budget == nil || size <= 0 {
 		return
