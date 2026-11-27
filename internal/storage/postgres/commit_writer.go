@@ -114,7 +114,8 @@ SELECT 'b', stage FROM body_streams WHERE audit_id = $1`, auditID)
 //     checkpoint wrote;
 //  3. a request pair merged at checkpoint 1 that no longer qualifies points
 //     back at itself (its own chunks come with the commit's chunks);
-//  4. the remaining header groups and chunks are inserted;
+//  4. the remaining header groups (version 1) or the complete header block
+//     (version 2) and the remaining chunks are written;
 //  5. finishAudit finalizes, merging in the database only the pairs the
 //     session left to it.
 //
@@ -125,15 +126,19 @@ func applyCommit(transaction dbTransaction, commit *commitWrite, signer *securit
 	auditID := commit.Finish.AuditID
 	var ended sql.NullInt64
 	var captureStatus string
-	if err := transaction.QueryRow("SELECT ended_at_ns, capture_status FROM audit_records WHERE audit_id=$1 FOR UPDATE", auditID).Scan(&ended, &captureStatus); err != nil {
+	var captureVersion int
+	if err := transaction.QueryRow("SELECT ended_at_ns, capture_status, capture_version FROM audit_records WHERE audit_id=$1 FOR UPDATE", auditID).Scan(&ended, &captureStatus, &captureVersion); err != nil {
 		return fmt.Errorf("postgres writer: read commit audit: %w", err)
 	}
 	if ended.Valid {
 		// A retry after an uncertain commit, or recovery got there first.
 		return loadFinishedOutcome(transaction, &commit.Finish)
 	}
-	// With a capture_version column this is where a version mismatch with the
-	// audit row is rejected; version 1 is the only one stored so far.
+	// capture_version is fixed by BeginAudit; the commit must be of the same
+	// version (D.3).
+	if captureVersion != storage.EffectiveCaptureVersion(commit.CaptureVersion) {
+		return localWriteError("postgres writer: commit capture version differs from the audit row")
+	}
 	var present *presentRows
 	if captureStatus == CaptureFailed {
 		var err error
@@ -145,6 +150,7 @@ func applyCommit(transaction dbTransaction, commit *commitWrite, signer *securit
 	bodyPresent := func(stage string) bool { return present == nil || present.bodies[stage] }
 
 	newStages := make([]HTTPStage, 0, len(commit.Stages))
+	newContents := make(map[string]StageContent, len(commit.Stages))
 	newBodies := make([]BodyStream, 0, len(commit.Stages))
 	type pendingTimeline struct {
 		stage    string
@@ -157,6 +163,7 @@ func applyCommit(transaction dbTransaction, commit *commitWrite, signer *securit
 		name := stage.Stage.Stage
 		if !stage.StageWritten {
 			newStages = append(newStages, cloneHTTPStage(stage.Stage))
+			newContents[name] = StageContent{Stage: name, ContentType: stage.ContentType, ContentEncoding: stage.ContentEncoding}
 			insertedStages[name] = true
 			if stage.Body != nil {
 				newBodies = append(newBodies, *stage.Body)
@@ -199,7 +206,7 @@ WHERE audit_id = $2 AND stage = $1 AND source_stage <> $1`, name, auditID); err 
 			}
 		}
 	}
-	if err := insertStageRows(transaction, newStages); err != nil {
+	if err := insertStageRows(transaction, newStages, newContents); err != nil {
 		return err
 	}
 	if err := insertBodyRows(transaction, newBodies); err != nil {
@@ -220,6 +227,11 @@ WHERE audit_id = $2 AND stage = $1 AND source_stage <> $1`, name, auditID); err 
 		}
 	}
 	if err := insertHeaderRows(transaction, headers); err != nil {
+		return err
+	}
+	// Version 2: the complete block, nil when the last checkpoint already
+	// wrote the same one.
+	if err := upsertHeaderBlock(transaction, auditID, commit.HeaderBlock); err != nil {
 		return err
 	}
 	var keep func(string) bool

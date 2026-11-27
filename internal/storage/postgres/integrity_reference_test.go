@@ -31,7 +31,18 @@ func referenceBlobDigest(encoder *digestEncoder, value []byte) {
 func referenceIntegrityPayloadDigest(ctx context.Context, transaction dbTransaction, cache *integrityGraphCache, auditID, eventType string) ([]byte, error) {
 	switch eventType {
 	case integrityCaptureFinalized:
-		return referenceCapturePayloadDigest(ctx, transaction, auditID)
+		var version int64
+		if err := transaction.QueryRowContext(ctx, `SELECT capture_version FROM audit_records WHERE audit_id = $1`, auditID).Scan(&version); err != nil {
+			return nil, err
+		}
+		switch version {
+		case CaptureVersion1:
+			return referenceCapturePayloadDigest(ctx, transaction, auditID)
+		case CaptureVersion2:
+			return referenceCapturePayloadDigestV2(ctx, transaction, auditID)
+		default:
+			return nil, errors.New("postgres integrity: unknown capture version")
+		}
 	case integritySemanticCompacted:
 		return referenceSemanticPayloadDigest(ctx, transaction, cache, auditID)
 	case integrityReconstructionFailed:

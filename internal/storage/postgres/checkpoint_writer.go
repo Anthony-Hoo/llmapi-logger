@@ -46,12 +46,17 @@ func (store *Store) Checkpoint(ctx context.Context, checkpoint AuditCheckpoint) 
 		AuditID:        checkpoint.AuditID,
 		CaptureVersion: checkpoint.CaptureVersion,
 		Stages:         make([]HTTPStage, len(checkpoint.Stages)),
+		Contents:       make([]StageContent, len(checkpoint.Contents)),
 		Headers:        make([]HTTPHeader, len(checkpoint.Headers)),
+		HeaderBlock:    cloneHeaderBlock(checkpoint.HeaderBlock),
 		Bodies:         make([]BodyStream, len(checkpoint.Bodies)),
 		Chunks:         checkpoint.Chunks,
 	}}
 	for index, stage := range checkpoint.Stages {
 		owned.Stages[index] = cloneHTTPStage(stage)
+	}
+	for index, content := range checkpoint.Contents {
+		owned.Contents[index] = StageContent{Stage: content.Stage, ContentType: cloneString(content.ContentType), ContentEncoding: cloneString(content.ContentEncoding)}
 	}
 	for index, header := range checkpoint.Headers {
 		owned.Headers[index] = cloneHTTPHeader(header)
@@ -62,16 +67,52 @@ func (store *Store) Checkpoint(ctx context.Context, checkpoint AuditCheckpoint) 
 	return store.submitAsync(ctx, writeRequest{kind: writeCheckpoint, data: owned, payloadBytes: chunkPayloadBytes(checkpoint.Chunks)})
 }
 
-// requireCaptureVersion admits the capture versions this schema can store.
-// Version 2 needs migration 007, which adds the header block and the new
-// columns; until then a version 2 write is a local error.
+// requireCaptureVersion admits the capture versions this schema can store:
+// version 1 (http_headers rows) and version 2 (the header block of migration
+// 007).
 func requireCaptureVersion(version int) error {
 	switch storage.EffectiveCaptureVersion(version) {
-	case storage.CaptureVersion1:
+	case storage.CaptureVersion1, storage.CaptureVersion2:
 		return nil
 	default:
 		return localWriteError(fmt.Sprintf("postgres writer: capture version %d is not supported by this schema", version))
 	}
+}
+
+// SupportsHeaderBlock tells the capture layer that this store writes capture
+// version 2: the header block, user_agent_enc and the stage content columns.
+func (store *Store) SupportsHeaderBlock() bool { return true }
+
+// upsertHeaderBlock replaces the audit's header block. Every write of a
+// version 2 audit that inserts stage rows carries the whole block for the
+// stages written so far, so the stored block's stages always match the stage
+// rows (C.8).
+func upsertHeaderBlock(transaction dbTransaction, auditID string, block *HeaderBlock) error {
+	if block == nil {
+		return nil
+	}
+	if _, err := transaction.Exec(`
+INSERT INTO http_header_blocks (audit_id, compression, plaintext_length, block_enc)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (audit_id) DO UPDATE SET
+    compression = excluded.compression,
+    plaintext_length = excluded.plaintext_length,
+    block_enc = excluded.block_enc`, auditID, block.Compression, block.PlaintextLength, block.DataEnc); err != nil {
+		return fmt.Errorf("postgres writer: write header block: %w", err)
+	}
+	return nil
+}
+
+// stageContents indexes the version 2 content columns by stage.
+func stageContents(contents []StageContent) map[string]StageContent {
+	if len(contents) == 0 {
+		return nil
+	}
+	indexed := make(map[string]StageContent, len(contents))
+	for _, content := range contents {
+		indexed[content.Stage] = content
+	}
+	return indexed
 }
 
 // applyCheckpoint inserts the checkpoint's rows in one savepoint, in the
@@ -80,13 +121,17 @@ func requireCaptureVersion(version int) error {
 func applyCheckpoint(transaction dbTransaction, checkpoint *checkpointWrite) error {
 	var ended sql.NullInt64
 	var captureStatus string
-	if err := transaction.QueryRow("SELECT ended_at_ns, capture_status FROM audit_records WHERE audit_id=$1", checkpoint.AuditID).Scan(&ended, &captureStatus); err != nil {
+	var captureVersion int
+	if err := transaction.QueryRow("SELECT ended_at_ns, capture_status, capture_version FROM audit_records WHERE audit_id=$1", checkpoint.AuditID).Scan(&ended, &captureStatus, &captureVersion); err != nil {
 		return fmt.Errorf("postgres writer: read checkpoint audit: %w", err)
 	}
 	if ended.Valid {
 		// A checkpoint queued behind its own finalization adds nothing to
 		// signed evidence.
 		return nil
+	}
+	if captureVersion != storage.EffectiveCaptureVersion(checkpoint.CaptureVersion) {
+		return localWriteError("postgres writer: checkpoint capture version differs from the audit row")
 	}
 	headers, bodies := checkpoint.Headers, checkpoint.Bodies
 	var keep func(string) bool
@@ -117,10 +162,19 @@ func applyCheckpoint(transaction dbTransaction, checkpoint *checkpointWrite) err
 		}
 		keep = func(stage string) bool { return present.bodies[stage] }
 	}
-	if err := insertStageRows(transaction, checkpoint.Stages); err != nil {
+	if err := insertStageRows(transaction, checkpoint.Stages, stageContents(checkpoint.Contents)); err != nil {
 		return err
 	}
 	if err := insertHeaderRows(transaction, headers); err != nil {
+		return err
+	}
+	// The block is written whole even when a recorded failure left a stage
+	// row missing: the store cannot open it to drop that stage's section, and
+	// writing it keeps the Headers the session captured. Such an audit is
+	// already marked failed; its block may then name a stage without a row,
+	// which headerblock.Expand reports as an integrity error
+	// (doc/features/09-security-encryption-and-redaction.md).
+	if err := upsertHeaderBlock(transaction, checkpoint.AuditID, checkpoint.HeaderBlock); err != nil {
 		return err
 	}
 	if err := insertBodyRows(transaction, bodies); err != nil {
@@ -168,20 +222,25 @@ func chunkPayloadBytes(source ChunkSource) int64 {
 	}
 }
 
-// insertStageRows is insertStage for several rows in one statement.
-func insertStageRows(transaction dbTransaction, stages []HTTPStage) error {
+// insertStageRows is insertStage for several rows in one statement, with the
+// version 2 content columns of each stage (NULL for a stage contents does not
+// name, and always for version 1).
+func insertStageRows(transaction dbTransaction, stages []HTTPStage, contents map[string]StageContent) error {
 	return forEachInsertBatch(len(stages), nil, func(start, end int) error {
 		values := make([]string, 0, end-start)
-		arguments := make([]any, 0, (end-start)*11)
+		arguments := make([]any, 0, (end-start)*13)
 		for index, stage := range stages[start:end] {
-			values = append(values, "("+placeholders(11, index*11)+")")
+			content := contents[stage.Stage]
+			values = append(values, "("+placeholders(13, index*13)+")")
 			arguments = append(arguments, stage.AuditID, stage.Stage, stage.State, stage.Proto, stage.Method, stage.Host,
-				stage.StatusCode, stage.ContentLength, stage.StartedAtNS, stage.EndedAtNS, stage.ErrorCode)
+				stage.StatusCode, stage.ContentLength, stage.StartedAtNS, stage.EndedAtNS, stage.ErrorCode,
+				content.ContentType, content.ContentEncoding)
 		}
 		if _, err := transaction.Exec(`
 INSERT INTO http_stages (
     audit_id, stage, state, proto, method, host, status_code,
-    content_length, started_at_ns, ended_at_ns, error_code
+    content_length, started_at_ns, ended_at_ns, error_code,
+    content_type, content_encoding
 ) VALUES `+strings.Join(values, ","), arguments...); err != nil {
 			return fmt.Errorf("postgres writer: start stage: %w", err)
 		}

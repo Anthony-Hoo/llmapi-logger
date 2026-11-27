@@ -105,6 +105,13 @@ func (store *Store) rememberFailedWrite(request writeRequest, barrier uint64) {
 		for _, header := range v.Headers {
 			remember(v.AuditID, header.Stage, true, false, 0, nil)
 		}
+		if v.HeaderBlock != nil {
+			// Version 2: the lost block held the Headers of the stages this
+			// checkpoint inserts.
+			for _, stage := range v.Stages {
+				remember(v.AuditID, stage.Stage, true, false, 0, nil)
+			}
+		}
 		for index, bound := range v.chunkBounds() {
 			if bound >= 0 {
 				remember(v.AuditID, captureStageNames[index], false, true, bound, nil)
@@ -125,6 +132,16 @@ func (store *Store) rememberFailedWrite(request writeRequest, barrier uint64) {
 		}
 		for _, header := range v.Headers {
 			remember(v.Finish.AuditID, header.Stage, true, false, 0, nil)
+		}
+		if v.HeaderBlock != nil {
+			// Version 2: the stored block is the last checkpoint's. It may
+			// lack the trailers of any stage written before, and the store
+			// cannot open it to tell which, so every such stage is marked.
+			for _, stage := range v.Stages {
+				if stage.StageWritten {
+					remember(v.Finish.AuditID, stage.Stage.Stage, true, false, 0, nil)
+				}
+			}
 		}
 		for index, bound := range v.chunkBounds() {
 			if bound >= 0 {

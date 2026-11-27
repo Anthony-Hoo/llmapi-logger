@@ -12,6 +12,8 @@ import (
 )
 
 const (
+	CaptureVersion1        = storage.CaptureVersion1
+	CaptureVersion2        = storage.CaptureVersion2
 	StageRequestReceived   = storage.StageRequestReceived
 	StageRequestSent       = storage.StageRequestSent
 	StageResponseReceived  = storage.StageResponseReceived

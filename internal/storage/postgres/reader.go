@@ -55,7 +55,7 @@ SELECT audit_id, started_at_ns, ended_at_ns, route_id, protocol, parser_name,
        method, path, request_uri_enc, mode, status_code, forward_status,
        capture_status, parse_status, blocked_by, block_code, error_code,
        newapi_request_id, caller_status, caller_attempts, caller_next_at_ns,
-       caller_updated_at_ns
+       caller_updated_at_ns, capture_version, user_agent_enc
 FROM audit_records
 WHERE audit_id = $1`, auditID), &snapshot.Audit); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -69,6 +69,13 @@ WHERE audit_id = $1`, auditID), &snapshot.Audit); err != nil {
 	}
 	if snapshot.Headers, err = readHeaders(ctx, transaction, auditID); err != nil {
 		return Snapshot{}, err
+	}
+	block, err := readHeaderBlockEvidence(ctx, transaction, auditID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if block != nil {
+		snapshot.HeaderBlock = &HeaderBlock{Compression: block.Compression, PlaintextLength: block.PlaintextLength, DataEnc: block.DataEnc}
 	}
 	if snapshot.Bodies, err = readBodies(ctx, transaction, auditID); err != nil {
 		return Snapshot{}, err
@@ -117,10 +124,13 @@ func scanAudit(row rowScanner, destination *AuditRecord) error {
 		&destination.CallerAttempts,
 		&callerNextAt,
 		&callerUpdatedAt,
+		&destination.CaptureVersion,
+		&destination.UserAgentEnc,
 	); err != nil {
 		return err
 	}
 	destination.RequestURIEnc = cloneBytes(destination.RequestURIEnc)
+	destination.UserAgentEnc = cloneBytes(destination.UserAgentEnc)
 	destination.EndedAtNS = nullInt64Pointer(endedAt)
 	destination.StatusCode = nullIntPointer(statusCode)
 	destination.BlockedBy = nullStringPointer(blockedBy)

@@ -677,12 +677,25 @@ func insertInboundStage(transaction dbTransaction, inbound InboundStage) (stageS
 		}
 		return err == nil, nil
 	}
-	written, err := part(func() error { return insertStageRows(transaction, []HTTPStage{inbound.Stage}) },
+	content := map[string]StageContent{inbound.Stage.Stage: {Stage: inbound.Stage.Stage, ContentType: inbound.ContentType, ContentEncoding: inbound.ContentEncoding}}
+	written, err := part(func() error { return insertStageRows(transaction, []HTTPStage{inbound.Stage}, content) },
 		writeRequest{kind: writeStartStage, data: inbound.Stage})
-	if err != nil || !written || len(inbound.Headers) == 0 {
+	if err != nil || !written {
 		// Without the stage row legacy's AddHeaders fails on its parent and
 		// adds no mark beyond the audit's.
 		return written, err
+	}
+	if inbound.HeaderBlock != nil {
+		// Version 2: a block with only this stage. A rejected block is marked
+		// as a rejected AddHeaders of the stage; the next write that inserts
+		// a stage row overwrites the block with every stage written so far.
+		marker := []HTTPHeader{{AuditID: inbound.Stage.AuditID, Stage: inbound.Stage.Stage}}
+		_, err = part(func() error { return upsertHeaderBlock(transaction, inbound.Stage.AuditID, inbound.HeaderBlock) },
+			writeRequest{kind: writeAddHeaders, data: marker})
+		return err == nil, err
+	}
+	if len(inbound.Headers) == 0 {
+		return true, nil
 	}
 	_, err = part(func() error { return insertHeaderRows(transaction, inbound.Headers) },
 		writeRequest{kind: writeAddHeaders, data: inbound.Headers})
@@ -696,8 +709,8 @@ INSERT INTO audit_records (
     method, path, request_uri_enc, mode, status_code, ttft_ns, forward_status,
     capture_status, parse_status, blocked_by, block_code, error_code,
     newapi_request_id, caller_status, caller_attempts, caller_next_at_ns,
-    caller_updated_at_ns, api_key_fpr
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
+    caller_updated_at_ns, api_key_fpr, capture_version, user_agent_enc
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
 		record.AuditID,
 		record.StartedAtNS,
 		record.EndedAtNS,
@@ -722,6 +735,8 @@ INSERT INTO audit_records (
 		record.CallerNextAtNS,
 		record.CallerUpdatedAtNS,
 		nullableBytes(record.APIKeyFPR),
+		storage.EffectiveCaptureVersion(record.CaptureVersion),
+		nullableBytes(record.UserAgentEnc),
 	)
 	if err != nil {
 		return fmt.Errorf("postgres writer: begin audit: %w", err)
@@ -992,7 +1007,7 @@ WHERE audit_id = $1`, finish.AuditID); err != nil {
 			return fmt.Errorf("postgres writer: retain terminal raw evidence: %w", err)
 		}
 	}
-	payloadDigest, err := capturePayloadDigest(context.Background(), transaction, finish.AuditID)
+	payloadDigest, err := capturePayloadDigestFor(context.Background(), transaction, finish.AuditID, schemaLive)
 	if err != nil {
 		return err
 	}

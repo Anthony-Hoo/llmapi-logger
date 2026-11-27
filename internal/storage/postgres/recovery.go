@@ -179,7 +179,9 @@ WHERE ended_at_ns IS NULL`, request.NowNS)
 		if _, err := transaction.Exec("UPDATE body_streams SET retention_state = 'full' WHERE audit_id = $1", auditID); err != nil {
 			return fmt.Errorf("postgres writer: retain recovered raw evidence: %w", err)
 		}
-		payloadDigest, err := capturePayloadDigest(context.Background(), transaction, auditID)
+		// An audit interrupted after a checkpoint is signed with the block
+		// that checkpoint wrote, which lacks what came later (D.4).
+		payloadDigest, err := capturePayloadDigestFor(context.Background(), transaction, auditID, schemaLive)
 		if err != nil {
 			return err
 		}

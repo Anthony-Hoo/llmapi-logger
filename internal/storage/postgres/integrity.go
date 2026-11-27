@@ -21,6 +21,7 @@ const (
 	integritySemanticCompacted    = "semantic_compacted"
 	integrityReconstructionFailed = "reconstruction_failed"
 	capturePayloadDomain          = "llmapi-logger/capture-payload/v1\x00"
+	capturePayloadDomainV2        = "llmapi-logger/capture-payload/v2\x00"
 	semanticPayloadDomain         = "llmapi-logger/semantic-payload/v1\x00"
 	reconstructionFailureDomain   = "llmapi-logger/reconstruction-failure/v1\x00"
 )
@@ -73,7 +74,7 @@ func (store *Store) VerifyIntegrityPayloads(ctx context.Context) error {
 	if store == nil || store.isClosed() {
 		return ErrClosed
 	}
-	if err := verifyIntegrityPayloads(ctx, store.readerDB); err != nil {
+	if err := verifyIntegrityPayloads(ctx, store.readerDB, schemaLive); err != nil {
 		// Shutdown cancels the context and tears down the reader pool
 		// mid-pass. That is an interrupted verification, not a detected
 		// mismatch, and must not leave the store permanently unhealthy.
@@ -218,19 +219,23 @@ type payloadTarget struct {
 	ConversationID string
 }
 
-func verifyIntegrityPayloads(ctx context.Context, database *sql.DB) error {
+func verifyIntegrityPayloads(ctx context.Context, database *sql.DB, schema digestSchema) error {
 	transaction, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return fmt.Errorf("postgres integrity: begin payload verification: %w", err)
 	}
 	defer transaction.Rollback()
-	if err := verifyIntegrityPayloadsTransaction(ctx, transaction); err != nil {
+	if err := verifyIntegrityPayloadsTransaction(ctx, transaction, schema); err != nil {
 		return err
 	}
 	return transaction.Commit()
 }
 
-func verifyIntegrityPayloadsTransaction(ctx context.Context, transaction dbTransaction) error {
+// verifyIntegrityPayloadsTransaction re-derives every event's payload digest.
+// schema names the tables it reads: schemaLive is a store opened by the proxy,
+// schemaBaseline the offline import target, which holds the 001 tables alone
+// and so has no capture_version column (D.3, E.3).
+func verifyIntegrityPayloadsTransaction(ctx context.Context, transaction dbTransaction, schema digestSchema) error {
 	// Only events whose audit still exists carry rows to re-derive from;
 	// retention removes the audit behind older events but keeps the chain.
 	// Ordering by conversation lets one cache serve a whole turn chain,
@@ -272,7 +277,7 @@ ORDER BY COALESCE(t.conversation_id, ''), e.sequence`)
 			conversation = target.ConversationID
 			cache.reset()
 		}
-		current, err := integrityPayloadDigest(ctx, transaction, cache, target.AuditID, target.EventType)
+		current, err := integrityPayloadDigestFor(ctx, transaction, cache, target.AuditID, target.EventType, schema)
 		if err != nil || !bytes.Equal(current, target.PayloadDigest) {
 			return errors.New("postgres integrity: current audit payload verification failed")
 		}
@@ -399,10 +404,16 @@ WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
 	return result, nil
 }
 
+// integrityPayloadDigest derives the payload digest of one event on a live
+// store.
 func integrityPayloadDigest(ctx context.Context, transaction dbTransaction, cache *integrityGraphCache, auditID, eventType string) ([]byte, error) {
+	return integrityPayloadDigestFor(ctx, transaction, cache, auditID, eventType, schemaLive)
+}
+
+func integrityPayloadDigestFor(ctx context.Context, transaction dbTransaction, cache *integrityGraphCache, auditID, eventType string, schema digestSchema) ([]byte, error) {
 	switch eventType {
 	case integrityCaptureFinalized:
-		return capturePayloadDigest(ctx, transaction, auditID)
+		return capturePayloadDigestFor(ctx, transaction, auditID, schema)
 	case integritySemanticCompacted:
 		return semanticPayloadDigest(ctx, transaction, cache, auditID)
 	case integrityReconstructionFailed:
@@ -910,5 +921,5 @@ func VerifyImportIntegrity(ctx context.Context, tx *sql.Tx, signer *security.Int
 	if err := verifyIntegrityChainTransaction(ctx, tx, signer); err != nil {
 		return err
 	}
-	return verifyIntegrityPayloadsTransaction(ctx, tx)
+	return verifyIntegrityPayloadsTransaction(ctx, tx, schemaBaseline)
 }

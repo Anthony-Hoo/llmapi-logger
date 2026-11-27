@@ -50,7 +50,7 @@ func (recorder *recordingTx) QueryRowContext(ctx context.Context, query string, 
 
 var (
 	ciphertextHashExpression = regexp.MustCompile(`CASE WHEN octet_length\(([a-z_.]+)\) > 0 THEN sha256\(([a-z_.]+)\) END`)
-	ciphertextColumn         = regexp.MustCompile(`\b(data_enc|timeline_enc|parsed_json_enc|value_enc|request_uri_enc)\b`)
+	ciphertextColumn         = regexp.MustCompile(`\b(data_enc|timeline_enc|parsed_json_enc|value_enc|request_uri_enc|user_agent_enc|block_enc)\b`)
 )
 
 // rawCiphertextColumns returns the ciphertext columns a statement would hand
@@ -148,7 +148,9 @@ INSERT INTO stream_timelines (
 //   - turn 2: continues turn 1, reusing its objects and binaries, with a
 //     timeline row whose ciphertext is NULL and no parsed result ciphertext;
 //   - a reconstruction failure with a parsed result ciphertext and no timeline;
-//   - a capture-only audit.
+//   - a capture-only audit;
+//   - two capture version 2 audits, one with a User-Agent and a header block,
+//     one with neither (insertDigestCaptureV2).
 func buildDigestFixture(t *testing.T, store *Store, cipher security.Cipher) []digestTarget {
 	t.Helper()
 	ctx := context.Background()
@@ -189,6 +191,8 @@ func buildDigestFixture(t *testing.T, store *Store, cipher security.Cipher) []di
 	}
 
 	insertDigestCapture(t, store, "digest-capture", 400, ParseError, false, nil)
+	insertDigestCaptureV2(t, store, "digest-capture-v2", 500, true)
+	insertDigestCaptureV2(t, store, "digest-capture-v2-bare", 600, false)
 
 	var conversations, linked, binaries, binaryRefs, externalRefs int
 	if err := store.readerDB.QueryRow(`
@@ -210,6 +214,8 @@ SELECT (SELECT COUNT(DISTINCT conversation_id) FROM turns),
 		{"digest-failed", integrityCaptureFinalized},
 		{"digest-failed", integrityReconstructionFailed},
 		{"digest-capture", integrityCaptureFinalized},
+		{"digest-capture-v2", integrityCaptureFinalized},
+		{"digest-capture-v2-bare", integrityCaptureFinalized},
 	}
 }
 
@@ -227,6 +233,8 @@ func emptyDigestFixtureCiphertext(t *testing.T, store *Store) {
 		`UPDATE stream_timelines SET timeline_enc = ''::bytea WHERE audit_id = 'digest-turn-1'`,
 		`UPDATE parsed_results SET parsed_json_enc = ''::bytea WHERE audit_id = 'digest-turn-1'`,
 		`UPDATE parsed_results SET parsed_json_enc = NULL WHERE audit_id = 'digest-failed'`,
+		`UPDATE audit_records SET user_agent_enc = ''::bytea WHERE audit_id = 'digest-capture-v2'`,
+		`UPDATE http_header_blocks SET block_enc = ''::bytea WHERE audit_id = 'digest-capture-v2'`,
 	} {
 		result, err := store.writerConn.ExecContext(context.Background(), statement)
 		if err != nil {
@@ -293,7 +301,7 @@ func compareDigestImplementations(t *testing.T, store *Store, targets []digestTa
 			seen[column] = true
 		}
 	}
-	for _, column := range []string{"data_enc", "timeline_enc", "parsed_json_enc", "value_enc", "request_uri_enc"} {
+	for _, column := range []string{"data_enc", "timeline_enc", "parsed_json_enc", "value_enc", "request_uri_enc", "user_agent_enc", "block_enc"} {
 		if !seen[column] {
 			t.Fatalf("reference never selected %s; the fixture does not reach it", column)
 		}
@@ -315,6 +323,7 @@ func TestPayloadDigestsMatchTheInProcessHashOfCiphertext(t *testing.T) {
 		{"digest-turn-2", integrityCaptureFinalized},
 		{"digest-turn-2", integritySemanticCompacted},
 		{"digest-failed", integrityReconstructionFailed},
+		{"digest-capture-v2", integrityCaptureFinalized},
 	} {
 		if bytes.Equal(stored[target], emptied[target]) {
 			t.Fatalf("%+v digest did not change when its ciphertext was emptied", target)
@@ -403,7 +412,7 @@ func TestEventsSignedOverInProcessDigestsStillVerify(t *testing.T) {
 	}
 	defer transaction.Rollback()
 	recorder := &recordingTx{dbTransaction: transaction}
-	if err := verifyIntegrityPayloadsTransaction(ctx, recorder); err != nil {
+	if err := verifyIntegrityPayloadsTransaction(ctx, recorder, schemaLive); err != nil {
 		t.Fatalf("recorded payload verification: %v", err)
 	}
 	for _, query := range recorder.queries {
@@ -428,6 +437,8 @@ func TestPayloadVerificationDetectsAFlippedCiphertextByte(t *testing.T) {
 		{"stream timeline", `UPDATE stream_timelines SET ` + flip("timeline_enc") + ` WHERE audit_id = 'digest-turn-1'`},
 		{"parsed result", `UPDATE parsed_results SET ` + flip("parsed_json_enc") + ` WHERE audit_id = 'digest-turn-1'`},
 		{"reconstruction failure parsed result", `UPDATE parsed_results SET ` + flip("parsed_json_enc") + ` WHERE audit_id = 'digest-failed'`},
+		{"user agent", `UPDATE audit_records SET ` + flip("user_agent_enc") + ` WHERE audit_id = 'digest-capture-v2'`},
+		{"header block", `UPDATE http_header_blocks SET ` + flip("block_enc") + ` WHERE audit_id = 'digest-capture-v2'`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

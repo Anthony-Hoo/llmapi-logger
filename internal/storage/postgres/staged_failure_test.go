@@ -751,22 +751,26 @@ func TestBeginAuditInboundFailureKeepsTheStartRow(t *testing.T) {
 	})
 }
 
-// TestStagedWriteInputs needs no database: version 2 is refused until its
-// migration, and large writes are sized for a transaction of their own.
+// TestStagedWriteInputs needs no database: a capture version other than 1
+// and 2 is refused before it is queued, and large writes are sized for a
+// transaction of their own.
 func TestStagedWriteInputs(t *testing.T) {
 	ctx := context.Background()
 	store := &Store{}
-	record := testAudit("version-two")
-	record.CaptureVersion = storage.CaptureVersion2
-	if err := store.BeginAudit(ctx, record); err == nil || !strings.Contains(err.Error(), "capture version 2") {
-		t.Fatalf("version 2 BeginAudit = %v", err)
+	if !store.SupportsHeaderBlock() {
+		t.Fatal("the PostgreSQL store does not write capture version 2")
 	}
-	if err := store.Checkpoint(ctx, AuditCheckpoint{AuditID: "version-two", CaptureVersion: storage.CaptureVersion2}); err == nil {
-		t.Fatal("version 2 checkpoint accepted")
+	record := testAudit("version-three")
+	record.CaptureVersion = 3
+	if err := store.BeginAudit(ctx, record); err == nil || !strings.Contains(err.Error(), "capture version 3") {
+		t.Fatalf("version 3 BeginAudit = %v", err)
 	}
-	finish := AuditFinish{AuditID: "version-two", EndedAtNS: 2, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}
-	if _, err := store.CommitAudit(ctx, AuditCommit{Finish: finish, CaptureVersion: storage.CaptureVersion2}); err == nil {
-		t.Fatal("version 2 commit accepted")
+	if err := store.Checkpoint(ctx, AuditCheckpoint{AuditID: "version-three", CaptureVersion: 3}); err == nil {
+		t.Fatal("version 3 checkpoint accepted")
+	}
+	finish := AuditFinish{AuditID: "version-three", EndedAtNS: 2, ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParsePending}
+	if _, err := store.CommitAudit(ctx, AuditCommit{Finish: finish, CaptureVersion: 3}); err == nil {
+		t.Fatal("version 3 commit accepted")
 	}
 	inbound := testAudit("bad-inbound")
 	inbound.Inbound = &InboundStage{Stage: HTTPStage{AuditID: "bad-inbound", Stage: StageRequestSent, StartedAtNS: 2}}
