@@ -806,6 +806,12 @@ func (application *App) closeComponents() error {
 		if application.auditStore != nil {
 			application.closeErr = application.auditStore.Close()
 		}
+		// After the store: its last writes may still read staged chunks and
+		// release their files. Close writes and syncs what is still queued, so
+		// the next start imports it, and stops the staging writer.
+		if application.auditStager != nil {
+			_ = application.auditStager.Close()
+		}
 	})
 	return application.closeErr
 }
