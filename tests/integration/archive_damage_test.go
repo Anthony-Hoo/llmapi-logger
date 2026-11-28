@@ -505,14 +505,11 @@ func TestArchiveKeepsAuditsWhoseEventsNoLongerMatch(t *testing.T) {
 	}
 }
 
-// DEFECT (archivecli cat): with --key, a manifest whose signature does not
-// verify is left out of the index (K.2 item 2) and reported on standard
-// error as "skipped", but `audit-archive cat --dir <archive> --key <key>`
-// still exits 0. R.7 item 4 says a bundle that does not verify is skipped
-// and cat exits 1; cat only counts the bundles skipped while reading, not
-// the manifests the index left out. A caller that checks the exit code
-// takes an incomplete dump for a complete one. This test fails until that
-// is fixed.
+// With --key, a manifest whose signature does not verify is left out of the
+// index (K.2 item 2) and reported on standard error as "skipped". cat must
+// then exit 1 (R.7 item 4): a caller that checks only the exit code would
+// otherwise take an incomplete dump for a complete one. cat once exited 0
+// here because it counted only the bundles skipped while reading.
 func TestArchiveCatOfAnArchiveWithAForgedManifestFails(t *testing.T) {
 	rig := newArchiveRig(t, archiveRigOptions{encrypt: true, minTurns: 1})
 	conversation := protofixture.NewConversation(protofixture.OpenAIChat, false, protofixture.Options{Seed: 66}, 0)
