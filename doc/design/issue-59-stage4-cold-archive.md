@@ -1907,3 +1907,46 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
 **给后续提交的说明**
 
 33. `internal/archive/columns.go` 的注释说列规格是“schema version 7 定义的”，现在是 8（迁移 008 只建目录表，没有改归档表，内容不受影响）。R.6 第 27 条第 2 项末尾的“这比任务要求的”是一句没写完的话，原文没有动。
+
+### R.9 校验后移除（O.1 第 13–15 个提交）
+
+**批量（第 13 个提交）**
+
+1. `retention.Batcher` 只管尺寸策略：当前批量、上限、上一轮是否完成。计时和暂停由调用方做，所以 retention 测试换掉的时钟和暂停函数照旧起作用。导出的还有 `TargetBatchTime`（1 秒）、`MaxBatchPause`（5 秒）、`PauseAfter(elapsed)`、`Wait(ctx, d)`。retention 的行为与测试不变。
+
+**存储操作（第 14 个提交，`postgres/archive_remove.go`）**
+
+2. `RemoveArchived(ctx, []ArchiveRemoval, removedAtNS)` 是 writer 操作 `writeRemoveArchived`，与 `writeDeleteExpired` 一样独占事务。与 M.2 的差别：
+   - 第 1 步的加锁语句同时锁成员行与分段行（`FOR UPDATE OF m, s`），条件里直接写 `s.format_version >= 1`、两者都是 `sealed`、分段不是 gap 包、成员有变更戳。格式版本门槛在 SQL 里，调用方绕不过去；
+   - 调用方给的 `(segment_id, revision, change_stamp)` 只作为额外的匹配条件：与目录表里的行不一致就跳过（`skipped`），删除的依据始终是事务内重算的戳与目录表里存的戳相等；
+   - 全部成员的戳在调用 `deleteAuditBatch` 之前算完，同一批里父轮次的检查点不会算到子轮次头上；
+   - 每条成员的结果是 `removed`、`stale`、`already_gone`、`skipped` 之一，按请求顺序返回；没有 `sealed` 成员的分段改为 `hot_removed`，`removed_at_ns` 取本批时间。全部成员变 `stale`、一条也没删的分段同样改为 `hot_removed`（M.2 第 4 步的字面意思）。
+3. `RemoveArchivedGaps(ctx, limit, removedAtNS)`：按 gap id 升序锁至多 `limit`（≤ 200）条可移除的 gap 成员，删 `audit_gaps`，改 `hot_removed`，空了的 gap 分段改 `hot_removed`。行已不在的 gap 照样标记，结果分别给出标记数和实际删除的行数。
+4. `ListRemovableArchiveMembers(ctx, after, limit)` 在只读池上按 `(audit_id, revision)` 分页列出可移除成员，排序由 runner 做（第 6 条）。新增的共享类型在 `storage/archive_types.go`：`ArchiveRemoval`、`ArchiveRemovable`、`ArchiveRemovalOutcome`、`ArchiveRemovalResult`、`ArchiveGapRemovalResult`、`ArchiveRemovalMinFormatVersion`（= 1）、四个结果常量和 `ValidateArchiveRemovals`。没有迁移。
+
+**runner（第 15 个提交，`archive/runner/remove.go`）**
+
+5. 移除阶段只在 `archive_then_delete` 下进入，位置不变：全部趟和 gap 导出之后。一次性列出全部可移除成员（每条约一两百字节，规模是“已导出未移除”的成员数），在 Go 里排序后切批，所以排序只有一份实现。到了运行期限就不再开始新批，不论期限是在趟里还是在移除中途到的；没做完的成员下次运行继续（H.6 第 4 条）。一批失败时整次运行以 `removal_failed` 结束，已提交的批保留。
+6. 导出的 `RemovalOrder`：`turn_created_at_ns` 降序，没有轮次的在最前，相同时 `audit_id` 降序（字节序，与目录表的 `C` 排序规则一致）。
+7. 批量：`Batcher` 从 1 起，整批且不超过 0.5 秒翻倍，超过 1 秒按比例缩小，慢失败降到 1；每批之后暂停同样长，至多 5 秒。gap 每批 200 条。`Batcher` 保存在 `Runner` 上，跨运行保留。
+8. 计数：`Result.Removal`（`Removed`、`Stale`、`AlreadyGone`、`Skipped`、`RemovedGaps`、`RemovedSegments`、`Batches`、`GapBatches`、`Duration`）。移除的 audit 与 gap 写进运行记录的 `removed_audits`、`removed_gaps`；移除时发现变化的成员计入 `stale_audits`，与登记意向时发现的合在一起。完成日志 `archive removal completed`，`event=archive_removal_completed`，只有计数和耗时。
+9. 测试点：`StepBetweenRemovalBatches`（每个已提交、不是最后一批之后）、`StepAfterRemoval`（全部批之后、运行记录写完之前）。
+10. 被移除时标成 `stale` 的成员由现有的 `StaleCandidates` 在下一次运行里重新收录（修订号加一），主机测试和 PostgreSQL 测试都证实了。
+11. 启动日志：`archive_then_delete` 下 `archive_removal_active`（校验后移除对格式版本不低于 1 的包生效，带 `format_version`）；格式版本低于 1 时再加 `archive_removal_trial_format`：试行格式的包只导出、从不作为移除依据，热库不会删任何东西、持续增长。原来的 `archive_removal_inactive` 和 `archive_then_delete` 下的 `archive_export_only` 不再输出。
+12. 测试怎样走到格式版本 1：`runner.Options.FormatVersionOverride` 只供测试，`app` 只经过测试用的 `archiveSeams` 传入，配置里没有它。runner 因此在选取、水位和登记分段时都用版本 1，包本身仍写 `archive.FormatVersion`（0）。只改目录表的 `format_version` 行不通：R.6 第 13 条的“当前成员”要求分段版本等于 runner 的版本，下一次运行会把这些成员重新导出并把旧行改成 `stale`。
+
+**测试的发现**
+
+13. 真实流量里造不出分支：代理按会话 key 把新轮次挂到该会话最新的轮次上，`Fork` 出来的两条续写在库里仍是一条链。分支的顺序由 runner 的主机测试覆盖，PostgreSQL 测试用的是链和成对的会话。
+14. M.1 第 1 行（计费回填）的完整循环（变 `stale`、下次以修订号 2 导出并移除）只在存储测试里做了：测试流量没有 `X-Oneapi-Request-Id`，补上调用者字段会让 `capture_finalized` 复核不过。应用层的循环用项目标识的首次写入与升级、以及检查点三种写。
+15. 按 `started_at_ns` 降序（A/B 情形，测试里只改目录表里的 `started_at_ns` 副本）逐条移除一个四轮会话：2 条成员误成 `stale`、2 个轮次被检查点改写；按 `RemovalOrder` 都是 0。
+
+**待维护者决定：删除之前是否再核对一次包**
+
+M、H.6 和 4.5 只在导出时（H.2 第 6 步）重开已发布的文件做完整核对，删除时只核对变更戳，不看盘上的包。实现照此办理，没有加额外的核对。所以分段定稿之后、移除之前包被删掉或损坏，成员仍会被移除，热库里的数据就只剩坏掉的包。可选的做法：
+
+- 甲，照现在：不再核对。代价：上面的情形无人发现，直到有人去读那个包。
+- 乙，每个分段在它的第一批移除之前做一次便宜的核对：文件存在、清单 MAC、清单与数据文件的 SHA-256 与目录表的 `manifest_sha256` 相符。代价：每个分段读一遍文件求哈希（每个分段至多 `segment_max_bytes` 的压缩后字节），不解密、不解析；失败时这个分段的成员不移除并报一个稳定码。
+- 丙，乙再加 J.2 的完整重读。代价：与导出时的重读相同，移除阶段的耗时大约翻倍，而它与导出时的重读重复。
+
+推荐乙。
