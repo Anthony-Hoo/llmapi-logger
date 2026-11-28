@@ -27,11 +27,13 @@ import (
 // integrationTimeout bounds every wait of this package for one step of the
 // running pipeline (a request through the proxy, its commit, its parse and
 // analysis, a log line, a shutdown). Such a step takes well under a second on
-// a developer machine; under -race on a slow shared runner it takes ten times
-// that, plus at most one 5-second capture recovery round of the writer, and
-// runners differ by half again: (10 s + 5 s) x 2. The waits poll, so a passing
-// run does not wait for the bound.
-const integrationTimeout = 30 * time.Second
+// a developer machine and ten times that under -race on a slow shared
+// runner. The longest legitimate path adds a 5-second capture recovery round
+// of the writer and the parser's 30-second pending scan, which is how an
+// audit finalized by the recovery gets parsed: 10 s + 5 s + 30 s, doubled for
+// the variance between runners. The waits poll, so a passing run does not
+// wait for the bound.
+const integrationTimeout = 90 * time.Second
 
 type observedRequest struct {
 	method        string
