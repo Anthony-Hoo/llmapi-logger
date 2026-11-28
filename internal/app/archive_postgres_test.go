@@ -272,12 +272,19 @@ func (env *archiveEnv) blockedRequest() {
 	env.waitTerminal()
 }
 
+// terminalWait bounds waitTerminal. An audit whose hand-over to the parser
+// is missed stays pending until the parser's next pending scan, which runs
+// every 30 seconds (defaultScanInterval in internal/parser), and is final
+// only after that scan and its parse. The wait is that interval plus a
+// generous margin, so a run under load does not end just short of the scan.
+const terminalWait = 30*time.Second + 60*time.Second
+
 // waitTerminal waits until every sent request is an ended audit whose parse
 // is final.
 func (env *archiveEnv) waitTerminal() {
 	t := env.t
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(terminalWait)
 	for {
 		var total, final int
 		err := env.db.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE ended_at_ns IS NOT NULL AND parse_status NOT IN ('pending', 'processing')
