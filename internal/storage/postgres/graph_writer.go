@@ -1231,19 +1231,23 @@ func loadRequestRefs(transaction dbTransaction, turnID string, memo map[string][
 	}
 	for i := len(path) - 1; i >= 0; i-- {
 		frame := path[i]
-		base := result
-		if frame.header.ParentBase == "post_turn" {
-			response := responsesByTurn[*frame.header.ParentTurnID]
-			// Do not append into a memoized ancestor's backing array.
-			base = append(append([]auditmodel.ObjectRef(nil), base...), response...)
+		var response []auditmodel.ObjectRef
+		if frame.header.ParentTurnID != nil {
+			response = responsesByTurn[*frame.header.ParentTurnID]
 		}
-		operations := operationsByTurn[frame.id]
-		result, err = applyImmutableRefs(base, operations)
+		// The parent bases were checked during the walk above. A post_turn base
+		// is a fresh slice, so a memoized ancestor's backing array is never
+		// appended into.
+		base, err := auditmodel.ContextBase(frame.header.ParentTurnID != nil, frame.header.ParentBase, result, response)
+		if err != nil {
+			return nil, localWriteError("postgres writer: invalid turn parent base")
+		}
+		result, err = auditmodel.ApplyContext(base, operationsByTurn[frame.id], frame.header.RequestItemCount, frame.header.RequestSequenceHash)
+		if errors.Is(err, auditmodel.ErrContextSequence) {
+			return nil, localWriteError("postgres writer: stored turn sequence hash mismatch")
+		}
 		if err != nil {
 			return nil, err
-		}
-		if len(result) != frame.header.RequestItemCount || !bytes.Equal(auditmodel.SequenceHash(result), frame.header.RequestSequenceHash) {
-			return nil, localWriteError("postgres writer: stored turn sequence hash mismatch")
 		}
 	}
 	// Bound retained endpoints by both count and total references. All memoized
@@ -1261,32 +1265,10 @@ func loadRequestRefs(transaction dbTransaction, turnID string, memo map[string][
 	return cloneObjectRefs(result), nil
 }
 
+// applyImmutableRefs is kept for the candidate preload, which checks the
+// sequence hash itself.
 func applyImmutableRefs(base []auditmodel.ObjectRef, operations []auditmodel.ContextOp) ([]auditmodel.ObjectRef, error) {
-	result := make([]auditmodel.ObjectRef, 0, len(base)+len(operations))
-	position := 0
-	for _, op := range operations {
-		switch op.Operation {
-		case auditmodel.OperationRetain, auditmodel.OperationDelete:
-			if op.Count <= 0 || op.Count > len(base)-position || op.Ref != nil {
-				return nil, auditmodel.ErrReconstruction
-			}
-			if op.Operation == auditmodel.OperationRetain {
-				result = append(result, base[position:position+op.Count]...)
-			}
-			position += op.Count
-		case auditmodel.OperationInsert:
-			if op.Count != 1 || op.Ref == nil || len(op.Ref.ObjectHash) == 0 || op.Ref.Slot == "" {
-				return nil, auditmodel.ErrReconstruction
-			}
-			result = append(result, *op.Ref)
-		default:
-			return nil, auditmodel.ErrReconstruction
-		}
-	}
-	if position != len(base) {
-		return nil, auditmodel.ErrReconstruction
-	}
-	return result, nil
+	return auditmodel.ApplyImmutableDelta(base, operations)
 }
 
 func loadContextOperations(transaction dbTransaction, turnID string) ([]auditmodel.ContextOp, error) {

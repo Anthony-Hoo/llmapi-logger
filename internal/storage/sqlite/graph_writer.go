@@ -720,35 +720,35 @@ FROM turns WHERE turn_id = ?`, turnID).Scan(&parent, &header.ParentBase, &header
 	if parent.Valid {
 		header.ParentTurnID = &parent.String
 	}
-	base := []auditmodel.ObjectRef(nil)
+	var parentRequest, parentResponse []auditmodel.ObjectRef
 	if header.ParentTurnID != nil {
-		parentRequest, err := loadRequestRefs(transaction, *header.ParentTurnID, memo, visiting)
-		if err != nil {
+		var err error
+		if parentRequest, err = loadRequestRefs(transaction, *header.ParentTurnID, memo, visiting); err != nil {
 			return nil, err
 		}
-		base = parentRequest
 		if header.ParentBase == "post_turn" {
-			parentResponse, err := loadResponseRefs(transaction, *header.ParentTurnID)
-			if err != nil {
+			if parentResponse, err = loadResponseRefs(transaction, *header.ParentTurnID); err != nil {
 				return nil, err
 			}
-			base = append(base, parentResponse...)
-		} else if header.ParentBase != "request" {
-			return nil, localWriteError("sqlite writer: invalid non-root parent base")
 		}
-	} else if header.ParentBase != "root" {
+	}
+	base, err := auditmodel.ContextBase(header.ParentTurnID != nil, header.ParentBase, parentRequest, parentResponse)
+	switch {
+	case errors.Is(err, auditmodel.ErrParentBase):
+		return nil, localWriteError("sqlite writer: invalid non-root parent base")
+	case err != nil:
 		return nil, localWriteError("sqlite writer: root turn has non-root base")
 	}
 	operations, err := loadContextOperations(transaction, turnID)
 	if err != nil {
 		return nil, err
 	}
-	result, err := auditmodel.ApplyDelta(base, operations)
+	result, err := auditmodel.ApplyContext(base, operations, header.RequestItemCount, header.RequestSequenceHash)
+	if errors.Is(err, auditmodel.ErrContextSequence) {
+		return nil, localWriteError("sqlite writer: stored turn sequence hash mismatch")
+	}
 	if err != nil {
 		return nil, err
-	}
-	if len(result) != header.RequestItemCount || !bytes.Equal(auditmodel.SequenceHash(result), header.RequestSequenceHash) {
-		return nil, localWriteError("sqlite writer: stored turn sequence hash mismatch")
 	}
 	memo[turnID] = cloneObjectRefs(result)
 	return result, nil
