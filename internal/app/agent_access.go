@@ -72,6 +72,7 @@ type Option func(*assemblyOptions)
 
 type assemblyOptions struct {
 	agentPackageDir string
+	archive         archiveSeams
 }
 
 // WithAgentPackageDir reads the agent packages from dir instead of the

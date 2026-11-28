@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/agentaccess"
+	archiverunner "llmapi-logger/internal/archive/runner"
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/config"
@@ -52,6 +53,7 @@ type App struct {
 	contentPolicies contentpolicy.RuleSet
 	orgReports      *orgreport.Service
 	retention       *retention.Runner
+	archive         *archiverunner.Runner
 	sessionRunner   *sessionanalysis.Runner
 	agentAccess     *agentaccess.Service
 	auditSink       audit.Sink
@@ -329,6 +331,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	}
 	warnDeprecatedInsights(configuration.Insights, logger)
 	warnWeakAdminToken(configuration, logger)
+	warnArchiveMode(configuration, logger)
 	newAPIClient, err := assembleNewAPIClient(configuration.NewAPI, upstreamProxy)
 	if err != nil {
 		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)
@@ -504,13 +507,17 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 			sessionAnalysisSettings = settings
 		}
 	}
-	if runtime.store != nil && configuration.RetentionDays > 0 {
+	// Guard 2 of 5.7: with the archive on, nothing is deleted without being
+	// archived first, so retention's direct delete is not assembled.
+	if runtime.store != nil && configuration.RetentionDays > 0 && !configuration.Archive.Enabled() {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
 		if err != nil {
 			_ = application.closeComponents()
 			return nil, fmt.Errorf("assemble retention runner: %w", err)
 		}
 	}
+	application.archive = assembleArchive(configuration, runtime, queryService, seams.archive, logger)
+	warnDirectDeleteResumed(ctx, configuration, runtime.store, logger)
 
 	developerLogin := developerLoginOptions(configuration, runtime.fingerprints)
 	// Agent access stays entirely unassembled when disabled: no service, no
@@ -581,6 +588,9 @@ func (application *App) Run(ctx context.Context) error {
 	}
 	if application.sessionRunner != nil {
 		application.sessionRunner.Start(ctx)
+	}
+	if application.archive != nil {
+		application.archive.Start(ctx)
 	}
 
 	if application.parserWorker != nil {
@@ -771,6 +781,9 @@ func (application *App) closeComponents() error {
 		if application.sessionRunner != nil {
 			application.sessionRunner.Close()
 		}
+		if application.archive != nil {
+			application.archive.Close()
+		}
 		if application.parserWorker != nil {
 			application.parserWorker.Close()
 			application.parserHealthy.Store(false)
@@ -923,6 +936,9 @@ type auditRuntime struct {
 	fingerprints *security.CredentialFingerprinter
 	// analysisFingerprints is nil when insights are disabled.
 	analysisFingerprints *security.AnalysisFingerprinter
+	// archiveKeys and eventSigner are nil when the archive is off.
+	archiveKeys *security.ArchiveKeys
+	eventSigner *security.IntegritySigner
 }
 
 func assembleAudit(ctx context.Context, configuration config.Config, logger *slog.Logger) auditRuntime {
@@ -946,10 +962,17 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
-	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits)
+	// Guard 5 of 5.7 and P item 12: a key is created only while nothing it
+	// would have to open exists, in the database or in the archive.
+	manifests := archiveManifestsPresent(configuration)
+	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits && !manifests)
 	if err != nil {
 		_ = store.Close()
-		logger.Warn("audit key unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		attributes := []any{"mode", configuration.Mode, "error_category", "key_unavailable"}
+		if manifests && !hasAudits {
+			attributes = append(attributes, "reason", "archive_manifests_present")
+		}
+		logger.Warn("audit key unavailable", attributes...)
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
@@ -988,6 +1011,13 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 			manager := audit.NewUnavailable(configuration.Mode, err, logger)
 			return auditRuntime{sink: manager, manager: manager}
 		}
+	}
+	archive, eventSigner, err := archiveKeys(configuration, key)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit archive keys unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
 	}
 	// Local staging (design F.7): what a previous run staged is imported
 	// before interrupted audits are recovered, so that recovery finalizes
@@ -1043,6 +1073,7 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 	return auditRuntime{
 		sink: manager, manager: manager, store: store, cipher: cipher, stager: stager,
 		fingerprints: fingerprints, analysisFingerprints: analysisFingerprints,
+		archiveKeys: archive, eventSigner: eventSigner,
 	}
 }
 
