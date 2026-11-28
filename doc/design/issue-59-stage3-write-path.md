@@ -1351,12 +1351,12 @@ A/B（R.7）之后维护者决定只保留 unified。这一节记录删了什么
 
 - 上游的响应头先于 `request_sent` 的 Body 结束（EOF 或 Close）被观察到时，检查点 1 已带上 `response_received`，检查点 2 只插入 `response_sent`；它和随后的提交都插入了阶段却没有块，被存储拒绝。提交在发送前失败，恢复表里没有记录，audit 一直不终结、不解析，直到下次启动由 `RecoverInterruptedAudits` 收尾（R.1 第 10 条的路径）。这个先后取决于调度，负载下偶尔出现，① 和 ④ 都是它。
 - 上游在请求 Body 发出之后失败（没有 `response_received`），代理写出的错误响应是提交插入的唯一阶段：同样不带块、同样被拒。这一种不靠竞争，每条都会发生。它是会话层测试推出来的，没有经真实代理在 PostgreSQL 上跑过。
-- 响应写出方在检查点 2 之后捕获的 `response_sent` Trailer 不改变形状，提交不带块，存下的块里没有这些 Trailer，audit 却以 complete 终结。版本 1 把它们作为 `http_headers` 行写进提交，所以这是版本 2 独有的缺失。
+- 响应写出方在检查点 2 之后捕获的 `response_sent` Trailer 不改变形状。上游也带 Trailer 时，`response_received` 的 Trailer 位照常改变形状，提交带上整块，两者的 Trailer 都在（修复前用测试核对过）；只有下游有 Trailer、而形状别无变化时，提交不带块，存下的块里没有 `response_sent` 的 Trailer，audit 却以 complete 终结。版本 1 把它们作为 `http_headers` 行写进提交，所以这是版本 2 独有的缺失。
 
 SQLite 写版本 1，没有块，不受影响。
 
 **改了什么。** 提交 `98863ba`：形状改用 `storage.StageOrder`（0 到 3）。形状只在内存里；碰不到上面三种情形的 audit，每次写带不带块与之前相同，存下的行不变。`TestHeaderBlockCoversTheResponseSentStage`（上游先回响应；`response_sent` 有 Trailer）和 `TestHeaderBlockCoversAnErrorResponseAfterTheRequestBody`（提交 `262f2c7`）用按两个存储的规则校验的桩存储，修复前都失败。修复后 `internal/parser` 整包 40 遍、`TestAgentJourneyPaging` 单独 100 遍、`tests/integration` 整包 5 遍都通过，没有任何检查点推迟；按修复前 1/38 到 1/50 的出现率，这些次数只算旁证，主要的证据是确定性的测试和上面的机制。`98863ba` 的提交说明把 ② 也算在这个原因上，那一条没有复现，应以本节为准。
 
-**生产上的影响。** PostgreSQL 部署里，上面前两种情形的 audit 留在 `ended_at_ns` 为空的状态，直到下次启动，期间不解析；日志特征是同一个 `audit_id` 先有 `capture_checkpoint_deferred`（只在第一种情形），再有 `finish_audit_failed`。第三种情形：带下游 Trailer、以 complete 终结的 audit，存下的块缺 `response_sent` 的 Trailer；修复之前写下并签名的这些行保持原样。客户端收到的响应不受影响。修复之后，有下游 Trailer 的 complete audit 存下并签名的块与之前不同（多了这些 Trailer，与版本 1 一致），请维护者确认。
+**生产上的影响。** PostgreSQL 部署里，上面前两种情形的 audit 留在 `ended_at_ns` 为空的状态，直到下次启动，期间不解析；日志特征是同一个 `audit_id` 先有 `capture_checkpoint_deferred`（只在第一种情形），再有 `finish_audit_failed`。第三种情形只在下游有 Trailer、上游没有 Trailer 时出现：以 complete 终结的 audit，存下的块缺 `response_sent` 的 Trailer；修复之前写下并签名的这些行保持原样。客户端收到的响应不受影响。修复之后，这类 audit 存下并签名的块与之前不同（多了这些 Trailer，与版本 1 一致），请维护者确认。另一个可以讨论的点：在发送前就被拒绝的提交不进恢复表，audit 要等下次启动才终结（R.1 第 10 条），这次的缺陷正是经这条路径变成长时间未终结的。
 
 **没有解决的。** ③ 在主机上与容器里的测试并行循环 12 遍没有复现，⑤ 没有专门复现，原因未定。猜测（没有验证）：③ 的故障注入用例断言哪一次写带哪些行（例如“header insert”的 3 个阶段），“上游先回”的先后会让检查点 1 带上 `response_received`，断言就不再成立。提交 `a96c20a` 把 archive harness 的等待放宽到 90 秒，理由是交接在负载下被错过；当时的消息（“final 5”）分不出那条是没有终结还是在等解析，所以不能确定那次是什么，放宽是否保留由维护者决定。
