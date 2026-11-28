@@ -777,7 +777,10 @@ type drainState struct {
 
 // drain waits until every audit is terminal, caller lookups are done and
 // analysis has caught up. Candidates that stay unchanged for five polls are
-// treated as permanently skipped and reported.
+// treated as permanently skipped and reported. Five seconds is shorter than
+// the backfill's 30 s tick and its 10 min retry delay, so with candidates left
+// the drain may end early and the rest of the backfill falls into the later
+// phases; a result with zero candidates left is exact.
 func (bench *bench) drain(ctx context.Context, served int64, options runOptions) drainState {
 	deadline := time.Now().Add(options.drainTimeout)
 	var state drainState

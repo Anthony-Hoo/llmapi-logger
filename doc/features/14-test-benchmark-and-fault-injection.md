@@ -204,7 +204,7 @@ PostgreSQL 的事务计数只到数据库一级，没有按会话的提交数（
 | 阶段 | 内容 |
 | --- | --- |
 | load | 流量进行中 |
-| drain | 等到每条 audit 都有终态解析状态、调用者查询完成、insights 与项目标识回填没有候选；剩余不变的候选视为永久跳过并报告 |
+| drain | 等到每条 audit 都有终态解析状态、调用者查询完成、insights 与项目标识回填没有候选；剩余不变的候选视为永久跳过并报告。“不变”只是连续五次、每秒一次的轮询数字相同，而回填每 30 秒才扫描一次，可重试的失败要等 10 分钟，所以候选不为 0 时 drain 可能提前结束，余下的回填算进后面的阶段。结果里 `analysis_candidates_left` 或 `project_identity_candidates_left` 不为 0 就是这种情况，这时 reads、idle 两段的数字不能直接比较；两者为 0 时 drain 确实等到了回填完成 |
 | reads | 经管理 API 读抽样 audit 的详情和两侧导出（`/api/v1/audits/{id}`、`/reconstructed/{side}`，没有可验证重建时回退 `/raw/{side}`），逐个串行 |
 | idle | 没有任何流量和工具查询，暴露回填循环空转的成本（附录 A.4） |
 

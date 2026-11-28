@@ -139,7 +139,7 @@ func mainRun(ctx context.Context, args []string, getenv func(string) string, std
 	chunkDelay := flags.Duration("upstream-chunk-delay", 0, "fake upstream delay between two streamed events")
 	idle := flags.Duration("idle", 11*time.Minute, "length of the idle phase; see above for why it should exceed 10.5 minutes")
 	settle := flags.Duration("settle", 11*time.Second, "wait before a snapshot so pending statistics are flushed")
-	drainTimeout := flags.Duration("drain-timeout", 15*time.Minute, "give up waiting for the drain after this long")
+	drainTimeout := flags.Duration("drain-timeout", 15*time.Minute, "give up waiting for the drain after this long; backfill candidates unchanged for five 1s polls also end it, and the result reports them as candidates_left")
 	pollInterval := flags.Duration("poll-interval", 100*time.Millisecond, "interval of the end-to-queryable latency poll")
 	latencySample := flags.Float64("latency-sample", 1, "fraction of requests whose end-to-queryable latency is tracked")
 	readSamples := flags.Int("read-samples", 50, "audits whose detail and exports are read in the reads phase")
