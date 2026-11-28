@@ -345,10 +345,7 @@ func TestCompletionLogUsesFinalAuditSessionSummary(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	manager, err := audit.NewManager(store, cipher, nil, audit.ModeAvailable, logger)
-	if err != nil {
-		t.Fatalf("create audit manager: %v", err)
-	}
+	manager := newTestManager(t, store, cipher, nil, logger, audit.Options{})
 	handler := newTestHandlerWithOptions(t, upstream.URL, manager, logger, nil, defaultTestRoutes())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody))

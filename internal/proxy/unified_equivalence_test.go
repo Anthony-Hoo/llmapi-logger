@@ -252,7 +252,6 @@ func (reader *fixedReader) Close() error { return reader.closeErr }
 // eqRun is one write path's process: store, manager, handler, parser.
 type eqRun struct {
 	t        *testing.T
-	path     string
 	dbPath   string
 	store    *sqlite.Store
 	cipher   security.Cipher
@@ -346,10 +345,10 @@ func eqRoutes() []config.RouteConfig {
 	}
 }
 
-func newEqRun(t *testing.T, writePath string, options audit.Options, wrap func(*sqlite.Store) audit.Store) *eqRun {
+func newEqRun(t *testing.T, options audit.Options, wrap func(*sqlite.Store) audit.Store) *eqRun {
 	t.Helper()
 	ctx := context.Background()
-	run := &eqRun{t: t, path: writePath, dbPath: filepath.Join(t.TempDir(), "audit.db"), logs: &lockedBuffer{}}
+	run := &eqRun{t: t, dbPath: filepath.Join(t.TempDir(), "audit.db"), logs: &lockedBuffer{}}
 	store, err := sqlite.Open(ctx, run.dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +366,6 @@ func newEqRun(t *testing.T, writePath string, options audit.Options, wrap func(*
 		t.Fatal(err)
 	}
 	run.clock.Store(eqClockOrigin)
-	options.WritePath = writePath
 	options.Now = func() time.Time {
 		run.reads.Add(1)
 		return time.Unix(0, run.clock.Add(1))
@@ -378,9 +376,7 @@ func newEqRun(t *testing.T, writePath string, options audit.Options, wrap func(*
 	if wrap != nil {
 		sessionStore = wrap(store)
 	}
-	if run.manager, err = audit.NewManagerWithOptions(sessionStore, run.cipher, credentials, audit.ModeAvailable, logger, options); err != nil {
-		t.Fatal(err)
-	}
+	run.manager = newTestManager(t, sessionStore, run.cipher, credentials, logger, options)
 	run.parserReads = &parserReadCounter{Store: store}
 	if run.worker, err = parser.NewWorker(run.parserReads, run.cipher, builtin.All(), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatal(err)
@@ -617,30 +613,25 @@ func frozenView(view eqClientView) eqFrozenView {
 		BodyLength: len(view.body), BodySHA256: hex.EncodeToString(sum[:])}
 }
 
-// frozen is the legacy oracle's value name: computed from the legacy run now
-// and checked against the file (or recorded) when legacy is not nil, read
-// from the file otherwise. The values of this package are normalised by the
-// run itself: audit ids come from a seeded source, every capture time from a
-// counter clock, ciphertext is opened under its row's AAD and kept as the
-// length and SHA-256 of the plaintext (renderEqColumn), other ciphertext as
-// its length, and the columns the parser worker stamps with its own clock are
+// frozen is the legacy oracle's value name: what the legacy write path
+// produced for the same traffic (internal/legacyoracle). The values of this
+// package were normalised by the run itself: audit ids come from a seeded
+// source, every capture time from a counter clock, ciphertext is opened under
+// its row's AAD and kept as the length and SHA-256 of the plaintext
+// (renderEqColumn), other ciphertext as its length, long views as their
+// digest, and the columns the parser worker stamps with its own clock are
 // masked.
-func frozen[T any](t *testing.T, name string, legacy *eqRun, value func(*eqRun) T) T {
+func frozen[T any](t *testing.T, name string) T {
 	t.Helper()
-	if legacy == nil {
-		return legacyoracle.Value[T](t, name, nil)
-	}
-	computed := value(legacy)
-	return legacyoracle.Value(t, name, &computed)
+	return legacyoracle.Value[T](t, name, nil)
 }
 
 func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("the whole fixture catalogue through both write paths")
 	}
-	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
 	var counting *countingStore
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, func(store *sqlite.Store) audit.Store {
+	unified := newEqRun(t, audit.Options{}, func(store *sqlite.Store) audit.Store {
 		counting = &countingStore{Store: store}
 		return counting
 	})
@@ -649,34 +640,28 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 	unified.enableHandover()
 	var ids []string
 	for _, exchange := range eqExchanges(t) {
-		var legacyView, unifiedView eqClientView
-		var legacyID, unifiedID string
-		var wait sync.WaitGroup
-		wait.Go(func() { legacyView, legacyID = legacy.send(copyChunks(exchange)) })
-		unifiedView, unifiedID = unified.send(copyChunks(exchange))
-		wait.Wait()
-		if id := frozen(t, "id/"+exchange.name, legacy, func(*eqRun) string { return legacyID }); id != unifiedID {
+		unifiedView, unifiedID := unified.send(copyChunks(exchange))
+		if id := frozen[string](t, "id/"+exchange.name); id != unifiedID {
 			t.Fatalf("%s: audit ids %s and %s", exchange.name, id, unifiedID)
 		}
-		if view := frozen(t, "view/"+exchange.name, legacy, func(*eqRun) eqFrozenView { return frozenView(legacyView) }); view != frozenView(unifiedView) {
+		if view := frozen[eqFrozenView](t, "view/"+exchange.name); view != frozenView(unifiedView) {
 			t.Fatalf("%s: client saw %+v, unified %+v %q", exchange.name, view, frozenView(unifiedView), unifiedView.body)
 		}
-		if reads := frozen(t, "reads/"+exchange.name, legacy, func(run *eqRun) int64 { return run.reads.Load() }); reads != unified.reads.Load() {
+		if reads := frozen[int64](t, "reads/"+exchange.name); reads != unified.reads.Load() {
 			t.Fatalf("%s: clock reads %d (legacy) and %d (unified)", exchange.name, reads, unified.reads.Load())
 		}
-		committed := frozen(t, "captured/"+exchange.name, legacy, func(run *eqRun) map[string][]eqRow { return run.captured[legacyID] })
+		committed := frozen[map[string][]eqRow](t, "captured/"+exchange.name)
 		if diffs := diffEqDumps(committed, unified.captured[unifiedID]); len(diffs) != 0 {
 			t.Fatalf("%s: committed rows differ:\n%s", exchange.name, strings.Join(diffs[:min(len(diffs), 30)], "\n"))
 		}
 		ids = append(ids, unifiedID)
 	}
-	compareCompletionLogs(t, legacy, unified.logs.Bytes())
+	compareCompletionLogs(t, unified.logs.Bytes())
 	for _, id := range ids {
-		compareQueryViews(t, id, legacy, unified)
+		compareQueryViews(t, id, unified)
 	}
-	legacy.worker.Close()
 	unified.worker.Close()
-	legacyDump := frozen(t, "final", legacy, func(run *eqRun) map[string][]eqRow { return dumpEqDatabase(t, run.dbPath, run.cipher) })
+	legacyDump := frozen[map[string][]eqRow](t, "final")
 	unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
 	if diffs := diffEqDumps(legacyDump, unifiedDump); len(diffs) != 0 {
 		t.Fatalf("stored rows differ:\n%s", strings.Join(diffs[:min(len(diffs), 40)], "\n"))
@@ -684,26 +669,23 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 	if len(legacyDump["audit_records"]) != len(ids) || len(legacyDump["parsed_results"]) == 0 || len(legacyDump["body_chunks"]) == 0 {
 		t.Fatalf("dump has %d audits, %d parse results, %d chunks", len(legacyDump["audit_records"]), len(legacyDump["parsed_results"]), len(legacyDump["body_chunks"]))
 	}
-	for _, run := range []*eqRun{legacy, unified} {
-		if err := run.store.VerifyIntegrityPayloads(context.Background()); err != nil {
-			t.Fatalf("%s: integrity: %v", run.path, err)
-		}
+	if err := unified.store.VerifyIntegrityPayloads(context.Background()); err != nil {
+		t.Fatalf("integrity: %v", err)
 	}
 	if counting.legacyOps.Load() != 0 || counting.commits.Load() != int64(len(ids)) || counting.checkpoints.Load() == 0 {
 		t.Fatalf("unified store saw %d legacy operations, %d commits for %d audits, %d checkpoints",
 			counting.legacyOps.Load(), counting.commits.Load(), len(ids), counting.checkpoints.Load())
 	}
-	// The legacy parse read every body back; the unified parse read none.
-	if legacy.parserReads.chunks.Load() == 0 || unified.parserReads.chunks.Load() != 0 || unified.parserReads.stages.Load() != 0 || unified.idOnlyJobs != 0 {
-		t.Fatalf("parser reads: legacy %d chunk pages, unified %d chunk pages and %d stage loads, %d id-only jobs",
-			legacy.parserReads.chunks.Load(), unified.parserReads.chunks.Load(), unified.parserReads.stages.Load(), unified.idOnlyJobs)
+	// The parse read no body back.
+	if unified.parserReads.chunks.Load() != 0 || unified.parserReads.stages.Load() != 0 || unified.idOnlyJobs != 0 {
+		t.Fatalf("parser reads: %d chunk pages and %d stage loads, %d id-only jobs",
+			unified.parserReads.chunks.Load(), unified.parserReads.stages.Load(), unified.idOnlyJobs)
 	}
-	t.Logf("%d exchanges, %d clock reads per run, %d checkpoints; legacy parse read %d chunk pages, unified none",
-		len(ids), legacy.reads.Load(), counting.checkpoints.Load(), legacy.parserReads.chunks.Load())
+	t.Logf("%d exchanges, %d clock reads, %d checkpoints; the parse read no body back", len(ids), unified.reads.Load(), counting.checkpoints.Load())
 }
 
 // The completion log line is identical except for the measured durations.
-func compareCompletionLogs(t *testing.T, legacyRun *eqRun, unified []byte) {
+func compareCompletionLogs(t *testing.T, unified []byte) {
 	t.Helper()
 	strip := func(records []map[string]any) []string {
 		out := make([]string, len(records))
@@ -716,7 +698,7 @@ func compareCompletionLogs(t *testing.T, legacyRun *eqRun, unified []byte) {
 		}
 		return out
 	}
-	left := frozen(t, "logs", legacyRun, func(run *eqRun) []string { return strip(completionLogRecords(t, run.logs.Bytes())) })
+	left := frozen[[]string](t, "logs")
 	right := strip(completionLogRecords(t, unified))
 	if len(left) != len(right) {
 		t.Fatalf("completion logs: %d and %d records", len(left), len(right))
@@ -730,7 +712,7 @@ func compareCompletionLogs(t *testing.T, legacyRun *eqRun, unified []byte) {
 
 // compareQueryViews compares the detail view and every export the query
 // service offers, which are what the web views and the agent exports render.
-func compareQueryViews(t *testing.T, id string, legacy, unified *eqRun) {
+func compareQueryViews(t *testing.T, id string, unified *eqRun) {
 	t.Helper()
 	ctx := context.Background()
 	render := func(run *eqRun) []string {
@@ -759,7 +741,7 @@ func compareQueryViews(t *testing.T, id string, legacy, unified *eqRun) {
 		}
 		return views
 	}
-	left, right := frozen(t, "queries/"+id, legacy, render), render(unified)
+	left, right := frozen[[]string](t, "queries/"+id), render(unified)
 	if len(left) != len(right) {
 		t.Fatalf("audit %s: %d views, unified %d", id, len(left), len(right))
 	}

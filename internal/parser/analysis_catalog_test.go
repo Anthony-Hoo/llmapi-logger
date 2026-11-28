@@ -309,10 +309,11 @@ func analyzeExchanges(name string, exchanges []protofixture.Exchange) ([]string,
 	if err != nil {
 		return fail(err)
 	}
-	manager, err := audit.NewManager(store, cipher, credentials, audit.ModeAvailable, logger)
+	manager, closeManager, err := newTestManager(dir, store, cipher, credentials, logger, audit.Options{})
 	if err != nil {
 		return fail(err)
 	}
+	defer closeManager()
 	fake := protofixture.NewUpstream("fx-")
 	fake.CancelWait = 10 * time.Second
 	// Answering only after the proxy's transport has finished sending the

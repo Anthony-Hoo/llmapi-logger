@@ -47,9 +47,9 @@ type divergeDrive struct {
 	piece             int
 }
 
-func runDiverge(t *testing.T, writePath string, drive divergeDrive) (storage.AuditFinish, sqlite.Snapshot) {
+func runDiverge(t *testing.T, drive divergeDrive) (storage.AuditFinish, sqlite.Snapshot) {
 	t.Helper()
-	return runDivergeWith(t, Options{WritePath: writePath}, drive)
+	return runDivergeWith(t, Options{}, drive)
 }
 
 // runDivergeWith is runDiverge with the manager's options, the clock and the
@@ -69,10 +69,7 @@ func runDivergeWith(t *testing.T, options Options, drive divergeDrive) (storage.
 	clock := int64(1_700_000_000_000_000_000)
 	options.Now = func() time.Time { clock++; return time.Unix(0, clock) }
 	options.Random = rand.NewChaCha8([32]byte{1})
-	manager, err := NewManagerWithOptions(store, cipher, nil, ModeAvailable, nil, options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newTestManager(t, store, cipher, nil, ModeAvailable, nil, options)
 	request := httptest.NewRequest(http.MethodPost, "http://proxy.example.com/v1/chat/completions", &pieceReader{data: drive.inbound, size: drive.piece})
 	request.ContentLength = int64(len(drive.inbound))
 	request.Header.Set("Content-Type", "application/json")
@@ -142,21 +139,11 @@ type divergeFrozen struct {
 	Chunks   []string
 }
 
-func freezeDiverge(outcome storage.AuditFinish, snapshot sqlite.Snapshot) divergeFrozen {
-	frozen := divergeFrozen{Outcome: outcome, Snapshot: snapshot, Chunks: chunkSummary(snapshot.Chunks)}
-	frozen.Snapshot.Chunks = nil
-	return frozen
-}
-
-// legacyDiverge returns the legacy oracle's run name. With legacy not nil
-// the legacy run is driven now and checked against the file, or recorded.
-func legacyDiverge(t *testing.T, name string, legacy func() (storage.AuditFinish, sqlite.Snapshot)) divergeFrozen {
+// legacyDiverge returns the legacy oracle's run name, which the legacy write
+// path produced for the same drive.
+func legacyDiverge(t *testing.T, name string) divergeFrozen {
 	t.Helper()
-	if legacy == nil {
-		return legacyoracle.Value[divergeFrozen](t, name, nil)
-	}
-	value := freezeDiverge(legacy())
-	return legacyoracle.Value(t, name, &value)
+	return legacyoracle.Value[divergeFrozen](t, name, nil)
 }
 
 // sameJSON reports whether two values encode the same.
@@ -234,8 +221,8 @@ func TestDivergingDuplicatesMatchLegacy(t *testing.T) {
 		{"response written longer", divergeDrive{inbound: request, outbound: request, received: response, sent: append(bytes.Clone(response), noise(1<<20, 4)...), piece: 32 << 10}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			legacy := legacyDiverge(t, "run", func() (storage.AuditFinish, sqlite.Snapshot) { return runDiverge(t, WritePathLegacy, test.drive) })
-			unifiedOutcome, unified := runDiverge(t, WritePathUnified, test.drive)
+			legacy := legacyDiverge(t, "run")
+			unifiedOutcome, unified := runDiverge(t, test.drive)
 			if legacy.Outcome != unifiedOutcome {
 				t.Fatalf("outcome %+v, unified %+v", legacy.Outcome, unifiedOutcome)
 			}

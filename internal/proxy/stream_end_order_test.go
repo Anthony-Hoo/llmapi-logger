@@ -255,19 +255,13 @@ func TestClientObservedResponseEndRelativeToTerminalAuditCommit(t *testing.T) {
 			endBeforeCommit:      false,
 		},
 	} {
-		for _, writePath := range []string{audit.WritePathLegacy, audit.WritePathUnified} {
-			name := test.name
-			if writePath == audit.WritePathUnified {
-				name += " unified"
-			}
-			t.Run(name, func(t *testing.T) {
-				runStreamOrderCase(t, test, writePath)
-			})
-		}
+		t.Run(test.name, func(t *testing.T) {
+			runStreamOrderCase(t, test)
+		})
 	}
 }
 
-func runStreamOrderCase(t *testing.T, test streamOrderCase, writePath string) {
+func runStreamOrderCase(t *testing.T, test streamOrderCase) {
 	ctx := context.Background()
 	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
@@ -281,10 +275,7 @@ func runStreamOrderCase(t *testing.T, test streamOrderCase, writePath string) {
 	blocking := newBlockingFinishStore(store)
 	logs := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, nil))
-	manager, err := audit.NewManagerWithOptions(blocking, cipher, nil, audit.ModeAvailable, logger, audit.Options{WritePath: writePath})
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newTestManager(t, blocking, cipher, nil, logger, audit.Options{})
 	inner := newTestHandlerWithOptions(t, test.upstream(t), manager, logger, nil, defaultTestRoutes())
 	returned := make(chan struct{})
 	var returnedOnce sync.Once
@@ -385,14 +376,12 @@ func runStreamOrderCase(t *testing.T, test streamOrderCase, writePath string) {
 	// On the unified path the checkpoints ran before the commit and were not
 	// held by it: an upstream that answered has both request and response
 	// checkpoints; the proxy's own error response has none (design B.1).
-	if writePath == audit.WritePathUnified {
-		want := int64(2)
-		if test.wantStatus == http.StatusBadGateway {
-			want = 0
-		}
-		if got := blocking.checkpointsAtCommit.Load(); got != want {
-			t.Fatalf("checkpoints returned before the commit = %d, want %d", got, want)
-		}
+	wantCheckpoints := int64(2)
+	if test.wantStatus == http.StatusBadGateway {
+		wantCheckpoints = 0
+	}
+	if got := blocking.checkpointsAtCommit.Load(); got != wantCheckpoints {
+		t.Fatalf("checkpoints returned before the commit = %d, want %d", got, wantCheckpoints)
 	}
 	// The completion log line is written after Finish returns, so it never
 	// precedes the terminal commit either.

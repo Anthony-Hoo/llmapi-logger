@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,18 +33,12 @@ func largeStreamExchange(t *testing.T) *eqExchange {
 	return exchange
 }
 
-// sendBoth sends the exchange through both runs; the client must see what it
-// saw on the legacy path (the legacy oracle's "view").
-func sendBoth(t *testing.T, legacy, unified *eqRun, exchange *eqExchange) eqClientView {
+// sendAgainstOracle sends the exchange; the client must see what it saw on
+// the legacy path (the legacy oracle's "view").
+func sendAgainstOracle(t *testing.T, unified *eqRun, exchange *eqExchange) eqClientView {
 	t.Helper()
-	var legacyView, unifiedView eqClientView
-	var wait sync.WaitGroup
-	if legacy != nil {
-		wait.Go(func() { legacyView, _ = legacy.send(copyChunks(exchange)) })
-	}
-	unifiedView, _ = unified.send(copyChunks(exchange))
-	wait.Wait()
-	if view := frozen(t, "view", legacy, func(*eqRun) eqFrozenView { return frozenView(legacyView) }); view != frozenView(unifiedView) {
+	unifiedView, _ := unified.send(copyChunks(exchange))
+	if view := frozen[eqFrozenView](t, "view"); view != frozenView(unifiedView) {
 		t.Fatalf("client saw %+v, unified %+v %q", view, frozenView(unifiedView), unifiedView.body)
 	}
 	return unifiedView
@@ -55,9 +48,9 @@ func sendBoth(t *testing.T, legacy, unified *eqRun, exchange *eqExchange) eqClie
 // "captured", each audit's rows as committed, before any parse released raw
 // chunks, and "final", the whole database at the end. delta turns the legacy
 // rows into what the unified path stores by design.
-func compareRuns(t *testing.T, legacy, unified *eqRun, delta func(map[string][]eqRow)) map[string][]eqRow {
+func compareRuns(t *testing.T, unified *eqRun, delta func(map[string][]eqRow)) map[string][]eqRow {
 	t.Helper()
-	captured := frozen(t, "captured", legacy, func(run *eqRun) map[string]map[string][]eqRow { return run.captured })
+	captured := frozen[map[string]map[string][]eqRow](t, "captured")
 	if len(captured) != len(unified.captured) {
 		t.Fatalf("%d audits, unified %d", len(captured), len(unified.captured))
 	}
@@ -69,11 +62,8 @@ func compareRuns(t *testing.T, legacy, unified *eqRun, delta func(map[string][]e
 			t.Fatalf("committed rows differ:\n%s", strings.Join(diffs[:min(len(diffs), 30)], "\n"))
 		}
 	}
-	if legacy != nil {
-		legacy.worker.Close()
-	}
 	unified.worker.Close()
-	legacyDump := frozen(t, "final", legacy, func(run *eqRun) map[string][]eqRow { return dumpEqDatabase(t, run.dbPath, run.cipher) })
+	legacyDump := frozen[map[string][]eqRow](t, "final")
 	unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
 	if delta != nil {
 		delta(legacyDump)
@@ -90,9 +80,8 @@ func compareRuns(t *testing.T, legacy, unified *eqRun, delta func(map[string][]e
 func TestCheckpointQueueFullIsFoldedIntoTheNextWrite(t *testing.T) {
 	for _, refuse := range []int{1, 2} {
 		t.Run(fmt.Sprintf("checkpoint %d refused", refuse), func(t *testing.T) {
-			legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
 			var counting *countingStore
-			unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, func(store *sqlite.Store) audit.Store {
+			unified := newEqRun(t, audit.Options{}, func(store *sqlite.Store) audit.Store {
 				counting = &countingStore{Store: store}
 				var calls atomic.Int64
 				counting.checkpoint = func(storage.AuditCheckpoint) error {
@@ -103,8 +92,8 @@ func TestCheckpointQueueFullIsFoldedIntoTheNextWrite(t *testing.T) {
 				}
 				return counting
 			})
-			sendBoth(t, legacy, unified, largeStreamExchange(t))
-			dump := compareRuns(t, legacy, unified, nil)
+			sendAgainstOracle(t, unified, largeStreamExchange(t))
+			dump := compareRuns(t, unified, nil)
 			if len(dump["audit_gaps"]) != 0 || counting.checkpoints.Load() != 2 {
 				t.Fatalf("gaps %d, checkpoints %d", len(dump["audit_gaps"]), counting.checkpoints.Load())
 			}
@@ -123,7 +112,7 @@ type commitScript struct {
 func scriptedCommitRun(t *testing.T, retries int, script *commitScript, sleeps *[]time.Duration) *eqRun {
 	t.Helper()
 	options := audit.Options{CommitRetries: retries, Sleep: func(delay time.Duration) { *sleeps = append(*sleeps, delay) }}
-	return newEqRun(t, audit.WritePathUnified, options, func(store *sqlite.Store) audit.Store {
+	return newEqRun(t, options, func(store *sqlite.Store) audit.Store {
 		counting := &countingStore{Store: store}
 		counting.commit = func(commit sqlite.AuditCommit) (sqlite.AuditFinish, error, bool) {
 			attempt := len(script.attempts)
@@ -214,10 +203,10 @@ func TestCommitAuditRetries(t *testing.T) {
 // with capture_budget_exhausted, the audit keeps raw in full for what it
 // has, a queue_full gap is recorded and forwarding is unchanged (F.6).
 func TestMemoryBudgetExhaustion(t *testing.T) {
-	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{StageBytes: 1 << 20, GlobalBytes: 1 << 20}, nil)
-	// The forwarded bytes are legacy's (sendBoth).
-	sendBoth(t, legacy, unified, largeStreamExchange(t))
+	// No staging: the budget alone decides (design F.6).
+	unified := newEqRun(t, audit.Options{StageBytes: 1 << 20, GlobalBytes: 1 << 20, Stager: refusingStager{}}, nil)
+	// The forwarded bytes are legacy's (sendAgainstOracle).
+	sendAgainstOracle(t, unified, largeStreamExchange(t))
 	unified.manager.CloseGaps(context.Background())
 	snapshot, err := unified.store.Snapshot(context.Background(), unified.lastAuditID())
 	if err != nil {
@@ -259,25 +248,21 @@ func unifiedBudgetUsed(run *eqRun) int64 { return run.manager.MemoryInUse() }
 // failed, and its rows equal legacy's except that the response pair is
 // merged in memory where legacy, for a failed capture, keeps both copies.
 func TestInboundStageNotStoredMatchesLegacy(t *testing.T) {
-	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, nil)
-	for _, run := range []*eqRun{legacy, unified} {
-		execSQL(t, run.dbPath, `CREATE TRIGGER reject_inbound BEFORE INSERT ON http_stages
-			WHEN NEW.stage = 'request_for_newapi_received_from_nginx' BEGIN SELECT RAISE(ABORT, 'rejected by test'); END`)
-	}
-	sendBoth(t, legacy, unified, largeStreamExchange(t))
-	for _, run := range []*eqRun{legacy, unified} {
-		record := completionLogRecords(t, run.logs.Bytes())[0]
-		assertLogField(t, record, "forward_status", "completed")
-		assertLogField(t, record, "capture_status", "failed")
-	}
+	unified := newEqRun(t, audit.Options{}, nil)
+	execSQL(t, unified.dbPath, `CREATE TRIGGER reject_inbound BEFORE INSERT ON http_stages
+		WHEN NEW.stage = 'request_for_newapi_received_from_nginx' BEGIN SELECT RAISE(ABORT, 'rejected by test'); END`)
+	sendAgainstOracle(t, unified, largeStreamExchange(t))
+	// Legacy, under the same trigger, logged completed and failed too.
+	record := completionLogRecords(t, unified.logs.Bytes())[0]
+	assertLogField(t, record, "forward_status", "completed")
+	assertLogField(t, record, "capture_status", "failed")
 	// The unified session learns of the lost stage from BeginAudit and says
 	// so as legacy does for a StartStage it is told failed; a legacy session
 	// whose StartStage is rejected inside the writer never learns of it.
 	if !strings.Contains(string(unified.logs.Bytes()), `"error_code":"start_stage_failed"`) {
 		t.Fatal("unified: no start_stage_failed log")
 	}
-	dump := compareRuns(t, legacy, unified, func(legacy map[string][]eqRow) {
+	dump := compareRuns(t, unified, func(legacy map[string][]eqRow) {
 		mergeResponsePair(t, legacy)
 	})
 	for _, row := range dump["body_streams"] {
@@ -395,10 +380,10 @@ func (store *freezingStore) CommitAudit(ctx context.Context, value sqlite.AuditC
 	return store.Store.CommitAudit(ctx, value)
 }
 
-func crashRun(t *testing.T, writePath string, at func(event string, count int) bool) (*eqRun, *freezingStore) {
+func crashRun(t *testing.T, at func(event string, count int) bool) (*eqRun, *freezingStore) {
 	t.Helper()
 	var frozen *freezingStore
-	run := newEqRun(t, writePath, audit.Options{}, func(store *sqlite.Store) audit.Store {
+	run := newEqRun(t, audit.Options{}, func(store *sqlite.Store) audit.Store {
 		frozen = &freezingStore{Store: store}
 		return frozen
 	})
@@ -428,10 +413,10 @@ func recoverRun(t *testing.T, run *eqRun) {
 		t.Fatal(err)
 	}
 	if count, err := reopened.RecoverInterruptedAudits(context.Background(), eqClockOrigin+10_000_000); err != nil || count != 1 {
-		t.Fatalf("%s: recovered %d: %v", run.path, count, err)
+		t.Fatalf("recovered %d: %v", count, err)
 	}
 	if err := reopened.VerifyIntegrityPayloads(context.Background()); err != nil {
-		t.Fatalf("%s: integrity after recovery: %v", run.path, err)
+		t.Fatalf("integrity after recovery: %v", err)
 	}
 	run.store = reopened
 }
@@ -510,17 +495,15 @@ func TestCrashPointsMatchLegacyAfterRecovery(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			legacy, _ := crashRun(t, audit.WritePathLegacy, test.at)
-			unified, _ := crashRun(t, audit.WritePathUnified, test.at)
-			sendBoth(t, legacy, unified, largeStreamExchange(t))
+			unified, _ := crashRun(t, test.at)
+			sendAgainstOracle(t, unified, largeStreamExchange(t))
 			// Let the writes enqueued before the freeze commit, as they would
 			// have within milliseconds of the crash.
 			time.Sleep(50 * time.Millisecond)
-			recoverRun(t, legacy)
 			recoverRun(t, unified)
 			// "recovered": the legacy database after the same crash and
 			// recovery.
-			legacyDump := frozen(t, "recovered", legacy, func(run *eqRun) map[string][]eqRow { return dumpEqDatabase(t, run.dbPath, run.cipher) })
+			legacyDump := frozen[map[string][]eqRow](t, "recovered")
 			unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
 			test.delta(t, legacyDump)
 			if diffs := diffEqDumps(legacyDump, unifiedDump); len(diffs) != 0 {
@@ -564,10 +547,9 @@ func largeResponseExchange(t *testing.T, size int) *eqExchange {
 // (Close fails after EOF): the commit points request_sent back at itself
 // and writes its own chunks, sealed from the borrowed bytes (B.5, K item 3).
 func TestRequestPairUnmergedAtFinish(t *testing.T) {
-	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
 	var counting *countingStore
 	var mergedAtCheckpoint atomic.Bool
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, func(store *sqlite.Store) audit.Store {
+	unified := newEqRun(t, audit.Options{}, func(store *sqlite.Store) audit.Store {
 		counting = &countingStore{Store: store}
 		counting.checkpoint = func(checkpoint storage.AuditCheckpoint) error {
 			for _, body := range checkpoint.Bodies {
@@ -581,8 +563,8 @@ func TestRequestPairUnmergedAtFinish(t *testing.T) {
 	})
 	exchange := largeStreamExchange(t)
 	exchange.closeErr = errors.New("close failed")
-	sendBoth(t, legacy, unified, exchange)
-	dump := compareRuns(t, legacy, unified, nil)
+	sendAgainstOracle(t, unified, exchange)
+	dump := compareRuns(t, unified, nil)
 	if !mergedAtCheckpoint.Load() {
 		t.Fatal("checkpoint 1 did not merge the request pair")
 	}
@@ -610,17 +592,14 @@ func TestLargeResponsesMatchLegacy(t *testing.T) {
 		{name: "upstream cut after the first MiB", cut: 1<<20 + 4096, abort: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
-			unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, nil)
+			unified := newEqRun(t, audit.Options{}, nil)
 			// Compared before the parse releases the raw chunks.
-			for _, run := range []*eqRun{legacy, unified} {
-				run.manager.SetCompletionNotifier(nil)
-				run.noParse = true
-			}
+			unified.manager.SetCompletionNotifier(nil)
+			unified.noParse = true
 			exchange := largeResponseExchange(t, 5<<19)
 			exchange.cutAt, exchange.abort = test.cut, test.abort
-			sendBoth(t, legacy, unified, exchange)
-			dump := compareRuns(t, legacy, unified, nil)
+			sendAgainstOracle(t, unified, exchange)
+			dump := compareRuns(t, unified, nil)
 			chunks := map[string]int{}
 			for _, row := range dump["body_chunks"] {
 				chunks[row["stage"]]++
@@ -636,20 +615,17 @@ func TestLargeResponsesMatchLegacy(t *testing.T) {
 // progress when the request body ends, so no checkpoint is written and the
 // commit carries everything (B.1).
 func TestClientCancelDuringUploadSkipsCheckpoints(t *testing.T) {
-	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
 	var counting *countingStore
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{}, func(store *sqlite.Store) audit.Store {
+	unified := newEqRun(t, audit.Options{}, func(store *sqlite.Store) audit.Store {
 		counting = &countingStore{Store: store}
 		return counting
 	})
-	legacy.noParse, unified.noParse = true, true
+	unified.noParse = true
 	exchange := largeStreamExchange(t)
 	exchange.cancelAfterRead = 1200 << 10
-	sendBoth(t, legacy, unified, exchange)
-	for _, run := range []*eqRun{legacy, unified} {
-		run.waitParsed(run.lastAuditID())
-	}
-	dump := compareRuns(t, legacy, unified, nil)
+	sendAgainstOracle(t, unified, exchange)
+	unified.waitParsed(unified.lastAuditID())
+	dump := compareRuns(t, unified, nil)
 	if counting.checkpoints.Load() != 0 || counting.commits.Load() != 1 {
 		t.Fatalf("checkpoints %d, commits %d", counting.checkpoints.Load(), counting.commits.Load())
 	}
@@ -663,7 +639,7 @@ func TestClientCancelDuringUploadSkipsCheckpoints(t *testing.T) {
 // and finalizes the audit as failed.
 func TestCommitConstraintFailureOnTheRealStore(t *testing.T) {
 	var counting *countingStore
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{CommitRetries: 3, Sleep: func(time.Duration) { t.Error("retried") }},
+	unified := newEqRun(t, audit.Options{CommitRetries: 3, Sleep: func(time.Duration) { t.Error("retried") }},
 		func(store *sqlite.Store) audit.Store {
 			counting = &countingStore{Store: store}
 			return counting

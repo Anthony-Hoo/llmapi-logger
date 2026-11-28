@@ -57,12 +57,9 @@ func typicalV2Drive() v2Drive {
 
 // runSession drives one request through a real Session as the proxy does,
 // stopping at stopAt. It returns the audit id.
-func runSession(t *testing.T, store audit.Store, cipher security.Cipher, writePath string, drive v2Drive, stopAt int) string {
+func runSession(t *testing.T, store audit.Store, cipher security.Cipher, drive v2Drive, stopAt int) string {
 	t.Helper()
-	manager, err := audit.NewManagerWithOptions(store, cipher, nil, "available", slog.New(slog.NewTextHandler(io.Discard, nil)), audit.Options{WritePath: writePath})
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newTestManager(t, store, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	inbound := httptest.NewRequest(http.MethodPost, "http://proxy.example.com/v1/chat/completions?trace=x", &fixedReads{data: drive.request, size: 32 << 10})
 	inbound.RequestURI = "/v1/chat/completions?trace=x"
@@ -135,26 +132,15 @@ func runSession(t *testing.T, store audit.Store, cipher security.Cipher, writePa
 	return session.ID()
 }
 
-// legacyRun is the legacy side of a comparison: the store and the audit it
-// wrote.
-type legacyRun struct {
-	store *Store
-	id    string
-}
-
-// frozenLegacy is the legacy oracle's value name: computed from the legacy
-// run and checked against the file (or recorded) when legacy is not nil, read
-// from the file otherwise. The values are normalised as the comparisons
-// below normalise them: no audit id and no time (normalizeSessionDump), Header
-// values and other ciphertext opened under their AAD; the timeline plaintext
-// holds observation times and is left out.
-func frozenLegacy[T any](t *testing.T, name string, legacy *legacyRun, value func(*legacyRun) T) T {
+// frozenLegacy is the legacy oracle's value name: what the legacy write path
+// stored for the same drive (internal/legacyoracle). The values are
+// normalised as the comparisons below normalise them: no audit id and no time
+// (normalizeSessionDump), Header values and other ciphertext opened under
+// their AAD, long texts as their digest; the timeline plaintext holds
+// observation times and is left out.
+func frozenLegacy[T any](t *testing.T, name string) T {
 	t.Helper()
-	if legacy == nil {
-		return legacyoracle.Value[T](t, name, nil)
-	}
-	computed := value(legacy)
-	return legacyoracle.Value(t, name, &computed)
+	return legacyoracle.Value[T](t, name, nil)
 }
 
 // flatSourceHeaders expands an audit's stored Headers, whatever its version.
@@ -173,12 +159,9 @@ func TestSessionWritesCaptureV2OnPostgreSQL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	cipher := v2TestCipher(t)
-	legacyStore, _ := openSignedStore(t)
 	unifiedStore, _ := openSignedStore(t)
 	drive := typicalV2Drive()
-	legacyID := runSession(t, legacyStore, cipher, audit.WritePathLegacy, drive, crashNone)
-	unifiedID := runSession(t, unifiedStore, cipher, audit.WritePathUnified, drive, crashNone)
-	legacy := &legacyRun{store: legacyStore, id: legacyID}
+	unifiedID := runSession(t, unifiedStore, cipher, drive, crashNone)
 
 	var version int
 	var headerRows, blocks int
@@ -186,7 +169,7 @@ func TestSessionWritesCaptureV2OnPostgreSQL(t *testing.T) {
 		Scan(&version, &headerRows, &blocks); err != nil || version != 2 || headerRows != 0 || blocks != 1 {
 		t.Fatalf("unified audit: version %d, %d header rows, %d blocks, %v", version, headerRows, blocks, err)
 	}
-	legacyHeaders := frozenLegacy(t, "headers", legacy, func(run *legacyRun) []string { return flatSourceHeaders(t, run.store, cipher, run.id) })
+	legacyHeaders := frozenLegacy[[]string](t, "headers")
 	unifiedHeaders := flatSourceHeaders(t, unifiedStore, cipher, unifiedID)
 	if !reflect.DeepEqual(legacyHeaders, unifiedHeaders) {
 		t.Fatalf("headers differ:\n legacy  %v\n unified %v", legacyHeaders, unifiedHeaders)
@@ -206,23 +189,8 @@ func TestSessionWritesCaptureV2OnPostgreSQL(t *testing.T) {
 	}
 	// The content columns hold what the parser chooses from the legacy rows.
 	for _, stage := range []string{StageRequestReceived, StageResponseReceived} {
-		want := frozenLegacy(t, "content_type/"+stage, legacy, func(run *legacyRun) string {
-			rows, err := run.store.LoadParserStage(ctx, run.id, stage)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var want string
-			for _, header := range rows.Headers {
-				if strings.EqualFold(header.Name, "content-type") {
-					aad, _ := security.AAD(run.id, "header", stage, header.Kind, header.Name, "0")
-					plaintext, err := cipher.Decrypt(aad, header.ValueEnc)
-					if err == nil && want == "" {
-						want = string(plaintext)
-					}
-				}
-			}
-			return want
-		})
+		// The parser's choice from the legacy rows (decryptContentHeaders).
+		want := frozenLegacy[string](t, "content_type/"+stage)
 		unified, err := unifiedStore.LoadParserStage(ctx, unifiedID, stage)
 		if err != nil {
 			t.Fatal(err)
@@ -251,14 +219,12 @@ func TestSessionWritesCaptureV2OnPostgreSQL(t *testing.T) {
 		}
 		return frozen
 	}
-	legacyDump := frozenLegacy(t, "rows", legacy, func(run *legacyRun) harnessDump { return sessionRows(run.store, run.id) })
+	legacyDump := frozenLegacy[harnessDump](t, "rows")
 	if differences := diffDumps(legacyDump, sessionRows(unifiedStore, unifiedID)); len(differences) != 0 {
 		t.Fatalf("rows differ:\n%s", strings.Join(differences, "\n"))
 	}
-	for _, store := range []*Store{legacyStore, unifiedStore} {
-		if err := store.VerifyIntegrityPayloads(ctx); err != nil {
-			t.Fatal(err)
-		}
+	if err := unifiedStore.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatal(err)
 	}
 	compareCaptureDigests(t, unifiedStore, unifiedID)
 }
@@ -274,20 +240,15 @@ func TestSessionCrashPointsRecoverCaptureV2(t *testing.T) {
 		t.Run(crashPointNames[point], func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			legacyStore, _ := openSignedStore(t)
 			unifiedStore, _ := openSignedStore(t)
 			drive := typicalV2Drive()
-			legacyID := runSession(t, legacyStore, cipher, audit.WritePathLegacy, drive, point)
-			unifiedID := runSession(t, unifiedStore, cipher, audit.WritePathUnified, drive, point)
-			legacy := &legacyRun{store: legacyStore, id: legacyID}
-			for _, store := range []*Store{legacyStore, unifiedStore} {
-				writerBarrier(t, store)
-				if recovered, err := store.RecoverInterruptedAudits(ctx, 9_000_000_000_000_000_000); err != nil || recovered != 1 {
-					t.Fatalf("recovered %d: %v", recovered, err)
-				}
-				if err := store.VerifyIntegrityPayloads(ctx); err != nil {
-					t.Fatalf("payload verification after recovery: %v", err)
-				}
+			unifiedID := runSession(t, unifiedStore, cipher, drive, point)
+			writerBarrier(t, unifiedStore)
+			if recovered, err := unifiedStore.RecoverInterruptedAudits(ctx, 9_000_000_000_000_000_000); err != nil || recovered != 1 {
+				t.Fatalf("recovered %d: %v", recovered, err)
+			}
+			if err := unifiedStore.VerifyIntegrityPayloads(ctx); err != nil {
+				t.Fatalf("payload verification after recovery: %v", err)
 			}
 			stages := map[int][]string{
 				crashInterceptor:  {StageRequestReceived},
@@ -304,7 +265,7 @@ func TestSessionCrashPointsRecoverCaptureV2(t *testing.T) {
 			}
 			// "headers": the legacy audit's Headers after the same crash and
 			// recovery.
-			legacyHeaders := frozenLegacy(t, "headers", legacy, func(run *legacyRun) []string { return flatSourceHeaders(t, run.store, cipher, run.id) })
+			legacyHeaders := frozenLegacy[[]string](t, "headers")
 			unifiedHeaders := flatSourceHeaders(t, unifiedStore, cipher, unifiedID)
 			if point == crashBeforeFinish {
 				// The upstream's trailers arrive with the end of its body,
@@ -381,7 +342,7 @@ func TestCaptureV2StatementCounts(t *testing.T) {
 		{"request and response trailers", typicalV2Drive()},
 	} {
 		recorder := &v2RecordingStore{}
-		runSession(t, recorder, cipher, audit.WritePathUnified, test.drive, crashNone)
+		runSession(t, recorder, cipher, test.drive, crashNone)
 		total, perKind := countStatements(t, store, dsn, recorder.ops)
 		var blocks []string
 		for _, op := range recorder.ops {
@@ -462,7 +423,7 @@ func TestSessionWithoutTheInboundStageWritesConsistentBlocks(t *testing.T) {
 	cipher := v2TestCipher(t)
 	store, _ := openSignedStore(t)
 	injectInsertFailure(t, store, "http_stages", "NEW.stage = 'request_for_newapi_received_from_nginx'")
-	auditID := runSession(t, store, cipher, audit.WritePathUnified, typicalV2Drive(), crashNone)
+	auditID := runSession(t, store, cipher, typicalV2Drive(), crashNone)
 	var captureStatus string
 	if err := store.readerDB.QueryRow(`SELECT capture_status FROM audit_records WHERE audit_id = $1`, auditID).Scan(&captureStatus); err != nil || captureStatus != CaptureFailed {
 		t.Fatalf("capture status %q, %v", captureStatus, err)
@@ -531,24 +492,22 @@ func TestSessionFailedCaptureStaysReadable(t *testing.T) {
 	t.Parallel()
 	cipher := v2TestCipher(t)
 	for _, test := range []struct {
-		name                      string
-		legacyTable, legacyWhen   string
+		name string
+		// The legacy oracle froze the legacy audit under the same rejected
+		// write: the stage row of request_sent in the first case, the
+		// inbound Header rows in the other two.
 		unifiedTable, unifiedWhen string
 		stopAt                    int
 		extraStage                string // the stage whose Headers only version 2 kept
 	}{
-		{"checkpoint 1 rejected", "http_stages", "NEW.stage = 'request_sent_to_newapi'", "http_stages", "NEW.stage = 'request_sent_to_newapi'", crashNone, StageRequestSent},
-		{"inbound block rejected, no later write", "http_headers", "NEW.stage = 'request_for_newapi_received_from_nginx'",
-			"http_header_blocks", "true", crashInterceptor, ""},
-		{"inbound block rejected, later writes", "http_headers", "NEW.stage = 'request_for_newapi_received_from_nginx'",
-			"http_header_blocks", "", crashNone, StageRequestReceived},
+		{"checkpoint 1 rejected", "http_stages", "NEW.stage = 'request_sent_to_newapi'", crashNone, StageRequestSent},
+		{"inbound block rejected, no later write", "http_header_blocks", "true", crashInterceptor, ""},
+		{"inbound block rejected, later writes", "http_header_blocks", "", crashNone, StageRequestReceived},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			legacyStore, _ := openSignedStore(t)
 			unifiedStore, _ := openSignedStore(t)
-			injectInsertFailure(t, legacyStore, test.legacyTable, test.legacyWhen)
 			if test.unifiedWhen == "" {
 				// Reject only the block BeginAudit writes, while the inbound
 				// stage is the audit's only stage row; checkpoint 1 then
@@ -566,18 +525,15 @@ CREATE TRIGGER reject_inbound_block BEFORE INSERT ON http_header_blocks FOR EACH
 			} else {
 				injectInsertFailure(t, unifiedStore, test.unifiedTable, test.unifiedWhen)
 			}
-			legacyID := runSession(t, legacyStore, cipher, audit.WritePathLegacy, typicalV2Drive(), test.stopAt)
-			unifiedID := runSession(t, unifiedStore, cipher, audit.WritePathUnified, typicalV2Drive(), test.stopAt)
-			for _, store := range []*Store{legacyStore, unifiedStore} {
-				writerBarrier(t, store)
-				if _, err := store.RecoverInterruptedAudits(ctx, 9_000_000_000_000_000_000); err != nil {
-					t.Fatal(err)
-				}
-				if err := store.VerifyIntegrityPayloads(ctx); err != nil {
-					t.Fatalf("payload verification: %v", err)
-				}
+			unifiedID := runSession(t, unifiedStore, cipher, typicalV2Drive(), test.stopAt)
+			writerBarrier(t, unifiedStore)
+			if _, err := unifiedStore.RecoverInterruptedAudits(ctx, 9_000_000_000_000_000_000); err != nil {
+				t.Fatal(err)
 			}
-			legacy := frozenLegacy(t, "headers", &legacyRun{store: legacyStore, id: legacyID}, func(run *legacyRun) []string { return queryHeaders(t, run.store, cipher, run.id) })
+			if err := unifiedStore.VerifyIntegrityPayloads(ctx); err != nil {
+				t.Fatalf("payload verification: %v", err)
+			}
+			legacy := frozenLegacy[[]string](t, "headers")
 			unified := queryHeaders(t, unifiedStore, cipher, unifiedID)
 			if test.extraStage != "" {
 				if len(withoutStage(unified, test.extraStage)) == len(unified) || len(withoutStage(legacy, test.extraStage)) != len(legacy) {

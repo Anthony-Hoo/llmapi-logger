@@ -85,10 +85,10 @@ const (
 	MaxCommitRetries     = 5
 )
 
-// Options selects the write path of a Manager. The zero value is the legacy
+// Options selects the write path of a Manager. The zero value is the unified
 // path.
 type Options struct {
-	// WritePath is WritePathLegacy (or empty) or WritePathUnified.
+	// WritePath is WritePathUnified (or empty) or WritePathLegacy.
 	WritePath string
 	// CommitRetries is the initial retry count of CommitAudit, 0 to 5; see
 	// SetCommitRetries.
@@ -149,7 +149,7 @@ type Manager struct {
 	sleep func(time.Duration)
 }
 
-// NewManager constructs a live audit manager on the legacy write path. A nil
+// NewManager constructs a live audit manager on the unified write path. A nil
 // fingerprinter disables credential scoping: every record is then stored
 // without an API key tag and no developer session can match it.
 func NewManager(store Store, cipher security.Cipher, fingerprints *security.CredentialFingerprinter, mode string, logger *slog.Logger) (*Manager, error) {
@@ -219,7 +219,7 @@ func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *se
 		manager.sleep = options.Sleep
 	}
 	manager.commitRetries.Store(int32(options.CommitRetries))
-	if options.WritePath == WritePathUnified {
+	if options.WritePath == WritePathUnified || options.WritePath == "" {
 		if support, ok := store.(unifiedWriteSupport); ok && !support.SupportsUnifiedWrite() {
 			return nil, ErrUnifiedUnsupported
 		}

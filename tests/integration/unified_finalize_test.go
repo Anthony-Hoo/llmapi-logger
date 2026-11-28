@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"llmapi-logger/internal/audit"
+	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/interceptor"
 	"llmapi-logger/internal/parser"
@@ -56,7 +58,7 @@ type finalizeRun struct {
 	database *sql.DB
 }
 
-func newFinalizeRun(t *testing.T, writePath string) *finalizeRun {
+func newFinalizeRun(t *testing.T) *finalizeRun {
 	t.Helper()
 	ctx := context.Background()
 	dsn := newIntegrationDatabaseURL(t)
@@ -74,7 +76,12 @@ func newFinalizeRun(t *testing.T, writePath string) *finalizeRun {
 		t.Fatal(err)
 	}
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	manager, err := audit.NewManagerWithOptions(store, cipher, nil, audit.ModeAvailable, quiet, audit.Options{WritePath: writePath})
+	stager, err := staging.Open(filepath.Join(t.TempDir(), "staging"), cipher, staging.Options{Logger: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stager.Close() })
+	manager, err := audit.NewManagerWithOptions(store, cipher, nil, audit.ModeAvailable, quiet, audit.Options{Stager: stager})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,9 +92,7 @@ func newFinalizeRun(t *testing.T, writePath string) *finalizeRun {
 		t.Fatal(err)
 	}
 	manager.SetCompletionNotifier(worker.Notify)
-	if manager.WritePath() == audit.WritePathUnified {
-		manager.SetHandover(worker.Submit)
-	}
+	manager.SetHandover(worker.Submit)
 	workerCtx, stop := context.WithCancel(ctx)
 	if err := worker.Start(workerCtx); err != nil {
 		t.Fatal(err)
@@ -102,7 +107,7 @@ func newFinalizeRun(t *testing.T, writePath string) *finalizeRun {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run.upstream = protofixture.NewUpstream(writePath)
+	run.upstream = protofixture.NewUpstream("fin")
 	server := httptest.NewServer(run.upstream)
 	t.Cleanup(server.Close)
 	target, _ := url.Parse(server.URL)
@@ -148,11 +153,12 @@ func (run *finalizeRun) send(t *testing.T, exchange protofixture.Exchange) (stri
 }
 
 // Design G on PostgreSQL with capture version 2: the parse of a normal
-// request reads no stage and no body chunk back, where legacy reads them.
-// It also measures, for the report, the time from the end of the response to
-// a terminal parse status on both paths, for a small and a 1 MB request, one
-// request at a time so the pending backlog stays far below 100 and the
-// 30-second scan plays no part.
+// request reads no stage and no body chunk back. It also measures, for the
+// report, the time from the end of the response to a terminal parse status,
+// for a small and a 1 MB request, one request at a time so the pending
+// backlog stays far below 100 and the 30-second scan plays no part. The
+// legacy numbers next to these (design stage 3, R.7) came from the binary
+// that still had the legacy path.
 func TestUnifiedParseDoesNotReadBackOnPostgreSQL(t *testing.T) {
 	small, err := protofixture.Build(protofixture.Case{Protocol: protofixture.OpenAIChat, Scenario: protofixture.ScenarioBasic, Stream: true},
 		protofixture.Options{Seed: 21})
@@ -167,7 +173,7 @@ func TestUnifiedParseDoesNotReadBackOnPostgreSQL(t *testing.T) {
 	if size := len(large[0].RequestBody); size < 900<<10 || size > 1200<<10 {
 		t.Fatalf("large request is %d bytes", size)
 	}
-	legacy, unified := newFinalizeRun(t, audit.WritePathLegacy), newFinalizeRun(t, audit.WritePathUnified)
+	unified := newFinalizeRun(t)
 	rounds := 15
 	if testing.Short() {
 		rounds = 2
@@ -176,27 +182,18 @@ func TestUnifiedParseDoesNotReadBackOnPostgreSQL(t *testing.T) {
 		name     string
 		exchange protofixture.Exchange
 	}{{"small", small[0]}, {"1MB", large[0]}} {
-		var legacyTimes, unifiedTimes []time.Duration
+		var times []time.Duration
 		for range rounds {
-			_, elapsed := legacy.send(t, size.exchange)
-			legacyTimes = append(legacyTimes, elapsed)
-			_, elapsed = unified.send(t, size.exchange)
-			unifiedTimes = append(unifiedTimes, elapsed)
+			_, elapsed := unified.send(t, size.exchange)
+			times = append(times, elapsed)
 		}
-		t.Logf("%s request (%d bytes): end of response to parsed, legacy p50 %v p90 %v; unified p50 %v p90 %v",
-			size.name, len(size.exchange.RequestBody), percentile(legacyTimes, 50), percentile(legacyTimes, 90),
-			percentile(unifiedTimes, 50), percentile(unifiedTimes, 90))
-	}
-	if legacy.reads.chunks.Load() == 0 || legacy.reads.stages.Load() == 0 {
-		t.Fatalf("legacy parse read %d stages and %d chunk pages", legacy.reads.stages.Load(), legacy.reads.chunks.Load())
+		t.Logf("%s request (%d bytes): end of response to parsed, p50 %v p90 %v",
+			size.name, len(size.exchange.RequestBody), percentile(times, 50), percentile(times, 90))
 	}
 	if unified.reads.chunks.Load() != 0 || unified.reads.stages.Load() != 0 {
-		t.Fatalf("unified parse read %d stages and %d chunk pages back", unified.reads.stages.Load(), unified.reads.chunks.Load())
+		t.Fatalf("the parse read %d stages and %d chunk pages back", unified.reads.stages.Load(), unified.reads.chunks.Load())
 	}
-	t.Logf("parser reads of stored evidence: legacy %d stage loads and %d chunk pages, unified none",
-		legacy.reads.stages.Load(), legacy.reads.chunks.Load())
 }
-
 func percentile(values []time.Duration, rank int) time.Duration {
 	sorted := append([]time.Duration(nil), values...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })

@@ -92,10 +92,7 @@ func TestSessionWritesTheHeaderBlock(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := &blockStore{refuse: test.refuse}
-			manager, err := NewManagerWithOptions(store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{WritePath: WritePathUnified})
-			if err != nil {
-				t.Fatal(err)
-			}
+			manager := newTestManager(t, store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
 			if manager.captureVersion != storage.CaptureVersion2 {
 				t.Fatalf("capture version %d", manager.captureVersion)
 			}

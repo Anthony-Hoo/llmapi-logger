@@ -25,10 +25,7 @@ func TestSessionPersistsNewAPIRequestIDAndNotifiesCallerWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newTestManager(t, store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
 	notified := make(chan string, 1)
 	manager.SetCallerNotifier(func(auditID string) bool {
 		notified <- auditID
@@ -77,7 +74,7 @@ func TestSessionIgnoresInvalidNewAPIRequestID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	cipher, _ := security.NewAESGCM(make([]byte, 32))
-	manager, _ := NewManager(store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager := newTestManager(t, store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
 	request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions", http.NoBody)
 	session, err := manager.Begin(context.Background(), request, routing.Match{RouteID: "chat", Parser: "openai.chat_completions"})
 	if err != nil {

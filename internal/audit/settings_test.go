@@ -101,7 +101,7 @@ func newCaptureSettings(t *testing.T, store SettingsStore, manager CommitRetrySe
 func TestCaptureSettingsSaveAndResetReachTheManager(t *testing.T) {
 	ctx := context.Background()
 	store := &settingsMemory{}
-	manager, err := NewManagerWithOptions(&bufferStore{}, optionsCipher(t), nil, ModeAvailable, nil, Options{CommitRetries: 3})
+	manager, err := NewManagerWithOptions(&commitStore{}, optionsCipher(t), nil, ModeAvailable, nil, Options{CommitRetries: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -83,10 +83,11 @@ func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher 
 		t.Fatal(err)
 	}
 	harness.store = store
-	manager, err := audit.NewManager(store, cipher, credentials, audit.ModeAvailable, logger)
+	manager, closeManager, err := newTestManager(t.TempDir(), store, cipher, credentials, logger, audit.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(closeManager)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		_, _ = io.Copy(io.Discard, request.Body)

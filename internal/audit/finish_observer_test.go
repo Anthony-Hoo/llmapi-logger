@@ -27,10 +27,7 @@ func TestFinishObserverSeesEachSessionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	manager, err := NewManagerWithOptions(store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newTestManager(t, store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
 	var mu sync.Mutex
 	var seen []time.Duration
 	SetFinishObserver(func(duration time.Duration) {

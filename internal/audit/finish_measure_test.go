@@ -61,8 +61,9 @@ func sseBody(size int, seed uint64) []byte {
 }
 
 // TestMeasureFinish reports how long Session.Finish takes for a streamed
-// response under each write path, and how much of it is spent before the
-// first write. It only runs with LLMAPI_MEASURE_FINISH=1.
+// response, and how much of it is spent before the first write. It only runs
+// with LLMAPI_MEASURE_FINISH=1. The legacy numbers next to these (design
+// stage 3, R.7) came from the binary that still had the legacy path.
 func TestMeasureFinish(t *testing.T) {
 	if os.Getenv("LLMAPI_MEASURE_FINISH") != "1" {
 		t.Skip("set LLMAPI_MEASURE_FINISH=1 to measure")
@@ -74,32 +75,26 @@ func TestMeasureFinish(t *testing.T) {
 	for _, size := range []int{1 << 20, 8 << 20} {
 		response := sseBody(size, uint64(size))
 		request := []byte(`{"model":"model-example","stream":true}`)
-		for _, writePath := range []string{WritePathLegacy, WritePathUnified} {
-			var totals, before []time.Duration
-			for round := range 9 {
-				store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), fmt.Sprintf("m%d.db", round)))
-				if err != nil {
-					t.Fatal(err)
-				}
-				timing := &timingStore{Store: store}
-				// A stage budget above the body keeps the unified path from
-				// exhausting it.
-				manager, err := NewManagerWithOptions(timing, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)),
-					Options{WritePath: writePath, StageBytes: 16 << 20, GlobalBytes: 64 << 20})
-				if err != nil {
-					t.Fatal(err)
-				}
-				session := driveStream(t, manager, request, response)
-				started := time.Now()
-				if err := session.Finish(); err != nil {
-					t.Fatal(err)
-				}
-				totals = append(totals, time.Since(started))
-				before = append(before, timing.firstWrite.Sub(started))
-				_ = store.Close()
+		var totals, before []time.Duration
+		for round := range 9 {
+			store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), fmt.Sprintf("m%d.db", round)))
+			if err != nil {
+				t.Fatal(err)
 			}
-			t.Logf("%s %d MiB stream: Finish median %v (before first write %v)", writePath, size>>20, median(totals), median(before))
+			timing := &timingStore{Store: store}
+			// A stage budget above the body keeps the body in memory.
+			manager := newTestManager(t, timing, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Options{StageBytes: 16 << 20, GlobalBytes: 64 << 20})
+			session := driveStream(t, manager, request, response)
+			started := time.Now()
+			if err := session.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			totals = append(totals, time.Since(started))
+			before = append(before, timing.firstWrite.Sub(started))
+			_ = store.Close()
 		}
+		t.Logf("%d MiB stream: Finish median %v (before first write %v)", size>>20, median(totals), median(before))
 	}
 }
 

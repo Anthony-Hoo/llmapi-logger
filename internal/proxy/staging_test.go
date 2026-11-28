@@ -70,17 +70,16 @@ func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
 	for _, exchange := range []*eqExchange{large, largeResponseExchange(t, 5<<19), unmerged, preRead, early} {
 		t.Run(exchange.name, func(t *testing.T) {
 			stager := openEqStager(t, filepath.Join(t.TempDir(), "staging"), staging.Options{})
-			legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
-			unified := newEqRun(t, audit.WritePathUnified, audit.Options{StageBytes: stagingTestBudget, Stager: stager}, nil)
-			sendBoth(t, legacy, unified, exchange)
+			unified := newEqRun(t, audit.Options{StageBytes: stagingTestBudget, Stager: stager}, nil)
+			sendAgainstOracle(t, unified, exchange)
 			ids := make([]string, 0, 1)
 			for id := range unified.captured {
 				ids = append(ids, id)
 			}
 			for _, id := range ids {
-				compareQueryViews(t, id, legacy, unified)
+				compareQueryViews(t, id, unified)
 			}
-			compareRuns(t, legacy, unified, nil)
+			compareRuns(t, unified, nil)
 			if stats := stager.Stats(); stats.Records == 0 {
 				t.Fatal("nothing was staged")
 			}
@@ -100,10 +99,9 @@ func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
 // recorded and the client sees the same bytes.
 func TestStagingFullThroughProxy(t *testing.T) {
 	stager := openEqStager(t, filepath.Join(t.TempDir(), "staging"), staging.Options{MaxBytes: 600 << 10})
-	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{StageBytes: stagingTestBudget, Stager: stager}, nil)
-	// The forwarded bytes are legacy's (sendBoth).
-	sendBoth(t, legacy, unified, largeStreamExchange(t))
+	unified := newEqRun(t, audit.Options{StageBytes: stagingTestBudget, Stager: stager}, nil)
+	// The forwarded bytes are legacy's (sendAgainstOracle).
+	sendAgainstOracle(t, unified, largeStreamExchange(t))
 	unified.manager.CloseGaps(context.Background())
 	snapshot, err := unified.store.Snapshot(context.Background(), unified.lastAuditID())
 	if err != nil {
@@ -127,7 +125,7 @@ func TestStagingFullThroughProxy(t *testing.T) {
 
 // stagedCrashRun is crashRun with staging: once frozen, neither the store
 // nor the staging files receive anything more, as when the process dies.
-func stagedCrashRun(t *testing.T, writePath string, at func(event string, count int) bool) (*eqRun, *staging.Stager, string) {
+func stagedCrashRun(t *testing.T, at func(event string, count int) bool) (*eqRun, *staging.Stager, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "staging")
 	var dead atomic.Bool
@@ -138,11 +136,8 @@ func stagedCrashRun(t *testing.T, writePath string, at func(event string, count 
 		return nil
 	}})
 	var frozen *freezingStore
-	options := audit.Options{}
-	if writePath == audit.WritePathUnified {
-		options = audit.Options{StageBytes: stagingTestBudget, Stager: keepingStager{stager}}
-	}
-	run := newEqRun(t, writePath, options, func(store *sqlite.Store) audit.Store {
+	options := audit.Options{StageBytes: stagingTestBudget, Stager: keepingStager{stager}}
+	run := newEqRun(t, options, func(store *sqlite.Store) audit.Store {
 		frozen = &freezingStore{Store: store}
 		return frozen
 	})
@@ -188,10 +183,10 @@ func restartWithImport(t *testing.T, run *eqRun, dir string, wantRecovered int) 
 		t.Fatal(err)
 	}
 	if count, err := reopened.RecoverInterruptedAudits(context.Background(), eqClockOrigin+10_000_000); err != nil || count != wantRecovered {
-		t.Fatalf("%s: recovered %d: %v", run.path, count, err)
+		t.Fatalf("recovered %d: %v", count, err)
 	}
 	if err := reopened.VerifyIntegrityPayloads(context.Background()); err != nil {
-		t.Fatalf("%s: integrity after recovery: %v", run.path, err)
+		t.Fatalf("integrity after recovery: %v", err)
 	}
 	run.store = reopened
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
@@ -217,20 +212,18 @@ func TestCrashWithStagedChunksRecovers(t *testing.T) {
 			func(event string, count int) bool { return event == "response-read" && count >= 5<<20 }, storage.StageResponseReceived},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			legacy, _, legacyDir := stagedCrashRun(t, audit.WritePathLegacy, test.at)
-			unified, stager, unifiedDir := stagedCrashRun(t, audit.WritePathUnified, test.at)
-			sendBoth(t, legacy, unified, test.exchange(t))
+			unified, stager, unifiedDir := stagedCrashRun(t, test.at)
+			sendAgainstOracle(t, unified, test.exchange(t))
 			staged := stager.Stats().Records
 			if staged == 0 {
 				t.Fatal("nothing was staged before the crash")
 			}
 			_ = stager.Close()
-			restartWithImport(t, legacy, legacyDir, 1)
 			report := restartWithImport(t, unified, unifiedDir, 1)
 			if report.Files != 1 || report.Removed != 1 || int64(report.Inserted) < 1 {
 				t.Fatalf("import %+v of %d staged chunks", report, staged)
 			}
-			legacyDump := frozen(t, "recovered", legacy, func(run *eqRun) map[string][]eqRow { return dumpEqDatabase(t, run.dbPath, run.cipher) })
+			legacyDump := frozen[map[string][]eqRow](t, "recovered")
 			unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
 			legacyChunks := map[string]bool{}
 			for _, row := range legacyDump["body_chunks"] {
@@ -269,7 +262,7 @@ func TestCrashWithStagedChunksRecovers(t *testing.T) {
 func TestCrashAfterCommitBeforeCleanup(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "staging")
 	stager := openEqStager(t, dir, staging.Options{})
-	unified := newEqRun(t, audit.WritePathUnified, audit.Options{StageBytes: stagingTestBudget, Stager: keepingStager{stager}}, nil)
+	unified := newEqRun(t, audit.Options{StageBytes: stagingTestBudget, Stager: keepingStager{stager}}, nil)
 	unified.noParse = true
 	_, id := unified.send(copyChunks(largeStreamExchange(t)))
 	stager.Flush()

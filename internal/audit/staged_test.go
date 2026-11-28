@@ -101,8 +101,8 @@ func TestStagedBodiesMatchLegacy(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stager := newTestStager(t, staging.Options{})
-			legacy := legacyDiverge(t, "run", func() (storage.AuditFinish, sqlite.Snapshot) { return runDiverge(t, WritePathLegacy, test.drive) })
-			unifiedOutcome, unified := runDivergeWith(t, Options{WritePath: WritePathUnified, StageBytes: 1 << 20, Stager: stager}, test.drive)
+			legacy := legacyDiverge(t, "run")
+			unifiedOutcome, unified := runDivergeWith(t, Options{StageBytes: 1 << 20, Stager: stager}, test.drive)
 			if legacy.Outcome != unifiedOutcome {
 				t.Fatalf("outcome %+v, unified %+v", legacy.Outcome, unifiedOutcome)
 			}
@@ -124,8 +124,8 @@ func TestGlobalBudgetPressureSpillsShortChunks(t *testing.T) {
 	response := noise(5<<19, 22)
 	drive := divergeDrive{inbound: request, outbound: request, received: response, sent: response, piece: 40 << 10}
 	stager := newTestStager(t, staging.Options{})
-	legacy := legacyDiverge(t, "run", func() (storage.AuditFinish, sqlite.Snapshot) { return runDiverge(t, WritePathLegacy, drive) })
-	unifiedOutcome, unified := runDivergeWith(t, Options{WritePath: WritePathUnified, StageBytes: 1 << 20, GlobalBytes: 1 << 20, Stager: syncStager{stager}}, drive)
+	legacy := legacyDiverge(t, "run")
+	unifiedOutcome, unified := runDivergeWith(t, Options{StageBytes: 1 << 20, GlobalBytes: 1 << 20, Stager: syncStager{stager}}, drive)
 	if legacy.Outcome != unifiedOutcome || unifiedOutcome.CaptureStatus != storage.CaptureComplete {
 		for _, body := range unified.Bodies {
 			t.Logf("%s %s %v stored %d of %d", body.Stage, body.State, valueOrEmpty(body.ErrorCode), body.StoredLength, body.ObservedLength)
@@ -169,7 +169,7 @@ func TestGlobalBudgetExhaustedWithSlowStaging(t *testing.T) {
 	request := noise(5<<19, 25)
 	drive := divergeDrive{inbound: request, outbound: request, received: []byte("ok"), sent: []byte("ok"), piece: 40 << 10}
 	stager := newTestStager(t, staging.Options{BatchDelay: time.Hour})
-	outcome, snapshot := runDivergeWith(t, Options{WritePath: WritePathUnified, StageBytes: 1 << 20, GlobalBytes: 1 << 20, Stager: stager}, drive)
+	outcome, snapshot := runDivergeWith(t, Options{StageBytes: 1 << 20, GlobalBytes: 1 << 20, Stager: stager}, drive)
 	if outcome.CaptureStatus != storage.CapturePartial || outcome.ForwardStatus != storage.ForwardCompleted {
 		t.Fatalf("outcome %+v", outcome)
 	}
@@ -197,7 +197,7 @@ func TestStagingRefusalExhaustsTheStage(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stager := newTestStager(t, test.options)
-			outcome, snapshot := runDivergeWith(t, Options{WritePath: WritePathUnified, StageBytes: 1 << 20, Stager: syncStager{stager}}, drive)
+			outcome, snapshot := runDivergeWith(t, Options{StageBytes: 1 << 20, Stager: syncStager{stager}}, drive)
 			if outcome.CaptureStatus != storage.CapturePartial || outcome.ForwardStatus != storage.ForwardCompleted {
 				t.Fatalf("outcome %+v", outcome)
 			}

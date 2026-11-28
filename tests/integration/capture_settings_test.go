@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/storage/postgres"
 )
 
@@ -70,7 +69,7 @@ WHERE a.ended_at_ns IS NULL AND s.stage = $1`, stage).Scan(&stored); err == nil 
 		_, _ = io.WriteString(writer, `{"id":"chatcmpl-1","object":"chat.completion","model":"model-example","choices":[{"index":0,"message":{"role":"assistant","content":"reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
 	}))
 	defer upstream.Close()
-	cfg := unifiedConfig(t, upstream.URL, config.AuditWritePathUnified)
+	cfg := unifiedConfig(t, upstream.URL)
 	// A file value other than the two saved below, so the attempt counts can
 	// only come from the saved values.
 	cfg.Audit.CommitRetries = 4

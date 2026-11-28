@@ -138,10 +138,12 @@ func newFinalizeHarness(t *testing.T, store finalizeStore, options audit.Options
 		t.Fatal(err)
 	}
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	options.WritePath = audit.WritePathUnified
-	if harness.manager, err = audit.NewManagerWithOptions(store, harness.cipher, nil, audit.ModeAvailable, quiet, options); err != nil {
+	manager, closeManager, err := newTestManager(t.TempDir(), store, harness.cipher, nil, quiet, options)
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(closeManager)
+	harness.manager = manager
 	harness.submit = func(job handover.Job) bool { harness.jobs <- job; return true }
 	harness.manager.SetHandover(func(job handover.Job) bool { return harness.submit(job) })
 	if harness.worker, err = parser.NewWorker(store, harness.cipher, parsers, quiet); err != nil {

@@ -1,11 +1,15 @@
 package audit
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 )
 
@@ -22,42 +26,54 @@ func optionsCipher(t *testing.T) security.Cipher {
 	return cipher
 }
 
-func TestManagerOptionsDefaultToLegacy(t *testing.T) {
-	manager, err := NewManager(&bufferStore{}, optionsCipher(t), nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
+// NewManager builds a manager on the unified write path, the only one: a
+// session writes its start row with the inbound stage and one commit, and
+// never a per-operation write (commitStore panics on those).
+func TestNewManagerWritesThroughTheUnifiedPath(t *testing.T) {
+	store := &commitStore{}
+	manager, err := NewManager(store, optionsCipher(t), nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manager.WritePath() != WritePathLegacy || manager.CommitRetries() != 0 {
-		t.Fatalf("write path %s, retries %d", manager.WritePath(), manager.CommitRetries())
+	if manager.CommitRetries() != 0 {
+		t.Fatalf("retries %d", manager.CommitRetries())
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.example.com/v1/chat/completions", strings.NewReader(`{"model":"model-example"}`))
+	session, err := manager.Begin(context.Background(), request, routing.Match{RouteID: "chat", Parser: "openai.chat_completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, request.Body)
+	if err := session.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.begins) != 1 || store.begins[0].Inbound == nil || len(store.commits) != 1 {
+		t.Fatalf("%d begins (inbound %v), %d commits", len(store.begins), len(store.begins) == 1 && store.begins[0].Inbound != nil, len(store.commits))
 	}
 }
 
-func TestManagerRefusesUnifiedOnAStoreThatCannotServeIt(t *testing.T) {
-	_, err := NewManagerWithOptions(noUnifiedStore{}, optionsCipher(t), nil, ModeStrict, nil, Options{WritePath: WritePathUnified, CommitRetries: 3})
-	if err == nil || !strings.Contains(err.Error(), "cannot serve audit.write_path unified") {
+func TestManagerRefusesAStoreThatCannotServeTheWritePath(t *testing.T) {
+	_, err := NewManagerWithOptions(noUnifiedStore{}, optionsCipher(t), nil, ModeStrict, nil, Options{CommitRetries: 3})
+	if err == nil || !strings.Contains(err.Error(), "cannot serve") {
 		t.Fatalf("error = %v", err)
-	}
-	if _, err := NewManagerWithOptions(noUnifiedStore{}, optionsCipher(t), nil, ModeStrict, nil, Options{WritePath: WritePathLegacy}); err != nil {
-		t.Fatalf("legacy refused: %v", err)
 	}
 }
 
 func TestManagerOptionsValidation(t *testing.T) {
 	for _, options := range []Options{
-		{WritePath: "fast"},
 		{CommitRetries: -1},
 		{CommitRetries: 6},
 		{StageBytes: 1<<20 - 1},
 		{StageBytes: 4 << 20, GlobalBytes: 2 << 20},
 	} {
-		if _, err := NewManagerWithOptions(&bufferStore{}, optionsCipher(t), nil, ModeAvailable, nil, options); err == nil {
+		if _, err := NewManagerWithOptions(&commitStore{}, optionsCipher(t), nil, ModeAvailable, nil, options); err == nil {
 			t.Fatalf("options %+v accepted", options)
 		}
 	}
 }
 
 func TestSetCommitRetriesClamps(t *testing.T) {
-	manager, err := NewManagerWithOptions(&bufferStore{}, optionsCipher(t), nil, ModeAvailable, nil, Options{CommitRetries: 2})
+	manager, err := NewManagerWithOptions(&commitStore{}, optionsCipher(t), nil, ModeAvailable, nil, Options{CommitRetries: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
