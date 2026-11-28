@@ -1,8 +1,6 @@
 package gemini
 
 import (
-	"sort"
-
 	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
@@ -73,76 +71,6 @@ func geminiParts(content map[string]any) []conversation.Part {
 		parts = append(parts, conversation.Unknown(part))
 	}
 	return parts
-}
-
-type candidateAggregate struct {
-	role      string
-	text      string
-	reasoning string
-	other     []conversation.Part
-	seenTools map[string]struct{}
-}
-
-func appendStreamConversation(events []base.SSEEvent, result *base.Result) {
-	candidates := make(map[int]*candidateAggregate)
-	for _, event := range events {
-		root, err := protocolutil.Object(event.Data)
-		if err != nil {
-			continue
-		}
-		for position, value := range protocolutil.Slice(root["candidates"]) {
-			candidate := protocolutil.Map(value)
-			index := position
-			if parsed := protocolutil.Int(candidate["index"]); parsed != nil {
-				index = *parsed
-			}
-			aggregate := candidates[index]
-			if aggregate == nil {
-				aggregate = &candidateAggregate{role: conversation.RoleAssistant, seenTools: make(map[string]struct{})}
-				candidates[index] = aggregate
-			}
-			content := protocolutil.Map(candidate["content"])
-			if role := normalizeRole(protocolutil.String(content["role"])); role != conversation.RoleUnknown {
-				aggregate.role = role
-			}
-			for _, part := range geminiParts(content) {
-				switch part.Type {
-				case conversation.PartText:
-					aggregate.text += part.Text
-				case conversation.PartReasoning:
-					aggregate.reasoning += part.Text
-				case conversation.PartToolCall, conversation.PartToolResult:
-					key := part.Type + "\x00" + part.ID + "\x00" + part.ToolCallID + "\x00" + part.Name + "\x00" + part.Arguments + "\x00" + part.Result
-					if _, seen := aggregate.seenTools[key]; !seen {
-						aggregate.seenTools[key] = struct{}{}
-						aggregate.other = append(aggregate.other, part)
-					}
-				default:
-					aggregate.other = append(aggregate.other, part)
-				}
-			}
-		}
-	}
-	indexes := make([]int, 0, len(candidates))
-	for index := range candidates {
-		indexes = append(indexes, index)
-	}
-	sort.Ints(indexes)
-	for _, index := range indexes {
-		aggregate := candidates[index]
-		parts := make([]conversation.Part, 0, 2+len(aggregate.other))
-		if aggregate.reasoning != "" {
-			parts = append(parts, conversation.Reasoning(aggregate.reasoning))
-		}
-		if aggregate.text != "" {
-			parts = append(parts, conversation.Text(aggregate.text))
-		}
-		parts = append(parts, aggregate.other...)
-		conversation.Ensure(&result.Conversation).Append(conversation.Message{
-			Role: aggregate.role, Phase: conversation.PhaseResponse,
-			Direction: conversation.DirectionUpstreamToClient, Content: parts,
-		})
-	}
 }
 
 func normalizeRole(role string) string {

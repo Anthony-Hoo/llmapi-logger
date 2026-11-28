@@ -10,3 +10,17 @@
 # checkout so the archives are identical whichever platform builds them.
 skill/** text eol=lf
 internal/agentdist/testdata/*.golden text eol=lf
+
+# Frozen output of the removed legacy write path (internal/legacyoracle).
+**/testdata/legacy-oracle/*.json text eol=lf
+
+# Frozen fixtures of the published archive format versions and the trial
+# version 0 fixture (internal/archivecli/frozen_test.go). They are compared
+# byte for byte and never regenerated: no line-ending conversion, and the
+# compressed and encrypted data files are binary.
+internal/archive/testdata/frozen/** -text
+internal/archive/testdata/trial/** -text
+internal/archive/testdata/frozen/**/*.gz binary
+internal/archive/testdata/frozen/**/*.enc binary
+internal/archive/testdata/trial/**/*.gz binary
+internal/archive/testdata/trial/**/*.enc binary

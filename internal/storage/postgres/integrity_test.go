@@ -385,3 +385,41 @@ func TestVerifyIntegrityPayloadsDetectsRowsChangedUnderAnIntactChain(t *testing.
 		})
 	}
 }
+
+// Retention deletes audits but never integrity events, so a store emptied by
+// retention still holds history that only the original key verifies.
+func TestHasAuditsCountsIntegrityEventsLeftByRetention(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	if has, err := store.HasAudits(ctx); err != nil || has {
+		t.Fatalf("empty store HasAudits = %v, %v; want false", has, err)
+	}
+	if err := store.EnableIntegrity(ctx, bytes.Repeat([]byte{0x5a}, security.KeySize)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginAudit(ctx, testAudit("audit-retained-event")); err != nil {
+		t.Fatal(err)
+	}
+	status := 200
+	if err := store.FinishAudit(ctx, AuditFinish{
+		AuditID: "audit-retained-event", EndedAtNS: 2, StatusCode: &status,
+		ForwardStatus: ForwardCompleted, CaptureStatus: CaptureComplete, ParseStatus: ParseSkipped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.DeleteExpired(ctx, 10, RetentionBatchLimit, RetentionBatchLimit)
+	if err != nil || result.DeletedAudits != 1 {
+		t.Fatalf("retention = %+v, %v; want one deleted audit", result, err)
+	}
+	var audits, events int
+	if err := store.readerDB.QueryRow(`SELECT (SELECT COUNT(*) FROM audit_records), (SELECT COUNT(*) FROM integrity_events)`).Scan(&audits, &events); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 0 || events == 0 {
+		t.Fatalf("after retention audits=%d events=%d; want no audits and some events", audits, events)
+	}
+	if has, err := store.HasAudits(ctx); err != nil || !has {
+		t.Fatalf("HasAudits with only integrity events = %v, %v; want true", has, err)
+	}
+}

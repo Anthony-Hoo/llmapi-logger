@@ -1,0 +1,4 @@
+{"source": "legacy capture write path at commit ce4e976",
+"values": {
+"headers": ["request_for_newapi_received_from_nginx header Accept 0 text/event-stream","request_for_newapi_received_from_nginx header Content-Type 0 application/json","request_for_newapi_received_from_nginx header User-Agent 0 harness-client/1.0","request_for_newapi_received_from_nginx header X-Trace 0 first","request_for_newapi_received_from_nginx header X-Trace 1 second","request_for_newapi_received_from_nginx header user-agent 0 harness-client/1.0"]
+}}

@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 )
 
 const parentCandidateLimit = 32
@@ -38,31 +40,24 @@ func saveParsedAudit(transaction dbTransaction, value ParsedAudit, signer *secur
 	}
 
 	graphVerified := false
+	var reconstructed []auditmodel.ObjectRef
 	if value.Turn != nil {
-		if err := persistPreparedTurn(transaction, *value.Turn); err != nil {
+		var err error
+		if reconstructed, err = persistTurn(transaction, *value.Turn); err != nil {
 			return err
 		}
 		graphVerified = true
 	}
 
-	discardRaw, err := shouldDiscardRawEvidence(transaction, value.Result, graphVerified)
+	decision, err := decideRawRetention(transaction, value, graphVerified)
 	if err != nil {
 		return err
 	}
-	retention := RetentionFull
-	if discardRaw {
-		retention = RetentionMetadata
-		if _, err := transaction.Exec(`DELETE FROM body_chunks WHERE audit_id = $1`, value.Result.AuditID); err != nil {
-			return fmt.Errorf("postgres writer: delete compacted raw chunks: %w", err)
-		}
+	if err := applySideRetention(transaction, value.Result.AuditID, decision.ReleaseRequest, StageRequestReceived, StageRequestSent); err != nil {
+		return err
 	}
-	if _, err := transaction.Exec(`
-UPDATE body_streams
-SET retention_state = $1,
-    stored_length = CASE WHEN $2 = 'metadata' THEN 0 ELSE stored_length END,
-    chunk_count = CASE WHEN $3 = 'metadata' THEN 0 ELSE chunk_count END
-WHERE audit_id = $4`, retention, retention, retention, value.Result.AuditID); err != nil {
-		return fmt.Errorf("postgres writer: update raw retention: %w", err)
+	if err := applySideRetention(transaction, value.Result.AuditID, decision.ReleaseResponse, StageResponseReceived, StageResponseSent); err != nil {
+		return err
 	}
 
 	parent, err := transaction.Exec(`
@@ -79,9 +74,15 @@ WHERE audit_id = $2
 		return err
 	}
 	if graphVerified {
-		// A nil cache means single-use: one write covers one audit, so there
-		// is no ancestor chain to amortize across.
-		payloadDigest, err := semanticPayloadDigest(context.Background(), transaction, nil, value.Result.AuditID)
+		// The digest starts from the request refs persistTurn has just
+		// rebuilt and verified in this transaction, so it does not walk the
+		// chain again. A full walk would verify the same rows and return the
+		// same refs: since then only body chunks, body streams and the parse
+		// status were written, and the walk's limits were checked against the
+		// whole chain when those refs were rebuilt.
+		cache := newIntegrityGraphCache()
+		cache.refs[value.Turn.AuditID] = reconstructed
+		payloadDigest, err := semanticPayloadDigest(context.Background(), transaction, cache, value.Result.AuditID)
 		if err != nil {
 			return err
 		}
@@ -157,35 +158,96 @@ ON CONFLICT(audit_id) DO UPDATE SET
 	return nil
 }
 
-func shouldDiscardRawEvidence(transaction dbTransaction, result ParsedResult, graphVerified bool) (bool, error) {
-	if result.Status != ParseOK || !graphVerified {
-		return false, nil
+// rawRetentionDecision is the rule saveParsedAudit applies. Tests replace it
+// to write rows the way an older binary did.
+var rawRetentionDecision = storage.DecideRawRetention
+
+// decideRawRetention reads the outcome of the audit and decides, per side,
+// whether its raw is released (storage.DecideRawRetention).
+func decideRawRetention(transaction dbTransaction, value ParsedAudit, graphVerified bool) (storage.RawRetention, error) {
+	result := value.Result
+	if !graphVerified || value.Turn == nil {
+		return rawRetentionDecision(storage.RawRetentionOutcome{ParseStatus: result.Status}), nil
 	}
-	var forwardStatus, captureStatus string
+	outcome := storage.RawRetentionOutcome{
+		ParseStatus:        result.Status,
+		TurnVerified:       graphVerified,
+		RequestNormalized:  value.Turn.RequestLayout != auditmodel.LayoutNone,
+		UpstreamErrorClass: result.UpstreamErrorClass,
+	}
 	var statusCode sql.NullInt64
+	var responseBodies int
 	if err := transaction.QueryRow(`
-SELECT forward_status, capture_status, status_code
+SELECT forward_status, capture_status, status_code,
+       (SELECT COUNT(*) FROM body_streams WHERE audit_id = $1 AND stage IN ($2, $3))
 FROM audit_records
-WHERE audit_id = $1`, result.AuditID).Scan(&forwardStatus, &captureStatus, &statusCode); err != nil {
-		return false, fmt.Errorf("postgres writer: read raw retention outcome: %w", err)
+WHERE audit_id = $1`, result.AuditID, StageResponseReceived, StageResponseSent).Scan(&outcome.ForwardStatus, &outcome.CaptureStatus, &statusCode, &responseBodies); err != nil {
+		return storage.RawRetention{}, fmt.Errorf("postgres writer: read raw retention outcome: %w", err)
 	}
-	return forwardStatus == ForwardCompleted && captureStatus == CaptureComplete && statusCode.Valid && statusCode.Int64 >= 200 && statusCode.Int64 < 400, nil
+	// A request-only turn: a response body was captured and the turn does not
+	// carry it.
+	outcome.ResponseOmitted = value.Turn.ResponseLayout == auditmodel.LayoutNone && responseBodies > 0
+	if statusCode.Valid {
+		outcome.StatusCode = &statusCode.Int64
+	}
+	var mergedStages int
+	if err := transaction.QueryRow(`
+SELECT COUNT(*)
+FROM body_streams
+WHERE audit_id = $1
+  AND ((stage = $2 AND source_stage = $2) OR (stage = $3 AND source_stage = $2))
+  AND state = 'complete'
+  AND (error_code IS NULL OR error_code <> 'body_stage_mismatch')`,
+		result.AuditID, StageRequestReceived, StageRequestSent).Scan(&mergedStages); err != nil {
+		return storage.RawRetention{}, fmt.Errorf("postgres writer: read request stage merge: %w", err)
+	}
+	outcome.RequestStagesMerged = mergedStages == 2
+	return rawRetentionDecision(outcome), nil
+}
+
+// applySideRetention sets the retention of one side's two stages. Releasing
+// deletes the side's chunks, which belong to whichever of its stages is the
+// source_stage (merging never crosses sides), and zeroes the stored counters.
+func applySideRetention(transaction dbTransaction, auditID string, release bool, first, second string) error {
+	retention := RetentionFull
+	if release {
+		retention = RetentionMetadata
+		if _, err := transaction.Exec(`DELETE FROM body_chunks WHERE audit_id = $1 AND stage IN ($2, $3)`, auditID, first, second); err != nil {
+			return fmt.Errorf("postgres writer: delete compacted raw chunks: %w", err)
+		}
+	}
+	if _, err := transaction.Exec(`
+UPDATE body_streams
+SET retention_state = $1,
+    stored_length = CASE WHEN $2 = 'metadata' THEN 0 ELSE stored_length END,
+    chunk_count = CASE WHEN $3 = 'metadata' THEN 0 ELSE chunk_count END
+WHERE audit_id = $4 AND stage IN ($5, $6)`, retention, retention, retention, auditID, first, second); err != nil {
+		return fmt.Errorf("postgres writer: update raw retention: %w", err)
+	}
+	return nil
 }
 
 func persistPreparedTurn(transaction dbTransaction, turn auditmodel.PreparedTurn) error {
+	_, err := persistTurn(transaction, turn)
+	return err
+}
+
+// persistTurn writes the turn and returns its request refs, rebuilt from the
+// stored rows and verified against the prepared sequence.
+func persistTurn(transaction dbTransaction, turn auditmodel.PreparedTurn) ([]auditmodel.ObjectRef, error) {
 	if err := insertBinaryObjects(transaction, turn); err != nil {
-		return err
+		return nil, err
 	}
 	if err := insertContentObjects(transaction, turn); err != nil {
-		return err
+		return nil, err
 	}
-	parent, err := chooseTurnParent(transaction, turn)
+	parent, chains, err := chooseTurnParent(transaction, turn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	conversationID, err := ensureConversation(transaction, turn, parent)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	base := []auditmodel.ObjectRef(nil)
 	parentTurnID := any(nil)
@@ -201,146 +263,542 @@ func persistPreparedTurn(transaction dbTransaction, turn auditmodel.PreparedTurn
 	}
 	operations := auditmodel.BuildDelta(base, turn.RequestRefs)
 	if err := insertTurn(transaction, turn, conversationID, parentTurnID, parentBase, linkReason, linkConfidence); err != nil {
-		return err
+		return nil, err
 	}
 	if err := insertContextOperations(transaction, turn.AuditID, operations); err != nil {
-		return err
+		return nil, err
 	}
 	if err := insertResponseItems(transaction, turn.AuditID, turn.ResponseRefs); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := transaction.Exec(`UPDATE conversations SET updated_at_ns = GREATEST(updated_at_ns, $1) WHERE conversation_id = $2`, turn.CreatedAtNS, conversationID); err != nil {
-		return fmt.Errorf("postgres writer: update conversation timestamp: %w", err)
+		return nil, fmt.Errorf("postgres writer: update conversation timestamp: %w", err)
 	}
 
-	memo := make(map[string][]auditmodel.ObjectRef)
-	reconstructed, err := loadRequestRefs(transaction, turn.AuditID, memo, make(map[string]bool))
+	reconstructed, err := reloadPersistedRequestRefs(transaction, turn, parent, chains, len(operations))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(reconstructed) != len(turn.RequestRefs) || !bytes.Equal(auditmodel.SequenceHash(reconstructed), turn.RequestSequenceHash) {
-		return localWriteError("postgres writer: persisted request sequence failed reconstruction")
+		return nil, localWriteError("postgres writer: persisted request sequence failed reconstruction")
 	}
 	response, err := loadResponseRefs(transaction, turn.AuditID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(response) != len(turn.ResponseRefs) || !bytes.Equal(auditmodel.SequenceHash(response), turn.ResponseSequenceHash) {
-		return localWriteError("postgres writer: persisted response sequence failed reconstruction")
+		return nil, localWriteError("postgres writer: persisted response sequence failed reconstruction")
 	}
-	return nil
+	return reconstructed, nil
+}
+
+// reloadPersistedRequestRefs rebuilds the just-written turn's request from
+// the stored rows. Its parent's chain was loaded and verified a moment ago in
+// this transaction and has not changed since, so the walk starts from the
+// parent's refs and reads only the new turn's rows. It first refuses what a
+// walk back to the root would have refused, in the same order and with the
+// same errors: more turns or reference rows on the whole chain than the
+// preload limits allow, or a turn with too many request items.
+func reloadPersistedRequestRefs(transaction dbTransaction, turn auditmodel.PreparedTurn, parent *turnParent, chains *candidateChains, operations int) ([]auditmodel.ObjectRef, error) {
+	full := func() ([]auditmodel.ObjectRef, error) {
+		return loadRequestRefs(transaction, turn.AuditID, make(map[string][]auditmodel.ObjectRef), make(map[string]bool))
+	}
+	if parent == nil || chains == nil {
+		return full()
+	}
+	frame, framed := chains.frames[parent.TurnID]
+	parentRefs, loaded := chains.refs[parent.TurnID]
+	if !framed || !loaded {
+		return full()
+	}
+	if frame.depth+1 > maxAncestorHeaders {
+		return nil, localWriteError("postgres writer: ancestor header limit exceeded")
+	}
+	if len(turn.RequestRefs) > maxAncestorReferenceRows {
+		return nil, localWriteError("postgres writer: reconstructed reference limit exceeded")
+	}
+	rows := frame.rows + operations
+	if parent.BaseKind == "post_turn" {
+		// The post_turn base is the parent's request followed by its response.
+		rows += len(parent.Base) - len(parentRefs)
+	}
+	if rows > maxAncestorReferenceRows {
+		return nil, localWriteError("postgres writer: ancestor reference limit exceeded")
+	}
+	return loadRequestRefs(transaction, turn.AuditID, map[string][]auditmodel.ObjectRef{parent.TurnID: parentRefs}, make(map[string]bool))
+}
+
+// Object writes send only what the database does not hold yet. Existence is
+// decided here, inside the writer transaction, and not taken from the
+// preparation lookup: that lookup runs on a read connection before the
+// transaction, and retention's object GC, which runs on this same writer, may
+// delete an unreferenced object in between. Because every object write and
+// every GC run share the one writer, what these batched reads see cannot
+// change before commit, so no row lock is needed.
+//
+// The reads select key and identity columns only, never data_enc or
+// value_enc, and existing rows are never written: the ciphertext the lookup
+// already authenticated stays in the database, and every digest computed
+// over stored rows keeps its input.
+
+// objectInsertBatchBytes caps the ciphertext one multi-row object insert
+// carries, so a turn with many large objects does not build one huge
+// statement. A single object larger than the cap is sent alone.
+const objectInsertBatchBytes = 4 << 20
+
+type binaryIdentity struct {
+	mediaType       string
+	plaintextLength int64
+}
+
+type contentIdentity struct {
+	semanticHash    []byte
+	kind            string
+	plaintextLength int64
+}
+
+type binaryRefKey struct{ objectHash, jsonPointer, binaryHash string }
+
+type binaryRefIdentity struct{ mediaType, encoding string }
+
+type externalRefKey struct{ objectHash, jsonPointer, refKind string }
+
+type ownedBinaryRef struct {
+	objectHash []byte
+	reference  auditmodel.BinaryReference
+}
+
+type ownedExternalRef struct {
+	objectHash []byte
+	reference  auditmodel.ExternalReference
 }
 
 func insertBinaryObjects(transaction dbTransaction, turn auditmodel.PreparedTurn) error {
-	for _, object := range turn.Binaries {
-		if _, err := transaction.Exec(`
+	missing, err := checkBinaryObjects(transaction, turn.Binaries)
+	if err != nil {
+		return err
+	}
+	return forEachInsertBatch(len(missing), func(index int) int { return len(missing[index].DataEnc) }, func(start, end int) error {
+		batch := missing[start:end]
+		values := make([]string, 0, len(batch))
+		arguments := make([]any, 0, len(batch)*7)
+		for index, object := range batch {
+			values = append(values, "("+placeholders(7, index*7)+")")
+			arguments = append(arguments, object.Hash, object.MediaType, object.Compression, object.PlaintextLength,
+				object.EncodedLength, object.DataEnc, turn.CreatedAtNS)
+		}
+		result, err := transaction.Exec(`
 INSERT INTO binary_objects (
     binary_hash, media_type, compression, plaintext_length,
     encoded_length, data_enc, created_at_ns
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT(binary_hash) DO NOTHING`,
-			object.Hash, object.MediaType, object.Compression, object.PlaintextLength,
-			object.EncodedLength, object.DataEnc, turn.CreatedAtNS,
-		); err != nil {
+) VALUES `+strings.Join(values, ",")+`
+ON CONFLICT(binary_hash) DO NOTHING`, arguments...)
+		if err != nil {
 			return fmt.Errorf("postgres writer: insert binary object: %w", err)
 		}
-		var mediaType string
-		var plaintextLength int64
+		return verifyShortInsert(result, len(batch), "binary object", func() (int, error) {
+			stillMissing, err := checkBinaryObjects(transaction, batch)
+			return len(stillMissing), err
+		})
+	})
+}
+
+// checkBinaryObjects compares every given object with the stored row of the
+// same hash and returns the objects no row exists for, each hash once.
+func checkBinaryObjects(transaction dbTransaction, objects []auditmodel.BinaryObject) ([]auditmodel.BinaryObject, error) {
+	hashes := make([][]byte, 0, len(objects))
+	for _, object := range objects {
+		hashes = append(hashes, object.Hash)
+	}
+	stored := make(map[string]binaryIdentity, len(objects))
+	err := forEachHashBatch(hashes, func(arguments []any) error {
+		rows, err := transaction.Query(`
+SELECT binary_hash, media_type, plaintext_length
+FROM binary_objects
+WHERE binary_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: read binary object identity: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var hash []byte
+			var identity binaryIdentity
+			if err := rows.Scan(&hash, &identity.mediaType, &identity.plaintextLength); err != nil {
+				return fmt.Errorf("postgres writer: read binary object identity: %w", err)
+			}
+			stored[string(hash)] = identity
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("postgres writer: read binary object identity: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var missing []auditmodel.BinaryObject
+	for _, object := range objects {
+		identity, exists := stored[string(object.Hash)]
+		if !exists {
+			// A repeated hash in the same turn is then checked against the
+			// first occurrence, as the row it is about to become.
+			stored[string(object.Hash)] = binaryIdentity{mediaType: object.MediaType, plaintextLength: object.PlaintextLength}
+			missing = append(missing, object)
+			continue
+		}
 		// Only properties of the stored plaintext take part in the identity
 		// check. compression and encoded_length describe how the existing row
 		// was encoded, not what it holds: the codec picks them per write, so an
 		// encoder that emits a different number of bytes for the same input —
 		// a gzip implementation change across a toolchain upgrade, say — makes
 		// them disagree with a row written by an earlier build. Treating that
-		// as corruption would reject every turn reusing such an object, and the
-		// insert above is DO NOTHING, so the row keeps the encoding its own
+		// as corruption would reject every turn reusing such an object, and an
+		// existing row is never written, so it keeps the encoding its own
 		// data_enc was produced with and stays self-consistent either way.
-		if err := transaction.QueryRow(`
-SELECT media_type, plaintext_length
-FROM binary_objects
-WHERE binary_hash = $1`, object.Hash).Scan(&mediaType, &plaintextLength); err != nil {
-			return fmt.Errorf("postgres writer: read binary object identity: %w", err)
+		if identity.mediaType != object.MediaType || identity.plaintextLength != object.PlaintextLength {
+			return nil, storedObjectIntegrityError("postgres writer: binary object hash collision or corruption")
 		}
-		if mediaType != object.MediaType || plaintextLength != object.PlaintextLength {
-			return storedObjectIntegrityError("postgres writer: binary object hash collision or corruption")
+	}
+	return missing, nil
+}
+
+func insertContentObjects(transaction dbTransaction, turn auditmodel.PreparedTurn) error {
+	missing, err := checkContentObjects(transaction, turn.Objects)
+	if err != nil {
+		return err
+	}
+	err = forEachInsertBatch(len(missing), func(index int) int { return len(missing[index].DataEnc) }, func(start, end int) error {
+		batch := missing[start:end]
+		values := make([]string, 0, len(batch))
+		arguments := make([]any, 0, len(batch)*8)
+		for index, object := range batch {
+			values = append(values, "("+placeholders(8, index*8)+")")
+			arguments = append(arguments, object.Hash, object.SemanticHash, object.Kind, object.Compression,
+				object.PlaintextLength, object.EncodedLength, object.DataEnc, turn.CreatedAtNS)
+		}
+		result, err := transaction.Exec(`
+INSERT INTO content_objects (
+    object_hash, semantic_hash, kind, compression, plaintext_length,
+    encoded_length, data_enc, created_at_ns
+) VALUES `+strings.Join(values, ",")+`
+ON CONFLICT(object_hash) DO NOTHING`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: insert content object: %w", err)
+		}
+		return verifyShortInsert(result, len(batch), "content object", func() (int, error) {
+			stillMissing, err := checkContentObjects(transaction, batch)
+			return len(stillMissing), err
+		})
+	})
+	if err != nil {
+		return err
+	}
+
+	// A new object cannot have reference rows yet, since both reference
+	// tables point at content_objects. Only objects that already existed are
+	// looked up; any of their reference rows found missing is written again,
+	// which repairs a row lost on its own.
+	inserted := make(map[string]bool, len(missing))
+	for _, object := range missing {
+		inserted[string(object.Hash)] = true
+	}
+	var binaryRefs, storedBinaryRefs []ownedBinaryRef
+	var externalRefs, storedExternalRefs []ownedExternalRef
+	for _, object := range turn.Objects {
+		for _, reference := range object.BinaryRefs {
+			owned := ownedBinaryRef{objectHash: object.Hash, reference: reference}
+			binaryRefs = append(binaryRefs, owned)
+			if !inserted[string(object.Hash)] {
+				storedBinaryRefs = append(storedBinaryRefs, owned)
+			}
+		}
+		for _, reference := range object.ExternalRefs {
+			owned := ownedExternalRef{objectHash: object.Hash, reference: reference}
+			externalRefs = append(externalRefs, owned)
+			if !inserted[string(object.Hash)] {
+				storedExternalRefs = append(storedExternalRefs, owned)
+			}
+		}
+	}
+	if err := insertBinaryReferences(transaction, binaryRefs, storedBinaryRefs); err != nil {
+		return err
+	}
+	return insertExternalReferences(transaction, externalRefs, storedExternalRefs)
+}
+
+// checkContentObjects compares every given object with the stored row of the
+// same hash and returns the objects no row exists for, each hash once.
+func checkContentObjects(transaction dbTransaction, objects []auditmodel.ContentObject) ([]auditmodel.ContentObject, error) {
+	hashes := make([][]byte, 0, len(objects))
+	for _, object := range objects {
+		hashes = append(hashes, object.Hash)
+	}
+	stored := make(map[string]contentIdentity, len(objects))
+	err := forEachHashBatch(hashes, func(arguments []any) error {
+		rows, err := transaction.Query(`
+SELECT object_hash, semantic_hash, kind, plaintext_length
+FROM content_objects
+WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: read content object identity: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var hash []byte
+			var identity contentIdentity
+			if err := rows.Scan(&hash, &identity.semanticHash, &identity.kind, &identity.plaintextLength); err != nil {
+				return fmt.Errorf("postgres writer: read content object identity: %w", err)
+			}
+			stored[string(hash)] = identity
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("postgres writer: read content object identity: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var missing []auditmodel.ContentObject
+	for _, object := range objects {
+		identity, exists := stored[string(object.Hash)]
+		if !exists {
+			stored[string(object.Hash)] = contentIdentity{semanticHash: object.SemanticHash, kind: object.Kind, plaintextLength: object.PlaintextLength}
+			missing = append(missing, object)
+			continue
+		}
+		// compression and encoded_length are left out for the reason given in
+		// checkBinaryObjects.
+		if !bytes.Equal(identity.semanticHash, object.SemanticHash) || identity.kind != object.Kind ||
+			identity.plaintextLength != object.PlaintextLength {
+			return nil, storedObjectIntegrityError("postgres writer: content object hash collision or corruption")
+		}
+	}
+	return missing, nil
+}
+
+// insertBinaryReferences writes the references in all that have no row yet.
+// Only the owners of stored are looked up; the rest belong to objects this
+// transaction has just inserted.
+func insertBinaryReferences(transaction dbTransaction, all, stored []ownedBinaryRef) error {
+	missing, err := checkBinaryReferences(transaction, all, stored)
+	if err != nil {
+		return err
+	}
+	return forEachInsertBatch(len(missing), nil, func(start, end int) error {
+		batch := missing[start:end]
+		values := make([]string, 0, len(batch))
+		arguments := make([]any, 0, len(batch)*5)
+		for index, owned := range batch {
+			values = append(values, "("+placeholders(5, index*5)+")")
+			arguments = append(arguments, owned.objectHash, owned.reference.JSONPointer, owned.reference.BinaryHash,
+				owned.reference.MediaType, owned.reference.Encoding)
+		}
+		result, err := transaction.Exec(`
+INSERT INTO content_binary_refs (
+    object_hash, json_pointer, binary_hash, media_type, encoding
+) VALUES `+strings.Join(values, ",")+`
+ON CONFLICT(object_hash, json_pointer, binary_hash) DO NOTHING`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: insert content binary ref: %w", err)
+		}
+		return verifyShortInsert(result, len(batch), "content binary ref", func() (int, error) {
+			stillMissing, err := checkBinaryReferences(transaction, batch, batch)
+			return len(stillMissing), err
+		})
+	})
+}
+
+func checkBinaryReferences(transaction dbTransaction, all, stored []ownedBinaryRef) ([]ownedBinaryRef, error) {
+	owners := make([][]byte, 0, len(stored))
+	for _, owned := range stored {
+		owners = append(owners, owned.objectHash)
+	}
+	rowsByKey := make(map[binaryRefKey]binaryRefIdentity, len(all))
+	err := forEachHashBatch(owners, func(arguments []any) error {
+		rows, err := transaction.Query(`
+SELECT object_hash, json_pointer, binary_hash, media_type, encoding
+FROM content_binary_refs
+WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: read binary reference identity: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var objectHash, binaryHash []byte
+			var jsonPointer string
+			var identity binaryRefIdentity
+			if err := rows.Scan(&objectHash, &jsonPointer, &binaryHash, &identity.mediaType, &identity.encoding); err != nil {
+				return fmt.Errorf("postgres writer: read binary reference identity: %w", err)
+			}
+			rowsByKey[binaryRefKey{string(objectHash), jsonPointer, string(binaryHash)}] = identity
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("postgres writer: read binary reference identity: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var missing []ownedBinaryRef
+	for _, owned := range all {
+		key := binaryRefKey{string(owned.objectHash), owned.reference.JSONPointer, string(owned.reference.BinaryHash)}
+		identity, exists := rowsByKey[key]
+		if !exists {
+			rowsByKey[key] = binaryRefIdentity{mediaType: owned.reference.MediaType, encoding: owned.reference.Encoding}
+			missing = append(missing, owned)
+			continue
+		}
+		if identity.mediaType != owned.reference.MediaType || identity.encoding != owned.reference.Encoding {
+			return nil, storedObjectIntegrityError("postgres writer: content binary reference collision or corruption")
+		}
+	}
+	return missing, nil
+}
+
+// insertExternalReferences is insertBinaryReferences for external references.
+// An existing row keeps its value_enc: the identity is value_hash, and the
+// ciphertext differs per seal only by its nonce.
+func insertExternalReferences(transaction dbTransaction, all, stored []ownedExternalRef) error {
+	missing, err := checkExternalReferences(transaction, all, stored)
+	if err != nil {
+		return err
+	}
+	return forEachInsertBatch(len(missing), func(index int) int { return len(missing[index].reference.ValueEnc) }, func(start, end int) error {
+		batch := missing[start:end]
+		values := make([]string, 0, len(batch))
+		arguments := make([]any, 0, len(batch)*5)
+		for index, owned := range batch {
+			values = append(values, "("+placeholders(5, index*5)+")")
+			arguments = append(arguments, owned.objectHash, owned.reference.JSONPointer, owned.reference.Kind,
+				owned.reference.ValueHash, owned.reference.ValueEnc)
+		}
+		result, err := transaction.Exec(`
+INSERT INTO content_external_refs (
+    object_hash, json_pointer, ref_kind, value_hash, value_enc
+) VALUES `+strings.Join(values, ",")+`
+ON CONFLICT(object_hash, json_pointer, ref_kind) DO NOTHING`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: insert content external ref: %w", err)
+		}
+		return verifyShortInsert(result, len(batch), "content external ref", func() (int, error) {
+			stillMissing, err := checkExternalReferences(transaction, batch, batch)
+			return len(stillMissing), err
+		})
+	})
+}
+
+func checkExternalReferences(transaction dbTransaction, all, stored []ownedExternalRef) ([]ownedExternalRef, error) {
+	owners := make([][]byte, 0, len(stored))
+	for _, owned := range stored {
+		owners = append(owners, owned.objectHash)
+	}
+	rowsByKey := make(map[externalRefKey][]byte, len(all))
+	err := forEachHashBatch(owners, func(arguments []any) error {
+		rows, err := transaction.Query(`
+SELECT object_hash, json_pointer, ref_kind, value_hash
+FROM content_external_refs
+WHERE object_hash IN (`+placeholders(len(arguments))+`)`, arguments...)
+		if err != nil {
+			return fmt.Errorf("postgres writer: read external reference identity: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var objectHash, valueHash []byte
+			var jsonPointer, refKind string
+			if err := rows.Scan(&objectHash, &jsonPointer, &refKind, &valueHash); err != nil {
+				return fmt.Errorf("postgres writer: read external reference identity: %w", err)
+			}
+			rowsByKey[externalRefKey{string(objectHash), jsonPointer, refKind}] = valueHash
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("postgres writer: read external reference identity: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var missing []ownedExternalRef
+	for _, owned := range all {
+		key := externalRefKey{string(owned.objectHash), owned.reference.JSONPointer, owned.reference.Kind}
+		valueHash, exists := rowsByKey[key]
+		if !exists {
+			rowsByKey[key] = owned.reference.ValueHash
+			missing = append(missing, owned)
+			continue
+		}
+		if !bytes.Equal(valueHash, owned.reference.ValueHash) {
+			return nil, storedObjectIntegrityError("postgres writer: content external reference collision or corruption")
+		}
+	}
+	return missing, nil
+}
+
+// forEachHashBatch runs one query per graphHashQueryBatch distinct hashes, which
+// keeps each statement far below PostgreSQL's 65535 bind parameters.
+func forEachHashBatch(hashes [][]byte, run func([]any) error) error {
+	seen := make(map[string]bool, len(hashes))
+	distinct := make([]any, 0, len(hashes))
+	for _, hash := range hashes {
+		if seen[string(hash)] {
+			continue
+		}
+		seen[string(hash)] = true
+		distinct = append(distinct, hash)
+	}
+	for start := 0; start < len(distinct); start += graphHashQueryBatch {
+		if err := run(distinct[start:min(start+graphHashQueryBatch, len(distinct))]); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func insertContentObjects(transaction dbTransaction, turn auditmodel.PreparedTurn) error {
-	for _, object := range turn.Objects {
-		if _, err := transaction.Exec(`
-INSERT INTO content_objects (
-    object_hash, semantic_hash, kind, compression, plaintext_length,
-    encoded_length, data_enc, created_at_ns
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT(object_hash) DO NOTHING`,
-			object.Hash, object.SemanticHash, object.Kind, object.Compression,
-			object.PlaintextLength, object.EncodedLength, object.DataEnc, turn.CreatedAtNS,
-		); err != nil {
-			return fmt.Errorf("postgres writer: insert content object: %w", err)
+// forEachInsertBatch splits count rows into multi-row inserts of at most
+// graphHashQueryBatch rows (at most 8 bind parameters each) and, when size is
+// given, at most objectInsertBatchBytes of payload unless one row alone is
+// larger.
+func forEachInsertBatch(count int, size func(int) int, run func(start, end int) error) error {
+	for start := 0; start < count; {
+		end, total := start, 0
+		for end < count && end-start < graphHashQueryBatch {
+			if size != nil {
+				rowSize := size(end)
+				if end > start && total+rowSize > objectInsertBatchBytes {
+					break
+				}
+				total += rowSize
+			}
+			end++
 		}
-		var semanticHash []byte
-		var kind string
-		var plaintextLength int64
-		// compression and encoded_length are left out for the reason given in
-		// insertBinaryObjects.
-		if err := transaction.QueryRow(`
-SELECT semantic_hash, kind, plaintext_length
-FROM content_objects WHERE object_hash = $1`, object.Hash).Scan(&semanticHash, &kind, &plaintextLength); err != nil {
-			return fmt.Errorf("postgres writer: read content object identity: %w", err)
+		if err := run(start, end); err != nil {
+			return err
 		}
-		if !bytes.Equal(semanticHash, object.SemanticHash) || kind != object.Kind ||
-			plaintextLength != object.PlaintextLength {
-			return storedObjectIntegrityError("postgres writer: content object hash collision or corruption")
-		}
-		for _, reference := range object.BinaryRefs {
-			if _, err := transaction.Exec(`
-INSERT INTO content_binary_refs (
-    object_hash, json_pointer, binary_hash, media_type, encoding
-) VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT(object_hash, json_pointer, binary_hash) DO NOTHING`,
-				object.Hash, reference.JSONPointer, reference.BinaryHash, reference.MediaType, reference.Encoding,
-			); err != nil {
-				return fmt.Errorf("postgres writer: insert content binary ref: %w", err)
-			}
-			var mediaType, encoding string
-			if err := transaction.QueryRow(`
-SELECT media_type, encoding
-FROM content_binary_refs
-WHERE object_hash = $1 AND json_pointer = $2 AND binary_hash = $3`,
-				object.Hash, reference.JSONPointer, reference.BinaryHash,
-			).Scan(&mediaType, &encoding); err != nil {
-				return fmt.Errorf("postgres writer: read binary reference identity: %w", err)
-			}
-			if mediaType != reference.MediaType || encoding != reference.Encoding {
-				return storedObjectIntegrityError("postgres writer: content binary reference collision or corruption")
-			}
-		}
-		for _, reference := range object.ExternalRefs {
-			if _, err := transaction.Exec(`
-INSERT INTO content_external_refs (
-    object_hash, json_pointer, ref_kind, value_hash, value_enc
-) VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT(object_hash, json_pointer, ref_kind) DO NOTHING`,
-				object.Hash, reference.JSONPointer, reference.Kind, reference.ValueHash, reference.ValueEnc,
-			); err != nil {
-				return fmt.Errorf("postgres writer: insert content external ref: %w", err)
-			}
-			var valueHash []byte
-			if err := transaction.QueryRow(`
-SELECT value_hash
-FROM content_external_refs
-WHERE object_hash = $1 AND json_pointer = $2 AND ref_kind = $3`,
-				object.Hash, reference.JSONPointer, reference.Kind,
-			).Scan(&valueHash); err != nil {
-				return fmt.Errorf("postgres writer: read external reference identity: %w", err)
-			}
-			if !bytes.Equal(valueHash, reference.ValueHash) {
-				return storedObjectIntegrityError("postgres writer: content external reference collision or corruption")
-			}
-		}
+		start = end
+	}
+	return nil
+}
+
+// verifyShortInsert handles an insert that stored fewer rows than it sent.
+// The rows were missing when this transaction looked, so a conflict means a
+// row appeared in between; it is accepted only after the same identity check
+// an existing row gets, and a row that is still absent fails the write.
+func verifyShortInsert(result sql.Result, sent int, what string, recheck func() (int, error)) error {
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres writer: count inserted %s rows: %w", what, err)
+	}
+	if inserted == int64(sent) {
+		return nil
+	}
+	stillMissing, err := recheck()
+	if err != nil {
+		return err
+	}
+	if stillMissing != 0 {
+		return localWriteError("postgres writer: " + what + " insert did not store every row")
 	}
 	return nil
 }
@@ -434,14 +892,17 @@ INSERT INTO turn_response_items (
 	return nil
 }
 
-func chooseTurnParent(transaction dbTransaction, turn auditmodel.PreparedTurn) (*turnParent, error) {
+// chooseTurnParent also returns the parent chains it loaded, for the writes
+// that follow in the same transaction; they are nil when the candidates were
+// evaluated without them.
+func chooseTurnParent(transaction dbTransaction, turn auditmodel.PreparedTurn) (*turnParent, *candidateChains, error) {
 	if turn.PreviousResponseID != "" {
 		candidate, err := loadCandidateByResponseID(transaction, turn.Protocol, turn.PreviousResponseID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
+			return nil, nil, err
 		}
 		if candidate != nil {
-			return evaluateCandidate(transaction, turn, *candidate, "previous_response_id", 100, linkForced, make(map[string][]auditmodel.ObjectRef))
+			return evaluateForced(transaction, turn, *candidate, "previous_response_id", 100)
 		}
 	}
 	if len(turn.ConversationKeyHash) == 32 {
@@ -453,16 +914,16 @@ WHERE c.protocol = $1 AND c.key_hash = $2 AND t.created_at_ns < $3
 ORDER BY t.created_at_ns DESC, t.turn_id DESC
 LIMIT $4`, turn.Protocol, turn.ConversationKeyHash, turn.CreatedAtNS, parentCandidateLimit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// A provider-side conversation is one chain whose requests carry only
 		// the new input, so content cannot confirm the link; follow the latest
 		// earlier turn as the provider does.
 		if turn.ServerManagedContext {
 			if len(candidates) == 0 {
-				return nil, nil
+				return nil, nil, nil
 			}
-			return evaluateCandidate(transaction, turn, candidates[0], "conversation_key", 95, linkForced, make(map[string][]auditmodel.ObjectRef))
+			return evaluateForced(transaction, turn, candidates[0], "conversation_key", 95)
 		}
 		// A conversation key groups a client session, not one agent: Codex
 		// sends the root session id as prompt_cache_key for the parent and
@@ -476,17 +937,61 @@ LIMIT $4`, turn.Protocol, turn.ConversationKeyHash, turn.CreatedAtNS, parentCand
 		return bestTurnParent(transaction, turn, candidates, linkConversationKey)
 	}
 
-	candidates, err := listTurnCandidates(transaction, `
+	candidates, err := listKeylessCandidates(transaction, turn.Protocol, turn.CreatedAtNS)
+	if err != nil {
+		return nil, nil, err
+	}
+	return bestTurnParent(transaction, turn, candidates, linkInferred)
+}
+
+// listKeylessCandidates returns the newest turns of protocol created before
+// createdAt, for a turn without a conversation key.
+func listKeylessCandidates(transaction dbTransaction, protocol string, createdAt int64) ([]turnCandidate, error) {
+	if query, ok := keylessCandidateQueries[protocol]; ok {
+		return listTurnCandidates(transaction, query, createdAt, parentCandidateLimit)
+	}
+	return listTurnCandidates(transaction, keylessCandidateQuery, protocol, createdAt, parentCandidateLimit)
+}
+
+// keylessCandidateQuery is the protocol-wide parent search of a turn without
+// a conversation key: the newest earlier turns of the protocol, walked along
+// turns_created_idx.
+const keylessCandidateQuery = `
 SELECT t.turn_id, t.conversation_id
 FROM turns AS t
 JOIN conversations AS c ON c.conversation_id = t.conversation_id
 WHERE c.protocol = $1 AND t.created_at_ns < $2
 ORDER BY t.created_at_ns DESC, t.turn_id DESC
-LIMIT $3`, turn.Protocol, turn.CreatedAtNS, parentCandidateLimit)
-	if err != nil {
-		return nil, err
+LIMIT $3`
+
+// keylessCandidateQueries holds the same search with the protocol written
+// into the text, one statement per protocol the parsers produce. pgx caches
+// prepared statements, and a generic plan of the parameterised form does not
+// know the protocol: for a protocol with fewer than 32 earlier turns it walks
+// the whole index, where a plan that knows the protocol is rare starts from
+// its conversations instead. The literals are these compile-time constants,
+// never the turn's value, which is only compared against them; any other
+// protocol uses the parameterised form. Rows and order are the same.
+var keylessCandidateQueries = func() map[string]string {
+	const template = `
+SELECT t.turn_id, t.conversation_id
+FROM turns AS t
+JOIN conversations AS c ON c.conversation_id = t.conversation_id
+WHERE c.protocol = '%s' AND t.created_at_ns < $1
+ORDER BY t.created_at_ns DESC, t.turn_id DESC
+LIMIT $2`
+	queries := map[string]string{}
+	for _, protocol := range []string{"openai", "anthropic", "gemini"} {
+		queries[protocol] = fmt.Sprintf(template, protocol)
 	}
-	return bestTurnParent(transaction, turn, candidates, linkInferred)
+	return queries
+}()
+
+// evaluateForced evaluates the one candidate a forced link names.
+func evaluateForced(transaction dbTransaction, turn auditmodel.PreparedTurn, candidate turnCandidate, reason string, confidence int) (*turnParent, *candidateChains, error) {
+	chains := loadCandidateChains(transaction, []turnCandidate{candidate})
+	parent, err := evaluateCandidate(transaction, turn, candidate, reason, confidence, linkForced, chains.memo())
+	return parent, chains, err
 }
 
 type turnCandidate struct{ turnID, conversationID string }
@@ -525,21 +1030,24 @@ func listTurnCandidates(transaction dbTransaction, query string, arguments ...an
 
 // bestTurnParent returns the accepted candidate with the lowest delta cost.
 // Candidates arrive newest first, so ties go to the most recent turn.
-func bestTurnParent(transaction dbTransaction, turn auditmodel.PreparedTurn, candidates []turnCandidate, mode linkMode) (*turnParent, error) {
-	// Candidates usually share most of their ancestry, so one memo spares each
-	// of them a full walk back to its root.
-	memo := make(map[string][]auditmodel.ObjectRef)
+func bestTurnParent(transaction dbTransaction, turn auditmodel.PreparedTurn, candidates []turnCandidate, mode linkMode) (*turnParent, *candidateChains, error) {
+	// The candidates usually lie on one chain. loadCandidateChains walks it
+	// once, oldest candidate first, and the memo then answers every
+	// candidate without a walk. The evaluation order and the comparison are
+	// unchanged.
+	chains := loadCandidateChains(transaction, candidates)
+	memo := chains.memo()
 	var best *turnParent
 	for _, candidate := range candidates {
 		evaluated, err := evaluateCandidate(transaction, turn, candidate, "", 0, mode, memo)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if evaluated != nil && (best == nil || evaluated.cost < best.cost) {
 			best = evaluated
 		}
 	}
-	return best, nil
+	return best, chains, nil
 }
 
 func loadCandidateByResponseID(transaction dbTransaction, protocol, responseID string) (*turnCandidate, error) {
@@ -723,19 +1231,23 @@ func loadRequestRefs(transaction dbTransaction, turnID string, memo map[string][
 	}
 	for i := len(path) - 1; i >= 0; i-- {
 		frame := path[i]
-		base := result
-		if frame.header.ParentBase == "post_turn" {
-			response := responsesByTurn[*frame.header.ParentTurnID]
-			// Do not append into a memoized ancestor's backing array.
-			base = append(append([]auditmodel.ObjectRef(nil), base...), response...)
+		var response []auditmodel.ObjectRef
+		if frame.header.ParentTurnID != nil {
+			response = responsesByTurn[*frame.header.ParentTurnID]
 		}
-		operations := operationsByTurn[frame.id]
-		result, err = applyImmutableRefs(base, operations)
+		// The parent bases were checked during the walk above. A post_turn base
+		// is a fresh slice, so a memoized ancestor's backing array is never
+		// appended into.
+		base, err := auditmodel.ContextBase(frame.header.ParentTurnID != nil, frame.header.ParentBase, result, response)
+		if err != nil {
+			return nil, localWriteError("postgres writer: invalid turn parent base")
+		}
+		result, err = auditmodel.ApplyContext(base, operationsByTurn[frame.id], frame.header.RequestItemCount, frame.header.RequestSequenceHash)
+		if errors.Is(err, auditmodel.ErrContextSequence) {
+			return nil, localWriteError("postgres writer: stored turn sequence hash mismatch")
+		}
 		if err != nil {
 			return nil, err
-		}
-		if len(result) != frame.header.RequestItemCount || !bytes.Equal(auditmodel.SequenceHash(result), frame.header.RequestSequenceHash) {
-			return nil, localWriteError("postgres writer: stored turn sequence hash mismatch")
 		}
 	}
 	// Bound retained endpoints by both count and total references. All memoized
@@ -744,41 +1256,19 @@ func loadRequestRefs(transaction dbTransaction, turnID string, memo map[string][
 	for _, refs := range memo {
 		total += len(refs)
 	}
-	if len(memo) >= 32 || total > 65536 {
+	if len(memo) >= memoEndpointLimit || total > memoReferenceLimit {
 		clear(memo)
 	}
-	if len(result) <= 65536 {
+	if len(result) <= memoReferenceLimit {
 		memo[turnID] = result
 	}
 	return cloneObjectRefs(result), nil
 }
 
+// applyImmutableRefs is kept for the candidate preload, which checks the
+// sequence hash itself.
 func applyImmutableRefs(base []auditmodel.ObjectRef, operations []auditmodel.ContextOp) ([]auditmodel.ObjectRef, error) {
-	result := make([]auditmodel.ObjectRef, 0, len(base)+len(operations))
-	position := 0
-	for _, op := range operations {
-		switch op.Operation {
-		case auditmodel.OperationRetain, auditmodel.OperationDelete:
-			if op.Count <= 0 || op.Count > len(base)-position || op.Ref != nil {
-				return nil, auditmodel.ErrReconstruction
-			}
-			if op.Operation == auditmodel.OperationRetain {
-				result = append(result, base[position:position+op.Count]...)
-			}
-			position += op.Count
-		case auditmodel.OperationInsert:
-			if op.Count != 1 || op.Ref == nil || len(op.Ref.ObjectHash) == 0 || op.Ref.Slot == "" {
-				return nil, auditmodel.ErrReconstruction
-			}
-			result = append(result, *op.Ref)
-		default:
-			return nil, auditmodel.ErrReconstruction
-		}
-	}
-	if position != len(base) {
-		return nil, auditmodel.ErrReconstruction
-	}
-	return result, nil
+	return auditmodel.ApplyImmutableDelta(base, operations)
 }
 
 func loadContextOperations(transaction dbTransaction, turnID string) ([]auditmodel.ContextOp, error) {

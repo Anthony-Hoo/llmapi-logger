@@ -2,18 +2,15 @@ package audit
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"llmapi-logger/internal/bodycodec"
+	"llmapi-logger/internal/headerblock"
 	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -40,6 +37,23 @@ type stageCapture struct {
 	body            *bodyCapture
 	faulted         bool
 	errorCode       string
+
+	// Write bookkeeping (design B.1): what earlier writes took.
+	// groups are the sealed header groups in capture order.
+	groups         []headerGroup
+	rowWritten     bool
+	bodyRowWritten bool
+	// merged: a checkpoint wrote this duplicate's body row pointing at its
+	// source, without chunks of its own.
+	merged bool
+	// spillWritten: the checkpoint of the stage's first spill to staging was
+	// accepted (design F.3).
+	spillWritten bool
+	// Capture version 2: the Header fields snapshotted at stage start and the
+	// Trailer fields when they arrived (hasTrailers).
+	headerFields  []headerblock.Field
+	trailerFields []headerblock.Field
+	hasTrailers   bool
 }
 
 // TerminalSummary is the immutable, non-sensitive request outcome available
@@ -92,6 +106,28 @@ type Session struct {
 
 	finishOnce sync.Once
 	finishErr  error
+
+	// manager is the session's manager: budgets, stager, capture version.
+	manager *Manager
+	// identity is what the parser needs of the audit row (Protocol,
+	// ParserName, Path), for the hand-over.
+	identity storage.ParserAudit
+	// memoryHeld is the plaintext this session holds in the global budget.
+	memoryHeld int64
+	// requestSentEnded: checkpoint 1's trigger has fired (or was skipped).
+	requestSentEnded bool
+	// committing is set when Finish builds the commit; no checkpoint follows.
+	committing bool
+	// inboundNotStored: BeginAudit kept the start row without the inbound
+	// stage (storage.ErrInboundStageNotStored).
+	inboundNotStored bool
+	// writtenBlock is the shape of the last header block an accepted write
+	// carried (capture version 2); blockWritten is false before the first.
+	writtenBlock blockShape
+	blockWritten bool
+	// stagedChunks: some chunk of this session went to the stager, whose file
+	// the session releases after the commit.
+	stagedChunks bool
 }
 
 func newSession(manager *Manager, requestContext context.Context, auditID, routeID string, started time.Time) *Session {
@@ -109,6 +145,7 @@ func newSession(manager *Manager, requestContext context.Context, auditID, route
 		callerNotify:  manager.callerNotifier(),
 		stages:        make(map[string]*stageCapture, 4),
 		forwardStatus: storage.ForwardInProgress,
+		manager:       manager,
 	}
 	if manager.mode == ModeAvailable {
 		session.gaps = manager.gaps
@@ -310,128 +347,9 @@ func (session *Session) Finish() error {
 		return nil
 	}
 	session.finishOnce.Do(func() {
-		session.finishErr = session.finish()
+		session.finishErr = session.timedFinish()
 	})
 	return session.finishErr
-}
-
-func (session *Session) finish() error {
-	session.mu.Lock()
-	if session.forwardStatus == storage.ForwardInProgress {
-		if session.request != nil && session.request.Err() != nil && !session.responseLogicallyCompleteLocked() {
-			session.forwardStatus = storage.ForwardClientCancelled
-			session.errorCode = stringPointer("client_cancelled")
-		} else {
-			session.forwardStatus = storage.ForwardCompleted
-		}
-	}
-	if session.forwardStatus == storage.ForwardClientCancelled || session.forwardStatus == storage.ForwardNewAPIError || session.forwardStatus == storage.ForwardProxyError {
-		session.captureFault = true
-	}
-
-	stageNames := make([]string, 0, len(session.stages))
-	for name := range session.stages {
-		stageNames = append(stageNames, name)
-	}
-	sort.Slice(stageNames, func(left, right int) bool { return stageOrder(stageNames[left]) < stageOrder(stageNames[right]) })
-	finishes := make([]storage.StageFinish, 0, len(stageNames))
-	for _, name := range stageNames {
-		stage := session.stages[name]
-		finish := session.finishStageLocked(stage)
-		if stage.persisted {
-			finishes = append(finishes, finish)
-		}
-	}
-
-	if session.bodyEncoder != nil {
-		session.bodyEncoder.Release()
-		session.bodyEncoder = nil
-	}
-
-	forwardStatus := session.forwardStatus
-	statusCode := cloneInt(session.statusCode)
-	blockedBy := cloneString(session.blockedBy)
-	blockCode := cloneString(session.blockCode)
-	errorCode := cloneString(session.errorCode)
-	newAPIRequestID := cloneString(session.newAPIRequestID)
-	captureStatus := storage.CaptureComplete
-	if session.captureFault {
-		captureStatus = storage.CapturePartial
-	}
-	parseStatus := storage.ParsePending
-	if forwardStatus == storage.ForwardRejected {
-		parseStatus = storage.ParseSkipped
-	}
-	endedAtNS := session.now().UnixNano()
-	session.mu.Unlock()
-
-	var writeErrors []error
-	for _, finish := range finishes {
-		if err := session.store.FinishStage(session.writeCtx, finish); err != nil {
-			writeErrors = append(writeErrors, fmt.Errorf("finish stage %s: %w", finish.Stage, err))
-			captureStatus = storage.CapturePartial
-			session.recordGapReason(gapReasonForWrite(err))
-			session.logCaptureFailure(finish.Stage, "finish_stage_failed")
-		}
-	}
-	if len(writeErrors) != 0 && errorCode == nil {
-		errorCode = stringPointer("audit_finalize_failed")
-	}
-	finish := storage.AuditFinish{
-		AuditID:         session.auditID,
-		EndedAtNS:       endedAtNS,
-		StatusCode:      statusCode,
-		ForwardStatus:   forwardStatus,
-		CaptureStatus:   captureStatus,
-		ParseStatus:     parseStatus,
-		BlockedBy:       blockedBy,
-		BlockCode:       blockCode,
-		ErrorCode:       errorCode,
-		NewAPIRequestID: newAPIRequestID,
-	}
-	if responseStage := session.stages[storage.StageResponseSent]; responseStage != nil {
-		ttft := responseStage.startedAtNS - session.started.UnixNano()
-		if ttft < 0 {
-			ttft = 0
-		}
-		finish.TTFTNS = &ttft
-	}
-	if persisted, err := session.store.FinishAuditWithResult(session.writeCtx, finish); err != nil {
-		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
-		captureStatus = storage.CapturePartial
-		session.recordGapReason(gapReasonForWrite(err))
-		session.logCaptureFailure("", "finish_audit_failed")
-	} else {
-		captureStatus = persisted.CaptureStatus
-		errorCode = cloneString(persisted.ErrorCode)
-		if parseStatus == storage.ParsePending && session.notify != nil {
-			_ = session.notify(session.auditID)
-		}
-	}
-	if newAPIRequestID != nil && session.callerNotify != nil && len(writeErrors) == 0 {
-		_ = session.callerNotify(session.auditID)
-	}
-	terminalErrorCode := valueOrEmpty(errorCode)
-	if len(writeErrors) != 0 && terminalErrorCode == "" {
-		terminalErrorCode = "audit_finalize_failed"
-	}
-	terminal := TerminalSummary{
-		AuditID:       session.auditID,
-		ForwardStatus: forwardStatus,
-		CaptureStatus: captureStatus,
-		ParseStatus:   parseStatus,
-		BlockedBy:     valueOrEmpty(blockedBy),
-		BlockCode:     valueOrEmpty(blockCode),
-		ErrorCode:     terminalErrorCode,
-	}
-	if statusCode != nil {
-		terminal.StatusCode = *statusCode
-		terminal.HasStatusCode = true
-	}
-	session.mu.Lock()
-	session.terminal = &terminal
-	session.mu.Unlock()
-	return errors.Join(writeErrors...)
 }
 
 func (session *Session) finishStageLocked(stage *stageCapture) storage.StageFinish {
@@ -578,25 +496,8 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 		session.statusCode = cloneInt(statusCode)
 	}
 
-	write := storage.HTTPStage{
-		AuditID:       session.auditID,
-		Stage:         name,
-		State:         storage.StageStateStreaming,
-		Proto:         proto,
-		Method:        method,
-		Host:          host,
-		StatusCode:    cloneInt(statusCode),
-		ContentLength: cloneInt64(contentLength),
-		StartedAtNS:   stage.startedAtNS,
-	}
-	if err := session.store.StartStage(session.writeCtx, write); err != nil {
-		stage.faulted = true
-		stage.errorCode = "start_stage_failed"
-		session.captureFault = true
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.logCaptureFailure(name, stage.errorCode)
-		return stage
-	}
+	// The stage is written by a later checkpoint or the commit; its headers
+	// are sealed (or, for capture version 2, snapshotted) now, at stage start.
 	stage.persisted = true
 	session.addHeadersLocked(stage, storage.HeaderKindHeader, headers)
 	return stage
@@ -619,39 +520,11 @@ func (session *Session) addHeadersLocked(stage *stageCapture, kind string, heade
 	if len(headers) == 0 || !stage.persisted {
 		return
 	}
-	names := make([]string, 0, len(headers))
-	for name := range headers {
-		names = append(names, name)
+	if session.headerBlockLocked() {
+		session.snapshotHeadersLocked(stage, kind, headers)
+		return
 	}
-	sort.Strings(names)
-	values := make([]storage.HTTPHeader, 0)
-	for _, name := range names {
-		for index, value := range headers.Values(name) {
-			aad, err := security.AAD(session.auditID, "header", stage.name, kind, name, strconv.Itoa(index))
-			if err != nil {
-				session.markStageFaultLocked(stage, "header_encryption_failed")
-				continue
-			}
-			encrypted, err := session.cipher.Encrypt(aad, []byte(value))
-			if err != nil {
-				session.markStageFaultLocked(stage, "header_encryption_failed")
-				continue
-			}
-			values = append(values, storage.HTTPHeader{
-				AuditID:     session.auditID,
-				Stage:       stage.name,
-				Kind:        kind,
-				Name:        name,
-				ValueIndex:  index,
-				ValueLength: len(value),
-				ValueEnc:    encrypted,
-			})
-		}
-	}
-	if err := session.store.AddHeaders(session.writeCtx, values); err != nil {
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.markStageFaultLocked(stage, "add_headers_failed")
-	}
+	session.addHeaderGroupLocked(stage, kind, headers)
 }
 
 func (session *Session) markStageFaultLocked(stage *stageCapture, errorCode string) {

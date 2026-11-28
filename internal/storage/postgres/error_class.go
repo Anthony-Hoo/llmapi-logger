@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/storage"
 )
 
 // ErrorClass returns a fixed allowlisted category. Never log the error text:
@@ -36,6 +37,9 @@ func ErrorClass(err error) string {
 	var identity storedObjectIntegrityError
 	var local localWriteError
 	switch {
+	case errors.Is(err, storage.ErrInboundStageNotStored):
+		// An admitted audit, not a storage failure.
+		return "inbound_stage_not_stored"
 	case errors.Is(err, ErrRecoveryOverflow):
 		return "recovery_overflow"
 	case errors.Is(err, ErrQueueFull):

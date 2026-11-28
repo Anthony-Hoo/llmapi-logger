@@ -2,8 +2,6 @@ package openai
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -11,6 +9,7 @@ import (
 	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
+	"llmapi-logger/internal/parser/streamevidence"
 )
 
 func (implementation *Parser) NormalizeAudit(_ context.Context, input base.Input, result base.Result) (auditmodel.Turn, error) {
@@ -232,57 +231,79 @@ func (implementation *Parser) normalizeJSONResponse(root map[string]any) (normal
 	return normalizedSide{layout: auditmodel.LayoutMarkerEnvelope, envelope: envelope, items: items, original: original}, nil
 }
 
+// normalizeStreamResponse stores a stream as the compact description of its
+// events, its summary, the residue (whatever the events carry that the
+// folded body does not) and, under the aggregate key, the folded non-stream
+// body split exactly as normalizeJSONResponse splits a non-stream response,
+// so a streamed answer and the same answer without streaming share their
+// item objects, and the next request shares them as it does for a
+// non-stream answer. A Responses body also stores its echoed instructions
+// and tools as items, which repeat on every turn of a conversation.
 func (implementation *Parser) normalizeStreamResponse(data []byte, result base.Result) (normalizedSide, error) {
 	events, _ := base.DecodeSSEWithStatus(data)
 	if len(events) == 0 {
 		return normalizedSide{}, errors.New("openai normalizer: empty SSE")
 	}
-	descriptors := make([]any, 0, len(events))
-	for _, event := range events {
-		digest := sha256.Sum256(event.Data)
-		descriptors = append(descriptors, map[string]any{
-			"event":       event.Event,
-			"data_length": len(event.Data),
-			"data_sha256": hex.EncodeToString(digest[:]),
-		})
+	fold := foldStream(events, implementation.name)
+	if fold.problem != nil {
+		return normalizedSide{}, fold.problem
 	}
-	items := make([]auditmodel.Item, 0)
-	aggregateValues := make([]any, 0)
-	if result.Conversation != nil {
-		for _, message := range result.Conversation.Messages {
-			if message.Phase != conversation.PhaseResponse {
-				continue
-			}
-			display := auditmodel.DisplayFromConversation(message)
-			value, err := displayJSONValue(display)
-			if err != nil {
-				return normalizedSide{}, err
-			}
-			items = append(items, auditmodel.Item{
-				Slot: auditmodel.SlotAggregate, Kind: "stream_" + message.Role,
-				Value: value, Display: []auditmodel.DisplayMessage{display},
-			})
-			aggregateValues = append(aggregateValues, value)
-		}
-	}
-	envelope := map[string]any{
-		"format": "sse",
-		"events": descriptors,
-		"summary": map[string]any{
-			"response_id": result.ResponseID,
-			"usage":       result.Usage,
-			"error_type":  result.ErrorType,
-			"error_code":  result.ErrorCode,
-		},
-	}
-	original, err := cloneMap(envelope)
+	residue, err := fold.residue.Entries()
 	if err != nil {
 		return normalizedSide{}, err
 	}
-	original[auditmodel.SlotAggregate] = aggregateValues
-	return normalizedSide{layout: auditmodel.LayoutOpenAIStreamResponse, envelope: envelope, items: items, original: original}, nil
+	split, err := implementation.normalizeJSONResponse(fold.body)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	body, ok := split.envelope.(map[string]any)
+	if !ok {
+		return normalizedSide{}, errors.New("openai normalizer: folded body is not an object")
+	}
+	items := split.items
+	if implementation.name == Responses || implementation.name == ResponsesCompact {
+		for _, echo := range []struct{ key, slot string }{{"instructions", auditmodel.SlotInstructions}, {"tools", auditmodel.SlotTools}} {
+			value, exists := body[echo.key]
+			if !exists || value == nil {
+				continue
+			}
+			item := auditmodel.Item{Slot: echo.slot, Kind: echo.key, Value: value}
+			if echo.key == "instructions" {
+				// The same kind and value as the request's instructions item,
+				// so both are one object.
+				item.Display = displayForInstructions(value)
+			}
+			body[echo.key] = auditmodel.ItemMarker(len(items))
+			items = append(items, item)
+		}
+	}
+	fields := map[string]any{
+		"format": "sse",
+		"events": streamevidence.Describe(events),
+		"summary": map[string]any{
+			"response_id":      result.ResponseID,
+			"usage":            result.Usage,
+			"normalized_usage": result.Normalized,
+			"stop_reason":      fold.stopReason,
+			"error_type":       result.ErrorType,
+			"error_code":       result.ErrorCode,
+		},
+	}
+	if len(residue) > 0 {
+		fields["residue"] = residue
+	}
+	original, err := cloneMap(fields)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	original[auditmodel.SlotAggregate] = split.original
+	fields[auditmodel.SlotAggregate] = body
+	envelope, err := cloneMap(fields)
+	if err != nil {
+		return normalizedSide{}, err
+	}
+	return normalizedSide{layout: auditmodel.LayoutOpenAIStreamResponseV2, envelope: envelope, items: items, original: original}, nil
 }
-
 func responseInputItem(value any) auditmodel.Item {
 	if text, ok := value.(string); ok {
 		return auditmodel.Item{
@@ -334,18 +355,6 @@ func displayFromResult(result base.Result) []auditmodel.DisplayMessage {
 		display = append(display, auditmodel.DisplayFromConversation(message))
 	}
 	return display
-}
-
-func displayJSONValue(display auditmodel.DisplayMessage) (any, error) {
-	encoded, err := auditmodel.CanonicalJSON(display)
-	if err != nil {
-		return nil, err
-	}
-	var value any
-	if err := auditmodel.DecodeJSON(encoded, &value); err != nil {
-		return nil, err
-	}
-	return value, nil
 }
 
 func itemKind(value map[string]any, fallback string) string {

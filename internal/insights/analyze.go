@@ -153,6 +153,10 @@ func firstUserItem(items []ctxItem) int {
 	return fallback
 }
 
+// DeclaredSessionID exposes explicitSessionID to the protocol normalizers, so
+// a turn's conversation key and its insights session come from one rule.
+func DeclaredSessionID(root map[string]any) string { return explicitSessionID(root) }
+
 // explicitSessionID reads a client-declared session id from the request body:
 // metadata.{session_id,conversation_id,thread_id}, or a Claude Code
 // metadata.user_id that is a JSON object (or the legacy "..._session_<id>").

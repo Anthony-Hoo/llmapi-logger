@@ -310,6 +310,50 @@ describe("content-addressed turn evidence", () => {
     expect(html).toContain("下载重建响应 JSON");
   });
 
+  it("reports raw and reconstruction availability per side", () => {
+    const body = turnDetail.bodies[0];
+    // An upstream failure releases the verified request and keeps the response.
+    const mixed: AuditDetail = {
+      ...turnDetail,
+      bodies: [
+        { ...body, stage: "request_for_newapi_received_from_nginx", source_stage: "request_for_newapi_received_from_nginx", retention_state: "metadata" },
+        { ...body, stage: "response_received_from_newapi", source_stage: "response_received_from_newapi", retention_state: "full", stored_length: 100, chunk_count: 1 },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <TurnStoragePanel detail={mixed} loading={null} note={null} onDownload={() => undefined} />,
+    );
+    expect(html).toContain("请求侧证据");
+    expect(html).toContain("原始 Body：已校验后释放 · 重建 JSON：可下载");
+    expect(html).toContain("原始 Body：完整保留 · 重建 JSON：可下载");
+
+    // A client gone before any response: the request rebuilds, the response
+    // does not exist, so its download is disabled rather than giving null.
+    const noResponse: AuditDetail = {
+      ...mixed,
+      turn: { ...turnDetail.turn!, response_layout: "none" },
+      bodies: [mixed.bodies[0]],
+    };
+    const noResponseHTML = renderToStaticMarkup(
+      <TurnStoragePanel detail={noResponse} loading={null} note={null} onDownload={() => undefined} />,
+    );
+    expect(noResponseHTML).toContain("原始 Body：无 · 重建 JSON：无响应可重建");
+    const responseButton = noResponseHTML.match(/<button[^>]*>(?:(?!<\/button>).)*下载重建响应 JSON/)?.[0] ?? "";
+    expect(responseButton).toContain('disabled=""');
+    const requestButton = noResponseHTML.match(/<button[^>]*>(?:(?!<\/button>).)*下载重建请求 JSON/)?.[0] ?? "";
+    expect(requestButton).toContain("<button");
+    expect(requestButton).not.toContain('disabled=""');
+
+    // A request-only turn: the response arrived only in part, so the turn
+    // does not carry it; its raw body is kept and is the evidence.
+    const requestOnly: AuditDetail = { ...mixed, turn: { ...turnDetail.turn!, response_layout: "none" } };
+    const requestOnlyHTML = renderToStaticMarkup(
+      <TurnStoragePanel detail={requestOnly} loading={null} note={null} onDownload={() => undefined} />,
+    );
+    expect(requestOnlyHTML).toContain("原始 Body：完整保留 · 重建 JSON：轮次未收录响应，以原始 Body 为准");
+    expect(requestOnlyHTML.match(/<button[^>]*>(?:(?!<\/button>).)*下载重建响应 JSON/)?.[0] ?? "").toContain('disabled=""');
+  });
+
   it("shows TTFT and verifies first/last logical SSE event times", () => {
     const html = renderToStaticMarkup(
       <StreamTimingPanel

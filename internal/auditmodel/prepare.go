@@ -35,6 +35,8 @@ func PrepareWithLookup(turn Turn, cipher security.Cipher, lookup ObjectLookup) (
 		return PreparedTurn{}, ErrInvalidModel
 	}
 	accumulator := newBinaryAccumulator()
+	accumulator.skipInlineFileData = turn.SkipInlineFileData
+	accumulator.inlineDataParts = turn.InlineDataParts
 	encoder := &contentEncoder{}
 	defer encoder.release()
 	objects := make(map[string]plainContentCandidate)
@@ -324,6 +326,26 @@ func sealExternalRefs(cipher security.Cipher, objectHash []byte, values []plainE
 		})
 	}
 	return result, nil
+}
+
+// OpenExternalReference authenticates one stored content_external_refs value
+// under the AAD sealExternalRefs used and checks it against valueHash. Nothing
+// but the cold archive reads these values back.
+func OpenExternalReference(cipher security.Cipher, objectHash []byte, jsonPointer, kind string, valueHash, valueEnc []byte) (string, error) {
+	aad, err := security.AAD("external_ref", hashHex(objectHash), jsonPointer, kind)
+	if err != nil {
+		return "", ErrIntegrity
+	}
+	plaintext, err := cipher.Decrypt(aad, valueEnc)
+	if err != nil {
+		return "", ErrIntegrity
+	}
+	value := string(plaintext)
+	clear(plaintext)
+	if !EqualHash(ExternalValueHash(kind, value), valueHash) {
+		return "", ErrIntegrity
+	}
+	return value, nil
 }
 
 func semanticProjection(value any) any {

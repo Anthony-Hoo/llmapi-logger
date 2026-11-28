@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"llmapi-logger/internal/agentaccess"
+	archiverunner "llmapi-logger/internal/archive/runner"
 	"llmapi-logger/internal/audit"
+	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/insights"
@@ -30,6 +32,7 @@ import (
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/sessionanalysis"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/uaguard"
 	"llmapi-logger/internal/web"
 )
@@ -50,11 +53,13 @@ type App struct {
 	contentPolicies contentpolicy.RuleSet
 	orgReports      *orgreport.Service
 	retention       *retention.Runner
+	archive         *archiverunner.Runner
 	sessionRunner   *sessionanalysis.Runner
 	agentAccess     *agentaccess.Service
 	auditSink       audit.Sink
 	auditManager    *audit.Manager
 	auditStore      runtimeStore
+	auditStager     *staging.Stager
 	cipher          security.Cipher
 	newAPIClient    *newapi.Client
 	mode            string
@@ -326,6 +331,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	}
 	warnDeprecatedInsights(configuration.Insights, logger)
 	warnWeakAdminToken(configuration, logger)
+	warnArchiveMode(configuration, archiveFormatVersion(seams.archive), logger)
 	newAPIClient, err := assembleNewAPIClient(configuration.NewAPI, upstreamProxy)
 	if err != nil {
 		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)
@@ -402,6 +408,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 		auditSink:       runtime.sink,
 		auditManager:    runtime.manager,
 		auditStore:      runtime.store,
+		auditStager:     runtime.stager,
 		cipher:          runtime.cipher,
 		newAPIClient:    newAPIClient,
 		userAgentRules:  userAgentRules,
@@ -430,12 +437,15 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 			return nil, fmt.Errorf("assemble insights analyzer: %w", err)
 		}
 		if vocabulary != nil {
-			// Metadata-retention OpenAI audits are backfilled from the
+			// Metadata-retention audits are backfilled from the
 			// verified turn graph instead of released raw chunks.
 			application.parserWorker.SetReconstructor(queryService)
 		}
 		if runtime.manager != nil {
 			runtime.manager.SetCompletionNotifier(application.parserWorker.Notify)
+			// The parse does not read back: committed audits go to the worker
+			// with the plaintext their session still holds.
+			runtime.manager.SetHandover(application.parserWorker.Submit)
 		}
 		if newAPIClient != nil {
 			application.callerWorker, err = newapi.NewWorker(runtime.store, newAPIClient, logger)
@@ -497,13 +507,17 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 			sessionAnalysisSettings = settings
 		}
 	}
-	if runtime.store != nil && configuration.RetentionDays > 0 {
+	// Guard 2 of 5.7: with the archive on, nothing is deleted without being
+	// archived first, so retention's direct delete is not assembled.
+	if runtime.store != nil && configuration.RetentionDays > 0 && !configuration.Archive.Enabled() {
 		application.retention, err = retention.New(runtime.store, configuration.RetentionDays, logger)
 		if err != nil {
 			_ = application.closeComponents()
 			return nil, fmt.Errorf("assemble retention runner: %w", err)
 		}
 	}
+	application.archive = assembleArchive(configuration, runtime, queryService, seams.archive, logger)
+	warnDirectDeleteResumed(ctx, configuration, runtime.store, logger)
 
 	developerLogin := developerLoginOptions(configuration, runtime.fingerprints)
 	// Agent access stays entirely unassembled when disabled: no service, no
@@ -517,6 +531,11 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	// token revocation) ends before the store is closed.
 	application.agentAccess = agentAccess
 	agentDist := assembleAgentDist(configuration, agentAccess, seams.agentPackageDir, logger)
+	captureSettings, err := assembleCaptureSettings(ctx, configuration, runtime, logger)
+	if err != nil {
+		_ = application.closeComponents()
+		return nil, err
+	}
 
 	application.adminServer, err = web.NewServer(configuration.AdminListen, web.Options{
 		AdminToken: configuration.AdminToken,
@@ -533,6 +552,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 
 		SessionAnalysis:         sessionAnalysisService,
 		SessionAnalysisSettings: sessionAnalysisSettings,
+		CaptureSettings:         captureSettings,
 
 		InjectedUserTextPrefixes: uiVocabulary(vocabulary).InjectedUserTextPrefixes(),
 
@@ -568,6 +588,9 @@ func (application *App) Run(ctx context.Context) error {
 	}
 	if application.sessionRunner != nil {
 		application.sessionRunner.Start(ctx)
+	}
+	if application.archive != nil {
+		application.archive.Start(ctx)
 	}
 
 	if application.parserWorker != nil {
@@ -758,6 +781,9 @@ func (application *App) closeComponents() error {
 		if application.sessionRunner != nil {
 			application.sessionRunner.Close()
 		}
+		if application.archive != nil {
+			application.archive.Close()
+		}
 		if application.parserWorker != nil {
 			application.parserWorker.Close()
 			application.parserHealthy.Store(false)
@@ -779,6 +805,12 @@ func (application *App) closeComponents() error {
 		}
 		if application.auditStore != nil {
 			application.closeErr = application.auditStore.Close()
+		}
+		// After the store: its last writes may still read staged chunks and
+		// release their files. Close writes and syncs what is still queued, so
+		// the next start imports it, and stops the staging writer.
+		if application.auditStager != nil {
+			_ = application.auditStager.Close()
 		}
 	})
 	return application.closeErr
@@ -900,13 +932,19 @@ func developerLoginTransport(configuration config.NewAPIConfig) http.RoundTrippe
 }
 
 type auditRuntime struct {
-	sink         audit.Sink
-	manager      *audit.Manager
-	store        runtimeStore
+	sink    audit.Sink
+	manager *audit.Manager
+	store   runtimeStore
+	// stager is the local staging of the capture sessions; nil when the
+	// audit is unavailable.
+	stager       *staging.Stager
 	cipher       security.Cipher
 	fingerprints *security.CredentialFingerprinter
 	// analysisFingerprints is nil when insights are disabled.
 	analysisFingerprints *security.AnalysisFingerprinter
+	// archiveKeys and eventSigner are nil when the archive is off.
+	archiveKeys *security.ArchiveKeys
+	eventSigner *security.IntegritySigner
 }
 
 func assembleAudit(ctx context.Context, configuration config.Config, logger *slog.Logger) auditRuntime {
@@ -930,10 +968,17 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
-	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits)
+	// Guard 5 of 5.7 and P item 12: a key is created only while nothing it
+	// would have to open exists, in the database or in the archive.
+	manifests := archiveManifestsPresent(configuration)
+	key, err := security.LoadOrCreateKey(configuration.KeyPath, !hasAudits && !manifests)
 	if err != nil {
 		_ = store.Close()
-		logger.Warn("audit key unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		attributes := []any{"mode", configuration.Mode, "error_category", "key_unavailable"}
+		if manifests && !hasAudits {
+			attributes = append(attributes, "reason", "archive_manifests_present")
+		}
+		logger.Warn("audit key unavailable", attributes...)
 		manager := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: manager, manager: manager}
 	}
@@ -973,8 +1018,43 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 			return auditRuntime{sink: manager, manager: manager}
 		}
 	}
+	archive, eventSigner, err := archiveKeys(configuration, key)
+	if err != nil {
+		_ = store.Close()
+		logger.Warn("audit archive keys unavailable", "mode", configuration.Mode, "error_category", "key_unavailable")
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
+	// Local staging (design F.7): what a previous run staged is imported
+	// before interrupted audits are recovered, so that recovery finalizes
+	// them with those chunks. A directory that cannot be used is checked
+	// first, before recovery, for the same reason a file the import cannot
+	// read stops the start (stage 3 design R.3 item 2): recovering now would
+	// finalize the interrupted audits without their staged chunks. Nothing is
+	// recovered or finalized; the audits stay open until a start with a
+	// usable directory imports their chunks. Without staging the session
+	// would also drop content beyond the memory budget, and there is no other
+	// write path: the audit is unavailable in both modes. Strict mode refuses
+	// requests; available mode forwards them without an audit.
+	stager, stagingErr := openStaging(configuration, cipher, logger)
+	if stager == nil {
+		_ = store.Close()
+		logger.Warn("audit staging unavailable", "mode", configuration.Mode,
+			"error_category", "staging_unavailable", "reason", staging.Reason(stagingErr))
+		manager := audit.NewUnavailable(configuration.Mode, stagingErr, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
+	if _, err := stager.Import(ctx, store); err != nil {
+		_ = stager.Close()
+		_ = store.Close()
+		logger.Warn("audit staging import failed", "mode", configuration.Mode, "error_category", "recovery_failed", "storage_error", storage.ErrorClass(err))
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
+	}
+	closeStager := func() { _ = stager.Close() }
 	recovered, recoveryErr := store.RecoverInterruptedAudits(ctx, time.Now().UnixNano())
 	if recoveryErr != nil {
+		closeStager()
 		_ = store.Close()
 		logger.Warn("interrupted audit recovery failed", "error_category", "recovery_failed")
 		manager := audit.NewUnavailable(configuration.Mode, recoveryErr, logger)
@@ -982,16 +1062,45 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 	} else if recovered > 0 {
 		logger.Info("interrupted audits recovered", "recovered_audits", recovered)
 	}
-	manager, err := audit.NewManager(store, cipher, fingerprints, configuration.Mode, logger)
+	options := auditOptions(configuration.Audit)
+	options.Stager = stager
+	manager, err := audit.NewManagerWithOptions(store, cipher, fingerprints, configuration.Mode, logger, options)
 	if err != nil {
+		closeStager()
 		_ = store.Close()
-		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable")
+		reason := "invalid_audit_options"
+		if errors.Is(err, audit.ErrUnifiedUnsupported) {
+			reason = "unified_unsupported"
+		}
+		logger.Warn("audit manager unavailable", "mode", configuration.Mode, "error_category", "audit_unavailable", "reason", reason)
 		unavailable := audit.NewUnavailable(configuration.Mode, err, logger)
 		return auditRuntime{sink: unavailable, manager: unavailable}
 	}
 	return auditRuntime{
-		sink: manager, manager: manager, store: store, cipher: cipher,
+		sink: manager, manager: manager, store: store, cipher: cipher, stager: stager,
 		fingerprints: fingerprints, analysisFingerprints: analysisFingerprints,
+		archiveKeys: archive, eventSigner: eventSigner,
+	}
+}
+
+// openStaging opens audit.staging.dir. A directory that is not configured,
+// cannot be created, is not a directory, is not the process's own, is open to
+// others or is not writable returns the error whose staging.Reason the caller
+// logs (F.1).
+func openStaging(configuration config.Config, cipher security.Cipher, logger *slog.Logger) (*staging.Stager, error) {
+	section := configuration.Audit.Staging
+	if section.Dir == "" {
+		return nil, errors.New("audit.staging.dir is not configured")
+	}
+	return staging.Open(section.Dir, cipher, staging.Options{MaxBytes: section.MaxBytes, Logger: logger})
+}
+
+// auditOptions maps the audit section onto the capture manager's options.
+func auditOptions(section config.AuditConfig) audit.Options {
+	return audit.Options{
+		CommitRetries: section.CommitRetries,
+		StageBytes:    section.Memory.StageBytes,
+		GlobalBytes:   section.Memory.GlobalBytes,
 	}
 }
 

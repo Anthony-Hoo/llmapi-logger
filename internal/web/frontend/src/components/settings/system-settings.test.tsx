@@ -39,11 +39,17 @@ describe("system settings menu", () => {
   it("offers the sections the enabled features have", () => {
     const client = {} as ApiClient;
     const ids = (org: boolean, analysis: boolean) => settingsSections(client, org, analysis).map((section) => section.id);
-    expect(ids(false, false)).toEqual(["ua-rules", "content-policy"]);
-    expect(ids(false, true)).toEqual(["ua-rules", "content-policy", "reports"]);
-    expect(ids(true, false)).toEqual(["ua-rules", "content-policy", "org", "reports"]);
-    expect(ids(true, true)).toEqual(["ua-rules", "content-policy", "org", "reports"]);
-    expect(settingsSections(client, true, true).map((section) => section.label)).toEqual(["UA 拦截规则", "关键词拦截", "项目组与项目", "周报与分析"]);
+    // The capture write setting is there whatever is enabled.
+    expect(ids(false, false)).toEqual(["ua-rules", "content-policy", "capture"]);
+    expect(ids(false, true)).toEqual(["ua-rules", "content-policy", "capture", "reports"]);
+    expect(ids(true, false)).toEqual(["ua-rules", "content-policy", "capture", "org", "reports"]);
+    expect(ids(true, true)).toEqual(["ua-rules", "content-policy", "capture", "org", "reports"]);
+    expect(settingsSections(client, true, true).map((section) => section.label)).toEqual(["UA 拦截规则", "关键词拦截", "审计写入", "项目组与项目", "周报与分析"]);
+    const capture = settingsSections(client, false, false).find((section) => section.id === "capture");
+    expect(capture?.hint).toBe("终结提交失败时的重试");
+    const page = renderToStaticMarkup(<SystemSettings sections={settingsSections(client, false, false)} initial="capture" />);
+    expect(page).toContain(">审计写入<");
+    expect(page).toContain("终结提交失败时的重试");
   });
 
   it("edits the weekly report parameters and shows the calendar read-only", () => {

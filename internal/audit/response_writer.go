@@ -109,5 +109,6 @@ func (writer *observedResponseWriter) start(status int) {
 			writer.underlying.Header(),
 			false,
 		)
+		writer.session.responseSentStarted()
 	})
 }

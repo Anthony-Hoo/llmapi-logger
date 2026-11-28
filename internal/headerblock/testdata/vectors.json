@@ -1,0 +1,391 @@
+{
+  "description": "Test vectors for internal/headerblock: the header block plaintext (design C.3), the sealed block AAD and stored triple (C.4) and the user_agent_enc encoding and AAD (C.5). All hex is lower case. The key is synthetic (bytes 0x00 to 0x1f) and only for these vectors. Sealed values carry a random AES-GCM nonce (12 bytes, prefixed) and a 16-byte tag; check them by opening, not by sealing again.",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "blocks": [
+    {
+      "name": "empty",
+      "description": "No stage reached: magic and version only.",
+      "stages": [],
+      "plaintext_hex": "4c4c484201"
+    },
+    {
+      "name": "single_value",
+      "description": "One request_received Header A: b and no Trailer.",
+      "stages": [
+        {
+          "stage": "request_for_newapi_received_from_nginx",
+          "stage_code": 1,
+          "headers": [
+            {
+              "name": "A",
+              "values_hex": [
+                "62"
+              ]
+            }
+          ],
+          "trailers": []
+        }
+      ],
+      "plaintext_hex": "4c4c4842010100000001000000014100000001000000016200000000"
+    },
+    {
+      "name": "empty_stage",
+      "description": "request_sent reached without any Header or Trailer: both name counts are zero.",
+      "stages": [
+        {
+          "stage": "request_sent_to_newapi",
+          "stage_code": 2,
+          "headers": [],
+          "trailers": []
+        }
+      ],
+      "plaintext_hex": "4c4c484201020000000000000000"
+    },
+    {
+      "name": "values_in_order",
+      "description": "Several values of one name keep value_index order, including an empty value and non-UTF-8 bytes.",
+      "stages": [
+        {
+          "stage": "request_for_newapi_received_from_nginx",
+          "stage_code": 1,
+          "headers": [
+            {
+              "name": "Accept",
+              "values_hex": [
+                "61",
+                "",
+                "fffe"
+              ]
+            }
+          ],
+          "trailers": []
+        }
+      ],
+      "plaintext_hex": "4c4c4842010100000001000000064163636570740000000300000001610000000000000002fffe00000000"
+    },
+    {
+      "name": "case_variants",
+      "description": "Two map keys differing only in case are distinct names in byte order (upper case first); legacy reads the canonical key's values for both.",
+      "stages": [
+        {
+          "stage": "request_for_newapi_received_from_nginx",
+          "stage_code": 1,
+          "headers": [
+            {
+              "name": "X-Dup",
+              "values_hex": [
+                "76"
+              ]
+            },
+            {
+              "name": "x-dup",
+              "values_hex": [
+                "76"
+              ]
+            }
+          ],
+          "trailers": []
+        }
+      ],
+      "plaintext_hex": "4c4c484201010000000200000005582d44757000000001000000017600000005782d64757000000001000000017600000000"
+    },
+    {
+      "name": "trailers",
+      "description": "A response_sent Trailer after its Headers.",
+      "stages": [
+        {
+          "stage": "response_from_newapi_sent_to_nginx",
+          "stage_code": 4,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "values_hex": [
+                "746578742f6576656e742d73747265616d"
+              ]
+            }
+          ],
+          "trailers": [
+            {
+              "name": "X-Trailer",
+              "values_hex": [
+                "646f6e65"
+              ]
+            }
+          ]
+        }
+      ],
+      "plaintext_hex": "4c4c48420104000000010000000c436f6e74656e742d547970650000000100000011746578742f6576656e742d73747265616d0000000100000009582d547261696c65720000000100000004646f6e65"
+    },
+    {
+      "name": "skipped_stage",
+      "description": "request_received and response_received reached, the stages between not: codes 1 and 3 only.",
+      "stages": [
+        {
+          "stage": "request_for_newapi_received_from_nginx",
+          "stage_code": 1,
+          "headers": [
+            {
+              "name": "A",
+              "values_hex": [
+                "31"
+              ]
+            }
+          ],
+          "trailers": []
+        },
+        {
+          "stage": "response_received_from_newapi",
+          "stage_code": 3,
+          "headers": [
+            {
+              "name": "B",
+              "values_hex": [
+                "32"
+              ]
+            }
+          ],
+          "trailers": []
+        }
+      ],
+      "plaintext_hex": "4c4c48420101000000010000000141000000010000000131000000000300000001000000014200000001000000013200000000"
+    },
+    {
+      "name": "all_stages",
+      "description": "All four stages with Headers, one Trailer on request_received.",
+      "stages": [
+        {
+          "stage": "request_for_newapi_received_from_nginx",
+          "stage_code": 1,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "values_hex": [
+                "6170706c69636174696f6e2f6a736f6e"
+              ]
+            },
+            {
+              "name": "User-Agent",
+              "values_hex": [
+                "6578616d706c652f312e30"
+              ]
+            }
+          ],
+          "trailers": [
+            {
+              "name": "X-T",
+              "values_hex": [
+                "74"
+              ]
+            }
+          ]
+        },
+        {
+          "stage": "request_sent_to_newapi",
+          "stage_code": 2,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "values_hex": [
+                "6170706c69636174696f6e2f6a736f6e"
+              ]
+            }
+          ],
+          "trailers": []
+        },
+        {
+          "stage": "response_received_from_newapi",
+          "stage_code": 3,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "values_hex": [
+                "746578742f6576656e742d73747265616d"
+              ]
+            }
+          ],
+          "trailers": []
+        },
+        {
+          "stage": "response_from_newapi_sent_to_nginx",
+          "stage_code": 4,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "values_hex": [
+                "746578742f6576656e742d73747265616d"
+              ]
+            }
+          ],
+          "trailers": []
+        }
+      ],
+      "plaintext_hex": "4c4c48420101000000020000000c436f6e74656e742d5479706500000001000000106170706c69636174696f6e2f6a736f6e0000000a557365722d4167656e74000000010000000b6578616d706c652f312e300000000100000003582d5400000001000000017402000000010000000c436f6e74656e742d5479706500000001000000106170706c69636174696f6e2f6a736f6e0000000003000000010000000c436f6e74656e742d547970650000000100000011746578742f6576656e742d73747265616d0000000004000000010000000c436f6e74656e742d547970650000000100000011746578742f6576656e742d73747265616d00000000"
+    }
+  ],
+  "invalid_blocks": [
+    {
+      "name": "wrong_magic",
+      "description": "Magic is not LLHB.",
+      "plaintext_hex": "4c4c484301"
+    },
+    {
+      "name": "wrong_version",
+      "description": "Version byte 0x02.",
+      "plaintext_hex": "4c4c484202"
+    },
+    {
+      "name": "stage_code_zero",
+      "description": "Stage code 0 is not defined.",
+      "plaintext_hex": "4c4c484201000000000000000000"
+    },
+    {
+      "name": "stage_code_five",
+      "description": "Stage code 5 is not defined.",
+      "plaintext_hex": "4c4c484201050000000000000000"
+    },
+    {
+      "name": "stages_out_of_order",
+      "description": "Stage code 2 before 1.",
+      "plaintext_hex": "4c4c484201020000000000000000010000000000000000"
+    },
+    {
+      "name": "stage_repeated",
+      "description": "Stage code 1 twice.",
+      "plaintext_hex": "4c4c484201010000000000000000010000000000000000"
+    },
+    {
+      "name": "missing_trailer_section",
+      "description": "A stage with only its header section.",
+      "plaintext_hex": "4c4c4842010100000000"
+    },
+    {
+      "name": "names_not_increasing",
+      "description": "Names b then a within one kind.",
+      "plaintext_hex": "4c4c48420101000000020000000162000000010000000131000000016100000001000000013100000000"
+    },
+    {
+      "name": "name_repeated",
+      "description": "The same name twice within one kind.",
+      "plaintext_hex": "4c4c48420101000000020000000161000000010000000131000000016100000001000000013200000000"
+    },
+    {
+      "name": "name_without_values",
+      "description": "value_count 0.",
+      "plaintext_hex": "4c4c484201010000000100000001610000000000000000"
+    },
+    {
+      "name": "value_beyond_end",
+      "description": "A value length larger than what remains.",
+      "plaintext_hex": "4c4c4842010100000001000000016100000001000000327800000000"
+    },
+    {
+      "name": "trailing_bytes",
+      "description": "One byte after the last stage section.",
+      "plaintext_hex": "4c4c48420101000000000000000000"
+    }
+  ],
+  "block_aads": [
+    {
+      "audit_id": "aud_vector_0001",
+      "compression": "none",
+      "aad_hex": "6175645f766563746f725f30303031006865616465725f626c6f636b5f7631006e6f6e65"
+    },
+    {
+      "audit_id": "aud_vector_0001",
+      "compression": "gzip",
+      "aad_hex": "6175645f766563746f725f30303031006865616465725f626c6f636b5f763100677a6970"
+    }
+  ],
+  "sealed_blocks": [
+    {
+      "name": "sealed_none",
+      "description": "The single_value block, shorter than 128 bytes, stored without compression.",
+      "audit_id": "aud_vector_0001",
+      "compression": "none",
+      "plaintext_length": 28,
+      "block_enc_hex": "7769e74aa04756e6168c244c5d69e5307e09f789263b08f1380b74972217e90dd1573759f80c21ba3fbf2d9c9aced793af567ce234426a5f",
+      "plaintext_hex": "4c4c4842010100000001000000014100000001000000016200000000"
+    },
+    {
+      "name": "sealed_gzip",
+      "description": "A block of realistic Headers for four stages, stored gzip-compressed.",
+      "audit_id": "aud_vector_0001",
+      "compression": "gzip",
+      "plaintext_length": 2129,
+      "block_enc_hex": "642c2e01de90cf9794cd1708af60c84b1c5640c9ea1e1b8ad3cc7c27947f8b90bfff45926c82843dc842376d210ddc6d418c4a076f1bd72ff4d8b84a8d7b9dbaf8f27c5653b81f4d2f84af366b5f7502b66f37b1162dcdcc0f4119bb457a61efa33c5afe0ff2af96b6723a8871a2950431ce286723c3a4154590602c4ad8e8130299528708c8ea46c287e9f9fc174b0a5fab8f567fb882a6c6e2f4f1fa479b66b3cc2299f4673487f48b20167d5454cb6798c28c53d728937808fe1e66055ca81321bc16421543343c7a49f3eeff9e677a2a00d85653869d3c2d948aa1f7cca1568d3cca7560bdf4f275959c59ec1dcb4dc44ed5360d65f1b2fac4d58a826dd2497f371ebb837110f8f70dfad30d5ba47674ecabb1d7e153ebec80278e34f257cdae7dd4f10e7e5b60084c3837fd5e0176d6870772faa0ae6b5271c37a0a74e4ef0aff95afe74bf46d12a0731270c1596b4bfb210508c6c51af73cab6dca4bc0a4544fc2da82590084f5956252bf200280d438a2f21c3fd8ea6386bd77b78fe7de9ca22aff95b6d115664d4d67ac06cc64c01dd67362d44baf97deac9ea2784691a6074043e5655bee39900975ba9e3435cc236d3f75dfcbac710660268d3d75e6693ddba1130adc1949e33442dac77f57f4a5b7f29eb8ef780fe2e38f81425d60fdff9d3fce5230e9bc3f95e783ad6fc93a4c2afc13c8725efd896f858674c5f2da196a7690150cf23011eccaf2adb191a9c3b7c5733ac71a9ac9a1760c382049349ffea0b574a6d3aca177de930ba117944680c2c8aebd0cc6aa054b9765ad2fdea122926abfb409a2d6c365d671ea1b1575005e03926ed236f8661ce62b3b9fb5d35b97f56e890eea6a5906769966dd31c1592a0993fdfa5afa9000c8a8d13c19aae73b79c68b97ff3f37c45687c66d17f58bc591280d49a399f2c52a393a50c5d5dcc7b9df271d0dcc427df901a87e74d72787",
+      "plaintext_hex": "4c4c484201010000000f0000000641636365707400000001000000106170706c69636174696f6e2f6a736f6e0000000f4163636570742d456e636f64696e670000000100000011677a69702c206465666c6174652c20627200000011416e7468726f7069632d56657273696f6e000000010000000a323032332d30362d30310000000d417574686f72697a6174696f6e000000010000003f42656172657220706c616365686f6c6465722d746f6b656e2d666f722d74657374732d303030303030303030303030303030303030303030303030303030300000000e436f6e74656e742d4c656e677468000000010000000534383231330000000c436f6e74656e742d5479706500000001000000106170706c69636174696f6e2f6a736f6e0000000a557365722d4167656e7400000001000000324578616d706c6553444b2f312e34322e3020286578616d706c652d6167656e743b2072756e74696d652032322e31312e30290000000f582d466f727761726465642d466f7200000001000000183139322e302e322e31302c203139382e35312e3130302e3700000011582d466f727761726465642d50726f746f0000000100000005687474707300000009582d5265616c2d4970000000010000000a3139322e302e322e313000000010582d537461696e6c6573732d41726368000000010000000378363400000010582d537461696e6c6573732d4c616e6700000001000000026a730000000e582d537461696e6c6573732d4f7300000001000000054c696e75780000001b582d537461696e6c6573732d5061636b6167652d56657273696f6e0000000100000006302e36302e3000000013582d537461696e6c6573732d52756e74696d6500000001000000046e6f64650000000002000000100000000641636365707400000001000000106170706c69636174696f6e2f6a736f6e0000000f4163636570742d456e636f64696e6700000001000000086964656e7469747900000011416e7468726f7069632d56657273696f6e000000010000000a323032332d30362d30310000000d417574686f72697a6174696f6e000000010000003f42656172657220706c616365686f6c6465722d746f6b656e2d666f722d74657374732d303030303030303030303030303030303030303030303030303030300000000e436f6e74656e742d4c656e677468000000010000000534383231330000000c436f6e74656e742d5479706500000001000000106170706c69636174696f6e2f6a736f6e0000000a557365722d4167656e7400000001000000324578616d706c6553444b2f312e34322e3020286578616d706c652d6167656e743b2072756e74696d652032322e31312e30290000000f582d466f727761726465642d466f7200000001000000183139322e302e322e31302c203139382e35312e3130302e3700000010582d466f727761726465642d486f7374000000010000000f6170692e6578616d706c652e636f6d00000011582d466f727761726465642d50726f746f0000000100000005687474707300000009582d5265616c2d4970000000010000000a3139322e302e322e313000000010582d537461696e6c6573732d41726368000000010000000378363400000010582d537461696e6c6573732d4c616e6700000001000000026a730000000e582d537461696e6c6573732d4f7300000001000000054c696e75780000001b582d537461696e6c6573732d5061636b6167652d56657273696f6e0000000100000006302e36302e3000000013582d537461696e6c6573732d52756e74696d6500000001000000046e6f64650000000003000000080000000d43616368652d436f6e74726f6c00000001000000086e6f2d63616368650000000c436f6e74656e742d547970650000000100000020746578742f6576656e742d73747265616d3b20636861727365743d7574662d380000000444617465000000010000001d4d6f6e2c203032204e6f7620323032362030383a30303a303020474d5400000006536572766572000000010000000f6578616d706c652d67617465776179000000045661727900000003000000064f726967696e0000001d4163636573732d436f6e74726f6c2d526571756573742d4d6574686f640000001e4163636573732d436f6e74726f6c2d526571756573742d4865616465727300000011582d416363656c2d427566666572696e6700000001000000026e6f00000016582d436f6e74656e742d547970652d4f7074696f6e7300000001000000076e6f736e69666600000013582d4f6e656170692d526571756573742d4964000000010000002032303236313130323038303030303030303030303030303030303030303030300000000004000000080000000d43616368652d436f6e74726f6c00000001000000086e6f2d63616368650000000c436f6e74656e742d547970650000000100000020746578742f6576656e742d73747265616d3b20636861727365743d7574662d380000000444617465000000010000001d4d6f6e2c203032204e6f7620323032362030383a30303a303020474d5400000006536572766572000000010000000f6578616d706c652d67617465776179000000045661727900000003000000064f726967696e0000001d4163636573732d436f6e74726f6c2d526571756573742d4d6574686f640000001e4163636573732d436f6e74726f6c2d526571756573742d4865616465727300000011582d416363656c2d427566666572696e6700000001000000026e6f00000016582d436f6e74656e742d547970652d4f7074696f6e7300000001000000076e6f736e69666600000013582d4f6e656170692d526571756573742d49640000000100000020323032363131303230383030303030303030303030303030303030303030303000000000"
+    }
+  ],
+  "user_agents": [
+    {
+      "name": "absent",
+      "description": "No User-Agent Header: no plaintext, the column is NULL.",
+      "absent": true,
+      "values_hex": [],
+      "plaintext_hex": ""
+    },
+    {
+      "name": "empty_value",
+      "description": "A User-Agent Header with one empty value.",
+      "absent": false,
+      "values_hex": [
+        ""
+      ],
+      "plaintext_hex": "0100000000"
+    },
+    {
+      "name": "single",
+      "description": "One value.",
+      "absent": false,
+      "values_hex": [
+        "6578616d706c652d636c692f312e30"
+      ],
+      "plaintext_hex": "010000000f6578616d706c652d636c692f312e30"
+    },
+    {
+      "name": "several",
+      "description": "Several values in order, one of them non-UTF-8.",
+      "absent": false,
+      "values_hex": [
+        "6669727374",
+        "",
+        "ff7365636f6e64"
+      ],
+      "plaintext_hex": "010000000566697273740000000000000007ff7365636f6e64"
+    }
+  ],
+  "user_agent_aads": [
+    {
+      "audit_id": "aud_vector_0001",
+      "aad_hex": "6175645f766563746f725f3030303100757365725f6167656e745f7631"
+    }
+  ],
+  "sealed_user_agents": [
+    {
+      "name": "empty_value",
+      "audit_id": "aud_vector_0001",
+      "enc_hex": "0bd0ca304bc432a462cea9c3caf76c24340b646da66f9edb4ae5f5a4f5279fcd0e",
+      "values_hex": [
+        ""
+      ]
+    },
+    {
+      "name": "single",
+      "audit_id": "aud_vector_0001",
+      "enc_hex": "914af51901ad7b1c3b1e6533d1809ebe244400edb2c2dc648091ac51b8e9c999819eba64a2a6c08884c18721cb6abec0",
+      "values_hex": [
+        "6578616d706c652d636c692f312e30"
+      ]
+    },
+    {
+      "name": "several",
+      "audit_id": "aud_vector_0001",
+      "enc_hex": "3e4f6ac9a9c7248755fc5acc1ec39f5fb1b02c52c14d5b0ae817f052fbc0ac1b9d33255c904fb46f3dd0bba5a28b3291b8684966a2",
+      "values_hex": [
+        "6669727374",
+        "",
+        "ff7365636f6e64"
+      ]
+    }
+  ]
+}

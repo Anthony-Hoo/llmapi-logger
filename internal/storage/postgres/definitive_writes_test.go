@@ -28,7 +28,7 @@ func releaseHeld(t *testing.T, writer *Store, done <-chan error) error {
 	var request writeRequest
 	select {
 	case request = <-writer.queue:
-	case <-time.After(time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("write was not queued")
 	}
 	select {
@@ -43,7 +43,7 @@ func releaseHeld(t *testing.T, writer *Store, done <-chan error) error {
 	case err := <-done:
 		<-writer.done
 		return err
-	case <-time.After(5 * time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("admitted write hung")
 		return nil
 	}
@@ -85,7 +85,7 @@ func TestAdmittedUserAgentRuleWritesPublishDespiteCallerCancellation(t *testing.
 				done <- err
 			}()
 			// Cancel only once the write is known to be admitted.
-			deadline := time.After(time.Second)
+			deadline := time.After(storeWait)
 			for len(writer.queue) == 0 {
 				select {
 				case <-deadline:
@@ -170,7 +170,7 @@ func TestAdmittedAdministratorWritesReturnTheDefinitiveResult(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- test.write(requestCtx, writer) }()
-			deadline := time.After(time.Second)
+			deadline := time.After(storeWait)
 			for len(writer.queue) == 0 {
 				select {
 				case <-deadline:

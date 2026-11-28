@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"llmapi-logger/internal/storage"
 )
 
 const (
@@ -24,6 +26,9 @@ type captureRecovery struct {
 	stages  [4]captureStageLoss
 	finish  *AuditFinish
 	barrier uint64
+	// staged refers to the staged chunks of a commit that failed for good
+	// (storage.StagedChunkHolder): file positions, never ciphertext.
+	staged storage.StagedChunkHolder
 }
 
 type captureStageLoss struct {
@@ -92,6 +97,69 @@ func (store *Store) rememberFailedWrite(request writeRequest, barrier uint64) {
 	case writeFinishAudit:
 		v := request.data.(*AuditFinish)
 		remember(v.AuditID, "", false, false, 0, v)
+	case writeCheckpoint:
+		// What the StartStage, StartBody, AddHeaders and AddChunk operations
+		// the checkpoint replaces would have recorded together (B.8).
+		v := request.data.(*checkpointWrite)
+		for _, stage := range v.Stages {
+			remember(v.AuditID, stage.Stage, false, false, 0, nil)
+		}
+		for _, body := range v.Bodies {
+			remember(v.AuditID, body.Stage, false, false, body.ObservedLength, nil)
+		}
+		for _, header := range v.Headers {
+			remember(v.AuditID, header.Stage, true, false, 0, nil)
+		}
+		if v.HeaderBlock != nil {
+			// Version 2: the lost block held the Headers of the stages this
+			// checkpoint inserts.
+			for _, stage := range v.Stages {
+				remember(v.AuditID, stage.Stage, true, false, 0, nil)
+			}
+		}
+		for index, bound := range v.chunkBounds() {
+			if bound >= 0 {
+				remember(v.AuditID, captureStageNames[index], false, true, bound, nil)
+			}
+		}
+	case writeCommitAudit:
+		// A whole commit lost in a failed batch: what its FinishStage,
+		// AddHeaders, AddChunk and FinishAudit would have recorded. Only the
+		// last attempt gets here (runWriter); a queue-full or operation-level
+		// failure records the outcome alone, as FinishAudit does.
+		v := request.data.(*commitWrite)
+		for _, stage := range v.Stages {
+			var observed int64
+			if stage.Body != nil {
+				observed = stage.Body.ObservedLength
+			}
+			remember(v.Finish.AuditID, stage.Stage.Stage, false, false, observed, nil)
+		}
+		for _, header := range v.Headers {
+			remember(v.Finish.AuditID, header.Stage, true, false, 0, nil)
+		}
+		if v.HeaderBlock != nil {
+			// Version 2: the stored block is the last checkpoint's. It may
+			// lack the trailers of any stage written before, and the store
+			// cannot open it to tell which, so every such stage is marked.
+			for _, stage := range v.Stages {
+				if stage.StageWritten {
+					remember(v.Finish.AuditID, stage.Stage.Stage, true, false, 0, nil)
+				}
+			}
+		}
+		for index, bound := range v.chunkBounds() {
+			if bound >= 0 {
+				remember(v.Finish.AuditID, captureStageNames[index], false, true, bound, nil)
+			}
+		}
+		remember(v.Finish.AuditID, "", false, false, 0, &v.Finish)
+		if holder, ok := v.Chunks.(storage.StagedChunkHolder); ok {
+			if entry, exists := store.recoveries[v.Finish.AuditID]; exists {
+				entry.staged = holder
+				store.recoveries[v.Finish.AuditID] = entry
+			}
+		}
 	}
 	store.recoveryPending.Store(int32(len(store.recoveries)))
 	// Queue-full finalization is not seen by the writer until it is woken.
@@ -179,6 +247,7 @@ func (store *Store) recoverCaptureWrites() {
 	}
 	store.recoveryMu.Lock()
 	completed := 0
+	var releases []storage.StagedChunkHolder
 	for id, finished := range done {
 		entry, exists := store.recoveries[id]
 		if !exists || entry.version != entries[id].version {
@@ -187,6 +256,10 @@ func (store *Store) recoverCaptureWrites() {
 		if finished {
 			delete(store.recoveries, id)
 			completed++
+			if entry.staged != nil && !store.stagedNotRecovered[id] {
+				releases = append(releases, entry.staged)
+			}
+			delete(store.stagedNotRecovered, id)
 		} else {
 			entry.marked = true
 			store.recoveries[id] = entry
@@ -194,6 +267,11 @@ func (store *Store) recoverCaptureWrites() {
 	}
 	store.recoveryPending.Store(int32(len(store.recoveries)))
 	store.recoveryMu.Unlock()
+	// The staged chunks are committed with the finalization: their staging
+	// files can go.
+	for _, holder := range releases {
+		holder.ReleaseStaged()
+	}
 	if wrote {
 		store.healthy.Store(true)
 	}
@@ -261,9 +339,62 @@ WHERE audit_id=$3 AND stage=$4`, loss.observed, loss.chunk, id, captureStageName
 	if entry.barrier > store.processedSequence {
 		return false, nil
 	}
+	if entry.staged != nil {
+		if err := store.insertRecoveredStaged(tx, id, entry.staged); err != nil {
+			return false, err
+		}
+	}
 	finish := cloneAuditFinish(*entry.finish)
-	if err := finishAudit(tx, &finish, store.integrity.Load()); err != nil {
+	if err := finishAudit(tx, &finish, store.integrity.Load(), legacyDedup); err != nil {
 		return false, fmt.Errorf("postgres: recover finalization: %w", err)
 	}
 	return true, nil
+}
+
+// holdStaged attaches the staged chunks of a commit that failed for good to
+// the audit's recovery entry, when the commit's chunk source has any
+// (storage.StagedChunkHolder). Without an entry (recovery overflow) the
+// staging file stays for the next start's import.
+func (store *Store) holdStaged(auditID string, source ChunkSource) {
+	holder, ok := source.(storage.StagedChunkHolder)
+	if !ok {
+		return
+	}
+	store.recoveryMu.Lock()
+	defer store.recoveryMu.Unlock()
+	if entry, exists := store.recoveries[auditID]; exists {
+		entry.staged = holder
+		store.recoveries[auditID] = entry
+	}
+}
+
+// insertRecoveredStaged inserts the staged chunks of a failed final commit
+// under their body rows, before the audit is finalized as failed, so that
+// finalizeIncompleteCapture accounts for them like any stored chunk. Only
+// chunks that continue a body's stored chunks are inserted. When that fails
+// on its own (a rejected chunk), the audit is finalized without them and
+// the staging file is kept, so the next start keeps it as an orphan.
+func (store *Store) insertRecoveredStaged(tx dbTransaction, auditID string, holder storage.StagedChunkHolder) error {
+	if _, err := tx.Exec("SAVEPOINT capture_staged"); err != nil {
+		return err
+	}
+	_, err := insertStagedChunks(tx, auditID, holder.StagedChunks())
+	if err != nil {
+		if !canIsolateWriteError(err) {
+			return err
+		}
+		if _, rollbackErr := tx.Exec("ROLLBACK TO capture_staged"); rollbackErr != nil {
+			return rollbackErr
+		}
+		if store.stagedNotRecovered == nil {
+			store.stagedNotRecovered = make(map[string]bool)
+		}
+		store.stagedNotRecovered[auditID] = true
+		if store.logger != nil {
+			store.logger.Warn("audit staged chunks not recovered", "audit_id", auditID,
+				"error_category", "staged_recovery_failed", "storage_error", ErrorClass(err))
+		}
+	}
+	_, err = tx.Exec("RELEASE capture_staged")
+	return err
 }

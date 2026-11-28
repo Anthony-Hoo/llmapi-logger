@@ -47,17 +47,42 @@ func (harness *insightsHarness) sendMessages(user string) string {
 		messagesResponse("model-example", `{"type":"text","text":"ok"}`))
 }
 
+// sendFullyRetained sends a Gemini request whose turn cannot be stored: its
+// text starts like a data URL but is not one, so preparing the turn fails
+// (doc/features/18 section 4.1), the parse is partial with
+// reconstruction_failed, and both raw bodies stay fully retained. Every
+// protocol has a normalizer now, so a declined turn is how an audit keeps its
+// raw on the success path.
+func (harness *insightsHarness) sendFullyRetained(user string) string {
+	h := headers("User-Agent", "example-agent/1.0", "X-Goog-Api-Key", "sk-backfillkey")
+	return harness.send("/v1beta/models/model-example:generateContent", h,
+		`{"contents":[{"role":"user","parts":[{"text":"data:`+user+`"}]}]}`,
+		upstreamResponse{contentType: "application/json", body: `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],` +
+			`"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":3,"totalTokenCount":23}}`})
+}
+
 func (harness *insightsHarness) sendChat(user string, response upstreamResponse) string {
 	h := headers("Authorization", "Bearer sk-backfillkey")
 	return harness.send("/v1/chat/completions", h, chatBody("model-example", "You are an agent.", user), response)
 }
 
-func TestInsightsBackfillFullRetentionAnthropic(t *testing.T) {
+func TestInsightsBackfillFullRetentionGemini(t *testing.T) {
 	t.Parallel()
 	harness := newInsightsHarness(t, nil)
-	older := harness.sendMessages("first task")
-	newer := harness.sendMessages("second task")
+	older := harness.sendFullyRetained("first task")
+	newer := harness.sendFullyRetained("second task")
 	ctx := context.Background()
+	for _, id := range []string{older, newer} {
+		for _, side := range []string{sqlite.StageRequestReceived, sqlite.StageResponseReceived} {
+			stage, err := harness.store.LoadParserStage(ctx, id, side)
+			if err != nil || stage.Body == nil || stage.Body.RetentionState != sqlite.RetentionFull {
+				t.Fatalf("audit %s %s must be fully retained: %+v %v", id, side, stage.Body, err)
+			}
+		}
+		if audit, err := harness.store.LoadParserAudit(ctx, id); err != nil || audit.ParseStatus != sqlite.ParsePartial {
+			t.Fatalf("audit %s parse status = %q, %v; want partial", id, audit.ParseStatus, err)
+		}
+	}
 	if harness.hasAnalysis(older) || harness.hasAnalysis(newer) {
 		t.Fatal("analysis exists before backfill")
 	}
@@ -162,7 +187,7 @@ func TestInsightsBackfillVersionUpgradeRecomputes(t *testing.T) {
 	harness := newInsightsHarness(t, nil)
 	ctx := context.Background()
 	id := harness.sendMessages("task")
-	harness.enableInsights(false)
+	harness.enableInsights(true)
 	if harness.worker.BackfillForTest(ctx) != 1 {
 		t.Fatal("initial backfill did not run")
 	}
@@ -239,5 +264,47 @@ func TestInsightsBackfillRunsOldestFirstSoNewerAuditsLinkPredecessors(t *testing
 	}
 	if newerRow.PrevAuditID == nil || *newerRow.PrevAuditID != older {
 		t.Fatalf("newer audit prev = %v, want %s", newerRow.PrevAuditID, older)
+	}
+}
+
+// Verified Messages audits release their raw bodies, so backfill rebuilds them
+// from the turn graph. Cache reads are most of an agent's prompt and must
+// survive that for a stream as well.
+func TestInsightsBackfillMetadataRetentionAnthropicKeepsCacheUsage(t *testing.T) {
+	t.Parallel()
+	harness := newInsightsHarness(t, nil)
+	ctx := context.Background()
+	h := headers("User-Agent", "example-agent/1.0", "X-Api-Key", "sk-backfillkey", "anthropic-version", "2023-06-01")
+	jsonID := harness.send("/v1/messages", h, messagesBody("model-example", "You are an agent.", userMessage("plain task")),
+		upstreamResponse{contentType: "application/json", body: `{"id":"msg_plain","type":"message","role":"assistant","model":"model-example",` +
+			`"content":[{"type":"text","text":"ok"}],"stop_reason":"max_tokens","usage":{"input_tokens":20,"cache_read_input_tokens":700,"cache_creation_input_tokens":60,"output_tokens":3}}`})
+	streamID := harness.send("/v1/messages", h, messagesBody("model-example", "You are an agent.", userMessage("streamed task")),
+		upstreamResponse{contentType: "text/event-stream", body: "" +
+			"event: message_start\n" + `data: {"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"model-example","content":[],"usage":{"input_tokens":20,"cache_read_input_tokens":700,"cache_creation_input_tokens":60,"output_tokens":1}}}` + "\n\n" +
+			"event: content_block_start\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+			"event: content_block_delta\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+			"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n" +
+			"event: message_delta\n" + `data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":3}}` + "\n\n" +
+			"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"})
+	for _, id := range []string{jsonID, streamID} {
+		stage, err := harness.store.LoadParserStage(ctx, id, sqlite.StageRequestReceived)
+		if err != nil || stage.Body == nil || stage.Body.RetentionState != sqlite.RetentionMetadata {
+			t.Fatalf("audit %s must be metadata-retained: %+v %v", id, stage.Body, err)
+		}
+	}
+	harness.enableInsights(true)
+	if got := harness.worker.BackfillForTest(ctx); got != 2 {
+		t.Fatalf("attempted %d audits, want 2", got)
+	}
+	for name, id := range map[string]string{"json": jsonID, "stream": streamID} {
+		row := harness.analysis(id)
+		if row.UncachedInput == nil || *row.UncachedInput != 20 || row.CacheRead == nil || *row.CacheRead != 700 ||
+			row.CacheWrite == nil || *row.CacheWrite != 60 || row.Output == nil || *row.Output != 3 || row.EstUser == 0 || row.EstSystem == 0 {
+			t.Fatalf("reconstructed %s audit = usage %v/%v/%v/%v est_user %d est_system %d", name,
+				row.UncachedInput, row.CacheRead, row.CacheWrite, row.Output, row.EstUser, row.EstSystem)
+		}
+		if row.StopReason == nil || *row.StopReason != insights.StopLength {
+			t.Fatalf("reconstructed %s audit stop reason = %v", name, row.StopReason)
+		}
 	}
 }

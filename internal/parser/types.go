@@ -9,6 +9,7 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights"
+	"llmapi-logger/internal/parser/handover"
 	"llmapi-logger/internal/storage"
 )
 
@@ -20,8 +21,17 @@ const (
 
 	MaxDecodedBodyBytes = 64 << 20
 	MaxGzipRatio        = 50
-	QueueCapacity       = 100
+	// QueueCapacity bounds the audits Notify (and so the pending scan) may
+	// have waiting in the worker's queue.
+	QueueCapacity = 100
+	// FinalizeQueueCapacity bounds the jobs Submit may have waiting in the
+	// same queue (design G.2).
+	FinalizeQueueCapacity = 4096
 )
+
+// FinalizeJob is what Submit takes: a committed audit and, unless it is an
+// id-only job, the plaintext evidence the capture session still held.
+type FinalizeJob = handover.Job
 
 // Parser extracts only fields useful for the local audit list and detail UI.
 type Parser interface {
@@ -45,7 +55,10 @@ type Store interface {
 	ReleaseProcessingParse(context.Context, string) error
 	LoadParserStage(context.Context, string, string) (storage.ParserStage, error)
 	ReadParserChunks(context.Context, string, string, int64, int) ([]storage.BodyChunk, error)
-	LoadParserRequestHeaders(context.Context, string, []string) ([]storage.HeaderEvidence, error)
+	// LoadParserHeaderSource returns the allowlisted inbound request headers:
+	// the filtered rows of a version 1 audit, the whole block of a version 2
+	// audit (loadRequestHeaders filters it in the process).
+	LoadParserHeaderSource(context.Context, string, []string) (storage.HeaderSource, error)
 	SaveParsedResult(context.Context, storage.ParsedResult) error
 	SaveParsedAudit(context.Context, storage.ParsedAudit) error
 }
@@ -105,6 +118,10 @@ type Result struct {
 	HasToolCall        *bool
 	Conversation       *conversation.Conversation
 	ParsedJSON         []byte
+	// StopReason is set only by the insights backfill, from the envelope of a
+	// released stream response. A live parse leaves it empty: the analyzer
+	// reads the stop reason from the response body.
+	StopReason string
 }
 
 // IsUsable reports whether at least one trusted public field was extracted.

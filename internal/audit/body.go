@@ -19,14 +19,10 @@ import (
 type bodyCapture struct {
 	digest         hash.Hash
 	persisted      bool
-	persistChunks  bool
 	sourceStage    string
 	observedLength int64
 	storedLength   int64
-	nextSeq        int64
 	chunkCount     int64
-	pending        []byte
-	pendingAtNS    int64
 	firstAtNS      int64
 	lastAtNS       int64
 	eofSeen        bool
@@ -70,6 +66,10 @@ type bodyCapture struct {
 	// longer than the probe, which must never match.
 	streamLine         []byte
 	streamLineOverflow bool
+
+	// unified is the retention state of the body (retain.go); nil only on a
+	// bodyCapture built by hand in a test.
+	unified *unifiedBody
 }
 
 type observedReadCloser struct {
@@ -100,6 +100,9 @@ func (reader *observedReadCloser) Read(buffer []byte) (int, error) {
 	if err == io.EOF {
 		reader.captureTrailers()
 	}
+	if err != nil {
+		reader.session.readBodyEnded(reader.stage)
+	}
 	return count, err
 }
 
@@ -108,6 +111,7 @@ func (reader *observedReadCloser) Close() error {
 		reader.closeErr = reader.underlying.Close()
 		reader.session.closeReadBody(reader.stage, reader.closeErr)
 		reader.captureTrailers()
+		reader.session.readBodyEnded(reader.stage)
 	})
 	return reader.closeErr
 }
@@ -137,6 +141,14 @@ func (session *Session) observeRead(stageName string, data []byte, readErr error
 		body.eofSeen = true
 		body.hashComplete = true
 		body.closed = true
+		return
+	}
+	if readErr != nil && body.eofSeen && len(data) == 0 {
+		// The body already ended at io.EOF, so every byte is captured. A
+		// later read that returns no data and an error (net/http's
+		// transport can read once more after the body was closed: "invalid
+		// Read on closed Body") loses nothing and does not make the body
+		// partial.
 		return
 	}
 	if readErr != nil {
@@ -226,11 +238,10 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 	}
 	body := &bodyCapture{
 		digest:         sha256.New(),
-		persistChunks:  true,
 		sourceStage:    stage.name,
 		streamComplete: true,
 	}
-	body.stream = body.persistChunks && stage.name == storage.StageResponseReceived && isEventStream(stage.contentType)
+	body.stream = stage.name == storage.StageResponseReceived && isEventStream(stage.contentType)
 	if body.stream {
 		body.streamPoints = make([]streamtimeline.Point, 0, 256)
 		// The probe sees raw upstream bytes, so terminal detection is only
@@ -243,25 +254,7 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 		}
 	}
 	stage.body = body
-	if !stage.persisted {
-		body.faulted = true
-		body.errorCode = "start_stage_failed"
-		return body
-	}
-	if err := session.store.StartBody(session.writeCtx, storage.BodyStream{
-		AuditID:        session.auditID,
-		Stage:          stage.name,
-		SourceStage:    stage.name,
-		State:          storage.StageStateStreaming,
-		RetentionState: storage.RetentionPending,
-	}); err != nil {
-		body.faulted = true
-		body.errorCode = "start_body_failed"
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.markStageFaultLocked(stage, body.errorCode)
-		return body
-	}
-	body.persisted = true
+	session.attachUnifiedBodyLocked(stage, body)
 	return body
 }
 
@@ -279,86 +272,38 @@ func (session *Session) observeBodyLocked(stage *stageCapture, body *bodyCapture
 		observeStreamEvents(body, data, body.observedLength, observedAtNS)
 	}
 	body.observedLength += int64(len(data))
-	if !body.persistChunks || !body.persisted {
-		return
-	}
-	// Bound staging memory even when an upstream Reader returns a very large
-	// buffer. Small bodies allocate only what they need, not a full chunk.
-	for len(data) > 0 {
-		if len(body.pending) == 0 {
-			body.pendingAtNS = observedAtNS
-		}
-		count := min(len(data), bodyChunkSize-len(body.pending))
-		needed := len(body.pending) + count
-		if needed > cap(body.pending) {
-			capacity := min(bodyChunkSize, max(needed, 2*cap(body.pending)))
-			next := make([]byte, len(body.pending), capacity)
-			copy(next, body.pending)
-			clear(body.pending)
-			body.pending = next
-		}
-		body.pending = append(body.pending, data[:count]...)
-		data = data[count:]
-		if len(body.pending) == bodyChunkSize {
-			session.flushBodyLocked(stage, body, false)
-		}
-	}
+	session.retainLocked(stage, body, data, observedAtNS)
 }
 
+// flushBodyLocked ends the open chunk of a body: when it is full, or always
+// with force, which every end of the body (EOF, Close, Finish) uses.
 func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, force bool) {
 	if body == nil {
 		return
 	}
-	if force {
-		// Completed request stages must not retain a chunk for the lifetime
-		// of a potentially long-running streaming response.
-		defer func() { clear(body.pending); body.pending = nil; body.pendingAtNS = 0 }()
-	}
-	if !body.persistChunks || !body.persisted || len(body.pending) == 0 {
-		return
-	}
-	if !force && len(body.pending) < bodyChunkSize {
-		return
-	}
-	// observeBodyLocked never stages more than one chunk. Encoding and
-	// encryption are synchronous; AddChunk receives only owned ciphertext.
-	plaintext := body.pending
-	observedAtNS := body.pendingAtNS
-	body.pending = body.pending[:0]
-	body.pendingAtNS = 0
-	defer clear(plaintext)
+	session.flushRetainedLocked(body, force)
+}
 
-	sequence := body.nextSeq
-	offset := body.storedLength
-	body.nextSeq++
+// sealChunkLocked compresses and encrypts one owning chunk of a stage, with
+// the format and AAD the legacy path used, so the chunk rows are the same.
+// It returns the stable error code of a failure, or "".
+func (session *Session) sealChunkLocked(stage *stageCapture, sequence, offset int64, plaintext []byte, observedAtNS int64) (storage.BodyChunk, string) {
 	compression, encoded, err := session.encodeBodyLocked(plaintext, stage.contentType)
 	if err != nil {
-		clear(plaintext)
-		body.faulted = true
-		body.errorCode = "body_compression_failed"
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
+		return storage.BodyChunk{}, "body_compression_failed"
 	}
 	encodedLength := len(encoded)
 	aad, err := security.AAD(session.auditID, "body_chunk_v2", stage.name, strconv.FormatInt(sequence, 10), compression)
 	if err != nil {
-		clear(plaintext)
 		clear(encoded)
-		body.faulted = true
-		body.errorCode = "body_encryption_failed"
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
+		return storage.BodyChunk{}, "body_encryption_failed"
 	}
 	encrypted, err := session.cipher.Encrypt(aad, encoded)
 	clear(encoded)
 	if err != nil {
-		clear(plaintext)
-		body.faulted = true
-		body.errorCode = "body_encryption_failed"
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
+		return storage.BodyChunk{}, "body_encryption_failed"
 	}
-	if err := session.store.AddChunk(session.writeCtx, storage.BodyChunk{
+	return storage.BodyChunk{
 		AuditID:         session.auditID,
 		Stage:           stage.name,
 		Seq:             sequence,
@@ -368,17 +313,7 @@ func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, 
 		ObservedAtNS:    observedAtNS,
 		Compression:     compression,
 		DataEnc:         encrypted,
-	}); err != nil {
-		clear(plaintext)
-		body.faulted = true
-		body.errorCode = "add_chunk_failed"
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
-	}
-	body.storedLength += int64(len(plaintext))
-	body.chunkCount++
-	clear(plaintext)
+	}, ""
 }
 
 func (session *Session) encodeBodyLocked(plaintext []byte, contentType string) (string, []byte, error) {

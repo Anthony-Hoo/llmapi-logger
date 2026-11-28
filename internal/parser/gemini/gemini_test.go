@@ -49,7 +49,7 @@ func TestParseGeminiSSEUsesLastUsageSnapshot(t *testing.T) {
 
 	implementation, _ := New(StreamGenerateContent)
 	data := "data: {\"responseId\":\"gem-s\",\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"private\"}]}}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":1,\"totalTokenCount\":4}}\n\n" +
-		"data: {\"modelVersion\":\"gemini-s2\",\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"hidden\",\"args\":{}}}]}}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":5,\"totalTokenCount\":8}}\n\n"
+		"data: {\"modelVersion\":\"gemini-s2\",\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"hidden\",\"args\":{}}}]}}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":5,\"totalTokenCount\":8}}\n\n"
 	result := implementation.Parse(context.Background(), base.Input{
 		Endpoint: "/v1beta/models/gemini-flash:streamGenerateContent",
 		Request:  base.BodySource{Present: true, Complete: true, Data: []byte(`{"contents":[]}`)},
@@ -177,12 +177,16 @@ func TestGeminiPromptFeedbackClassificationAcrossTransports(t *testing.T) {
 				result := implementation.Parse(context.Background(), base.Input{
 					Response: base.BodySource{Present: true, Complete: true, ContentType: contentType, Data: []byte(payload)},
 				})
-				want := ""
+				want, wantStatus := "", base.StatusOK
 				if reason == "SAFETY" {
 					want = policyclass.ClassContentFilter
+				} else if transport != "json" {
+					// No candidate and no block reason: a stream that ends
+					// like this has not reported how it ended.
+					wantStatus = base.StatusPartial
 				}
-				if result.Status != base.StatusOK || result.UpstreamErrorClass != want {
-					t.Fatalf("status=%q, class=%q; want status=%q, class=%q", result.Status, result.UpstreamErrorClass, base.StatusOK, want)
+				if result.Status != wantStatus || result.UpstreamErrorClass != want {
+					t.Fatalf("status=%q, class=%q; want status=%q, class=%q", result.Status, result.UpstreamErrorClass, wantStatus, want)
 				}
 			})
 		}

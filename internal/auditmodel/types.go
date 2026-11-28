@@ -27,6 +27,18 @@ const (
 	LayoutMarkerEnvelope                = "marker_envelope"
 	LayoutOpenAIStreamResponse          = "openai.stream.response"
 
+	LayoutAnthropicMessagesRequestSystemNone   = "anthropic.messages.request.system_none"
+	LayoutAnthropicMessagesRequestSystemSingle = "anthropic.messages.request.system_single"
+	LayoutAnthropicMessagesRequestSystemArray  = "anthropic.messages.request.system_array"
+	LayoutAnthropicStreamResponse              = "anthropic.stream.response"
+
+	LayoutGeminiRequestSystemNone   = "gemini.generate_content.request.system_none"
+	LayoutGeminiRequestSystemSingle = "gemini.generate_content.request.system_single"
+	LayoutGeminiStreamResponse      = "gemini.stream.response"
+
+	SlotContents          = "contents"
+	SlotSystemInstruction = "systemInstruction"
+
 	SlotInstructions = "instructions"
 	SlotMessages     = "messages"
 	SlotInput        = "input"
@@ -34,6 +46,8 @@ const (
 	SlotOutput       = "output"
 	SlotChoice       = "choice"
 	SlotAggregate    = "aggregate"
+	SlotSystem       = "system"
+	SlotContent      = "content"
 
 	OperationRetain = "retain"
 	OperationDelete = "delete"
@@ -148,7 +162,18 @@ type Turn struct {
 	// keeps (a Responses conversation), so it carries only the new input and
 	// cannot be matched to its parent by repeated content.
 	ServerManagedContext bool
-	CreatedAtNS          int64
+	// SkipInlineFileData turns off the file_data/file_content/attachment_data
+	// key heuristic. It is set for protocols that never carry inline files
+	// under those keys, where a matching key is caller-defined data, such as a
+	// tool argument, and must stay a plain string.
+	SkipInlineFileData bool
+	// InlineDataParts turns on the Gemini inline part rule: the base64 "data"
+	// string of an inlineData (or inline_data) object is stored as a binary
+	// object by its decoded bytes. It applies only when the string is the
+	// canonical padded standard encoding of those bytes, so rebuilding it
+	// gives the same string; any other string stays as it is.
+	InlineDataParts bool
+	CreatedAtNS     int64
 }
 
 type ObjectRef struct {

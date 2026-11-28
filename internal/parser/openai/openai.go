@@ -17,7 +17,10 @@ const (
 	Completions      = "openai.completions"
 	Responses        = "openai.responses"
 	ResponsesCompact = "openai.responses_compact"
-	version          = "2"
+	// version 3 stores a stream as the folded body plus a residue
+	// (auditmodel.LayoutOpenAIStreamResponseV2); version 2 rows keep their
+	// per-event descriptors and display aggregate.
+	version = "3"
 )
 
 type Parser struct {
@@ -201,8 +204,19 @@ func parseStream(data []byte, parserName string, result *base.Result) error {
 			}
 		}
 	}
-	appendStreamConversation(events, parserName, result)
+	// The conversation is read from the folded body, so a stream and the
+	// same answer without streaming yield the same conversation.
+	appendResponseConversation(foldStream(events, parserName).body, parserName, result)
 	return nil
+}
+
+// foldStream folds the events of one stream into the endpoint's non-stream
+// body.
+func foldStream(events []base.SSEEvent, parserName string) streamFold {
+	if parserName == Responses || parserName == ResponsesCompact {
+		return foldResponsesStream(events)
+	}
+	return foldChatStream(events)
 }
 
 func applyUsage(usage map[string]any, result *base.Result) {

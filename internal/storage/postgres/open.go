@@ -52,6 +52,9 @@ type Store struct {
 	submittedSequence uint64 // protected by submitMu
 	processedSequence uint64 // writer goroutine only
 	recoveryCursor    string // writer goroutine only; round-robin recovery
+	// stagedNotRecovered: audits whose staged chunks recovery could not
+	// insert; their staging file is kept. Writer goroutine only.
+	stagedNotRecovered map[string]bool
 
 	closeOnce sync.Once
 	closeErr  error

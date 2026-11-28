@@ -1,5 +1,7 @@
 // Package builtin assembles the small fixed parser set used by the personal
-// single-process deployment.
+// single-process deployment. It is the one place that lists the protocol
+// adapters: the proxy, the query service and every tool that rebuilds turns
+// reach them through Registry, so none can run without them.
 package builtin
 
 import (
@@ -9,21 +11,42 @@ import (
 	"llmapi-logger/internal/parser/openai"
 )
 
-// All returns one parser for every configured first-version parser name.
-func All() []base.Parser {
-	chat, _ := openai.New(openai.ChatCompletions)
-	completions, _ := openai.New(openai.Completions)
-	responses, _ := openai.New(openai.Responses)
-	compact, _ := openai.New(openai.ResponsesCompact)
-	generate, _ := gemini.New(gemini.GenerateContent)
-	streamGenerate, _ := gemini.New(gemini.StreamGenerateContent)
-	return []base.Parser{
-		chat,
-		completions,
-		responses,
-		compact,
-		anthropic.New(),
-		generate,
-		streamGenerate,
+// registry is built when the package is initialized. An invalid adapter list
+// is a programming error and stops every binary at start-up, before any turn
+// is rebuilt.
+var registry = mustRegistry()
+
+func mustRegistry() *base.Registry {
+	registry, err := base.NewRegistry(adapters()...)
+	if err != nil {
+		panic(err)
+	}
+	return registry
+}
+
+// adapters is the built-in protocol list. Adding a protocol means writing its
+// adapter and adding it here.
+func adapters() []base.Adapter {
+	return []base.Adapter{
+		must(openai.Adapter(openai.ChatCompletions)),
+		must(openai.Adapter(openai.Completions)),
+		must(openai.Adapter(openai.Responses)),
+		must(openai.Adapter(openai.ResponsesCompact)),
+		anthropic.Adapter(),
+		must(gemini.Adapter(gemini.GenerateContent)),
+		must(gemini.Adapter(gemini.StreamGenerateContent)),
 	}
 }
+
+func must(adapter base.Adapter, err error) base.Adapter {
+	if err != nil {
+		panic(err)
+	}
+	return adapter
+}
+
+// Registry returns the built-in adapters keyed by parser name.
+func Registry() *base.Registry { return registry }
+
+// All returns one parser for every configured first-version parser name.
+func All() []base.Parser { return registry.Parsers() }

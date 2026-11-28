@@ -11,6 +11,7 @@ import (
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/contentpolicy"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/uaguard"
 
 	sqlitecodes "modernc.org/sqlite/lib"
@@ -44,6 +45,11 @@ const (
 	writeCreateContentPolicyRule
 	writeUpdateContentPolicyRule
 	writeDeleteContentPolicyRule
+	writeCheckpoint
+	writeCommitAudit
+	// writeRestoreStagedChunks is the start-up import of local staging
+	// (staged_restore.go).
+	writeRestoreStagedChunks
 )
 
 type writeRequest struct {
@@ -55,13 +61,57 @@ type writeRequest struct {
 }
 
 // BeginAudit enqueues a parent audit row and waits until its batch commits.
+// When record.Inbound is set (the unified write path), the request_received
+// stage row and its per-value header rows are written in the same operation.
+// This store only writes capture version 1.
 func (store *Store) BeginAudit(ctx context.Context, record AuditRecord) error {
 	record.Defaults()
+	if record.Inbound != nil {
+		inbound := *record.Inbound
+		inbound.Stage.Defaults()
+		record.Inbound = &inbound
+	}
 	if err := validateAuditRecord(record); err != nil {
 		return err
 	}
-	return store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: cloneAuditRecord(record)})
+	if err := storage.ValidateAuditRecordCapture(record); err != nil {
+		return err
+	}
+	if storage.EffectiveCaptureVersion(record.CaptureVersion) != storage.CaptureVersion1 {
+		return errUnsupportedCaptureVersion
+	}
+	if record.Inbound == nil {
+		return store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: cloneAuditRecord(record)})
+	}
+	// The outcome of the inbound part travels beside the acknowledgement: the
+	// operation itself succeeds, so the start row and its failure marks
+	// commit, and only a committed batch reports the lost stage row.
+	write := &beginAuditWrite{record: cloneAuditRecord(record)}
+	if err := store.submitSync(ctx, writeRequest{kind: writeBeginAudit, data: write}); err != nil {
+		return err
+	}
+	if write.inboundStageLost {
+		return fmt.Errorf("sqlite: begin audit: %w", storage.ErrInboundStageNotStored)
+	}
+	return nil
 }
+
+// beginAuditWrite is a BeginAudit carrying the inbound stage. The writer sets
+// inboundStageLost when the stage row was rejected in its nested savepoint;
+// the caller reads it only after a nil acknowledgement, which the writer
+// sends after the batch committed.
+type beginAuditWrite struct {
+	record           AuditRecord
+	inboundStageLost bool
+}
+
+// errUnsupportedCaptureVersion rejects version 2 writes: the SQLite schema has
+// no capture_version column, header block table or stage content columns.
+var errUnsupportedCaptureVersion = errors.New("sqlite: only capture version 1 is supported")
+
+// SupportsHeaderBlock tells the capture layer which capture version to write.
+// The SQLite store has no header block table, so it always writes version 1.
+func (store *Store) SupportsHeaderBlock() bool { return false }
 
 // StartStage non-blockingly appends an observed HTTP stage to the writer
 // queue. A nil error means accepted by the queue, not yet committed.
@@ -162,8 +212,11 @@ func (store *Store) submitAsync(ctx context.Context, request writeRequest) error
 		store.submittedSequence = request.sequence
 		return nil
 	default:
-		if request.kind == writeFinishAudit {
-			// Replaying must wait for every earlier accepted stage write.
+		if request.kind == writeFinishAudit || request.kind == writeCommitAudit {
+			// Replaying must wait for every earlier accepted stage write. A
+			// commit is remembered only on its final attempt (see
+			// rememberFailedWrite); a rejected checkpoint is merged into the
+			// session's next write and is not remembered at all.
 			store.rememberFailedWrite(request, store.submittedSequence)
 		}
 		return ErrQueueFull
@@ -254,11 +307,21 @@ func (store *Store) runWriter() {
 		}
 		if err == nil {
 			for index, request := range batch {
-				if request.kind == writeFinishAudit {
+				switch request.kind {
+				case writeFinishAudit:
 					if results[index] != nil && !errors.Is(results[index], sql.ErrNoRows) {
 						store.rememberFailedWrite(request, request.sequence)
 					} else if results[index] == nil {
 						store.forgetFinishedRecovery(request.data.(*AuditFinish).AuditID)
+					}
+				case writeCommitAudit:
+					commit := request.data.(*AuditCommit)
+					if results[index] != nil && !errors.Is(results[index], sql.ErrNoRows) {
+						// An isolated failure is never retried, so record the
+						// terminal outcome now, whatever the attempt.
+						store.rememberFailedCommit(commit, request.sequence)
+					} else if results[index] == nil {
+						store.forgetFinishedRecovery(commit.Finish.AuditID)
 					}
 				}
 			}
@@ -268,7 +331,10 @@ func (store *Store) runWriter() {
 		}
 		for index, request := range batch {
 			if request.ack != nil {
-				if err != nil {
+				if err != nil && request.kind == writeCommitAudit {
+					// Keep the cause so ErrorClass still sees the SQLite code.
+					request.ack <- fmt.Errorf("%w: %w", ErrWriteBatchFailed, err)
+				} else if err != nil {
 					request.ack <- err
 				} else {
 					request.ack <- results[index]
@@ -398,6 +464,17 @@ func markCaptureWriteFailed(transaction *sql.Tx, request writeRequest) error {
 		auditIDs = []string{request.data.(BodyChunk).AuditID}
 	case writeFinishStage:
 		auditIDs = []string{request.data.(StageFinish).AuditID}
+	case writeCheckpoint:
+		// The whole checkpoint rolled back. Mark what the StartStage,
+		// AddHeaders and AddChunk operations it replaces would have marked;
+		// updates aimed at stage or body rows of this checkpoint find nothing.
+		checkpoint := request.data.(AuditCheckpoint)
+		auditIDs = []string{checkpoint.AuditID}
+		for _, header := range checkpoint.Headers {
+			headerStages[[2]string{header.AuditID, header.Stage}] = struct{}{}
+		}
+	case writeCommitAudit:
+		auditIDs = []string{request.data.(*AuditCommit).Finish.AuditID}
 	}
 	for _, auditID := range auditIDs {
 		if _, err := transaction.Exec(`
@@ -425,6 +502,18 @@ WHERE audit_id = ? AND stage = ? AND state = 'streaming'
 			return fmt.Errorf("sqlite writer: record missing chunk: %w", err)
 		}
 	}
+	if request.kind == writeCheckpoint {
+		checkpoint := request.data.(AuditCheckpoint)
+		for stage, observed := range checkpointChunkBounds(checkpoint) {
+			if _, err := transaction.Exec(`
+UPDATE body_streams SET observed_length = MAX(observed_length, ?), error_code = ?
+WHERE audit_id = ? AND stage = ? AND state = 'streaming'
+  AND EXISTS (SELECT 1 FROM audit_records a WHERE a.audit_id = body_streams.audit_id AND a.ended_at_ns IS NULL)`,
+				observed, CaptureChunkMissing, checkpoint.AuditID, stage); err != nil {
+				return fmt.Errorf("sqlite writer: record missing chunk: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -435,7 +524,17 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 		if store.recoveryOverflow.Load() {
 			return ErrRecoveryOverflow
 		}
-		return insertAudit(transaction, request.data.(AuditRecord))
+		write, withInbound := request.data.(*beginAuditWrite)
+		if !withInbound {
+			return insertAudit(transaction, request.data.(AuditRecord))
+		}
+		write.inboundStageLost = false
+		if err := insertAudit(transaction, write.record); err != nil {
+			return err
+		}
+		lost, err := insertInboundStage(transaction, write.record)
+		write.inboundStageLost = lost
+		return err
 	case writeStartStage:
 		return insertStage(transaction, request.data.(HTTPStage))
 	case writeStartBody:
@@ -447,25 +546,20 @@ func (store *Store) applyWrite(transaction *sql.Tx, request writeRequest) error 
 	case writeFinishStage:
 		return finishStage(transaction, request.data.(StageFinish))
 	case writeFinishAudit:
-		store.recoveryMu.Lock()
-		entry, pending := store.recoveries[request.data.(*AuditFinish).AuditID]
-		store.recoveryMu.Unlock()
-		if pending && !entry.marked {
-			// A failed recovery attempt and this batch use separate
-			// transactions. The later finish must not outrun its marker.
-			entry.finish = nil
-			if _, err := store.recoverCaptureEntry(transaction, request.data.(*AuditFinish).AuditID, entry); err != nil {
-				return err
-			}
-		}
-		if store.recoveryOverflow.Load() {
-			if _, err := transaction.Exec(`UPDATE audit_records
-SET capture_status='failed', error_code='capture_recovery_overflow'
-WHERE audit_id=? AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID); err != nil {
-				return err
-			}
+		if err := store.prepareFinalization(transaction, request.data.(*AuditFinish).AuditID); err != nil {
+			return err
 		}
 		return finishAudit(transaction, request.data.(*AuditFinish), signer)
+	case writeCheckpoint:
+		return writeAuditCheckpoint(transaction, request.data.(AuditCheckpoint))
+	case writeCommitAudit:
+		commit := request.data.(*AuditCommit)
+		if err := store.prepareFinalization(transaction, commit.Finish.AuditID); err != nil {
+			return err
+		}
+		return commitAudit(transaction, commit, signer)
+	case writeRestoreStagedChunks:
+		return restoreStagedChunks(transaction, request.data.(*stagedRestoreWrite))
 	case writeResetProcessingParses:
 		return resetProcessingParses(transaction)
 	case writeClaimPendingParse:
@@ -505,6 +599,81 @@ WHERE audit_id=? AND ended_at_ns IS NULL`, request.data.(*AuditFinish).AuditID);
 	default:
 		return fmt.Errorf("sqlite writer: unknown operation %d", request.kind)
 	}
+}
+
+// prepareFinalization runs before FinishAudit and CommitAudit: a failure
+// marker that a failed recovery transaction could not persist must land
+// before the terminal update, and a recovery overflow fails the capture.
+func (store *Store) prepareFinalization(transaction *sql.Tx, auditID string) error {
+	store.recoveryMu.Lock()
+	entry, pending := store.recoveries[auditID]
+	store.recoveryMu.Unlock()
+	if pending && !entry.marked {
+		// A failed recovery attempt and this batch use separate
+		// transactions. The later finish must not outrun its marker.
+		entry.finish = nil
+		if _, err := store.recoverCaptureEntry(transaction, auditID, entry); err != nil {
+			return err
+		}
+	}
+	if store.recoveryOverflow.Load() {
+		if _, err := transaction.Exec(`UPDATE audit_records
+SET capture_status='failed', error_code='capture_recovery_overflow'
+WHERE audit_id=? AND ended_at_ns IS NULL`, auditID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// insertInboundStage writes the inbound stage row and then its headers, each
+// in a nested savepoint, so the start row commits whenever it would have
+// committed without them: admission never depends on the inbound evidence
+// being storable. An isolatable failure rolls back only that part and marks
+// the audit as markCaptureWriteFailed does for a failed StartStage or
+// AddHeaders of request_received. Without the stage row its headers are not
+// attempted, as their AddHeaders would only fail on the missing parent.
+// stageLost reports that the stage row was rolled back; a lost header group
+// alone keeps the stage row and is not reported.
+func insertInboundStage(transaction *sql.Tx, record AuditRecord) (stageLost bool, err error) {
+	inbound := record.Inbound
+	failed, err := isolatedInboundWrite(transaction, func() error { return insertStage(transaction, inbound.Stage) })
+	if err != nil {
+		return false, err
+	}
+	if failed {
+		return true, markCaptureWriteFailed(transaction, writeRequest{kind: writeStartStage, data: inbound.Stage})
+	}
+	if len(inbound.Headers) == 0 {
+		return false, nil
+	}
+	failed, err = isolatedInboundWrite(transaction, func() error { return insertHeaders(transaction, inbound.Headers) })
+	if err != nil || !failed {
+		return false, err
+	}
+	return false, markCaptureWriteFailed(transaction, writeRequest{kind: writeAddHeaders, data: inbound.Headers})
+}
+
+// isolatedInboundWrite runs write in a nested savepoint. It reports an
+// isolatable failure as rolled back; any other failure is returned and fails
+// the whole batch, as it would for the start row itself.
+func isolatedInboundWrite(transaction *sql.Tx, write func() error) (bool, error) {
+	if _, err := transaction.Exec("SAVEPOINT begin_inbound"); err != nil {
+		return false, fmt.Errorf("sqlite writer: inbound savepoint: %w", err)
+	}
+	writeErr := write()
+	if writeErr != nil {
+		if !canIsolateWriteError(writeErr) {
+			return false, writeErr
+		}
+		if _, err := transaction.Exec("ROLLBACK TO begin_inbound"); err != nil {
+			return false, fmt.Errorf("sqlite writer: rollback inbound: %w", err)
+		}
+	}
+	if _, err := transaction.Exec("RELEASE begin_inbound"); err != nil {
+		return false, fmt.Errorf("sqlite writer: release inbound: %w", err)
+	}
+	return writeErr != nil, nil
 }
 
 func insertAudit(transaction *sql.Tx, record AuditRecord) error {
@@ -646,6 +815,33 @@ INSERT INTO body_chunks (
 }
 
 func finishStage(transaction *sql.Tx, finish StageFinish) error {
+	result, err := updateStageFinal(transaction, finish)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result, "finish stage"); err != nil {
+		return err
+	}
+	if finish.Body == nil {
+		return nil
+	}
+
+	result, err = updateBodyFinal(transaction, finish.AuditID, finish.Stage, nil, *finish.Body)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result, "finish body"); err != nil {
+		return err
+	}
+	if finish.Body.Timeline != nil {
+		return upsertStreamTimeline(transaction, finish.AuditID, finish.Stage, *finish.Body.Timeline)
+	}
+	return nil
+}
+
+// updateStageFinal writes the terminal values of one stage row. A failure
+// marker recorded by write recovery keeps the stage partial.
+func updateStageFinal(transaction *sql.Tx, finish StageFinish) (sql.Result, error) {
 	result, err := transaction.Exec(`
 UPDATE http_stages
 SET state = CASE WHEN error_code IN ('capture_headers_failed','capture_storage_failed') THEN 'partial' ELSE ? END,
@@ -661,47 +857,49 @@ WHERE audit_id = ? AND stage = ?`,
 		finish.Stage,
 	)
 	if err != nil {
-		return fmt.Errorf("sqlite writer: finish stage: %w", err)
+		return nil, fmt.Errorf("sqlite writer: finish stage: %w", err)
 	}
-	if err := requireOneRow(result, "finish stage"); err != nil {
-		return err
-	}
-	if finish.Body == nil {
-		return nil
-	}
+	return result, nil
+}
 
-	result, err = transaction.Exec(`
+// updateBodyFinal writes the terminal aggregate of one body row. sourceStage
+// is nil for FinishStage, which never changes it; CommitAudit passes the
+// final value, so a pair merged or unmerged after the row was written gets
+// its final source.
+func updateBodyFinal(transaction *sql.Tx, auditID, stage string, sourceStage *string, body BodyFinish) (sql.Result, error) {
+	result, err := transaction.Exec(`
 UPDATE body_streams
-SET observed_length = ?, stored_length = ?, sha256 = ?, hash_complete = ?,
+SET source_stage = COALESCE(?, source_stage),
+    observed_length = ?, stored_length = ?, sha256 = ?, hash_complete = ?,
     eof_seen = ?, state = ?, retention_state = ?,
     first_observed_at_ns = ?, last_observed_at_ns = ?, chunk_count = ?,
     stream_event_count = ?, stream_timeline_complete = ?, error_code = ?
 WHERE audit_id = ? AND stage = ?`,
-		finish.Body.ObservedLength,
-		finish.Body.StoredLength,
-		nullableBytes(finish.Body.SHA256),
-		boolInteger(finish.Body.HashComplete),
-		boolInteger(finish.Body.EOFSeen),
-		finish.Body.State,
-		finish.Body.RetentionState,
-		finish.Body.FirstObservedAtNS,
-		finish.Body.LastObservedAtNS,
-		finish.Body.ChunkCount,
-		finish.Body.StreamEventCount,
-		boolInteger(finish.Body.StreamTimelineComplete),
-		finish.Body.ErrorCode,
-		finish.AuditID,
-		finish.Stage,
+		sourceStage,
+		body.ObservedLength,
+		body.StoredLength,
+		nullableBytes(body.SHA256),
+		boolInteger(body.HashComplete),
+		boolInteger(body.EOFSeen),
+		body.State,
+		body.RetentionState,
+		body.FirstObservedAtNS,
+		body.LastObservedAtNS,
+		body.ChunkCount,
+		body.StreamEventCount,
+		boolInteger(body.StreamTimelineComplete),
+		body.ErrorCode,
+		auditID,
+		stage,
 	)
 	if err != nil {
-		return fmt.Errorf("sqlite writer: finish body: %w", err)
+		return nil, fmt.Errorf("sqlite writer: finish body: %w", err)
 	}
-	if err := requireOneRow(result, "finish body"); err != nil {
-		return err
-	}
-	if finish.Body.Timeline != nil {
-		timeline := finish.Body.Timeline
-		if _, err := transaction.Exec(`
+	return result, nil
+}
+
+func upsertStreamTimeline(transaction *sql.Tx, auditID, stage string, timeline StreamTimeline) error {
+	if _, err := transaction.Exec(`
 INSERT INTO stream_timelines (
     audit_id, stage, event_count, first_event_at_ns, last_event_at_ns,
     timeline_complete, compression, plaintext_length, timeline_enc
@@ -714,18 +912,28 @@ ON CONFLICT(audit_id, stage) DO UPDATE SET
     compression = excluded.compression,
     plaintext_length = excluded.plaintext_length,
     timeline_enc = excluded.timeline_enc`,
-			finish.AuditID, finish.Stage, timeline.EventCount,
-			timeline.FirstEventAtNS, timeline.LastEventAtNS,
-			boolInteger(timeline.Complete), timeline.Compression,
-			timeline.PlaintextLength, timeline.DataEnc,
-		); err != nil {
-			return fmt.Errorf("sqlite writer: save stream timeline: %w", err)
-		}
+		auditID, stage, timeline.EventCount,
+		timeline.FirstEventAtNS, timeline.LastEventAtNS,
+		boolInteger(timeline.Complete), timeline.Compression,
+		timeline.PlaintextLength, timeline.DataEnc,
+	); err != nil {
+		return fmt.Errorf("sqlite writer: save stream timeline: %w", err)
 	}
 	return nil
 }
 
+// dedupBothPairs is the legacy finalization: both stage pairs are merged in
+// the database when they turn out equivalent.
+var dedupBothPairs = [2]bool{true, true}
+
 func finishAudit(transaction *sql.Tx, finish *AuditFinish, signer *security.IntegritySigner) error {
+	return finishAuditWithDedup(transaction, finish, signer, dedupBothPairs)
+}
+
+// finishAuditWithDedup finalizes one audit. dedupInDB names the stage pairs
+// (request, response) whose merge is decided here from the stored rows; a
+// pair whose merge CommitAudit already decided in memory is skipped.
+func finishAuditWithDedup(transaction *sql.Tx, finish *AuditFinish, signer *security.IntegritySigner, dedupInDB [2]bool) error {
 	// Recovery and a caller retry may meet after an uncertain Ack. A second
 	// finalization must not overwrite parsing/caller state or sign a new event.
 	var ended sql.NullInt64
@@ -748,7 +956,7 @@ func finishAudit(transaction *sql.Tx, finish *AuditFinish, signer *security.Inte
 		}
 		finish.ErrorCode = &code
 	} else {
-		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID); err != nil {
+		if err := deduplicateEquivalentBodyStages(transaction, finish.AuditID, dedupInDB); err != nil {
 			return err
 		}
 	}
@@ -891,11 +1099,14 @@ type bodyDedupState struct {
 	TimelineComplete int
 }
 
-func deduplicateEquivalentBodyStages(transaction *sql.Tx, auditID string) error {
-	for _, pair := range [][2]string{
+func deduplicateEquivalentBodyStages(transaction *sql.Tx, auditID string, dedupInDB [2]bool) error {
+	for index, pair := range [][2]string{
 		{StageRequestReceived, StageRequestSent},
 		{StageResponseReceived, StageResponseSent},
 	} {
+		if !dedupInDB[index] {
+			continue
+		}
 		if err := deduplicateEquivalentBodyPair(transaction, auditID, pair[0], pair[1]); err != nil {
 			return err
 		}
@@ -1028,6 +1239,15 @@ func cloneAuditRecord(record AuditRecord) AuditRecord {
 	record.CallerNextAtNS = cloneInt64(record.CallerNextAtNS)
 	record.CallerUpdatedAtNS = cloneInt64(record.CallerUpdatedAtNS)
 	record.APIKeyFPR = cloneBytes(record.APIKeyFPR)
+	record.UserAgentEnc = cloneBytes(record.UserAgentEnc)
+	if record.Inbound != nil {
+		inbound := InboundStage{Stage: cloneHTTPStage(record.Inbound.Stage)}
+		inbound.Headers = make([]HTTPHeader, len(record.Inbound.Headers))
+		for index, header := range record.Inbound.Headers {
+			inbound.Headers[index] = cloneHTTPHeader(header)
+		}
+		record.Inbound = &inbound
+	}
 	return record
 }
 

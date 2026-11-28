@@ -1241,96 +1241,36 @@ ORDER BY seq
 	}
 }
 
-func assertEncryptedHeader(
-	t *testing.T,
-	database *sql.DB,
-	cipher *security.AESGCM,
-	auditID string,
-	stage string,
-	name string,
-	want string,
-) {
+// assertEncryptedHeader requires the audit's stored Headers to hold name in
+// stage with the value want. On PostgreSQL the capture session writes capture
+// version 2: one encrypted header block per audit and no per-value rows; the
+// block is opened as every reader opens it, through headerblock.Expand.
+func assertEncryptedHeader(t *testing.T, database *sql.DB, cipher *security.AESGCM, auditID, stage, name, want string) {
 	t.Helper()
-	var kind, storedName string
-	var valueIndex, valueLength int
-	var encrypted []byte
-	err := database.QueryRow(`
-SELECT kind, name, value_index, value_length, value_enc
-FROM http_headers
-WHERE audit_id = $1 AND stage = $2 AND lower(name) = lower($3)
-ORDER BY value_index
-LIMIT 1
-`, auditID, stage, name).Scan(&kind, &storedName, &valueIndex, &valueLength, &encrypted)
-	if err != nil {
-		t.Fatalf("read encrypted header %s/%s: %v", stage, name, err)
-	}
-	if valueLength != len(want) {
-		t.Errorf("encrypted header value length = %d, want %d", valueLength, len(want))
-	}
-	aad, err := security.AAD(
-		auditID,
-		"header",
-		stage,
-		kind,
-		storedName,
-		strconv.Itoa(valueIndex),
-	)
-	if err != nil {
-		t.Fatalf("build encrypted header AAD: %v", err)
-	}
-	plaintext, err := cipher.Decrypt(aad, encrypted)
-	if err != nil {
-		t.Fatalf("decrypt header %s/%s: %v", stage, name, err)
-	}
-	if string(plaintext) != want {
-		t.Errorf("decrypted header value = %q, want %q", plaintext, want)
-	}
+	assertStoredHeaderValue(t, database, cipher, auditID, stage, "header", name, want)
 }
 
-func assertEncryptedTrailer(
-	t *testing.T,
-	database *sql.DB,
-	cipher *security.AESGCM,
-	auditID string,
-	stage string,
-	name string,
-	want string,
-) {
+// assertEncryptedTrailer is assertEncryptedHeader for a Trailer.
+func assertEncryptedTrailer(t *testing.T, database *sql.DB, cipher *security.AESGCM, auditID, stage, name, want string) {
 	t.Helper()
-	var storedName string
-	var valueIndex, valueLength int
-	var encrypted []byte
-	err := database.QueryRow(`
-SELECT name, value_index, value_length, value_enc
-FROM http_headers
-WHERE audit_id = $1 AND stage = $2 AND kind = 'trailer' AND lower(name) = lower($3)
-ORDER BY value_index
-LIMIT 1
-`, auditID, stage, name).Scan(&storedName, &valueIndex, &valueLength, &encrypted)
-	if err != nil {
-		t.Fatalf("read encrypted trailer %s/%s: %v", stage, name, err)
+	assertStoredHeaderValue(t, database, cipher, auditID, stage, "trailer", name, want)
+}
+
+func assertStoredHeaderValue(t *testing.T, database *sql.DB, cipher *security.AESGCM, auditID, stage, kind, name, want string) {
+	t.Helper()
+	var rows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM http_headers WHERE audit_id = $1`, auditID).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("%d per-value header rows (%v), want the version 2 block only", rows, err)
 	}
-	if valueLength != len(want) {
-		t.Errorf("encrypted trailer value length = %d, want %d", valueLength, len(want))
+	for _, value := range expandStoredHeaders(t, database, cipher, auditID) {
+		if value.Stage == stage && value.Kind == kind && strings.EqualFold(value.Name, name) && value.ValueIndex == 0 {
+			if string(value.Value) != want {
+				t.Errorf("%s %s %s = %q, want %q", stage, kind, name, value.Value, want)
+			}
+			return
+		}
 	}
-	aad, err := security.AAD(
-		auditID,
-		"header",
-		stage,
-		"trailer",
-		storedName,
-		strconv.Itoa(valueIndex),
-	)
-	if err != nil {
-		t.Fatalf("build encrypted trailer AAD: %v", err)
-	}
-	plaintext, err := cipher.Decrypt(aad, encrypted)
-	if err != nil {
-		t.Fatalf("decrypt trailer %s/%s: %v", stage, name, err)
-	}
-	if string(plaintext) != want {
-		t.Errorf("decrypted trailer value = %q, want %q", plaintext, want)
-	}
+	t.Fatalf("no stored %s %s %s", stage, kind, name)
 }
 
 // Scan the raw values of every persisted column, including BYTEA ciphertext.

@@ -29,6 +29,34 @@ insights:
   vocabulary_file: ""
   # Optional per-model context-window overrides in tokens.
   context_windows: {}
+# Audit capture; see audit-proxy.example.yaml. staging.dir is required and is
+# the audit-staging volume of compose.yaml.
+audit:
+  commit_retries: 3
+  memory:
+    stage_bytes: 8388608
+    global_bytes: 268435456
+  staging:
+    dir: /staging
+    max_bytes: 4294967296
+# Cold archive (doc/features/26-cold-archive.md); see audit-proxy.example.yaml.
+# Off by default. This version only exports: with a mode other than off,
+# retention stops deleting and the hot database keeps growing. compose.yaml
+# mounts the audit-archive volume at /archive; the image creates it owned by
+# the container user (65532) with mode 0700. A host directory mounted there
+# instead must have the same owner and mode.
+# archive:
+#   mode: "off"
+#   dir: /archive
+#   encrypt: true
+#   run_at: "03:00"
+#   timezone: ""
+#   segment_max_bytes: 268435456
+#   conversation_min_turns: 16
+#   conversation_min_bytes: 16777216
+#   pass_audits: 5000
+#   run_deadline_minutes: 240
+#   verify_sample: 0.05
 
 interceptors:
   require-client-credential:

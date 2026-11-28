@@ -39,14 +39,14 @@ func queueBehindBusyWriter(t *testing.T, store *Store, submissions ...func() err
 	}()
 	select {
 	case <-entered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("writer did not start the gate operation")
 	}
 	results := make([]chan error, len(submissions))
 	for index, submit := range submissions {
 		results[index] = make(chan error, 1)
 		go func() { results[index] <- submit() }()
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(storeWait)
 		for len(store.queue) != index+1 {
 			if time.Now().After(deadline) {
 				t.Fatalf("submission %d did not reach the writer queue", index)

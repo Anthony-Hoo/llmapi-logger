@@ -105,10 +105,39 @@ ON CONFLICT (audit_id) DO UPDATE SET
 	return nil
 }
 
+// projectBackfillQuery builds the identity candidate query. Both bounds are
+// row comparisons, so audit_analysis_time_idx (started_at_ns, audit_id) is
+// read backwards from before down to after only: the parser worker passes its
+// watermark as after, and in the steady state that range holds just the rows
+// analysed since the last pass.
+func projectBackfillQuery(version int, after, before *storage.ProjectBackfillCursor, limit int) (string, []any) {
+	query := `
+SELECT aa.audit_id, aa.started_at_ns, aa.protocol
+FROM audit_analysis AS aa
+LEFT JOIN audit_project_identity AS pi ON pi.audit_id = aa.audit_id
+WHERE (pi.audit_id IS NULL OR pi.identity_version < $1)`
+	arguments := []any{version}
+	if after != nil {
+		query += `
+  AND (aa.started_at_ns, aa.audit_id) > (` + parameter(len(arguments)+1) + `, ` + parameter(len(arguments)+2) + `)`
+		arguments = append(arguments, after.StartedAtNS, after.AuditID)
+	}
+	if before != nil {
+		query += `
+  AND (aa.started_at_ns, aa.audit_id) < (` + parameter(len(arguments)+1) + `, ` + parameter(len(arguments)+2) + `)`
+		arguments = append(arguments, before.StartedAtNS, before.AuditID)
+	}
+	query += `
+ORDER BY aa.started_at_ns DESC, aa.audit_id DESC
+LIMIT ` + parameter(len(arguments)+1)
+	return query, append(arguments, limit)
+}
+
 // ListProjectIdentityBackfillCandidates returns up to limit analysed audits
-// whose identity row is missing or older than version, newest first; before
-// continues below a cursor.
-func (store *Store) ListProjectIdentityBackfillCandidates(ctx context.Context, version int, before *storage.ProjectBackfillCursor, limit int) ([]storage.ProjectBackfillCandidate, error) {
+// whose identity row is missing or older than version, newest first; after
+// is an exclusive lower bound and before continues below a cursor (nil: no
+// bound).
+func (store *Store) ListProjectIdentityBackfillCandidates(ctx context.Context, version int, after, before *storage.ProjectBackfillCursor, limit int) ([]storage.ProjectBackfillCandidate, error) {
 	if ctx == nil {
 		return nil, errors.New("postgres: nil context")
 	}
@@ -118,21 +147,7 @@ func (store *Store) ListProjectIdentityBackfillCandidates(ctx context.Context, v
 	if version <= 0 || limit <= 0 || limit > maxParserReadLimit {
 		return nil, errors.New("postgres: invalid project identity backfill request")
 	}
-	query := `
-SELECT aa.audit_id, aa.started_at_ns, aa.protocol
-FROM audit_analysis AS aa
-LEFT JOIN audit_project_identity AS pi ON pi.audit_id = aa.audit_id
-WHERE (pi.audit_id IS NULL OR pi.identity_version < $1)`
-	arguments := []any{version}
-	if before != nil {
-		query += `
-  AND (aa.started_at_ns < $2 OR (aa.started_at_ns = $3 AND aa.audit_id < $4))`
-		arguments = append(arguments, before.StartedAtNS, before.StartedAtNS, before.AuditID)
-	}
-	query += `
-ORDER BY aa.started_at_ns DESC, aa.audit_id DESC
-LIMIT ` + parameter(len(arguments)+1)
-	arguments = append(arguments, limit)
+	query, arguments := projectBackfillQuery(version, after, before, limit)
 	rows, err := store.readerDB.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list project identity candidates: %w", err)
@@ -150,6 +165,34 @@ LIMIT ` + parameter(len(arguments)+1)
 		return nil, fmt.Errorf("postgres: iterate project identity candidates: %w", err)
 	}
 	return candidates, nil
+}
+
+// projectBackfillHorizonQuery reads the newest analysed audit position by one
+// backward step of audit_analysis_time_idx.
+const projectBackfillHorizonQuery = `
+SELECT started_at_ns, audit_id
+FROM audit_analysis
+ORDER BY started_at_ns DESC, audit_id DESC
+LIMIT 1`
+
+// ProjectBackfillHorizon returns the newest analysed audit position, in the
+// order the identity backfill lists candidates. False means no analysis.
+func (store *Store) ProjectBackfillHorizon(ctx context.Context) (storage.ProjectBackfillCursor, bool, error) {
+	if ctx == nil {
+		return storage.ProjectBackfillCursor{}, false, errors.New("postgres: nil context")
+	}
+	if store == nil || store.isClosed() {
+		return storage.ProjectBackfillCursor{}, false, ErrClosed
+	}
+	var horizon storage.ProjectBackfillCursor
+	err := store.readerDB.QueryRowContext(ctx, projectBackfillHorizonQuery).Scan(&horizon.StartedAtNS, &horizon.AuditID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storage.ProjectBackfillCursor{}, false, nil
+	}
+	if err != nil {
+		return storage.ProjectBackfillCursor{}, false, fmt.Errorf("postgres: read project identity horizon: %w", err)
+	}
+	return horizon, true, nil
 }
 
 // LoadProjectIdentity reads one stored row (tests and diagnostics).

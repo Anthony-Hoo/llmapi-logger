@@ -64,6 +64,10 @@ func ErrorClass(err error) string {
 		return "sqlite_error"
 	}
 	switch {
+	case errors.Is(err, ErrInboundStageNotStored):
+		// An admitted audit whose BeginAudit could not store the inbound
+		// stage row, not a storage failure.
+		return "inbound_stage_not_stored"
 	case errors.Is(err, ErrRecoveryOverflow):
 		return "recovery_overflow"
 	case errors.Is(err, ErrQueueFull):

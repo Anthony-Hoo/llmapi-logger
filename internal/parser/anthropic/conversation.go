@@ -1,8 +1,6 @@
 package anthropic
 
 import (
-	"sort"
-
 	"llmapi-logger/internal/conversation"
 	base "llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/protocolutil"
@@ -24,6 +22,8 @@ func appendRequestConversation(root map[string]any, result *base.Result) {
 	}
 }
 
+// appendResponseConversation reads a Message body, non-stream or folded from
+// a stream.
 func appendResponseConversation(root map[string]any, result *base.Result) {
 	role := normalizeRole(protocolutil.String(root["role"]))
 	if role == conversation.RoleUnknown {
@@ -91,107 +91,6 @@ func anthropicResultString(value any) string {
 		return parts[0].Text
 	}
 	return conversation.ValueString(value)
-}
-
-type streamBlock struct {
-	blockType   string
-	id          string
-	name        string
-	text        string
-	reasoning   string
-	input       any
-	partialJSON string
-	unknown     map[string]any
-}
-
-func appendStreamConversation(events []base.SSEEvent, result *base.Result) {
-	role := conversation.RoleAssistant
-	blocks := make(map[int]*streamBlock)
-	var initialContent any
-	for _, event := range events {
-		root, err := protocolutil.Object(event.Data)
-		if err != nil {
-			continue
-		}
-		eventType := protocolutil.String(root["type"])
-		if eventType == "" {
-			eventType = event.Event
-		}
-		switch eventType {
-		case "message_start":
-			message := protocolutil.Map(root["message"])
-			if parsed := normalizeRole(protocolutil.String(message["role"])); parsed != conversation.RoleUnknown {
-				role = parsed
-			}
-			initialContent = message["content"]
-		case "content_block_start":
-			index := streamIndex(root)
-			block := protocolutil.Map(root["content_block"])
-			blocks[index] = &streamBlock{
-				blockType: protocolutil.String(block["type"]), id: protocolutil.String(block["id"]),
-				name: protocolutil.String(block["name"]), text: protocolutil.String(block["text"]),
-				reasoning: protocolutil.String(block["thinking"]), input: block["input"], unknown: block,
-			}
-		case "content_block_delta":
-			index := streamIndex(root)
-			block := blocks[index]
-			if block == nil {
-				block = &streamBlock{}
-				blocks[index] = block
-			}
-			delta := protocolutil.Map(root["delta"])
-			switch protocolutil.String(delta["type"]) {
-			case "text_delta":
-				block.blockType = "text"
-				block.text += protocolutil.String(delta["text"])
-			case "thinking_delta":
-				block.blockType = "thinking"
-				block.reasoning += protocolutil.String(delta["thinking"])
-			case "input_json_delta":
-				block.blockType = "tool_use"
-				block.partialJSON += protocolutil.String(delta["partial_json"])
-			}
-		}
-	}
-	if len(blocks) == 0 {
-		appendMessage(result, conversation.PhaseResponse, conversation.DirectionUpstreamToClient, role, "", "", anthropicContentParts(initialContent))
-		return
-	}
-	indexes := make([]int, 0, len(blocks))
-	for index := range blocks {
-		indexes = append(indexes, index)
-	}
-	sort.Ints(indexes)
-	parts := make([]conversation.Part, 0, len(indexes))
-	for _, index := range indexes {
-		block := blocks[index]
-		switch block.blockType {
-		case "text":
-			if block.text != "" {
-				parts = append(parts, conversation.Text(block.text))
-			}
-		case "thinking":
-			if block.reasoning != "" {
-				parts = append(parts, conversation.Reasoning(block.reasoning))
-			}
-		case "tool_use":
-			arguments := block.partialJSON
-			if arguments == "" {
-				arguments = conversation.ValueString(block.input)
-			}
-			parts = append(parts, conversation.Part{Type: conversation.PartToolCall, ID: block.id, Name: block.name, Arguments: arguments})
-		default:
-			parts = append(parts, conversation.Unknown(block.unknown))
-		}
-	}
-	appendMessage(result, conversation.PhaseResponse, conversation.DirectionUpstreamToClient, role, "", "", parts)
-}
-
-func streamIndex(root map[string]any) int {
-	if parsed := protocolutil.Int(root["index"]); parsed != nil {
-		return *parsed
-	}
-	return 0
 }
 
 func appendMessage(result *base.Result, phase, direction, role, name, toolCallID string, parts []conversation.Part) {

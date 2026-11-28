@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"llmapi-logger/internal/bodycodec"
+	"llmapi-logger/internal/headerblock"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -46,14 +48,29 @@ func (worker *Worker) loadInput(ctx context.Context, audit storage.ParserAudit) 
 
 // loadRequestHeaders decrypts the allowlisted inbound request headers with the
 // same AAD the query service verifies. Any failure discards the partial set.
+//
+// A version 1 audit has its rows filtered by name in SQL and only those are
+// decrypted. A version 2 audit keeps all its Headers in one ciphertext, so the
+// whole block is opened in the process and the other values are cleared right
+// after filtering; the maintainer accepted that for this internal tool
+// (design decision 2, module 09).
 func (worker *Worker) loadRequestHeaders(ctx context.Context, auditID string, names []string) (http.Header, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
-	evidence, err := worker.store.LoadParserRequestHeaders(ctx, auditID, names)
+	source, err := worker.store.LoadParserHeaderSource(ctx, auditID, names)
 	if err != nil {
 		return nil, err
 	}
+	if source.CaptureVersion == storage.CaptureVersion2 {
+		return worker.filterBlockHeaders(auditID, source, names)
+	}
+	return worker.decryptRequestHeaderRows(auditID, source.Rows)
+}
+
+// decryptRequestHeaderRows decrypts the version 1 rows the allowlist
+// selected, in the order given. Any failure discards the partial set.
+func (worker *Worker) decryptRequestHeaderRows(auditID string, evidence []storage.HeaderEvidence) (http.Header, error) {
 	if len(evidence) == 0 {
 		return nil, nil
 	}
@@ -74,6 +91,57 @@ func (worker *Worker) loadRequestHeaders(ctx context.Context, auditID string, na
 	return headers, nil
 }
 
+// filterBlockHeaders keeps, from an opened version 2 block, what the version
+// 1 query selects: request_received Headers (not Trailers) whose lower-case
+// name is on the allowlist, in the query's order (lower-case name, then
+// value_index; the stored name breaks a tie).
+func (worker *Worker) filterBlockHeaders(auditID string, source storage.HeaderSource, names []string) (http.Header, error) {
+	values, err := headerblock.Expand(worker.cipher, auditID, source)
+	if err != nil {
+		return nil, errors.New("parser: request header integrity failure")
+	}
+	return selectAllowlisted(values, names), nil
+}
+
+// selectAllowlisted keeps, from a flat list of Header values, the
+// request_received Headers whose lower-case name is on the allowlist, in the
+// version 1 query's order. It clears every value it was given.
+func selectAllowlisted(values []headerblock.Value, names []string) http.Header {
+	allowed := make(map[string]bool, len(names))
+	for _, name := range names {
+		if lowered := strings.ToLower(strings.TrimSpace(name)); lowered != "" {
+			allowed[lowered] = true
+		}
+	}
+	selected := make([]headerblock.Value, 0, len(allowed))
+	for _, value := range values {
+		if value.Stage == storage.StageRequestReceived && value.Kind == storage.HeaderKindHeader && allowed[strings.ToLower(value.Name)] {
+			selected = append(selected, value)
+			continue
+		}
+		clear(value.Value)
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	sort.SliceStable(selected, func(left, right int) bool {
+		leftName, rightName := strings.ToLower(selected[left].Name), strings.ToLower(selected[right].Name)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		if selected[left].ValueIndex != selected[right].ValueIndex {
+			return selected[left].ValueIndex < selected[right].ValueIndex
+		}
+		return selected[left].Name < selected[right].Name
+	})
+	headers := make(http.Header, len(selected))
+	for _, value := range selected {
+		headers.Add(value.Name, string(value.Value))
+		clear(value.Value)
+	}
+	return headers
+}
+
 func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (BodySource, *int, error) {
 	stage, err := worker.store.LoadParserStage(ctx, auditID, stageName)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -88,17 +156,33 @@ func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (
 	}
 
 	source := BodySource{Present: true, Complete: true}
-	if err := worker.decryptContentHeaders(auditID, stageName, stage.Headers, &source); err != nil {
+	if stage.CaptureVersion == storage.CaptureVersion2 {
+		// Version 2 stores the chosen values on the stage row (C.6); the
+		// header block is not opened for them.
+		if stage.ContentType != nil {
+			source.ContentType = *stage.ContentType
+		}
+		if stage.ContentEncoding != nil {
+			source.ContentEncoding = *stage.ContentEncoding
+		}
+	} else if err := worker.decryptContentHeaders(auditID, stageName, stage.Headers, &source); err != nil {
 		source.Complete = false
 		source.ErrorCode = "capture_integrity_error"
 		return source, statusCode, err
 	}
 
 	raw, complete, errorCode, err := worker.readRawBody(ctx, auditID, stageName, *stage.Body)
+	source, err = decodeBody(source, raw, complete, errorCode, err)
+	return source, statusCode, err
+}
+
+// decodeBody completes a body source from the assembled raw bytes: it records
+// their completeness and code, then removes the HTTP content encoding.
+func decodeBody(source BodySource, raw []byte, complete bool, errorCode string, err error) (BodySource, error) {
 	source.Complete = complete
 	source.ErrorCode = errorCode
 	if err != nil && len(raw) == 0 {
-		return source, statusCode, err
+		return source, err
 	}
 
 	decoded, decodeCode, decodeErr := decodeContent(raw, source.ContentEncoding)
@@ -107,7 +191,7 @@ func (worker *Worker) loadBody(ctx context.Context, auditID, stageName string) (
 		source.Complete = false
 		source.ErrorCode = selectEvidenceCode(source.ErrorCode, decodeCode)
 	}
-	return source, statusCode, errors.Join(err, decodeErr)
+	return source, errors.Join(err, decodeErr)
 }
 
 func (worker *Worker) decryptContentHeaders(auditID, stageName string, headers []storage.HTTPHeader, source *BodySource) error {
@@ -142,6 +226,35 @@ func (worker *Worker) decryptContentHeaders(auditID, stageName string, headers [
 }
 
 func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string, body storage.BodyStream) ([]byte, bool, string, error) {
+	return assembleBody(body, storedChunks{ctx: ctx, worker: worker, auditID: auditID, stage: stageName})
+}
+
+// assembledChunk is one chunk of a body, in seq order, as a chunkSource
+// yields it: its position, and what plaintext needs to open it.
+type assembledChunk struct {
+	seq    int64
+	offset int64
+	// stored is the encrypted row (the database source); plaintext is the
+	// chunk's bytes (the in-memory source).
+	stored    *storage.BodyChunk
+	plaintext []byte
+}
+
+// chunkSource feeds assembleBody: page returns at most parserChunkPage chunks
+// after afterSeq in seq order (an error is a read failure), and plaintext
+// opens one of them (an error is an integrity failure).
+type chunkSource interface {
+	page(afterSeq int64) ([]assembledChunk, error)
+	plaintext(chunk assembledChunk) ([]byte, error)
+}
+
+// assembleBody rebuilds a stored body from its chunks, with every check the
+// parser makes on stored evidence: contiguous seq and offset, each chunk
+// opened under its own AAD, the encoded-size limit, the stored length and the
+// digest of the body row, and the row's completeness. It returns the raw
+// bytes (what could be read, on failure), whether they are complete, the
+// stable evidence code and the failure.
+func assembleBody(body storage.BodyStream, source chunkSource) ([]byte, bool, string, error) {
 	initialCapacity := int(min(int64(maxEncodedBodySize), body.StoredLength))
 	buffer := bytes.NewBuffer(make([]byte, 0, initialCapacity))
 	expectedSeq := int64(0)
@@ -150,7 +263,7 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 	complete := body.State == storage.StageStateComplete && body.HashComplete && body.EOFSeen && body.StoredLength == body.ObservedLength
 
 	for {
-		chunks, err := worker.store.ReadParserChunks(ctx, auditID, stageName, afterSeq, parserChunkPage)
+		chunks, err := source.page(afterSeq)
 		if err != nil {
 			return buffer.Bytes(), false, "evidence_read_error", err
 		}
@@ -158,35 +271,12 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 			break
 		}
 		for _, chunk := range chunks {
-			if chunk.Seq != expectedSeq || chunk.Offset != expectedOffset {
+			if chunk.seq != expectedSeq || chunk.offset != expectedOffset {
 				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk sequence or offset mismatch")
 			}
-			compression := chunk.Compression
-			if compression == "" {
-				compression = bodycodec.CompressionNone
-			}
-			aad, err := security.AAD(auditID, "body_chunk_v2", chunk.Stage, strconv.FormatInt(chunk.Seq, 10), compression)
+			plaintext, err := source.plaintext(chunk)
 			if err != nil {
-				return buffer.Bytes(), false, "capture_integrity_error", fmt.Errorf("parser: body chunk AAD: %w", err)
-			}
-			encoded, err := worker.cipher.Decrypt(aad, chunk.DataEnc)
-			if err != nil && compression == bodycodec.CompressionNone {
-				legacyAAD, legacyErr := security.AAD(auditID, "body_chunk", chunk.Stage, strconv.FormatInt(chunk.Seq, 10))
-				if legacyErr == nil {
-					encoded, err = worker.cipher.Decrypt(legacyAAD, chunk.DataEnc)
-				}
-			}
-			if err != nil {
-				return buffer.Bytes(), false, "capture_integrity_error", fmt.Errorf("parser: decrypt body chunk: %w", err)
-			}
-			if chunk.EncodedLength > 0 && len(encoded) != chunk.EncodedLength {
-				clear(encoded)
-				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk encoded length mismatch")
-			}
-			plaintext, decodeErr := bodycodec.Decode(encoded, compression, chunk.PlaintextLength)
-			clear(encoded)
-			if decodeErr != nil {
-				return buffer.Bytes(), false, "capture_integrity_error", errors.New("parser: body chunk decompression failed")
+				return buffer.Bytes(), false, "capture_integrity_error", err
 			}
 			if buffer.Len()+len(plaintext) > maxEncodedBodySize {
 				remaining := maxEncodedBodySize - buffer.Len()
@@ -198,7 +288,7 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 			_, _ = buffer.Write(plaintext)
 			expectedSeq++
 			expectedOffset += int64(len(plaintext))
-			afterSeq = chunk.Seq
+			afterSeq = chunk.seq
 		}
 		if len(chunks) < parserChunkPage {
 			break
@@ -223,6 +313,59 @@ func (worker *Worker) readRawBody(ctx context.Context, auditID, stageName string
 		return raw, false, errorCode, nil
 	}
 	return raw, true, "", nil
+}
+
+// storedChunks is the chunk source of a stored body: the body_chunks rows of
+// the stage's source, paged from the store and opened with the cipher.
+type storedChunks struct {
+	ctx     context.Context
+	worker  *Worker
+	auditID string
+	stage   string
+}
+
+func (source storedChunks) page(afterSeq int64) ([]assembledChunk, error) {
+	chunks, err := source.worker.store.ReadParserChunks(source.ctx, source.auditID, source.stage, afterSeq, parserChunkPage)
+	if err != nil {
+		return nil, err
+	}
+	page := make([]assembledChunk, len(chunks))
+	for index := range chunks {
+		page[index] = assembledChunk{seq: chunks[index].Seq, offset: chunks[index].Offset, stored: &chunks[index]}
+	}
+	return page, nil
+}
+
+func (source storedChunks) plaintext(entry assembledChunk) ([]byte, error) {
+	chunk := entry.stored
+	compression := chunk.Compression
+	if compression == "" {
+		compression = bodycodec.CompressionNone
+	}
+	aad, err := security.AAD(source.auditID, "body_chunk_v2", chunk.Stage, strconv.FormatInt(chunk.Seq, 10), compression)
+	if err != nil {
+		return nil, fmt.Errorf("parser: body chunk AAD: %w", err)
+	}
+	encoded, err := source.worker.cipher.Decrypt(aad, chunk.DataEnc)
+	if err != nil && compression == bodycodec.CompressionNone {
+		legacyAAD, legacyErr := security.AAD(source.auditID, "body_chunk", chunk.Stage, strconv.FormatInt(chunk.Seq, 10))
+		if legacyErr == nil {
+			encoded, err = source.worker.cipher.Decrypt(legacyAAD, chunk.DataEnc)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("parser: decrypt body chunk: %w", err)
+	}
+	if chunk.EncodedLength > 0 && len(encoded) != chunk.EncodedLength {
+		clear(encoded)
+		return nil, errors.New("parser: body chunk encoded length mismatch")
+	}
+	plaintext, decodeErr := bodycodec.Decode(encoded, compression, chunk.PlaintextLength)
+	clear(encoded)
+	if decodeErr != nil {
+		return nil, errors.New("parser: body chunk decompression failed")
+	}
+	return plaintext, nil
 }
 
 func decodeContent(raw []byte, contentEncoding string) ([]byte, string, error) {

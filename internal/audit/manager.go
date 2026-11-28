@@ -14,9 +14,11 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"llmapi-logger/internal/parser/streamterminal"
+	"llmapi-logger/internal/audit/staging"
+	"llmapi-logger/internal/parser/handover"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -29,19 +31,66 @@ const (
 
 var ErrUnavailable = errors.New("audit unavailable")
 
-// Store is the ordered persistence surface used by a Session.
-// FinishAuditWithResult is a barrier for earlier asynchronous writes and
-// returns the effective committed outcome for the completion log.
+// ErrUnifiedUnsupported is NewManagerWithOptions refusing a store that
+// cannot serve the capture write path.
+var ErrUnifiedUnsupported = errors.New("audit: the store cannot serve the capture write path")
+
+// Store is the ordered persistence surface used by a Session: BeginAudit
+// with the inbound stage (waited for), Checkpoint (not waited for) and
+// CommitAudit, which is a barrier for the earlier writes, is waited for and
+// returns the effective committed outcome for the completion log. A store
+// that implements the methods but cannot serve them says so through
+// SupportsUnifiedWrite. The stores' per-operation writes (StartStage and the
+// others) are not part of it: no session issues them since the legacy write
+// path was removed.
 type Store interface {
 	Healthy() bool
 	BeginAudit(context.Context, storage.AuditRecord) error
-	StartStage(context.Context, storage.HTTPStage) error
-	StartBody(context.Context, storage.BodyStream) error
-	AddHeaders(context.Context, []storage.HTTPHeader) error
-	AddChunk(context.Context, storage.BodyChunk) error
-	FinishStage(context.Context, storage.StageFinish) error
-	FinishAuditWithResult(context.Context, storage.AuditFinish) (storage.AuditFinish, error)
+	Checkpoint(context.Context, storage.AuditCheckpoint) error
+	CommitAudit(context.Context, storage.AuditCommit) (storage.AuditFinish, error)
 	InsertAuditGaps(context.Context, []storage.AuditGap) error
+}
+
+// unifiedWriteSupport is implemented by a store that may be unable to serve
+// the capture write path. A store without the method serves it.
+type unifiedWriteSupport interface {
+	SupportsUnifiedWrite() bool
+}
+
+// headerBlockSupport is implemented by a store that can write the version 2
+// header block. A store without the method cannot.
+type headerBlockSupport interface {
+	SupportsHeaderBlock() bool
+}
+
+// Defaults of the capture write path (design F.1, B.8).
+const (
+	DefaultStageBytes    = 8 << 20
+	DefaultGlobalBytes   = 256 << 20
+	DefaultCommitRetries = 3
+	MaxCommitRetries     = 5
+)
+
+// Options are the run-time parameters of a Manager. The zero value is the
+// defaults without staging.
+type Options struct {
+	// CommitRetries is the initial retry count of CommitAudit, 0 to 5; see
+	// SetCommitRetries.
+	CommitRetries int
+	// StageBytes and GlobalBytes are the plaintext a session keeps in memory
+	// per stage and for the whole process. Zero means the default.
+	StageBytes  int64
+	GlobalBytes int64
+	// Stager takes sealed chunks the memory budget cannot hold
+	// (*staging.Stager). Nil means no staging: content beyond the budget is
+	// not retained (design F.6).
+	Stager ChunkStager
+	// Now and Random replace the clock and the audit id source, for
+	// deterministic tests and tools. Nil means time.Now and crypto/rand.
+	Now    func() time.Time
+	Random io.Reader
+	// Sleep replaces the wait between CommitAudit attempts. Nil is time.Sleep.
+	Sleep func(time.Duration)
 }
 
 // Sink is the proxy-facing audit admission interface. A nil Session always
@@ -68,12 +117,31 @@ type Manager struct {
 	notifyMu     sync.RWMutex
 	notify       func(string) bool
 	callerNotify func(string) bool
+	// handover takes committed audits (handover.go).
+	handover func(handover.Job) bool
+
+	// captureVersion is the capture_version the sessions write.
+	captureVersion int
+	// commitRetries is the live retry count of CommitAudit (SetCommitRetries).
+	commitRetries atomic.Int32
+	stageBytes    int64
+	budget        *memoryBudget
+	stager        ChunkStager
+	// sleep waits between CommitAudit attempts; tests replace it.
+	sleep func(time.Duration)
 }
 
-// NewManager constructs a live audit manager. A nil fingerprinter disables
-// credential scoping: every record is then stored without an API key tag and no
-// developer session can match it.
+// NewManager constructs a live audit manager on the unified write path. A nil
+// fingerprinter disables credential scoping: every record is then stored
+// without an API key tag and no developer session can match it.
 func NewManager(store Store, cipher security.Cipher, fingerprints *security.CredentialFingerprinter, mode string, logger *slog.Logger) (*Manager, error) {
+	return NewManagerWithOptions(store, cipher, fingerprints, mode, logger, Options{})
+}
+
+// NewManagerWithOptions constructs a live audit manager with explicit
+// options. It refuses, at construction rather than per request, a store that
+// cannot serve the write path.
+func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *security.CredentialFingerprinter, mode string, logger *slog.Logger, options Options) (*Manager, error) {
 	if mode != ModeAvailable && mode != ModeStrict {
 		return nil, fmt.Errorf("audit: invalid mode %q", mode)
 	}
@@ -86,6 +154,19 @@ func NewManager(store Store, cipher security.Cipher, fingerprints *security.Cred
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if options.CommitRetries < 0 || options.CommitRetries > MaxCommitRetries {
+		return nil, fmt.Errorf("audit: commit retries must be between 0 and %d, got %d", MaxCommitRetries, options.CommitRetries)
+	}
+	stageBytes, globalBytes := options.StageBytes, options.GlobalBytes
+	if stageBytes == 0 {
+		stageBytes = DefaultStageBytes
+	}
+	if globalBytes == 0 {
+		globalBytes = DefaultGlobalBytes
+	}
+	if stageBytes < bodyChunkSize || stageBytes > globalBytes {
+		return nil, fmt.Errorf("audit: stage memory budget must be at least %d and at most the global budget", bodyChunkSize)
+	}
 	manager := &Manager{
 		store:        store,
 		cipher:       cipher,
@@ -94,9 +175,71 @@ func NewManager(store Store, cipher security.Cipher, fingerprints *security.Cred
 		logger:       logger,
 		now:          time.Now,
 		random:       rand.Reader,
+		stageBytes:   stageBytes,
+		budget:       &memoryBudget{limit: globalBytes},
+		stager:       options.Stager,
+		sleep:        time.Sleep,
 	}
+	if manager.stager == nil {
+		manager.stager = unavailableStager{}
+	} else if queue, ok := manager.stager.(interface{ SetBudget(staging.Budget) }); ok {
+		// The staging write queue counts against the same budget (F.5).
+		queue.SetBudget(queueBudget{budget: manager.budget})
+	}
+	if options.Now != nil {
+		manager.now = options.Now
+	}
+	if options.Random != nil {
+		manager.random = options.Random
+	}
+	if options.Sleep != nil {
+		manager.sleep = options.Sleep
+	}
+	manager.commitRetries.Store(int32(options.CommitRetries))
+	if support, ok := store.(unifiedWriteSupport); ok && !support.SupportsUnifiedWrite() {
+		return nil, ErrUnifiedUnsupported
+	}
+	manager.captureVersion = captureVersionFor(store)
 	manager.gaps = newGapBuffer(store, logger, func() time.Time { return manager.now() })
 	return manager, nil
+}
+
+// captureVersionFor is the single place that chooses the capture version the
+// sessions write: version 2 (the header block) on a store that writes it,
+// which is PostgreSQL; version 1 otherwise, which is SQLite (H.2).
+func captureVersionFor(store Store) int {
+	if support, ok := store.(headerBlockSupport); ok && support.SupportsHeaderBlock() {
+		return storage.CaptureVersion2
+	}
+	return storage.CaptureVersion1
+}
+
+// SetCommitRetries changes how many times a session retries a CommitAudit
+// that failed with a retryable error, from 0 to 5; values outside the range
+// are clamped. Sessions read it once, when their first attempt is prepared,
+// so a change applies to commits that start afterwards.
+func (manager *Manager) SetCommitRetries(retries int) {
+	if manager == nil {
+		return
+	}
+	manager.commitRetries.Store(int32(min(max(retries, 0), MaxCommitRetries)))
+}
+
+// CommitRetries returns the current retry count of CommitAudit.
+func (manager *Manager) CommitRetries() int {
+	if manager == nil {
+		return 0
+	}
+	return int(manager.commitRetries.Load())
+}
+
+// MemoryInUse returns the body plaintext the sessions hold in the global
+// memory budget.
+func (manager *Manager) MemoryInUse() int64 {
+	if manager == nil {
+		return 0
+	}
+	return manager.budget.Used()
 }
 
 // NewUnavailable constructs a manager that preserves configured admission
@@ -257,17 +400,7 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		// developer session see its own rejected requests too.
 		APIKeyFPR: manager.fingerprints.FingerprintRequest(request.Header, query),
 	}
-	if err := manager.store.BeginAudit(ctx, record); err != nil {
-		manager.recordGap(gapReasonForWrite(err))
-		return nil, fmt.Errorf("audit: begin record: %w", err)
-	}
-	if manager.gaps != nil {
-		manager.gaps.trigger()
-	}
-	session := newSession(manager, ctx, auditID, match.RouteID, started)
-	session.terminalMatcher = streamterminal.MatcherFor(match.Parser)
-	session.WrapRequestReceived(request)
-	return session, nil
+	return manager.beginSession(ctx, request, match, record, started)
 }
 
 func gapReasonForWrite(err error) string {

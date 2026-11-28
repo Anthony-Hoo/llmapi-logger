@@ -57,7 +57,15 @@ import type {
   AnalysisSessionsQuery,
   AnalysisUsers,
 } from "./lib/session-analysis/types";
-import type { AnalysisProbeResult, AnalysisSettingsUpdate, AnalysisSettingsView, OrgEditableSettings, OrgSettingsView } from "./lib/settings/types";
+import type {
+  AnalysisProbeResult,
+  AnalysisSettingsUpdate,
+  AnalysisSettingsView,
+  CaptureEditableSettings,
+  CaptureSettingsView,
+  OrgEditableSettings,
+  OrgSettingsView,
+} from "./lib/settings/types";
 import type { AgentAccessApi, AgentChangeList, AgentTokenList, AuthorizationResponse, InstallLink } from "./lib/agent-access/types";
 
 const API_BASE = "/api/v1";
@@ -124,6 +132,12 @@ export interface ApiClient {
   saveOrgReportSettings: (update: OrgEditableSettings, signal?: AbortSignal) => Promise<OrgSettingsView>;
   /** Drops the saved weekly report settings; the configuration file applies again. */
   resetOrgReportSettings: (signal?: AbortSignal) => Promise<OrgSettingsView>;
+  /** Administrators only: the final-commit retry count in use and where it comes from. */
+  getCaptureSettings: (signal?: AbortSignal) => Promise<CaptureSettingsView>;
+  /** Saves a retry count that overrides the configuration file at once. */
+  saveCaptureSettings: (update: CaptureEditableSettings, signal?: AbortSignal) => Promise<CaptureSettingsView>;
+  /** Drops the saved retry count; the configuration file applies again. */
+  resetCaptureSettings: (signal?: AbortSignal) => Promise<CaptureSettingsView>;
   /** Administrators only: session totals of a period per NewAPI user. */
   listAnalysisUsers: (range: { from_ns: string; to_ns: string }, signal?: AbortSignal) => Promise<AnalysisUsers>;
   listAnalysisSessions: (query: AnalysisSessionsQuery, signal?: AbortSignal) => Promise<AnalysisSessionsPage>;
@@ -650,6 +664,22 @@ export function createApiClient(
         throw await responseError(response);
       }
       return withClients((await response.json()) as OrgSettingsView);
+    },
+
+    getCaptureSettings(signal) {
+      return requestJSON<CaptureSettingsView>(`${API_BASE}/settings/audit-capture`, signal);
+    },
+
+    saveCaptureSettings(update, signal) {
+      return mutateJSON<CaptureSettingsView>(`${API_BASE}/settings/audit-capture`, "PUT", update, signal);
+    },
+
+    async resetCaptureSettings(signal) {
+      const response = await sessionFetch(`${API_BASE}/settings/audit-capture`, { method: "DELETE", signal });
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+      return (await response.json()) as CaptureSettingsView;
     },
 
     async dismissAnalysisSuggestion(id, signal) {

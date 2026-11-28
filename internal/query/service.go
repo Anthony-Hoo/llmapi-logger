@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 	"strings"
 
 	"llmapi-logger/internal/conversation"
+	"llmapi-logger/internal/headerblock"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -102,7 +102,7 @@ func (service *Service) List(ctx context.Context, filter Filter, cursor Cursor, 
 
 	page := Page{Items: make([]AuditSummary, 0, len(storagePage.Rows))}
 	for _, row := range storagePage.Rows {
-		userAgent, _, err := service.readUserAgent(ctx, row.AuditID, "")
+		userAgent, _, err := service.readUserAgent(ctx, row, "")
 		if err != nil {
 			return Page{}, err
 		}
@@ -148,7 +148,7 @@ func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter
 		}
 		for index, row := range storagePage.Rows {
 			scanned++
-			userAgent, matches, err := service.readUserAgent(ctx, row.AuditID, filter.UserAgent)
+			userAgent, matches, err := service.readUserAgent(ctx, row, filter.UserAgent)
 			if err != nil {
 				return Page{}, err
 			}
@@ -175,32 +175,58 @@ func (service *Service) listWithHeaderFilters(ctx context.Context, storageFilter
 	return page, nil
 }
 
-func (service *Service) readUserAgent(ctx context.Context, auditID, needle string) (*string, bool, error) {
-	headers, err := service.store.QueryRequestHeaderEvidence(ctx, auditID)
-	if err != nil {
-		return nil, false, fmt.Errorf("query: read request headers: %w", err)
+// readUserAgent returns the inbound User-Agent the list shows for one row (its
+// first value) and whether any value contains needle, ignoring case; without
+// a User-Agent nothing matches. It dispatches on capture_version (C.5):
+// version 2 opens user_agent_enc, which the list query already returned;
+// version 1 reads the row's http_headers values with one query per row.
+func (service *Service) readUserAgent(ctx context.Context, row storage.AuditListRow, needle string) (*string, bool, error) {
+	var values []string
+	switch row.CaptureVersion {
+	case storage.CaptureVersion1:
+		headers, err := service.store.QueryRequestHeaderEvidence(ctx, row.AuditID)
+		if err != nil {
+			return nil, false, fmt.Errorf("query: read request headers: %w", err)
+		}
+		for _, header := range headers {
+			if !strings.EqualFold(header.Name, "user-agent") {
+				continue
+			}
+			plaintext, err := service.decryptHeader(row.AuditID, header)
+			if err != nil {
+				return nil, false, err
+			}
+			values = append(values, string(plaintext))
+			clear(plaintext)
+		}
+	case storage.CaptureVersion2:
+		opened, err := headerblock.OpenUserAgent(service.cipher, row.AuditID, row.UserAgentEnc)
+		if err != nil {
+			return nil, false, ErrIntegrity
+		}
+		values = opened
+	default:
+		return nil, false, ErrIntegrity
 	}
-	var userAgent *string
+	userAgent, matched := matchUserAgent(values, needle)
+	return userAgent, matched, nil
+}
+
+// matchUserAgent picks the User-Agent the list shows from the opened values
+// and reports whether any of them contains needle, as readUserAgent does.
+func matchUserAgent(values []string, needle string) (*string, bool) {
+	if len(values) == 0 {
+		return nil, false
+	}
+	userAgent := values[0]
 	matched := needle == ""
 	userAgentNeedle := strings.ToLower(needle)
-	for _, header := range headers {
-		if !strings.EqualFold(header.Name, "user-agent") {
-			continue
-		}
-		plaintext, err := service.decryptHeader(auditID, header)
-		if err != nil {
-			return nil, false, err
-		}
-		value := string(plaintext)
-		clear(plaintext)
-		if userAgent == nil {
-			userAgent = &value
-		}
+	for _, value := range values {
 		if needle != "" && strings.Contains(strings.ToLower(value), userAgentNeedle) {
 			matched = true
 		}
 	}
-	return userAgent, matched && userAgent != nil, nil
+	return &userAgent, matched
 }
 
 func (service *Service) decryptHeader(auditID string, header storage.HeaderEvidence) ([]byte, error) {
@@ -284,7 +310,11 @@ func (service *Service) GetMetadata(ctx context.Context, auditID string, scope *
 	if err != nil {
 		return Detail{}, fmt.Errorf("query: get audit metadata: %w", err)
 	}
-	return Detail{Audit: mapAudit(storageDetail.Audit), Stages: mapStages(storageDetail.Stages), Bodies: mapBodies(storageDetail.Bodies)}, nil
+	return metadataDetail(storageDetail), nil
+}
+
+func metadataDetail(storageDetail storage.AuditQueryDetail) Detail {
+	return Detail{Audit: mapAudit(storageDetail.Audit), Stages: mapStages(storageDetail.Stages), Bodies: mapBodies(storageDetail.Bodies)}
 }
 
 func mapStages(stages []storage.HTTPStage) []Stage {
@@ -350,12 +380,6 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 		return Detail{}, fmt.Errorf("query: get audit: %w", err)
 	}
 
-	detail := Detail{
-		Audit:   mapAudit(storageDetail.Audit),
-		Stages:  mapStages(storageDetail.Stages),
-		Headers: make([]Header, 0, len(storageDetail.Headers)),
-		Bodies:  mapBodies(storageDetail.Bodies),
-	}
 	requestURIAAD, err := security.AAD(auditID, "request_uri")
 	if err != nil {
 		return Detail{}, ErrIntegrity
@@ -364,34 +388,50 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 	if err != nil {
 		return Detail{}, ErrIntegrity
 	}
-	detail.RequestURI = string(requestURI)
-	clear(requestURI)
-	for _, header := range storageDetail.Headers {
-		aad, err := security.AAD(
-			auditID,
-			"header",
-			header.Stage,
-			header.Kind,
-			header.Name,
-			strconv.Itoa(header.ValueIndex),
-		)
-		if err != nil {
-			return Detail{}, ErrIntegrity
+	defer clear(requestURI)
+	// Both capture versions expand to the same flat list in the same order
+	// (headerblock.Expand), so the web view, the Agent API, its credential
+	// masking and the exports see no difference.
+	headers, err := headerblock.Expand(service.cipher, auditID, storageDetail.HeaderSource())
+	if err != nil {
+		return Detail{}, ErrIntegrity
+	}
+	defer func() {
+		for _, header := range headers {
+			clear(header.Value)
 		}
-		plaintext, err := service.cipher.Decrypt(aad, header.ValueEnc)
-		if err != nil || len(plaintext) != header.ValueLength {
-			clear(plaintext)
-			return Detail{}, ErrIntegrity
-		}
-		value := string(plaintext)
-		clear(plaintext)
+	}()
+	var turn func() (ReconstructedTurn, error)
+	if storageDetail.TurnGraph != nil {
+		turn = func() (ReconstructedTurn, error) { return reconstructAuditTurn(service.cipher, storageDetail) }
+	}
+	return buildDetail(storageDetail, requestURI, headers,
+		func() (parsedEnvelope, error) {
+			return openParsedEnvelope(service.cipher, auditID, storageDetail.ParsedResult)
+		}, turn)
+}
+
+// buildDetail is Get without decryption. row supplies the columns that are
+// not secret; its ciphertext columns are not read. requestURI and headers are
+// the opened request URI and the flat header list in headerblock.Expand
+// order; neither is kept or changed. openParsed opens the parsed envelope and
+// turn, when not nil, reconstructs the audit's turn.
+func buildDetail(storageDetail storage.AuditQueryDetail, requestURI []byte, headers []headerblock.Value, openParsed func() (parsedEnvelope, error), turn func() (ReconstructedTurn, error)) (Detail, error) {
+	detail := Detail{
+		Audit:      mapAudit(storageDetail.Audit),
+		Stages:     mapStages(storageDetail.Stages),
+		Headers:    make([]Header, 0),
+		Bodies:     mapBodies(storageDetail.Bodies),
+		RequestURI: string(requestURI),
+	}
+	for _, header := range headers {
 		detail.Headers = append(detail.Headers, Header{
 			Stage:       header.Stage,
 			Kind:        header.Kind,
 			Name:        header.Name,
 			ValueIndex:  header.ValueIndex,
-			ValueLength: header.ValueLength,
-			Value:       value,
+			ValueLength: len(header.Value),
+			Value:       string(header.Value),
 		})
 	}
 	if parsed := storageDetail.ParsedResult; parsed != nil {
@@ -415,28 +455,14 @@ func (service *Service) Get(ctx context.Context, auditID string, scope *Scope) (
 			HasToolCall:        parsed.HasToolCall,
 			ParsedAtNS:         parsed.ParsedAtNS,
 		}
-		if len(parsed.ParsedJSONEnc) != 0 {
-			aad, aadErr := security.AAD(auditID, "parsed_json", parsed.ParserName)
-			if aadErr != nil {
-				return Detail{}, ErrIntegrity
-			}
-			plaintext, decryptErr := service.cipher.Decrypt(aad, parsed.ParsedJSONEnc)
-			if decryptErr != nil {
-				return Detail{}, ErrIntegrity
-			}
-			var envelope struct {
-				Conversation *conversation.Conversation `json:"conversation"`
-			}
-			decodeErr := json.Unmarshal(plaintext, &envelope)
-			clear(plaintext)
-			if decodeErr != nil || !validConversation(envelope.Conversation) {
-				return Detail{}, ErrIntegrity
-			}
-			detail.Conversation = envelope.Conversation
+		envelope, envelopeErr := openParsed()
+		if envelopeErr != nil {
+			return Detail{}, envelopeErr
 		}
+		detail.Conversation = envelope.Conversation
 	}
-	if storageDetail.TurnGraph != nil {
-		reconstructed, reconstructErr := reconstructTurnGraph(service.cipher, storageDetail.Audit.ParserName, storageDetail.TurnGraph)
+	if turn != nil {
+		reconstructed, reconstructErr := turn()
 		if reconstructErr != nil {
 			return Detail{}, ErrIntegrity
 		}
@@ -524,6 +550,11 @@ func (service *Service) RawMeta(ctx context.Context, auditID string, side Side) 
 	if err != nil {
 		return RawMetadata{}, fmt.Errorf("query: read raw metadata: %w", err)
 	}
+	return rawMetadata(metadata)
+}
+
+// rawMetadata is RawMeta for the metadata of the stage selectRawBody chose.
+func rawMetadata(metadata storage.RawBodyMetadata) (RawMetadata, error) {
 	if metadata.State == storage.StageStateStreaming {
 		return RawMetadata{}, ErrNotReady
 	}

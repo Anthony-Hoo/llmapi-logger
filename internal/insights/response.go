@@ -56,6 +56,9 @@ func (analysis *Analysis) applyResponse(input Input, vocab *Vocabulary) {
 		}
 	}
 	analysis.StopReason = responseStopReason(input.Response)
+	if analysis.StopReason == "" {
+		analysis.StopReason = normalizeStop(input.StopReason)
+	}
 	if analysis.StopReason == StopEndTurn && analysis.ResponseKinds&KindToolCall != 0 && reportsToolUseAsStop(input) {
 		analysis.StopReason = StopToolUse
 	}

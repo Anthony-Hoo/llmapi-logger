@@ -57,7 +57,7 @@ func TestMigrationTwoAppliesOnceAndRuntimeOnly(t *testing.T) {
 		versions = append(versions, version)
 	}
 	rows.Close()
-	if len(versions) != 4 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 {
+	if len(versions) != 8 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 || versions[4] != 5 || versions[5] != 6 || versions[6] != 7 || versions[7] != 8 {
 		t.Fatalf("versions = %v", versions)
 	}
 	if err := store.Close(); err != nil {
@@ -65,7 +65,7 @@ func TestMigrationTwoAppliesOnceAndRuntimeOnly(t *testing.T) {
 	}
 	reopened, err := Open(context.Background(), dsn)
 	if err != nil {
-		t.Fatalf("reopen at version 4: %v", err)
+		t.Fatalf("reopen at version 7: %v", err)
 	}
 	reopened.Close()
 
@@ -180,13 +180,18 @@ func TestProjectIdentityBackfillCandidatesNewestFirst(t *testing.T) {
 	if err := store.SaveProjectIdentity(ctx, identityTestRow("c-mid")); err != nil {
 		t.Fatal(err)
 	}
-	candidates, err := store.ListProjectIdentityBackfillCandidates(ctx, 1, nil, 10)
+	candidates, err := store.ListProjectIdentityBackfillCandidates(ctx, 1, nil, nil, 10)
 	if err != nil || len(candidates) != 2 || candidates[0].AuditID != "c-new" || candidates[1].AuditID != "c-old" {
 		t.Fatalf("candidates = %+v err = %v", candidates, err)
 	}
-	candidates, err = store.ListProjectIdentityBackfillCandidates(ctx, 2, &storage.ProjectBackfillCursor{StartedAtNS: 300, AuditID: "c-new"}, 10)
+	candidates, err = store.ListProjectIdentityBackfillCandidates(ctx, 2, nil, &storage.ProjectBackfillCursor{StartedAtNS: 300, AuditID: "c-new"}, 10)
 	if err != nil || len(candidates) != 2 || candidates[0].AuditID != "c-mid" {
 		t.Fatalf("version upgrade candidates = %+v err = %v", candidates, err)
+	}
+	// A lower bound keeps the walk above the watermark.
+	candidates, err = store.ListProjectIdentityBackfillCandidates(ctx, 2, &storage.ProjectBackfillCursor{StartedAtNS: 100, AuditID: "c-old"}, nil, 10)
+	if err != nil || len(candidates) != 2 || candidates[0].AuditID != "c-new" || candidates[1].AuditID != "c-mid" {
+		t.Fatalf("bounded candidates = %+v err = %v", candidates, err)
 	}
 }
 

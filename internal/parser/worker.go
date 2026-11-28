@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/insights"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -20,17 +21,24 @@ const defaultScanInterval = 30 * time.Second
 
 // Worker owns one bounded queue and one parser goroutine. Queue saturation is
 // intentionally non-blocking; pending rows are picked up by later scans.
+//
+// The queue is one FIFO for both inputs: audits Notify enqueues (at most
+// QueueCapacity waiting) and jobs Submit enqueues (at most
+// FinalizeQueueCapacity waiting), so audits are parsed in the order they were
+// handed over. Enqueueing happens under mu, as Close's drain does, so every
+// job's plaintext is released exactly once.
 type Worker struct {
 	store   Store
 	cipher  security.Cipher
 	parsers map[string]Parser
 	logger  *slog.Logger
-	queue   chan string
+	queue   chan FinalizeJob
 	// Only the parser goroutine accesses this bounded recovery backlog.
 	// A failed release must be retried before the same audit can be claimed.
 	pendingReleases map[string]struct{}
 
 	scanInterval time.Duration
+	jobDeadline  time.Duration
 	now          func() time.Time
 
 	// Guarded by mu; read once per audit by the parser goroutine.
@@ -40,15 +48,27 @@ type Worker struct {
 	idleTasks       []IdleTask
 	projectAnalyzer ProjectAnalyzer
 
-	// Only the parser goroutine accesses the insights backfill state.
-	backfillCursor   *storage.AnalysisBackfillCursor
-	backfillSkipped  map[string]struct{}
-	backfillNextScan time.Time
+	// Only the parser goroutine accesses the insights backfill state
+	// (backfill.go): the watermark, the open pass's cursor and number, the
+	// audits skipped for good, the audits to retry and the retries the open
+	// pass still has to try first.
+	backfillMark       watermark
+	backfillCursor     *storage.AnalysisBackfillCursor
+	backfillPass       uint64
+	backfillSkipped    map[string]*keyset
+	backfillRetry      map[string]*backfillRetry
+	backfillRetryQueue []string
+	backfillNextScan   time.Time
 	// backfillProgress is readable from any goroutine.
 	backfillProgress backfillProgress
-	// Project identity backfill state, parser goroutine only.
-	projectCursor   *storage.ProjectBackfillCursor
-	projectNextScan time.Time
+	// Project identity backfill state, parser goroutine only (project.go).
+	projectMark       watermark
+	projectCursor     *storage.ProjectBackfillCursor
+	projectPass       uint64
+	projectSkipped    map[string]*keyset
+	projectRetry      map[string]*backfillRetry
+	projectRetryQueue []string
+	projectNextScan   time.Time
 
 	mu      sync.Mutex
 	started bool
@@ -83,9 +103,10 @@ func NewWorker(store Store, cipher security.Cipher, parsers []Parser, logger *sl
 		cipher:          cipher,
 		parsers:         indexed,
 		logger:          logger,
-		queue:           make(chan string, QueueCapacity),
+		queue:           make(chan FinalizeJob, FinalizeQueueCapacity),
 		pendingReleases: make(map[string]struct{}),
 		scanInterval:    defaultScanInterval,
+		jobDeadline:     defaultJobDeadline,
 		now:             time.Now,
 	}, nil
 }
@@ -185,17 +206,47 @@ func (worker *Worker) Notify(auditID string) bool {
 	if worker == nil || strings.TrimSpace(auditID) == "" {
 		return false
 	}
+	return worker.enqueue(FinalizeJob{Audit: storage.ParserAudit{AuditID: auditID}}, QueueCapacity)
+}
+
+// Submit hands a committed audit to the parser goroutine without waiting
+// (design G.1). A job with evidence is parsed from that evidence instead of
+// the stored rows; an id-only job is parsed like a notified audit. Submit
+// takes the job's plaintext: its Release runs exactly once, when the job is
+// refused, after it is processed, or when the worker stops before reaching
+// it. False means the queue is full or the worker is closed; the row then
+// stays pending for the scan, as after a refused Notify.
+func (worker *Worker) Submit(job FinalizeJob) bool {
+	if worker == nil || strings.TrimSpace(job.Audit.AuditID) == "" {
+		releaseJob(job)
+		return false
+	}
+	if !worker.enqueue(job, FinalizeQueueCapacity) {
+		releaseJob(job)
+		return false
+	}
+	return true
+}
+
+// enqueue adds a job unless the worker is closed or limit jobs are already
+// waiting.
+func (worker *Worker) enqueue(job FinalizeJob, limit int) bool {
 	worker.mu.Lock()
-	closed := worker.closed
-	worker.mu.Unlock()
-	if closed {
+	defer worker.mu.Unlock()
+	if worker.closed || len(worker.queue) >= limit {
 		return false
 	}
 	select {
-	case worker.queue <- auditID:
+	case worker.queue <- job:
 		return true
 	default:
 		return false
+	}
+}
+
+func releaseJob(job FinalizeJob) {
+	if job.Release != nil {
+		job.Release()
 	}
 }
 
@@ -225,6 +276,16 @@ func (worker *Worker) Close() {
 		cancel()
 	}
 	worker.wait.Wait()
+	// No job can be enqueued any more (closed is set); release the plaintext
+	// of those the goroutine did not reach. Their rows stay pending.
+	for {
+		select {
+		case job := <-worker.queue:
+			releaseJob(job)
+		default:
+			return
+		}
+	}
 }
 
 func (worker *Worker) run(ctx context.Context) {
@@ -235,8 +296,8 @@ func (worker *Worker) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case auditID := <-worker.queue:
-			worker.process(ctx, auditID)
+		case job := <-worker.queue:
+			worker.serve(ctx, job)
 		case <-ticker.C:
 			worker.retryProcessingReleases(ctx)
 			worker.scan(ctx)
@@ -260,28 +321,85 @@ func (worker *Worker) scan(ctx context.Context) {
 	}
 }
 
-func (worker *Worker) process(ctx context.Context, auditID string) {
-	if _, waiting := worker.pendingReleases[auditID]; waiting || len(worker.pendingReleases) >= QueueCapacity {
-		// Pending rows remain discoverable after storage recovers. Do not
-		// claim more work than this worker can remember to release safely.
+// defaultJobDeadline bounds one parse, from the claim to the save (design
+// G.2). It cannot interrupt a parser that computes without looking at its
+// context; it bounds every wait on the store and is checked before the save.
+const defaultJobDeadline = 2 * time.Minute
+
+// errJobDeadline is the cause of a job context whose deadline passed, which
+// tells it apart from the worker stopping.
+var errJobDeadline = errors.New("parser: job deadline exceeded")
+
+// serve processes one queued job and then releases its plaintext.
+func (worker *Worker) serve(ctx context.Context, job FinalizeJob) {
+	defer releaseJob(job)
+	jobCtx, cancel := context.WithTimeoutCause(ctx, worker.jobDeadline, errJobDeadline)
+	defer cancel()
+	if job.Evidence == nil {
+		worker.processWithin(ctx, jobCtx, job.Audit.AuditID)
 		return
 	}
-	audit, err := worker.store.LoadParserAudit(ctx, auditID)
+	worker.finalize(ctx, jobCtx, job.Audit, job.Evidence)
+}
+
+// process parses an audit from its stored evidence, without a deadline.
+func (worker *Worker) process(ctx context.Context, auditID string) {
+	worker.processWithin(ctx, ctx, auditID)
+}
+
+// processWithin parses an audit from its stored evidence. ctx is the
+// worker's; jobCtx is ctx with the job's deadline, which bounds everything up
+// to the save.
+func (worker *Worker) processWithin(ctx, jobCtx context.Context, auditID string) {
+	if !worker.mayClaim(auditID) {
+		return
+	}
+	audit, err := worker.store.LoadParserAudit(jobCtx, auditID)
 	if err != nil {
 		worker.logger.Warn("parser audit load failed", "audit_id", auditID, "error_code", "audit_load_failed")
 		return
 	}
-	claimed, err := worker.store.ClaimPendingParse(ctx, auditID)
+	if !worker.claim(ctx, jobCtx, auditID) {
+		return
+	}
+	input, evidenceErr := worker.loadInput(jobCtx, audit)
+	worker.parseClaimed(ctx, jobCtx, audit, input, evidenceErr)
+}
+
+// mayClaim reports whether the worker may claim the audit now.
+func (worker *Worker) mayClaim(auditID string) bool {
+	// Pending rows remain discoverable after storage recovers. Do not claim
+	// more work than this worker can remember to release safely.
+	_, waiting := worker.pendingReleases[auditID]
+	return !waiting && len(worker.pendingReleases) < QueueCapacity
+}
+
+func (worker *Worker) claim(ctx, jobCtx context.Context, auditID string) bool {
+	claimed, err := worker.store.ClaimPendingParse(jobCtx, auditID)
 	if err != nil {
 		worker.logger.Warn("parser claim failed", "audit_id", auditID, "error_code", "parse_claim_failed")
-		return
+		if ctx.Err() == nil && jobExpired(jobCtx) {
+			// The claim may still commit after the wait ended; the release
+			// is queued behind it, and is a no-op when it did not.
+			worker.releaseProcessing(ctx, auditID)
+		}
+		return false
 	}
-	if !claimed {
-		return
-	}
+	return claimed
+}
 
+func jobExpired(jobCtx context.Context) bool {
+	return errors.Is(context.Cause(jobCtx), errJobDeadline)
+}
+
+// parseClaimed parses, normalizes, prepares, saves and analyzes a claimed
+// audit; every path into the parser ends here. ctx is the worker's: the
+// analysis after the save runs under it, as before. jobCtx carries the job's
+// deadline. After the claim it either saves and reaches analyze, or releases
+// the claim (a panic in normalization or preparation, the deadline, a failed
+// save), or leaves it processing for startup recovery when the worker stops.
+func (worker *Worker) parseClaimed(ctx, jobCtx context.Context, audit storage.ParserAudit, input Input, evidenceErr error) {
 	implementation := worker.parsers[audit.ParserName]
-	input, evidenceErr := worker.loadInput(ctx, audit)
 	result := Result{}
 	if implementation == nil {
 		result.Status = StatusSkipped
@@ -290,23 +408,60 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 		result.Status = StatusSkipped
 		result.ErrorCode = "no_body"
 	} else {
-		result = parseSafely(ctx, implementation, input)
+		result = parseSafely(jobCtx, implementation, input)
 	}
-	worker.normalizeResult(&result, input, evidenceErr)
-	prepared := worker.prepareTurn(ctx, audit, implementation, input, &result)
-	savedStatus, err := worker.persistResult(ctx, audit, implementation, result, prepared)
+	prepared, panicked := worker.prepareSafely(jobCtx, audit, implementation, input, evidenceErr, &result)
+	if panicked {
+		// Nothing was saved. The release counts as a failed attempt, so an
+		// audit that panics every time ends as parsed_result_save_failed.
+		worker.logger.Warn("parser normalization failed", "audit_id", audit.AuditID, "error_code", "normalize_panic")
+		worker.releaseProcessing(ctx, audit.AuditID)
+		return
+	}
+	if ctx.Err() == nil && jobExpired(jobCtx) {
+		worker.logger.Warn("parser job deadline exceeded", "audit_id", audit.AuditID, "error_code", "parse_deadline_exceeded")
+		worker.releaseProcessing(ctx, audit.AuditID)
+		return
+	}
+	savedStatus, err := worker.persistResult(jobCtx, audit, implementation, result, prepared)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			// A canceled save may not have been attempted, or may still commit
-			// after submitSync stops waiting. Leave processing for startup
-			// recovery instead of spending the persistence-failure budget.
+			if ctx.Err() != nil {
+				// The worker is stopping. A canceled save may not have been
+				// attempted, or may still commit after submitSync stops
+				// waiting. Leave processing for startup recovery instead of
+				// spending the persistence-failure budget.
+				return
+			}
+			if jobExpired(jobCtx) {
+				// The save may still commit after the wait ended; the release
+				// is queued behind it and is then a no-op.
+				worker.logger.Warn("parser job deadline exceeded", "audit_id", audit.AuditID, "error_code", "parse_deadline_exceeded")
+				worker.releaseProcessing(ctx, audit.AuditID)
+			}
+			worker.backfillUnsure(audit.AuditID)
 			return
 		}
 		worker.logger.Warn("parser result save failed", "audit_id", audit.AuditID, "error_code", "parsed_result_save_failed", "storage_error", storage.ErrorClass(err))
 		worker.releaseProcessing(ctx, audit.AuditID)
+		// The error may have come back after the save committed; the release
+		// is then a no-op and the audit is ok or partial without an analysis.
+		worker.backfillUnsure(audit.AuditID)
 		return
 	}
 	worker.analyze(ctx, audit, input, result, savedStatus)
+}
+
+// prepareSafely normalizes the result and prepares the turn, reporting a
+// panic in either instead of letting it end the process.
+func (worker *Worker) prepareSafely(ctx context.Context, audit storage.ParserAudit, implementation Parser, input Input, evidenceErr error, result *Result) (prepared *auditmodel.PreparedTurn, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			prepared, panicked = nil, true
+		}
+	}()
+	worker.normalizeResult(result, input, evidenceErr)
+	return worker.prepareTurn(ctx, audit, implementation, input, result), false
 }
 
 // analyze runs the optional insights analyzer for a saved ok or partial
@@ -314,18 +469,27 @@ func (worker *Worker) process(ctx context.Context, auditID string) {
 // which persistResult may have downgraded. Failures and panics are logged
 // with a stable code and dropped: the parse status is already committed, and
 // the insights backfill recomputes missing rows later instead of retrying
-// here.
+// here. Every saved ok or partial audit left without an analysis, unless the
+// worker is stopping, is reported to backfillLater: the backfill's watermark
+// may already cover it.
 func (worker *Worker) analyze(ctx context.Context, audit storage.ParserAudit, input Input, result Result, savedStatus string) {
 	analyzer := worker.auditAnalyzer()
-	if analyzer == nil || (savedStatus != StatusOK && savedStatus != StatusPartial) ||
-		!input.Request.Present || len(input.Request.Data) == 0 {
+	if analyzer == nil || (savedStatus != StatusOK && savedStatus != StatusPartial) {
+		return
+	}
+	if !input.Request.Present || len(input.Request.Data) == 0 {
+		worker.backfillLater(audit.AuditID, input, nil)
 		return
 	}
 	// The optional project identity hook is independent of the insights
 	// result; it runs first so an analysis failure cannot skip it.
 	worker.analyzeProject(ctx, audit, input, result)
 	err := runAnalyzer(ctx, analyzer, audit, input, result)
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	worker.backfillLater(audit.AuditID, input, err)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	if errors.Is(err, errAnalyzerPanic) {
@@ -358,6 +522,7 @@ func runAnalyzer(ctx context.Context, analyzer AuditAnalyzer, audit storage.Pars
 		Response:         input.Response.Data,
 		ResponseComplete: input.Response.Complete,
 		ResponseIsStream: result.ObservedStream != nil && *result.ObservedStream,
+		StopReason:       result.StopReason,
 		Headers:          input.Headers,
 		RequestModel:     result.RequestModel,
 		ResponseModel:    result.ResponseModel,
@@ -388,21 +553,104 @@ func (worker *Worker) retryProcessingReleases(ctx context.Context) {
 	}
 }
 
+// prepareTurn prepares the turn of a parsed audit. A full turn, carrying the
+// request and the response, needs an ok parse of complete bodies. When that
+// cannot be had because of the response alone, a request-only turn is
+// prepared instead (prepareRequestOnlyTurn): its response layout is none, and
+// the response raw stays as the only evidence of the response.
 func (worker *Worker) prepareTurn(ctx context.Context, audit storage.ParserAudit, implementation Parser, input Input, result *Result) *auditmodel.PreparedTurn {
-	if implementation == nil || result == nil || result.Status != StatusOK || !input.Request.Complete || (input.Response.Present && !input.Response.Complete) {
+	if implementation == nil || result == nil || !input.Request.Complete {
 		return nil
 	}
 	normalizer, ok := implementation.(AuditNormalizer)
 	if !ok {
 		return nil
 	}
+	if result.Status != StatusOK || (input.Response.Present && !input.Response.Complete) {
+		return worker.prepareRequestOnlyTurn(ctx, audit, implementation, normalizer, input, result)
+	}
 	turn, err := normalizer.NormalizeAudit(ctx, input, *result)
+	if errors.Is(err, ErrStreamResidueTooLarge) {
+		// The response is complete and was parsed; its stream only carries
+		// more than the envelope may hold. The parse stays ok, the response
+		// raw stays, and the request can still be released.
+		prepared := worker.prepareRequestOnlyTurn(ctx, audit, implementation, normalizer, input, result)
+		if prepared != nil {
+			if result.ErrorCode == "" {
+				result.ErrorCode = ErrorCodeResponseNotNormalized
+			}
+			return prepared
+		}
+	}
 	if err != nil {
 		result.Status = StatusPartial
 		result.ErrorCode = "normalization_failed"
 		result.ParsedJSON = nil
 		return nil
 	}
+	return worker.prepareNormalizedTurn(ctx, audit, turn, result)
+}
+
+// prepareRequestOnlyTurn prepares a turn from the request alone for an audit
+// whose response was captured but cannot be carried by the turn: it is
+// incomplete, the parse is partial because of it, or the normalizer declined
+// it. The request must be one a full turn would accept: a complete body, which
+// the parser reads without fault on its own (so a partial parse is partial
+// because of the response), and which normalizes and verifies against its
+// decoded bytes. Whatever fails, it returns nil and leaves the result as it
+// is: the audit then keeps all of its raw, as it did before.
+//
+// The normalizer is called with the response removed from the input, which
+// every normalizer answers with response layout none; no protocol needs its
+// own request-only path.
+func (worker *Worker) prepareRequestOnlyTurn(ctx context.Context, audit storage.ParserAudit, implementation Parser, normalizer AuditNormalizer, input Input, result *Result) *auditmodel.PreparedTurn {
+	if result.Status != StatusOK && result.Status != StatusPartial {
+		return nil
+	}
+	if !input.Request.Present || !input.Request.Complete || input.Request.ErrorCode != "" || !input.Response.Present ||
+		input.Response.ErrorCode == "evidence_read_error" || input.Response.ErrorCode == "capture_integrity_error" {
+		// No response, so nothing to leave out; or the response could not be
+		// read as it was stored, so what the parser saw is not the evidence.
+		return nil
+	}
+	requestOnly := input
+	requestOnly.Response = BodySource{}
+	requestOnly.StatusCode = nil
+	if parsed := parseSafely(ctx, implementation, requestOnly); parsed.Status != StatusOK {
+		return nil
+	}
+	turn, err := normalizer.NormalizeAudit(ctx, requestOnly, *result)
+	if err != nil || turn.RequestLayout == auditmodel.LayoutNone || turn.ResponseLayout != auditmodel.LayoutNone {
+		return nil
+	}
+	turn.ResponseItems, turn.ResponseEnvelope, turn.ResponseOriginal = nil, nil, nil
+	// A failed check must not relabel the parse: the audit then stays as it
+	// was before request-only turns existed.
+	probe := *result
+	return worker.prepareNormalizedTurn(ctx, audit, turn, &probe)
+}
+
+// ErrorCodeResponseNotNormalized is the parse error code of an ok parse whose
+// complete response the normalizer declined (ErrStreamResidueTooLarge): the
+// audit has a request-only turn and keeps its response raw.
+const ErrorCodeResponseNotNormalized = "response_not_normalized"
+
+// responseMessages returns the response-phase messages of a parsed
+// conversation, which a request-only turn does not rebuild.
+func responseMessages(value *conversation.Conversation) []conversation.Message {
+	messages := make([]conversation.Message, 0)
+	for _, message := range value.Messages {
+		if message.Phase == conversation.PhaseResponse {
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
+// prepareNormalizedTurn fills the audit fields of a normalized turn and
+// prepares it with the reconstruction check. A failed check marks the parse
+// partial with reconstruction_failed.
+func (worker *Worker) prepareNormalizedTurn(ctx context.Context, audit storage.ParserAudit, turn auditmodel.Turn, result *Result) *auditmodel.PreparedTurn {
 	turn.AuditID = audit.AuditID
 	turn.Protocol = audit.Protocol
 	turn.ParserName = audit.ParserName
@@ -479,21 +727,18 @@ func (worker *Worker) persistResult(ctx context.Context, audit storage.ParserAud
 	if implementation != nil {
 		parserVersion = implementation.Version()
 	}
-	aad, err := security.AAD(audit.AuditID, "parsed_json", audit.ParserName)
-	if err != nil {
+	plaintext, generatedPlaintext := parsedResultPlaintext(result, prepared)
+	// Large results, chiefly the fallback conversation, are compressed inside
+	// the encrypted payload; see auditmodel.SealParsedResult.
+	encrypted, err := auditmodel.SealParsedResult(worker.cipher, audit.AuditID, audit.ParserName, plaintext)
+	if errors.Is(err, auditmodel.ErrParsedResultAAD) {
 		worker.logger.Warn("parser result AAD failed", "audit_id", audit.AuditID, "error_code", "parsed_json_aad_failed")
 		result.Status = StatusError
 		result.ErrorCode = "parsed_json_aad_failed"
-	}
-	var encrypted []byte
-	plaintext, generatedPlaintext := parsedResultPlaintext(result, prepared == nil)
-	if err == nil {
-		encrypted, err = worker.cipher.Encrypt(aad, plaintext)
-		if err != nil {
-			worker.logger.Warn("parser result encryption failed", "audit_id", audit.AuditID, "error_code", "parsed_json_encryption_failed")
-			result.Status = StatusError
-			result.ErrorCode = "parsed_json_encryption_failed"
-		}
+	} else if err != nil {
+		worker.logger.Warn("parser result encryption failed", "audit_id", audit.AuditID, "error_code", "parsed_json_encryption_failed")
+		result.Status = StatusError
+		result.ErrorCode = "parsed_json_encryption_failed"
 	}
 	if generatedPlaintext {
 		clear(plaintext)
@@ -523,21 +768,45 @@ func (worker *Worker) persistResult(ctx context.Context, audit storage.ParserAud
 	return result.Status, worker.store.SaveParsedAudit(ctx, storage.ParsedAudit{Result: storageResult, Turn: prepared})
 }
 
-func parsedResultPlaintext(result Result, includeConversation bool) ([]byte, bool) {
+// PartialResponseMessagesKey is the parsed_json_enc key under which an audit
+// with a request-only turn keeps the response-phase messages of its parsed
+// conversation. The turn rebuilds only the request messages; readers append
+// these after them (doc/features/18 section 6).
+const PartialResponseMessagesKey = "partial_response_messages"
+
+// parsedResultPlaintext is the plaintext of parsed_json_enc. Without a turn
+// it holds the whole parsed conversation as the fallback copy. With a turn
+// the conversation is rebuilt from the turn and not stored again, except for
+// what a turn without a response (response layout none) cannot rebuild: the
+// response-phase messages of the conversation, kept on their own under
+// PartialResponseMessagesKey. A turn with no captured response has none, and
+// stores nothing more.
+func parsedResultPlaintext(result Result, prepared *auditmodel.PreparedTurn) ([]byte, bool) {
 	plaintext := result.ParsedJSON
 	generated := false
 	if len(plaintext) == 0 {
 		plaintext, _ = json.Marshal(compactResultJSON(result))
 		generated = true
 	}
-	if !includeConversation || result.Conversation == nil {
+	if result.Conversation == nil {
 		return plaintext, generated
+	}
+	key, value := "conversation", any(result.Conversation)
+	if prepared != nil {
+		if prepared.ResponseLayout != auditmodel.LayoutNone {
+			return plaintext, generated
+		}
+		messages := responseMessages(result.Conversation)
+		if len(messages) == 0 {
+			return plaintext, generated
+		}
+		key, value = PartialResponseMessagesKey, messages
 	}
 	var envelope map[string]any
 	if err := json.Unmarshal(plaintext, &envelope); err != nil || envelope == nil {
 		envelope = make(map[string]any)
 	}
-	envelope["conversation"] = result.Conversation
+	envelope[key] = value
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		return plaintext, generated

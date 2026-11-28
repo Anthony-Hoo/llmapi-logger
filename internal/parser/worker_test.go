@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -13,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/conversation"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
@@ -52,14 +55,14 @@ func TestWorkerStartupScanDecodesGzipAndEncryptsParsedJSON(t *testing.T) {
 		if !bytes.Equal(input.Response.Data, responsePlaintext) || !input.Response.Complete {
 			t.Fatalf("response evidence = %+v data=%q", input.Response, input.Response.Data)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("worker did not parse startup pending audit")
 	}
 
 	var saved sqlite.ParsedResult
 	select {
 	case saved = <-store.saved:
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("worker did not save parsed result")
 	}
 	if store.resetCount != 1 || saved.Status != StatusOK || saved.RequestModel == nil || *saved.RequestModel != "worker-model" {
@@ -94,14 +97,114 @@ func TestParsedResultPlaintextOmitsConversationWhenTurnGraphOwnsIt(t *testing.T)
 		ParsedJSON: []byte(`{"status":"ok","model":"model-example"}`),
 	}
 
-	fallback, generated := parsedResultPlaintext(result, true)
+	fallback, generated := parsedResultPlaintext(result, nil)
 	if !generated || !bytes.Contains(fallback, []byte("conversation-canary")) {
 		t.Fatalf("fallback plaintext = %s generated=%v", fallback, generated)
 	}
 	clear(fallback)
-	compacted, generated := parsedResultPlaintext(result, false)
+	full := &auditmodel.PreparedTurn{RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope}
+	compacted, generated := parsedResultPlaintext(result, full)
 	if generated || bytes.Contains(compacted, []byte("conversation-canary")) {
 		t.Fatalf("content-addressed plaintext = %s generated=%v", compacted, generated)
+	}
+	// A turn without a response and a conversation without response
+	// messages: nothing is left for the turn not to rebuild.
+	requestOnly := &auditmodel.PreparedTurn{RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutNone}
+	if plain, _ := parsedResultPlaintext(result, requestOnly); bytes.Contains(plain, []byte("conversation-canary")) || bytes.Contains(plain, []byte(PartialResponseMessagesKey)) {
+		t.Fatalf("request-only plaintext without response messages = %s", plain)
+	}
+}
+
+// A request-only turn rebuilds the request messages; only the response-phase
+// messages of the parsed conversation are kept, under their own key, and the
+// conversation key is not written.
+func TestParsedResultPlaintextKeepsOnlyResponseMessagesOfARequestOnlyTurn(t *testing.T) {
+	t.Parallel()
+	view := conversation.New()
+	view.Append(conversation.Message{
+		Role: conversation.RoleUser, Phase: conversation.PhaseRequest, Direction: conversation.DirectionClientToUpstream,
+		Content: []conversation.Part{conversation.Text("request-canary")},
+	})
+	view.Append(conversation.Message{
+		Role: conversation.RoleAssistant, Phase: conversation.PhaseResponse, Direction: conversation.DirectionUpstreamToClient,
+		Content: []conversation.Part{conversation.Text("half an answer")},
+	})
+	result := Result{Status: StatusPartial, Conversation: view, ParsedJSON: []byte(`{"status":"partial"}`)}
+	plain, _ := parsedResultPlaintext(result, &auditmodel.PreparedTurn{RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutNone})
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := envelope["conversation"]; exists || bytes.Contains(plain, []byte("request-canary")) {
+		t.Fatalf("request-only plaintext stores the conversation: %s", plain)
+	}
+	var messages []conversation.Message
+	if err := json.Unmarshal(envelope[PartialResponseMessagesKey], &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Phase != conversation.PhaseResponse || messages[0].Content[0].Text != "half an answer" {
+		t.Fatalf("partial response messages = %+v", messages)
+	}
+	if string(envelope["status"]) != `"partial"` {
+		t.Fatalf("the parse summary was lost: %s", plain)
+	}
+}
+
+func TestPersistResultCompressesFallbackConversationOnly(t *testing.T) {
+	t.Parallel()
+	if auditmodel.MaxParsedResultBytes < 2*MaxDecodedBodyBytes {
+		t.Fatal("the parsed result bound must cover a fallback built from two maximal bodies")
+	}
+	cipher := testCipher(t)
+	auditID, parserName := "audit-persist-fallback", "test.parser"
+	store := newFakeStore(auditID, parserName)
+	worker, err := NewWorker(store, cipher, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(worker.Close)
+	view := conversation.New()
+	for index := 0; index < 100; index++ {
+		view.Append(conversation.Message{
+			Role: conversation.RoleUser, Phase: conversation.PhaseRequest,
+			Direction: conversation.DirectionClientToUpstream,
+			Content:   []conversation.Part{conversation.Text(fmt.Sprintf("fallback-canary %d %s", index, bytes.Repeat([]byte("context "), 50)))},
+		})
+	}
+	audit := store.audits[auditID]
+	aad, err := security.AAD(auditID, "parsed_json", parserName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		prepared   *auditmodel.PreparedTurn
+		compressed bool
+	}{
+		// No verified turn: the conversation is embedded and worth compressing.
+		{name: "fallback", compressed: true},
+		// A verified turn owns the conversation; the summary stays plain.
+		{name: "summary", prepared: &auditmodel.PreparedTurn{}},
+	} {
+		result := Result{Status: StatusPartial, Conversation: view, ParsedJSON: []byte(`{"status":"partial"}`)}
+		if _, err := worker.persistResult(context.Background(), audit, nil, result, test.prepared); err != nil {
+			t.Fatal(err)
+		}
+		saved := <-store.saved
+		payload, err := cipher.Decrypt(aad, saved.ParsedJSONEnc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := bytes.HasPrefix(payload, []byte{0x1f, 0x8b}); got != test.compressed {
+			t.Fatalf("%s: stored compressed = %v, want %v", test.name, got, test.compressed)
+		}
+		opened, err := auditmodel.OpenParsedResult(cipher, auditID, parserName, saved.ParsedJSONEnc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(opened, []byte("fallback-canary 99")) != test.compressed {
+			t.Fatalf("%s: opened result = %.80s", test.name, opened)
+		}
 	}
 }
 
@@ -149,7 +252,7 @@ func TestWorkerRecoversParserPanic(t *testing.T) {
 		if saved.Status != StatusError || saved.ErrorCode == nil || *saved.ErrorCode != "parser_panic" {
 			t.Fatalf("panic result = %+v", saved)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("panic result was not saved")
 	}
 }
@@ -173,7 +276,7 @@ func TestWorkerSaveFailureReleasesAuditForRetry(t *testing.T) {
 	}
 	defer worker.Close()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(PipelineWait)
 	for {
 		store.mu.Lock()
 		audit := store.audits[auditID]
@@ -196,7 +299,7 @@ func TestWorkerSaveFailureReleasesAuditForRetry(t *testing.T) {
 		if saved.Status != StatusOK {
 			t.Fatalf("retried result status = %q", saved.Status)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("released audit was not retried")
 	}
 	store.mu.Lock()
@@ -247,7 +350,7 @@ func TestWorkerEvidenceErrorsOverrideProtocolFallbacks(t *testing.T) {
 				if saved.Status != test.wantStatus || saved.ErrorCode == nil || *saved.ErrorCode != test.wantCode {
 					t.Fatalf("saved evidence result = %+v, want status=%s code=%s", saved, test.wantStatus, test.wantCode)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(PipelineWait):
 				t.Fatal("evidence result was not saved")
 			}
 		})
@@ -470,6 +573,15 @@ func (store *fakeStore) ReadParserChunks(_ context.Context, auditID, stage strin
 		}
 	}
 	return result, nil
+}
+
+// LoadParserHeaderSource returns version 1 rows, as the SQLite store does.
+func (store *fakeStore) LoadParserHeaderSource(ctx context.Context, auditID string, names []string) (storage.HeaderSource, error) {
+	rows, err := store.LoadParserRequestHeaders(ctx, auditID, names)
+	if err != nil {
+		return storage.HeaderSource{}, err
+	}
+	return storage.HeaderSource{CaptureVersion: storage.CaptureVersion1, Rows: rows}, nil
 }
 
 func (store *fakeStore) LoadParserRequestHeaders(_ context.Context, _ string, names []string) ([]sqlite.HeaderEvidence, error) {

@@ -24,7 +24,16 @@ import (
 	"llmapi-logger/internal/routing"
 )
 
-const integrationTimeout = 5 * time.Second
+// integrationTimeout bounds every wait of this package for one step of the
+// running pipeline (a request through the proxy, its commit, its parse and
+// analysis, a log line, a shutdown). Such a step takes well under a second on
+// a developer machine and ten times that under -race on a slow shared
+// runner. The longest legitimate path adds a 5-second capture recovery round
+// of the writer and the parser's 30-second pending scan, which is how an
+// audit finalized by the recovery gets parsed: 10 s + 5 s + 30 s, doubled for
+// the variance between runners. The waits poll, so a passing run does not
+// wait for the bound.
+const integrationTimeout = 90 * time.Second
 
 type observedRequest struct {
 	method        string
@@ -383,6 +392,9 @@ newapi:
 mode: available
 database_url: '%s'
 key_path: '%s'
+audit:
+  staging:
+    dir: '%s'
 admin_token: integration-admin-token
 retention_days: 0
 %sroutes:
@@ -391,7 +403,7 @@ retention_days: 0
     path: '%s'
     match: exact
     parser: openai.chat_completions%s
-`, yamlQuote(upstreamURL), yamlQuote(newIntegrationDatabaseURL(t)), yamlQuote(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))), interceptorYAML, yamlQuote(routePath), routeInterceptorYAML)
+`, yamlQuote(upstreamURL), yamlQuote(newIntegrationDatabaseURL(t)), yamlQuote(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))), yamlQuote(filepath.Join(t.TempDir(), "staging")), interceptorYAML, yamlQuote(routePath), routeInterceptorYAML)
 
 	path := filepath.Join(tempDir, "config.yaml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {

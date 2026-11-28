@@ -35,6 +35,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { ContentPolicyPanel } from "./components/content-policy-panel";
 import { ReportSettingsPanel } from "./components/settings/report-settings-panel";
 import { SystemSettings, type SettingsSection } from "./components/settings/system-settings";
+import { CaptureSettingsCard } from "./components/settings/capture-settings-form";
 import { ConversationView } from "./components/conversation-view";
 import { AgentAccessView } from "./components/agent-access/agent-access-view";
 import { AgentAuthorizeView } from "./components/agent-access/authorize-view";
@@ -707,12 +708,14 @@ export function Dashboard({
 
 /**
  * The pages of the administrator's "系统配置" menu. Project groups need
- * organisation reports; the report parameters need either feature.
+ * organisation reports; the report parameters need either feature. The
+ * capture write setting is always there.
  */
 export function settingsSections(client: ApiClient, hasOrgReports: boolean, hasSessionAnalysis: boolean): SettingsSection[] {
   const sections: SettingsSection[] = [
     { id: "ua-rules", label: "UA 拦截规则", hint: "按 User-Agent 拒绝请求", render: () => <UserAgentRulesPanel client={client} /> },
     { id: "content-policy", label: "关键词拦截", hint: "按请求内容拦截", render: () => <ContentPolicyPanel client={client} /> },
+    { id: "capture", label: "审计写入", hint: "终结提交失败时的重试", render: () => <CaptureSettingsCard client={client} /> },
   ];
   if (hasOrgReports) {
     sections.push({
@@ -1835,8 +1838,24 @@ export function TurnStoragePanel({
 }) {
   const turn = detail.turn;
   if (!turn) {
-    return <EmptyValue>当前请求没有可用的内容寻址轮次；异常或暂不支持的协议会继续保留完整原始证据。</EmptyValue>;
+    return <EmptyValue>当前请求没有可用的内容寻址轮次；没有轮次的记录和暂不支持的协议会继续保留完整原始证据。</EmptyValue>;
   }
+  const verified = turn.reconstruction_status === "verified";
+  // Raw retention is decided per side, so each side reports on its own whether
+  // its raw body is still there and whether it can be rebuilt.
+  const sides = (["request", "response"] as RawSide[]).map((side) => {
+    const body = bodyForSide(detail, side);
+    // A turn with response layout "none" holds no response to rebuild:
+    // either none arrived, or the turn is request-only (the response was
+    // incomplete or not normalized) and its raw body is the only evidence.
+    const omitted = side === "response" && turn.response_layout === "none";
+    return {
+      side,
+      raw: rawSideLabel(body),
+      rebuildable: verified && !omitted,
+      unavailable: omitted ? (body ? "轮次未收录响应，以原始 Body 为准" : "无响应可重建") : "不可用",
+    };
+  });
 
   return (
     <div className="space-y-4">
@@ -1862,27 +1881,25 @@ export function TurnStoragePanel({
           ["响应序列 SHA-256", hashValue(turn.response_sequence_sha256)],
           ["请求重建 SHA-256", hashValue(turn.request_reconstruction_sha256)],
           ["响应重建 SHA-256", hashValue(turn.response_reconstruction_sha256)],
+          ...sides.map(({ side, raw, rebuildable, unavailable }): [string, ReactNode] => [
+            side === "request" ? "请求侧证据" : "响应侧证据",
+            `原始 Body：${raw} · 重建 JSON：${rebuildable ? "可下载" : unavailable}`,
+          ]),
         ]}
       />
       <div className="flex flex-wrap gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => onDownload("request")}
-          disabled={loading !== null || turn.reconstruction_status !== "verified"}
-        >
-          <DownloadIcon />
-          <span>{loading === "request" ? "重建中…" : "下载重建请求 JSON"}</span>
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => onDownload("response")}
-          disabled={loading !== null || turn.reconstruction_status !== "verified"}
-        >
-          <DownloadIcon />
-          <span>{loading === "response" ? "重建中…" : "下载重建响应 JSON"}</span>
-        </Button>
+        {sides.map(({ side, rebuildable }) => (
+          <Button
+            key={side}
+            variant="outline"
+            size="sm"
+            onClick={() => onDownload(side)}
+            disabled={loading !== null || !rebuildable}
+          >
+            <DownloadIcon />
+            <span>{loading === side ? "重建中…" : side === "request" ? "下载重建请求 JSON" : "下载重建响应 JSON"}</span>
+          </Button>
+        ))}
       </div>
       {note ? <p className="text-caption text-subtle">{note}</p> : null}
     </div>
@@ -2371,6 +2388,15 @@ function turnLinkLabel(reason: string): string {
     context_edit: "上下文编辑 / 截断",
     retention_checkpoint: "保留期独立检查点",
   } as Record<string, string>)[reason] ?? reason;
+}
+
+// rawSideLabel says whether one side's raw body can be downloaded.
+function rawSideLabel(body: AuditBody | undefined): string {
+  if (!body) return "无";
+  if (body.state === "streaming" || body.retention_state === "pending") return "处理中";
+  if (body.retention_state === "metadata") return "已校验后释放";
+  if (body.retention_state === "full") return "完整保留";
+  return body.retention_state;
 }
 
 function retentionLabel(state: string): string {

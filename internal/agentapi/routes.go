@@ -118,6 +118,12 @@ var WebRouteExceptions = []WebRouteException{
 	{Method: "DELETE", Path: "/api/v1/agent-access/tokens/{id}", Reason: "agent access pages of the web UI (this module)"},
 	{Method: "GET", Path: "/api/v1/agent-access/changes", Reason: "agent access pages of the web UI (this module): recent agent changes, administrators only"},
 	{Method: "POST", Path: "/api/v1/agent-access/install-links", Reason: "agent access pages of the web UI (this module): the install prompt with its signed download link"},
+	// A runtime parameter of the capture write path, changed only from the
+	// management UI; it does not widen the agent facade's contract (issue
+	// #59 stage 3 design H.3).
+	{Method: "GET", Path: "/api/v1/settings/audit-capture", Reason: "runtime parameter of the capture write path, changed only from the management UI"},
+	{Method: "PUT", Path: "/api/v1/settings/audit-capture", Reason: "runtime parameter of the capture write path, changed only from the management UI"},
+	{Method: "DELETE", Path: "/api/v1/settings/audit-capture", Reason: "runtime parameter of the capture write path, changed only from the management UI"},
 }
 
 // FacadeOnlyEndpoints are facade endpoints with no web route of their own:

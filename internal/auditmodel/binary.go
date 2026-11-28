@@ -25,7 +25,9 @@ type plainExternalReference struct {
 }
 
 type binaryAccumulator struct {
-	objects map[string]binaryCandidate
+	objects            map[string]binaryCandidate
+	skipInlineFileData bool
+	inlineDataParts    bool
 }
 
 func newBinaryAccumulator() *binaryAccumulator {
@@ -82,7 +84,20 @@ func (accumulator *binaryAccumulator) transformAt(value any, pointer string) (tr
 					Value:       text,
 				})
 			}
-			if text, ok := child.(string); ok && isInlineFileData(typed, key) {
+			if text, ok := child.(string); ok && accumulator.inlineDataParts && key == "data" && isInlineDataObject(pointer) {
+				if candidate, marker, extracted := parseInlineDataPart(typed, text); extracted {
+					accumulator.add(candidate)
+					output[key] = marker
+					result.BinaryRefs = append(result.BinaryRefs, BinaryReference{
+						JSONPointer: childPointer,
+						BinaryHash:  append([]byte(nil), candidate.Hash...),
+						MediaType:   candidate.MediaType,
+						Encoding:    "base64",
+					})
+					continue
+				}
+			}
+			if text, ok := child.(string); ok && !accumulator.skipInlineFileData && isInlineFileData(typed, key) {
 				candidate, marker, decoded, err := parseInlineFileData(typed, text)
 				if err != nil {
 					return transformResult{}, err
@@ -213,6 +228,41 @@ func parseInlineFileData(parent map[string]any, value string) (binaryCandidate, 
 		"encoding":   "base64",
 	}
 	return binaryCandidate{Hash: hash, MediaType: mediaType, Data: decoded}, map[string]any{BinaryMarkerKey: metadata}, true, nil
+}
+
+// isInlineDataObject reports whether pointer names a Gemini inline part
+// object, the value of an inlineData or inline_data key.
+func isInlineDataObject(pointer string) bool {
+	return strings.HasSuffix(pointer, "/inlineData") || strings.HasSuffix(pointer, "/inline_data")
+}
+
+// parseInlineDataPart decodes the data of a Gemini inline part. It extracts
+// only a non-empty string that is the padded standard base64 encoding of its
+// bytes, the form restoreBinaryMarker writes back, so the rebuilt value is
+// the same string. Anything else is left in place rather than rejected: the
+// rule runs wherever the key appears, tool arguments included.
+func parseInlineDataPart(parent map[string]any, value string) (binaryCandidate, map[string]any, bool) {
+	if value == "" {
+		return binaryCandidate{}, nil, false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || base64.StdEncoding.EncodeToString(decoded) != value {
+		return binaryCandidate{}, nil, false
+	}
+	mediaType := "application/octet-stream"
+	for _, key := range []string{"mimeType", "mime_type"} {
+		if candidate, ok := parent[key].(string); ok && strings.TrimSpace(candidate) != "" {
+			mediaType = strings.TrimSpace(candidate)
+			break
+		}
+	}
+	hash := BinaryHash(decoded)
+	metadata := map[string]any{
+		"hash":       hashHex(hash),
+		"media_type": mediaType,
+		"encoding":   "base64",
+	}
+	return binaryCandidate{Hash: hash, MediaType: mediaType, Data: decoded}, map[string]any{BinaryMarkerKey: metadata}, true
 }
 
 func escapePointer(value string) string {

@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -125,6 +127,11 @@ func TestExampleConfigsLoad(t *testing.T) {
 	for _, name := range []string{"audit-proxy.example.yaml", "audit-proxy.docker.yaml"} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join("..", "..", "configs", name)
+			if runtime.GOOS == "windows" {
+				// The examples name Unix paths; audit.staging.dir must be
+				// absolute, which a Unix path is not on Windows.
+				path = withLocalStagingDir(t, path)
+			}
 			cfg, err := Load(path)
 			if err != nil {
 				t.Fatalf("Load(%q) error = %v", path, err)
@@ -136,10 +143,34 @@ func TestExampleConfigsLoad(t *testing.T) {
 	}
 }
 
+// withLocalStagingDir copies a configuration file with its audit.staging.dir
+// replaced by an absolute directory of this platform.
+func withLocalStagingDir(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced := regexp.MustCompile(`(?m)^(\s+dir:) .*$`).ReplaceAllString(string(content), "$1 '"+filepath.Join(t.TempDir(), "staging")+"'")
+	if replaced == string(content) {
+		t.Fatalf("%s has no audit.staging.dir", path)
+	}
+	copied := filepath.Join(t.TempDir(), filepath.Base(path))
+	if err := os.WriteFile(copied, []byte(replaced), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return copied
+}
+
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
 	if !strings.Contains(contents, "database_url:") {
 		contents = "database_url: postgres://localhost/test?sslmode=disable\n" + contents
+	}
+	// audit.staging.dir is required; a test that is not about the audit
+	// section gets one of its own.
+	if !strings.Contains(contents, "audit:") {
+		contents += "\naudit:\n  staging:\n    dir: '" + filepath.Join(t.TempDir(), "staging") + "'\n"
 	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(strings.TrimLeft(contents, "\n")), 0o600); err != nil {

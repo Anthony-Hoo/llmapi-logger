@@ -96,7 +96,7 @@ func TestRuntimeSettingsWriteOutlivesTheRequest(t *testing.T) {
 			var request writeRequest
 			select {
 			case request = <-writer.queue:
-			case <-time.After(time.Second):
+			case <-time.After(storeWait):
 				t.Fatal("write was not queued")
 			}
 			cancel()
@@ -113,7 +113,7 @@ func TestRuntimeSettingsWriteOutlivesTheRequest(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(storeWait):
 				t.Fatal("settings write hung")
 			}
 			<-writer.done

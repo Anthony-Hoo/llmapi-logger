@@ -1,0 +1,520 @@
+package postgres
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+
+	"llmapi-logger/internal/auditmodel"
+	"llmapi-logger/internal/conversation"
+	"llmapi-logger/internal/query"
+	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
+)
+
+// perSideAudit describes one audit written through the store the way the
+// capture and the parser write it, with all four stages carrying a body.
+type perSideAudit struct {
+	id            string
+	status        *int
+	forward       string
+	capture       string
+	upstreamClass *string
+	// mismatch makes request_sent differ from request_received, as the
+	// capture records it: body_stage_mismatch on a partial request_sent.
+	mismatch bool
+	// requestOnly saves a request-only turn (response layout none although a
+	// response was captured); otherwise the turn carries the response.
+	requestOnly bool
+	// parse is the saved parse status; empty means ok.
+	parse string
+	// noTurn saves the parse without a turn, as an audit stored before
+	// request-only turns: errorCode and the fallback conversation go with it.
+	noTurn    bool
+	errorCode string
+	fallback  *conversation.Conversation
+}
+
+func perSideStatus(code int) *int { return &code }
+
+func perSideChunk(t *testing.T, cipher security.Cipher, auditID, stage string, plaintext []byte) BodyChunk {
+	t.Helper()
+	aad, err := security.AAD(auditID, "body_chunk_v2", stage, strconv.FormatInt(0, 10), "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := cipher.Encrypt(aad, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return BodyChunk{
+		AuditID: auditID, Stage: stage, Seq: 0, Offset: 0, PlaintextLength: len(plaintext),
+		EncodedLength: len(plaintext), Compression: "none", ObservedAtNS: 3, DataEnc: ciphertext,
+	}
+}
+
+var perSideRequest = []byte(`{"model":"model-example","messages":[{"role":"user","content":"per side example"}]}`)
+var perSideResponse = []byte(`{"error":{"message":"upstream example failure"}}`)
+
+func writePerSideAudit(t *testing.T, store *Store, cipher security.Cipher, audit perSideAudit) {
+	t.Helper()
+	ctx := context.Background()
+	record := testAudit(audit.id)
+	// A request URI the query service can open, so the detail view reads.
+	uriAAD, err := security.AAD(audit.id, "request_uri")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.RequestURIEnc, err = cipher.Encrypt(uriAAD, []byte(record.Path)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginAudit(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	bodies := map[string][]byte{
+		StageRequestReceived:  perSideRequest,
+		StageRequestSent:      perSideRequest,
+		StageResponseReceived: perSideResponse,
+		StageResponseSent:     perSideResponse,
+	}
+	if audit.mismatch {
+		bodies[StageRequestSent] = append(append([]byte(nil), perSideRequest[:len(perSideRequest)-1]...), ' ', '}')
+	}
+	for _, stage := range []string{StageRequestReceived, StageRequestSent, StageResponseReceived, StageResponseSent} {
+		httpStage := HTTPStage{AuditID: audit.id, Stage: stage, Proto: "HTTP/1.1", Method: "POST", Host: "newapi.example.com", StartedAtNS: 2}
+		if stage == StageResponseReceived || stage == StageResponseSent {
+			httpStage.StatusCode = audit.status
+		}
+		if err := store.StartStage(ctx, httpStage); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.StartBody(ctx, BodyStream{AuditID: audit.id, Stage: stage}); err != nil {
+			t.Fatal(err)
+		}
+		body := bodies[stage]
+		if err := store.AddChunk(ctx, perSideChunk(t, cipher, audit.id, stage, body)); err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(body)
+		finish := StageFinish{
+			AuditID: audit.id, Stage: stage, State: StageStateComplete, StatusCode: httpStage.StatusCode, EndedAtNS: 4,
+			Body: &BodyFinish{
+				ObservedLength: int64(len(body)), StoredLength: int64(len(body)), SHA256: digest[:],
+				HashComplete: true, EOFSeen: true, State: StageStateComplete, ChunkCount: 1,
+			},
+		}
+		if audit.mismatch && stage == StageRequestSent {
+			code := "body_stage_mismatch"
+			finish.State, finish.ErrorCode = StageStatePartial, &code
+			finish.Body.State, finish.Body.ErrorCode = StageStatePartial, &code
+		}
+		if err := store.FinishStage(ctx, finish); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.FinishAudit(ctx, AuditFinish{
+		AuditID: audit.id, EndedAtNS: 5, StatusCode: audit.status,
+		ForwardStatus: audit.forward, CaptureStatus: audit.capture, ParseStatus: ParsePending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimPendingParse(ctx, audit.id)
+	if err != nil || !claimed {
+		t.Fatalf("claim %s = %v, %v", audit.id, claimed, err)
+	}
+	var request, response map[string]any
+	if err := json.Unmarshal(perSideRequest, &request); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(perSideResponse, &response); err != nil {
+		t.Fatal(err)
+	}
+	messages := request["messages"].([]any)
+	turn := auditmodel.Turn{
+		AuditID: audit.id, Protocol: "openai", ParserName: "openai.chat_completions",
+		RequestLayout: auditmodel.LayoutOpenAIChatRequest, ResponseLayout: auditmodel.LayoutMarkerEnvelope,
+		RequestEnvelope: map[string]any{"model": "model-example"},
+		RequestItems:    []auditmodel.Item{{Slot: auditmodel.SlotMessages, Kind: "user_message", Value: messages[0]}},
+		RequestOriginal: request, ResponseEnvelope: response, ResponseOriginal: response, CreatedAtNS: 6,
+	}
+	if audit.requestOnly {
+		turn.ResponseLayout, turn.ResponseEnvelope, turn.ResponseOriginal = auditmodel.LayoutNone, nil, nil
+	}
+	prepared, err := auditmodel.Prepare(turn, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parse := audit.parse
+	if parse == "" {
+		parse = ParseOK
+	}
+	saved := ParsedAudit{
+		Result: ParsedResult{
+			AuditID: audit.id, ParserName: "openai.chat_completions", ParserVersion: "2",
+			Status: parse, UpstreamErrorClass: audit.upstreamClass, ParsedAtNS: 7,
+		},
+		Turn: &prepared,
+	}
+	if audit.noTurn {
+		saved.Turn = nil
+		if audit.errorCode != "" {
+			saved.Result.ErrorCode = &audit.errorCode
+		}
+		plaintext, err := json.Marshal(map[string]any{"status": parse, "conversation": audit.fallback})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.Result.ParsedJSONEnc, err = auditmodel.SealParsedResult(cipher, audit.id, "openai.chat_completions", plaintext); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SaveParsedAudit(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type perSideStageState struct {
+	retention   string
+	sourceStage string
+	stored      int64
+	chunkCount  int64
+	chunks      int
+}
+
+func readPerSideStages(t *testing.T, store *Store, auditID string) map[string]perSideStageState {
+	t.Helper()
+	rows, err := store.readerDB.Query(`
+SELECT b.stage, b.retention_state, b.source_stage, b.stored_length, b.chunk_count,
+       (SELECT COUNT(*) FROM body_chunks AS c WHERE c.audit_id = b.audit_id AND c.stage = b.stage)
+FROM body_streams AS b WHERE b.audit_id = $1`, auditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	states := make(map[string]perSideStageState)
+	for rows.Next() {
+		var stage string
+		var state perSideStageState
+		if err := rows.Scan(&stage, &state.retention, &state.sourceStage, &state.stored, &state.chunkCount, &state.chunks); err != nil {
+			t.Fatal(err)
+		}
+		states[stage] = state
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return states
+}
+
+// sideOf reports the retention a side's two stages ended with, and checks the
+// stored counters and chunks match it.
+func sideOf(t *testing.T, name string, states map[string]perSideStageState, first, second string) string {
+	t.Helper()
+	left, right := states[first], states[second]
+	if left.retention != right.retention {
+		t.Fatalf("%s: %s is %s but %s is %s", name, first, left.retention, second, right.retention)
+	}
+	for stage, state := range map[string]perSideStageState{first: left, second: right} {
+		if state.retention == RetentionMetadata && (state.stored != 0 || state.chunkCount != 0 || state.chunks != 0) {
+			t.Fatalf("%s: released %s kept stored=%d chunk_count=%d chunks=%d", name, stage, state.stored, state.chunkCount, state.chunks)
+		}
+	}
+	if left.retention == RetentionFull && left.chunks+right.chunks == 0 {
+		t.Fatalf("%s: retained side %s/%s has no chunks", name, first, second)
+	}
+	return left.retention
+}
+
+func openPerSideStore(t *testing.T) (*Store, string, []byte, security.Cipher) {
+	t.Helper()
+	ctx := context.Background()
+	key := bytes.Repeat([]byte{0x5a}, security.KeySize)
+	path := newTestDSN(t)
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnableIntegrity(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewAESGCM(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, path, key, cipher
+}
+
+// verifyReopened closes the store and proves on a fresh one that the chain
+// and every event's payload digest still verify.
+func verifyReopened(t *testing.T, store *Store, path string, key []byte) *Store {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.EnableIntegrity(ctx, key); err != nil {
+		t.Fatalf("integrity chain: %v", err)
+	}
+	if err := reopened.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatalf("integrity payloads: %v", err)
+	}
+	return reopened
+}
+
+func TestRawRetentionIsDecidedPerSide(t *testing.T) {
+	t.Parallel()
+
+	store, path, key, cipher := openPerSideStore(t)
+	class := upstreamClassPointer("content_policy")
+	cases := []struct {
+		audit             perSideAudit
+		request, response string
+		merged            bool
+	}{
+		{perSideAudit{id: "per-side-200", status: perSideStatus(200), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionMetadata, true},
+		{perSideAudit{id: "per-side-500", status: perSideStatus(500), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-503", status: perSideStatus(503), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-429", status: perSideStatus(429), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-401", status: perSideStatus(401), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-403", status: perSideStatus(403), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-408", status: perSideStatus(408), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-409", status: perSideStatus(409), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-499", status: perSideStatus(499), forward: ForwardCompleted, capture: CaptureComplete}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-400-classified", status: perSideStatus(400), forward: ForwardCompleted, capture: CaptureComplete, upstreamClass: class}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-422-classified", status: perSideStatus(422), forward: ForwardCompleted, capture: CaptureComplete, upstreamClass: class}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-400", status: perSideStatus(400), forward: ForwardCompleted, capture: CaptureComplete}, RetentionFull, RetentionFull, true},
+		{perSideAudit{id: "per-side-422", status: perSideStatus(422), forward: ForwardCompleted, capture: CaptureComplete}, RetentionFull, RetentionFull, true},
+		{perSideAudit{id: "per-side-404", status: perSideStatus(404), forward: ForwardCompleted, capture: CaptureComplete}, RetentionFull, RetentionFull, true},
+		{perSideAudit{id: "per-side-413", status: perSideStatus(413), forward: ForwardCompleted, capture: CaptureComplete}, RetentionFull, RetentionFull, true},
+		{perSideAudit{id: "per-side-cancelled", status: perSideStatus(200), forward: ForwardClientCancelled, capture: CapturePartial}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "per-side-mismatch-503", status: perSideStatus(503), forward: ForwardCompleted, capture: CapturePartial, mismatch: true}, RetentionFull, RetentionFull, false},
+		// A full turn with a partial parse cannot happen today; it releases
+		// nothing.
+		{perSideAudit{id: "full-turn-partial", status: perSideStatus(200), forward: ForwardCompleted, capture: CaptureComplete, parse: ParsePartial}, RetentionFull, RetentionFull, true},
+		// Request-only turns keep the response whatever the outcome.
+		{perSideAudit{id: "request-only-residue-200", status: perSideStatus(200), forward: ForwardCompleted, capture: CaptureComplete, requestOnly: true}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "request-only-partial-200", status: perSideStatus(200), forward: ForwardCompleted, capture: CaptureComplete, requestOnly: true, parse: ParsePartial}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "request-only-cancelled", status: perSideStatus(200), forward: ForwardClientCancelled, capture: CapturePartial, requestOnly: true, parse: ParsePartial}, RetentionMetadata, RetentionFull, true},
+		{perSideAudit{id: "request-only-400", status: perSideStatus(400), forward: ForwardCompleted, capture: CaptureComplete, requestOnly: true, parse: ParsePartial}, RetentionFull, RetentionFull, true},
+		{perSideAudit{id: "request-only-mismatch", status: perSideStatus(200), forward: ForwardClientCancelled, capture: CapturePartial, mismatch: true, requestOnly: true, parse: ParsePartial}, RetentionFull, RetentionFull, false},
+	}
+	for _, test := range cases {
+		writePerSideAudit(t, store, cipher, test.audit)
+	}
+	for _, test := range cases {
+		states := readPerSideStages(t, store, test.audit.id)
+		if merged := states[StageRequestSent].sourceStage == StageRequestReceived; merged != test.merged {
+			t.Fatalf("%s: request stages merged = %v, want %v", test.audit.id, merged, test.merged)
+		}
+		if got := sideOf(t, test.audit.id, states, StageRequestReceived, StageRequestSent); got != test.request {
+			t.Errorf("%s: request side = %s, want %s", test.audit.id, got, test.request)
+		}
+		if got := sideOf(t, test.audit.id, states, StageResponseReceived, StageResponseSent); got != test.response {
+			t.Errorf("%s: response side = %s, want %s", test.audit.id, got, test.response)
+		}
+		if test.audit.mismatch && (states[StageRequestReceived].chunks != 1 || states[StageRequestSent].chunks != 1) {
+			t.Errorf("%s: a mismatched request must keep both copies, chunks = %d and %d", test.audit.id,
+				states[StageRequestReceived].chunks, states[StageRequestSent].chunks)
+		}
+	}
+
+	reopened := verifyReopened(t, store, path, key)
+	service, err := query.New(reopened, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// A released request answers as a released body does; the retained
+	// response of the same audit still downloads byte for byte, and the
+	// request is rebuilt from the turn.
+	var discard bytes.Buffer
+	if err := service.StreamRaw(ctx, "per-side-503", query.SideRequest, &discard); !errors.Is(err, query.ErrNotRetained) {
+		t.Fatalf("released request raw = %v, want ErrNotRetained", err)
+	}
+	var response bytes.Buffer
+	if err := service.StreamRaw(ctx, "per-side-503", query.SideResponse, &response); err != nil || !bytes.Equal(response.Bytes(), perSideResponse) {
+		t.Fatalf("retained response raw = %q, %v", response.Bytes(), err)
+	}
+	reconstructed, err := service.ReconstructTurn(ctx, "per-side-503")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := json.Marshal(reconstructed.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalJSON(t, rebuilt) != canonicalJSON(t, perSideRequest) {
+		t.Fatalf("rebuilt request = %s", rebuilt)
+	}
+}
+
+func canonicalJSON(t *testing.T, value []byte) string {
+	t.Helper()
+	var decoded any
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := auditmodel.CanonicalJSON(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(canonical)
+}
+
+// An abnormal audit written by an older binary kept all four stages full and
+// was signed that way. The new rule must neither rewrite nor reject it.
+func TestRawRetentionOldRuleRowsStillVerifyAndRead(t *testing.T) {
+	store, path, key, cipher := openPerSideStore(t)
+	previous := rawRetentionDecision
+	rawRetentionDecision = func(outcome storage.RawRetentionOutcome) storage.RawRetention {
+		// The rule before per-side retention: both sides or neither.
+		if outcome.ForwardStatus == ForwardCompleted && outcome.CaptureStatus == CaptureComplete &&
+			outcome.StatusCode != nil && *outcome.StatusCode >= 200 && *outcome.StatusCode < 400 {
+			return storage.RawRetention{ReleaseRequest: true, ReleaseResponse: true}
+		}
+		return storage.RawRetention{}
+	}
+	writePerSideAudit(t, store, cipher, perSideAudit{id: "old-rule-503", status: perSideStatus(503), forward: ForwardCompleted, capture: CaptureComplete})
+	rawRetentionDecision = previous
+	// One audit under the new rule in the same chain.
+	writePerSideAudit(t, store, cipher, perSideAudit{id: "new-rule-503", status: perSideStatus(503), forward: ForwardCompleted, capture: CaptureComplete})
+
+	states := readPerSideStages(t, store, "old-rule-503")
+	if states[StageRequestSent].sourceStage != StageRequestReceived {
+		t.Fatalf("old-rule request stages were not merged: %+v", states)
+	}
+	if request := sideOf(t, "old-rule-503", states, StageRequestReceived, StageRequestSent); request != RetentionFull {
+		t.Fatalf("old-rule request side = %s, want full", request)
+	}
+	if response := sideOf(t, "old-rule-503", states, StageResponseReceived, StageResponseSent); response != RetentionFull {
+		t.Fatalf("old-rule response side = %s, want full", response)
+	}
+	var semantic int
+	if err := store.readerDB.QueryRow(`SELECT COUNT(*) FROM integrity_events WHERE audit_id = $1 AND event_type = $2`,
+		"old-rule-503", integritySemanticCompacted).Scan(&semantic); err != nil || semantic != 1 {
+		t.Fatalf("old-rule semantic events = %d, %v", semantic, err)
+	}
+
+	reopened := verifyReopened(t, store, path, key)
+	service, err := query.New(reopened, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for side, want := range map[query.Side][]byte{query.SideRequest: perSideRequest, query.SideResponse: perSideResponse} {
+		var body bytes.Buffer
+		if err := service.StreamRaw(ctx, "old-rule-503", side, &body); err != nil || !bytes.Equal(body.Bytes(), want) {
+			t.Fatalf("old-rule %s raw = %q, %v", side, body.Bytes(), err)
+		}
+	}
+	if _, err := service.ReconstructTurn(ctx, "old-rule-503"); err != nil {
+		t.Fatalf("old-rule turn: %v", err)
+	}
+	if after := readPerSideStages(t, reopened, "old-rule-503"); after[StageRequestReceived].retention != RetentionFull {
+		t.Fatalf("old-rule row was rewritten: %+v", after)
+	}
+}
+
+// Audits stored before request-only turns have no turn, keep all four stages
+// full and a fallback conversation in parsed_json_enc; a declined
+// normalization also has a reconstruction_failed event. Next to a request-only
+// audit written now, in the same chain, they read and verify as before.
+func TestAuditsWithoutARequestOnlyTurnStillVerifyAndRead(t *testing.T) {
+	store, path, key, cipher := openPerSideStore(t)
+	fallback := conversation.New()
+	fallback.Append(conversation.Message{Role: conversation.RoleUser, Phase: conversation.PhaseRequest,
+		Direction: conversation.DirectionClientToUpstream, Content: []conversation.Part{conversation.Text("per side example")}})
+	fallback.Append(conversation.Message{Role: conversation.RoleAssistant, Phase: conversation.PhaseResponse,
+		Direction: conversation.DirectionUpstreamToClient, Content: []conversation.Part{conversation.Text("half an answer")}})
+	old := []perSideAudit{
+		{id: "old-cancelled", status: perSideStatus(200), forward: ForwardClientCancelled, capture: CapturePartial,
+			parse: ParsePartial, noTurn: true, errorCode: "body_read_error", fallback: fallback},
+		{id: "old-declined", status: perSideStatus(200), forward: ForwardCompleted, capture: CaptureComplete,
+			parse: ParsePartial, noTurn: true, errorCode: "normalization_failed", fallback: fallback},
+	}
+	for _, audit := range old {
+		writePerSideAudit(t, store, cipher, audit)
+	}
+	writePerSideAudit(t, store, cipher, perSideAudit{id: "new-request-only", status: perSideStatus(200), forward: ForwardClientCancelled,
+		capture: CapturePartial, requestOnly: true, parse: ParsePartial})
+
+	events := func(auditID string) []string {
+		rows, err := store.readerDB.Query(`SELECT event_type FROM integrity_events WHERE audit_id = $1 ORDER BY sequence`, auditID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var types []string
+		for rows.Next() {
+			var eventType string
+			if err := rows.Scan(&eventType); err != nil {
+				t.Fatal(err)
+			}
+			types = append(types, eventType)
+		}
+		return types
+	}
+	want := map[string][]string{
+		"old-cancelled":    {integrityCaptureFinalized},
+		"old-declined":     {integrityCaptureFinalized, integrityReconstructionFailed},
+		"new-request-only": {integrityCaptureFinalized, integritySemanticCompacted},
+	}
+	for auditID, types := range want {
+		if got := events(auditID); strings.Join(got, ",") != strings.Join(types, ",") {
+			t.Fatalf("%s: integrity events %v, want %v", auditID, got, types)
+		}
+	}
+
+	reopened := verifyReopened(t, store, path, key)
+	service, err := query.New(reopened, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, audit := range old {
+		states := readPerSideStages(t, reopened, audit.id)
+		if sideOf(t, audit.id, states, StageRequestReceived, StageRequestSent) != RetentionFull ||
+			sideOf(t, audit.id, states, StageResponseReceived, StageResponseSent) != RetentionFull {
+			t.Fatalf("%s: retention changed: %+v", audit.id, states)
+		}
+		for side, body := range map[query.Side][]byte{query.SideRequest: perSideRequest, query.SideResponse: perSideResponse} {
+			var raw bytes.Buffer
+			if err := service.StreamRaw(ctx, audit.id, side, &raw); err != nil || !bytes.Equal(raw.Bytes(), body) {
+				t.Fatalf("%s %s raw = %q, %v", audit.id, side, raw.Bytes(), err)
+			}
+		}
+		detail, err := service.Get(ctx, audit.id, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detail.Turn != nil || !reflect.DeepEqual(detail.Conversation, fallback) {
+			t.Fatalf("%s: detail turn %v conversation %+v", audit.id, detail.Turn != nil, detail.Conversation)
+		}
+		if session, err := service.SessionConversation(ctx, audit.id); err != nil || !reflect.DeepEqual(session, fallback) {
+			t.Fatalf("%s: session conversation %+v, %v", audit.id, session, err)
+		}
+		if _, err := service.ReconstructTurn(ctx, audit.id); !errors.Is(err, query.ErrNoTurnGraph) {
+			t.Fatalf("%s: reconstruct = %v, want ErrNoTurnGraph", audit.id, err)
+		}
+	}
+	states := readPerSideStages(t, reopened, "new-request-only")
+	if sideOf(t, "new-request-only", states, StageRequestReceived, StageRequestSent) != RetentionMetadata ||
+		sideOf(t, "new-request-only", states, StageResponseReceived, StageResponseSent) != RetentionFull {
+		t.Fatalf("new-request-only retention: %+v", states)
+	}
+	var raw bytes.Buffer
+	if err := service.StreamRaw(ctx, "new-request-only", query.SideResponse, &raw); err != nil || !bytes.Equal(raw.Bytes(), perSideResponse) {
+		t.Fatalf("new-request-only response raw = %q, %v", raw.Bytes(), err)
+	}
+}

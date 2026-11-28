@@ -189,6 +189,17 @@ func openContentWithDecoder(cipher security.Cipher, stored StoredContent, decode
 	return plaintext, nil
 }
 
+// OpenContent authenticates, decompresses and checks one stored content
+// object as OpenObject does, and returns its canonical JSON text, the bytes
+// its object_hash is taken over. The cold archive stores this text. The caller
+// must clear the result.
+func OpenContent(cipher security.Cipher, stored StoredContent) ([]byte, error) {
+	if stored.EncodedLength < 0 || stored.PlaintextLength < 0 {
+		return nil, ErrIntegrity
+	}
+	return openContent(cipher, stored)
+}
+
 func OpenObject(cipher security.Cipher, stored StoredContent) (DecodedObject, error) {
 	if stored.EncodedLength < 0 || stored.PlaintextLength < 0 {
 		return DecodedObject{}, ErrIntegrity

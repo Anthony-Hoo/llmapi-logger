@@ -26,7 +26,7 @@ GET /api/v1/audits?limit=50&before_started_at_ns=...&before_id=...
 
 支持时间、协议、路径、模型、User-Agent、NewAPI 用户、用户名、Token ID/名称、状态码、状态段（`status_class`：`4xx`/`5xx`/`error`）、转发状态、阻断组件/代码、捕获状态，以及上游策略拒绝分类（`upstream_error_class`：`cyber_policy`/`misalignment_policy`/`content_policy`/`content_filter`/`moderation_blocked`/`safety_policy`）等窄筛选。列表 DTO 增加 `parsed_error_type`、`parsed_error_code`、`upstream_error_class` 三个可空字段用于展示上游拒绝。排序固定为 `started_at_ns DESC, audit_id DESC`，使用 `started_at_ns + audit_id` keyset cursor，默认 50、最大 200；`conversation`/`collapse` 筛选不改变排序和分页语义。`status_class=error` 匹配 `status_code` 在 400–599 的记录；`status_code` 为空的记录（例如在收到上游响应头之前就取消的请求）不计入，收到上游响应头后取消仍保留上游状态码。任何上述行级筛选生效时会话折叠（`collapse`）都被忽略，按轮次逐条列出，避免命中的较早轮次被同会话更新的轮次隐藏；User-Agent 也在不折叠的候选集上过滤。分页 cursor 和开发者身份 scope 不关闭折叠。
 
-列表 SQL 只读取 audit、parsed summary 和 token link 窄列；query 层为每个候选 audit 单独读取并认证解密入站 User-Agent。User-Agent 筛选是不区分大小写的子串匹配，每次最多扫描 2000 个候选。列表不会读取 Request-URI、其他 Header、Body、parsed conversation 或 content/binary objects。
+列表 SQL 只读取 audit、parsed summary 和 token link 窄列；query 层为每个候选 audit 认证解密入站 User-Agent，按 `capture_version` 分派（`query.Service.readUserAgent`）：版本 2 的行直接打开列表查询已经带回的 `user_agent_enc`，版本 1 的行照旧每行查一次 `http_headers`。两者语义相同：显示第一个值，任一值包含子串就算匹配，没有 User-Agent 时不匹配。User-Agent 筛选是不区分大小写的子串匹配，每次最多扫描 2000 个候选。列表不会读取 Request-URI、其他 Header、Body、parsed conversation 或 content/binary objects。
 
 列表 DTO 包含 TTFT、request/response model、caller status、可选用户/Token 元数据、入站 User-Agent 和所属 conversation。Web 层使用安全用户目录按 user ID 补充 `display_name`；前端优先显示显示名，不暴露完整用户名作为主标签，Token 名称和 ID 分行显示。
 
@@ -66,7 +66,7 @@ GET /api/v1/audits/{audit_id}/reconstructed/response
 
 只对 verified turn 可用。返回从 envelope、有序 item refs 和 binary objects 重建的 provider JSON，而不是从 UI conversation 反向生成。data URL 与 inline file data 使用原始二进制恢复；`file_id` 等外部引用保留。
 
-OpenAI JSON 请求/非流式响应要求 canonical 语义与原 Body 一致。SSE 响应返回可审计的聚合语义对象和 event descriptors，不宣称返回原始 SSE wire bytes；需要原字节时只有异常 full raw 才提供。
+OpenAI 与 Anthropic 的 JSON 请求/非流式响应要求 canonical 语义与原 Body 一致。SSE 响应返回一个对象：`format`（`sse`）、`events`（事件描述）、`summary`、`aggregate`（折叠出的非流式 body）和可选的 `residue`（折叠体给不回来的事件内容，格式见模块 18 §10）；不宣称返回原始 SSE wire bytes，需要原字节时只有 `retention_state=full` 的一侧才提供；raw 按侧保留，有 verified turn 的异常记录通常只剩响应侧 raw（[模块 18](18-content-addressed-conversation-storage.md) §6）。OpenAI parser 版本 2 写入的流式记录没有 `residue`，`aggregate` 是展示用 message 数组。
 
 UI 提供“下载重建请求 JSON”和“下载重建响应 JSON”，不会把页面渲染文本重新编码作为证据。
 
@@ -118,7 +118,7 @@ UI 默认只显示 TTFT、Body 首末观测、SSE event count 和 complete 状�
 - 工具流量内联图片：tool call 参数与 tool result 中的 base64 图片（data URL、Anthropic `source.data`、Gemini `inline_data` 三种形态）在展示层渲染为缩略图，点击进入全屏查看器：滚轮以光标为中心缩放、拖动平移、双击在适应屏幕与原始大小间切换，多图时两侧箭头按钮与 ←/→ 方向键循环切换（切换时重置缩放），Esc 或点击背景关闭；展示用 JSON 中的 base64 载荷替换为「[图片 #n 类型 大小]」占位符以保持可读。图片全部来自 data: URL，渲染不发起网络请求；该替换只作用于展示副本，不改写存储值。未识别内容块沿用同一提取逻辑，但用户消息中的图片块在 DTO 中被截断到 4 KiB，通常无法完整渲染。
 - 轮次与内容存储：conversation/parent/link、item count、布局、sequence/reconstruction hash 和 verified 状态；提供 reconstructed JSON 下载；在详情中位于「存储与原始证据」下，默认折叠。详情头在该记录属于某个 conversation 时提供「查看同会话」按钮，点击后清除所有行级筛选及其输入草稿，再对列表应用该 conversation 筛选，保留折叠偏好与服务端身份 scope；筛选生效时列表上方显示会话横幅（含会话 ID）和「清除会话筛选」操作。清除会话筛选仅移除 conversation；若在会话视图中重新应用了行级筛选，仍按轮次展示，否则按已保存的折叠偏好展示。
 - 流式响应时序：TTFT、event count、首末观测、timeline complete 和按需 timeline 校验。
-- 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。
+- 原始 HTTP 证据：默认折叠，显示 stage/Header/Trailer/Body hash/retention；full raw 按需预览或下载。轮次面板按请求侧、响应侧分别说明 raw 是否保留、重建 JSON 是否可下载；turn 的 response layout 为 `none`（没有响应可重建）时响应侧重建按钮不可用，`reconstructed/response` 返回 `404 not_available`，不返回 `200 null`。这包括只有请求的轮次（模块 18 §6）：响应侧标明“轮次未收录响应，以原始 Body 为准”，响应 raw 完整保留、可下载；详情的 conversation 是重建出的请求消息加上 `parsed_json_enc` 里的残缺回答消息，`Index` 连续。
 - UA 规则：Go RE2 正则的新增、编辑、启停和删除，持久化后热生效。
 - 关键词拦截规则（[模块 22](22-content-policy.md)）：模型 RE2、动作（拦截/仅记录）、关键词逐行编辑、扫描范围复选（默认全部 7 类）；新增、编辑、启停和删除后立即生效。规则命中在访问 NewAPI 前返回本地 `400`，审计记录稳定 block code；开发者视图隐藏该入口。
 
@@ -218,10 +218,21 @@ type AuditQuery interface {
 | --- | --- | --- |
 | UA 拦截规则 | 模型与 User-Agent 的拦截规则 | 始终 |
 | 关键词拦截 | 请求内容的关键词规则 | 始终 |
+| 审计写入 | 终结提交失败时的重试次数 | 始终 |
 | 项目组与项目 | 上一段所述的组、成员、项目与规则 | 开启组织周报 |
 | 周报与分析 | 项目周报的时区、周起始日、合并间隔、排名客户端和标记阈值；会话分析的模型阶段是否启用、模型名、提示词版本 | 开启组织周报或会话分析 |
 
 “周报与分析”里，会话分析的运行时间和模型阶段（地址、模型名、Key、并发、输出上限等）可以直接修改并保存，保存的值覆盖配置文件、从下一轮分析起生效，并提供“测试连接”和“恢复为配置文件的值”；可改的项、接口和生效规则见 24 §4.1。项目周报的合并间隔、排名客户端（从词表能识别的客户端里勾选，不能手输）和两个标记阈值同样可以修改并保存，保存后未冻结的周立即按新值计算，已冻结的周要“重新生成”；时区和每周起始日只读（23 §3）。developer 登录看不到“系统配置”。
+
+“审计写入”只有一项：采集会话的终结提交（`CommitAudit`）因写入队列已满或整批事务失败而没有成功时重试几次，取值 0 到 5，0 表示只尝试一次。配置文件的 `audit.commit_retries`（默认 3）是底，页面保存的值覆盖它、立即生效：之后开始的终结提交按新值重试，不用重启；“恢复为配置文件的值”删掉保存的值。第 k 次重试之前等 `min(100 ms × 2^(k-1), 1 s)`，所以 3 次最多多等 0.7 秒、5 次最多多等 2.5 秒，另加各次尝试本身的时间；页面按每个取值列出这个时间。接口返回的 `write_path` 总是 `unified`：写入路径只有这一条，字段留着是为了不改接口；页面不显示写入路径，也不再有 legacy 的提示。生效的值放在审计管理器的原子变量里，请求不为它读库。接口：
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /api/v1/settings/audit-capture` | `{source: file\|saved, updated_ns?, settings: {commit_retries}, file: {commit_retries}, write_path: "unified"}`；库里保存的值读不出来时按配置文件回答 |
+| `PUT /api/v1/settings/audit-capture` | 请求体只接受 `{"commit_retries": n}`，n 必须是整数；缺字段、`null`、小数、字符串、未知字段一律 `400 invalid_settings`；超出范围 `400 invalid_settings`，消息为 `audit.commit_retries must be between 0 and 5` |
+| `DELETE /api/v1/settings/audit-capture` | 恢复为配置文件的值 |
+
+三个方法只对管理员开放，developer 会话 `403`；保存的值读不出来时写入一律 `503 settings_unavailable`，什么都不保存。启动时读一次保存的值；读不出来或不再合法时告警并按配置文件运行。审计存储打不开（或因审计管理器不可用而被关闭）时，这一节照样装配：页面能读，显示配置文件的值，但不能保存，写入同样 `503`。这组路由不对应 Agent 门面的命令，列在路由表的例外里（采集写入的运行参数，只在管理界面修改）。
 
 ## 12. 最少测试
 
@@ -231,7 +242,7 @@ type AuditQuery interface {
 - 详情逐项 Header/Trailer、Body retention/source/timeline 字段和 display name。
 - verified turn 的 complex Responses 请求/响应精确重建，包括 developer、reasoning、并行工具、PNG、`file_id`、inline file data 和 usage。
 - reconstructed/timeline 路由鉴权、`no-store` 和稳定错误。
-- metadata raw 不可读取且 UI 不显示 raw 按钮；full raw 大 Body 内存有界。
+- metadata raw 不可读取且 UI 不显示 raw 按钮；full raw 大 Body 内存有界；请求侧已释放、响应侧保留的记录，请求 raw 返回 410，响应 raw 可下载。
 - timeline 完整/截断语义、首末时间和 point count 校验；Body 缺块不改变已封存时间线的 complete。
 - conversation 安全 Markdown、角色顺序、工具关联和未知内容展示。
 - 用户输入导航：注入文本判定与 Go 词表共用 `internal/insights/testdata/user_input_prefixes.json`；会话响应携带 `injected_user_text_prefixes`；刻度只覆盖人输入的消息、每条消息都有跳转锚点。

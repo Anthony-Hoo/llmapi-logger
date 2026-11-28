@@ -108,12 +108,14 @@ func (store *Store) LoadParserStage(ctx context.Context, auditID, stageName stri
 
 	result := ParserStage{}
 	var statusCode, contentLength, endedAt sql.NullInt64
-	var errorCode sql.NullString
+	var errorCode, contentType, contentEncoding sql.NullString
 	err = transaction.QueryRowContext(ctx, `
-SELECT audit_id, stage, state, proto, method, host, status_code,
-       content_length, started_at_ns, ended_at_ns, error_code
-FROM http_stages
-WHERE audit_id = $1 AND stage = $2`, auditID, stageName).Scan(
+SELECT s.audit_id, s.stage, s.state, s.proto, s.method, s.host, s.status_code,
+       s.content_length, s.started_at_ns, s.ended_at_ns, s.error_code,
+       a.capture_version, s.content_type, s.content_encoding
+FROM http_stages AS s
+JOIN audit_records AS a ON a.audit_id = s.audit_id
+WHERE s.audit_id = $1 AND s.stage = $2`, auditID, stageName).Scan(
 		&result.Stage.AuditID,
 		&result.Stage.Stage,
 		&result.Stage.State,
@@ -125,6 +127,9 @@ WHERE audit_id = $1 AND stage = $2`, auditID, stageName).Scan(
 		&result.Stage.StartedAtNS,
 		&endedAt,
 		&errorCode,
+		&result.CaptureVersion,
+		&contentType,
+		&contentEncoding,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -136,6 +141,12 @@ WHERE audit_id = $1 AND stage = $2`, auditID, stageName).Scan(
 	result.Stage.ContentLength = nullInt64Pointer(contentLength)
 	result.Stage.EndedAtNS = nullInt64Pointer(endedAt)
 	result.Stage.ErrorCode = nullStringPointer(errorCode)
+	if result.CaptureVersion == CaptureVersion2 {
+		// Version 2 keeps the content headers on the stage row, so the
+		// parser never opens the header block for them (C.6).
+		result.ContentType = nullStringPointer(contentType)
+		result.ContentEncoding = nullStringPointer(contentEncoding)
+	}
 
 	var body BodyStream
 	var digest []byte
@@ -180,6 +191,12 @@ WHERE audit_id = $1 AND stage = $2`, auditID, stageName).Scan(
 		result.Body = &body
 	}
 
+	if result.CaptureVersion == CaptureVersion2 {
+		if err := transaction.Commit(); err != nil {
+			return ParserStage{}, fmt.Errorf("postgres: commit parser stage read: %w", err)
+		}
+		return result, nil
+	}
 	rows, err := transaction.QueryContext(ctx, `
 SELECT audit_id, stage, kind, name, value_index, value_length, value_enc
 FROM http_headers
@@ -280,6 +297,64 @@ ORDER BY lower(name), value_index`, arguments...)
 		return nil, fmt.Errorf("postgres: iterate parser request headers: %w", err)
 	}
 	return result, nil
+}
+
+// LoadParserHeaderSource returns what the parser needs to read the
+// allowlisted inbound request headers of one audit, in the form
+// headerblock.Expand reads. Version 1 filters in SQL as
+// LoadParserRequestHeaders does and returns only those rows. Version 2 returns
+// the whole block and the stage set: the block is one ciphertext, so the
+// parser opens all of it in the process and filters there, which the
+// maintainer accepted for this internal tool (design decision 2, module 09).
+func (store *Store) LoadParserHeaderSource(ctx context.Context, auditID string, names []string) (HeaderSource, error) {
+	if ctx == nil {
+		return HeaderSource{}, errors.New("postgres: nil context")
+	}
+	if auditID == "" {
+		return HeaderSource{}, errors.New("postgres: empty audit id")
+	}
+	if store == nil || store.isClosed() {
+		return HeaderSource{}, ErrClosed
+	}
+	transaction, err := store.readerDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return HeaderSource{}, fmt.Errorf("postgres: begin parser header read: %w", err)
+	}
+	defer transaction.Rollback()
+	var source HeaderSource
+	var captureStatus, forwardStatus string
+	if err := transaction.QueryRowContext(ctx, `SELECT capture_version, capture_status, forward_status FROM audit_records WHERE audit_id = $1`, auditID).Scan(&source.CaptureVersion, &captureStatus, &forwardStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return HeaderSource{}, sql.ErrNoRows
+		}
+		return HeaderSource{}, fmt.Errorf("postgres: read parser capture version: %w", err)
+	}
+	source.CaptureFailed = captureStatus == CaptureFailed
+	source.Interrupted = forwardStatus == ForwardInterrupted
+	if source.CaptureVersion == CaptureVersion2 {
+		if source.Block, err = readHeaderBlockEvidence(ctx, transaction, auditID); err != nil {
+			return HeaderSource{}, err
+		}
+		stages, err := readStages(ctx, transaction, auditID)
+		if err != nil {
+			return HeaderSource{}, err
+		}
+		source.StageSet = make([]string, 0, len(stages))
+		for _, stage := range stages {
+			source.StageSet = append(source.StageSet, stage.Stage)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return HeaderSource{}, fmt.Errorf("postgres: commit parser header read: %w", err)
+	}
+	if source.CaptureVersion != CaptureVersion2 {
+		rows, err := store.LoadParserRequestHeaders(ctx, auditID, names)
+		if err != nil {
+			return HeaderSource{}, err
+		}
+		source.Rows = rows
+	}
+	return source, nil
 }
 
 // ReadParserChunks returns ciphertext chunks strictly after afterSeq, ordered

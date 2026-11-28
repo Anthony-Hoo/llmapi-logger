@@ -481,7 +481,10 @@ func TestDownloadRespellingsShareOneBudget(t *testing.T) {
 		return rows
 	}
 	rows := downloadRows()
-	for deadline := time.Now().Add(5 * time.Second); rows < agentdist.DownloadsPerLink && time.Now().Before(deadline); rows = downloadRows() {
+	// The audit rows are written behind the responses, milliseconds here; the
+	// bound is ten times a second, doubled for -race on a slow runner, with
+	// margin. The loop polls, so a passing run does not wait for it.
+	for deadline := time.Now().Add(30 * time.Second); rows < agentdist.DownloadsPerLink && time.Now().Before(deadline); rows = downloadRows() {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if rows != agentdist.DownloadsPerLink {

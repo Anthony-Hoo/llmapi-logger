@@ -292,7 +292,7 @@ func TestRecoverySnapshotKeepsConcurrentFinalization(t *testing.T) {
 	before := store.writerDB.Stats().WaitCount
 	done := make(chan struct{})
 	go func() { writer.recoverCaptureWrites(); close(done) }()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(storeWait)
 	for store.writerDB.Stats().WaitCount == before {
 		if time.Now().After(deadline) {
 			t.Fatal("recovery did not snapshot before waiting for writer connection")
@@ -436,7 +436,7 @@ func setWriterReadOnly(t *testing.T, store *Store, enabled bool) {
 
 func waitForCaptureRecovery(t *testing.T, store *Store) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(recoveryWait)
 	for store.recoveryPending.Load() != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("capture recovery did not drain: %d", store.recoveryPending.Load())

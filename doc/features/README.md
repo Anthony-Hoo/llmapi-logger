@@ -8,7 +8,7 @@
 
 本项目是部署在 Nginx 与 NewAPI 之间的个人审计代理：单用户、单机、一个 Go 二进制、一个 NewAPI 后端、一个 PostgreSQL 数据库和一个本地主密钥文件。
 
-数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI 成功记录经重建验证后释放长期 raw；异常记录保留 full 原字节。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
+数据端口统一接收 NewAPI 请求，但只有进程内 Matcher 精确命中的 LLM API route 才会采集四阶段 HTTP 证据、执行可插拔拦截链并异步解析 OpenAI/Anthropic/Gemini JSON/SSE。普通 OpenAI、Anthropic 与 Gemini 成功记录经重建验证后释放长期 raw；异常记录按侧保留：响应侧保留 full 原字节，已通过重建校验的请求侧按[模块 18](18-content-addressed-conversation-storage.md) §6 的状态码规则释放或保留。`/v1/models` 等真正无关的 NewAPI 请求走无审计 passthrough；配置路径的错误 Method、编码/双重编码等价形式、子路径、受保护模板路径族和危险非规范路径 fail-closed，不访问 NewAPI。
 
 ~~~text
 Client -> Nginx -> Data-plane dispatcher
@@ -49,7 +49,9 @@ Nginx -> Data-plane dispatcher -> Matcher
 
 ~~~text
 cmd/audit-proxy/
+cmd/audit-archive/                       # 冷归档的独立读取工具（模块 26）
 internal/{config,routing,proxy,audit,conversation,storage/sqlite,parser,query,web}/
+internal/archive/{,stream,bundle,runner}/ # 冷归档的格式、分帧加密、包与每日运行
 internal/storage/sqlite/migrations/
 configs/
 ~~~
@@ -93,7 +95,7 @@ YAML 只保留 listen、admin_listen、`newapi`（url、可选 proxy_url、respo
 
 PostgreSQL 使用独立 schema 版本，并保留旧证据模型的关系约束。除原有 audit/stage/header/body/parsed/token/gap/rule 表外，新增 content/binary objects、对象引用、conversations/turns、turn delta、stream timelines、integrity events、动态关键词规则表 `content_policy_rules`，以及不在完整性链内的派生数据 `audit_analysis`、`agent_spawn_hints`（上下文洞察）与 `parsed_results.upstream_error_class`（上游策略拒绝分类）。当前表定义以 `internal/storage/postgres/migrations/001_init.sql` 为准；SQLite 模块仅记录离线导入源格式。迁移边界见 [PostgreSQL 方案](../design/postgres-history-storage.md) 和 [部署迁移](../deployment/postgresql-migration.md)。
 
-采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw；以局部错误失败时不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝启动。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
+采用单 writer goroutine + 简单批事务，每条操作使用 SAVEPOINT 隔离失败，查询使用独立只读连接池。解析保存失败持久化退避，最多失败 5 次后进入 error 并保留 full raw；以局部错误失败时不影响同批正常采集。migration 只按数字版本顺序执行；数据库版本高于程序支持版本时拒绝打开审计存储（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。启动只验证 event chain 本身（MAC 链接与事件完整性），成本随事件数线性增长；重算历史证据摘要的那一段随会话深度增长，改由监听器绑定后的后台任务通过只读连接池执行，摘要不一致会把 store sticky 置为不健康。两段都可由进程生命周期 context 取消。
 
 局部或整批失败丢失的采集写入必须在终结前标记对应 audit 为 failed，终结时修复仍在 streaming 的子记录，并将提交后的实际状态回传 Session。Store 在单 writer 内有界恢复失败标记和终态，不缓存正文，队列屏障保证恢复不越过已接受的采集写入；已提交终态不会被重放覆盖或重复签名。恢复积压或容量溢出会使 Store 不报告健康，溢出需要修复存储后重启恢复。正常停机取消不会消耗解析保存重试预算。
 
@@ -101,19 +103,19 @@ PostgreSQL 使用独立 schema 版本，并保留旧证据模型的关系约束�
 
 启动恢复同样对已知采集失败执行分块对账，保留缺块标记和可读取片段。存储级错误（如只读、磁盘满和 I/O）不参与局部失败隔离，必须令整批失败并使数据库健康状态降级。
 
-保留清理按每事务最多 200 条、每轮每类 5000 条有界执行；每批在 writer 中独占事务，批量按上一批的耗时调整并在批间让出 writer（[模块 12](12-retention-and-maintenance.md) §5.1）；积压或失败时一分钟后继续，追平后每小时检查，避免固定每日上限长期落后于请求量。失败日志只增加安全的存储错误类别，不输出底层异常文本。
+保留清理按每事务最多 200 条、每轮每类 5000 条有界执行；每批在 writer 中独占事务，批量按上一批的耗时调整并在批间让出 writer（[模块 12](12-retention-and-maintenance.md) §5.1）；积压或失败时一分钟后继续，追平后每小时检查，避免固定每日上限长期落后于请求量。失败日志只增加安全的存储错误类别，不输出底层异常文本。开启冷归档（`archive.mode` 不为 `off`）时这条直接删除不组装：到期记录改由每天一次的归档导出，本版本导出后不删除，热库持续增长（[模块 26](26-cold-archive.md)）。
 
 存量对象及引用身份不匹配会触发进程内不可自动清除的完整性失败；隔离该次解析写入不意味着数据库仍可报告健康。
 
-key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
+key_path 存放 32-byte 主密钥：存在则读取；不存在时，只有数据库里没有 audit 记录、没有完整性事件、也没有冷归档分段，并且（归档开启时）归档目录里没有任何清单，才自动生成，否则按密钥不可用处理（[模块 09](09-security-encryption-and-redaction.md) §3）。每个 Header 值（采集版本 2 为每条 audit 一个 Header 块和一个入站 User-Agent）、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 
 详细设计见 [03](03-audit-session-and-evidence-capture.md) 与 [04](04-sqlite-storage-and-migrations.md)。
 
 ## 8. Parser 与管理面
 
-Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建。Anthropic/Gemini 当前保持摘要、conversation 和 full raw，不宣称已经获得 item 级压缩。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
+Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放入内存 parser queue（条件满足时连同会话手里的明文一起交给 worker，不再读回，模块 05 §5.1）。固定一个 worker 解密证据，为 OpenAI、Anthropic 和 Gemini 的常见 JSON/SSE 生成非敏感摘要。OpenAI Chat/Completions/Responses 进一步拆成可分支 turn、content object 和按解码字节寻址的图片/文件对象；Anthropic Messages 同样按 message 拆成 turn 与 content object；Gemini GenerateContent 按 Content 拆分，`inlineData` 按解码字节存为 binary object；verified 的普通 2xx/3xx 请求删除长期 raw chunks，详情和下载从对象精确重建；有 verified turn 的异常记录按侧决定，通常释放请求侧、保留响应侧（模块 18 §6）。Gemini 流只有带 finish reason（或提示词被拦截）才算完整，截断的流保持 `partial` 和 full raw（模块 08 §5）。解析保存失败后的 release 若遇到存储故障，worker 会有界记录并在每次 pending 扫描前重试，数据库恢复后无需重启即可继续处理；release 确认成功前不重新 claim 同一 audit。启用 `insights` 时，parser 在解析成功后同一 goroutine 内派生 `audit_analysis` 行（失败只记日志，不影响解析状态），并在队列空闲时每个扫描周期回填最多 20 条缺失或版本过旧的历史记录。
 
-管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。只有 `retention_state=full` 的异常记录提供 raw Body；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域；汇总端点只读明文派生列，只有单条审计的上下文构成和 Agent 树节点名字按需解密 `detail_enc`。所有管理证据响应禁止缓存。
+管理面默认 127.0.0.1，但 loopback 也必须使用 admin_token。CLI 可直接发送静态 Bearer token；React 静态 shell 不含数据，登录成功后改用七天过期的 HttpOnly Cookie。普通列表只定向解密入站 User-Agent，主视图展示调用者、时间、模型和 User-Agent；Token ID、路径和状态属于高级筛选。受保护详情展示 conversation、turn/parent/link、TTFT、SSE event count、Body retention 和逐项 Header/Trailer；verified provider request/response 可下载重建 JSON，timeline 按需读取。raw Body 按侧提供：只有 `retention_state=full` 的一侧可下载，同一条异常记录可能请求侧已释放、响应侧仍可下载；metadata 状态明确说明原始字节已通过重建验证后释放。这不是 wire dump。洞察端点与页面同样只读、禁止缓存，并对开发者会话逐行套用作用域；汇总端点只读明文派生列，只有单条审计的上下文构成和 Agent 树节点名字按需解密 `detail_enc`。所有管理证据响应禁止缓存。
 
 受保护页面另提供动态 User-Agent 规则管理：模型与 User-Agent 使用 Go RE2 正则，保存时编译校验，持久化成功后以原子快照立即替换；初始启用规则要求 `^gpt` 模型的 User-Agent 以 `codex-tui` 或 `Codex Desktop` 开头，否则在访问 NewAPI 前返回通用 `401 unauthorized`，精确拦截码仅保留在审计数据中。规则不会扩大 Matcher 的 LLM 路由范围。
 
@@ -148,10 +150,11 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 23 | [组织项目周报与使用合规（可选，默认关闭）](23-org-project-reports.md) |
 | 24 | [会话记录分析（可选，默认关闭）](24-session-analysis.md) |
 | 25 | [Agent 接入（可选，默认关闭；全部阶段已实现，端到端旅程在 PostgreSQL 上通过；未验证：真实浏览器、容器镜像、真实 NewAPI、`-race`）](25-agent-access.md)，[接口合同](25-agent-access-contract.md) |
+| 26 | [冷归档与归档格式（可选，默认关闭；导出与校验后移除，格式版本 1）](26-cold-archive.md) |
 
 ## 10. 当前实现范围
 
-当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址 OpenAI conversation/turn/multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。关键词/模型拦截规则与上游策略拒绝分类见[模块 22](22-content-policy.md)。可选的组织项目周报（`org_reports.enabled`，默认关闭，[模块 23](23-org-project-reports.md)）在 parser 内按请求提取加密的项目标识，按管理员配置的项目组与规则归属，按 Agent 树根会话计算 AI 活跃时长并冻结周快照；关闭时不提取、不跑作业、`/api/v1/org/*` 全部 404。可选的会话记录分析（`session_analysis.enabled`，默认关闭，[模块 24](24-session-analysis.md)）每日批处理按 Agent 树根会话计算确定性信号、生成加密的输入包，并可调用只允许本机或内网地址的模型做逐会话标注和周度复盘；管理员可以按用户查看，开发者只看自己 Key 的会话。配置类页面集中在管理页面的“系统配置”里，其中周报与会话分析的部分运行参数可以在页面上修改并覆盖配置文件（[模块 10](10-query-api-and-minimal-web-ui.md) §11）；管理页面有亮色和暗色两套主题（[设计 Token 规范](../design/tokens.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
+当前仓库包含数据面三态分发、LLM route/interceptor、透明 ReverseProxy、四阶段加密证据、内容寻址的 OpenAI/Anthropic conversation/turn 与 multimodal objects、SSE timeline、HMAC 完整性链、SQLite 单 writer、异步 parser、受 Token 保护的查询与 React UI、启动恢复、retention checkpoint/GC、安全日志和单机构建部署材料。异步 parser 还会派生上下文洞察（归一化用量、构成估算、会话与 Agent 树），成本取自 NewAPI 实际计费（[模块 21](21-newapi-billing.md)），由 `insights.enabled` 控制，后台回填历史记录，并通过洞察页与 `/api/v1/insights/*` 查询（[模块 20](20-context-insights.md)、[接入指南](../deployment/insights-and-agent-headers.md)）。关键词/模型拦截规则与上游策略拒绝分类见[模块 22](22-content-policy.md)。可选的组织项目周报（`org_reports.enabled`，默认关闭，[模块 23](23-org-project-reports.md)）在 parser 内按请求提取加密的项目标识，按管理员配置的项目组与规则归属，按 Agent 树根会话计算 AI 活跃时长并冻结周快照；关闭时不提取、不跑作业、`/api/v1/org/*` 全部 404。可选的会话记录分析（`session_analysis.enabled`，默认关闭，[模块 24](24-session-analysis.md)）每日批处理按 Agent 树根会话计算确定性信号、生成加密的输入包，并可调用只允许本机或内网地址的模型做逐会话标注和周度复盘；管理员可以按用户查看，开发者只看自己 Key 的会话。配置类页面集中在管理页面的“系统配置”里，其中周报与会话分析的部分运行参数可以在页面上修改并覆盖配置文件（[模块 10](10-query-api-and-minimal-web-ui.md) §11）；管理页面有亮色和暗色两套主题（[设计 Token 规范](../design/tokens.md)）。项目仍不提供 metrics、在线导出、DELETE、自动 VACUUM、WebSocket/Realtime 审计或复杂运行时重连。
 
 ## 11. 最小验收
 
@@ -163,7 +166,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 - available 记录失败仍转发，并存在日志或 audit_gaps。
 - `/v1/models` 等安全非 LLM 请求透明到达 NewAPI，且不建 audit、不执行 interceptor；错误 Method、编码近似、受保护 LLM 路径族与危险路径返回 404，NewAPI 零调用。
 - OpenAI Responses/Chat/Completions 可从 envelope、有序 item 和 binary object 精确重建；重复历史和 PNG 复用，turn delta 随轮次近似线性增长。
-- 普通成功 verified 后 raw chunks 删除；拦截、解析、上游、采集或重建异常保留 full raw。
+- 普通成功 verified 后 raw chunks 删除；拦截、解析或重建异常以及没有 turn 的记录两侧保留 full raw；有 verified turn 的上游异常、客户端取消等保留响应侧 full raw，请求侧按模块 18 §6 释放或保留（两个请求阶段不完整或不一致时保留）。
 - SSE 网络小块不逐行长期保存；TTFT、逻辑 event count、首末事件和最多 100,000 个时间点可校验。
 - DB/WAL 无测试 secret、Body、图片或主密钥明文。
 - 拦截链首个 reject 会在调用 NewAPI 前返回；记录 blocked_by/block_code，后续 NewAPI 阶段不存在。
@@ -188,3 +191,27 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 ## PostgreSQL 与历史存储更新
 
 运行时采用 PostgreSQL 单写者锁、独立迁移及 repeatable-read 证据快照。capture 缓冲按需增长并释放；内容对象在压缩加密前批量查重并验证既有对象；insights v8 使用加密共享前缀节点，后台有界回填保留旧明细可读。图重建改为迭代复用引用数组，仍逐祖先验证重建 hash，不声称已消除所有历史长度相关 CPU 开销。具体边界和回滚见上述方案与部署文档。
+
+issue #59 第 1 阶段（方案见 [`doc/design/issue-59-unified-write-cold-archive.md`](../design/issue-59-unified-write-cold-archive.md)，本地基线见其附录 B）在不改变任何完整性摘要字节的前提下收紧了几处读写：
+
+- 洞察回填和项目标识回填各带一个进程内水位，全部处理完之后每轮只读上一轮以来的新行；必然失败的记录每个进程最多读一次 Body，存储故障按退避重试（[模块 20](20-context-insights.md) §9、[模块 23](23-org-project-reports.md)）。
+- 保存一轮时只把库里还没有的 content/binary object 发给数据库，已有对象用批量查询核对身份（[模块 18](18-content-addressed-conversation-storage.md)）。
+- 完整性摘要里的密文 SHA-256 由 PostgreSQL 计算，密文不再取回进程；摘要字节与之前完全相同。
+- `parsed_json_enc` 在明文达到 4 KiB 且压缩有收益时先 gzip 再加密，旧行原样可读；旧版本读不了压缩行（[模块 09](09-security-encryption-and-redaction.md)）。
+- 迁移 005 删除无人使用的 `content_objects_semantic_idx`（[模块 04](04-sqlite-storage-and-migrations.md) §3.7）。
+- 迁移 006 加索引 `turns (created_at_ns, turn_id)`，让没有会话 key 的轮次找父轮次候选时不再扫描整张 `turns` 表（模块 04 §3.8）。
+- 四类协议的合成夹具和 A/B 压测工具 `cmd/audit-bench` 见[模块 14](14-test-benchmark-and-fault-injection.md) §9。
+
+issue #59 第 3 阶段（设计与实施记录见 [`doc/design/issue-59-stage3-write-path.md`](../design/issue-59-stage3-write-path.md)）加了 unified 写入路径；A/B 之后 legacy 路径已删去，unified 是唯一的写入路径（实施记录 R.8）：
+
+- 采集会话（[模块 01](01-configuration-and-route-boundary.md) §4 第 18 项）把一条 audit 写成至多四个 writer 操作：`BeginAudit` 带上入站阶段，请求 Body 发完给上游时和响应头转发时各一个不等待的检查点，`Finish` 等待的 `CommitAudit`（有阶段落暂存时，每个这样的阶段另加一个只写行的检查点）。Body 在内存预算（默认每阶段 8 MiB、全进程 256 MiB）内留到写库，超出的部分加密写入本地暂存，启动时导入；成对阶段在内存里判定。`CommitAudit` 在队列满或整批失败时重试，次数可在管理页面修改（[模块 10](10-query-api-and-minimal-web-ui.md) §11）。会话行为与崩溃时留下的证据见[模块 03](03-audit-session-and-evidence-capture.md) §13，writer 操作见模块 04 §5.1。
+- PostgreSQL 上 unified 写采集版本 2（迁移 007，schema 版本 7）：每条 audit 一个密封的 Header 块、单独密封的入站 User-Agent、阶段行上的内容类型与编码两列、版本 2 的 capture 摘要；版本 1 的行照常读取和校验（模块 04 §3.9、[模块 09](09-security-encryption-and-redaction.md) §5.2）。SQLite 只写版本 1。
+- parser 只有一个 4096 个作业的 FIFO。已提交的 audit 交给 `Submit`，条件满足时带着会话手里的明文，解析不读回 raw；`Notify` 和 pending 扫描照旧；normalization 有 recover，给每个作业加了 2 分钟期限（[模块 05](05-parser-framework.md) §5）。
+- `audit.staging.dir` 必填；启动时暂存目录不可用，两种模式下审计都不可用（available 不审计照常转发，strict 拒绝）。`audit.write_path` 可以省略或写 `unified`，写 `legacy` 时配置校验失败。没有切回的开关；回滚只能换回上一个版本的二进制，它读不了采集版本 2 的行（[部署说明](../deployment/README.md) 3.3）。
+
+issue #59 第 4 阶段的 P3（设计与实施记录见 [`doc/design/issue-59-stage4-cold-archive.md`](../design/issue-59-stage4-cold-archive.md)）加了冷归档，默认关闭（[模块 26](26-cold-archive.md)）：
+
+- `archive.mode` 为 `export_only` 或 `archive_then_delete` 时，每天一次把 retention 本来要删除的 audit 和 gap 导出到 `archive.dir`：明文行按会话或协议装包，gzip 后分帧加密，每个包有一份签名的明文清单；发布前登记意向，发布后重读核对、抽样与热库比对，再定稿。凭据值不进归档，只留名称、长度和 keyed 指纹。
+- 开启后 retention 的直接删除不再组装。`export_only` 只导出，热库持续增长；`archive_then_delete` 在导出之后做校验后移除。格式定为版本 1 并冻结，每个发布过的版本有一个冻结夹具，当前的读取工具必须能读；试行的版本 0 的包不读，也永远不作为删除的依据。
+- 迁移 008 加目录表，schema 版本 8（[模块 04](04-sqlite-storage-and-migrations.md) §3.10）；旧版本打不开版本 8 的库。主密钥的新建另外要求目录表没有分段、归档目录里没有清单（[模块 09](09-security-encryption-and-redaction.md) §3）。
+- 独立读取工具 `cmd/audit-archive` 只读归档目录，不连数据库：列出、核对、输出明文行、按单条导出的形态导出、拿已知 Key 核对指纹（模块 26 §24）。

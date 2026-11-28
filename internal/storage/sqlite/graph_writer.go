@@ -11,6 +11,7 @@ import (
 
 	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 )
 
 const parentCandidateLimit = 32
@@ -45,24 +46,15 @@ func saveParsedAudit(transaction *sql.Tx, value ParsedAudit, signer *security.In
 		graphVerified = true
 	}
 
-	discardRaw, err := shouldDiscardRawEvidence(transaction, value.Result, graphVerified)
+	decision, err := decideRawRetention(transaction, value, graphVerified)
 	if err != nil {
 		return err
 	}
-	retention := RetentionFull
-	if discardRaw {
-		retention = RetentionMetadata
-		if _, err := transaction.Exec(`DELETE FROM body_chunks WHERE audit_id = ?`, value.Result.AuditID); err != nil {
-			return fmt.Errorf("sqlite writer: delete compacted raw chunks: %w", err)
-		}
+	if err := applySideRetention(transaction, value.Result.AuditID, decision.ReleaseRequest, StageRequestReceived, StageRequestSent); err != nil {
+		return err
 	}
-	if _, err := transaction.Exec(`
-UPDATE body_streams
-SET retention_state = ?,
-    stored_length = CASE WHEN ? = 'metadata' THEN 0 ELSE stored_length END,
-    chunk_count = CASE WHEN ? = 'metadata' THEN 0 ELSE chunk_count END
-WHERE audit_id = ?`, retention, retention, retention, value.Result.AuditID); err != nil {
-		return fmt.Errorf("sqlite writer: update raw retention: %w", err)
+	if err := applySideRetention(transaction, value.Result.AuditID, decision.ReleaseResponse, StageResponseReceived, StageResponseSent); err != nil {
+		return err
 	}
 
 	parent, err := transaction.Exec(`
@@ -157,19 +149,67 @@ ON CONFLICT(audit_id) DO UPDATE SET
 	return nil
 }
 
-func shouldDiscardRawEvidence(transaction *sql.Tx, result ParsedResult, graphVerified bool) (bool, error) {
-	if result.Status != ParseOK || !graphVerified {
-		return false, nil
+// decideRawRetention mirrors the PostgreSQL store: both apply
+// storage.DecideRawRetention to the same outcome.
+func decideRawRetention(transaction *sql.Tx, value ParsedAudit, graphVerified bool) (storage.RawRetention, error) {
+	result := value.Result
+	if !graphVerified || value.Turn == nil {
+		return storage.DecideRawRetention(storage.RawRetentionOutcome{ParseStatus: result.Status}), nil
 	}
-	var forwardStatus, captureStatus string
+	outcome := storage.RawRetentionOutcome{
+		ParseStatus:        result.Status,
+		TurnVerified:       graphVerified,
+		RequestNormalized:  value.Turn.RequestLayout != auditmodel.LayoutNone,
+		UpstreamErrorClass: result.UpstreamErrorClass,
+	}
 	var statusCode sql.NullInt64
+	var responseBodies int
 	if err := transaction.QueryRow(`
-SELECT forward_status, capture_status, status_code
+SELECT forward_status, capture_status, status_code,
+       (SELECT COUNT(*) FROM body_streams WHERE audit_id = ? AND stage IN (?, ?))
 FROM audit_records
-WHERE audit_id = ?`, result.AuditID).Scan(&forwardStatus, &captureStatus, &statusCode); err != nil {
-		return false, fmt.Errorf("sqlite writer: read raw retention outcome: %w", err)
+WHERE audit_id = ?`, result.AuditID, StageResponseReceived, StageResponseSent, result.AuditID).Scan(&outcome.ForwardStatus, &outcome.CaptureStatus, &statusCode, &responseBodies); err != nil {
+		return storage.RawRetention{}, fmt.Errorf("sqlite writer: read raw retention outcome: %w", err)
 	}
-	return forwardStatus == ForwardCompleted && captureStatus == CaptureComplete && statusCode.Valid && statusCode.Int64 >= 200 && statusCode.Int64 < 400, nil
+	// A request-only turn; see the PostgreSQL store.
+	outcome.ResponseOmitted = value.Turn.ResponseLayout == auditmodel.LayoutNone && responseBodies > 0
+	if statusCode.Valid {
+		outcome.StatusCode = &statusCode.Int64
+	}
+	var mergedStages int
+	if err := transaction.QueryRow(`
+SELECT COUNT(*)
+FROM body_streams
+WHERE audit_id = ?
+  AND ((stage = ? AND source_stage = ?) OR (stage = ? AND source_stage = ?))
+  AND state = 'complete'
+  AND (error_code IS NULL OR error_code <> 'body_stage_mismatch')`,
+		result.AuditID, StageRequestReceived, StageRequestReceived, StageRequestSent, StageRequestReceived).Scan(&mergedStages); err != nil {
+		return storage.RawRetention{}, fmt.Errorf("sqlite writer: read request stage merge: %w", err)
+	}
+	outcome.RequestStagesMerged = mergedStages == 2
+	return storage.DecideRawRetention(outcome), nil
+}
+
+// applySideRetention sets the retention of one side's two stages; see the
+// PostgreSQL store.
+func applySideRetention(transaction *sql.Tx, auditID string, release bool, first, second string) error {
+	retention := RetentionFull
+	if release {
+		retention = RetentionMetadata
+		if _, err := transaction.Exec(`DELETE FROM body_chunks WHERE audit_id = ? AND stage IN (?, ?)`, auditID, first, second); err != nil {
+			return fmt.Errorf("sqlite writer: delete compacted raw chunks: %w", err)
+		}
+	}
+	if _, err := transaction.Exec(`
+UPDATE body_streams
+SET retention_state = ?,
+    stored_length = CASE WHEN ? = 'metadata' THEN 0 ELSE stored_length END,
+    chunk_count = CASE WHEN ? = 'metadata' THEN 0 ELSE chunk_count END
+WHERE audit_id = ? AND stage IN (?, ?)`, retention, retention, retention, auditID, first, second); err != nil {
+		return fmt.Errorf("sqlite writer: update raw retention: %w", err)
+	}
+	return nil
 }
 
 func persistPreparedTurn(transaction *sql.Tx, turn auditmodel.PreparedTurn) error {
@@ -680,35 +720,35 @@ FROM turns WHERE turn_id = ?`, turnID).Scan(&parent, &header.ParentBase, &header
 	if parent.Valid {
 		header.ParentTurnID = &parent.String
 	}
-	base := []auditmodel.ObjectRef(nil)
+	var parentRequest, parentResponse []auditmodel.ObjectRef
 	if header.ParentTurnID != nil {
-		parentRequest, err := loadRequestRefs(transaction, *header.ParentTurnID, memo, visiting)
-		if err != nil {
+		var err error
+		if parentRequest, err = loadRequestRefs(transaction, *header.ParentTurnID, memo, visiting); err != nil {
 			return nil, err
 		}
-		base = parentRequest
 		if header.ParentBase == "post_turn" {
-			parentResponse, err := loadResponseRefs(transaction, *header.ParentTurnID)
-			if err != nil {
+			if parentResponse, err = loadResponseRefs(transaction, *header.ParentTurnID); err != nil {
 				return nil, err
 			}
-			base = append(base, parentResponse...)
-		} else if header.ParentBase != "request" {
-			return nil, localWriteError("sqlite writer: invalid non-root parent base")
 		}
-	} else if header.ParentBase != "root" {
+	}
+	base, err := auditmodel.ContextBase(header.ParentTurnID != nil, header.ParentBase, parentRequest, parentResponse)
+	switch {
+	case errors.Is(err, auditmodel.ErrParentBase):
+		return nil, localWriteError("sqlite writer: invalid non-root parent base")
+	case err != nil:
 		return nil, localWriteError("sqlite writer: root turn has non-root base")
 	}
 	operations, err := loadContextOperations(transaction, turnID)
 	if err != nil {
 		return nil, err
 	}
-	result, err := auditmodel.ApplyDelta(base, operations)
+	result, err := auditmodel.ApplyContext(base, operations, header.RequestItemCount, header.RequestSequenceHash)
+	if errors.Is(err, auditmodel.ErrContextSequence) {
+		return nil, localWriteError("sqlite writer: stored turn sequence hash mismatch")
+	}
 	if err != nil {
 		return nil, err
-	}
-	if len(result) != header.RequestItemCount || !bytes.Equal(auditmodel.SequenceHash(result), header.RequestSequenceHash) {
-		return nil, localWriteError("sqlite writer: stored turn sequence hash mismatch")
 	}
 	memo[turnID] = cloneObjectRefs(result)
 	return result, nil

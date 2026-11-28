@@ -95,6 +95,59 @@ session_analysis:
 #   allow_write: false
 #   public_url: ""
 
+# Audit capture. The session keeps bodies in memory and writes an audit in at
+# most four writer operations: the start record, a checkpoint when the request
+# body ends, one when the response headers are forwarded, and the final
+# commit, which Finish waits for and retries up to commit_retries times (0 to
+# 5). Body content beyond the per-stage memory budget (or when the
+# process-wide budget is full) is sealed and written to local staging, one
+# encrypted file per audit, and read back by the commit; a stage's first
+# spill adds one more operation that writes its rows.
+# staging.dir is required: an absolute path on a disk as reliable as the
+# database's, not tmpfs, and not the key's directory. A directory that cannot
+# be used at start-up leaves the proxy without audit (strict mode refuses
+# requests, available mode forwards them unaudited). When staging is full or
+# fails while running, the stage stops being retained (marked partial);
+# forwarding is never affected. The start imports files a previous run left
+# there. write_path may be left out or set to unified; legacy was removed.
+audit:
+  commit_retries: 3
+  memory:
+    stage_bytes: 8388608
+    global_bytes: 268435456
+  staging:
+    dir: /var/lib/llmapi-logger/staging
+    max_bytes: 4294967296
+
+# Cold archive (doc/features/26-cold-archive.md). Off by default and the whole
+# section may be omitted. Once a day it exports the audits and gaps retention
+# would delete into dir: plaintext lines, gzip, framed encryption under keys
+# derived from key_path, and a signed plaintext manifest per bundle. No
+# credential value is archived. With the archive on, retention no longer
+# deletes directly: export_only only exports and the hot database keeps
+# growing; archive_then_delete removes from the hot database what a sealed,
+# checked bundle of format version 1 holds unchanged. Removed audits are only
+# in the archive (read them with audit-archive).
+# Requires retention_days > 0. dir is an absolute path on its own disk, not the
+# key's directory and not audit.staging.dir; back up the key apart from it.
+# timezone empty means org_reports.timezone. verify_sample compares at least
+# one member of every bundle with the hot database. To pause archiving
+# without resuming direct deletion, set retention_days to 0. Deploy a version
+# that contains this module before adding the section, and remove it before
+# rolling back (configuration loading is strict).
+# archive:
+#   mode: "off"
+#   dir: /var/lib/llmapi-logger/archive
+#   encrypt: true
+#   run_at: "03:00"
+#   timezone: ""
+#   segment_max_bytes: 268435456
+#   conversation_min_turns: 16
+#   conversation_min_bytes: 16777216
+#   pass_audits: 5000
+#   run_deadline_minutes: 240
+#   verify_sample: 0.05
+
 interceptors:
   require-client-credential:
     type: require_credential

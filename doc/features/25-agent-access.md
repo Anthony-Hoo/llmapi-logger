@@ -112,7 +112,7 @@ CREATE TABLE agent_audit_log (
 要点：
 
 - `internal/storage/postgres/migrate.go` 的 `derivedMigrations` 加一项，`latestSchemaVersion` 改为 4。
-- **旧版本遇到版本 4 的库会拒绝启动**（“schema is newer than supported”）。回滚步骤写进部署文档：先删这两张表和 `schema_migrations` 里的 4 号行，再换回旧版本。
+- **旧版本遇到版本 4 的库打不开审计存储**（“schema is newer than supported”；进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。回滚步骤写进部署文档：先删这两张表和 `schema_migrations` 里的 4 号行，再换回旧版本。
 - 有两个测试断言“版本恰好是 1、2、3”（`org_reports_test.go`、`session_analysis_test.go`），要一起改。
 - 令牌的签发与撤销走“有确定结果”的写入路径（`submitPolicySync`，关键词规则现在用的那条）。`last_used_at_ns` 限频写入，同一令牌每分钟最多一次，写失败只记日志。
 - 审计写入失败只记日志，不影响业务请求。唯一的例外是输入包与分面的读取：既有的查看日志仍然是“写不进就不返回内容”，本模块不改这条规则。
@@ -277,7 +277,7 @@ POST /api/agent/v1/token（授权码 + 校验串）→ 令牌写入本地凭据�
 
 ## 9. 命令行与 Skill 包
 
-- 命令行是 `cmd/llmaudit`，只用标准库。它与服务端共用一个只含数据结构与错误码的小包，不依赖服务端的其他内部包。
+- 命令行是 `cmd/llmaudit`，只用标准库。它与服务端共用一个只含数据结构与错误码的小包 `internal/agentapi`，另用 `internal/termio` 在终端里不回显地读一行（与冷归档的读取工具 `audit-archive` 共用，同样只依赖标准库），不依赖服务端的其他内部包。
 - 本地状态放在用户主目录下的专用目录：凭据文件仅本人可读、原子替换；可用环境变量改位置。
 - 输出与退出码见合同。成功时标准输出一个 JSON，失败时标准错误一个 JSON。
 - Skill 包结构：

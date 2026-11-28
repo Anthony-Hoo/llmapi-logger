@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/agentapi"
+	"llmapi-logger/internal/auditmodel"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/storage"
 )
@@ -25,8 +26,9 @@ func addExportRecords(fixture *readFixture) {
 		record.row.ForwardStatus = record.detail.Audit.ForwardStatus
 		fixture.audits.records = append([]auditRecord{record}, fixture.audits.records...)
 	}
-	// An Anthropic record: parsed, with a conversation, but only the OpenAI
-	// parser rebuilds a request and a response.
+	// A record without a turn, as an Anthropic one written before Anthropic
+	// turns were stored: parsed, with a conversation, but no rebuilt request
+	// or response.
 	add("anthropic-no-turn", 20*time.Second, func(detail *query.Detail) {
 		detail.Audit.Protocol, detail.Audit.ParserName, detail.Turn = "anthropic", "anthropic.messages", nil
 	})
@@ -38,6 +40,28 @@ func addExportRecords(fixture *readFixture) {
 	})
 	add("released", 23*time.Second, func(detail *query.Detail) {
 		detail.Bodies[1].RetentionState = storage.RetentionMetadata
+	})
+	// Raw retention is decided per side: an upstream failure releases the
+	// verified request and keeps the response.
+	add("request-released", 26*time.Second, func(detail *query.Detail) {
+		status := http.StatusServiceUnavailable
+		detail.Audit.StatusCode = &status
+		detail.Bodies[0].RetentionState, detail.Bodies[0].StoredLength = storage.RetentionMetadata, 0
+	})
+	// A client that went away before any response: the turn rebuilds the
+	// request but has no response to rebuild.
+	add("no-response", 27*time.Second, func(detail *query.Detail) {
+		detail.Audit.ForwardStatus, detail.Audit.StatusCode = storage.ForwardClientCancelled, nil
+		detail.Turn.RequestLayout, detail.Turn.ResponseLayout = auditmodel.LayoutOpenAIChatRequest, auditmodel.LayoutNone
+		detail.Bodies = detail.Bodies[:1]
+		detail.Bodies[0].RetentionState, detail.Bodies[0].StoredLength = storage.RetentionMetadata, 0
+	})
+	// A client that went away mid-stream: the request-only turn rebuilds the
+	// request, the half response stays as raw only and is not rebuilt.
+	add("request-only", 28*time.Second, func(detail *query.Detail) {
+		detail.Audit.ForwardStatus, detail.Audit.ParseStatus, detail.ParsedResult.Status = storage.ForwardClientCancelled, storage.ParsePartial, storage.ParsePartial
+		detail.Turn.RequestLayout, detail.Turn.ResponseLayout = auditmodel.LayoutOpenAIChatRequest, auditmodel.LayoutNone
+		detail.Bodies[0].RetentionState, detail.Bodies[0].StoredLength = storage.RetentionMetadata, 0
 	})
 	add("retention-pending", 24*time.Second, func(detail *query.Detail) {
 		detail.Bodies[0].RetentionState = storage.RetentionPending
@@ -77,6 +101,13 @@ func TestAgentExportStatesPredictTheExport(t *testing.T) {
 		"parse-failed":      {"conversation": {exportNotAvailable, exportReasonParseFailed}, "response": {exportNotAvailable, exportReasonParseFailed}},
 		"parse-pending":     {"conversation": {exportPending, exportReasonParsePending}, "request": {exportPending, exportReasonParsePending}},
 		"released":          {"raw-response": {exportNotRetained, exportReasonReleased}, "raw-request": {State: exportAvailable}},
+		"request-released": {"raw-request": {exportNotRetained, exportReasonReleased}, "raw-response": {State: exportAvailable},
+			"request": {State: exportAvailable}, "response": {State: exportAvailable}},
+		"no-response": {"request": {State: exportAvailable}, "response": {exportNotAvailable, exportReasonNoBody},
+			"raw-request": {exportNotRetained, exportReasonReleased}, "raw-response": {exportNotAvailable, exportReasonNoBody}},
+		"request-only": {"request": {State: exportAvailable}, "response": {exportNotAvailable, exportReasonNoBody},
+			"raw-request": {exportNotRetained, exportReasonReleased}, "raw-response": {State: exportAvailable},
+			"conversation": {State: exportAvailable}, "timeline-response": {State: exportAvailable}},
 		"retention-pending": {"raw-request": {exportPending, exportReasonRetentionPending}},
 		"capturing":         {"timeline-response": {exportPending, exportReasonCapturing}, "raw-response": {exportPending, exportReasonCapturing}, "request": {exportPending, exportReasonInProgress}},
 		"blocked-own": {"conversation": {exportNotAvailable, exportReasonBlocked}, "request": {exportNotAvailable, exportReasonBlocked},

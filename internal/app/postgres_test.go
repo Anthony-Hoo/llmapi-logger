@@ -52,7 +52,7 @@ func TestPostgresApplicationHTTPPersistence(t *testing.T) {
 		io.WriteString(w, `{"id":"test","object":"chat.completion","model":"lab-model","choices":[{"index":0,"message":{"role":"assistant","content":"safe reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}`)
 	}))
 	defer upstream.Close()
-	cfg := config.Default()
+	cfg := testConfig(t)
 	cfg.DatabaseURL = u.String()
 	cfg.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	cfg.AdminToken = "synthetic-test-admin"
@@ -105,7 +105,7 @@ func TestPostgresApplicationHTTPPersistence(t *testing.T) {
 	if status != 200 || !bytes.Contains(b, []byte("safe reply")) {
 		t.Fatalf("forward status %d: %s", status, b)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(pipelineWait)
 	var page storage.AuditListPage
 	for time.Now().Before(deadline) {
 		page, err = app.auditStore.ListAudits(ctx, storage.AuditQueryFilter{}, storage.AuditQueryCursor{}, 10)

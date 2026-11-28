@@ -24,7 +24,7 @@ import (
 
 func insightsTestConfig(t *testing.T, upstreamURL string, enabled bool, vocabularyFile string) config.Config {
 	t.Helper()
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.DatabaseURL = "postgres://localhost/test?sslmode=disable"
 	configuration.NewAPI.URL = upstreamURL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
@@ -56,7 +56,7 @@ func parseOneAudit(t *testing.T, application *App) string {
 	if err := application.parserWorker.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(pipelineWait)
 	for time.Now().Before(deadline) {
 		page, err := application.auditStore.ListAudits(ctx, sqlite.AuditQueryFilter{}, sqlite.AuditQueryCursor{}, 10)
 		if err != nil {
@@ -96,7 +96,7 @@ func TestInsightsWiringFollowsConfiguration(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = application.Close() })
 		auditID := parseOneAudit(t, application)
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(pipelineWait)
 		for {
 			row, err := application.auditStore.LoadAnalysis(context.Background(), auditID)
 			if err == nil {

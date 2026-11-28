@@ -43,6 +43,9 @@ newapi:
 mode: available
 database_url: postgres://localhost/test?sslmode=disable
 key_path: '%s'
+audit:
+  staging:
+    dir: '%s'
 admin_token: test-admin-token
 retention_days: 0
 interceptors: {}
@@ -52,7 +55,7 @@ routes:
     path: /v1/chat/completions
     match: exact
     parser: openai.chat_completions
-`, yamlString(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))))
+`, yamlString(filepath.ToSlash(filepath.Join(tempDir, "key", "audit.key"))), yamlString(filepath.Join(tempDir, "staging")))
 	path := filepath.Join(tempDir, "config.yaml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)

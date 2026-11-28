@@ -140,7 +140,7 @@ org_reports:
 - **文本扫描范围**：cwd 和 root 可能出现在 system、user（含 `<system-reminder>` 包裹的 meta 消息）甚至会话中途插入的 system 消息里，所以提取器扫描全部文本块，同一请求里取**最后出现**的值（对应"环境更新"）。
 - **只扫描请求开头和末尾**：完整环境块一般在会话开头注入，随历史一起重发；压缩后可能消失。为控制开销，只扫描前若干条和最后若干条消息。
 
-实现位置：在 insights 词表为每个客户端新增 `project_headers`、`project_body_paths`、`project_text_patterns`（会自动扩展 Header 采集白名单，需加入 `x-codex-turn-metadata`、`x-opencode-project`、`x-agent-project`），并在 analyzer 旁新增提取器。实时路径在 parser worker 内执行。历史回填分两种：**Header 类信号**（Codex、OpenCode、declared）只读 `http_headers` 并解密单个 Header，速度快；**文本类信号**需要请求体，raw 已释放的 OpenAI 记录走已验证的重建，Anthropic 记录依赖 raw 是否还在，否则跳过。
+实现位置：在 insights 词表为每个客户端新增 `project_headers`、`project_body_paths`、`project_text_patterns`（会自动扩展 Header 采集白名单，需加入 `x-codex-turn-metadata`、`x-opencode-project`、`x-agent-project`），并在 analyzer 旁新增提取器。实时路径在 parser worker 内执行。历史回填分两种：**Header 类信号**（Codex、OpenCode、declared）只读白名单 Header，速度快：采集版本 1 只解密 `http_headers` 里名单内的值，版本 2 在 parser 进程内打开整块后过滤（模块 05 §6、模块 09 §8）；**文本类信号**需要请求体，raw 已释放的 OpenAI 记录走已验证的重建，Anthropic 记录依赖 raw 是否还在，否则跳过。
 
 ### 5.2 归属（查询时）
 
@@ -260,7 +260,8 @@ org_reports:
 - **优先级**：客户端自身的条目先于共享条目；请求体路径先于 Header（Codex 的 Header 只在请求体没有 `workspaces` 时作为回退）；文本模式最后执行，只补空缺字段，同一请求内后出现的匹配覆盖先出现的（环境更新）。只扫描前 8 条与后 8 条消息里的 system/developer/user 文本（含注入块），**从不扫描工具结果、工具调用和 assistant 文本**，避免工具输出里的路径被误认成 cwd。
 - **`source` 取值**比计划多了 `declared` 与 `root`：`declared` > `codex_turn_metadata`（remote）> `agent_header`（OpenCode 哈希）> `root` > `cwd` > `none`。另加 `body_scanned` 列，标记该行是否读过请求体（回填时 Header 已有强信号就不读请求体）。
 - **OpenCode 哈希**：解密后的身份里保存 Header 原值（40 位十六进制，`global` 等值丢弃）；规则编译时对字面量 `repo_url` 预先计算 `sha1("git-remote:" + host/org/repo)` 比对。OpenCode 自己对 origin 的规范化方式是否与本项目一致仍待真实请求核对（§11）。
-- **回填**：parser worker 每个扫描周期（30 秒）在 insights 回填之后执行，按 `started_at_ns` **倒序**、每次最多 50 条，让本周和上周先补齐。先只解密白名单 Header；Header 没有 remote、项目哈希或声明名时才读请求体：raw 仍在则直接读，OpenAI 的 metadata 记录走已验证的重建，Anthropic/Gemini 的 raw 已释放则只保存 Header 结果。
+- **回填**：parser worker 每个扫描周期（30 秒）在 insights 回填之后执行，按 `started_at_ns` **倒序**、每次最多 50 条，让本周和上周先补齐。先只读白名单 Header（版本 2 的 audit 要在进程内打开整个 Header 块，见上）；Header 没有 remote、项目哈希或声明名时才读请求体：raw 仍在则直接读，metadata 记录（OpenAI、Anthropic、Gemini）走已验证的重建，没有 normalizer 的协议 raw 已释放则只保存 Header 结果（内置协议现在都有 normalizer）。
+- **回填水位**：与 insights 回填（[20 §9](20-context-insights.md#9-回填)）一样在内存里记水位。一轮开始时读最新一条分析行的位置（`ProjectBackfillHorizon`，`audit_analysis_time_idx` 反向一步），这一轮只列水位之后的候选（`ListProjectIdentityBackfillCandidates` 的 `after` 下界，行比较），走完后水位推进到该位置；全部标识完以后每一轮只读新写入的分析行。不变量：水位以下的每一条分析行要么已有当前版本的标识，要么在标识回填的重试集合里。分析行只会在 parser goroutine 上新增：实时路径先跑项目钩子再写分析行，钩子失败就交给重试集合；insights 回填由旧到新补写的旧分析行，落在本回填（由新到旧）早已走过的一侧，写成功后把水位降到它之前，由下一轮按候选查询决定要不要处理：版本升级后重算的大多已有当前标识，只多走一段索引范围，不再读证据；位置未知的记录进重试集合，处理前先查一次已存的标识行。重试集合满了就把水位降到该记录之前。进程启动后的第一轮全量扫描，覆盖 `ProjectIdentityVersion` 升级。失败按 insights 回填同样的规则处理：存储类失败按 10、20、40、80 分钟退避重试、永不放弃；其余失败（如保存被拒绝）本进程内只读一次正文，记 `project_backfill_skipped`（`reason=failed`）。改动前保存一直失败的记录每一轮都要重读请求体。
 - **迁移**：`002_org_reports.sql` 只在运行时 `migrate()` 中执行，离线导入器的基线仍是 001（见 04 §3.5）。副作用：已被新版代理打开过的空库会多出 org 表，不能再作为离线导入目标；导入应在首次启动前完成。
 ### 13.2 M2 项目组、项目与主体
 
@@ -283,7 +284,7 @@ org_reports:
 ### 13.4 M4 周快照、API 与页面
 
 - 快照表 `org_weekly_snapshots` + `org_weekly_stats`（见 04 §3.5），没有指向 audit 的外键，retention 删除原始记录后仍可读取；项目名按冻结时保存。
-- 冻结作业挂在 parser worker 的空闲任务上（与回填同一 30 秒节奏）：每 10 分钟最多检查一次，只启动一个受保护的后台 goroutine，不阻塞解析。它从旧到新检查最近 5 个已结束的周（覆盖默认 30 天 retention），周结束 2 小时后才冻结；该周仍有待解析的请求或缺当前项目标识的已分析请求时推迟；已解析但还没有分析行的请求，要等周结束 2 小时后开始的一轮分析回填走过这一周才放行（回填跳过的请求，如正文已释放、没有对应解析器，不会一直卡住这一周）。但周结束 72 小时后无论如何冻结（记录 `org_snapshot_incomplete` 告警），保证在 retention 之前落库。当前周永不冻结。
+- 冻结作业挂在 parser worker 的空闲任务上（与回填同一 30 秒节奏）：每 10 分钟最多检查一次，只启动一个受保护的后台 goroutine，不阻塞解析。它从旧到新检查最近 5 个已结束的周（覆盖默认 30 天 retention），周结束 2 小时后才冻结；该周仍有待解析的请求或缺当前项目标识的已分析请求时推迟；已解析但还没有分析行的请求，要等周结束 2 小时后开始的一轮分析回填走过这一周才放行（回填跳过的请求，如正文已释放、没有对应解析器，不会一直卡住这一周）。有水位的一轮从水位处开始：水位以下的记录早已被试过，这一轮先重试其中等着重试的记录，之后才算走过水位以下的部分。但周结束 72 小时后无论如何冻结（记录 `org_snapshot_incomplete` 告警），保证在 retention 之前落库。当前周永不冻结。
 - 已冻结的周直接读快照，修改规则不影响它；“重新生成”按当前规则和仍保留的证据重算并整体覆盖。本周与未冻结的周实时计算，同一目录快照下 1 分钟内复用结果。
 - 每次加载一周时前后各多读 24 小时，用于把跨周的块按重叠拆分；超过 24 小时不间断（每段间隔 ≤ 阈值）的活动会在边界处被截断，这在实际中可以忽略。
 - developer 的“我的本周”只返回会话身份（NewAPI 用户 id，来自签名 Cookie）对应的一行；身份未知时返回空行。所有 org 端点都是 `no-store`。

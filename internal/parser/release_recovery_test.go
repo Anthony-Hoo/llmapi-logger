@@ -65,7 +65,7 @@ func TestWorkerRecoversFailedReleaseWithoutRestart(t *testing.T) {
 				if result.Status != StatusOK {
 					t.Fatalf("recovered result = %s", result.Status)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(PipelineWait):
 				t.Fatal("audit stayed processing after storage recovered; pending scans did not retry release")
 			}
 			worker.Close()

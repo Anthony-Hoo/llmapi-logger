@@ -39,7 +39,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        p.error_type, p.error_code, p.upstream_error_class,
        a.newapi_request_id, a.caller_status,
        t.newapi_user_id, t.username, t.newapi_token_id, t.token_name,
-       tn.conversation_id,`)
+       tn.conversation_id, a.capture_version, a.user_agent_enc,`)
 	if filter.Scope == nil {
 		statement.WriteString(`
        (SELECT COUNT(*) FROM turns AS tc WHERE tc.conversation_id = tn.conversation_id)`)
@@ -228,7 +228,7 @@ SELECT a.audit_id, a.started_at_ns, a.ended_at_ns, a.route_id, a.protocol,
        p.error_type, p.error_code, p.upstream_error_class,
        a.newapi_request_id, a.caller_status,
        t.newapi_user_id, t.username, t.newapi_token_id, t.token_name,
-       tn.conversation_id,`)
+       tn.conversation_id, a.capture_version, a.user_agent_enc,`)
 	if scope == nil {
 		statement.WriteString(`
        (SELECT COUNT(*) FROM turns AS tc WHERE tc.conversation_id = tn.conversation_id)`)
@@ -269,7 +269,13 @@ WHERE audit_id = $1`, auditID).Scan(&detail.RequestURIEnc); err != nil {
 		return AuditQueryDetail{}, err
 	}
 	if full {
+		// Both forms are read whatever capture_version says, so
+		// headerblock.Expand sees a version 1 audit with a block, or a
+		// version 2 audit with header rows, and rejects it.
 		if detail.Headers, err = readHeaderEvidence(ctx, transaction, auditID); err != nil {
+			return AuditQueryDetail{}, err
+		}
+		if detail.HeaderBlock, err = readHeaderBlockEvidence(ctx, transaction, auditID); err != nil {
 			return AuditQueryDetail{}, err
 		}
 	}
@@ -480,6 +486,8 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 		&newAPITokenID,
 		&tokenName,
 		&conversationID,
+		&destination.CaptureVersion,
+		&destination.UserAgentEnc,
 		&conversationTurns,
 	); err != nil {
 		return err
@@ -504,7 +512,26 @@ func scanAuditListRow(row rowScanner, destination *AuditListRow) error {
 	destination.Username = nullStringPointer(username)
 	destination.NewAPITokenID = nullInt64Pointer(newAPITokenID)
 	destination.TokenName = nullStringPointer(tokenName)
+	destination.UserAgentEnc = cloneBytes(destination.UserAgentEnc)
 	return nil
+}
+
+// readHeaderBlockEvidence reads the header block of a version 2 audit, nil
+// when there is none.
+func readHeaderBlockEvidence(ctx context.Context, transaction dbTransaction, auditID string) (*HeaderBlockEvidence, error) {
+	var block HeaderBlockEvidence
+	err := transaction.QueryRowContext(ctx, `
+SELECT compression, plaintext_length, block_enc
+FROM http_header_blocks
+WHERE audit_id = $1`, auditID).Scan(&block.Compression, &block.PlaintextLength, &block.DataEnc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read header block: %w", err)
+	}
+	block.DataEnc = cloneBytes(block.DataEnc)
+	return &block, nil
 }
 
 func readHeaderEvidence(ctx context.Context, transaction dbTransaction, auditID string) ([]HeaderEvidence, error) {

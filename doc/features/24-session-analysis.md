@@ -154,7 +154,7 @@ session_analysis:
 ### 5.3 正文来源与开销
 
 - L0 是会话级批处理，不在 `audit_analysis` 上加列，也不提升 `AnalysisVersion`，理由与 23 §4 相同。
-- 每个请求只读它**新增**的条目：最新一条用户消息、本次响应的工具调用，以及下一请求带回的工具结果。OpenAI 记录读轮次图的增量（18），开销与会话长度无关；Anthropic、Gemini 记录在 raw 仍在时按 `prev_audit_id` 去掉公共前缀。
+- 每个请求只读它**新增**的条目：最新一条用户消息、本次响应的工具调用，以及下一请求带回的工具结果。有轮次图的记录（OpenAI、Anthropic）读轮次图的增量（18），开销与会话长度无关；没有轮次图的记录（Gemini、升级前写入的 Anthropic 记录）在 raw 仍在时按 `prev_audit_id` 去掉公共前缀。
 - 正文不可得（raw 已释放且不能重建）时跳过，并记录原因，计入覆盖率。每日批处理离 30 天 retention 很远，正常情况下不会遇到。
 - 只在批处理内存中解密，不写日志，不进明文列。
 
@@ -182,11 +182,11 @@ session_analysis:
 | `agent_spawn_hints` | `hint_fpr` | 明文指纹 | 子 Agent 连边（沿用 20 §5.8） | 不另存 |
 | `token_links` | `newapi_user_id`、`newapi_token_id`、`quota`、`quota_per_unit`、`billing_state` | 明文 | L0：成本与归属人；聚合范围 | `session_signals` 存 `newapi_user_id` 和成本。**`username`、`token_name` 不读入包**：模型不需要知道是谁 |
 | `parsed_results` 明文列 | `request_model`、`response_model`、`error_type`、`error_code`、`upstream_error_class`、`status` | 明文 | L0：上游错误、策略拒绝计数 | 计数 |
-| `parsed_results.parsed_json_enc` | 其中的 `conversation`（[Conversation DTO](../../internal/conversation/types.go)：消息角色、text / reasoning / tool_call / tool_result / unknown 五类 part） | 解密 | 包：非 OpenAI 规范化记录（Anthropic、Gemini 等）的用户轮次、助手文本、工具调用 | 只进 `pack_enc` |
-| OpenAI 轮次图：`turns`、`turn_context_ops`、`turn_response_items`、`content_objects` | 每轮 `insert` 操作新增的条目、响应条目 | `content_objects` 解密 | 包：OpenAI 记录（含 Codex）的用户轮次、助手文本、工具调用与结果状态。只读增量条目，不重建整段历史 | 只进 `pack_enc` |
+| `parsed_results.parsed_json_enc` | 其中的 `conversation`（[Conversation DTO](../../internal/conversation/types.go)：消息角色、text / reasoning / tool_call / tool_result / unknown 五类 part），以及只有请求的轮次的 `partial_response_messages` | 解密 | 包：没有轮次图的记录（Gemini、normalization 失败的记录、升级前写入的 Anthropic 记录）的用户轮次、助手文本、工具调用；只有请求的轮次（模块 18 §6）的残缺回答，接在轮次图重建出的请求消息之后（`query.MergePartialResponse`） | 只进 `pack_enc` |
+| 轮次图（OpenAI、Anthropic）：`turns`、`turn_context_ops`、`turn_response_items`、`content_objects` | 每轮 `insert` 操作新增的条目、响应条目 | `content_objects` 解密 | 包：有轮次图的记录（含 Codex、Claude Code）的用户轮次、助手文本、工具调用与结果状态。只读增量条目，不重建整段历史 | 只进 `pack_enc` |
 | `content_binary_refs`、`binary_objects` | 前者的 `media_type`、后者的 `plaintext_length` | 明文；**二进制正文不解密** | 包：图片和附件的占位符 | 不落库 |
 | `body_chunks`（raw，仅 `retention_state=full`） | provider 原始 JSON | 解密 | 兜底：Conversation DTO 不保留的字段，目前只有 Anthropic `tool_result.is_error` | 不落库；raw 不在时该失败状态记为"未知" |
-| `http_headers` | — | 不直接读 | 客户端、Agent 身份已在 `audit_analysis`；项目标识由 23 的提取器负责 | — |
+| `http_headers`、`http_header_blocks` | — | 不直接读 | 客户端、Agent 身份已在 `audit_analysis`；项目标识由 23 的提取器负责 | — |
 | `http_stages`、`body_streams`（除 `retention_state`）、`stream_timelines`、`integrity_events` | — | 不读 | — | — |
 | 模块 23（启用时） | 归属结果（`project_id`、信号级别、分桶）、`projects.name`、`principal_class`、`group_members` | 明文管理数据。归属由 23 的服务计算，`identity_enc` 在它内部解密；本模块只拿到项目 id、项目名、级别和是否 service，**拿不到仓库地址和路径** | 包：`[会话]` 的项目名与信号级别；L0：service 排除；聚合：项目、项目组 | `session_signals.project_id`、`bucket`；`session_text_fprs.project_id` |
 
@@ -205,7 +205,7 @@ session_analysis:
 
 1. **候选请求**：会话内 `agent_role` 为 `main` 的请求中 `turn_start=1` 的那些，即最后一条输入是真实用户消息。子 Agent 的首条消息另行处理（§6.4）。
 2. **只取新增的那条用户消息**：
-   - OpenAI 记录取本轮 `insert` 操作里最后一条 user 条目。
+   - 有轮次图的记录取本轮 `insert` 操作里最后一条 user 条目。
    - 其他协议取 Conversation 中 `phase=request` 的最后一条 `role=user` 消息。
    - 不从历史重读，因此每个用户轮次只出现一次，与压缩无关。
 3. **筛出人输入的文本**：
@@ -708,7 +708,7 @@ S0 不依赖 23，可以先做；`project_id` 和 `bucket` 在 23 落地前为�
 
 ### S0（确定性信号）
 
-- **会话快照**：每个 Agent 只解密最后一个请求，加上每次检测到压缩之前的那个请求（最多 6 个快照），在内存里合并：用户轮次按规范化文本去重，工具调用按 call id 去重。没有按 §5.3 逐请求读取增量条目；OpenAI 记录用已验证的轮次图重建，其他协议读解析器加密保存的 conversation。
+- **会话快照**：每个 Agent 只解密最后一个请求，加上每次检测到压缩之前的那个请求（最多 6 个快照），在内存里合并：用户轮次按规范化文本去重，工具调用按 call id 去重。没有按 §5.3 逐请求读取增量条目；有轮次图的记录（OpenAI、Anthropic）用已验证的轮次图重建，其余记录读解析器加密保存的 conversation。
 - **用户轮次到 audit 的映射**：第 k 个用户轮次对应该 Agent 第 k 个 `turn_start=1` 的请求；两边数量不一致时，多出的轮次都映射到最后一个。
 - **工具失败**：Conversation DTO 不保留 Anthropic `tool_result.is_error`，S0 不读 raw；改为在词表里配置 `shell_ok_without_exit_code`（默认 `claude_code`、`zcode`）：这些客户端的 shell 结果没有退出码就视为成功，`Exit code N` 视为失败。其他客户端解析不到退出码记为未知。
 - **路径与工具名**：直接从解密后的工具调用参数里取（`insights` 词表的 `file_ops`、`apply_patch` 头），没有读取 `audit_analysis.detail_enc`。

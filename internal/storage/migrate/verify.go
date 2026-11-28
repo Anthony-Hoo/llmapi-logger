@@ -58,7 +58,11 @@ func verifyEncrypted(t tableSpec, v []any, key []byte) error {
 			}
 		}
 	case "parsed_results":
-		plain, err = open("parsed_json_enc", str("audit_id"), "parsed_json", str("parser_name"))
+		// Opened through the shared helper so a compressed row is decompressed
+		// and bounded, not only decrypted.
+		if m["parsed_json_enc"] != nil {
+			plain, err = auditmodel.OpenParsedResult(cipher, str("audit_id"), str("parser_name"), blob("parsed_json_enc"))
+		}
 	case "stream_timelines":
 		plain, err = open("timeline_enc", str("audit_id"), "stream_timeline_v1", str("stage"), str("compression"))
 		if err == nil && m["timeline_enc"] != nil {

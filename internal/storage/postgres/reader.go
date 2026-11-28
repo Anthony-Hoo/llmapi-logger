@@ -15,7 +15,13 @@ const stageOrderSQL = `CASE stage
     ELSE 5
 END`
 
-// HasAudits reports whether at least one audit parent row exists.
+// HasAudits reports whether the store holds any audit history: an audit parent
+// row, an integrity event or a cold archive segment. Start-up creates a new
+// master key only when this is false. Integrity events are never deleted, so
+// after retention removes every audit they still need the original key; a new
+// one would fail the chain verification and leave the audit store unusable.
+// Archived bundles are encrypted and signed with keys derived from the same
+// master key, so a catalogued segment needs it too (design L.3).
 func (store *Store) HasAudits(ctx context.Context) (bool, error) {
 	if ctx == nil {
 		return false, errors.New("postgres: nil context")
@@ -24,7 +30,9 @@ func (store *Store) HasAudits(ctx context.Context) (bool, error) {
 		return false, ErrClosed
 	}
 	var exists bool
-	if err := store.readerDB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM audit_records LIMIT 1)").Scan(&exists); err != nil {
+	if err := store.readerDB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM audit_records)
+    OR EXISTS (SELECT 1 FROM integrity_events)
+    OR EXISTS (SELECT 1 FROM archive_segments)`).Scan(&exists); err != nil {
 		return false, fmt.Errorf("postgres: check audits: %w", err)
 	}
 	return exists, nil
@@ -55,7 +63,7 @@ SELECT audit_id, started_at_ns, ended_at_ns, route_id, protocol, parser_name,
        method, path, request_uri_enc, mode, status_code, forward_status,
        capture_status, parse_status, blocked_by, block_code, error_code,
        newapi_request_id, caller_status, caller_attempts, caller_next_at_ns,
-       caller_updated_at_ns
+       caller_updated_at_ns, capture_version, user_agent_enc
 FROM audit_records
 WHERE audit_id = $1`, auditID), &snapshot.Audit); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -69,6 +77,13 @@ WHERE audit_id = $1`, auditID), &snapshot.Audit); err != nil {
 	}
 	if snapshot.Headers, err = readHeaders(ctx, transaction, auditID); err != nil {
 		return Snapshot{}, err
+	}
+	block, err := readHeaderBlockEvidence(ctx, transaction, auditID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if block != nil {
+		snapshot.HeaderBlock = &HeaderBlock{Compression: block.Compression, PlaintextLength: block.PlaintextLength, DataEnc: block.DataEnc}
 	}
 	if snapshot.Bodies, err = readBodies(ctx, transaction, auditID); err != nil {
 		return Snapshot{}, err
@@ -117,10 +132,13 @@ func scanAudit(row rowScanner, destination *AuditRecord) error {
 		&destination.CallerAttempts,
 		&callerNextAt,
 		&callerUpdatedAt,
+		&destination.CaptureVersion,
+		&destination.UserAgentEnc,
 	); err != nil {
 		return err
 	}
 	destination.RequestURIEnc = cloneBytes(destination.RequestURIEnc)
+	destination.UserAgentEnc = cloneBytes(destination.UserAgentEnc)
 	destination.EndedAtNS = nullInt64Pointer(endedAt)
 	destination.StatusCode = nullIntPointer(statusCode)
 	destination.BlockedBy = nullStringPointer(blockedBy)

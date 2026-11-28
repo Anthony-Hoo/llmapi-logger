@@ -6,6 +6,9 @@ package storage
 const (
 	SettingsSessionAnalysis = "session_analysis"
 	SettingsOrgReports      = "org_reports"
+	// SettingsAuditCapture holds the CommitAudit retry count. The database
+	// accepts it from migration 007 on.
+	SettingsAuditCapture = "audit_capture"
 )
 
 // RuntimeSettings is one row of runtime_settings. Settings is plaintext JSON

@@ -48,6 +48,11 @@ type insightsHarness struct {
 type upstreamResponse struct {
 	contentType string
 	body        string
+	// status is the upstream HTTP status; zero means 200.
+	status int
+	// sent, when set, is closed once the body was written and flushed; the
+	// upstream then holds the stream open until the request is cancelled.
+	sent chan struct{}
 }
 
 func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher security.Cipher, fp *security.AnalysisFingerprinter) parser.AuditAnalyzer) *insightsHarness {
@@ -78,10 +83,11 @@ func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher 
 		t.Fatal(err)
 	}
 	harness.store = store
-	manager, err := audit.NewManager(store, cipher, credentials, audit.ModeAvailable, logger)
+	manager, closeManager, err := newTestManager(t.TempDir(), store, cipher, credentials, logger, audit.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(closeManager)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		_, _ = io.Copy(io.Discard, request.Body)
@@ -89,13 +95,23 @@ func newInsightsHarness(t *testing.T, analyzer func(store *sqlite.Store, cipher 
 		next := harness.response
 		harness.mu.Unlock()
 		response.Header().Set("Content-Type", next.contentType)
+		if next.status != 0 {
+			response.WriteHeader(next.status)
+		}
 		_, _ = io.WriteString(response, next.body)
+		if next.sent != nil {
+			response.(http.Flusher).Flush()
+			close(next.sent)
+			<-request.Context().Done()
+		}
 	}))
 	t.Cleanup(upstream.Close)
 	routes := []config.RouteConfig{
 		{ID: "chat", Method: http.MethodPost, Path: "/v1/chat/completions", Match: "exact", Parser: "openai.chat_completions"},
 		{ID: "responses", Method: http.MethodPost, Path: "/v1/responses", Match: "exact", Parser: "openai.responses"},
 		{ID: "messages", Method: http.MethodPost, Path: "/v1/messages", Match: "exact", Parser: "anthropic.messages"},
+		{ID: "gemini", Method: http.MethodPost, Path: "/v1beta/models/{model}:generateContent", Match: "template", Parser: "gemini.generate_content"},
+		{ID: "gemini-stream", Method: http.MethodPost, Path: "/v1beta/models/{model}:streamGenerateContent", Match: "template", Parser: "gemini.stream_generate_content"},
 	}
 	matcher, err := routing.Compile(routes)
 	if err != nil {
@@ -149,11 +165,15 @@ func (harness *insightsHarness) send(path string, headers http.Header, body stri
 	}
 	recorder := httptest.NewRecorder()
 	harness.handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
+	want := http.StatusOK
+	if response.status != 0 {
+		want = response.status
+	}
+	if recorder.Code != want {
 		harness.t.Fatalf("proxy status = %d body=%q", recorder.Code, recorder.Body.String())
 	}
 	ctx := context.Background()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(parser.PipelineWait)
 	for time.Now().Before(deadline) {
 		ids, err := harness.store.ListPendingParseIDs(ctx, 100)
 		if err != nil {

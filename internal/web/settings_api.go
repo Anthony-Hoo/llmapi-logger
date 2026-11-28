@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/orgreport"
 	"llmapi-logger/internal/sessionanalysis"
 )
@@ -115,6 +116,84 @@ func (handler *managementHandler) serveOrgReportsSettings(writer http.ResponseWr
 	default:
 		handler.writeOrgResult(writer, http.StatusOK, nil, err)
 	}
+}
+
+// CaptureSettings is the audit capture setting an administrator saves from
+// the management UI: the retry count of the unified path's final commit
+// (design H.3). Nil makes GET, PUT and DELETE answer 404.
+type CaptureSettings interface {
+	Get(context.Context) (audit.CaptureSettingsView, error)
+	Update(context.Context, audit.CaptureEditableSettings) (audit.CaptureSettingsView, error)
+	Reset(context.Context) (audit.CaptureSettingsView, error)
+}
+
+// captureSettingsPath is the saved section of the capture write path.
+const captureSettingsPath = "/api/v1/settings/audit-capture"
+
+// serveCaptureSettings reads, saves and resets the capture setting.
+// serveProtected has checked the role. The method is checked first, so an
+// unknown method answers 405 whether or not the service is assembled.
+func (handler *managementHandler) serveCaptureSettings(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet, http.MethodPut, http.MethodDelete:
+	default:
+		methodNotAllowed(writer, http.MethodGet, http.MethodPut, http.MethodDelete)
+		return
+	}
+	if handler.captureSettings == nil {
+		writeError(writer, http.StatusNotFound, "not_found", "audit capture settings are not available")
+		return
+	}
+	ctx, cancel := handler.insightsContext(request)
+	defer cancel()
+	var view audit.CaptureSettingsView
+	var err error
+	switch request.Method {
+	case http.MethodGet:
+		view, err = handler.captureSettings.Get(ctx)
+	case http.MethodPut:
+		edited, ok := decodeCaptureSettingsBody(writer, request)
+		if !ok {
+			return
+		}
+		view, err = handler.captureSettings.Update(ctx, edited)
+	case http.MethodDelete:
+		view, err = handler.captureSettings.Reset(ctx)
+	}
+	switch {
+	case err == nil:
+		writeJSON(writer, http.StatusOK, view)
+	case errors.Is(err, audit.ErrInvalidSettings):
+		writeError(writer, http.StatusBadRequest, "invalid_settings", audit.SettingsMessage(err))
+	case errors.Is(err, audit.ErrSettingsUnavailable):
+		// The saved section could not be read; nothing was written.
+		writeError(writer, http.StatusServiceUnavailable, "settings_unavailable", "saved settings could not be read; nothing was saved")
+	case errors.Is(err, context.Canceled):
+		return
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(writer, http.StatusServiceUnavailable, "settings_timeout", "settings request timed out")
+	default:
+		handler.logger.Warn("audit capture settings request failed", "error_code", "settings_unavailable")
+		writeError(writer, http.StatusServiceUnavailable, "settings_unavailable", "audit capture settings are unavailable")
+	}
+}
+
+// decodeCaptureSettingsBody accepts exactly {"commit_retries": n} with n an
+// integer. A missing or null field is refused: 0 is a valid value, so a
+// default would silently switch the retries off.
+func decodeCaptureSettingsBody(writer http.ResponseWriter, request *http.Request) (audit.CaptureEditableSettings, bool) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxSettingsBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var body struct {
+		CommitRetries *int `json:"commit_retries"`
+	}
+	var trailing any
+	if err := decoder.Decode(&body); err != nil || body.CommitRetries == nil || !errors.Is(decoder.Decode(&trailing), io.EOF) {
+		writeError(writer, http.StatusBadRequest, "invalid_settings", "invalid settings body: commit_retries must be an integer")
+		return audit.CaptureEditableSettings{}, false
+	}
+	return audit.CaptureEditableSettings{CommitRetries: *body.CommitRetries}, true
 }
 
 func decodeSettingsBody(writer http.ResponseWriter, request *http.Request) (sessionanalysis.SettingsUpdate, bool) {

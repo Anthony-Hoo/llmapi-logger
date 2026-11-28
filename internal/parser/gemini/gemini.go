@@ -18,7 +18,10 @@ import (
 const (
 	GenerateContent       = "gemini.generate_content"
 	StreamGenerateContent = "gemini.stream_generate_content"
-	version               = "2"
+	// version 3 adds the content-addressed normalizer, reads a stream's
+	// conversation from its folded body and requires a finish reason (or a
+	// prompt block) for a stream to parse as ok.
+	version = "3"
 )
 
 type Parser struct {
@@ -155,25 +158,46 @@ func parseResponse(root map[string]any, result *base.Result) {
 func parseStream(data []byte, result *base.Result) error {
 	events, tailClosed := base.DecodeSSEWithStatus(data)
 	if len(events) == 0 {
-		return errors.New("gemini parser: empty SSE")
+		return errEmptySSE
 	}
 	observed := true
 	result.ObservedStream = &observed
 	if !accumulateStream(events, result) {
 		return errors.New("gemini parser: no valid SSE event")
 	}
-	if malformed := streamMalformed(events); malformed || !tailClosed {
-		result.Status = base.StatusPartial
-		if result.ErrorCode == "" {
-			if malformed {
-				result.ErrorCode = "invalid_sse_event"
-			} else {
-				result.ErrorCode = "unterminated_sse_event"
-			}
-		}
+	fold := foldStream(events)
+	switch {
+	case streamMalformed(events):
+		markPartial(result, "invalid_sse_event")
+	case !tailClosed:
+		markPartial(result, "unterminated_sse_event")
+	default:
+		checkComplete(fold, result)
 	}
-	appendStreamConversation(events, result)
+	// The conversation is read from the folded body, so a stream and the same
+	// answer without streaming yield the same conversation.
+	appendResponseConversation(fold.body, result)
 	return nil
+}
+
+// checkComplete marks a stream that did not end as a Gemini stream ends
+// (streamFold.complete) as partial, so it is never verified and its raw is
+// never released. A stream ended by an error object is partial too: the
+// answer stopped with an error, as an Anthropic error event does.
+func checkComplete(fold streamFold, result *base.Result) {
+	switch {
+	case fold.errored:
+		markPartial(result, "stream_error")
+	case !fold.complete():
+		markPartial(result, "missing_finish_reason")
+	}
+}
+
+func markPartial(result *base.Result, code string) {
+	result.Status = base.StatusPartial
+	if result.ErrorCode == "" {
+		result.ErrorCode = code
+	}
 }
 
 // accumulateStream folds every chunk object into result, so the last usage
@@ -209,31 +233,26 @@ func looksLikeJSONArray(data []byte) bool {
 // array. Each element is treated exactly like one SSE event, so the result
 // matches an equivalent SSE stream.
 func parseArrayStream(data []byte, result *base.Result) error {
-	var elements []json.RawMessage
-	if err := base.DecodeJSON(data, &elements); err != nil {
+	events, err := arrayEvents(data)
+	if err != nil {
 		return err
-	}
-	if len(elements) == 0 {
-		return errors.New("gemini parser: empty JSON array stream")
-	}
-	events := make([]base.SSEEvent, len(elements))
-	for index, element := range elements {
-		events[index] = base.SSEEvent{Data: element}
 	}
 	observed := true
 	result.ObservedStream = &observed
 	if !accumulateStream(events, result) {
 		return errors.New("gemini parser: no valid JSON array element")
 	}
+	fold := foldStream(events)
 	if streamMalformed(events) {
-		result.Status = base.StatusPartial
-		if result.ErrorCode == "" {
-			result.ErrorCode = "invalid_event"
-		}
+		markPartial(result, "invalid_event")
+	} else {
+		checkComplete(fold, result)
 	}
-	appendStreamConversation(events, result)
+	appendResponseConversation(fold.body, result)
 	return nil
 }
+
+type rawElement = json.RawMessage
 
 // normalizeUsage splits promptTokenCount, which includes cached content, into
 // exclusive buckets. candidatesTokenCount excludes thinking, so output adds

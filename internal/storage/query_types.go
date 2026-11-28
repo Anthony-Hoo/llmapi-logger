@@ -78,6 +78,12 @@ type AuditListRow struct {
 	// ConversationTurns is the total number of turns in the row's
 	// conversation, or nil when the audit has no turn.
 	ConversationTurns *int64
+	// CaptureVersion selects how the User-Agent is read: version 1 from the
+	// http_headers rows, version 2 from UserAgentEnc.
+	CaptureVersion int
+	// UserAgentEnc is the sealed inbound User-Agent of a version 2 audit, nil
+	// when absent. It must be opened by the query service, never returned.
+	UserAgentEnc []byte
 }
 
 // AuditListPage contains a keyset-paginated result. HasMore is computed by
@@ -98,6 +104,36 @@ type HeaderEvidence struct {
 	ValueIndex  int
 	ValueLength int
 	ValueEnc    []byte
+}
+
+// HeaderBlockEvidence is the stored header block of a version 2 audit, as
+// read back from http_header_blocks.
+type HeaderBlockEvidence struct {
+	Compression     string
+	PlaintextLength int64
+	DataEnc         []byte
+}
+
+// HeaderSource is everything a reader needs to expand the saved Headers of one
+// audit through headerblock.Expand, whichever capture version wrote them.
+// Version 1 fills Rows; version 2 fills Block. StageSet names the stages that
+// have an http_stages row, which a version 2 block must match exactly unless
+// CaptureFailed or Interrupted is set.
+type HeaderSource struct {
+	CaptureVersion int
+	Rows           []HeaderEvidence
+	Block          *HeaderBlockEvidence
+	StageSet       []string
+	// CaptureFailed is set when the audit's stored capture_status is failed:
+	// a write was rejected, so its block and its stage rows may legitimately
+	// disagree. capture_status is covered by the capture payload digest.
+	CaptureFailed bool
+	// Interrupted is set when the audit's stored forward_status is
+	// interrupted, which only startup recovery writes: the process exited
+	// with the audit open, and a failure mark still held in the writer's
+	// in-memory recovery table may have been lost with it. forward_status is
+	// covered by the capture payload digest.
+	Interrupted bool
 }
 
 // ParsedResultSummary is the narrow, non-secret projection of parsed_results.
@@ -153,10 +189,30 @@ type AuditQueryDetail struct {
 	RequestURIEnc []byte
 	Stages        []HTTPStage
 	Headers       []HeaderEvidence
-	Bodies        []BodyStream
-	ParsedResult  *ParsedResultSummary
-	TurnGraph     *TurnGraph
-	TokenLink     *TokenLinkSummary
+	// HeaderBlock is the stored block of a version 2 audit; Headers is then
+	// empty.
+	HeaderBlock  *HeaderBlockEvidence
+	Bodies       []BodyStream
+	ParsedResult *ParsedResultSummary
+	TurnGraph    *TurnGraph
+	TokenLink    *TokenLinkSummary
+}
+
+// HeaderSource returns the Header evidence of the detail in the form
+// headerblock.Expand reads. The stage set is taken from the stage rows.
+func (detail AuditQueryDetail) HeaderSource() HeaderSource {
+	stages := make([]string, 0, len(detail.Stages))
+	for _, stage := range detail.Stages {
+		stages = append(stages, stage.Stage)
+	}
+	return HeaderSource{
+		CaptureVersion: detail.Audit.CaptureVersion,
+		Rows:           detail.Headers,
+		Block:          detail.HeaderBlock,
+		StageSet:       stages,
+		CaptureFailed:  detail.Audit.CaptureStatus == CaptureFailed,
+		Interrupted:    detail.Audit.ForwardStatus == ForwardInterrupted,
+	}
 }
 
 // TurnGraph is a transactionally consistent encrypted projection of one

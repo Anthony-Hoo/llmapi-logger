@@ -79,6 +79,23 @@ export interface OrgClientOption {
   label: string;
 }
 
+/** The audit capture field an administrator can change from the page (design H.3). */
+export interface CaptureEditableSettings {
+  /** How many times the unified write path retries a failed final commit, 0–5. */
+  commit_retries: number;
+}
+
+export interface CaptureSettingsView {
+  /** "saved": a saved section overrides the configuration file. */
+  source: "file" | "saved";
+  updated_ns?: string;
+  settings: CaptureEditableSettings;
+  /** What the configuration file says, i.e. what a reset returns to. */
+  file: CaptureEditableSettings;
+  /** Always "unified", the only capture write path; the page does not show it. */
+  write_path: string;
+}
+
 /** Outcome of the connection test; it carries no model output. */
 export interface AnalysisProbeResult {
   ok: boolean;

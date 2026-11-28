@@ -28,10 +28,7 @@ func newFingerprintTestManager(t *testing.T, fingerprints *security.CredentialFi
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(store, cipher, fingerprints, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newTestManager(t, store, cipher, fingerprints, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
 	return manager, path
 }
 
