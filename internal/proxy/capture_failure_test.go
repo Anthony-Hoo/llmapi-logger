@@ -31,6 +31,7 @@ import (
 // when the commit saw the failure, partial with audit_finalize_failed when
 // the commit itself was rejected.
 func TestCaptureWriteFailuresEndTheAuditFailed(t *testing.T) {
+	t.Parallel()
 	valueOrEmpty := func(value *string) string {
 		if value == nil {
 			return ""

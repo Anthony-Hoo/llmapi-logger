@@ -690,6 +690,7 @@ func frozen[T any](t *testing.T, name string) T {
 }
 
 func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("the whole fixture catalogue through both write paths")
 	}

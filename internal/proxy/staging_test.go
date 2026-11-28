@@ -57,6 +57,7 @@ func requireNoStagingFiles(t *testing.T, stager *staging.Stager) {
 // the whole request: every row equals legacy's, and so do the
 // views and exports.
 func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
+	t.Parallel()
 	large := largeStreamExchange(t)
 	unmerged := cloneExchange(large, "unmerged")
 	unmerged.closeErr = errors.New("close failed")
@@ -114,6 +115,7 @@ func (stager *countingStager) Stage(chunk storage.BodyChunk) (*staging.Ref, erro
 // capture_budget_exhausted, raw is kept in full, a queue_full gap is
 // recorded and the client sees the same bytes.
 func TestStagingFullThroughProxy(t *testing.T) {
+	t.Parallel()
 	stager := openEqStager(t, filepath.Join(t.TempDir(), "staging"), staging.Options{MaxBytes: 600 << 10})
 	unified := newEqRun(t, audit.Options{StageBytes: stagingTestBudget, Stager: stager}, nil)
 	// The forwarded bytes are legacy's (sendAgainstOracle).
@@ -276,6 +278,7 @@ func TestCrashWithStagedChunksRecovers(t *testing.T) {
 // The process stops after the commit and before the staging file is
 // removed: the next start only removes the file, and the audit is unchanged.
 func TestCrashAfterCommitBeforeCleanup(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "staging")
 	stager := openEqStager(t, dir, staging.Options{})
 	unified := newEqRun(t, audit.Options{StageBytes: stagingTestBudget, Stager: keepingStager{stager}}, nil)

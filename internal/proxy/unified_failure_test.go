@@ -78,6 +78,7 @@ func compareRuns(t *testing.T, unified *eqRun, delta func(map[string][]eqRow)) m
 // rows are those of a run without the fault, no gap is recorded, and one
 // stable log line says what happened (design B.8, K item 4).
 func TestCheckpointQueueFullIsFoldedIntoTheNextWrite(t *testing.T) {
+	t.Parallel()
 	for _, refuse := range []int{1, 2} {
 		t.Run(fmt.Sprintf("checkpoint %d refused", refuse), func(t *testing.T) {
 			var counting *countingStore
@@ -127,6 +128,7 @@ func scriptedCommitRun(t *testing.T, retries int, script *commitScript, sleeps *
 }
 
 func TestCommitAuditRetries(t *testing.T) {
+	t.Parallel()
 	batch := fmt.Errorf("commit: %w", storage.ErrWriteBatchFailed)
 	constraint := errors.New("constraint failed")
 	for _, test := range []struct {
@@ -203,6 +205,7 @@ func TestCommitAuditRetries(t *testing.T) {
 // with capture_budget_exhausted, the audit keeps raw in full for what it
 // has, a queue_full gap is recorded and forwarding is unchanged (F.6).
 func TestMemoryBudgetExhaustion(t *testing.T) {
+	t.Parallel()
 	// No staging: the budget alone decides (design F.6).
 	unified := newEqRun(t, audit.Options{StageBytes: 1 << 20, GlobalBytes: 1 << 20, Stager: refusingStager{}}, nil)
 	// The forwarded bytes are legacy's (sendAgainstOracle).
@@ -248,6 +251,7 @@ func unifiedBudgetUsed(run *eqRun) int64 { return run.manager.MemoryInUse() }
 // failed, and its rows equal legacy's except that the response pair is
 // merged in memory where legacy, for a failed capture, keeps both copies.
 func TestInboundStageNotStoredMatchesLegacy(t *testing.T) {
+	t.Parallel()
 	unified := newEqRun(t, audit.Options{}, nil)
 	execSQL(t, unified.dbPath, `CREATE TRIGGER reject_inbound BEFORE INSERT ON http_stages
 		WHEN NEW.stage = 'request_for_newapi_received_from_nginx' BEGIN SELECT RAISE(ABORT, 'rejected by test'); END`)
@@ -511,6 +515,7 @@ func largeResponseExchange(t *testing.T, size int) *eqExchange {
 // (Close fails after EOF): the commit points request_sent back at itself
 // and writes its own chunks, sealed from the borrowed bytes (B.5, K item 3).
 func TestRequestPairUnmergedAtFinish(t *testing.T) {
+	t.Parallel()
 	var counting *countingStore
 	var mergedAtCheckpoint atomic.Bool
 	unified := newEqRun(t, audit.Options{}, func(store *sqlite.Store) audit.Store {
@@ -547,6 +552,7 @@ func TestRequestPairUnmergedAtFinish(t *testing.T) {
 // pair, and the duplicate sealed from borrowed bytes when the pair cannot
 // merge.
 func TestLargeResponsesMatchLegacy(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		cut   int
@@ -579,6 +585,7 @@ func TestLargeResponsesMatchLegacy(t *testing.T) {
 // progress when the request body ends, so no checkpoint is written and the
 // commit carries everything (B.1).
 func TestClientCancelDuringUploadSkipsCheckpoints(t *testing.T) {
+	t.Parallel()
 	var counting *countingStore
 	unified := newEqRun(t, audit.Options{}, func(store *sqlite.Store) audit.Store {
 		counting = &countingStore{Store: store}
@@ -602,6 +609,7 @@ func TestClientCancelDuringUploadSkipsCheckpoints(t *testing.T) {
 // the commit writes) is not retried; the writer records the outcome itself
 // and finalizes the audit as failed.
 func TestCommitConstraintFailureOnTheRealStore(t *testing.T) {
+	t.Parallel()
 	var counting *countingStore
 	unified := newEqRun(t, audit.Options{CommitRetries: 3, Sleep: func(time.Duration) { t.Error("retried") }},
 		func(store *sqlite.Store) audit.Store {
