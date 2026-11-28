@@ -922,6 +922,17 @@ func (bundle *Bundle) LoadObjects(ctx context.Context, records ...*archive.Recor
 	return set, nil
 }
 
+// Objects calls visit with every entry of the objects file in stored order,
+// one entry in memory at a time, by one pass over the file; a segment without
+// an objects file has none. The reader tool's cat --with-objects uses it. It
+// needs a successful Verify first.
+func (bundle *Bundle) Objects(ctx context.Context, visit func(archive.ObjectEntry) error) error {
+	if err := bundle.requireVerified(); err != nil {
+		return err
+	}
+	return bundle.eachObject(ctx, visit)
+}
+
 // StreamRaw calls visit with the raw chunks of one stage of the record, in
 // seq order, one chunk in memory at a time, by one pass over the objects
 // file. Pass the body's SourceStage (archive.Record.OwningChunks). The
