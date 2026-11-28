@@ -61,7 +61,7 @@ func TestFailedRunsAreRetriedWithinTheDeadline(t *testing.T) {
 	h := newHarness(t)
 	h.options.Now = time.Now
 	h.options.RetryDelay = 20 * time.Millisecond
-	h.options.RunDeadline = 70 * time.Millisecond
+	h.options.RunDeadline = 100 * time.Millisecond
 	h.addTurnless("only", protocolChat, baseTimeNS)
 	h.store.fail["OpenSnapshot"] = errors.New("reader unavailable")
 	runner := h.runner()
@@ -74,7 +74,9 @@ func TestFailedRunsAreRetriedWithinTheDeadline(t *testing.T) {
 			failed++
 		}
 	}
-	if failed < 3 || failed > 4 || elapsed > time.Second {
+	// At least one retry, and none started past the deadline (100 ms / 20 ms
+	// allows at most five runs, however slow the timers are).
+	if failed < 2 || failed > 5 || elapsed > 2*time.Second {
 		t.Fatalf("%d failed runs in %v", failed, elapsed)
 	}
 

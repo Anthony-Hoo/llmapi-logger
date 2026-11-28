@@ -96,7 +96,7 @@ func (current *run) execute() error {
 		}
 		if pass > 0 && !current.now().Before(current.deadline) {
 			current.result.DeadlineReached = true
-			return nil
+			break
 		}
 		more, err := current.pass()
 		if err != nil {
@@ -106,13 +106,16 @@ func (current *run) execute() error {
 			break
 		}
 	}
-	if !current.now().Before(current.deadline) {
+	if !current.result.DeadlineReached && !current.now().Before(current.deadline) {
 		current.result.DeadlineReached = true
-		return nil
 	}
-	if err := current.gaps(); err != nil {
-		return err
+	if !current.result.DeadlineReached {
+		if err := current.gaps(); err != nil {
+			return err
+		}
 	}
+	// H.2: removal follows once the passes have ended or the deadline was
+	// reached, over every segment sealed so far.
 	return current.removalPhase()
 }
 

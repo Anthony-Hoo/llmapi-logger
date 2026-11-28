@@ -353,6 +353,34 @@ func TestReconciliationCompletesARunStoppedAtEachStep(t *testing.T) {
 	}
 }
 
+// H.6 item 1 resumes at H.2 step 6: a bundle published before a crash is
+// sampled again before reconciliation seals it, and rejected when it differs.
+func TestReconciliationSamplesBeforeSealing(t *testing.T) {
+	h := newHarness(t)
+	h.addTurnless("only", protocolChat, baseTimeNS)
+	h.options.Step = func(step string) error {
+		if step == StepAfterPublish {
+			return errors.New("crash")
+		}
+		return nil
+	}
+	if _, err := h.run(); !errors.Is(err, errCrash) {
+		t.Fatal(err)
+	}
+	h.options.Step = nil
+	h.sampler.differ = func(string) bool { return true }
+	result, err := h.run()
+	if err == nil || result.Reason != "sample_mismatch" || result.ReconciledSealed != 0 {
+		t.Fatalf("result %+v, %v", result, err)
+	}
+	if countMatching(h.files(), func(file string) bool { return strings.HasSuffix(file, bundle.RejectedSuffix) }) == 0 {
+		t.Fatalf("files %q", h.files())
+	}
+	h.sampler.differ = nil
+	h.mustRun()
+	h.requireEachOnce("only")
+}
+
 // J.3: a sampled member that differs from the hot store voids the bundle
 // (renamed .rejected, intent dropped) unless its change stamp shows it
 // changed after the export, when it counts as stale and the bundle stands.

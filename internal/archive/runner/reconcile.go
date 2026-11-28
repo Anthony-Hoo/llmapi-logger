@@ -141,15 +141,36 @@ func (current *run) verifyAgainstCatalog(path string, segment storage.ArchiveSeg
 	if len(members) != len(report.Members) {
 		return false, nil
 	}
-	byKey := make(map[storage.ArchiveMemberKey][]byte, len(members))
+	byKey := make(map[storage.ArchiveMemberKey]storage.ArchiveMember, len(members))
 	for _, member := range members {
-		byKey[storage.ArchiveMemberKey{AuditID: member.AuditID, Revision: member.Revision}] = member.RecordDigest
+		byKey[storage.ArchiveMemberKey{AuditID: member.AuditID, Revision: member.Revision}] = member
 	}
+	infos := make(map[string]memberInfo, len(members))
+	stale := map[string]bool{}
 	for _, member := range report.Members {
-		digest, ok := byKey[storage.ArchiveMemberKey{AuditID: member.AuditID, Revision: member.Revision}]
-		if !ok || !bytes.Equal(digest, member.Digest[:]) {
+		row, ok := byKey[storage.ArchiveMemberKey{AuditID: member.AuditID, Revision: member.Revision}]
+		if !ok || !bytes.Equal(row.RecordDigest, member.Digest[:]) {
 			return false, nil
 		}
+		info := memberInfo{digest: member.Digest, turnCreated: row.TurnCreatedAtNS}
+		copy(info.stamp[:], row.ChangeStamp)
+		infos[member.AuditID] = info
+		if row.State == storage.ArchiveMemberStale {
+			stale[member.AuditID] = true
+		}
+	}
+	// H.6 item 1 resumes at H.2 step 6, which includes the read-equivalence
+	// sample (J.3), against the stamps the intent recorded.
+	if err := current.sample(opened, infos, stale); err != nil {
+		if current.ctx.Err() != nil {
+			return false, current.ctx.Err()
+		}
+		if reasonOf(err) == "sample_mismatch" {
+			return false, nil
+		}
+		// No comparison was possible: leave the segment publishing for the
+		// next run.
+		return false, err
 	}
 	return true, nil
 }
