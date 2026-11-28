@@ -223,6 +223,96 @@ type ArchiveReconciledResult struct {
 	SkippedGaps    []int64
 }
 
+// ArchiveRemovalMinFormatVersion is the lowest format version whose sealed
+// segments may serve as the basis for removing hot data (design 4.4 and
+// M.2): bundles of the trial format 0 are exported but never removed.
+const ArchiveRemovalMinFormatVersion = 1
+
+// Outcomes of removing one member from the hot store (M.2).
+const (
+	// ArchiveRemovalRemoved: the audit was deleted from the hot store and the
+	// member marked hot_removed in the same transaction.
+	ArchiveRemovalRemoved = "removed"
+	// ArchiveRemovalStale: the audit changed since its export (its change
+	// stamp differs); nothing was deleted and the member is stale.
+	ArchiveRemovalStale = "stale"
+	// ArchiveRemovalAlreadyGone: the audit was no longer in the hot store;
+	// the member was marked hot_removed.
+	ArchiveRemovalAlreadyGone = "already_gone"
+	// ArchiveRemovalSkipped: the catalog row is not removable (no longer
+	// sealed, its segment not sealed or of a trial format version, or it
+	// differs from the request); nothing changed.
+	ArchiveRemovalSkipped = "skipped"
+)
+
+// ArchiveRemoval names one member to remove from the hot store, as the
+// caller listed it. The store removes it only when the catalog row still
+// matches all four fields.
+type ArchiveRemoval struct {
+	SegmentID   string
+	AuditID     string
+	Revision    int64
+	ChangeStamp []byte
+}
+
+// ArchiveRemovable is one member a removal may take: a sealed member of a
+// sealed segment of format version ArchiveRemovalMinFormatVersion or later,
+// with the order keys of M.2.
+type ArchiveRemovable struct {
+	ArchiveRemoval
+	StartedAtNS     int64
+	TurnCreatedAtNS *int64
+}
+
+// ArchiveRemovalOutcome is what removing one member did.
+type ArchiveRemovalOutcome struct {
+	AuditID  string
+	Revision int64
+	Outcome  string
+}
+
+// ArchiveRemovalResult reports one removal batch: an outcome per requested
+// member in request order, and the segments it marked hot_removed because no
+// sealed member was left in them.
+type ArchiveRemovalResult struct {
+	Outcomes        []ArchiveRemovalOutcome
+	RemovedSegments int64
+}
+
+// ArchiveGapRemovalResult reports one gap removal batch: the gap members
+// marked hot_removed, the audit_gaps rows deleted with them (fewer when a
+// row was already gone) and the gaps segments marked hot_removed.
+type ArchiveGapRemovalResult struct {
+	RemovedGaps     int64
+	DeletedRows     int64
+	RemovedSegments int64
+}
+
+// ValidateArchiveRemovals checks one removal batch: at most
+// RetentionBatchLimit members, each audit once.
+func ValidateArchiveRemovals(batch []ArchiveRemoval) error {
+	if len(batch) == 0 || len(batch) > RetentionBatchLimit {
+		return fmt.Errorf("storage: an archive removal batch holds 1 to %d members", RetentionBatchLimit)
+	}
+	seen := make(map[string]bool, len(batch))
+	for _, removal := range batch {
+		switch {
+		case !ValidArchiveID(removal.SegmentID):
+			return errors.New("storage: invalid archive segment id")
+		case !validArchiveAuditID(removal.AuditID):
+			return errors.New("storage: invalid archive member audit id")
+		case seen[removal.AuditID]:
+			return errors.New("storage: archive audit listed twice in one removal batch")
+		case removal.Revision < 1:
+			return errors.New("storage: invalid archive member revision")
+		case !validArchiveDigest(removal.ChangeStamp):
+			return errors.New("storage: invalid archive change stamp")
+		}
+		seen[removal.AuditID] = true
+	}
+	return nil
+}
+
 // ArchiveCandidate is one audit the export snapshot looked at for selection
 // (B.1). Deferral is empty when the audit meets conditions 1 to 3, otherwise
 // one of the ArchiveDeferred* reasons; Current reports a current member

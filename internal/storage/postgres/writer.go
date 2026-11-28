@@ -60,6 +60,12 @@ const (
 	// writeArchive carries one cold archive catalog write (archive_catalog.go)
 	// as an archiveWrite closure. Each one is alone in its transaction.
 	writeArchive
+	// writeRemoveArchived and writeRemoveArchivedGaps are the cold archive's
+	// verified removal of archived audits and gaps from the hot store
+	// (archive_remove.go), each alone in its transaction like a retention
+	// batch.
+	writeRemoveArchived
+	writeRemoveArchivedGaps
 )
 
 type writeRequest struct {
@@ -92,8 +98,10 @@ const (
 // large checkpoint or commit is alone for the same reason. An archive catalog
 // write is alone so that its outcome (an intent registered, a segment sealed)
 // is never rolled back by an unrelated failure in the same batch (design I).
+// The archive's removal batches are alone for both reasons (design M.2).
 func (request writeRequest) alone() bool {
 	return request.policy != nil || request.kind == writeDeleteExpired || request.kind == writeArchive ||
+		request.kind == writeRemoveArchived || request.kind == writeRemoveArchivedGaps ||
 		request.payloadBytes > aloneWritePayloadBytes
 }
 
@@ -634,6 +642,10 @@ func (store *Store) applyWrite(transaction dbTransaction, request writeRequest) 
 		return request.data.(derivedWrite)(transaction)
 	case writeArchive:
 		return request.data.(archiveWrite)(transaction)
+	case writeRemoveArchived:
+		return removeArchived(transaction, request.data.(*archiveRemovalRequest))
+	case writeRemoveArchivedGaps:
+		return removeArchivedGaps(transaction, request.data.(*archiveGapRemovalRequest))
 	default:
 		return fmt.Errorf("postgres writer: unknown operation %d", request.kind)
 	}

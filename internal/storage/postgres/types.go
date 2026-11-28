@@ -203,6 +203,11 @@ type (
 	ArchiveReconciledResult = storage.ArchiveReconciledResult
 	ArchiveCandidate        = storage.ArchiveCandidate
 	ArchiveDuePage          = storage.ArchiveDuePage
+	ArchiveRemoval          = storage.ArchiveRemoval
+	ArchiveRemovable        = storage.ArchiveRemovable
+	ArchiveRemovalOutcome   = storage.ArchiveRemovalOutcome
+	ArchiveRemovalResult    = storage.ArchiveRemovalResult
+	ArchiveGapRemovalResult = storage.ArchiveGapRemovalResult
 )
 
 func validateAuditRecord(record AuditRecord) error {
