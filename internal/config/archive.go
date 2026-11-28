@@ -121,13 +121,15 @@ func validateArchive(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("archive.dir: resolve the key directory: %w", err)
 	}
-	if within(dir, keyDir) || within(keyDir, dir) {
+	// Compared as written and where the directories really are (overlap); the
+	// key file itself may be a link, so its real directory is checked too.
+	if overlap(dir, keyDir) || overlap(physical(dir), filepath.Dir(physical(cfg.KeyPath))) {
 		return errors.New("archive.dir must not be the directory of key_path, contain it or be inside it")
 	}
 	// P item 13: the staging directory holds ciphertext too.
 	if staging := cfg.Audit.Staging.Dir; staging != "" && filepath.IsAbs(staging) {
 		stagingDir := filepath.Clean(staging)
-		if within(dir, stagingDir) || within(stagingDir, dir) {
+		if overlap(dir, stagingDir) {
 			return errors.New("archive.dir must not be audit.staging.dir, contain it or be inside it")
 		}
 	}

@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -109,10 +111,69 @@ func validateAuditStaging(audit AuditConfig, keyPath string) error {
 	if err != nil {
 		return fmt.Errorf("audit.staging.dir: resolve the key directory: %w", err)
 	}
-	if within(dir, keyDir) || within(keyDir, dir) {
+	// The key file itself may be a link, so its real directory is checked too.
+	if overlap(dir, keyDir) || overlap(physical(dir), filepath.Dir(physical(keyPath))) {
 		return errors.New("audit.staging.dir must not be the directory of key_path, contain it or be inside it")
 	}
 	return nil
+}
+
+// overlap reports whether directories a and b are the same or one contains
+// the other, either as written or where they really are once symbolic links
+// are followed. It runs when the configuration is loaded: a link changed while
+// the proxy runs is not seen.
+func overlap(a, b string) bool {
+	if within(a, b) || within(b, a) {
+		return true
+	}
+	a, b = physical(a), physical(b)
+	return within(a, b) || within(b, a)
+}
+
+// physical returns the absolute path with every symbolic link along it
+// followed. The part that does not exist yet is appended as written, so a
+// directory created later is compared by where it will be created; a link
+// whose target does not exist yet is followed by its text. When the path
+// cannot be resolved it is returned as written, which the lexical check
+// still covers.
+func physical(path string) string {
+	written, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	current, missing := written, ""
+	// Each step either follows one dangling link or moves up one directory;
+	// the bound stops a loop of dangling links.
+	for step := 0; step < 255; step++ {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, missing)
+		}
+		if info, err := os.Lstat(current); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(current)
+			if err != nil {
+				return written
+			}
+			if !filepath.IsAbs(target) {
+				// The link exists, so its directory does: resolve it before
+				// joining, so that a ".." in the target is taken from the real
+				// directory.
+				parent := filepath.Dir(current)
+				if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+					parent = resolved
+				}
+				target = filepath.Join(parent, target)
+			}
+			current = filepath.Clean(target)
+			continue
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return written
+		}
+		missing = filepath.Join(filepath.Base(current), missing)
+		current = parent
+	}
+	return written
 }
 
 // within reports whether path is base or below it.

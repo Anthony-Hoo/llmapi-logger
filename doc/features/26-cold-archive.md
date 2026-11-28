@@ -988,7 +988,7 @@ archive:
 | 1 | `archive.mode` 不为 `off` 而 `retention_days` 为 0：拒绝 | 配置校验 |
 | 2 | 开启归档时不做任何直接删除 | 组装：`archive.mode` 不为 `off` 时不组装 retention runner（audit 和 gap 都不再直接删除）。`export_only` 下归档 runner 不删除任何东西，启动日志 Warn `archive export only: hot store keeps growing`（`error_category=archive_export_only`）；`archive_then_delete` 下唯一的删除是 §18.7 的校验后移除，启动日志见 §19 |
 | 3 | 归档关掉、`retention_days > 0`，而以前运行过归档：醒目提示直接删除已经恢复 | 启动：目录表里有任何一条运行记录时 Warn `archive is off and retention deletes directly again; to pause archiving set retention_days: 0`，`error_category=archive_direct_delete_resumed`，带 `retention_days`。想暂停归档而不恢复直接删除，应把 `retention_days` 设为 0 |
-| 4 | `archive.dir` 与 `key_path` 的目录相同或互相包含：拒绝 | 配置校验（暂存目录同样不许，见上表） |
+| 4 | `archive.dir` 与 `key_path` 的目录相同或互相包含：拒绝 | 配置校验（暂存目录同样不许，见上表）。按写下的路径和跟随符号链接后的实际位置各比一次，经链接把密钥放进归档目录同样拒绝；这项比较在加载配置时做，运行中改动的链接看不到 |
 | 5 | 已有数据或已有归档包时不新建主密钥 | 启动：见 §17.4 |
 
 ### 17.4 主密钥与归档目录的启动检查

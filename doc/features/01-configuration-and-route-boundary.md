@@ -144,7 +144,7 @@ routes:
     | `commit_retries` | 3 | 0–5；`CommitAudit` 失败后重试几次，管理页面保存的值覆盖它（模块 10 §11） |
     | `memory.stage_bytes` | 8 MiB（8388608） | 不小于 1 MiB（1048576），不大于 `memory.global_bytes` |
     | `memory.global_bytes` | 256 MiB（268435456） | 只受上一行约束 |
-    | `staging.dir` | 空 | 两种模式下都必填；必须是绝对路径，不能是 `key_path` 所在的目录，也不能包含它或位于其中 |
+    | `staging.dir` | 空 | 两种模式下都必填；必须是绝对路径，不能是 `key_path` 所在的目录，也不能包含它或位于其中。按写下的路径和跟随符号链接后的实际位置各比一次（还不存在的部分按将来创建的位置算，`key_path` 本身是链接时按它指向的文件算）；这项比较在加载配置时做（validate-config 也做），运行中改动的链接看不到 |
     | `staging.max_bytes` | 4 GiB（4294967296） | 必须为正；限制暂存目录里全部普通文件的大小，包括导入时改名保留的文件 |
 
     `staging.dir` 只在启动时检查（`internal/audit/staging` 的 `PrepareDirectory`），validate-config 不检查：不存在就以 0700 创建；Unix 上要求属主是进程用户、组和其他用户没有任何权限，Windows 上交给目录 ACL；还要能在里面创建并删除一个探针文件。检查不通过（或目录没有配置）时，两种模式下审计都不可用，与此前 strict 的处理相同：关闭存储，记一条 `audit staging unavailable`（带 `mode`、`error_category=staging_unavailable` 和 `reason`：`not_absolute`、`create_failed`、`inspect_failed`、`not_directory`、`wrong_owner`、`open_permissions`、`not_writable`，没有配置时为 `staging_unavailable`；不带路径和错误原文），以不可用的审计管理器运行：available 模式照常转发、不建 audit，strict 模式在准入时回 `503`。没有暂存就会丢掉超出内存预算的 Body，又没有别的写入路径可退，所以不提供不带暂存运行的方式；以前 available 模式退回 legacy 写入的做法已经没有了。这个判断在启动导入和 `RecoverInterruptedAudits` 之前做：目录不可用就像暂存文件全都读不出来：此时恢复会把带着暂存块中断的 audit 不带这些块就终结（与导入读不出文件时中止的理由相同，第 3 阶段设计 R.3 第 2 条）。所以不恢复、不终结任何记录，中断的 audit 原样保持未终结；目录修好、重启之后按正常顺序先导入暂存块，再恢复。
@@ -155,7 +155,7 @@ routes:
     | 键 | 默认 | 校验 |
     | --- | --- | --- |
     | `mode` | `off` | `off`、`export_only`、`archive_then_delete` 之一。`export_only` 只导出；`archive_then_delete` 在导出之后校验并移除格式版本不低于 1 的分段里的成员（内置格式版本是 1）；试行格式版本 0 的包从不作为移除依据（模块 26 §2、§17.2、§18.7） |
-    | `dir` | 空 | 必填，绝对路径；不能是 `key_path` 所在的目录、包含它或位于其中（5.7 第 4 条护栏）；也不能与 `audit.staging.dir` 相同、包含它或位于其中 |
+    | `dir` | 空 | 必填，绝对路径；不能是 `key_path` 所在的目录、包含它或位于其中（5.7 第 4 条护栏）；也不能与 `audit.staging.dir` 相同、包含它或位于其中。与 `staging.dir` 一样，按写下的路径和跟随符号链接后的实际位置各比一次，在加载配置时做，运行中改动的链接看不到 |
     | `encrypt` | `true` | `false` 时数据文件是不加密的 `.jsonl.gz` |
     | `run_at` | `03:00` | `HH:MM`，每天运行的本地时间 |
     | `timezone` | 空 | 非空时是可加载的 IANA 名称；为空时取 `org_reports.timezone`，不论组织周报是否开启 |

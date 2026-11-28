@@ -2,7 +2,9 @@ package config
 
 import (
 	"math"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -144,5 +146,114 @@ func TestArchiveLocationFallsBackToTheReportZone(t *testing.T) {
 	cfg.Archive.Timezone = "UTC"
 	if location, err := ArchiveLocation(cfg); err != nil || location.String() != "UTC" {
 		t.Fatalf("location = %v, %v", location, err)
+	}
+}
+
+// The directories are kept apart where they really are, not only as written:
+// a symbolic link must not put the key inside the archive or the staging
+// directory, nor the staging directory inside the archive.
+func TestDirectorySeparationFollowsSymlinks(t *testing.T) {
+	link := func(t *testing.T, target, name string) {
+		t.Helper()
+		if err := os.Symlink(target, name); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("creating a symbolic link needs a privilege this Windows account lacks: %v", err)
+			}
+			t.Fatal(err)
+		}
+	}
+	mkdir := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const keyGuard = "archive.dir must not be the directory of key_path"
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, base string, cfg *Config)
+		want  string // empty: accepted
+	}{
+		{"key directory is an alias of the archive", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "archive"))
+			link(t, filepath.Join(base, "archive"), filepath.Join(base, "key-alias"))
+			cfg.KeyPath = filepath.Join(base, "key-alias", "audit.key")
+		}, keyGuard},
+		{"archive is an alias of the key directory", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "data"))
+			link(t, filepath.Join(base, "data"), filepath.Join(base, "archive-alias"))
+			cfg.Archive.Dir = filepath.Join(base, "archive-alias", "bundles")
+		}, keyGuard},
+		{"staging directory is an alias of the key directory", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "data"))
+			link(t, filepath.Join(base, "data"), filepath.Join(base, "staging-alias"))
+			cfg.Audit.Staging.Dir = filepath.Join(base, "staging-alias")
+		}, "audit.staging.dir must not be the directory of key_path"},
+		{"archive contains the staging directory through an alias", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "volume"))
+			link(t, filepath.Join(base, "volume"), filepath.Join(base, "staging-alias"))
+			cfg.Audit.Staging.Dir = filepath.Join(base, "staging-alias", "staging")
+			cfg.Archive.Dir = filepath.Join(base, "volume")
+		}, "archive.dir must not be audit.staging.dir"},
+		{"alias with missing directories on both sides", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "volume"))
+			link(t, filepath.Join(base, "volume"), filepath.Join(base, "alias"))
+			cfg.KeyPath = filepath.Join(base, "alias", "keys", "audit.key")
+			cfg.Archive.Dir = filepath.Join(base, "volume", "keys", "archive")
+		}, keyGuard},
+		{"key file is a link into the archive", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "archive"))
+			mkdir(t, filepath.Join(base, "data"))
+			if err := os.WriteFile(filepath.Join(base, "archive", "audit.key"), make([]byte, 32), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link(t, filepath.Join(base, "archive", "audit.key"), filepath.Join(base, "data", "audit.key"))
+		}, keyGuard},
+		{"key directory is a dangling relative alias of the archive", func(t *testing.T, base string, cfg *Config) {
+			link(t, "archive", filepath.Join(base, "key-alias"))
+			cfg.KeyPath = filepath.Join(base, "key-alias", "keys", "audit.key")
+			cfg.Archive.Dir = filepath.Join(base, "archive", "keys")
+		}, keyGuard},
+		{"key directory written inside the archive stays refused though it links elsewhere", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "elsewhere"))
+			mkdir(t, filepath.Join(base, "archive"))
+			link(t, filepath.Join(base, "elsewhere"), filepath.Join(base, "archive", "key-alias"))
+			cfg.KeyPath = filepath.Join(base, "archive", "key-alias", "audit.key")
+		}, keyGuard},
+		{"dangling relative link with .. under an aliased directory", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "real", "sub"))
+			link(t, filepath.Join(base, "real", "sub"), filepath.Join(base, "sub-alias"))
+			// sub-alias/keys -> ../archive resolves from real/sub to real/archive.
+			link(t, filepath.Join("..", "archive"), filepath.Join(base, "real", "sub", "keys"))
+			cfg.KeyPath = filepath.Join(base, "sub-alias", "keys", "audit.key")
+			cfg.Archive.Dir = filepath.Join(base, "real", "archive")
+		}, keyGuard},
+		{"alias pointing elsewhere is accepted", func(t *testing.T, base string, cfg *Config) {
+			mkdir(t, filepath.Join(base, "elsewhere"))
+			mkdir(t, filepath.Join(base, "archive"))
+			link(t, filepath.Join(base, "elsewhere"), filepath.Join(base, "key-alias"))
+			cfg.KeyPath = filepath.Join(base, "key-alias", "audit.key")
+		}, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			cfg := testConfig()
+			cfg.KeyPath = filepath.Join(base, "data", "audit.key")
+			cfg.Audit.Staging.Dir = filepath.Join(base, "staging")
+			cfg.RetentionDays = 30
+			cfg.Archive.Mode = ArchiveModeExportOnly
+			cfg.Archive.Dir = filepath.Join(base, "archive")
+			test.setup(t, base, &cfg)
+			err := Validate(cfg)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
