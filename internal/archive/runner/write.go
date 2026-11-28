@@ -371,7 +371,9 @@ func (current *run) readOptions() (bundle.ReadOptions, func()) {
 // returns the members' audit ids once the segment is sealed. On a failure
 // after the intent it follows H.4: a bundle that fails the checks is
 // rejected (renamed, never deleted) and its intent dropped; a failed seal
-// leaves the published, checked segment to the next reconciliation.
+// leaves the published, checked segment to the next reconciliation, and so
+// does a sample that could not compare because the hot side could not be
+// read, as reconciliation itself does in that case (H.6 item 1).
 func (current *run) commit(sample bool, sealed *bundle.Sealed, members map[string]memberInfo, gapIDs []int64) ([]string, error) {
 	options := current.options()
 	manifest := sealed.Manifest()
@@ -432,6 +434,13 @@ func (current *run) commit(sample bool, sealed *bundle.Sealed, members map[strin
 		if current.ctx.Err() != nil {
 			// Shutdown, not a bad bundle: the next reconciliation re-reads it.
 			return nil, current.ctx.Err()
+		}
+		if isHotUnreadable(err) {
+			// Nothing says the bundle is wrong: it stays published and the
+			// segment publishing. The run fails (sample_failed) before this
+			// pass is recorded, so the watermark stays; the next run's
+			// reconciliation samples the segment again and seals it.
+			return nil, err
 		}
 		_ = bundle.Reject(path)
 		current.dropIntent(manifest.SegmentID)

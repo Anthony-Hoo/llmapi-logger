@@ -236,13 +236,17 @@ func (current *run) sample(opened *bundle.Bundle, members map[string]memberInfo,
 			return current.ctx.Err()
 		}
 		if err != nil {
-			return fail("sample_failed", err)
+			// Only the hot side makes Compare fail (an archived side that
+			// cannot be read compares unequal): the bundle is not at fault.
+			return &failure{reason: "sample_failed", err: err, hotUnreadable: true}
 		}
 		if equal {
 			continue
 		}
 		stamp, exists, err := options.Store.ChangeStamp(current.ctx, record.Audit.AuditID)
 		if err != nil {
+			// A difference was seen and could not be put down to a change
+			// after the export: the bundle may be at fault.
 			return fail("sample_failed", err)
 		}
 		if !exists || stamp != members[record.Audit.AuditID].stamp {

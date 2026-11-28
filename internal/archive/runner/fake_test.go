@@ -427,6 +427,9 @@ func (store *fakeStore) Watermark(_ context.Context, formatVersion int64) (*stor
 }
 
 func (store *fakeStore) ChangeStamp(_ context.Context, auditID string) ([32]byte, bool, error) {
+	if err := store.injected("ChangeStamp"); err != nil {
+		return [32]byte{}, false, err
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	audit, ok := store.audits[auditID]
@@ -576,10 +579,12 @@ func (snapshot *fakeSnapshot) Close() error {
 	return nil
 }
 
-// fakeSampler answers every comparison with equal, or calls differ.
+// fakeSampler answers every comparison with equal, or calls differ; fail,
+// when set, makes the comparison impossible (the hot side cannot be read).
 type fakeSampler struct {
 	mu       sync.Mutex
 	differ   func(auditID string) bool
+	fail     func(auditID string) error
 	compared []string
 }
 
@@ -588,7 +593,24 @@ func (sampler *fakeSampler) Compare(_ context.Context, audit *archivecli.AuditRe
 	defer sampler.mu.Unlock()
 	id := audit.Record.Audit.AuditID
 	sampler.compared = append(sampler.compared, id)
+	if sampler.fail != nil {
+		if err := sampler.fail(id); err != nil {
+			return false, err
+		}
+	}
 	return sampler.differ == nil || !sampler.differ(id), nil
+}
+
+func (sampler *fakeSampler) comparedCount(id string) int {
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+	count := 0
+	for _, compared := range sampler.compared {
+		if compared == id {
+			count++
+		}
+	}
+	return count
 }
 
 // sealedMembers lists, per audit, the members in sealed segments.

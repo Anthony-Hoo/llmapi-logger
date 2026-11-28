@@ -1886,11 +1886,12 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
     - 包写入方以记录本身的原因（`invalid_record`、`order`、`context_mismatch`、`payload_mismatch`、`entry_too_large`）拒绝一条记录时，`SegmentWriter.Add` 已作废整个未封的分段；runner 把这条推迟为 `export_failed`、Warn `archive record refused`（`archive_record_refused`，`reason` 是写入方的码），再从仍然打开的快照里把这个分段的其余成员重新读出写进新分段。被拒记录的子轮次因为父轮次不在分段里了，由写入方改写成物化形式。
     - 抽样发现一条成员读出不同而变更戳没变时，这个包照样作废（`.rejected`、删意向行），但这条推迟为 `export_failed`、Warn `archive sample mismatch`（`archive_sample_mismatch`），包里其余的成员在同一趟里写进一个新包并重新走登记到定稿。
     运行继续，这一趟的水位照常推进；完成日志分别计 `refused_audits`、`sample_mismatch_audits`，两者也计入 `excluded_audits`。真实行上产生不了写入方拒绝（`Export` 先做同样的检查），这条路径由 runner 的主机测试覆盖；抽样的这条有 PostgreSQL 上的测试（提交 `daf91b5`：成员自己的回答对象在快照之后被损坏，共享的内容对象不在变更戳里，所以差异归到这条成员）。
-    I/O 与快照的故障、重读 `Verify` 不过、抽样无法比较，仍然作废这个包并让运行以 `archive_failed` 失败。**其中包括抽样时热库读不出来（`sample_failed`）**：那并不说明包有问题，包却被改名 `.rejected`。对账里同一情形不作废，分段留在 `publishing`，这次运行以失败结束、下次再试。两处的处理不一致，记在这里。对账里抽样读出不同时包作废，成员不进推迟表（它们所在那一趟的水位当时没有推进）。
+    I/O 与快照的故障、重读 `Verify` 不过，仍然作废这个包并让运行以 `archive_failed` 失败。对账里抽样读出不同时包作废，成员不进推迟表（它们所在那一趟的水位当时没有推进）。
+    **抽样时热库读不出来（`sample_failed`）**，新发布的分段与对账的处理相同：`Compare` 出错（`QuerySampler` 里只有热库一侧会让它出错，归档一侧读不出来算作不同）不说明包有问题，包不作废、意向行不删，分段留在 `publishing`；运行以 `archive_failed`（`reason=sample_failed`）结束，这一趟没有记录，水位不动；下一次运行的对账按第 26 条重新抽样，通过就定稿。原先新发布的分段在这时也被改名 `.rejected`，与对账不一致。`sample_failed` 的另一种来源仍然作废包：一条成员比较不等、再查变更戳时热库读不出来，差异没法归到快照之后的改动，包可能有问题。对账里这种情形照旧不作废、留在 `publishing`。
 
 **对账（H.6）**
 
-26. `publishing` 的分段：清单不在就删意向行；在就重读核对，与意向行的成员、修订号、摘要比对，再按第 23、24 条抽样，都通过才定稿（提交 `a2c2420`：对账也要先抽样）。抽样时热库读不出来，见第 25 条。
+26. `publishing` 的分段：清单不在就删意向行；在就重读核对，与意向行的成员、修订号、摘要比对，再按第 23、24 条抽样，都通过才定稿（提交 `a2c2420`：对账也要先抽样）。抽样时热库读不出来，这次运行以 `sample_failed` 失败，分段留在 `publishing` 下次再试；新发布的分段同样处理，见第 25 条。
 27. 目录表不认识的包：`bundle.Open` 失败（例如密钥不符）的静默跳过；`Verify` 不过的只记一条 Warn，不改名；通过的按 R.6 第 10 条登记，成员一律 `stale`，已有当前成员的 audit 不登记。
 28. 写入方命名的临时文件删除；没有清单列出的数据文件改名 `.orphan`；有清单解析不了或签名不对时 Warn 一条 `archive_manifest_unusable`。H.6 第 4 步（继续移除）属于移除阶段，现在不做。
 

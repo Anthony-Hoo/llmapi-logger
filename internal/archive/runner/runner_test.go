@@ -424,6 +424,77 @@ func TestSampleMismatch(t *testing.T) {
 	})
 }
 
+func isRejectedManifest(file string) bool {
+	return strings.HasSuffix(file, bundle.ManifestSuffix+bundle.RejectedSuffix)
+}
+
+// J.3, H.6 item 1: a sample that cannot compare because the hot side cannot
+// be read says nothing about the bundle. A freshly committed segment is then
+// handled as reconciliation handles it: not rejected, left publishing, the
+// run fails with sample_failed before the pass is recorded, and the next
+// run's reconciliation samples it again and seals it.
+func TestSampleFailedLeavesTheSegmentPublishing(t *testing.T) {
+	h := newHarness(t)
+	h.addTurnless("a", protocolChat, baseTimeNS)
+	h.addTurnless("b", protocolChat, baseTimeNS+1)
+	h.sampler.fail = func(string) error { return errors.New("hot store down") }
+	result, err := h.run()
+	if err == nil || result.Status != storage.ArchiveRunFailed || result.Reason != "sample_failed" {
+		t.Fatalf("result %+v, %v", result, err)
+	}
+	files := h.files()
+	if countMatching(files, isRejectedManifest) != 0 || countMatching(files, func(file string) bool { return strings.HasSuffix(file, bundle.ManifestSuffix) }) != 1 {
+		t.Fatalf("files %q", files)
+	}
+	if len(h.store.segments) != 1 {
+		t.Fatalf("segments %+v", h.store.segments)
+	}
+	for _, segment := range h.store.segments {
+		if segment.State != storage.ArchiveSegmentPublishing {
+			t.Fatalf("segment %+v", segment)
+		}
+	}
+	if h.store.runs[0].Watermark != nil || len(h.store.deferred) != 0 || result.Counts.Segments != 0 {
+		t.Fatalf("watermark %+v, deferred %+v, result %+v", h.store.runs[0].Watermark, h.store.deferred, result)
+	}
+	if !strings.Contains(h.logs.String(), `"reason":"sample_failed"`) {
+		t.Fatalf("logs %s", h.logs.String())
+	}
+
+	h.sampler.fail = nil
+	next := h.mustRun()
+	if next.ReconciledSealed != 1 || next.Counts.Segments != 0 {
+		t.Fatalf("result %+v", next)
+	}
+	h.verifyAll()
+	h.requireEachOnce("a", "b")
+	files = h.files()
+	if countMatching(files, isTemp) != 0 || countMatching(files, isRejectedManifest) != 0 {
+		t.Fatalf("files %q", files)
+	}
+}
+
+// The other sample_failed: a member read back differently and its change
+// stamp could not be read, so the difference is not put down to a late
+// write. The bundle may be at fault and is rejected as before.
+func TestSampleFailedOnTheChangeStampRejectsTheBundle(t *testing.T) {
+	h := newHarness(t)
+	h.addTurnless("only", protocolChat, baseTimeNS)
+	h.sampler.differ = func(string) bool { return true }
+	h.store.fail["ChangeStamp"] = errors.New("hot store down")
+	result, err := h.run()
+	if err == nil || result.Status != storage.ArchiveRunFailed || result.Reason != "sample_failed" {
+		t.Fatalf("result %+v, %v", result, err)
+	}
+	if countMatching(h.files(), isRejectedManifest) != 1 || len(h.store.segments) != 0 {
+		t.Fatalf("files %q, segments %+v", h.files(), h.store.segments)
+	}
+	delete(h.store.fail, "ChangeStamp")
+	h.sampler.differ = nil
+	h.mustRun()
+	h.requireEachOnce("only")
+}
+
 // J.2: a bundle that fails the re-read after publication is rejected and
 // its intent dropped; its audits stay due.
 func TestRereadFailureRejectsTheBundle(t *testing.T) {

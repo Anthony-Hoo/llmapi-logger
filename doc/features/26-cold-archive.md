@@ -1067,7 +1067,9 @@ archive:
 
 两种情形下被排除的成员都留在热库，推迟原因 `export_failed`，之后每次运行再看一次；运行照常继续，水位照常推进。完成日志分别计入 `refused_audits` 和 `sample_mismatch_audits`（也计入 `excluded_audits`）。
 
-除此之外，第 4 步核对不过，或第 5 步无法比较（热库读不出来），这个包作废（改名 `.rejected`，不删除；意向行删掉），这次运行以 `archive_failed` 失败结束；成员仍是热库里的普通 audit，这一趟的水位没有推进，下一次运行重新导出它们。
+除此之外，第 4 步核对不过，这个包作废（改名 `.rejected`，不删除；意向行删掉），这次运行以 `archive_failed` 失败结束；成员仍是热库里的普通 audit，这一趟的水位没有推进，下一次运行重新导出它们。
+
+第 5 步无法比较时分两种。比较时热库读不出来，这并不说明包有问题：包不作废，分段留在 `publishing`，这次运行以 `archive_failed` 失败结束（`reason=sample_failed`），这一趟的水位没有推进；下一次运行的对账重新抽样，通过就定稿（§20 第 1 条），与对账里遇到同样情形时一样。一条成员读出不同、而查它此刻的变更戳时热库读不出来，差异没法归到快照之后的改动，包可能有问题：这个包照样作废（`.rejected`、意向行删掉），运行同样以 `sample_failed` 失败。
 
 ### 18.6 失败
 
@@ -1075,7 +1077,8 @@ archive:
 | --- | --- |
 | 一条 audit 的完整性事件复核不过、或某段密文解不开 | 只排除这一条：不归档、留在热库，推迟原因 `integrity_failed`，计入 `integrity_failed_audits`，日志 Error `archive integrity check failed`（`error_category=archive_integrity_failed`，`reason` 是具体原因）。存储的载荷校验状态置为失败，与后台载荷校验发现损坏时相同，存储因此报告不健康 |
 | 一条 audit 不能导出、被写入方拒绝，或抽样时读出不同而变更戳没变 | 只排除这一条，推迟原因 `export_failed`，其余成员照常写进包（§18.5）；运行继续 |
-| 重读核对不过，或抽样无法比较 | 这个包作废（`.rejected`），运行以 `archive_failed` 结束，10 分钟后重试 |
+| 重读核对不过 | 这个包作废（`.rejected`），运行以 `archive_failed` 结束，10 分钟后重试 |
+| 抽样时热库读不出来（`sample_failed`） | 包不作废，分段留在 `publishing`，运行以 `archive_failed` 结束、水位不动；下一次运行的对账重新抽样后定稿。读出不同而变更戳读不出来时包作废（§18.5） |
 | 磁盘满、写入或 fsync 失败 | 删掉这个分段自己的临时文件，不登记；运行以 `archive_failed` 结束（`reason` 是写入方的码，如 `disk_full`、`write_failed`、`sync_failed`）；10 分钟后重试 |
 | 登记意向、定稿或目录表的其他写失败 | 运行以 `archive_failed` 结束；已发布而没定稿的分段留给对账 |
 | 快照本身出错（取消、存储关闭、事务不再应答） | 结束这一趟和这次运行（`snapshot_failed`），不排除任何成员，不置失败状态 |
@@ -1118,13 +1121,13 @@ archive:
 
 **完成日志的字段**：`status`、`exported_audits`（登记为当前成员的条数，不含登记时已是 `stale` 的）、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`（被排除的条数，含下两项）、`stale_audits`、`exported_gaps`、`refused_audits`（写入方拒绝的）、`sample_mismatch_audits`（抽样读出不同的）、`segments`、`disk_bytes`、`duration_ms`；推迟数大于 0 的原因各有一个 `deferred_<原因>`；对账定稿了分段时有 `reconciled_segments`；到了期限时有 `deadline_reached=true`。
 
-**失败的 `reason`**：`catalog_failed`（目录表读写失败）、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`（抽样时热库读不出来）、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及写入、发布和核对时 `internal/archive/bundle` 的码（如 `disk_full`、`write_failed`、`sync_failed`、`name_exists`、`link_failed`，§24.3 的结果码）。
+**失败的 `reason`**：`catalog_failed`（目录表读写失败）、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`（抽样时热库读不出来；包是否作废见 §18.5）、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及写入、发布和核对时 `internal/archive/bundle` 的码（如 `disk_full`、`write_failed`、`sync_failed`、`name_exists`、`link_failed`，§24.3 的结果码）。
 
 ## 20. 对账
 
 每次运行开始时先把目录表和归档目录对齐。对账只读、改名和登记；唯一删除的是写入方自己命名的临时文件。
 
-1. **`publishing` 的分段**（上次发布后、定稿前中断）：清单不在，删掉意向行，已链上的数据文件留给第 3 步当孤儿；清单在，就按 §16 重读核对，成员与修订号、摘要都与意向行一致，再做 §18.5 第 5 步的抽样，都通过就定稿。核对或抽样不一致时，包改名 `.rejected`、意向行删掉。抽样时热库读不出来，这次运行以失败结束（`sample_failed`），分段留在 `publishing`，下一次再试。
+1. **`publishing` 的分段**（上次发布后、定稿前中断）：清单不在，删掉意向行，已链上的数据文件留给第 3 步当孤儿；清单在，就按 §16 重读核对，成员与修订号、摘要都与意向行一致，再做 §18.5 第 5 步的抽样，都通过就定稿。核对或抽样不一致时，包改名 `.rejected`、意向行删掉。抽样时热库读不出来，这次运行以失败结束（`sample_failed`），分段留在 `publishing`，下一次再试；新发布的分段遇到同样情形时也这样处理（§18.5）。
 2. **目录表不认识的包**（例如数据库从备份恢复，或回滚后重新升级）：用密钥核对通过的，登记为 `sealed` 的分段；成员一律登记为 `stale`、没有变更戳，可以列出和读取，但永远不作为删除依据；某个 audit 已经有当前成员时只登记分段、不登记它。分段行的 `run_id` 记为执行对账的这次运行。核对不过的只记日志，不改名。
 3. **残留文件**：写入方命名的临时文件（§3.2）删掉；没有任何清单列出的数据文件改名加 `.orphan`，不删除。
 

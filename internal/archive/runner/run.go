@@ -18,6 +18,16 @@ type failure struct {
 	err    error
 	// auditID names the one member a sample mismatch is attributed to.
 	auditID string
+	// hotUnreadable marks a sample_failed that says nothing about the
+	// bundle: the hot side could not be read for the comparison (J.3).
+	hotUnreadable bool
+}
+
+// isHotUnreadable reports whether err is a sample that could not compare
+// because the hot side could not be read.
+func isHotUnreadable(err error) bool {
+	var target *failure
+	return errors.As(err, &target) && target.hotUnreadable
 }
 
 func (failure *failure) Error() string { return "archive runner: " + failure.reason }
