@@ -39,6 +39,23 @@ audit:
   staging:
     dir: /staging
     max_bytes: 4294967296
+# Cold archive (doc/features/26-cold-archive.md); see audit-proxy.example.yaml.
+# Off by default. This version only exports: with a mode other than off,
+# retention stops deleting and the hot database keeps growing. Uncomment the
+# /archive mount in compose.yaml too; the directory must be owned by the
+# container user (65532) with mode 0700.
+# archive:
+#   mode: "off"
+#   dir: /archive
+#   encrypt: true
+#   run_at: "03:00"
+#   timezone: ""
+#   segment_max_bytes: 268435456
+#   conversation_min_turns: 16
+#   conversation_min_bytes: 16777216
+#   pass_audits: 5000
+#   run_deadline_minutes: 240
+#   verify_sample: 0.05
 
 interceptors:
   require-client-credential:

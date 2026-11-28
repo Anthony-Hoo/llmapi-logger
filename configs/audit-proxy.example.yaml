@@ -119,6 +119,33 @@ audit:
     dir: /var/lib/llmapi-logger/staging
     max_bytes: 4294967296
 
+# Cold archive (doc/features/26-cold-archive.md). Off by default and the whole
+# section may be omitted. Once a day it exports the audits and gaps retention
+# would delete into dir: plaintext lines, gzip, framed encryption under keys
+# derived from key_path, and a signed plaintext manifest per bundle. No
+# credential value is archived. THIS VERSION ONLY EXPORTS: with export_only or
+# archive_then_delete, retention no longer deletes anything and the hot
+# database keeps growing; archive_then_delete behaves like export_only.
+# Requires retention_days > 0. dir is an absolute path on its own disk, not the
+# key's directory and not audit.staging.dir; back up the key apart from it.
+# timezone empty means org_reports.timezone. verify_sample compares at least
+# one member of every bundle with the hot database. To pause archiving
+# without resuming direct deletion, set retention_days to 0. Deploy a version
+# that contains this module before adding the section, and remove it before
+# rolling back (configuration loading is strict).
+# archive:
+#   mode: "off"
+#   dir: /var/lib/llmapi-logger/archive
+#   encrypt: true
+#   run_at: "03:00"
+#   timezone: ""
+#   segment_max_bytes: 268435456
+#   conversation_min_turns: 16
+#   conversation_min_bytes: 16777216
+#   pass_audits: 5000
+#   run_deadline_minutes: 240
+#   verify_sample: 0.05
+
 interceptors:
   require-client-credential:
     type: require_credential

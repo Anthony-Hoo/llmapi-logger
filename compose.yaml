@@ -33,6 +33,13 @@ services:
       # runs without audit). Its own volume: never the key's /data, never
       # the read-only root or the tmpfs /tmp. doc/deployment/README.md 3.2.
       - audit-staging:/staging
+      # Cold archive (archive.dir; off by default). Uncomment together with
+      # the archive section of the config. Its own disk: never the key's
+      # /data, never the staging volume. The image has no /archive, so a new
+      # named volume would be owned by root and refused at start-up: mount a
+      # host directory owned by 65532 with mode 0700. Back up the key apart
+      # from this disk. doc/deployment/README.md 3.4.
+      # - /path/to/archive-disk:/archive
       - ./configs/audit-proxy.docker.yaml:/etc/audit-proxy/config.yaml:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
