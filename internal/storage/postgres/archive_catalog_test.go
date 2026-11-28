@@ -100,7 +100,7 @@ func TestArchiveCatalogRunsIntentsAndSeal(t *testing.T) {
 		t.Fatalf("intent result = %+v", result)
 	}
 	states := memberStates(t, store)
-	if states[ArchiveMemberKey{"catalog-a", 1}] != ArchiveMemberSealed || states[ArchiveMemberKey{"catalog-c", 1}] != ArchiveMemberSealed {
+	if states[ArchiveMemberKey{AuditID: "catalog-a", Revision: 1}] != ArchiveMemberSealed || states[ArchiveMemberKey{AuditID: "catalog-c", Revision: 1}] != ArchiveMemberSealed {
 		t.Fatalf("member states = %v", states)
 	}
 	segment, err := store.ArchiveSegment(ctx, intent.Segment.SegmentID)
@@ -130,11 +130,11 @@ func TestArchiveCatalogRunsIntentsAndSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Stale) != 0 || !reflect.DeepEqual(result.Superseded, []ArchiveMemberKey{{"catalog-a", 1}}) {
+	if len(result.Stale) != 0 || !reflect.DeepEqual(result.Superseded, []ArchiveMemberKey{{AuditID: "catalog-a", Revision: 1}}) {
 		t.Fatalf("re-inclusion result = %+v", result)
 	}
 	states = memberStates(t, store)
-	if states[ArchiveMemberKey{"catalog-a", 1}] != ArchiveMemberStale || states[ArchiveMemberKey{"catalog-a", 2}] != ArchiveMemberSealed {
+	if states[ArchiveMemberKey{AuditID: "catalog-a", Revision: 1}] != ArchiveMemberStale || states[ArchiveMemberKey{AuditID: "catalog-a", Revision: 2}] != ArchiveMemberSealed {
 		t.Fatalf("member states after re-inclusion = %v", states)
 	}
 	if revision, err := store.ArchiveCurrentRevision(ctx, "catalog-a"); err != nil || revision != 2 {
@@ -171,7 +171,7 @@ func TestArchiveCatalogRunsIntentsAndSeal(t *testing.T) {
 		t.Fatalf("drop unknown intent = %v, %v", dropped, err)
 	}
 	states = memberStates(t, store)
-	if _, ok := states[ArchiveMemberKey{"catalog-a", 2}]; ok || states[ArchiveMemberKey{"catalog-a", 1}] != ArchiveMemberStale {
+	if _, ok := states[ArchiveMemberKey{AuditID: "catalog-a", Revision: 2}]; ok || states[ArchiveMemberKey{AuditID: "catalog-a", Revision: 1}] != ArchiveMemberStale {
 		t.Fatalf("member states after drop = %v", states)
 	}
 
@@ -262,11 +262,11 @@ func TestArchiveCatalogReconciledBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result.SkippedMembers, []ArchiveMemberKey{{"reconcile-a", 1}}) || len(result.SkippedGaps) != 0 {
+	if !reflect.DeepEqual(result.SkippedMembers, []ArchiveMemberKey{{AuditID: "reconcile-a", Revision: 1}}) || len(result.SkippedGaps) != 0 {
 		t.Fatalf("reconciled result = %+v", result)
 	}
 	states := memberStates(t, store)
-	if states[ArchiveMemberKey{"reconcile-a", 1}] != ArchiveMemberSealed || states[ArchiveMemberKey{"reconcile-a-elsewhere", 3}] != ArchiveMemberStale {
+	if states[ArchiveMemberKey{AuditID: "reconcile-a", Revision: 1}] != ArchiveMemberSealed || states[ArchiveMemberKey{AuditID: "reconcile-a-elsewhere", Revision: 3}] != ArchiveMemberStale {
 		t.Fatalf("member states = %v", states)
 	}
 	gapSegment := testArchiveSegment("d0000000000000000000000000000004", run.RunID, "gaps/found.manifest.json", 2)
