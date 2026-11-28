@@ -262,8 +262,12 @@ func (store *Store) RegisterArchiveIntent(ctx context.Context, intent ArchiveInt
 		}
 		members := append([]ArchiveMember(nil), owned.Members...)
 		sort.Slice(members, func(left, right int) bool { return members[left].AuditID < members[right].AuditID })
+		known, err := readIntentMemberState(transaction, members)
+		if err != nil {
+			return err
+		}
 		for _, member := range members {
-			state, superseded, err := registerIntentMember(transaction, owned.Segment.SegmentID, member)
+			state, superseded, err := registerIntentMember(transaction, owned.Segment.SegmentID, member, known[member.AuditID])
 			if err != nil {
 				return err
 			}
@@ -294,42 +298,98 @@ const (
 	ArchiveMemberStale      = storage.ArchiveMemberStale
 )
 
-func registerIntentMember(transaction dbTransaction, segmentID string, member ArchiveMember) (string, *ArchiveMemberKey, error) {
-	var highest int64
-	if err := transaction.QueryRow(`SELECT COALESCE(MAX(revision), 0) FROM archive_members WHERE audit_id = $1`, member.AuditID).Scan(&highest); err != nil {
-		return "", nil, fmt.Errorf("postgres archive: read member revision: %w", err)
+// intentMemberState is what the catalog and the hot store already hold for
+// one audit of an intent, read in batches before the members are inserted.
+type intentMemberState struct {
+	highestRevision int64
+	hasCurrent      bool
+	currentRevision int64
+	currentState    string
+	stamp           archiveStamp
+}
+
+// readIntentMemberState reads, for every member and a few hundred at a time,
+// the highest revision, the current (not stale) row locked FOR UPDATE, and
+// the change stamp recomputed in this transaction, so the writer does not pay
+// a round trip per table and member.
+func readIntentMemberState(transaction dbTransaction, members []ArchiveMember) (map[string]*intentMemberState, error) {
+	known := make(map[string]*intentMemberState, len(members))
+	ids := make([]string, 0, len(members))
+	for _, member := range members {
+		known[member.AuditID] = &intentMemberState{}
+		ids = append(ids, member.AuditID)
 	}
-	if member.Revision <= highest {
+	for start := 0; start < len(ids); start += archiveStampBatch {
+		end := min(start+archiveStampBatch, len(ids))
+		arguments := stringsToAny(ids[start:end])
+		rows, err := transaction.Query(`
+SELECT audit_id, MAX(revision) FROM archive_members
+WHERE audit_id IN (`+placeholders(len(arguments))+`) GROUP BY audit_id`, arguments...)
+		if err != nil {
+			return nil, fmt.Errorf("postgres archive: read member revisions: %w", err)
+		}
+		for rows.Next() {
+			var auditID string
+			var revision int64
+			if err := rows.Scan(&auditID, &revision); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("postgres archive: scan member revision: %w", err)
+			}
+			known[auditID].highestRevision = revision
+		}
+		if err := closeRows(rows); err != nil {
+			return nil, fmt.Errorf("postgres archive: read member revisions: %w", err)
+		}
+		rows, err = transaction.Query(`
+SELECT audit_id, revision, state FROM archive_members
+WHERE audit_id IN (`+placeholders(len(arguments))+`) AND state <> 'stale'
+ORDER BY audit_id
+FOR UPDATE`, arguments...)
+		if err != nil {
+			return nil, fmt.Errorf("postgres archive: read current members: %w", err)
+		}
+		for rows.Next() {
+			var auditID, state string
+			var revision int64
+			if err := rows.Scan(&auditID, &revision, &state); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("postgres archive: scan current member: %w", err)
+			}
+			entry := known[auditID]
+			entry.hasCurrent, entry.currentRevision, entry.currentState = true, revision, state
+		}
+		if err := closeRows(rows); err != nil {
+			return nil, fmt.Errorf("postgres archive: read current members: %w", err)
+		}
+	}
+	stamps, err := archiveChangeStamps(context.Background(), transaction, ids)
+	if err != nil {
+		return nil, err
+	}
+	for id, stamp := range stamps {
+		known[id].stamp = stamp
+	}
+	return known, nil
+}
+
+func registerIntentMember(transaction dbTransaction, segmentID string, member ArchiveMember, known *intentMemberState) (string, *ArchiveMemberKey, error) {
+	if member.Revision <= known.highestRevision {
 		return "", nil, localWriteError("postgres: archive member revision is not above the audit's existing revisions")
 	}
-	var currentRevision int64
-	var currentState string
-	err := transaction.QueryRow(`
-SELECT revision, state FROM archive_members
-WHERE audit_id = $1 AND state <> 'stale'
-FOR UPDATE`, member.AuditID).Scan(&currentRevision, &currentState)
-	hasCurrent := err == nil
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", nil, fmt.Errorf("postgres archive: read current member: %w", err)
-	}
-	stamp, exists, err := archiveChangeStamp(context.Background(), transaction, member.AuditID)
-	if err != nil {
-		return "", nil, err
-	}
 	state := ArchiveMemberSealed
-	if !exists || !bytes.Equal(stamp[:], member.ChangeStamp) {
+	if !known.stamp.exists || !bytes.Equal(known.stamp.stamp[:], member.ChangeStamp) {
 		state = ArchiveMemberStale
 	}
 	var superseded *ArchiveMemberKey
-	if hasCurrent {
-		switch currentState {
+	if known.hasCurrent {
+		switch known.currentState {
 		case ArchiveMemberSealed:
 			if _, err := transaction.Exec(`
 UPDATE archive_members SET state = 'stale', state_changed_at_ns = $1
-WHERE audit_id = $2 AND revision = $3`, member.StateChangedAtNS, member.AuditID, currentRevision); err != nil {
+WHERE audit_id = $2 AND revision = $3`, member.StateChangedAtNS, member.AuditID, known.currentRevision); err != nil {
 				return "", nil, fmt.Errorf("postgres archive: supersede member: %w", err)
 			}
-			superseded = &ArchiveMemberKey{AuditID: member.AuditID, Revision: currentRevision}
+			superseded = &ArchiveMemberKey{AuditID: member.AuditID, Revision: known.currentRevision}
 		default:
 			// A removed audit cannot be exported again; whatever was read is
 			// not a current member.
@@ -347,7 +407,6 @@ INSERT INTO archive_members (
 	}
 	return state, superseded, nil
 }
-
 func insertArchiveSegment(transaction dbTransaction, segment ArchiveSegment) error {
 	if _, err := transaction.Exec(`
 INSERT INTO archive_segments (
@@ -565,7 +624,7 @@ func (store *Store) ArchiveSegment(ctx context.Context, segmentID string) (Archi
 }
 
 // ListArchiveSegments returns the segments in state (publishing, sealed or
-// hot_removed), oldest first, at most limit after the segment id after.
+// hot_removed) in segment_id order, at most limit after the segment id after.
 func (store *Store) ListArchiveSegments(ctx context.Context, state, after string, limit int) ([]ArchiveSegment, error) {
 	if err := store.archiveReadable(ctx); err != nil {
 		return nil, err

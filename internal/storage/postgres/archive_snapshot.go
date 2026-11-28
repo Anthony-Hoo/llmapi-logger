@@ -215,6 +215,13 @@ SELECT a.audit_id, a.started_at_ns, a.protocol, t.conversation_id, t.created_at_
 FROM audit_records AS a
 LEFT JOIN turns AS t ON t.audit_id = a.audit_id`
 
+// archiveDueQuery pages after the watermark along audit_records_started_idx:
+// $1 format version, $2 and $3 the watermark, $4 the cutoff, $5 the limit.
+const archiveDueQuery = archiveCandidateColumns + `
+WHERE (a.started_at_ns, a.audit_id) > ($2, $3) AND a.started_at_ns < $4
+ORDER BY a.started_at_ns, a.audit_id
+LIMIT $5`
+
 func (snapshot *ArchiveSnapshot) queryCandidates(statement string, arguments ...any) ([]ArchiveCandidate, error) {
 	rows, err := snapshot.tx.QueryContext(snapshot.ctx, statement, arguments...)
 	if err != nil {
@@ -257,10 +264,7 @@ func (snapshot *ArchiveSnapshot) Due(after *ArchivePosition, cutoffNS, formatVer
 	if after != nil {
 		afterStarted, afterAudit = after.StartedAtNS, after.AuditID
 	}
-	candidates, err := snapshot.queryCandidates(archiveCandidateColumns+`
-WHERE (a.started_at_ns, a.audit_id) > ($2, $3) AND a.started_at_ns < $4
-ORDER BY a.started_at_ns, a.audit_id
-LIMIT $5`, formatVersion, afterStarted, afterAudit, cutoffNS, limit+1)
+	candidates, err := snapshot.queryCandidates(archiveDueQuery, formatVersion, afterStarted, afterAudit, cutoffNS, limit+1)
 	if err != nil {
 		return ArchiveDuePage{}, err
 	}
@@ -1229,8 +1233,8 @@ FROM audit_project_identity WHERE audit_id = $1`, auditID).Scan(&identity.Identi
 // (query.StreamRaw, J.2 item 5): every chunk belongs to the source stage of a
 // body with full retention that is not streaming, and for each such body the
 // chunks of its source stage run on in seq and offset (a forward gap only for
-// a partial body with capture_chunk_missing), their count is chunk_count and
-// their bytes stored_length. A record that breaks this would be rejected by
+// a partial body with capture_chunk_missing, within the observed length), their
+// count is chunk_count and their bytes stored_length. A record that breaks this would be rejected by
 // the bundle's re-read check and void its whole segment; it is excluded
 // here instead.
 func checkArchiveRawLayout(record *archive.Record) error {
@@ -1247,6 +1251,9 @@ func checkArchiveRawLayout(record *archive.Record) error {
 				if !missing || chunk.Seq <= sequence || chunk.Offset < offset {
 					return errors.New("raw chunks do not run on")
 				}
+			}
+			if chunk.PlaintextLength < 0 || missing && (chunk.Offset > body.ObservedLength || chunk.PlaintextLength > body.ObservedLength-chunk.Offset) {
+				return errors.New("raw chunk outside the observed body")
 			}
 			total += chunk.PlaintextLength
 			count++

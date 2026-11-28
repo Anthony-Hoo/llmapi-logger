@@ -410,7 +410,7 @@ func TestArchiveDigestCoversEveryDigestColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tested := 0
+	changed, excluded, skipped := 0, 0, 0
 	for _, column := range archive.Columns {
 		if column.Class != archive.ClassDigest {
 			continue
@@ -418,6 +418,7 @@ func TestArchiveDigestCoversEveryDigestColumn(t *testing.T) {
 		name := column.Table + "." + column.Name
 		expectation := digestExpectations[name]
 		if expectation.skip != "" {
+			skipped++
 			continue
 		}
 		scope, ok := digestScope[column.Table]
@@ -479,7 +480,11 @@ func TestArchiveDigestCoversEveryDigestColumn(t *testing.T) {
 				t.Fatalf("restoring did not return the baseline: %v", err)
 			}
 		})
-		tested++
+		if expectation.excluded != "" {
+			excluded++
+		} else {
+			changed++
+		}
 	}
 	for name, expectation := range digestExpectations {
 		found := false
@@ -493,7 +498,7 @@ func TestArchiveDigestCoversEveryDigestColumn(t *testing.T) {
 			t.Errorf("%s: both skipped and expected", name)
 		}
 	}
-	t.Logf("%d digest columns changed in the database", tested)
+	t.Logf("digest columns: %d change the record digest, %d exclude the audit, %d skipped", changed, excluded, skipped)
 }
 
 // zeroOneColumns are the 0/1 flags of the archived tables.

@@ -474,3 +474,82 @@ func TestArchiveSnapshotNeedsIntegrity(t *testing.T) {
 		t.Fatal("snapshot opened without integrity")
 	}
 }
+
+// Two shapes the main test does not bundle: a version 1 audit with header
+// rows, one of them a credential, and a version 2 failed capture whose block
+// has a section for a stage that has no row (the loose rule of
+// headerblock.Expand).
+func TestArchiveSnapshotBundlesHeaderShapes(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openSignedStore(t)
+	cipher := v2TestCipher(t)
+	keys := archiveTestKeys(t)
+
+	writeV1Audit(t, store, cipher, "v1-credential")
+	uriAAD, _ := security.AAD("v1-credential", "request_uri")
+	uri, err := cipher.Encrypt(uriAAD, []byte("/v1/chat/completions?key=synthetic-query-key&alt=sse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExecWriter(t, store, `UPDATE audit_records SET request_uri_enc = $1 WHERE audit_id = 'v1-credential'`, uri)
+	resignArchiveEvents(t, store, "v1-credential")
+	parseArchiveAudit(t, store, cipher, "v1-credential", archiveTurnSpec{noTurn: true, createdAtNS: 3000})
+
+	injectInsertFailure(t, store, "http_stages", "NEW.stage = 'request_sent_to_newapi'")
+	writeV2Audit(t, store, cipher, v2Audit{id: "v2-rejected"})
+	dropInjectedFailure(t, store, "http_stages")
+	parseArchiveAudit(t, store, cipher, "v2-rejected", archiveTurnSpec{noTurn: true, createdAtNS: 3000, status: ParseError, errorCode: "parse_failed"})
+	if err := store.VerifyIntegrityPayloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, exports, _ := writeAndVerifyBundle(t, store, cipher, t.TempDir(), bundle.Spec{Kind: archive.BundleBucket, Protocol: "openai", Index: 1}, []string{"v1-credential", "v2-rejected"})
+
+	v1 := exports["v1-credential"].Record
+	if v1.Headers.CaptureVersion != CaptureVersion1 || v1.Headers.BlockPresent || v1.Headers.BlockStages != nil || len(v1.Headers.Values) == 0 {
+		t.Fatalf("v1 headers = %+v", v1.Headers)
+	}
+	secret := []byte("Bearer synthetic-secret")
+	credentials := 0
+	for _, value := range v1.Headers.Values {
+		if value.Name != "Authorization" {
+			if value.Value.Omitted {
+				t.Fatalf("%s omitted", value.Name)
+			}
+			continue
+		}
+		credentials++
+		if !value.Value.Omitted || value.Value.Value != "" || value.Value.Length != int64(len(secret)) || value.Value.Fingerprint != keys.CredentialFingerprint(secret) {
+			t.Fatalf("Authorization projected as %+v", value.Value)
+		}
+	}
+	if credentials != 2 {
+		t.Fatalf("credential values = %d, want both stages' Authorization", credentials)
+	}
+	query := v1.Audit.RequestURI
+	if !query.HasQuery || len(query.Segments) != 2 || !query.Segments[0].Credential || query.Segments[0].RawName != "key" ||
+		query.Segments[0].Fingerprint != keys.CredentialFingerprint([]byte("synthetic-query-key")) || query.Segments[1].Raw != "alt=sse" {
+		t.Fatalf("request URI projected as %+v", query)
+	}
+
+	v2 := exports["v2-rejected"].Record
+	rows := map[string]bool{}
+	for _, stage := range v2.Stages {
+		rows[stage.Stage] = true
+	}
+	if v2.Audit.CaptureStatus != CaptureFailed || rows[StageRequestSent] || !slices.Contains(v2.Headers.BlockStages, StageRequestSent) || !v2.Headers.BlockPresent {
+		t.Fatalf("v2 failed capture: status %s, stage rows %v, block stages %v", v2.Audit.CaptureStatus, rows, v2.Headers.BlockStages)
+	}
+	sectionValues := 0
+	for _, value := range v2.Headers.Values {
+		if value.Stage == StageRequestSent {
+			sectionValues++
+		}
+	}
+	if sectionValues == 0 {
+		t.Fatal("the section of the stage without a row is not in the record")
+	}
+	if v2.Audit.UserAgent == nil || len(v2.Audit.UserAgent) != 2 {
+		t.Fatalf("v2 user agent = %+v", v2.Audit.UserAgent)
+	}
+}

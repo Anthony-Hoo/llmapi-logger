@@ -150,20 +150,32 @@ func TestArchiveChangeStampTracksEveryWriteToTheAudit(t *testing.T) {
 		base = next
 	}
 
-	// VACUUM (FREEZE) must have frozen the rows for the assertion to mean
-	// anything: relfrozenxid advances only when no older row version is left.
-	var frozenBefore, frozenAfter string
-	if err := admin.QueryRow(`SELECT relfrozenxid::text FROM pg_class WHERE oid = to_regclass('audit_records')`).Scan(&frozenBefore); err != nil {
-		t.Fatal(err)
-	}
-	exec(`VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) audit_records, turns, token_links, turn_context_ops, turn_response_items`)
-	if err := admin.QueryRow(`SELECT relfrozenxid::text FROM pg_class WHERE oid = to_regclass('audit_records')`).Scan(&frozenAfter); err != nil {
-		t.Fatal(err)
-	}
-	if frozenAfter == frozenBefore {
-		t.Fatalf("VACUUM (FREEZE) did not advance relfrozenxid (%s): an older snapshot holds the rows back", frozenBefore)
-	}
-	unchanged("VACUUM (FREEZE)")
+	// VACUUM (FREEZE) must have frozen the member's rows for the assertion to
+	// mean anything: a row is frozen for certain once its xmin precedes the
+	// table's relfrozenxid. An older snapshot held by another session on the
+	// shared database can hold the freeze back; the subtest is then skipped.
+	t.Run("VACUUM (FREEZE)", func(t *testing.T) {
+		if _, err := admin.ExecContext(ctx, `VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) audit_records, turns, token_links, turn_context_ops, turn_response_items`); err != nil {
+			t.Fatal(err)
+		}
+		frozen := true
+		for _, table := range []string{"audit_records", "turns", "token_links"} {
+			var precedes bool
+			if err := admin.QueryRow(`
+SELECT age(t.xmin) > age(c.relfrozenxid)
+FROM `+table+` AS t, pg_class AS c
+WHERE t.audit_id = 'stamp-member' AND c.oid = to_regclass($1)`, table).Scan(&precedes); err != nil {
+				t.Fatal(err)
+			}
+			frozen = frozen && precedes
+		}
+		if !frozen {
+			t.Skip("an older snapshot on the shared database held the freeze back; the member's rows are not frozen")
+		}
+		if stampOf(t, store, "stamp-member") != base {
+			t.Fatal("VACUUM (FREEZE) changed the stamp")
+		}
+	})
 	before := relationFiles(t, admin, "audit_records", "turns")
 	exec(`VACUUM FULL audit_records, turns, token_links, turn_context_ops, turn_response_items`)
 	if after := relationFiles(t, admin, "audit_records", "turns"); after[0] == before[0] || after[1] == before[1] {
@@ -268,5 +280,41 @@ func TestArchiveChangeStampTracksEveryWriteToTheAudit(t *testing.T) {
 	var deleted int
 	if err := admin.QueryRow(`SELECT COUNT(*) FROM audit_records WHERE audit_id = 'stamp-parent'`).Scan(&deleted); err != nil || deleted != 0 {
 		t.Fatalf("parent still present: %d, %v", deleted, err)
+	}
+}
+
+// The batched stamps the intent registration uses are the stamps of each
+// audit alone.
+func TestArchiveChangeStampsBatchEqualsSingle(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	cipher := graphTestCipher(t)
+	saveGraphTestTurn(t, store, cipher, "batch-parent", "", "batch-response-parent", 100,
+		[]graphTestItem{userItem("parent question")}, []graphTestItem{assistantItem("parent answer")})
+	saveGraphTestTurn(t, store, cipher, "batch-child", "batch-response-parent", "batch-response-child", 200,
+		[]graphTestItem{userItem("parent question"), assistantItem("parent answer"), userItem("child")}, []graphTestItem{assistantItem("child answer")})
+	ended := int64(301)
+	insertRetentionAudit(t, store, "batch-plain", 300, &ended, ParseOK, true)
+	ids := []string{"batch-plain", "batch-missing", "batch-child", "batch-parent"}
+	transaction, err := store.readerDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transaction.Rollback()
+	batch, err := archiveChangeStamps(ctx, transaction, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		stamp, exists, err := archiveChangeStamp(ctx, transaction, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if batch[id].stamp != stamp || batch[id].exists != exists || exists == (id == "batch-missing") {
+			t.Fatalf("%s: batch %+v, alone %x %v", id, batch[id], stamp, exists)
+		}
+	}
+	if batch["batch-child"].stamp == batch["batch-parent"].stamp {
+		t.Fatal("two audits share a stamp")
 	}
 }
