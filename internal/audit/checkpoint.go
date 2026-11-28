@@ -21,7 +21,8 @@ import (
 // request_sent body ends, checkpoint 2 when response_sent starts, and
 // CommitAudit at Finish. A checkpoint writes what is new since the previous
 // write and is not waited for; when it cannot be enqueued its content stays
-// in memory and goes with the next write.
+// in memory and goes with the next write. A stage's first spill to staging
+// adds one more operation, the spill checkpoint below.
 
 // headerGroup is one sealed (stage, kind) group of version 1 header rows.
 type headerGroup struct {

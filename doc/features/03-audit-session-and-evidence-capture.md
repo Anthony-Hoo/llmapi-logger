@@ -154,7 +154,7 @@ worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存
 
 ## 13. unified 写入路径
 
-`audit.write_path`（模块 01 §4 第 18 项）选择会话怎样写库。`legacy`（默认）就是上面各节描述的逐操作写法：每个阶段、每组 Header、每个 1 MiB 块各是一个 writer 操作，一条典型流式请求 22 个。`unified` 把一条 audit 写成最多四个 writer 操作，Body 在内存里留到写库为止。设计与维护者的决定见 [issue #59 第 3 阶段设计](../design/issue-59-stage3-write-path.md)，与设计不同的地方见它的“实施记录”。
+`audit.write_path`（模块 01 §4 第 18 项）选择会话怎样写库。`legacy`（默认）就是上面各节描述的逐操作写法：每个阶段、每组 Header、每个 1 MiB 块各是一个 writer 操作，一条典型流式请求 22 个。`unified` 把一条 audit 写成最多四个 writer 操作（有阶段落暂存时，每个这样的阶段另加一个只写行的检查点，§13.4），Body 在内存里留到写库为止。设计与维护者的决定见 [issue #59 第 3 阶段设计](../design/issue-59-stage3-write-path.md)，与设计不同的地方见它的“实施记录”。
 
 开关在构造 `audit.Manager` 时定（`NewManagerWithOptions`），不按请求切换；`Manager.WritePath` 报告会话实际使用的路径。存储声明自己不能承担 unified 时，构造失败，审计不可用。PostgreSQL 存储写采集版本 2（Header 块），SQLite 存储只写版本 1（`captureVersionFor`）。两条路径共用观察层、阶段与 Body 的终态判定（`finishStageLocked`）和时钟读取，所以长度、SHA-256、状态、错误码、`body_stage_mismatch` 和“终止事件之后断开算完成”的规则都相同；不同的只是保留层和写库方式。
 
@@ -267,13 +267,15 @@ Body 标为故障，阶段 partial，`capture_status` 为 partial，raw 保留 `
 | 退出时刻 | legacy | unified | 差别 |
 | --- | --- | --- | --- |
 | 拦截器执行中，包括 body 拦截器预读 | 起始行；`request_received` 的行和 Header；预读超过 1 MiB 时已满的块 | 起始行；`request_received` 的行和 Header（版本 2 含 `user_agent_enc` 和只含入站阶段的块）；预读超过预算时，落暂存的块和它的 Body 行 | 预算以内的预读字节没有 |
-| 请求 Body 正在上传 | 起始行；两个请求阶段的行和 Header；两个阶段各自已满 1 MiB 的块 | 同上一行；请求 Body 超过预算时，另有落暂存时的检查点写的 `request_sent` 行和 Header、`request_received` 的 Body 行和落暂存的块 | `request_sent` 的行和 Header（与入站几乎逐条相同）在没落暂存时没有；预算以内的请求 Body 没有，legacy 只丢最后不足 1 MiB 的部分 |
+| 入站 Body 已收完，正在转发给上游 | 起始行；`request_received` 的行、Header 和整个 Body；`request_sent` 的行和 Header，以及它已满 1 MiB 的块 | 同上一行；请求 Body 超过预算时，另有 `request_sent` 落暂存时的检查点写的行、Header、Body 行和它落暂存的块 | 预算以内的请求 Body 一个字节也没有，而 legacy 这时已有完整的入站 Body；`request_sent` 的行和 Header（与入站几乎逐条相同）在没落暂存时没有 |
 | 请求读完，响应头还没到 | 以上全部，加两个请求阶段的尾块和请求 Trailer | 检查点 1：两个请求阶段的行、Header 和请求 Trailer（版本 2 为残缺块），Body 行，请求侧全部块 | 合并了的 `request_sent` 没有自己的块，`source_stage` 指向来源 |
 | 响应流到一半 | 以上全部，加两个响应阶段的行和 Header，各自已满 1 MiB 的块 | 检查点 1 和 2；响应 Body 只有超出预算后落暂存的块 | 预算以内的响应 Body 没有（legacy 只丢最后不足 1 MiB） |
 | 响应已读完，`Finish` 提交之前 | 以上全部，加两个响应阶段的尾块和上游响应 Trailer（EOF 时异步写出） | 同上一行 | 同上一行；随 Body 结束到达的上游响应 Trailer 也没有，它只由 `CommitAudit` 写 |
 | `Finish` 提交之后 | 完整 | 完整 | 无 |
 
 两条路径的恢复都把这些 audit 终结为 `interrupted`，未完成的阶段和 Body 收尾为 partial、`process_exit`，raw `full`，并签名；版本 2 签的是最后一次写出的残缺块（模块 09 §8）。SSE 响应体通常远小于预算，所以响应侧的差别在实际流量里影响小；请求侧的差别是维护者接受的（设计决定 1、4）。
+
+第二行需要说明：应用里全局拦截器总是先把请求 Body 读完（§13.4），所以客户端上传发生在第一行那段时间里，第二行是把缓冲的 Body 发给上游的时间。检查点 1 的触发点是 `request_sent` 的 Body 结束，不是入站 Body 收完，因为成对阶段要等两边都结束才能判定。于是从入站收完到发完给上游这一段（连接上游加发送，上游在本机时是毫秒级，上游迟迟不收时更长），unified 的库里没有预算以内的请求 Body，legacy 有完整的入站 Body。设计稿 B.7 的表按交替读取写了“请求 Body 正在上传”一行，没有单独列出这一段。
 
 ### 13.8 交给 parser
 

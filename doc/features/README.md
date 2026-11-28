@@ -201,7 +201,7 @@ issue #59 第 1 阶段（方案见 [`doc/design/issue-59-unified-write-cold-arch
 
 issue #59 第 3 阶段（设计与实施记录见 [`doc/design/issue-59-stage3-write-path.md`](../design/issue-59-stage3-write-path.md)）加了第二条写入路径，默认不启用：
 
-- `audit.write_path: unified`（默认 `legacy`，[模块 01](01-configuration-and-route-boundary.md) §4 第 18 项）把一条 audit 写成至多四个 writer 操作：`BeginAudit` 带上入站阶段，请求 Body 读完时和响应头转发时各一个不等待的检查点，`Finish` 等待的 `CommitAudit`。Body 在内存预算（默认每阶段 8 MiB、全进程 256 MiB）内留到写库，超出的部分加密写入本地暂存，启动时导入；成对阶段在内存里判定。`CommitAudit` 在队列满或整批失败时重试，次数可在管理页面修改（[模块 10](10-query-api-and-minimal-web-ui.md) §11）。会话行为与崩溃时留下的证据见[模块 03](03-audit-session-and-evidence-capture.md) §13，writer 操作见模块 04 §5.1。
+- `audit.write_path: unified`（默认 `legacy`，[模块 01](01-configuration-and-route-boundary.md) §4 第 18 项）把一条 audit 写成至多四个 writer 操作：`BeginAudit` 带上入站阶段，请求 Body 发完给上游时和响应头转发时各一个不等待的检查点，`Finish` 等待的 `CommitAudit`（有阶段落暂存时，每个这样的阶段另加一个只写行的检查点）。Body 在内存预算（默认每阶段 8 MiB、全进程 256 MiB）内留到写库，超出的部分加密写入本地暂存，启动时导入；成对阶段在内存里判定。`CommitAudit` 在队列满或整批失败时重试，次数可在管理页面修改（[模块 10](10-query-api-and-minimal-web-ui.md) §11）。会话行为与崩溃时留下的证据见[模块 03](03-audit-session-and-evidence-capture.md) §13，writer 操作见模块 04 §5.1。
 - PostgreSQL 上 unified 写采集版本 2（迁移 007，schema 版本 7）：每条 audit 一个密封的 Header 块、单独密封的入站 User-Agent、阶段行上的内容类型与编码两列、版本 2 的 capture 摘要；版本 1 的行照常读取和校验（模块 04 §3.9、[模块 09](09-security-encryption-and-redaction.md) §5.2）。SQLite 只写版本 1。
 - parser 只有一个 4096 个作业的 FIFO。unified 下已提交的 audit 交给 `Submit`，条件满足时带着会话手里的明文，解析不读回 raw；两条路径都给 normalization 加了 recover，给每个作业加了 2 分钟期限（[模块 05](05-parser-framework.md) §5）。
 - 先发带迁移 007、仍用 legacy 的版本，再启用 unified；回滚顺序见[部署说明](../deployment/README.md) 3.3。

@@ -102,7 +102,8 @@ session_analysis:
 # and the final commit, which Finish waits for and retries up to
 # commit_retries times (0 to 5). Body content beyond the per-stage memory
 # budget (or when the process-wide budget is full) is sealed and written to
-# local staging, one encrypted file per audit, and read back by the commit.
+# local staging, one encrypted file per audit, and read back by the commit;
+# a stage's first spill adds one more operation that writes its rows.
 # unified requires staging.dir: an absolute path on a disk as reliable as the
 # database's, not tmpfs, and not the key's directory. When staging is full or
 # fails, the stage stops being retained (marked partial); forwarding is never

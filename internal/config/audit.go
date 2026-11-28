@@ -28,7 +28,8 @@ const (
 
 // AuditConfig selects how the capture session writes an audit. The default,
 // legacy, is the per-operation write path; unified keeps bodies in memory and
-// writes an audit in at most four writer operations.
+// writes an audit in at most four writer operations, plus one for each stage
+// that spills to staging.
 type AuditConfig struct {
 	WritePath string `yaml:"write_path"`
 	// CommitRetries bounds the retries of the final write of the unified path.
