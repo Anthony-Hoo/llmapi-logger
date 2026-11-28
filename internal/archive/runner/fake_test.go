@@ -309,13 +309,6 @@ func (store *fakeStore) RegisterReconciled(_ context.Context, reconciled storage
 		owned.SegmentID, owned.State = segment.SegmentID, storage.ArchiveMemberStale
 		store.members = append(store.members, &owned)
 	}
-	for _, gapID := range reconciled.GapIDs {
-		if _, exists := store.gapMembers[gapID]; exists {
-			result.SkippedGaps = append(result.SkippedGaps, gapID)
-			continue
-		}
-		store.gapMembers[gapID] = segment.SegmentID
-	}
 	return result, nil
 }
 

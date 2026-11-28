@@ -573,3 +573,46 @@ VALUES ($1, $2, 'queue_full', 1, '', $2) RETURNING id`, 1000+index, 1001+index).
 		t.Fatal("an oversized gap batch was accepted")
 	}
 }
+
+// A gaps bundle the catalog does not know (the database was restored from an
+// older backup while the archive directory was kept) names gap ids the
+// restored identity sequence may hand out again for other gaps. Reconciling
+// it must neither make those ids removable nor keep the current gaps of the
+// same ids from being exported (H.6 item 2).
+func TestReconciledGapsAreNeitherRemovedNorSkipped(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openSignedStore(t)
+	var gapID int64
+	if err := store.writerConn.QueryRowContext(ctx, `INSERT INTO audit_gaps (started_at_ns, ended_at_ns, reason, request_count, detail, created_at_ns)
+VALUES (1000, 1001, 'queue_full', 1, '', 1001) RETURNING id`).Scan(&gapID); err != nil {
+		t.Fatal(err)
+	}
+	run := testArchiveRun("56000000000000000000000000000001", 10)
+	if _, err := store.BeginArchiveRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	sealedAt := int64(4000)
+	segment := testArchiveSegment("56000000000000000000000000000010", run.RunID, "gaps/found.manifest.json", 0)
+	segment.BundleKind, segment.FormatVersion = storage.ArchiveBundleGaps, storage.ArchiveRemovalMinFormatVersion
+	segment.State, segment.ManifestSHA256, segment.SealedAtNS = storage.ArchiveSegmentSealed, bytes.Repeat([]byte{0x57}, 32), &sealedAt
+	if _, err := store.RegisterReconciledArchive(ctx, ArchiveReconciled{Segment: segment}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := store.RemoveArchivedGaps(ctx, segment.SegmentID, 10, 5000)
+	if err != nil || removed != (ArchiveGapRemovalResult{}) {
+		t.Fatalf("removal of a reconciled gaps segment: %+v, %v", removed, err)
+	}
+	var exists bool
+	if err := store.readerDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM audit_gaps WHERE id = $1)`, gapID).Scan(&exists); err != nil || !exists {
+		t.Fatalf("the current gap was deleted: %v", err)
+	}
+	snapshot, err := store.OpenArchiveSnapshot(ctx, ArchiveSnapshotOptions{Cipher: v2TestCipher(t), Fingerprinter: archiveTestKeys(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Close()
+	due, err := snapshot.DueGaps(10_000, 0, 10)
+	if err != nil || len(due) != 1 || due[0].ID != gapID {
+		t.Fatalf("due gaps %+v, %v", due, err)
+	}
+}

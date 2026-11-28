@@ -255,7 +255,7 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 | `RegisterArchiveIntent` | 插入 `publishing` 的分段和全部成员、gap 成员。每个成员在事务内用导出快照同一个函数重算变更戳：audit 已不在或戳不同就登记为 `stale`；同一 audit 已有 `sealed` 的旧行时先把它改为 `stale`；已有 `hot_removed` 的行时新行登记为 `stale`；修订号必须大于该 audit 已有的全部修订号 |
 | `SealArchiveSegment` | `publishing` 改为 `sealed`，写清单 SHA-256、落盘字节和定稿时间；已是同一清单摘要的 `sealed` 时什么都不做 |
 | `DropArchiveIntent` | 删掉 `publishing` 的分段，成员与 gap 成员级联删除；不存在时什么都不做，其他状态拒绝 |
-| `RegisterReconciledArchive` | 对账登记目录表不认识的包：`sealed` 的分段，成员一律 `stale`、没有变更戳，gap 成员 `sealed`；已有的 `(audit_id, revision)` 和已在别的分段里的 gap 跳过并列出 |
+| `RegisterReconciledArchive` | 对账登记目录表不认识的包：`sealed` 的分段，成员一律 `stale`、没有变更戳；gap 包不登记 gap 成员（id 可能已被另一条 gap 重用），这些 gap 照常重新导出；已有的 `(audit_id, revision)` 跳过并列出 |
 | `FinishArchiveRun` | `running` 改为 `completed` 或 `archive_failed`，写最终计数 |
 
 输入的校验在 `internal/storage/archive_types.go`，不过的输入是本地错误，只回滚这一个操作。

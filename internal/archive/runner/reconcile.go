@@ -20,7 +20,8 @@ import (
 //     intent dropped, and a manifest that fails is rejected (renamed).
 //  2. A verified bundle the catalog does not know is registered sealed, its
 //     members stale (never a reason to delete) unless the audit already has
-//     a current member.
+//     a current member; a gaps bundle without its gaps, which are exported
+//     again.
 //  3. Temporary files of the writer's naming are removed; data files no
 //     manifest lists are renamed .orphan.
 //
@@ -240,15 +241,11 @@ func (current *run) reconcileUnknown(entry bundle.Entry) error {
 		DiskBytes: diskBytes + size, FirstStartedAtNS: &first, LastEndedAtNS: &last, State: storage.ArchiveSegmentSealed,
 		CreatedAtNS: nowNS, SealedAtNS: &nowNS,
 	}}
-	if manifest.BundleKind == archive.BundleGaps {
-		err := opened.Gaps(current.ctx, func(gap archive.Gap) error {
-			reconciled.GapIDs = append(reconciled.GapIDs, gap.ID)
-			return nil
-		})
-		if err != nil {
-			return nil
-		}
-	} else {
+	// A gaps bundle is registered without its gaps: an audit_gaps row of the
+	// same id may be another gap (ids are handed out again after a restore),
+	// and a gap has no change stamp to tell. Its gaps are exported again and
+	// never removed on its account.
+	if manifest.BundleKind != archive.BundleGaps {
 		for _, member := range report.Members {
 			hasCurrent, err := options.Store.HasCurrentMember(current.ctx, member.AuditID)
 			if err != nil {
@@ -269,7 +266,7 @@ func (current *run) reconcileUnknown(entry bundle.Entry) error {
 			})
 		}
 	}
-	reconciled.Segment.MemberCount = int64(len(reconciled.Members) + len(reconciled.GapIDs))
+	reconciled.Segment.MemberCount = int64(len(reconciled.Members))
 	if _, err := options.Store.RegisterReconciled(current.ctx, reconciled); err != nil {
 		return current.catalogFailure(err)
 	}

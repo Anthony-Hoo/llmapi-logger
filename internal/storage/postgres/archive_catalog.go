@@ -520,16 +520,17 @@ func (store *Store) DropArchiveIntent(ctx context.Context, segmentID string) (bo
 }
 
 // RegisterReconciledArchive registers a verified bundle the catalog did not
-// know (H.6 item 2): a sealed segment, its members stale without a change
-// stamp, its gaps sealed. A member whose (audit_id, revision) the catalog
-// already has, or a gap already in another segment, is skipped and listed in
+// know (H.6 item 2): a sealed segment and its members, stale without a change
+// stamp. A gaps segment gets no gap members (storage.ArchiveReconciled), so
+// it is never a basis for removal and its gaps are selected again. A member
+// whose (audit_id, revision) the catalog already has is skipped and listed in
 // the result; the segment row is always inserted. A segment or manifest name
 // the catalog already has is an error.
 func (store *Store) RegisterReconciledArchive(ctx context.Context, reconciled ArchiveReconciled) (ArchiveReconciledResult, error) {
 	if err := storage.ValidateArchiveReconciled(reconciled); err != nil {
 		return ArchiveReconciledResult{}, archiveInvalid(err)
 	}
-	owned := ArchiveReconciled{Segment: cloneArchiveSegment(reconciled.Segment), Members: cloneArchiveMembers(reconciled.Members), GapIDs: append([]int64(nil), reconciled.GapIDs...)}
+	owned := ArchiveReconciled{Segment: cloneArchiveSegment(reconciled.Segment), Members: cloneArchiveMembers(reconciled.Members)}
 	var result ArchiveReconciledResult
 	err := store.submitArchive(ctx, func(transaction dbTransaction) error {
 		result = ArchiveReconciledResult{}
@@ -552,19 +553,6 @@ ON CONFLICT (audit_id, revision) DO NOTHING`,
 				return fmt.Errorf("postgres archive: count reconciled member: %w", err)
 			} else if affected == 0 {
 				result.SkippedMembers = append(result.SkippedMembers, ArchiveMemberKey{AuditID: member.AuditID, Revision: member.Revision})
-			}
-		}
-		for _, gapID := range owned.GapIDs {
-			inserted, err := transaction.Exec(`
-INSERT INTO archive_gap_members (gap_id, segment_id, state) VALUES ($1, $2, 'sealed')
-ON CONFLICT (gap_id) DO NOTHING`, gapID, owned.Segment.SegmentID)
-			if err != nil {
-				return fmt.Errorf("postgres archive: insert reconciled gap: %w", err)
-			}
-			if affected, err := inserted.RowsAffected(); err != nil {
-				return fmt.Errorf("postgres archive: count reconciled gap: %w", err)
-			} else if affected == 0 {
-				result.SkippedGaps = append(result.SkippedGaps, gapID)
 			}
 		}
 		return nil

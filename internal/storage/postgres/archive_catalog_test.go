@@ -262,21 +262,21 @@ func TestArchiveCatalogReconciledBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result.SkippedMembers, []ArchiveMemberKey{{AuditID: "reconcile-a", Revision: 1}}) || len(result.SkippedGaps) != 0 {
+	if !reflect.DeepEqual(result.SkippedMembers, []ArchiveMemberKey{{AuditID: "reconcile-a", Revision: 1}}) {
 		t.Fatalf("reconciled result = %+v", result)
 	}
 	states := memberStates(t, store)
 	if states[ArchiveMemberKey{AuditID: "reconcile-a", Revision: 1}] != ArchiveMemberSealed || states[ArchiveMemberKey{AuditID: "reconcile-a-elsewhere", Revision: 3}] != ArchiveMemberStale {
 		t.Fatalf("member states = %v", states)
 	}
-	gapSegment := testArchiveSegment("d0000000000000000000000000000004", run.RunID, "gaps/found.manifest.json", 2)
+	// A reconciled gaps segment is registered without gap members.
+	gapSegment := testArchiveSegment("d0000000000000000000000000000004", run.RunID, "gaps/found.manifest.json", 0)
 	gapSegment.BundleKind, gapSegment.State, gapSegment.ManifestSHA256, gapSegment.SealedAtNS = storage.ArchiveBundleGaps, storage.ArchiveSegmentSealed, bytes.Repeat([]byte{0x56}, 32), &sealedAt
-	result, err = store.RegisterReconciledArchive(ctx, ArchiveReconciled{Segment: gapSegment, GapIDs: []int64{8, 9}})
-	if err != nil || !reflect.DeepEqual(result.SkippedGaps, []int64{8}) {
-		t.Fatalf("reconciled gaps = %+v, %v", result, err)
+	if _, err := store.RegisterReconciledArchive(ctx, ArchiveReconciled{Segment: gapSegment}); err != nil {
+		t.Fatalf("reconciled gaps segment: %v", err)
 	}
 	gapMembers, err := store.ListArchiveGapMembers(ctx, "", "", 0, 10)
-	if err != nil || len(gapMembers) != 3 || gapMembers[2].GapID != 9 || gapMembers[2].SegmentID != gapSegment.SegmentID {
+	if err != nil || len(gapMembers) != 2 || gapMembers[0].SegmentID != gaps.SegmentID || gapMembers[1].SegmentID != gaps.SegmentID {
 		t.Fatalf("gap members = %+v, %v", gapMembers, err)
 	}
 	// The same manifest name again is refused.

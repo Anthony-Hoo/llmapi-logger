@@ -214,7 +214,9 @@ func (current *run) remove() error {
 		return current.removalFailure(err)
 	}
 	for _, segment := range sealedSegments {
-		if segment.BundleKind != storage.ArchiveBundleGaps || segment.FormatVersion < storage.ArchiveRemovalMinFormatVersion {
+		// A reconciled gaps segment has no gap members (H.6 item 2): nothing
+		// to check or remove.
+		if segment.BundleKind != storage.ArchiveBundleGaps || segment.FormatVersion < storage.ArchiveRemovalMinFormatVersion || segment.MemberCount == 0 {
 			continue
 		}
 		for {

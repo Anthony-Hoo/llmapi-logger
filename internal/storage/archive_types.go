@@ -208,19 +208,20 @@ type ArchiveSeal struct {
 
 // ArchiveReconciled registers a verified bundle the catalog did not know
 // (H.6 item 2): a sealed segment whose members are all stale and carry no
-// change stamp. RunID of the segment is the reconciling run.
+// change stamp. RunID of the segment is the reconciling run. A gaps segment
+// is registered without gap members: a gap has no change stamp, so nothing
+// shows that the audit_gaps row of the same id is the gap the bundle holds (a
+// database restored from an older backup hands the ids out again). Its gaps
+// are therefore never removed on its account and are exported again.
 type ArchiveReconciled struct {
 	Segment ArchiveSegment
 	Members []ArchiveMember
-	GapIDs  []int64
 }
 
-// ArchiveReconciledResult lists the rows a reconciliation did not insert
-// because the catalog already had them: a member with the same (audit_id,
-// revision), a gap already exported in another segment.
+// ArchiveReconciledResult lists the members a reconciliation did not insert
+// because the catalog already had the same (audit_id, revision).
 type ArchiveReconciledResult struct {
 	SkippedMembers []ArchiveMemberKey
-	SkippedGaps    []int64
 }
 
 // ArchiveRemovalMinFormatVersion is the lowest format version whose sealed
@@ -570,11 +571,8 @@ func ValidateArchiveSeal(seal ArchiveSeal) error {
 
 // ValidateArchiveReconciled checks a reconciled bundle.
 func ValidateArchiveReconciled(reconciled ArchiveReconciled) error {
-	if err := validateArchiveSegment(reconciled.Segment, ArchiveSegmentSealed, len(reconciled.Members), len(reconciled.GapIDs)); err != nil {
+	if err := validateArchiveSegment(reconciled.Segment, ArchiveSegmentSealed, len(reconciled.Members), 0); err != nil {
 		return err
 	}
-	if err := validateArchiveMembers(reconciled.Members, false); err != nil {
-		return err
-	}
-	return validateArchiveGaps(reconciled.GapIDs)
+	return validateArchiveMembers(reconciled.Members, false)
 }
