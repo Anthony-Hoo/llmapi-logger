@@ -105,7 +105,7 @@ PostgreSQL 使用独立 schema 版本，并保留旧证据模型的关系约束�
 
 存量对象及引用身份不匹配会触发进程内不可自动清除的完整性失败；隔离该次解析写入不意味着数据库仍可报告健康。
 
-key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库尚无审计数据时自动生成。每个 Header 值（采集版本 2 为每条 audit 一个 Header 块和一个入站 User-Agent）、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
+key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库既没有 audit 记录也没有完整性事件时自动生成。每个 Header 值（采集版本 2 为每条 audit 一个 Header 块和一个入站 User-Agent）、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 
 详细设计见 [03](03-audit-session-and-evidence-capture.md) 与 [04](04-sqlite-storage-and-migrations.md)。
 

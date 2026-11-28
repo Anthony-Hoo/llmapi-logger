@@ -15,7 +15,11 @@ const stageOrderSQL = `CASE stage
     ELSE 5
 END`
 
-// HasAudits reports whether at least one audit parent row exists.
+// HasAudits reports whether the store holds any audit history: an audit parent
+// row or an integrity event. Start-up creates a new master key only when this
+// is false. Integrity events are never deleted, so after retention removes
+// every audit they still need the original key; a new one would fail the
+// chain verification and leave the audit store unusable.
 func (store *Store) HasAudits(ctx context.Context) (bool, error) {
 	if ctx == nil {
 		return false, errors.New("postgres: nil context")
@@ -24,7 +28,8 @@ func (store *Store) HasAudits(ctx context.Context) (bool, error) {
 		return false, ErrClosed
 	}
 	var exists bool
-	if err := store.readerDB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM audit_records LIMIT 1)").Scan(&exists); err != nil {
+	if err := store.readerDB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM audit_records)
+    OR EXISTS (SELECT 1 FROM integrity_events)`).Scan(&exists); err != nil {
 		return false, fmt.Errorf("postgres: check audits: %w", err)
 	}
 	return exists, nil

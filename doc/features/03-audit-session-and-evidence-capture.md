@@ -97,7 +97,7 @@ Request-URI 可能包含 key，保存在 audit_records.request_uri_enc。无法�
 
 ## 7. AES-256-GCM
 
-key_path 指向一个 32-byte 主密钥：存在则读取；不存在且数据库尚无审计数据时用 crypto/rand 原子生成。Unix 创建权限为 0600；Windows 使用当前用户私有数据目录的 ACL。
+key_path 指向一个 32-byte 主密钥：存在则读取；不存在且数据库既没有 audit 记录也没有完整性事件时用 crypto/rand 原子生成（规则见[模块 09](09-security-encryption-and-redaction.md) §3）。Unix 创建权限为 0600；Windows 使用当前用户私有数据目录的 ACL。
 
 每个 Header 值、压缩后的 Body chunk、Request-URI、parsed result、content/binary object 和 stream timeline 使用独立 12-byte 随机 nonce：
 

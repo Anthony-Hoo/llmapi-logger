@@ -28,7 +28,7 @@
 
 - 固定 32 个随机字节，AES-256-GCM。
 - key 文件存在时只读，不覆盖。
-- 数据库没有 audit 时允许原子创建；数据库已有 audit 且 key 缺失时禁止生成替代 key。
+- 数据库里既没有 audit 记录、也没有完整性事件时，才允许原子创建；两者有其一而 key 缺失时，禁止生成替代 key。完整性事件不会被 retention 删除：retention 删光 audit 后事件仍要用原来的 key 校验，换成新 key 会让链校验失败、审计存储不可用，所以这时同样不生成新 key，启动按 key 不可用处理。
 - POSIX 建议 `0600`；Windows 使用仅维护账户可读的 ACL。
 - key 长度错误、不可读或 GCM 初始化失败时不允许明文降级；available 只做代理，strict 返回 `503`。
 

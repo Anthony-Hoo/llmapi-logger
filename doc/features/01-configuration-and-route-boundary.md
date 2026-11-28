@@ -212,7 +212,7 @@ metadata interceptor 只读取克隆后的 Method、Path、Query、Header、Cont
 
 ## 9. Key 与模式
 
-key_path 指向 32-byte 主密钥：存在则读取；不存在且数据库尚无审计数据时用 crypto/rand 原子生成。Unix 创建权限设为 0600；Windows 依赖 key 所在目录的当前用户 ACL，并在文档中明确要求使用私有数据目录。key 内容不写日志或数据库。
+key_path 指向 32-byte 主密钥：存在则读取；不存在且数据库既没有 audit 记录也没有完整性事件时用 crypto/rand 原子生成（规则见[模块 09](09-security-encryption-and-redaction.md) §3）。Unix 创建权限设为 0600；Windows 依赖 key 所在目录的当前用户 ACL，并在文档中明确要求使用私有数据目录。key 内容不写日志或数据库。
 
 服务可先启动 listener，再检查审计依赖。
 
