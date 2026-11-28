@@ -1616,3 +1616,30 @@ P4：
 8. **暂存目录里留下的文件不进归档。** 第 3 阶段的启动导入会把接不上的暂存文件改名为 `.orphan` 或 `.corrupt` 留在 `audit.staging.dir`，它们可能是某条已终结 audit 的一部分 raw 的唯一副本。归档只读数据库：这样的 audit 按库里的样子（raw 残缺、`full`）归档和移除，暂存目录里的文件既不读也不删，移除之后仍在原处，需要人工处理。归档运行不检查暂存目录。
 9. **调用者查找被关掉时，`caller_status = 'pending'` 的记录会一直被推迟**（Q8 甲）。查找有终态（`resolved`、`unresolved`），但只有 NewAPI 集成开着时才会走到。集成关掉之后遗留的 `pending` 记录不会被归档，表现为每次运行报告的推迟条数不降。
 10. **Header 采集的另外两个分支没有逐一读过**（D.2 依据的是 `addHeadersLocked` 这一个入口）。
+
+---
+
+## 实施记录
+
+下面是代码与正文不同、或正文没有写到的地方，随实施补充。
+
+### R.1 查询层的拆分（O.1 第 4 个提交）
+
+组装的一半在 `internal/query/plain.go`，不需要 cipher 和存储，`internal/query` 的依赖里没有任何一个存储包。入口：`BuildDetail`、`BuildMetadata`、`BuildSummary`、`ReconstructPlainTurn`、`PlainSessionConversation`、`TimelineFromPlain`、`RawMetadataFromPlain`、`RawStages`、`VerifyRaw`；输入类型 `PlainDetail`、`PlainParsedResult`、`PlainTurnGraph`、`PlainObject`、`PlainBinary`、`PlainChunk`。与 K.3 不同的地方：
+
+1. **热路径没有先拼出 `PlainDetail`。** K.3 第 3 步设想热路径解密后构造 `PlainDetail` 再组装。这样会改变行为：现在只解密被引用到的对象和二进制，并且各方法只打开自己需要的部分（`ReconstructTurn` 只在只有请求的轮次上打开解析结果，`SessionConversation` 不打开 Header 和 Request-URI），出错时报的阶段名也取决于打开的顺序。所以两条路共用的是同一组不导出的核心函数，它们接收“按需打开”的函数；错误值和文案不变。
+2. **`ReconstructPlainTurn` 的入参是 `PlainDetail`**，不是 K.3 写的解析器名加图：只有请求的轮次要用解析结果合并 `partial_response_messages`。
+3. **对象以规范化 JSON 文本交给组装的一半**，每次打开都按内容地址、长度、schema 版本和 kind 核对，与 `OpenObject` 解密之后做的检查相同。`RestoreBinaries` 会原地修改解码后的值，所以每个引用都要重新解码。
+4. **只留在解密一侧的检查**：AEAD 认证、对象与块的密文编码长度、版本 1 Header 行的 `value_length`、版本 2 的阶段集合检查（在 `headerblock.Expand` 里）、`parsed_json_enc` 的解压。归档读取要自己保证这些输入已经是核对过的明文。
+5. **输出还不是归档一侧的最终形式。** `BuildDetail` 接收原始的 Request-URI 字节，Header 的 `ValueLength` 取自值的长度；`BuildSummary` 接收原始的 User-Agent。读取工具手里只有投影后的形式，组装之后要按 D.3 把这三处换回投影项。
+
+对正文其他小节的更正：
+
+- **C.3 说读取工具不需要注册解析器，不对。** 由轮次生成会话要经过 `builtin.Registry().RebuildConversation`，`cmd/audit-archive` 要引入 `parser/builtin`。
+- **C.4 的增量操作要有人应用。** `PlainTurnGraph.RequestRefs` 必须是物化后的引用，而把增量操作应用到父轮次引用上的代码（`loadRequestRefs`）只在两个存储的 `graph_writer.go` 里。读取工具需要同一段逻辑：把它移到存储和读取工具都能引入的包里（按 P 节的小选择处理，W-format 负责）。
+- **来源阶段的解析在存储里。** `StreamBodyChunks` 读的是 `body_streams.source_stage` 的块；`QueryStreamTimeline` 的时间线和 `Stage` 取自来源阶段，`ObservedLength` 取自所选阶段自己的行。读取工具要照做。
+- **版本 1 的 User-Agent 顺序**来自 `QueryRequestHeaderEvidence` 返回行的顺序，`BuildSummary` 要求传入的值已经是这个顺序。
+
+### R.2 `HasAudits`（O.1 第 1 个提交）
+
+两个存储的 `HasAudits` 现在是“`audit_records` 或 `integrity_events` 有行”。目录表加进这个判断留给迁移 008 的提交。新增的启动测试 `TestStartupDoesNotReplaceMissingKeyWhileIntegrityEventsRemain` 是仓库里第一个“密钥文件缺失”的启动测试；把查询改回旧的写法时，它会看到启动新建了密钥并报 `integrity_unavailable`。
