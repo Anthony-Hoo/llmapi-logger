@@ -74,8 +74,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Under the race detector the PostgreSQL-backed packages take several
+      # minutes each on a hosted runner and have exceeded go test's default
+      # limit of 10 minutes per package on a slow one.
       - name: Test
-        run: go test -race ./...
+        run: go test -race -timeout 30m ./...
 
   publish:
     needs: test
