@@ -60,7 +60,6 @@ const analysisCatalogSeed = 42
 // timestamps, nonces) are replaced by stable labels or by their presence.
 // LLMAPI_ANALYSIS_CATALOG_OUT writes the dump to that path instead.
 func TestAnalysisOfFixtureCatalog(t *testing.T) {
-	t.Parallel()
 	type namedCase struct {
 		name  string
 		build func() ([]protofixture.Exchange, error)

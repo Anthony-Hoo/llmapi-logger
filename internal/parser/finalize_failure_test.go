@@ -96,6 +96,37 @@ func newFaultStore(t *testing.T) *faultStore {
 	return &faultStore{Store: store, path: path}
 }
 
+// waitReparsed waits for the parse from the database that follows a released
+// attempt, and fails with what the audit and the worker looked like when the
+// wait expired: a second release puts the audit into a 60-second backoff that
+// only a later pending scan ends.
+func (store *faultStore) waitReparsed(t *testing.T, worker *parser.Worker, auditID string) {
+	t.Helper()
+	deadline := time.Now().Add(parser.PipelineWait)
+	for {
+		database := store.database(t)
+		var status string
+		var failures int
+		var next sql.NullInt64
+		if err := database.QueryRow(`SELECT parse_status, parse_save_failures, parse_next_at_ns FROM audit_records WHERE audit_id = ?`, auditID).
+			Scan(&status, &failures, &next); err != nil {
+			t.Fatal(err)
+		}
+		if status != storage.ParsePending && status != storage.ParseProcessing {
+			return
+		}
+		if time.Now().After(deadline) {
+			backoff := "NULL"
+			if next.Valid {
+				backoff = time.Until(time.Unix(0, next.Int64)).Round(time.Second).String() + " from now"
+			}
+			t.Fatalf("audit %s was not parsed again within %v: parse_status=%s parse_save_failures=%d parse_next_at_ns=%s, %d jobs queued",
+				auditID, parser.PipelineWait, status, failures, backoff, worker.QueueLength())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // faultyParser wraps a built-in parser: its normalizer panics, or its parse
 // stalls, the next times asked.
 type faultyParser struct {
@@ -152,7 +183,14 @@ func TestFinalizerFailuresLeaveTheAuditToTheDatabasePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const deadline = 150 * time.Millisecond
+	// deadline is the job deadline of the cases whose first attempt must
+	// run into it. The parse from the database that follows runs under the
+	// same deadline, so it must fit too: if it overran, it would be released
+	// a second time and wait out a 60-second backoff, past every wait here.
+	// That parse of this small exchange takes well under 0.3 s on a tenth of
+	// a CPU; 5 s keeps it clear under -race on a slow runner. The other cases
+	// keep the worker's own deadline.
+	const deadline = 5 * time.Second
 	for _, test := range []struct {
 		name string
 		// arrange breaks the first attempt.
@@ -160,19 +198,21 @@ func TestFinalizerFailuresLeaveTheAuditToTheDatabasePath(t *testing.T) {
 		// released: the first attempt released the claim, counting one
 		// failure; otherwise the saved parse stands.
 		released bool
+		// expires: the first attempt runs into the job deadline.
+		expires bool
 	}{
 		{name: "normalizer panics", released: true, arrange: func(_ *faultStore, faulty *faultyParser) { faulty.panics.Store(1) }},
-		{name: "deadline passes before the save", released: true, arrange: func(_ *faultStore, faulty *faultyParser) {
+		{name: "deadline passes before the save", released: true, expires: true, arrange: func(_ *faultStore, faulty *faultyParser) {
 			faulty.stall = 2 * deadline
 			faulty.stalls.Store(1)
 		}},
-		{name: "deadline passes during the save", released: true, arrange: func(store *faultStore, _ *faultyParser) {
+		{name: "deadline passes during the save", released: true, expires: true, arrange: func(store *faultStore, _ *faultyParser) {
 			store.save = func(ctx context.Context, _ func() error) error { <-ctx.Done(); return ctx.Err() }
 		}},
 		{name: "save fails", released: true, arrange: func(store *faultStore, _ *faultyParser) {
 			store.save = func(context.Context, func() error) error { return fmt.Errorf("save: %w", storage.ErrQueueFull) }
 		}},
-		{name: "save acknowledgement lost", released: false, arrange: func(store *faultStore, _ *faultyParser) {
+		{name: "save acknowledgement lost", released: false, expires: true, arrange: func(store *faultStore, _ *faultyParser) {
 			store.save = func(ctx context.Context, real func() error) error {
 				if err := real(); err != nil {
 					return err
@@ -186,7 +226,9 @@ func TestFinalizerFailuresLeaveTheAuditToTheDatabasePath(t *testing.T) {
 			store := newFaultStore(t)
 			parsers, faulty := faultyParsers(t, "openai.chat_completions")
 			harness := newFinalizeHarness(t, store, audit.Options{}, parsers)
-			harness.worker.SetJobDeadlineForTest(deadline)
+			if test.expires {
+				harness.worker.SetJobDeadlineForTest(deadline)
+			}
 			ctx, stop := context.WithCancel(context.Background())
 			defer stop()
 			if err := harness.worker.Start(ctx); err != nil {
@@ -225,7 +267,7 @@ func TestFinalizerFailuresLeaveTheAuditToTheDatabasePath(t *testing.T) {
 			// once its backoff has elapsed, reading it from the database.
 			store.endBackoff(t, id)
 			harness.worker.ScanForTest(ctx)
-			waitParsed(t, store, id)
+			store.waitReparsed(t, harness.worker, id)
 			if status, failures, _ := store.parseState(t, id); status != storage.ParseOK || failures != 1 || store.chunkReads.Load() == 0 {
 				t.Fatalf("later parse: status %s, %d failures, %d chunk pages read", status, failures, store.chunkReads.Load())
 			}
