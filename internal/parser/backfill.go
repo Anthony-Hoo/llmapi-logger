@@ -59,9 +59,13 @@ func retryableFailure(err error) bool {
 	}
 	var state interface{ SQLState() string }
 	if errors.As(err, &state) && len(state.SQLState()) >= 2 {
-		// Connection, transaction rollback (serialization, deadlock),
-		// insufficient resources, object in use (lock timeout), operator
-		// intervention (shutdown, cancel) and system errors.
+		// A read-only transaction (a standby, or default_transaction_read_only
+		// during a failover), connection, transaction rollback (serialization,
+		// deadlock), insufficient resources, object in use (lock timeout),
+		// operator intervention (shutdown, cancel) and system errors.
+		if state.SQLState() == "25006" {
+			return true
+		}
 		switch state.SQLState()[:2] {
 		case "08", "40", "53", "55", "57", "58":
 			return true
