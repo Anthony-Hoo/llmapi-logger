@@ -17,7 +17,6 @@ import (
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/security"
-	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/postgres"
 )
 
@@ -30,17 +29,16 @@ type archiveSeams struct {
 	now   func() time.Time
 	fault func(operation, path string) error
 	step  func(step string) error
-	// formatVersion, when positive, is runner.Options.FormatVersionOverride:
-	// tests drive the removal of format version 1 before the format is
-	// frozen.
-	formatVersion int64
+	// formatVersion, when set, is runner.Options.FormatVersionOverride:
+	// tests leave catalog rows of the trial format version 0.
+	formatVersion *int64
 }
 
 // archiveFormatVersion is the format version the runner works with: the
 // built-in archive.FormatVersion unless a test seam overrides it.
 func archiveFormatVersion(seams archiveSeams) int64 {
-	if seams.formatVersion > 0 {
-		return seams.formatVersion
+	if seams.formatVersion != nil {
+		return *seams.formatVersion
 	}
 	version, err := strconv.ParseInt(archive.FormatVersion, 10, 64)
 	if err != nil {
@@ -99,9 +97,11 @@ func archiveKeys(configuration config.Config, key []byte) (*security.ArchiveKeys
 // warnArchiveMode writes the start-up lines of guard 2 (L.2, H.5): with the
 // archive on, retention's direct delete is not assembled. export_only says
 // the hot store keeps growing. archive_then_delete says verified removal is
-// active for bundles of format version 1 or later and, while the format the
-// runner writes (formatVersion) is the trial version 0, that its bundles are
-// exported but never removed: nothing is removed from the hot store.
+// active for bundles of format version 1 or later, with the format version
+// the runner writes. (The trial format version 0 had a line of its own;
+// since the freeze the runner never writes version 0, and segments of
+// version 0 left in the catalog are re-exported and never removed, design
+// R.10.)
 func warnArchiveMode(configuration config.Config, formatVersion int64, logger *slog.Logger) {
 	switch configuration.Archive.Mode {
 	case config.ArchiveModeExportOnly:
@@ -109,10 +109,6 @@ func warnArchiveMode(configuration config.Config, formatVersion int64, logger *s
 	case config.ArchiveModeArchiveThenDelete:
 		logger.Warn("archive verified removal active: archived audits are removed from the hot store once their bundle of format version 1 or later is sealed and their change stamp is unchanged",
 			"error_category", "archive_removal_active", "format_version", formatVersion)
-		if formatVersion < storage.ArchiveRemovalMinFormatVersion {
-			logger.Warn("archive format version 0 is the trial format: its bundles are exported but never removed, so nothing is removed from the hot store and it keeps growing",
-				"error_category", "archive_removal_trial_format", "format_version", formatVersion)
-		}
 	}
 }
 

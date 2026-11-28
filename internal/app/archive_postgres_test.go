@@ -64,9 +64,9 @@ type archiveEnv struct {
 	fault    atomic.Pointer[func(operation, path string) error]
 	step     atomic.Pointer[func(step string) error]
 	sent     int
-	// formatVersion, when positive, overrides the runner's format version
-	// (archive_remove_postgres_test.go).
-	formatVersion int64
+	// formatVersion, when set, overrides the runner's format version: tests
+	// leave catalog rows of the trial version 0 (archive_remove_postgres_test.go).
+	formatVersion *int64
 }
 
 func archiveDSN(t *testing.T) (string, *sql.DB) {
@@ -862,27 +862,26 @@ func TestPostgresArchiveDiskFullPublishesNothing(t *testing.T) {
 	env.requireOneSealedMember(ids)
 }
 
-// Guards on PostgreSQL: archive_then_delete at the built-in trial format
-// version 0 says so, exports and removes nothing; turning the archive off
-// with retention on after
-// runs warns that direct deletion resumed and assembles retention again; an
+// Guards on PostgreSQL: archive_then_delete at the built-in format version 1
+// says that verified removal is active (and nothing about a trial format),
+// exports and removes; turning the archive off with retention on after runs
+// warns that direct deletion resumed and assembles retention again; an
 // archive path that is not a directory leaves the runner off and the audit
 // working.
 func TestPostgresArchiveStartupGuards(t *testing.T) {
 	env := newArchiveEnv(t, config.ArchiveModeArchiveThenDelete)
-	if !strings.Contains(env.logs.String(), `"error_category":"archive_removal_active"`) ||
-		!strings.Contains(env.logs.String(), `"error_category":"archive_removal_trial_format"`) || env.app.retention != nil {
+	if !strings.Contains(env.logs.String(), `"error_category":"archive_removal_active","format_version":1`) ||
+		strings.Contains(env.logs.String(), "trial") || env.app.retention != nil {
 		t.Fatalf("logs %s", env.logs.String())
 	}
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIResponses}, 1)
-	before := env.tableCounts()
 	env.due()
 	result := env.mustRun()
-	if result.Counts.ExportedAudits != int64(env.sent) {
+	if result.Counts.ExportedAudits != int64(env.sent) || result.Removal.Removed != int64(env.sent) {
 		t.Fatalf("result %+v", result)
 	}
-	if after := env.tableCounts(); fmt.Sprint(after) != fmt.Sprint(before) {
-		t.Fatal("archive_then_delete removed hot rows at format version 0")
+	if left := env.tableCounts()["audit_records"]; left != 0 {
+		t.Fatalf("%d audits left after archive_then_delete", left)
 	}
 	if err := env.app.Close(); err != nil {
 		t.Fatal(err)

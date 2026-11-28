@@ -86,12 +86,13 @@ type Options struct {
 	Step func(step string) error
 	// Random returns a number in [0, 1) for the sample; nil uses math/rand.
 	Random func() float64
-	// FormatVersionOverride, when positive, replaces archive.FormatVersion
-	// as the format version the run selects by and registers its segments
-	// with. It exists for tests that drive the removal of format version 1
-	// before the format is frozen; the bundles themselves still carry
-	// archive.FormatVersion. Production never sets it.
-	FormatVersionOverride int64
+	// FormatVersionOverride, when set, replaces archive.FormatVersion as the
+	// format version the run selects by (the current members and the
+	// watermark, B.1) and registers its segments with. It exists for tests
+	// that leave catalog rows of the trial version 0, as a deployment that
+	// exported before the freeze has them; the bundles themselves still
+	// carry archive.FormatVersion. Production never sets it.
+	FormatVersionOverride *int64
 }
 
 // Points of Options.Step.
@@ -148,11 +149,11 @@ func New(options Options) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	if options.FormatVersionOverride < 0 {
-		return nil, errors.New("archive runner: invalid format version override")
-	}
-	if options.FormatVersionOverride > 0 {
-		formatVersion = options.FormatVersionOverride
+	if override := options.FormatVersionOverride; override != nil {
+		if *override < 0 {
+			return nil, errors.New("archive runner: invalid format version override")
+		}
+		formatVersion = *override
 	}
 	if options.Location == nil {
 		options.Location = time.Local

@@ -11,8 +11,9 @@ import (
 )
 
 // manifestDomain starts the manifest MAC input (F.2). It carries the format
-// version, like the record digest domain.
-const manifestDomain = "llmapi-logger/archive-manifest/v" + FormatVersion + "\x00"
+// version and is frozen with version 1, like the record digest domain. (The
+// trial version 0 used ".../archive-manifest/v0".)
+const manifestDomain = "llmapi-logger/archive-manifest/v1\x00"
 
 // Bundle kinds of a manifest (decision 5.3, F.1).
 const (
@@ -33,7 +34,37 @@ var (
 	ErrKeyMismatch = errors.New("archive: manifest was written under a different archive key")
 	// ErrManifestMAC reports a manifest whose MAC does not verify.
 	ErrManifestMAC = errors.New("archive: manifest signature does not verify")
+	// ErrUnsupportedFormatVersion reports a manifest of this format whose
+	// format_version is a well-formed version other than FormatVersion: the
+	// trial version 0, or a later version this reader predates. Nothing of
+	// such a bundle is read or verified. The error is also an ErrFormat.
+	ErrUnsupportedFormatVersion = errors.New("archive: unsupported archive format version")
 )
+
+// UnsupportedFormatVersionError is the error of ErrUnsupportedFormatVersion
+// with the manifest's version, a canonical decimal of at most 19 digits.
+type UnsupportedFormatVersionError struct {
+	Version string
+}
+
+func (e *UnsupportedFormatVersionError) Error() string {
+	return "archive: manifest format_version " + strconv.Quote(e.Version) + " is not version " + FormatVersion + ", the only one this reader reads"
+}
+
+// Is makes the error both ErrUnsupportedFormatVersion and ErrFormat.
+func (e *UnsupportedFormatVersionError) Is(target error) bool {
+	return target == ErrUnsupportedFormatVersion || target == ErrFormat
+}
+
+// unsupportedVersion returns the UnsupportedFormatVersionError of a manifest
+// of this format with a canonical decimal version other than FormatVersion,
+// and nil otherwise (a malformed version is a plain format error).
+func unsupportedVersion(format, version string) error {
+	if format != FormatName || version == FormatVersion || !canonicalDecimal(version) {
+		return nil
+	}
+	return &UnsupportedFormatVersionError{Version: version}
+}
 
 // ManifestSigner is the part of security.ArchiveKeys the manifest needs:
 // SignManifest and VerifyManifest are HMAC-SHA-256 under K_sign over exactly
@@ -103,6 +134,9 @@ type ManifestGaps struct {
 // protocol and no gap range), known file roles with at most one of each,
 // non-negative counts, and tables naming only archived tables.
 func (manifest *Manifest) Validate() error {
+	if err := unsupportedVersion(manifest.Format, manifest.FormatVersion); err != nil {
+		return err
+	}
 	switch {
 	case manifest.Format != FormatName:
 		return formatError("manifest format %q", manifest.Format)
@@ -327,9 +361,23 @@ func EncodeManifest(manifest *Manifest) ([]byte, error) {
 // DecodeManifest parses a manifest. It accepts any whitespace and key order,
 // rejects unknown, missing and duplicate keys and non-canonical values, and
 // validates the result. It does not verify the MAC.
+//
+// The format and format_version are looked at first, leniently: a manifest of
+// this format whose version is well formed but not FormatVersion is an
+// *UnsupportedFormatVersionError, whatever the rest holds, since another
+// version may have other keys and other meanings.
 func DecodeManifest(data []byte) (*Manifest, error) {
 	if !utf8.Valid(data) {
 		return nil, formatError("manifest is not valid UTF-8")
+	}
+	var head map[string]json.RawMessage
+	if json.Unmarshal(data, &head) == nil {
+		var format, version string
+		if json.Unmarshal(head["format"], &format) == nil && json.Unmarshal(head["format_version"], &version) == nil {
+			if err := unsupportedVersion(format, version); err != nil {
+				return nil, err
+			}
+		}
 	}
 	f, err := decodeObject(bytes.TrimSpace(data), "format", "format_version", "source_schema_version", "segment_id",
 		"run_id", "bundle_kind", "protocol", "conversations", "first_started_at_ns", "last_ended_at_ns",

@@ -1,0 +1,292 @@
+{
+  "format": "llmapi-logger-archive",
+  "format_version": "1",
+  "source_schema_version": "8",
+  "segment_id": "abababababababababababababababab",
+  "run_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "bundle_kind": "conversation",
+  "protocol": "openai",
+  "conversations": [
+    "conv_full"
+  ],
+  "first_started_at_ns": "1764300000123456789",
+  "last_ended_at_ns": "1764300001123456789",
+  "created_at_ns": "1764400000000000000",
+  "encrypted": true,
+  "key_fingerprint": "7e94e081367fe20b1dbaad84c76a47e7b5035d506b0540e2bddb42d236c4306a",
+  "tables": {
+    "audit_gaps": [
+      "id",
+      "started_at_ns",
+      "ended_at_ns",
+      "reason",
+      "request_count",
+      "detail",
+      "created_at_ns"
+    ],
+    "audit_project_identity": [
+      "audit_id",
+      "identity_version",
+      "extracted_at_ns",
+      "source",
+      "body_scanned",
+      "identity_fpr",
+      "remote_fpr",
+      "repo_root_fpr",
+      "cwd_fpr",
+      "identity_enc"
+    ],
+    "audit_records": [
+      "audit_id",
+      "schema_generation",
+      "started_at_ns",
+      "ended_at_ns",
+      "route_id",
+      "protocol",
+      "parser_name",
+      "method",
+      "path",
+      "request_uri_enc",
+      "mode",
+      "status_code",
+      "ttft_ns",
+      "forward_status",
+      "capture_status",
+      "parse_status",
+      "blocked_by",
+      "block_code",
+      "error_code",
+      "newapi_request_id",
+      "caller_status",
+      "caller_attempts",
+      "caller_next_at_ns",
+      "caller_updated_at_ns",
+      "api_key_fpr",
+      "parse_save_failures",
+      "parse_next_at_ns",
+      "capture_version",
+      "user_agent_enc"
+    ],
+    "binary_objects": [
+      "binary_hash",
+      "media_type",
+      "plaintext_length",
+      "data_enc",
+      "created_at_ns"
+    ],
+    "body_chunks": [
+      "audit_id",
+      "stage",
+      "seq",
+      "offset",
+      "plaintext_length",
+      "observed_at_ns",
+      "data_enc"
+    ],
+    "body_streams": [
+      "audit_id",
+      "stage",
+      "source_stage",
+      "observed_length",
+      "stored_length",
+      "sha256",
+      "hash_complete",
+      "eof_seen",
+      "state",
+      "retention_state",
+      "first_observed_at_ns",
+      "last_observed_at_ns",
+      "chunk_count",
+      "stream_event_count",
+      "stream_timeline_complete",
+      "error_code"
+    ],
+    "content_binary_refs": [
+      "object_hash",
+      "json_pointer",
+      "binary_hash",
+      "media_type",
+      "encoding"
+    ],
+    "content_external_refs": [
+      "object_hash",
+      "json_pointer",
+      "ref_kind",
+      "value_hash",
+      "value_enc"
+    ],
+    "content_objects": [
+      "object_hash",
+      "semantic_hash",
+      "kind",
+      "plaintext_length",
+      "data_enc",
+      "created_at_ns"
+    ],
+    "conversations": [
+      "conversation_id",
+      "protocol",
+      "key_hash",
+      "created_at_ns"
+    ],
+    "http_header_blocks": [
+      "audit_id",
+      "block_enc"
+    ],
+    "http_headers": [
+      "audit_id",
+      "stage",
+      "kind",
+      "name",
+      "value_index",
+      "value_length",
+      "value_enc"
+    ],
+    "http_stages": [
+      "audit_id",
+      "stage",
+      "state",
+      "proto",
+      "method",
+      "host",
+      "status_code",
+      "content_length",
+      "started_at_ns",
+      "ended_at_ns",
+      "error_code",
+      "content_type",
+      "content_encoding"
+    ],
+    "integrity_events": [
+      "sequence",
+      "audit_id",
+      "event_type",
+      "previous_mac",
+      "payload_digest",
+      "event_mac",
+      "created_at_ns"
+    ],
+    "parsed_results": [
+      "audit_id",
+      "parser_name",
+      "parser_version",
+      "status",
+      "request_model",
+      "response_model",
+      "requested_stream",
+      "observed_stream",
+      "response_id",
+      "usage_input",
+      "usage_output",
+      "usage_total",
+      "error_type",
+      "error_code",
+      "message_count",
+      "tool_call_count",
+      "has_tool_call",
+      "parsed_json_enc",
+      "parsed_at_ns",
+      "upstream_error_class"
+    ],
+    "stream_timelines": [
+      "audit_id",
+      "stage",
+      "event_count",
+      "first_event_at_ns",
+      "last_event_at_ns",
+      "timeline_complete",
+      "plaintext_length",
+      "timeline_enc"
+    ],
+    "token_links": [
+      "audit_id",
+      "newapi_user_id",
+      "username",
+      "newapi_token_id",
+      "token_name",
+      "linked_at_ns",
+      "billing_state",
+      "quota",
+      "quota_per_unit",
+      "billed_prompt_tokens",
+      "billed_completion_tokens",
+      "billing_attempts"
+    ],
+    "turn_context_ops": [
+      "turn_id",
+      "op_index",
+      "operation",
+      "item_count",
+      "slot",
+      "object_hash",
+      "semantic_hash"
+    ],
+    "turn_response_items": [
+      "turn_id",
+      "ordinal",
+      "slot",
+      "object_hash",
+      "semantic_hash"
+    ],
+    "turns": [
+      "turn_id",
+      "audit_id",
+      "conversation_id",
+      "parent_turn_id",
+      "parent_base",
+      "link_reason",
+      "link_confidence",
+      "request_layout",
+      "response_layout",
+      "request_envelope_hash",
+      "response_envelope_hash",
+      "request_item_count",
+      "response_item_count",
+      "request_sequence_hash",
+      "response_sequence_hash",
+      "request_reconstruction_hash",
+      "response_reconstruction_hash",
+      "reconstruction_status",
+      "previous_response_id",
+      "response_id",
+      "created_at_ns"
+    ]
+  },
+  "files": [
+    {
+      "role": "lines",
+      "name": "20261128T030000Z_20261128T040000Z_conv_full_s0001.jsonl.gz.enc",
+      "bytes": "1234",
+      "sha256": "1010101010101010101010101010101010101010101010101010101010101010"
+    },
+    {
+      "role": "objects",
+      "name": "20261128T030000Z_20261128T040000Z_conv_full_s0001.objects.jsonl.gz.enc",
+      "bytes": "5678",
+      "sha256": "2020202020202020202020202020202020202020202020202020202020202020"
+    }
+  ],
+  "line_count": "2",
+  "object_count": "5",
+  "raw_chunk_count": "1",
+  "members": [
+    {
+      "audit_id": "audit-a",
+      "revision": "1",
+      "conversation_id": "conv_full",
+      "started_at_ns": "1764300000123456789",
+      "ended_at_ns": "1764300000923456789",
+      "record_digest": "3030303030303030303030303030303030303030303030303030303030303030"
+    },
+    {
+      "audit_id": "audit-b",
+      "revision": "2",
+      "conversation_id": "conv_full",
+      "started_at_ns": "1764300000223456789",
+      "ended_at_ns": "1764300001123456789",
+      "record_digest": "4040404040404040404040404040404040404040404040404040404040404040"
+    }
+  ],
+  "gaps": null,
+  "mac": "ff6367840f56bf000c3ca5e8d997df69b35cc2d68ca7fecc9a00d718eeb1f203"
+}

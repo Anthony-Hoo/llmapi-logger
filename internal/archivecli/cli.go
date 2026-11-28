@@ -206,7 +206,7 @@ func (c *common) openReader(ctx context.Context, env *Env) (*Reader, error) {
 		fmt.Fprintln(env.Stderr, "audit-archive: warning: --skip-event-mac: the copied integrity events' MACs are not checked")
 	}
 	for _, problem := range reader.Index().Problems() {
-		fmt.Fprintf(env.Stderr, "audit-archive: skipped %s: %s\n", c.relative(problem.Path), problem.Reason)
+		fmt.Fprintf(env.Stderr, "audit-archive: skipped %s: %s\n", c.relative(problem.Path), problemText(problem))
 	}
 	return reader, nil
 }

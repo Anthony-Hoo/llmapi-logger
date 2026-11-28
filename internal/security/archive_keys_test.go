@@ -23,7 +23,9 @@ const (
 	archiveVectorSigningKey     = "4fbeecfe16f46d811839e4394d762f4505c6acd9f9fec4e45649141c2c156631"
 	archiveVectorFingerprintKey = "6c9486caf63a70955a3e520fdf08d2c0eb4766c2aaac8c1a4289d6fd7e1f0c89"
 	archiveVectorKeyFingerprint = "0c8bba6a5885ad44085662606f3b0e132dac071a100904c1b0537491dd611b33"
-	// HMAC(K_sign, "llmapi-logger/archive-manifest/v1\x00example manifest encoding")
+	// HMAC(K_sign, "llmapi-logger/archive-manifest/v1\x00example manifest encoding"):
+	// the prefix is the manifest domain of archive format version 1, which
+	// archive_domain_test.go checks against internal/archive.
 	archiveVectorManifestMAC = "b00d3d340bd58abba1cd8046521627b928bb344df53b01478567de11affab267"
 	// HMAC(K_fpr, "llmapi-logger/archive-credential-value/v1\x00Bearer sk-example-0000")
 	archiveVectorCredentialFingerprint = "b4023273ef3cc1ec165ef09947eff805059db3d3b87435ded5dcdcf738886d66"
@@ -35,6 +37,18 @@ const (
 	archiveVectorCredentialKey  = "3501d605da5fe1bec2ab6514aa20d4e4875318a3e19999c41385792eb3f464dd"
 	archiveVectorAnalysisKey    = "5c976886f152932e3bd4804fed50ba78726c4125f13779b6b914285b262efdeb"
 	archiveVectorManifestPrefix = "llmapi-logger/archive-manifest/v1\x00"
+	// HMAC(K_sign, archiveVectorManifestPrefix || the canonical encoding of
+	// internal/archive/testdata/manifest_v1.json), computed outside Go with
+	// .NET's HMACSHA256 over the bytes of manifest_v1.encoding.hex.
+	archiveVectorRealManifestMAC = "717a4960de98d9e151383cdd6d2a9669fac3bb45312f5a2b2be606c353e8112b"
+)
+
+// Exported for archive_domain_test.go (package security_test), which can
+// import internal/archive where this package's own tests cannot.
+var (
+	ArchiveTestMaster            = archiveTestMaster
+	ArchiveVectorManifestPrefix  = archiveVectorManifestPrefix
+	ArchiveVectorRealManifestMAC = archiveVectorRealManifestMAC
 )
 
 func mustDeriveArchiveKeys(t *testing.T, master []byte) *ArchiveKeys {

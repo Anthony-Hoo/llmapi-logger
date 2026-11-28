@@ -2,18 +2,19 @@
   "format": "llmapi-logger-archive",
   "format_version": "0",
   "source_schema_version": "8",
-  "segment_id": "abababababababababababababababab",
-  "run_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-  "bundle_kind": "conversation",
+  "segment_id": "66db04cdd18fe3c83fca23d91ddc0030",
+  "run_id": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "bundle_kind": "bucket",
   "protocol": "openai",
   "conversations": [
-    "conv_full"
+    "conv_frozen",
+    "conv_frozen_open"
   ],
-  "first_started_at_ns": "1764300000123456789",
-  "last_ended_at_ns": "1764300001123456789",
-  "created_at_ns": "1764400000000000000",
-  "encrypted": true,
-  "key_fingerprint": "7e94e081367fe20b1dbaad84c76a47e7b5035d506b0540e2bddb42d236c4306a",
+  "first_started_at_ns": "1764300120000000000",
+  "last_ended_at_ns": "1764300241000000000",
+  "created_at_ns": "1764303600000000000",
+  "encrypted": false,
+  "key_fingerprint": "0c8bba6a5885ad44085662606f3b0e132dac071a100904c1b0537491dd611b33",
   "tables": {
     "audit_gaps": [
       "id",
@@ -255,38 +256,46 @@
   "files": [
     {
       "role": "lines",
-      "name": "20261128T030000Z_20261128T040000Z_conv_full_s0001.jsonl.gz.enc",
-      "bytes": "1234",
-      "sha256": "1010101010101010101010101010101010101010101010101010101010101010"
+      "name": "20251128T032200Z_20251128T032401Z_bucket-openai-0f1e2d3c_s0001.jsonl.gz",
+      "bytes": "6826",
+      "sha256": "1709801b3c0b0925f2184984e0f44a86c243787462140236bcd1dfffc93bdeff"
     },
     {
       "role": "objects",
-      "name": "20261128T030000Z_20261128T040000Z_conv_full_s0001.objects.jsonl.gz.enc",
-      "bytes": "5678",
-      "sha256": "2020202020202020202020202020202020202020202020202020202020202020"
+      "name": "20251128T032200Z_20251128T032401Z_bucket-openai-0f1e2d3c_s0001.objects.jsonl.gz",
+      "bytes": "5310",
+      "sha256": "3d9102ea17fa5c6332fb7dc248bedc6aa580aafd3fbaa5df65ef875b0f69d7ef"
     }
   ],
-  "line_count": "2",
-  "object_count": "5",
-  "raw_chunk_count": "1",
+  "line_count": "3",
+  "object_count": "15",
+  "raw_chunk_count": "35",
   "members": [
     {
-      "audit_id": "audit-a",
-      "revision": "1",
-      "conversation_id": "conv_full",
-      "started_at_ns": "1764300000123456789",
-      "ended_at_ns": "1764300000923456789",
-      "record_digest": "3030303030303030303030303030303030303030303030303030303030303030"
+      "audit_id": "frozen-a3",
+      "revision": "2",
+      "conversation_id": "conv_frozen",
+      "started_at_ns": "1764300120000000000",
+      "ended_at_ns": "1764300121000000000",
+      "record_digest": "10d7ec7a832f98ea320ad4d4de27fa04707f5a8fd89bc3893756fd86ccf484e6"
     },
     {
-      "audit_id": "audit-b",
+      "audit_id": "frozen-a4",
       "revision": "2",
-      "conversation_id": "conv_full",
-      "started_at_ns": "1764300000223456789",
-      "ended_at_ns": "1764300001123456789",
-      "record_digest": "4040404040404040404040404040404040404040404040404040404040404040"
+      "conversation_id": "conv_frozen_open",
+      "started_at_ns": "1764300180000000000",
+      "ended_at_ns": "1764300181000000000",
+      "record_digest": "95e395deb92b8a1e31ca63f1fff2a5a127efbe00232f9bd26651b37391bd4154"
+    },
+    {
+      "audit_id": "frozen-loose",
+      "revision": "2",
+      "conversation_id": null,
+      "started_at_ns": "1764300240000000000",
+      "ended_at_ns": "1764300241000000000",
+      "record_digest": "d19b99ada8a29c91da6e3f445865df3ab7f20669ac7e7c8d46b64739bcbe96b4"
     }
   ],
   "gaps": null,
-  "mac": "1273577148f447fd006a321761c719b147cdfe4e25e2ddfa9c7862d17506a163"
+  "mac": "b5c28f13abfa61f83fc0c462c2cf159eb922be3de1e6c6ffcbe028ffe964b849"
 }

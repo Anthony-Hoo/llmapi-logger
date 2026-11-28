@@ -25,9 +25,10 @@ import (
 )
 
 // The cold archive's verified removal end to end on PostgreSQL (design M,
-// N.3): real traffic through the proxy, archive runs in archive_then_delete.
-// The format is not frozen yet, so the runner is told to work at format
-// version 1 through the test seam; the bundles still carry version 0.
+// N.3): real traffic through the proxy, archive runs in archive_then_delete
+// at the built-in format version 1, with no seam: the bundles and the catalog
+// both say version 1. The trial version 0 is reached only through the test
+// seam (trialVersion).
 
 // archivedTables are the tables an archived audit has rows in, and the
 // shared ones removal may garbage collect.
@@ -40,7 +41,7 @@ var archivedTables = []string{
 
 func newRemovalEnv(t *testing.T) *archiveEnv {
 	t.Helper()
-	return newArchiveEnvWith(t, config.ArchiveModeArchiveThenDelete, func(env *archiveEnv) { env.formatVersion = 1 })
+	return newArchiveEnv(t, config.ArchiveModeArchiveThenDelete)
 }
 
 func (env *archiveEnv) store() *postgres.Store {
@@ -119,7 +120,7 @@ AND EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = m.audit_id)`); m
 func TestPostgresArchiveRemovesVerifiedAudits(t *testing.T) {
 	env := newRemovalEnv(t)
 	logs := env.logs.String()
-	if !strings.Contains(logs, `"error_category":"archive_removal_active"`) || strings.Contains(logs, "archive_removal_trial_format") ||
+	if !strings.Contains(logs, `"error_category":"archive_removal_active","format_version":1`) || strings.Contains(logs, "trial") ||
 		strings.Contains(logs, `"error_category":"archive_export_only"`) || env.app.retention != nil {
 		t.Fatalf("start-up logs %s", logs)
 	}
@@ -227,13 +228,22 @@ VALUES (1000, 2000, 'queue_full', 3, '', 2001), (3000, 4000, 'db_unavailable', 1
 	}
 }
 
-// At the built-in format version 0 (no seam), archive_then_delete exports
-// and removes nothing: every archived table hashes the same before and after
-// the run, and the start says why.
-func TestPostgresArchiveRemovalAtFormatVersionZero(t *testing.T) {
-	env := newArchiveEnv(t, config.ArchiveModeArchiveThenDelete)
-	if !strings.Contains(env.logs.String(), `"error_category":"archive_removal_trial_format"`) || env.app.archive.FormatVersion() != 0 {
-		t.Fatalf("start-up logs %s", env.logs.String())
+// trialVersion is the seam's format version 0: the runner registers its
+// segments, selects and keeps its watermark at the trial version, as a
+// deployment that exported before the freeze did. The bundles it writes are
+// still of the built-in version.
+func trialVersion(env *archiveEnv) { version := int64(0); env.formatVersion = &version }
+
+// Catalog rows of the trial format version 0 are never a basis for removal
+// (design B.1 item 4, M.2 step 1, R.10). archive_then_delete with the runner
+// at version 0 exports everything and removes nothing: every archived table
+// hashes the same before and after two runs. The store lists no removable
+// member, and asked directly to remove a version 0 member with its own
+// segment, revision and change stamp, it skips it.
+func TestPostgresArchiveTrialFormatIsNeverRemoved(t *testing.T) {
+	env := newArchiveEnvWith(t, config.ArchiveModeArchiveThenDelete, trialVersion)
+	if env.app.archive.FormatVersion() != 0 {
+		t.Fatalf("runner at format version %d", env.app.archive.FormatVersion())
 	}
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat, protofixture.Gemini}, 2)
 	if _, err := env.db.Exec(`INSERT INTO audit_gaps (started_at_ns, ended_at_ns, reason, request_count, detail, created_at_ns)
@@ -254,12 +264,188 @@ VALUES (1000, 2000, 'queue_full', 3, '', 2001)`); err != nil {
 		}
 		t.Fatal("archive_then_delete changed the hot store at format version 0")
 	}
-	if sealed := env.count(`SELECT COUNT(*) FROM archive_members WHERE state = 'sealed'`); sealed != env.sent {
-		t.Fatalf("%d sealed members for %d audits", sealed, env.sent)
+	if sealed := env.count(`SELECT COUNT(*) FROM archive_members AS m JOIN archive_segments AS s USING (segment_id)
+WHERE m.state = 'sealed' AND s.state = 'sealed' AND s.format_version = 0`); sealed != env.sent {
+		t.Fatalf("%d sealed members of version 0 for %d audits", sealed, env.sent)
 	}
 	env.mustRun()
 	if after := env.tableHashes(); !reflect.DeepEqual(after, before) {
 		t.Fatal("a second run changed the hot store at format version 0")
+	}
+
+	store := env.store()
+	if removable, err := store.ListRemovableArchiveMembers(env.ctx, nil, 100); err != nil || len(removable) != 0 {
+		t.Fatalf("removable members %d (%v)", len(removable), err)
+	}
+	var removal storage.ArchiveRemoval
+	if err := env.db.QueryRow(`SELECT segment_id, audit_id, revision, change_stamp FROM archive_members ORDER BY audit_id LIMIT 1`).
+		Scan(&removal.SegmentID, &removal.AuditID, &removal.Revision, &removal.ChangeStamp); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := store.RemoveArchived(env.ctx, []storage.ArchiveRemoval{removal}, time.Now().UnixNano())
+	if err != nil || len(outcome.Outcomes) != 1 || outcome.Outcomes[0].Outcome != storage.ArchiveRemovalSkipped {
+		t.Fatalf("direct removal of a version 0 member %+v (%v)", outcome, err)
+	}
+	var segment string
+	if err := env.db.QueryRow(`SELECT segment_id FROM archive_segments WHERE bundle_kind = 'gaps'`).Scan(&segment); err != nil {
+		t.Fatal(err)
+	}
+	if gaps, err := store.RemoveArchivedGaps(env.ctx, segment, 200, time.Now().UnixNano()); err != nil || gaps.RemovedGaps != 0 || gaps.DeletedRows != 0 {
+		t.Fatalf("direct removal of a version 0 gap %+v (%v)", gaps, err)
+	}
+	if after := env.tableHashes(); !reflect.DeepEqual(after, before) {
+		t.Fatal("a direct removal changed the hot store at format version 0")
+	}
+}
+
+// A deployment that ran export_only on the trial format and upgrades (design
+// B.1 item 4 and the watermark rule, R.10). The first phase exports every
+// audit and a gap with the runner at version 0; its manifests are then
+// relabelled format_version "0", so that, like real trial bundles, the
+// current reader refuses them. After the restart at the built-in version 1
+// in archive_then_delete, the watermark of version 1 starts empty and the
+// first run exports every audit again at revision 2 into version 1 bundles;
+// the version 0 members turn stale and their segments stay sealed, never
+// removed; removal goes by the version 1 members alone and empties the hot
+// store of audits; the old files are byte for byte as they were, none
+// renamed; the archive reads revision 2 of every audit. The gap exported at
+// version 0 is not exported again (archive_gap_members is keyed by the gap
+// id) and so it is never removed: it stays in audit_gaps.
+func TestPostgresArchiveTrialFormatIsExportedAgain(t *testing.T) {
+	env := newArchiveEnvWith(t, config.ArchiveModeExportOnly, trialVersion)
+	env.traffic([]protofixture.Protocol{protofixture.OpenAIResponses, protofixture.AnthropicMessages}, 3)
+	if _, err := env.db.Exec(`INSERT INTO audit_gaps (started_at_ns, ended_at_ns, reason, request_count, detail, created_at_ns)
+VALUES (1000, 2000, 'queue_full', 3, '', 2001)`); err != nil {
+		t.Fatal(err)
+	}
+	ids := env.auditIDs()
+	env.due()
+	trial := env.mustRun()
+	if trial.Counts.ExportedAudits != int64(len(ids)) || trial.ExportedGaps != 1 {
+		t.Fatalf("trial run %+v", trial)
+	}
+	var trialSegments int
+	if trialSegments = env.count(`SELECT COUNT(*) FROM archive_segments WHERE format_version = 0 AND state = 'sealed'`); trialSegments < 2 {
+		t.Fatalf("%d sealed version 0 segments", trialSegments)
+	}
+	if err := filepath.WalkDir(env.cfg.Archive.Dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".manifest.json") {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relabelled := bytes.Replace(data, []byte(`"format_version": "1"`), []byte(`"format_version": "0"`), 1)
+		if bytes.Equal(relabelled, data) {
+			return errors.New("manifest without format_version 1")
+		}
+		return os.WriteFile(path, relabelled, 0o600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldFiles := env.fileDigests()
+	if manifestCount(oldFiles) != trialSegments {
+		t.Fatalf("%d manifests for %d segments", manifestCount(oldFiles), trialSegments)
+	}
+	if err := env.app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	env.formatVersion = nil
+	env.cfg.Archive.Mode = config.ArchiveModeArchiveThenDelete
+	env.logs = &lockedBuffer{}
+	env.start()
+	if env.app.archive.FormatVersion() != 1 {
+		t.Fatalf("runner at format version %d", env.app.archive.FormatVersion())
+	}
+	if watermark, err := env.store().ArchiveWatermark(env.ctx, 1); err != nil || watermark != nil {
+		t.Fatalf("version 1 watermark before the first run %+v (%v)", watermark, err)
+	}
+	upgraded := env.mustRun()
+	if upgraded.Counts.ExportedAudits != int64(len(ids)) || upgraded.Removal.Removed != int64(len(ids)) || upgraded.Removal.Stale != 0 ||
+		upgraded.ExportedGaps != 0 || upgraded.Removal.RemovedGaps != 0 || upgraded.ReconciledSealed != 0 {
+		t.Fatalf("first run at version 1 %+v / %+v", upgraded.Counts, upgraded.Removal)
+	}
+	if left := len(env.auditIDs()); left != 0 {
+		t.Fatalf("%d audits left", left)
+	}
+	if watermark, err := env.store().ArchiveWatermark(env.ctx, 1); err != nil || watermark == nil {
+		t.Fatalf("version 1 watermark after the run %+v (%v)", watermark, err)
+	}
+	for _, id := range ids {
+		rows, err := env.db.Query(`SELECT m.revision, m.state, s.format_version, s.state FROM archive_members AS m
+JOIN archive_segments AS s USING (segment_id) WHERE m.audit_id = $1 ORDER BY m.revision`, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for rows.Next() {
+			var revision, version int64
+			var state, segmentState string
+			if err := rows.Scan(&revision, &state, &version, &segmentState); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, fmt.Sprintf("%d:%s:v%d:%s", revision, state, version, segmentState))
+		}
+		rows.Close()
+		if want := []string{"1:stale:v0:sealed", "2:hot_removed:v1:hot_removed"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s members %v, want %v", id, got, want)
+		}
+	}
+	if sealed := env.count(`SELECT COUNT(*) FROM archive_segments WHERE format_version = 0 AND state = 'sealed' AND removed_at_ns IS NULL`); sealed != trialSegments {
+		t.Fatalf("%d of %d version 0 segments still sealed", sealed, trialSegments)
+	}
+	if gaps := env.count(`SELECT COUNT(*) FROM audit_gaps`); gaps != 1 ||
+		env.count(`SELECT COUNT(*) FROM archive_gap_members AS g JOIN archive_segments AS s USING (segment_id) WHERE s.format_version = 0 AND g.state = 'sealed'`) != 1 {
+		t.Fatalf("%d gaps in the hot store; the version 0 gap member should stay sealed", gaps)
+	}
+	files := env.fileDigests()
+	for name, digest := range oldFiles {
+		if files[name] != digest {
+			t.Fatalf("%s changed or is gone", name)
+		}
+	}
+	for name := range files {
+		if strings.HasSuffix(name, ".orphan") || strings.HasSuffix(name, ".rejected") {
+			t.Fatalf("%s renamed", name)
+		}
+	}
+	logs := env.logs.String()
+	if !strings.Contains(logs, fmt.Sprintf(`"unsupported_format_version":%d`, trialSegments)) {
+		t.Fatalf("logs %s", logs)
+	}
+
+	keys, err := archivecli.LoadKeys(env.cfg.KeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := archivecli.OpenReader(env.ctx, env.cfg.Archive.Dir, archivecli.ReaderOptions{Keys: keys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	problems := reader.Index().Problems()
+	if len(problems) != trialSegments {
+		t.Fatalf("%d index problems for %d trial bundles", len(problems), trialSegments)
+	}
+	for _, problem := range problems {
+		if problem.Reason != "unsupported_format_version" || problem.FormatVersion != "0" {
+			t.Fatalf("problem %+v", problem)
+		}
+	}
+	for _, id := range ids {
+		audit, err := reader.Audit(env.ctx, id)
+		if err != nil || audit.Record.Revision != 2 {
+			t.Fatalf("%s reads %v (%v)", id, audit, err)
+		}
+		var buffer bytes.Buffer
+		if err := archivecli.ExportAudit(env.ctx, audit, "conversation", &buffer); err != nil {
+			t.Fatalf("%s conversation: %v", id, err)
+		}
+	}
+	if again := env.mustRun(); again.Counts.ExportedAudits != 0 || again.Removal.Removed != 0 {
+		t.Fatalf("next run %+v", again)
 	}
 }
 
@@ -501,7 +687,7 @@ func TestPostgresArchiveStartOrderMakesFalseStaleMembers(t *testing.T) {
 		{"removal order", runner.RemovalOrder, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			env := newArchiveEnvWith(t, config.ArchiveModeExportOnly, func(env *archiveEnv) { env.formatVersion = 1 })
+			env := newArchiveEnv(t, config.ArchiveModeExportOnly)
 			conversation := protofixture.NewConversation(protofixture.OpenAIResponses, true, protofixture.Options{Seed: 3, ItemBytes: 100}, 50)
 			for turn := 0; turn < 4; turn++ {
 				env.send(conversation.Next(protofixture.ScenarioBasic, protofixture.Features{}))

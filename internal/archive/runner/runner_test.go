@@ -153,7 +153,7 @@ func TestPassesFollowTheWatermark(t *testing.T) {
 		t.Fatalf("result %+v", result)
 	}
 	h.requireEachOnce(append(all, ids(conversation)...)...)
-	watermark, _ := h.store.Watermark(context.Background(), 0)
+	watermark, _ := h.store.Watermark(context.Background(), h.runner().FormatVersion())
 	if watermark == nil || watermark.AuditID != conversation[2].id {
 		t.Fatalf("watermark %+v", watermark)
 	}

@@ -18,10 +18,12 @@ type Entry struct {
 	Manifest     *archive.Manifest
 }
 
-// Problem is a manifest the index could not use, with the reason code.
+// Problem is a manifest the index could not use, with the reason code. For
+// ReasonUnsupportedFormatVersion, FormatVersion is the manifest's version.
 type Problem struct {
-	Path   string
-	Reason string
+	Path          string
+	Reason        string
+	FormatVersion string
 }
 
 // Location is one revision of an audit: the bundle and the line that holds
@@ -108,7 +110,12 @@ func BuildIndex(ctx context.Context, root string, signer archive.ManifestSigner)
 	for _, path := range manifests {
 		manifest, files, err := readManifest(path)
 		if err != nil {
-			index.problems = append(index.problems, Problem{Path: path, Reason: ReasonOf(err)})
+			problem := Problem{Path: path, Reason: ReasonOf(err)}
+			var unsupported *archive.UnsupportedFormatVersionError
+			if errors.As(err, &unsupported) {
+				problem.FormatVersion = unsupported.Version
+			}
+			index.problems = append(index.problems, problem)
 			unreadable = append(unreadable, strings.TrimSuffix(path, ManifestSuffix)+".")
 			continue
 		}

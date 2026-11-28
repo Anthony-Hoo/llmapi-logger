@@ -463,7 +463,7 @@ func handDigestInput(r *Record) []byte {
 		}
 	}
 	a := r.Audit
-	out.WriteString("llmapi-logger/archive-record/v0\x00")
+	out.WriteString("llmapi-logger/archive-record/v1\x00")
 	T(a.AuditID)
 	T("audit_records")
 	I(a.SchemaGeneration)
@@ -592,7 +592,7 @@ func TestDigestMatchesTheHandWrittenSequence(t *testing.T) {
 // The fixed vectors: the full record's line and digest, and the hand-built
 // record's digest, pinned in testdata for the format document.
 func TestDigestVectors(t *testing.T) {
-	vectors := map[string]*Record{"record_full_v0": fullRecord(t), "record_hand_v0": handRecord()}
+	vectors := map[string]*Record{"record_full_v1": fullRecord(t), "record_hand_v1": handRecord()}
 	for name, record := range vectors {
 		line, digest, parts, err := EncodeLine(record)
 		if err != nil || len(parts) != 0 {

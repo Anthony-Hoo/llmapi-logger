@@ -184,7 +184,7 @@ func runFpr(ctx context.Context, env *Env, args []string) error {
 	}
 	defer reader.Close()
 	for _, problem := range reader.Index().Problems() {
-		fmt.Fprintf(env.Stderr, "audit-archive: skipped %s: %s\n", printable(c.relative(problem.Path)), problem.Reason)
+		fmt.Fprintf(env.Stderr, "audit-archive: skipped %s: %s\n", printable(c.relative(problem.Path)), problemText(problem))
 	}
 	entries := reader.Index().Bundles()
 	switch {

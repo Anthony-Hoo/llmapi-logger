@@ -14,8 +14,10 @@ import (
 )
 
 // recordDigestDomain starts the record digest input (E.2). It carries the
-// format version: version 0 is the trial format.
-const recordDigestDomain = "llmapi-logger/archive-record/v" + FormatVersion + "\x00"
+// format version and is frozen with version 1: it is written out rather than
+// derived from FormatVersion, so a later format version cannot change what
+// a version 1 digest is. (The trial version 0 used ".../archive-record/v0".)
+const recordDigestDomain = "llmapi-logger/archive-record/v1\x00"
 
 // digestEncoder writes the E.1 notation. Every method appends to w.
 type digestEncoder struct {

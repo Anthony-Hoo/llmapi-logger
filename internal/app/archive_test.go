@@ -31,9 +31,9 @@ func archiveTestConfig(t *testing.T, mode string) config.Config {
 
 // Guard 2 (L.2): with the archive on, retention's direct delete is not
 // assembled. export_only says the hot store keeps growing; archive_then_delete
-// says verified removal is active for format version 1 and later and, at the
-// built-in trial format version 0, that nothing is removed. Off, retention
-// runs as before and nothing is said.
+// says verified removal is active, at the built-in format version 1, and says
+// nothing about a trial format. Off, retention runs as before and nothing is
+// said.
 func TestArchiveModeReplacesDirectRetention(t *testing.T) {
 	for _, test := range []struct {
 		mode      string
@@ -42,7 +42,7 @@ func TestArchiveModeReplacesDirectRetention(t *testing.T) {
 	}{
 		{config.ArchiveModeOff, true, nil},
 		{config.ArchiveModeExportOnly, false, []string{`"error_category":"archive_export_only"`}},
-		{config.ArchiveModeArchiveThenDelete, false, []string{`"error_category":"archive_removal_active"`, `"error_category":"archive_removal_trial_format"`}},
+		{config.ArchiveModeArchiveThenDelete, false, []string{`"error_category":"archive_removal_active","format_version":1`}},
 	} {
 		t.Run(test.mode, func(t *testing.T) {
 			cfg := archiveTestConfig(t, test.mode)

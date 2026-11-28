@@ -20,10 +20,12 @@ import (
 	"llmapi-logger/internal/storage"
 )
 
-// FormatVersion is the archive format version written into lines' digest
-// domain and manifests. Version 0 is the trial format (design Q14); the
-// freeze to version 1 is a separate commit.
-const FormatVersion = "0"
+// FormatVersion is the archive format version this build writes into
+// manifests, and the only one its reader accepts (Manifest.Validate). Version
+// 1 is published and frozen (design R.10): its bundles stay readable by every
+// later reader, so nothing that version 1 bundles depend on may change. Version
+// 0 was the trial format (design Q14); its bundles are refused and re-exported.
+const FormatVersion = "1"
 
 // FormatName is the manifest's format field.
 const FormatName = "llmapi-logger-archive"

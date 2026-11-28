@@ -71,6 +71,12 @@ const (
 	ReasonCanceled         = "canceled"
 )
 
+// ReasonUnsupportedFormatVersion is a manifest of the archive format whose
+// format_version this reader does not read: the trial version 0 (re-exported,
+// never a basis for removal) or a later version. Nothing else of the bundle
+// is read, its signature included; its data files are not orphans.
+const ReasonUnsupportedFormatVersion = "unsupported_format_version"
+
 // Error is the error of every operation of the package. Error() is the
 // reason code alone; Unwrap returns the cause, which may hold paths and
 // values and must not be logged.

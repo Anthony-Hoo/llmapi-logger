@@ -44,7 +44,7 @@ func TestManifestSignVerifyAndVector(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := ManifestMACInput(manifest)
-	if !bytes.HasPrefix(input, []byte("llmapi-logger/archive-manifest/v0\x00")) || !bytes.Equal(input[len(manifestDomain):], ManifestEncoding(manifest)) {
+	if !bytes.HasPrefix(input, []byte("llmapi-logger/archive-manifest/v1\x00")) || !bytes.Equal(input[len(manifestDomain):], ManifestEncoding(manifest)) {
 		t.Fatal("MAC input is not the manifest domain followed by the encoding")
 	}
 	if string(input) == "llmapi-logger/archive-key-fingerprint/v1\x00" {
@@ -54,8 +54,8 @@ func TestManifestSignVerifyAndVector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkVector(t, "manifest_v0.json", encoded)
-	checkVector(t, "manifest_v0.encoding.hex", []byte(hex.EncodeToString(ManifestEncoding(manifest))+"\n"))
+	checkVector(t, "manifest_v1.json", encoded)
+	checkVector(t, "manifest_v1.encoding.hex", []byte(hex.EncodeToString(ManifestEncoding(manifest))+"\n"))
 	decoded, err := DecodeManifest(encoded)
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +66,59 @@ func TestManifestSignVerifyAndVector(t *testing.T) {
 	again, err := EncodeManifest(decoded)
 	if err != nil || !bytes.Equal(again, encoded) {
 		t.Fatalf("re-encoding differs: %v", err)
+	}
+}
+
+// The strings that carry the format version are frozen with version 1
+// (design R.10). The vector manifest's MAC was also computed outside Go
+// (.NET HMACSHA256 with K_sign = 0x80..0x9f over the manifest domain and the
+// bytes of manifest_v1.encoding.hex).
+func TestFormatVersionOneIsFrozen(t *testing.T) {
+	if FormatVersion != "1" || recordDigestDomain != "llmapi-logger/archive-record/v1\x00" || manifestDomain != "llmapi-logger/archive-manifest/v1\x00" {
+		t.Fatalf("format version %q, domains %q %q", FormatVersion, recordDigestDomain, manifestDomain)
+	}
+	if mac := testManifest(t).MAC; hex.EncodeToString(mac[:]) != "ff6367840f56bf000c3ca5e8d997df69b35cc2d68ca7fecc9a00d718eeb1f203" {
+		t.Fatalf("vector manifest MAC %x", mac)
+	}
+}
+
+// A manifest of this format whose format_version is another well-formed
+// version (the trial 0, a later 2) is refused as unsupported before anything
+// else of it is read, even with keys this version does not know; a version
+// that is not a canonical decimal is a plain format error. Writing refuses
+// any version but this one.
+func TestManifestOfAnotherFormatVersion(t *testing.T) {
+	encoded, err := EncodeManifest(testManifest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"0", "2", "10"} {
+		mutated := strings.Replace(string(encoded), `"format_version": "1"`, `"format_version": "`+version+`"`, 1)
+		for name, variant := range map[string]string{"as written": mutated, "with an unknown key": strings.Replace(mutated, `"line_count"`, `"extra": 1, "line_count"`, 1)} {
+			_, err := DecodeManifest([]byte(variant))
+			var unsupported *UnsupportedFormatVersionError
+			if !errors.Is(err, ErrUnsupportedFormatVersion) || !errors.Is(err, ErrFormat) || !errors.As(err, &unsupported) || unsupported.Version != version {
+				t.Fatalf("version %s %s: %v", version, name, err)
+			}
+		}
+	}
+	for _, version := range []string{"01", "-1", "", "v1", "1.0"} {
+		mutated := strings.Replace(string(encoded), `"format_version": "1"`, `"format_version": "`+version+`"`, 1)
+		if _, err := DecodeManifest([]byte(mutated)); !errors.Is(err, ErrFormat) || errors.Is(err, ErrUnsupportedFormatVersion) {
+			t.Fatalf("version %q: %v", version, err)
+		}
+	}
+	other := strings.Replace(strings.Replace(string(encoded), `"format_version": "1"`, `"format_version": "2"`, 1), `"llmapi-logger-archive"`, `"other"`, 1)
+	if _, err := DecodeManifest([]byte(other)); errors.Is(err, ErrUnsupportedFormatVersion) || !errors.Is(err, ErrFormat) {
+		t.Fatalf("another format: %v", err)
+	}
+	manifest := testManifest(t)
+	manifest.FormatVersion = "0"
+	if err := manifest.Sign(newTestKeys()); !errors.Is(err, ErrUnsupportedFormatVersion) {
+		t.Fatalf("Sign at version 0: %v", err)
+	}
+	if _, err := EncodeManifest(manifest); !errors.Is(err, ErrUnsupportedFormatVersion) {
+		t.Fatalf("EncodeManifest at version 0: %v", err)
 	}
 }
 
@@ -95,7 +148,7 @@ func TestManifestTamper(t *testing.T) {
 	keys := newTestKeys()
 	mutations := map[string]func(*Manifest){
 		"format":              func(m *Manifest) { m.Format += "x" },
-		"format_version":      func(m *Manifest) { m.FormatVersion = "1" },
+		"format_version":      func(m *Manifest) { m.FormatVersion = "2" },
 		"source_schema":       func(m *Manifest) { m.SourceSchemaVersion = "9" },
 		"segment_id":          func(m *Manifest) { m.SegmentID = strings.Repeat("ac", 16) },
 		"run_id":              func(m *Manifest) { m.RunID = strings.Repeat("ce", 16) },
@@ -193,7 +246,7 @@ func TestManifestValidate(t *testing.T) {
 	}
 	cases := map[string]func(string) string{
 		"format":  func(s string) string { return strings.Replace(s, `"llmapi-logger-archive"`, `"other"`, 1) },
-		"version": func(s string) string { return strings.Replace(s, `"format_version": "0"`, `"format_version": "1"`, 1) },
+		"version": func(s string) string { return strings.Replace(s, `"format_version": "1"`, `"format_version": "2"`, 1) },
 		"schema version": func(s string) string {
 			return strings.Replace(s, `"source_schema_version": "8"`, `"source_schema_version": "08"`, 1)
 		},

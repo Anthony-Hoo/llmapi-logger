@@ -83,6 +83,9 @@ func parseManifest(data []byte) (*archive.Manifest, map[string]archive.ManifestF
 		return nil, nil, fail(ReasonManifestInvalid, errors.New("manifest is not a regular file of bounded size"))
 	}
 	manifest, err := archive.DecodeManifest(data)
+	if errors.Is(err, archive.ErrUnsupportedFormatVersion) {
+		return nil, nil, fail(ReasonUnsupportedFormatVersion, err)
+	}
 	if err != nil {
 		return nil, nil, fail(ReasonManifestInvalid, err)
 	}

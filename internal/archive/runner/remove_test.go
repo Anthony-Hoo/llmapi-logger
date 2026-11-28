@@ -186,12 +186,11 @@ func (store *fakeStore) memberStates(auditID string) map[int64]string {
 	return out
 }
 
-// newRemovalHarness is a harness in archive_then_delete whose runner works
-// with format version 1, the version removal requires.
+// newRemovalHarness is a harness in archive_then_delete at the built-in
+// format version, which removal accepts (version 1 and later).
 func newRemovalHarness(t *testing.T) *harness {
 	h := newHarness(t)
 	h.options.Mode = storage.ArchiveModeArchiveThenDelete
-	h.options.FormatVersionOverride = 1
 	return h
 }
 
@@ -497,15 +496,48 @@ func TestRemovalGates(t *testing.T) {
 			t.Fatalf("export_only removal %+v calls %v", result.Removal, h.store.calls)
 		}
 	})
+	// Catalog rows of the trial format version 0 (the seam registers the
+	// segments at 0) are never a basis for removal. The first run at the
+	// built-in version exports the audits again at revision 2, the version 0
+	// members turn stale, and removal goes by the new members only. A gap
+	// exported at version 0 is never exported again (a gap has one catalog
+	// row, keyed by its id) and so never removed.
 	t.Run("format version 0", func(t *testing.T) {
 		h := newRemovalHarness(t)
-		h.options.FormatVersionOverride = 0
+		h.options.FormatVersionOverride = int64Pointer(0)
 		h.addConversation("conv-gate", "openai", 2, baseTimeNS)
 		h.store.gaps = []archive.Gap{{ID: 1, StartedAtNS: baseTimeNS, EndedAtNS: baseTimeNS + 10, Reason: "queue_full", RequestCount: 1, CreatedAtNS: baseTimeNS + 11}}
 		result := h.mustRun()
 		if h.runner().FormatVersion() != 0 || result.Counts.ExportedAudits != 2 || result.Removal.Removed != 0 || result.Removal.RemovedGaps != 0 ||
 			len(h.store.audits) != 2 || len(h.store.gaps) != 1 || len(h.store.removalBatches) != 0 {
 			t.Fatalf("format 0: %+v, %d audits", result, len(h.store.audits))
+		}
+		if again := h.mustRun(); again.Counts.ExportedAudits != 0 || again.Removal.Removed != 0 || len(h.store.audits) != 2 {
+			t.Fatalf("second run at format 0: %+v", again)
+		}
+
+		h.options.FormatVersionOverride = nil
+		upgraded := h.mustRun()
+		if h.runner().FormatVersion() != 1 || upgraded.Counts.ExportedAudits != 2 || upgraded.Removal.Removed != 2 || upgraded.Removal.Stale != 0 ||
+			upgraded.ExportedGaps != 0 || upgraded.Removal.RemovedGaps != 0 || len(h.store.audits) != 0 || len(h.store.gaps) != 1 {
+			t.Fatalf("first run at format 1: %+v", upgraded)
+		}
+		audits := map[string]bool{}
+		for _, member := range h.store.members {
+			audits[member.AuditID] = true
+		}
+		if len(audits) != 2 {
+			t.Fatalf("members of %d audits", len(audits))
+		}
+		for id := range audits {
+			if states := h.store.memberStates(id); !reflect.DeepEqual(states, map[int64]string{1: storage.ArchiveMemberStale, 2: storage.ArchiveMemberHotRemoved}) {
+				t.Fatalf("%s members %v", id, states)
+			}
+		}
+		for _, segment := range h.store.segments {
+			if segment.FormatVersion == 0 && segment.State == storage.ArchiveSegmentHotRemoved {
+				t.Fatalf("a version 0 segment was removed: %+v", segment)
+			}
 		}
 	})
 	t.Run("deadline", func(t *testing.T) {

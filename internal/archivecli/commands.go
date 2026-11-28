@@ -45,6 +45,15 @@ type GapInfo struct {
 	Count   int64 `json:"count,string"`
 }
 
+// problemText is the reason code of a manifest the index left out and, for
+// a bundle of a format version this reader does not read, that version.
+func problemText(problem bundle.Problem) string {
+	if problem.Reason == bundle.ReasonUnsupportedFormatVersion && problem.FormatVersion != "" {
+		return fmt.Sprintf("%s (format_version %q; this reader reads format version %s)", problem.Reason, problem.FormatVersion, archive.FormatVersion)
+	}
+	return problem.Reason
+}
+
 func formatNS(ns int64) string { return time.Unix(0, ns).UTC().Format(time.RFC3339) }
 
 // Authenticity checks a manifest's key fingerprint and MAC: ok,
@@ -92,7 +101,7 @@ func runList(ctx context.Context, env *Env, args []string) error {
 		return err
 	}
 	for _, problem := range index.Problems() {
-		fmt.Fprintf(env.Stderr, "audit-archive: unreadable manifest %s: %s\n", c.relative(problem.Path), problem.Reason)
+		fmt.Fprintf(env.Stderr, "audit-archive: unreadable manifest %s: %s\n", c.relative(problem.Path), problemText(problem))
 	}
 	entries := index.Bundles()
 	switch {

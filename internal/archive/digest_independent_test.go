@@ -256,7 +256,7 @@ func independentRecord() *archive.Record {
 // design text.
 func independentSequence() []byte {
 	w := &e1{}
-	w.raw([]byte("llmapi-logger/archive-record/v0\x00"))
+	w.raw([]byte("llmapi-logger/archive-record/v1\x00"))
 	w.T(vAuditID)
 
 	w.M("audit_records")
@@ -611,9 +611,12 @@ func independentSequence() []byte {
 	return w.Bytes()
 }
 
-// pinnedIndependentDigest freezes the digest of independentRecord; the
-// format document can cite it beside the hand-written sequence.
-const pinnedIndependentDigest = "8e50300a767d596dd1e678968f13755774ec7fc3aff137afa481537bf40c3b6a"
+// pinnedIndependentDigest freezes the digest of independentRecord at format
+// version 1; the format document can cite it beside the hand-written
+// sequence. It is the SHA-256 of independentSequence(), checked outside Go
+// (.NET SHA-256 over the 6176 bytes); the trial version 0 sequence, which
+// differs only in the domain's version digit, hashed to 8e50300a…3b6a.
+const pinnedIndependentDigest = "4cfe35155fed5adda6e62907973656920a7abdfed05f43da3746f9d60e90b6f6"
 
 func TestDigestEqualsIndependentE2Sequence(t *testing.T) {
 	record := independentRecord()

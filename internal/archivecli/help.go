@@ -61,8 +61,10 @@ protocol, time range (UTC), members, conversations, whether encrypted,
 format version, and the manifest path relative to --dir. No key is needed;
 with --key each manifest's key fingerprint and signature are checked and the
 AUTH column says ok, key_mismatch or mac_mismatch (not_checked without a key).
-Manifests that do not parse are reported on standard error. Data files are
-not read; use verify for that.
+Manifests that do not parse are reported on standard error, a bundle of a
+format version this reader does not read (the trial version 0, or a later
+version) with unsupported_format_version and its version. Data files are not
+read; use verify for that.
 
 Flags:
   --dir <archive>       The archive directory (archive.dir). Required.
@@ -101,7 +103,9 @@ Without --key an encrypted bundle is never decrypted: it shows ok at level
 files when its files are intact.
 
 Result codes: ok; file_missing, file_mismatch (a file differs from the
-manifest), manifest_invalid, mac_mismatch, key_mismatch, decrypt_failed,
+manifest), manifest_invalid, unsupported_format_version (a bundle of the trial
+format version 0, which is re-exported, or of a later version: nothing of it
+is read), mac_mismatch, key_mismatch, decrypt_failed,
 decompress_failed, line_invalid, count_mismatch,
 member_mismatch, order, context_mismatch, digest_mismatch, object_mismatch,
 raw_mismatch, reference_open, event_mac_mismatch, read_failed. With --dir, a

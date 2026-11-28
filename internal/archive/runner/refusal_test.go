@@ -74,7 +74,7 @@ func TestRefusedParentLeavesItsChildrenMaterialised(t *testing.T) {
 		!strings.Contains(h.logs.String(), `"reason":"payload_mismatch"`) || !strings.Contains(h.logs.String(), `"refused_audits":1`) {
 		t.Fatalf("logs %s", h.logs.String())
 	}
-	watermark, _ := h.store.Watermark(context.Background(), 0)
+	watermark, _ := h.store.Watermark(context.Background(), h.runner().FormatVersion())
 	if watermark == nil || watermark.AuditID != audits[3].id { // the last audit by start
 		t.Fatalf("watermark %+v", watermark)
 	}

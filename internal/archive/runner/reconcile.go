@@ -57,8 +57,18 @@ func (current *run) reconcile() error {
 	for _, path := range leftovers.DataWithoutManifest {
 		_, _ = bundle.MarkOrphan(path)
 	}
-	if problems := len(index.Problems()); problems > 0 {
-		options.Logger.Warn("archive directory has manifests that do not verify", "error_category", "archive_manifest_unusable", "manifests", problems)
+	if problems := index.Problems(); len(problems) > 0 {
+		// Bundles of another format version (the trial version 0, which is
+		// re-exported, or a later one) are counted apart: they are not
+		// damage, and their files are left as they are.
+		unsupported := 0
+		for _, problem := range problems {
+			if problem.Reason == bundle.ReasonUnsupportedFormatVersion {
+				unsupported++
+			}
+		}
+		options.Logger.Warn("archive directory has manifests that do not verify", "error_category", "archive_manifest_unusable", "manifests", len(problems),
+			"unsupported_format_version", unsupported)
 	}
 	return nil
 }

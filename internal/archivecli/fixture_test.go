@@ -237,6 +237,33 @@ func (f *fixture) withRaw(record *archive.Record, stage, paired string, data []b
 // image, the raw request (received, and sent served from it) and response
 // (received, and sent served from it), and a response stream timeline.
 func (f *fixture) withRealTurn(record *archive.Record, conversationID string, createdNS int64, prompt string) {
+	f.t.Helper()
+	f.withRealChildTurn(record, conversationID, createdNS, prompt, nil, nil, false)
+}
+
+// userItem is the Responses input message of a prompt, with an inline image
+// that depends on the prompt.
+func userItem(prompt string) map[string]any {
+	png := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x62, byte(len(prompt))}, 64)...)
+	return map[string]any{"type": "message", "role": "user", "content": []any{
+		map[string]any{"type": "input_text", "text": prompt + " " + contentMarker},
+		map[string]any{"type": "input_image", "image_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)},
+	}}
+}
+
+// answerItem is the Responses output message that answers prompt in audit
+// auditID.
+func answerItem(auditID, prompt string) map[string]any {
+	return map[string]any{"type": "message", "id": "message-" + auditID, "role": "assistant",
+		"content": []any{map[string]any{"type": "output_text", "text": "answer to " + prompt + " " + contentMarker}}}
+}
+
+// withRealChildTurn is withRealTurn for a turn whose request repeats history
+// (the earlier input and output items) before the new prompt. With a parent
+// it is the parent's child (parent_base post_turn), its context the delta
+// against the parent's request and response. A requestOnly turn has no
+// response: the exchange ended before the upstream answered.
+func (f *fixture) withRealChildTurn(record *archive.Record, conversationID string, createdNS int64, prompt string, parent *archive.Record, history []any, requestOnly bool) {
 	t := f.t
 	t.Helper()
 	auditID := record.Audit.AuditID
@@ -248,22 +275,17 @@ func (f *fixture) withRealTurn(record *archive.Record, conversationID string, cr
 	if err != nil {
 		t.Fatal(err)
 	}
-	png := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x62, byte(len(prompt))}, 64)...)
 	requestBody, err := auditmodel.CanonicalJSON(map[string]any{
 		"model": "model-example",
-		"input": []any{map[string]any{"type": "message", "role": "user", "content": []any{
-			map[string]any{"type": "input_text", "text": prompt + " " + contentMarker},
-			map[string]any{"type": "input_image", "image_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)},
-		}}},
+		"input": append(append([]any(nil), history...), userItem(prompt)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	responseBody, err := auditmodel.CanonicalJSON(map[string]any{
 		"id": "response-" + auditID, "object": "response", "model": "model-result",
-		"output": []any{map[string]any{"type": "message", "id": "message-" + auditID, "role": "assistant",
-			"content": []any{map[string]any{"type": "output_text", "text": "answer to " + prompt + " " + contentMarker}}}},
-		"usage": map[string]any{"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
+		"output": []any{answerItem(auditID, prompt)},
+		"usage":  map[string]any{"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -271,6 +293,9 @@ func (f *fixture) withRealTurn(record *archive.Record, conversationID string, cr
 	input := base.Input{AuditID: auditID, Protocol: "openai", Endpoint: "/v1/responses",
 		Request:  base.BodySource{Present: true, Complete: true, ContentType: "application/json", Data: requestBody},
 		Response: base.BodySource{Present: true, Complete: true, ContentType: "application/json", Data: responseBody}}
+	if requestOnly {
+		responseBody, input.Response = nil, base.BodySource{}
+	}
 	normalized, err := implementation.NormalizeAudit(context.Background(), input, implementation.Parse(context.Background(), input))
 	if err != nil {
 		t.Fatal(err)
@@ -288,9 +313,17 @@ func (f *fixture) withRealTurn(record *archive.Record, conversationID string, cr
 			RequestSequenceHash: prepared.RequestSequenceHash, ResponseSequenceHash: prepared.ResponseSequenceHash,
 			RequestReconstructionHash: prepared.RequestReconstructionHash, ResponseReconstructionHash: prepared.ResponseReconstructionHash,
 			ReconstructionStatus: "verified", CreatedAtNS: prepared.CreatedAtNS},
-		Context:     archive.RequestContext{Form: archive.ContextDelta, Ops: archive.ContextOpsFrom(auditmodel.BuildDelta(nil, prepared.RequestRefs))},
 		RequestRefs: append([]auditmodel.ObjectRef(nil), prepared.RequestRefs...),
 	}
+	var parentRefs []auditmodel.ObjectRef
+	if parent != nil {
+		turn.Row.ParentTurnID = text(parent.Turn.Row.TurnID)
+		turn.Row.ParentBase = auditmodel.ParentBasePostTurn
+		turn.Row.LinkReason = "conversation_key"
+		turn.Row.LinkConfidence = 90
+		parentRefs = append(append([]auditmodel.ObjectRef(nil), parent.Turn.RequestRefs...), parent.Turn.ResponseRefs()...)
+	}
+	turn.Context = archive.RequestContext{Form: archive.ContextDelta, Ops: archive.ContextOpsFrom(auditmodel.BuildDelta(parentRefs, prepared.RequestRefs))}
 	if prepared.ResponseID != "" {
 		turn.Row.ResponseID = text(prepared.ResponseID)
 	}
@@ -329,8 +362,14 @@ func (f *fixture) withRealTurn(record *archive.Record, conversationID string, cr
 	record.ParsedResult = &archive.ParsedResult{ParserName: openai.Responses, ParserVersion: "1", Status: storage.ParseOK,
 		RequestModel: text("model-example"), ResponseModel: text("model-result"), ParsedAtNS: record.Audit.EndedAtNS + 1}
 	f.withRaw(record, storage.StageRequestReceived, storage.StageRequestSent, requestBody, 64, true)
+	f.raw[auditID+"/request"] = requestBody
+	if requestOnly {
+		f.event(record, 2, "semantic_compacted", createdNS+1)
+		f.exchanges[auditID] = exchange{request: requestBody}
+		return
+	}
 	f.withRaw(record, storage.StageResponseReceived, storage.StageResponseSent, responseBody, 100, true)
-	f.raw[auditID+"/request"], f.raw[auditID+"/response"] = requestBody, responseBody
+	f.raw[auditID+"/response"] = responseBody
 	points := []streamtimeline.Point{{Offset: 10, AtNS: record.Audit.StartedAtNS + 10}, {Offset: 40, AtNS: record.Audit.StartedAtNS + 20}, {Offset: int64(len(responseBody)), AtNS: record.Audit.StartedAtNS + 35}}
 	encoded, err := streamtimeline.Encode(points)
 	if err != nil {
