@@ -173,7 +173,7 @@ func (harness *insightsHarness) send(path string, headers http.Header, body stri
 		harness.t.Fatalf("proxy status = %d body=%q", recorder.Code, recorder.Body.String())
 	}
 	ctx := context.Background()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(parser.PipelineWait)
 	for time.Now().Before(deadline) {
 		ids, err := harness.store.ListPendingParseIDs(ctx, 100)
 		if err != nil {

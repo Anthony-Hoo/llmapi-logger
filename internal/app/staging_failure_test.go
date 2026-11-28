@@ -205,7 +205,7 @@ func runFailedCommit(t *testing.T, backend failureBackend, restart, isolated boo
 		defer runtime.stager.Close()
 	}
 	var snapshot storage.Snapshot
-	for deadline := time.Now().Add(20 * time.Second); ; {
+	for deadline := time.Now().Add(pipelineWait); ; {
 		snapshot, err = backend.snapshot(ctx, runtime.store, id)
 		if err != nil {
 			t.Fatal(err)

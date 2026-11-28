@@ -96,7 +96,7 @@ func submitAll(t *testing.T, worker *parser.Worker, jobs ...handover.Job) {
 
 func waitFor(t *testing.T, done func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(parser.PipelineWait)
 	for !done() {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out")

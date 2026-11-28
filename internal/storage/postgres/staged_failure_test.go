@@ -471,7 +471,7 @@ func TestCommitUncertainOutcomeIsReadBack(t *testing.T) {
 		_, err := store.CommitAudit(attempt, commit)
 		result <- err
 	}()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(storeWait)
 	for {
 		var waiting bool
 		if err := blocker.QueryRow(`SELECT COALESCE(wait_event_type = 'Lock', false) FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&waiting); err != nil {

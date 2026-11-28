@@ -225,7 +225,7 @@ func (harness *finalizeHarness) next() handover.Job {
 	select {
 	case job := <-harness.jobs:
 		return job
-	case <-time.After(10 * time.Second):
+	case <-time.After(parser.PipelineWait):
 		harness.t.Fatal("no job was handed over")
 		return handover.Job{}
 	}

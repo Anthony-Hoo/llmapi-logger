@@ -151,7 +151,7 @@ func TestCaptureV2LostCheckpointIsUnreadableUntilMarked(t *testing.T) {
 			t.Fatalf("detail before the mark = %v", err)
 		}
 	}
-	deadline := time.Now().Add(3 * captureRecoveryInterval)
+	deadline := time.Now().Add(recoveryWait)
 	for {
 		if _, capture, _ := detailStages(t, store, "v2-unmarked"); capture == CaptureFailed {
 			break

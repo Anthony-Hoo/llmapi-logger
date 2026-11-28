@@ -397,7 +397,7 @@ func setWriterReadOnly(t *testing.T, store *Store, enabled bool) {
 
 func waitForCaptureRecovery(t *testing.T, store *Store) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(recoveryWait)
 	for store.recoveryPending.Load() != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("capture recovery did not drain: %d", store.recoveryPending.Load())
@@ -433,7 +433,7 @@ func TestRecoverySnapshotKeepsConcurrentFinalization(t *testing.T) {
 	writer.rememberFailedWrite(writeRequest{kind: writeStartStage, data: HTTPStage{AuditID: "concurrent-recovery", Stage: StageRequestReceived}}, 0)
 	done := make(chan struct{})
 	go func() { writer.recoverCaptureWrites(); close(done) }()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(storeWait)
 	for {
 		var waiting bool
 		if err := blocker.QueryRow(`SELECT COALESCE(wait_event_type='Lock',false) FROM pg_stat_activity WHERE pid=$1`, pid).Scan(&waiting); err != nil {

@@ -266,7 +266,7 @@ func TestAcceptedPolicyWritesPublishDespiteCallerCancellation(t *testing.T) {
 			var request writeRequest
 			select {
 			case request = <-writer.queue:
-			case <-time.After(time.Second):
+			case <-time.After(storeWait):
 				t.Fatal("write was not queued")
 			}
 			cancel()
@@ -283,7 +283,7 @@ func TestAcceptedPolicyWritesPublishDespiteCallerCancellation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(storeWait):
 				t.Fatal("policy write hung")
 			}
 			<-writer.done
@@ -313,7 +313,7 @@ func TestExpiredQueuedPolicyCannotCommitLater(t *testing.T) {
 	var request writeRequest
 	select {
 	case request = <-writer.queue:
-	case <-time.After(time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("not queued")
 	}
 	cancel()
@@ -322,7 +322,7 @@ func TestExpiredQueuedPolicyCannotCommitLater(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("expired queued write hung")
 	}
 	writer.queue <- request
@@ -386,7 +386,7 @@ func TestExecutingPolicyDeadlineDoesNotHangOrAffectAuditWrites(t *testing.T) {
 	var request writeRequest
 	select {
 	case request = <-writer.queue:
-	case <-time.After(time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("not queued")
 	}
 	writer.queue <- request
@@ -396,7 +396,7 @@ func TestExecutingPolicyDeadlineDoesNotHangOrAffectAuditWrites(t *testing.T) {
 	writer.queue <- audit
 	close(writer.queue)
 	go writer.runWriter()
-	deadline := time.After(time.Second)
+	deadline := time.After(storeWait)
 	for request.policy.state.Load() != 1 {
 		select {
 		case <-deadline:
@@ -411,7 +411,7 @@ func TestExecutingPolicyDeadlineDoesNotHangOrAffectAuditWrites(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err=%v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("started policy ignored deadline")
 	}
 	if err := connection.Close(); err != nil {
@@ -422,7 +422,7 @@ func TestExecutingPolicyDeadlineDoesNotHangOrAffectAuditWrites(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(storeWait):
 		t.Fatal("unrelated audit write hung")
 	}
 	<-writer.done

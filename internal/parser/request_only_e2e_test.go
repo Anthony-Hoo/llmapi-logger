@@ -80,7 +80,7 @@ func (harness *insightsHarness) sendCancelled(path string, headers http.Header, 
 		defer close(done)
 		harness.handler.ServeHTTP(writer, request)
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(parser.PipelineWait)
 	<-sent
 	for writer.received() < len(partial) {
 		if time.Now().After(deadline) {
@@ -97,7 +97,7 @@ func (harness *insightsHarness) sendCancelled(path string, headers http.Header, 
 func (harness *insightsHarness) parseNext() string {
 	harness.t.Helper()
 	ctx := context.Background()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(parser.PipelineWait)
 	for time.Now().Before(deadline) {
 		ids, err := harness.store.ListPendingParseIDs(ctx, 100)
 		if err != nil {

@@ -26,7 +26,7 @@ import (
 
 func waitQueued(t *testing.T, writer *Store) {
 	t.Helper()
-	deadline := time.After(time.Second)
+	deadline := time.After(storeWait)
 	for len(writer.queue) == 0 {
 		select {
 		case <-deadline:

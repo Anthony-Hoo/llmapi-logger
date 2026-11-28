@@ -575,7 +575,7 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 		t.Fatalf("proxied response = %d %q", proxyResponse.Code, proxyResponse.Body.String())
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(pipelineWait)
 	for {
 		page, listErr := application.auditStore.ListAudits(context.Background(), sqlite.AuditQueryFilter{}, sqlite.AuditQueryCursor{}, 10)
 		if listErr != nil {
@@ -660,7 +660,7 @@ func TestUserCatalogRefreshLoopRetriesAfterInitialFailureAndStops(t *testing.T) 
 		t.Fatal("failed startup refresh unexpectedly published a snapshot")
 	}
 
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(pipelineWait)
 	for len(client.Snapshot().Users) == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}

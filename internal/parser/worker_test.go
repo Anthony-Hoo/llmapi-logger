@@ -55,14 +55,14 @@ func TestWorkerStartupScanDecodesGzipAndEncryptsParsedJSON(t *testing.T) {
 		if !bytes.Equal(input.Response.Data, responsePlaintext) || !input.Response.Complete {
 			t.Fatalf("response evidence = %+v data=%q", input.Response, input.Response.Data)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("worker did not parse startup pending audit")
 	}
 
 	var saved sqlite.ParsedResult
 	select {
 	case saved = <-store.saved:
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("worker did not save parsed result")
 	}
 	if store.resetCount != 1 || saved.Status != StatusOK || saved.RequestModel == nil || *saved.RequestModel != "worker-model" {
@@ -252,7 +252,7 @@ func TestWorkerRecoversParserPanic(t *testing.T) {
 		if saved.Status != StatusError || saved.ErrorCode == nil || *saved.ErrorCode != "parser_panic" {
 			t.Fatalf("panic result = %+v", saved)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("panic result was not saved")
 	}
 }
@@ -276,7 +276,7 @@ func TestWorkerSaveFailureReleasesAuditForRetry(t *testing.T) {
 	}
 	defer worker.Close()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(PipelineWait)
 	for {
 		store.mu.Lock()
 		audit := store.audits[auditID]
@@ -299,7 +299,7 @@ func TestWorkerSaveFailureReleasesAuditForRetry(t *testing.T) {
 		if saved.Status != StatusOK {
 			t.Fatalf("retried result status = %q", saved.Status)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(PipelineWait):
 		t.Fatal("released audit was not retried")
 	}
 	store.mu.Lock()
@@ -350,7 +350,7 @@ func TestWorkerEvidenceErrorsOverrideProtocolFallbacks(t *testing.T) {
 				if saved.Status != test.wantStatus || saved.ErrorCode == nil || *saved.ErrorCode != test.wantCode {
 					t.Fatalf("saved evidence result = %+v, want status=%s code=%s", saved, test.wantStatus, test.wantCode)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(PipelineWait):
 				t.Fatal("evidence result was not saved")
 			}
 		})

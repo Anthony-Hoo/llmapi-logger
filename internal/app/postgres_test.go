@@ -105,7 +105,7 @@ func TestPostgresApplicationHTTPPersistence(t *testing.T) {
 	if status != 200 || !bytes.Contains(b, []byte("safe reply")) {
 		t.Fatalf("forward status %d: %s", status, b)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(pipelineWait)
 	var page storage.AuditListPage
 	for time.Now().Before(deadline) {
 		page, err = app.auditStore.ListAudits(ctx, storage.AuditQueryFilter{}, storage.AuditQueryCursor{}, 10)

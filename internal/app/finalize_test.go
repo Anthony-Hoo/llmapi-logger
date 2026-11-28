@@ -59,7 +59,7 @@ func TestCommittedAuditsAreHandedToTheParser(t *testing.T) {
 			auditID := page.Rows[0].AuditID
 			// The analysis row is written on the parser goroutine right after
 			// the save.
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(pipelineWait)
 			for {
 				parsed, err := application.auditStore.LoadParserAudit(ctx, auditID)
 				_, analysisErr := application.auditStore.LoadAnalysis(ctx, auditID)

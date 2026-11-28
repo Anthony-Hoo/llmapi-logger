@@ -487,7 +487,7 @@ func sendFixtureExchange(ctx context.Context, proxyURL string, fake *protofixtur
 // nextParsedAudit waits for the audit of the exchange just sent to become
 // parseable and parses it, analysis included.
 func nextParsedAudit(ctx context.Context, store *sqlite.Store, worker *parser.Worker, seen map[string]bool) (string, error) {
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(parser.PipelineWait)
 	for time.Now().Before(deadline) {
 		ids, err := store.ListPendingParseIDs(ctx, 100)
 		if err != nil {
