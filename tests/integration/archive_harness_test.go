@@ -96,10 +96,10 @@ type archiveRigOptions struct {
 }
 
 type archiveRig struct {
-	t        *testing.T
-	ctx      context.Context
-	options  archiveRigOptions
-	dsn string
+	t       *testing.T
+	ctx     context.Context
+	options archiveRigOptions
+	dsn     string
 	// db is query-only; rw writes, for the tests that change rows after the
 	// fact as an attacker or a bug would.
 	db, rw   *sql.DB
