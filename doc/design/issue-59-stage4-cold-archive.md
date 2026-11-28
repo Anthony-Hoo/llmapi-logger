@@ -1865,7 +1865,7 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
 
 12. 一趟的预算 `pass_audits` 依次分给：推迟过的 audit（每次运行开始时读出全部推迟行，每条每次运行再看一次）、`stale` 的成员（只在 `archive_then_delete` 下，且推迟的看完之后）、水位之后的新范围。B.2 只说新范围。
 13. 期限只在趟与趟之间检查，至少做一趟；到了期限这次运行仍以 `completed` 结束，完成日志带 `deadline_reached`。**到了期限时 gap 不导出**，留给下一次。
-14. 推迟：快照给出的 `open`、`parse_pending`、`caller_pending`，导出时完整性类的排除记 `integrity_failed`，其余排除记 `export_failed`（R.6 第 18 条）。`not_found` 的和已有当前成员的从推迟表里去掉。不能导出的成员留在热库、登记推迟、按原因计数报告，之后每次运行再看。
+14. 推迟：快照给出的 `open`、`parse_pending`、`caller_pending`，导出时完整性类的排除记 `integrity_failed`，其余排除记 `export_failed`（R.6 第 18 条）；包写入方拒绝的记录和抽样读出不同的成员（第 25 条）也记 `export_failed`。`not_found` 的和已有当前成员的从推迟表里去掉。不能导出的成员留在热库、登记推迟、按原因计数报告，之后每次运行再看。
 15. 水位只在这一趟的分段全部定稿之后，随计数、推迟和不再推迟的 audit 一起由 `RecordArchivePass` 写入（R.6 第 3 条）；新范围这一页没有任何行时水位不动。
 
 **分组与装包（B.3、B.4）**
@@ -1881,8 +1881,12 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
 21. 每个分段写满或这一趟写完就立即封包、登记、发布、核对、定稿，再写下一个包；H.2 把关文件、登记、发布写成一趟的第 3 到 7 步，没有说是逐个分段做。分段的清单临时文件在登记之前就已写好并 fsync（R.5 第 6 条）。
 22. 重读核对之后，每个成员重算的摘要要等于导出快照里的；gap 包比较 gap 数。
 23. **抽样（J.3）。** 抽 `ceil(verify_sample × n)` 条，至少一条：`verify_sample` 为 0 时每个包也比对一条。登记意向时已是 `stale` 的成员不参加；gap 包不抽样。比较的是读取工具的渲染：详情（经 `archive.ProjectDetail` 投影的热库详情）、Header、重建的 Turn 与 provider 请求和响应、会话、两侧时间线、两侧 raw 的元数据和字节的 SHA-256；一侧出错时比较错误类别。**`List` 那一行的摘要不比**（J.3 的表里有）。
-24. 比较不等时，在只读连接池上开一个 REPEATABLE READ 快照重算这条成员此刻的变更戳（`ArchiveChangeStamp`）：与导出时不同或 audit 已不在，计入这次运行的 `stale_audits`，不作废这个包；相同则 `sample_mismatch`，包作废。**这条成员在目录表里仍是 `sealed`**，只有计数记下它；`exported_audits` 也照样算上它（`exported_audits` 只减去登记意向时就是 `stale` 的）。移除上线时，移除前的变更戳比对会把它挡下。
-25. 核对或抽样的任何一种失败都作废这个包（改名 `.rejected`、删意向行），**包括抽样时热库读不出来（`sample_failed`）**：那并不说明包有问题。对账里同一情形不作废，分段留在 `publishing`，这次运行以失败结束、下次再试。两处的处理不一致，记在这里。
+24. 比较不等时，在只读连接池上开一个 REPEATABLE READ 快照重算这条成员此刻的变更戳（`ArchiveChangeStamp`）：与导出时不同或 audit 已不在，计入这次运行的 `stale_audits`，不作废这个包；相同则按第 25 条只排除这一条。变更戳变了的那种成员**在目录表里仍是 `sealed`**，只有计数记下它；`exported_audits` 也照样算上它（`exported_audits` 只减去登记意向时就是 `stale` 的）。移除上线时，移除前的变更戳比对会把它挡下。
+25. **一条成员的问题只排除这一条**（提交 `a913f30`；H.4 和 J.3 写的是整个包作废、运行失败）：
+    - 包写入方以记录本身的原因（`invalid_record`、`order`、`context_mismatch`、`payload_mismatch`、`entry_too_large`）拒绝一条记录时，`SegmentWriter.Add` 已作废整个未封的分段；runner 把这条推迟为 `export_failed`、Warn `archive record refused`（`archive_record_refused`，`reason` 是写入方的码），再从仍然打开的快照里把这个分段的其余成员重新读出写进新分段。被拒记录的子轮次因为父轮次不在分段里了，由写入方改写成物化形式。
+    - 抽样发现一条成员读出不同而变更戳没变时，这个包照样作废（`.rejected`、删意向行），但这条推迟为 `export_failed`、Warn `archive sample mismatch`（`archive_sample_mismatch`），包里其余的成员在同一趟里写进一个新包并重新走登记到定稿。
+    运行继续，这一趟的水位照常推进；完成日志分别计 `refused_audits`、`sample_mismatch_audits`，两者也计入 `excluded_audits`。真实行上产生不了写入方拒绝（`Export` 先做同样的检查），这条路径由 runner 的主机测试覆盖；抽样的这条有 PostgreSQL 上的测试（提交 `daf91b5`：成员自己的回答对象在快照之后被损坏，共享的内容对象不在变更戳里，所以差异归到这条成员）。
+    I/O 与快照的故障、重读 `Verify` 不过、抽样无法比较，仍然作废这个包并让运行以 `archive_failed` 失败。**其中包括抽样时热库读不出来（`sample_failed`）**：那并不说明包有问题，包却被改名 `.rejected`。对账里同一情形不作废，分段留在 `publishing`，这次运行以失败结束、下次再试。两处的处理不一致，记在这里。对账里抽样读出不同时包作废，成员不进推迟表（它们所在那一趟的水位当时没有推进）。
 
 **对账（H.6）**
 
@@ -1896,7 +1900,7 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
 
 **日志与运行记录（H.5）**
 
-30. 完成日志 `archive run completed` 与失败日志 `archive run failed` 的字段：`status`、`exported_audits`、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`、`stale_audits`、`exported_gaps`、`segments`、`disk_bytes`、`duration_ms`，推迟数大于 0 的原因各一个 `deferred_<原因>`，可选 `reconciled_segments`、`deadline_reached`；失败时加 `error_category=archive_failed`、`reason` 和（不是包层的错误时）`storage_error`。失败的 `reason`：`catalog_failed`、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`、`sample_mismatch`、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及 `internal/archive/bundle` 的码。
+30. 完成日志 `archive run completed` 与失败日志 `archive run failed` 的字段：`status`、`exported_audits`、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`、`stale_audits`、`exported_gaps`、`refused_audits`、`sample_mismatch_audits`、`segments`、`disk_bytes`、`duration_ms`，推迟数大于 0 的原因各一个 `deferred_<原因>`，可选 `reconciled_segments`、`deadline_reached`；失败时加 `error_category=archive_failed`、`reason` 和（不是包层的错误时）`storage_error`。失败的 `reason`：`catalog_failed`、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及 `internal/archive/bundle` 的码。
 31. 一条 audit 的完整性类排除另记一条 Error `archive integrity check failed`（`archive_integrity_failed`，`reason` 是 R.6 第 18 条的原因）。
 32. `archive_runs.disk_bytes` 和完成日志的 `disk_bytes` 含清单本身的字节；分段行的 `disk_bytes` 同样含清单。
 

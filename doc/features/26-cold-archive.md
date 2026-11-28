@@ -1032,7 +1032,7 @@ archive:
 | `parse_pending` | `parse_status` 是 `pending` 或 `processing` |
 | `caller_pending` | `caller_status` 是 `pending` |
 | `integrity_failed` | 原完整性事件复核不过、或某段密文解不开（§18.6） |
-| `export_failed` | 导出时这一条不能归档，而原因不是数据损坏（时间线边界、raw 布局或记录格式不过） |
+| `export_failed` | 这一条不能归档，而原因不是数据损坏：导出时时间线边界、raw 布局或记录格式不过，包写入方以记录本身的原因拒绝了它，或抽样时它读出来与热库不同而变更戳没变（§18.5） |
 
 不能导出的 audit 留在热库，登记进 `archive_deferred` 并写明原因，之后每次运行再看一次；每次运行按原因报告推迟的条数（§19）。推迟没有上限：推迟数一直不降，说明解析、调用者查找或数据本身卡住了，应当去修那里。已不在热库的 audit 从推迟表里去掉。
 
@@ -1057,17 +1057,25 @@ archive:
 2. **登记意向。** 一个 writer 操作在目录表插入 `publishing` 的分段行和全部成员行（记录摘要、变更戳、修订号）。同一事务里重算每个成员的变更戳：与快照时不同、或 audit 已不在，登记为 `stale`（快照之后它已经变了）。
 3. **发布。** 用硬链接把数据文件链到正式名，fsync 目录，再链接清单，再 fsync 目录。正式名已存在时失败，从不覆盖。中途失败时已经链上的文件改名加 `.rejected`，意向行删掉。
 4. **重读核对**（§16）：重新打开已发布的包，做全部检查，并且每个成员重算的摘要必须等于快照里算出的。
-5. **抽样比对**（设计 J.3）：按 `verify_sample` 抽取 `ceil(比例 × 成员数)` 条，每个包至少一条（比例为 0 时也是一条），登记意向时已是 `stale` 的成员不参加。用读取工具的同一套渲染，把归档读出的详情、Header、重建的 Turn 与 provider 请求和响应、会话、两侧时间线、两侧 raw 的元数据和字节的 SHA-256，与查询层从热库对同一条记录给出的结果（经同样的凭据投影）逐字节比较；一侧报错时比较错误类别。比较不等时，再查这条成员此刻在热库里的变更戳：与导出时不同（快照之后被改过）就把它算作 `stale`，不作废这个包；相同则这个包作废。gap 包不抽样。
+5. **抽样比对**（设计 J.3）：按 `verify_sample` 抽取 `ceil(比例 × 成员数)` 条，每个包至少一条（比例为 0 时也是一条），登记意向时已是 `stale` 的成员不参加。用读取工具的同一套渲染，把归档读出的详情、Header、重建的 Turn 与 provider 请求和响应、会话、两侧时间线、两侧 raw 的元数据和字节的 SHA-256，与查询层从热库对同一条记录给出的结果（经同样的凭据投影）逐字节比较；一侧报错时比较错误类别。比较不等时，再查这条成员此刻在热库里的变更戳：与导出时不同（快照之后被改过）就把它算作 `stale`，不作废这个包；相同则这条成员读出来与热库不同，处理见下。gap 包不抽样。
 6. **定稿。** 一个 writer 操作把分段改为 `sealed`，写清单的 SHA-256。
 
-第 4、5 步任何一项不过，这个包作废：清单和数据文件改名加 `.rejected`（不删除），意向行删掉，成员仍是热库里的普通 audit，下一次运行从旧水位重新导出。
+**一条成员的问题只排除这一条。** 两种情形：
+
+- 写入方以记录本身的原因拒绝一条记录（`invalid_record`、`order`、`context_mismatch`、`payload_mismatch`、`entry_too_large`）。写入方这时已作废整个未封的分段（删掉它的临时文件，不会发布半条记录），runner 从仍然打开的快照里把这个分段的其余成员重新读出、写进新的分段；这条记录的子轮次因为父轮次不在分段里了，改写成物化形式。日志 Warn `archive record refused`（`error_category=archive_record_refused`，`reason` 是写入方的码）。
+- 第 5 步发现一条成员读出不同而变更戳没变。这个包照样作废（改名 `.rejected`、意向行删掉），这条成员排除，包里其余的成员在同一趟里写进一个新的包，再走一遍第 2 到 6 步。日志 Warn `archive sample mismatch`（`error_category=archive_sample_mismatch`）。
+
+两种情形下被排除的成员都留在热库，推迟原因 `export_failed`，之后每次运行再看一次；运行照常继续，水位照常推进。完成日志分别计入 `refused_audits` 和 `sample_mismatch_audits`（也计入 `excluded_audits`）。
+
+除此之外，第 4 步核对不过，或第 5 步无法比较（热库读不出来），这个包作废（改名 `.rejected`，不删除；意向行删掉），这次运行以 `archive_failed` 失败结束；成员仍是热库里的普通 audit，这一趟的水位没有推进，下一次运行重新导出它们。
 
 ### 18.6 失败
 
 | 情形 | 处理 |
 | --- | --- |
 | 一条 audit 的完整性事件复核不过、或某段密文解不开 | 只排除这一条：不归档、留在热库，推迟原因 `integrity_failed`，计入 `integrity_failed_audits`，日志 Error `archive integrity check failed`（`error_category=archive_integrity_failed`，`reason` 是具体原因）。存储的载荷校验状态置为失败，与后台载荷校验发现损坏时相同，存储因此报告不健康 |
-| 一条 audit 不能导出，而不是因为损坏 | 只排除这一条，推迟原因 `export_failed` |
+| 一条 audit 不能导出、被写入方拒绝，或抽样时读出不同而变更戳没变 | 只排除这一条，推迟原因 `export_failed`，其余成员照常写进包（§18.5）；运行继续 |
+| 重读核对不过，或抽样无法比较 | 这个包作废（`.rejected`），运行以 `archive_failed` 结束，10 分钟后重试 |
 | 磁盘满、写入或 fsync 失败 | 删掉这个分段自己的临时文件，不登记；运行以 `archive_failed` 结束（`reason` 是写入方的码，如 `disk_full`、`write_failed`、`sync_failed`）；10 分钟后重试 |
 | 登记意向、定稿或目录表的其他写失败 | 运行以 `archive_failed` 结束；已发布而没定稿的分段留给对账 |
 | 快照本身出错（取消、存储关闭、事务不再应答） | 结束这一趟和这次运行（`snapshot_failed`），不排除任何成员，不置失败状态 |
@@ -1102,13 +1110,15 @@ archive:
 | `archive run failed` | Warn | 同下，另加 `error_category=archive_failed`、`reason`，存储错误时 `storage_error` | 一次运行失败结束；运行开始前就失败时只有 `error_category`、`reason=catalog_failed`、`storage_error` |
 | `archive run interrupted` | Warn | `error_category=archive_interrupted`、`exported_audits`、`duration_ms` | 运行被取消（进程关闭） |
 | `archive integrity check failed` | Error | `error_category=archive_integrity_failed`、`reason` | 一条 audit 复核不过（§18.6） |
+| `archive record refused` | Warn | `error_category=archive_record_refused`、`reason`（写入方的码） | 包写入方以记录本身的原因拒绝一条记录，只排除它（§18.5） |
+| `archive sample mismatch` | Warn | `error_category=archive_sample_mismatch`、`reason=sample_mismatch` | 抽样时一条成员读出不同而变更戳没变：包作废，只排除它，其余成员重写（§18.5） |
 | `archive directory has manifests that do not verify` | Warn | `error_category=archive_manifest_unusable`、`manifests` | 对账时有清单解析不了或签名不对 |
 | `archive bundle unknown to the catalog does not verify` | Warn | `error_category=archive_manifest_unusable`、`reason` | 对账时一个目录表不认识的包核对不过 |
 | `archive bundle registered from the directory` | Info | `bundle_kind`、`members` | 对账登记了一个目录表不认识的包 |
 
-**完成日志的字段**：`status`、`exported_audits`（登记为当前成员的条数，不含登记时已是 `stale` 的）、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`（导出时被排除的条数）、`stale_audits`、`exported_gaps`、`segments`、`disk_bytes`、`duration_ms`；推迟数大于 0 的原因各有一个 `deferred_<原因>`；对账定稿了分段时有 `reconciled_segments`；到了期限时有 `deadline_reached=true`。
+**完成日志的字段**：`status`、`exported_audits`（登记为当前成员的条数，不含登记时已是 `stale` 的）、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`（被排除的条数，含下两项）、`stale_audits`、`exported_gaps`、`refused_audits`（写入方拒绝的）、`sample_mismatch_audits`（抽样读出不同的）、`segments`、`disk_bytes`、`duration_ms`；推迟数大于 0 的原因各有一个 `deferred_<原因>`；对账定稿了分段时有 `reconciled_segments`；到了期限时有 `deadline_reached=true`。
 
-**失败的 `reason`**：`catalog_failed`（目录表读写失败）、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`（抽样时热库读不出来）、`sample_mismatch`、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及写入、发布和核对时 `internal/archive/bundle` 的码（如 `disk_full`、`write_failed`、`sync_failed`、`name_exists`、`link_failed`，§24.3 的结果码）。
+**失败的 `reason`**：`catalog_failed`（目录表读写失败）、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`（抽样时热库读不出来）、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及写入、发布和核对时 `internal/archive/bundle` 的码（如 `disk_full`、`write_failed`、`sync_failed`、`name_exists`、`link_failed`，§24.3 的结果码）。
 
 ## 20. 对账
 
