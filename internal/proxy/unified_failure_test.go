@@ -34,23 +34,34 @@ func largeStreamExchange(t *testing.T) *eqExchange {
 	return exchange
 }
 
-func sendBoth(t *testing.T, legacy, unified *eqRun, exchange *eqExchange) (eqClientView, eqClientView) {
+// sendBoth sends the exchange through both runs; the client must see what it
+// saw on the legacy path (the legacy oracle's "view").
+func sendBoth(t *testing.T, legacy, unified *eqRun, exchange *eqExchange) eqClientView {
 	t.Helper()
 	var legacyView, unifiedView eqClientView
 	var wait sync.WaitGroup
-	wait.Go(func() { legacyView, _ = legacy.send(copyChunks(exchange)) })
+	if legacy != nil {
+		wait.Go(func() { legacyView, _ = legacy.send(copyChunks(exchange)) })
+	}
 	unifiedView, _ = unified.send(copyChunks(exchange))
 	wait.Wait()
-	if legacyView.status != unifiedView.status || string(legacyView.body) != string(unifiedView.body) {
-		t.Fatalf("client saw %d %q and %d %q", legacyView.status, legacyView.body, unifiedView.status, unifiedView.body)
+	if view := frozen(t, "view", legacy, func(*eqRun) eqFrozenView { return frozenView(legacyView) }); view != frozenView(unifiedView) {
+		t.Fatalf("client saw %+v, unified %+v %q", view, frozenView(unifiedView), unifiedView.body)
 	}
-	return legacyView, unifiedView
+	return unifiedView
 }
 
+// compareRuns compares the unified run's rows with the legacy oracle's:
+// "captured", each audit's rows as committed, before any parse released raw
+// chunks, and "final", the whole database at the end. delta turns the legacy
+// rows into what the unified path stores by design.
 func compareRuns(t *testing.T, legacy, unified *eqRun, delta func(map[string][]eqRow)) map[string][]eqRow {
 	t.Helper()
-	// The rows as committed, before any parse released raw chunks.
-	for id, committed := range legacy.captured {
+	captured := frozen(t, "captured", legacy, func(run *eqRun) map[string]map[string][]eqRow { return run.captured })
+	if len(captured) != len(unified.captured) {
+		t.Fatalf("%d audits, unified %d", len(captured), len(unified.captured))
+	}
+	for id, committed := range captured {
 		if delta != nil {
 			delta(committed)
 		}
@@ -58,9 +69,11 @@ func compareRuns(t *testing.T, legacy, unified *eqRun, delta func(map[string][]e
 			t.Fatalf("committed rows differ:\n%s", strings.Join(diffs[:min(len(diffs), 30)], "\n"))
 		}
 	}
-	legacy.worker.Close()
+	if legacy != nil {
+		legacy.worker.Close()
+	}
 	unified.worker.Close()
-	legacyDump := dumpEqDatabase(t, legacy.dbPath, legacy.cipher)
+	legacyDump := frozen(t, "final", legacy, func(run *eqRun) map[string][]eqRow { return dumpEqDatabase(t, run.dbPath, run.cipher) })
 	unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
 	if delta != nil {
 		delta(legacyDump)
@@ -203,11 +216,8 @@ func TestCommitAuditRetries(t *testing.T) {
 func TestMemoryBudgetExhaustion(t *testing.T) {
 	legacy := newEqRun(t, audit.WritePathLegacy, audit.Options{}, nil)
 	unified := newEqRun(t, audit.WritePathUnified, audit.Options{StageBytes: 1 << 20, GlobalBytes: 1 << 20}, nil)
-	exchange := largeStreamExchange(t)
-	legacyView, unifiedView := sendBoth(t, legacy, unified, exchange)
-	if string(legacyView.body) != string(unifiedView.body) {
-		t.Fatal("forwarded bytes changed")
-	}
+	// The forwarded bytes are legacy's (sendBoth).
+	sendBoth(t, legacy, unified, largeStreamExchange(t))
 	unified.manager.CloseGaps(context.Background())
 	snapshot, err := unified.store.Snapshot(context.Background(), unified.lastAuditID())
 	if err != nil {
@@ -508,7 +518,9 @@ func TestCrashPointsMatchLegacyAfterRecovery(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			recoverRun(t, legacy)
 			recoverRun(t, unified)
-			legacyDump := dumpEqDatabase(t, legacy.dbPath, legacy.cipher)
+			// "recovered": the legacy database after the same crash and
+			// recovery.
+			legacyDump := frozen(t, "recovered", legacy, func(run *eqRun) map[string][]eqRow { return dumpEqDatabase(t, run.dbPath, run.cipher) })
 			unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
 			test.delta(t, legacyDump)
 			if diffs := diffEqDumps(legacyDump, unifiedDump); len(diffs) != 0 {

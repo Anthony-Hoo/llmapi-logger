@@ -41,6 +41,7 @@ import (
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/interceptor"
+	"llmapi-logger/internal/legacyoracle"
 	"llmapi-logger/internal/parser"
 	"llmapi-logger/internal/parser/builtin"
 	"llmapi-logger/internal/parser/handover"
@@ -601,6 +602,38 @@ func copyChunks(exchange *eqExchange) *eqExchange {
 	return &clone
 }
 
+// eqFrozenView is what the client saw, as the legacy oracle keeps it.
+type eqFrozenView struct {
+	Status     int
+	Header     string
+	Trailer    string
+	BodyLength int
+	BodySHA256 string
+}
+
+func frozenView(view eqClientView) eqFrozenView {
+	sum := sha256.Sum256(view.body)
+	return eqFrozenView{Status: view.status, Header: fmt.Sprint(view.header), Trailer: fmt.Sprint(view.trailer),
+		BodyLength: len(view.body), BodySHA256: hex.EncodeToString(sum[:])}
+}
+
+// frozen is the legacy oracle's value name: computed from the legacy run now
+// and checked against the file (or recorded) when legacy is not nil, read
+// from the file otherwise. The values of this package are normalised by the
+// run itself: audit ids come from a seeded source, every capture time from a
+// counter clock, ciphertext is opened under its row's AAD and kept as the
+// length and SHA-256 of the plaintext (renderEqColumn), other ciphertext as
+// its length, and the columns the parser worker stamps with its own clock are
+// masked.
+func frozen[T any](t *testing.T, name string, legacy *eqRun, value func(*eqRun) T) T {
+	t.Helper()
+	if legacy == nil {
+		return legacyoracle.Value[T](t, name, nil)
+	}
+	computed := value(legacy)
+	return legacyoracle.Value(t, name, &computed)
+}
+
 func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("the whole fixture catalogue through both write paths")
@@ -622,29 +655,28 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 		wait.Go(func() { legacyView, legacyID = legacy.send(copyChunks(exchange)) })
 		unifiedView, unifiedID = unified.send(copyChunks(exchange))
 		wait.Wait()
-		if legacyID != unifiedID {
-			t.Fatalf("%s: audit ids %s and %s", exchange.name, legacyID, unifiedID)
+		if id := frozen(t, "id/"+exchange.name, legacy, func(*eqRun) string { return legacyID }); id != unifiedID {
+			t.Fatalf("%s: audit ids %s and %s", exchange.name, id, unifiedID)
 		}
-		if legacyView.status != unifiedView.status || !bytes.Equal(legacyView.body, unifiedView.body) ||
-			fmt.Sprint(legacyView.header) != fmt.Sprint(unifiedView.header) || fmt.Sprint(legacyView.trailer) != fmt.Sprint(unifiedView.trailer) {
-			t.Fatalf("%s: client saw %d %v %q, unified %d %v %q", exchange.name, legacyView.status, legacyView.header, legacyView.body,
-				unifiedView.status, unifiedView.header, unifiedView.body)
+		if view := frozen(t, "view/"+exchange.name, legacy, func(*eqRun) eqFrozenView { return frozenView(legacyView) }); view != frozenView(unifiedView) {
+			t.Fatalf("%s: client saw %+v, unified %+v %q", exchange.name, view, frozenView(unifiedView), unifiedView.body)
 		}
-		if legacy.reads.Load() != unified.reads.Load() {
-			t.Fatalf("%s: clock reads %d (legacy) and %d (unified)", exchange.name, legacy.reads.Load(), unified.reads.Load())
+		if reads := frozen(t, "reads/"+exchange.name, legacy, func(run *eqRun) int64 { return run.reads.Load() }); reads != unified.reads.Load() {
+			t.Fatalf("%s: clock reads %d (legacy) and %d (unified)", exchange.name, reads, unified.reads.Load())
 		}
-		if diffs := diffEqDumps(legacy.captured[legacyID], unified.captured[unifiedID]); len(diffs) != 0 {
+		committed := frozen(t, "captured/"+exchange.name, legacy, func(run *eqRun) map[string][]eqRow { return run.captured[legacyID] })
+		if diffs := diffEqDumps(committed, unified.captured[unifiedID]); len(diffs) != 0 {
 			t.Fatalf("%s: committed rows differ:\n%s", exchange.name, strings.Join(diffs[:min(len(diffs), 30)], "\n"))
 		}
-		ids = append(ids, legacyID)
+		ids = append(ids, unifiedID)
 	}
-	compareCompletionLogs(t, legacy.logs.Bytes(), unified.logs.Bytes())
+	compareCompletionLogs(t, legacy, unified.logs.Bytes())
 	for _, id := range ids {
 		compareQueryViews(t, id, legacy, unified)
 	}
 	legacy.worker.Close()
 	unified.worker.Close()
-	legacyDump := dumpEqDatabase(t, legacy.dbPath, legacy.cipher)
+	legacyDump := frozen(t, "final", legacy, func(run *eqRun) map[string][]eqRow { return dumpEqDatabase(t, run.dbPath, run.cipher) })
 	unifiedDump := dumpEqDatabase(t, unified.dbPath, unified.cipher)
 	if diffs := diffEqDumps(legacyDump, unifiedDump); len(diffs) != 0 {
 		t.Fatalf("stored rows differ:\n%s", strings.Join(diffs[:min(len(diffs), 40)], "\n"))
@@ -671,7 +703,7 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 }
 
 // The completion log line is identical except for the measured durations.
-func compareCompletionLogs(t *testing.T, legacy, unified []byte) {
+func compareCompletionLogs(t *testing.T, legacyRun *eqRun, unified []byte) {
 	t.Helper()
 	strip := func(records []map[string]any) []string {
 		out := make([]string, len(records))
@@ -684,7 +716,8 @@ func compareCompletionLogs(t *testing.T, legacy, unified []byte) {
 		}
 		return out
 	}
-	left, right := strip(completionLogRecords(t, legacy)), strip(completionLogRecords(t, unified))
+	left := frozen(t, "logs", legacyRun, func(run *eqRun) []string { return strip(completionLogRecords(t, run.logs.Bytes())) })
+	right := strip(completionLogRecords(t, unified))
 	if len(left) != len(right) {
 		t.Fatalf("completion logs: %d and %d records", len(left), len(right))
 	}
@@ -720,9 +753,16 @@ func compareQueryViews(t *testing.T, id string, legacy, unified *eqRun) {
 		add("turn", turn, err)
 		bodies, err := run.query.ReconstructBodies(ctx, id)
 		add("bodies", bodies, err)
+		// A long view is kept as its length, digest and first bytes.
+		for index := range views {
+			views[index] = legacyoracle.Digest(views[index])
+		}
 		return views
 	}
-	left, right := render(legacy), render(unified)
+	left, right := frozen(t, "queries/"+id, legacy, render), render(unified)
+	if len(left) != len(right) {
+		t.Fatalf("audit %s: %d views, unified %d", id, len(left), len(right))
+	}
 	for index := range left {
 		if left[index] != right[index] {
 			at := 0

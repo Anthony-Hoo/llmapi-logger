@@ -14,6 +14,7 @@ import (
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/headerblock"
+	"llmapi-logger/internal/legacyoracle"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
@@ -134,6 +135,28 @@ func runSession(t *testing.T, store audit.Store, cipher security.Cipher, writePa
 	return session.ID()
 }
 
+// legacyRun is the legacy side of a comparison: the store and the audit it
+// wrote.
+type legacyRun struct {
+	store *Store
+	id    string
+}
+
+// frozenLegacy is the legacy oracle's value name: computed from the legacy
+// run and checked against the file (or recorded) when legacy is not nil, read
+// from the file otherwise. The values are normalised as the comparisons
+// below normalise them: no audit id and no time (normalizeSessionDump), Header
+// values and other ciphertext opened under their AAD; the timeline plaintext
+// holds observation times and is left out.
+func frozenLegacy[T any](t *testing.T, name string, legacy *legacyRun, value func(*legacyRun) T) T {
+	t.Helper()
+	if legacy == nil {
+		return legacyoracle.Value[T](t, name, nil)
+	}
+	computed := value(legacy)
+	return legacyoracle.Value(t, name, &computed)
+}
+
 // flatSourceHeaders expands an audit's stored Headers, whatever its version.
 func flatSourceHeaders(t *testing.T, store *Store, cipher security.Cipher, auditID string) []string {
 	t.Helper()
@@ -155,6 +178,7 @@ func TestSessionWritesCaptureV2OnPostgreSQL(t *testing.T) {
 	drive := typicalV2Drive()
 	legacyID := runSession(t, legacyStore, cipher, audit.WritePathLegacy, drive, crashNone)
 	unifiedID := runSession(t, unifiedStore, cipher, audit.WritePathUnified, drive, crashNone)
+	legacy := &legacyRun{store: legacyStore, id: legacyID}
 
 	var version int
 	var headerRows, blocks int
@@ -162,7 +186,8 @@ func TestSessionWritesCaptureV2OnPostgreSQL(t *testing.T) {
 		Scan(&version, &headerRows, &blocks); err != nil || version != 2 || headerRows != 0 || blocks != 1 {
 		t.Fatalf("unified audit: version %d, %d header rows, %d blocks, %v", version, headerRows, blocks, err)
 	}
-	legacyHeaders, unifiedHeaders := flatSourceHeaders(t, legacyStore, cipher, legacyID), flatSourceHeaders(t, unifiedStore, cipher, unifiedID)
+	legacyHeaders := frozenLegacy(t, "headers", legacy, func(run *legacyRun) []string { return flatSourceHeaders(t, run.store, cipher, run.id) })
+	unifiedHeaders := flatSourceHeaders(t, unifiedStore, cipher, unifiedID)
 	if !reflect.DeepEqual(legacyHeaders, unifiedHeaders) {
 		t.Fatalf("headers differ:\n legacy  %v\n unified %v", legacyHeaders, unifiedHeaders)
 	}
@@ -181,33 +206,53 @@ func TestSessionWritesCaptureV2OnPostgreSQL(t *testing.T) {
 	}
 	// The content columns hold what the parser chooses from the legacy rows.
 	for _, stage := range []string{StageRequestReceived, StageResponseReceived} {
-		legacy, err := legacyStore.LoadParserStage(ctx, legacyID, stage)
-		if err != nil {
-			t.Fatal(err)
-		}
+		want := frozenLegacy(t, "content_type/"+stage, legacy, func(run *legacyRun) string {
+			rows, err := run.store.LoadParserStage(ctx, run.id, stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want string
+			for _, header := range rows.Headers {
+				if strings.EqualFold(header.Name, "content-type") {
+					aad, _ := security.AAD(run.id, "header", stage, header.Kind, header.Name, "0")
+					plaintext, err := cipher.Decrypt(aad, header.ValueEnc)
+					if err == nil && want == "" {
+						want = string(plaintext)
+					}
+				}
+			}
+			return want
+		})
 		unified, err := unifiedStore.LoadParserStage(ctx, unifiedID, stage)
 		if err != nil {
 			t.Fatal(err)
-		}
-		var want string
-		for _, header := range legacy.Headers {
-			if strings.EqualFold(header.Name, "content-type") {
-				aad, _ := security.AAD(legacyID, "header", stage, header.Kind, header.Name, "0")
-				plaintext, err := cipher.Decrypt(aad, header.ValueEnc)
-				if err == nil && want == "" {
-					want = string(plaintext)
-				}
-			}
 		}
 		if unified.ContentType == nil || *unified.ContentType != want || unified.ContentEncoding != nil {
 			t.Fatalf("%s content type = %v, legacy rows say %q", stage, unified.ContentType, want)
 		}
 	}
-	legacyDump, unifiedDump := dumpAudit(t, legacyStore.readerDB, harnessCipherOf(t, cipher), legacyID), dumpAudit(t, unifiedStore.readerDB, harnessCipherOf(t, cipher), unifiedID)
-	for _, dump := range []harnessDump{legacyDump, unifiedDump} {
+	sessionRows := func(store *Store, id string) harnessDump {
+		dump := dumpAudit(t, store.readerDB, harnessCipherOf(t, cipher), id)
 		dump.dropRows("http_headers", func(harnessRow) bool { return true })
+		dump = normalizeSessionDump(dump)
+		// Opened chunk contents are long; they are kept as their digest.
+		for _, rows := range dump {
+			for _, row := range rows {
+				for column, value := range row {
+					if text, ok := value.(string); ok {
+						row[column] = legacyoracle.Digest(text)
+					}
+				}
+			}
+		}
+		frozen, err := legacyoracle.RoundTrip(dump)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return frozen
 	}
-	if differences := diffDumps(normalizeSessionDump(legacyDump), normalizeSessionDump(unifiedDump)); len(differences) != 0 {
+	legacyDump := frozenLegacy(t, "rows", legacy, func(run *legacyRun) harnessDump { return sessionRows(run.store, run.id) })
+	if differences := diffDumps(legacyDump, sessionRows(unifiedStore, unifiedID)); len(differences) != 0 {
 		t.Fatalf("rows differ:\n%s", strings.Join(differences, "\n"))
 	}
 	for _, store := range []*Store{legacyStore, unifiedStore} {
@@ -234,6 +279,7 @@ func TestSessionCrashPointsRecoverCaptureV2(t *testing.T) {
 			drive := typicalV2Drive()
 			legacyID := runSession(t, legacyStore, cipher, audit.WritePathLegacy, drive, point)
 			unifiedID := runSession(t, unifiedStore, cipher, audit.WritePathUnified, drive, point)
+			legacy := &legacyRun{store: legacyStore, id: legacyID}
 			for _, store := range []*Store{legacyStore, unifiedStore} {
 				writerBarrier(t, store)
 				if recovered, err := store.RecoverInterruptedAudits(ctx, 9_000_000_000_000_000_000); err != nil || recovered != 1 {
@@ -256,7 +302,10 @@ func TestSessionCrashPointsRecoverCaptureV2(t *testing.T) {
 			if source := stored.HeaderSource(); !reflect.DeepEqual(source.StageSet, stages) || source.Block == nil {
 				t.Fatalf("stage rows %v, block %v; want %v", source.StageSet, source.Block != nil, stages)
 			}
-			legacyHeaders, unifiedHeaders := flatSourceHeaders(t, legacyStore, cipher, legacyID), flatSourceHeaders(t, unifiedStore, cipher, unifiedID)
+			// "headers": the legacy audit's Headers after the same crash and
+			// recovery.
+			legacyHeaders := frozenLegacy(t, "headers", legacy, func(run *legacyRun) []string { return flatSourceHeaders(t, run.store, cipher, run.id) })
+			unifiedHeaders := flatSourceHeaders(t, unifiedStore, cipher, unifiedID)
 			if point == crashBeforeFinish {
 				// The upstream's trailers arrive with the end of its body,
 				// after checkpoint 2: legacy wrote them at once, the unified
@@ -528,7 +577,8 @@ CREATE TRIGGER reject_inbound_block BEFORE INSERT ON http_header_blocks FOR EACH
 					t.Fatalf("payload verification: %v", err)
 				}
 			}
-			legacy, unified := queryHeaders(t, legacyStore, cipher, legacyID), queryHeaders(t, unifiedStore, cipher, unifiedID)
+			legacy := frozenLegacy(t, "headers", &legacyRun{store: legacyStore, id: legacyID}, func(run *legacyRun) []string { return queryHeaders(t, run.store, cipher, run.id) })
+			unified := queryHeaders(t, unifiedStore, cipher, unifiedID)
 			if test.extraStage != "" {
 				if len(withoutStage(unified, test.extraStage)) == len(unified) || len(withoutStage(legacy, test.extraStage)) != len(legacy) {
 					t.Fatalf("%s: legacy %v, unified %v", test.extraStage, legacy, unified)

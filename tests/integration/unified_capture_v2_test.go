@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/legacyoracle"
 	"llmapi-logger/internal/protofixture"
 	"llmapi-logger/internal/storage/postgres"
 )
@@ -185,18 +186,28 @@ func TestUnifiedCaptureVersion2MatchesLegacyOnPostgreSQL(t *testing.T) {
 		}
 		for turn, exchange := range built {
 			label := fmt.Sprintf("%s turn %d", value, turn)
-			legacyStatus, legacyBody, legacyID := send(legacy, legacyDB, exchange)
-			unifiedStatus, unifiedBody, unifiedID := send(unified, unifiedDB, exchange)
-			if legacyStatus != unifiedStatus || !bytes.Equal(legacyBody, unifiedBody) {
-				t.Fatalf("%s: client saw %d (%d bytes) and %d (%d bytes)", label, legacyStatus, len(legacyBody), unifiedStatus, len(unifiedBody))
+			var legacySide *legacyApp
+			var legacyStatus int
+			var legacyBody []byte
+			if legacy != nil {
+				var legacyID string
+				legacyStatus, legacyBody, legacyID = send(legacy, legacyDB, exchange)
+				legacySide = &legacyApp{db: legacyDB, cipher: legacyCipher, id: legacyID}
 			}
-			legacyShape := readStoredShape(t, legacyDB, client, legacy.adminURL, legacyCipher, legacyID)
+			unifiedStatus, unifiedBody, unifiedID := send(unified, unifiedDB, exchange)
+			if want := frozenLegacy(t, "client/"+label, legacySide, func(*legacyApp) clientResult { return clientOf(legacyStatus, legacyBody) }); want != clientOf(unifiedStatus, unifiedBody) {
+				t.Fatalf("%s: client saw %+v, unified %+v", label, want, clientOf(unifiedStatus, unifiedBody))
+			}
+			legacyShape := frozenLegacy(t, "shape/"+label, legacySide, func(run *legacyApp) storedShape {
+				return readStoredShape(t, run.db, client, legacy.adminURL, run.cipher, run.id)
+			})
 			unifiedShape := readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
 			if !reflect.DeepEqual(legacyShape, unifiedShape) {
 				t.Fatalf("%s: stored audits differ:\n legacy  %+v\n unified %+v", label, legacyShape, unifiedShape)
 			}
-			requireCaptureVersionsAcross(t, label, legacyDB, unifiedDB, legacyCipher, unifiedCipher, legacyID, unifiedID)
-			if legacyView, unifiedView := agentView(t, legacyCLI, legacyID), agentView(t, unifiedCLI, unifiedID); legacyView != unifiedView {
+			requireCaptureVersionsAcross(t, label, legacySide, unifiedDB, unifiedCipher, unifiedID)
+			legacyView := frozenLegacy(t, "agent/"+label, legacySide, func(run *legacyApp) string { return legacyoracle.Digest(agentView(t, legacyCLI, run.id)) })
+			if unifiedView := legacyoracle.Digest(agentView(t, unifiedCLI, unifiedID)); legacyView != unifiedView {
 				t.Fatalf("%s: Agent API output differs:\n legacy  %s\n unified %s", label, legacyView, unifiedView)
 			}
 			agentViews++

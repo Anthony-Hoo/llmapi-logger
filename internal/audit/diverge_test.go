@@ -4,18 +4,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"testing"
 	"time"
 
 	"llmapi-logger/internal/bodycodec"
+	"llmapi-logger/internal/legacyoracle"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -130,6 +131,48 @@ func runDivergeWith(t *testing.T, options Options, drive divergeDrive) (storage.
 	return storage.AuditFinish{CaptureStatus: terminal.CaptureStatus, ForwardStatus: terminal.ForwardStatus}, openSnapshot(t, cipher, snapshot)
 }
 
+// divergeFrozen is one run as the legacy oracle keeps it. The run is
+// deterministic (counter clock, seeded audit ids, fixed key); the header
+// values and chunk contents are kept opened (openSnapshot), and the chunks
+// only as chunkSummary: position, lengths, compression, observation time and
+// a prefix of the plaintext's SHA-256.
+type divergeFrozen struct {
+	Outcome  storage.AuditFinish
+	Snapshot sqlite.Snapshot
+	Chunks   []string
+}
+
+func freezeDiverge(outcome storage.AuditFinish, snapshot sqlite.Snapshot) divergeFrozen {
+	frozen := divergeFrozen{Outcome: outcome, Snapshot: snapshot, Chunks: chunkSummary(snapshot.Chunks)}
+	frozen.Snapshot.Chunks = nil
+	return frozen
+}
+
+// legacyDiverge returns the legacy oracle's run name. With legacy not nil
+// the legacy run is driven now and checked against the file, or recorded.
+func legacyDiverge(t *testing.T, name string, legacy func() (storage.AuditFinish, sqlite.Snapshot)) divergeFrozen {
+	t.Helper()
+	if legacy == nil {
+		return legacyoracle.Value[divergeFrozen](t, name, nil)
+	}
+	value := freezeDiverge(legacy())
+	return legacyoracle.Value(t, name, &value)
+}
+
+// sameJSON reports whether two values encode the same.
+func sameJSON(t *testing.T, left, right any) bool {
+	t.Helper()
+	a, err := json.Marshal(left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Equal(a, b)
+}
+
 // openSnapshot replaces ciphertext by the decoded plaintext, so two runs
 // with different nonces compare equal when their content is.
 func openSnapshot(t *testing.T, cipher security.Cipher, snapshot sqlite.Snapshot) sqlite.Snapshot {
@@ -191,25 +234,12 @@ func TestDivergingDuplicatesMatchLegacy(t *testing.T) {
 		{"response written longer", divergeDrive{inbound: request, outbound: request, received: response, sent: append(bytes.Clone(response), noise(1<<20, 4)...), piece: 32 << 10}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			legacyOutcome, legacy := runDiverge(t, WritePathLegacy, test.drive)
+			legacy := legacyDiverge(t, "run", func() (storage.AuditFinish, sqlite.Snapshot) { return runDiverge(t, WritePathLegacy, test.drive) })
 			unifiedOutcome, unified := runDiverge(t, WritePathUnified, test.drive)
-			if legacyOutcome != unifiedOutcome {
-				t.Fatalf("outcome %+v, unified %+v", legacyOutcome, unifiedOutcome)
+			if legacy.Outcome != unifiedOutcome {
+				t.Fatalf("outcome %+v, unified %+v", legacy.Outcome, unifiedOutcome)
 			}
-			for _, part := range []struct {
-				name            string
-				legacy, unified any
-			}{
-				{"audit", legacy.Audit, unified.Audit},
-				{"stages", legacy.Stages, unified.Stages},
-				{"headers", legacy.Headers, unified.Headers},
-				{"bodies", legacy.Bodies, unified.Bodies},
-				{"chunks", chunkSummary(legacy.Chunks), chunkSummary(unified.Chunks)},
-			} {
-				if !reflect.DeepEqual(part.legacy, part.unified) {
-					t.Fatalf("%s differ:\n legacy  %+v\n unified %+v", part.name, part.legacy, part.unified)
-				}
-			}
+			compareSnapshots(t, legacy, unified, true)
 			owned := map[string]int{}
 			for _, chunk := range unified.Chunks {
 				owned[chunk.Stage]++

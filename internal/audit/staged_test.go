@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -57,25 +56,26 @@ func requireStagingEmpty(t *testing.T, stager *staging.Stager) {
 	}
 }
 
-func compareSnapshots(t *testing.T, legacy, unified sqlite.Snapshot, chunks bool) {
+// compareSnapshots compares a unified run's rows with the legacy oracle's.
+func compareSnapshots(t *testing.T, legacy divergeFrozen, unified sqlite.Snapshot, chunks bool) {
 	t.Helper()
 	parts := []struct {
 		name            string
 		legacy, unified any
 	}{
-		{"audit", legacy.Audit, unified.Audit},
-		{"stages", legacy.Stages, unified.Stages},
-		{"headers", legacy.Headers, unified.Headers},
-		{"bodies", legacy.Bodies, unified.Bodies},
+		{"audit", legacy.Snapshot.Audit, unified.Audit},
+		{"stages", legacy.Snapshot.Stages, unified.Stages},
+		{"headers", legacy.Snapshot.Headers, unified.Headers},
+		{"bodies", legacy.Snapshot.Bodies, unified.Bodies},
 	}
 	if chunks {
 		parts = append(parts, struct {
 			name            string
 			legacy, unified any
-		}{"chunks", chunkSummary(legacy.Chunks), chunkSummary(unified.Chunks)})
+		}{"chunks", legacy.Chunks, chunkSummary(unified.Chunks)})
 	}
 	for _, part := range parts {
-		if !reflect.DeepEqual(part.legacy, part.unified) {
+		if !sameJSON(t, part.legacy, part.unified) {
 			t.Fatalf("%s differ:\n legacy  %+v\n unified %+v", part.name, part.legacy, part.unified)
 		}
 	}
@@ -101,10 +101,10 @@ func TestStagedBodiesMatchLegacy(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stager := newTestStager(t, staging.Options{})
-			legacyOutcome, legacy := runDiverge(t, WritePathLegacy, test.drive)
+			legacy := legacyDiverge(t, "run", func() (storage.AuditFinish, sqlite.Snapshot) { return runDiverge(t, WritePathLegacy, test.drive) })
 			unifiedOutcome, unified := runDivergeWith(t, Options{WritePath: WritePathUnified, StageBytes: 1 << 20, Stager: stager}, test.drive)
-			if legacyOutcome != unifiedOutcome {
-				t.Fatalf("outcome %+v, unified %+v", legacyOutcome, unifiedOutcome)
+			if legacy.Outcome != unifiedOutcome {
+				t.Fatalf("outcome %+v, unified %+v", legacy.Outcome, unifiedOutcome)
 			}
 			compareSnapshots(t, legacy, unified, true)
 			if stats := stager.Stats(); stats.Records < 4 || stats.Fsyncs == 0 {
@@ -124,17 +124,17 @@ func TestGlobalBudgetPressureSpillsShortChunks(t *testing.T) {
 	response := noise(5<<19, 22)
 	drive := divergeDrive{inbound: request, outbound: request, received: response, sent: response, piece: 40 << 10}
 	stager := newTestStager(t, staging.Options{})
-	legacyOutcome, legacy := runDiverge(t, WritePathLegacy, drive)
+	legacy := legacyDiverge(t, "run", func() (storage.AuditFinish, sqlite.Snapshot) { return runDiverge(t, WritePathLegacy, drive) })
 	unifiedOutcome, unified := runDivergeWith(t, Options{WritePath: WritePathUnified, StageBytes: 1 << 20, GlobalBytes: 1 << 20, Stager: syncStager{stager}}, drive)
-	if legacyOutcome != unifiedOutcome || unifiedOutcome.CaptureStatus != storage.CaptureComplete {
+	if legacy.Outcome != unifiedOutcome || unifiedOutcome.CaptureStatus != storage.CaptureComplete {
 		for _, body := range unified.Bodies {
 			t.Logf("%s %s %v stored %d of %d", body.Stage, body.State, valueOrEmpty(body.ErrorCode), body.StoredLength, body.ObservedLength)
 		}
-		t.Fatalf("outcome %+v, unified %+v", legacyOutcome, unifiedOutcome)
+		t.Fatalf("outcome %+v, unified %+v", legacy.Outcome, unifiedOutcome)
 	}
 	// Chunk counts may differ; every other column of the body rows may not.
-	for index := range legacy.Bodies {
-		legacy.Bodies[index].ChunkCount, unified.Bodies[index].ChunkCount = 0, 0
+	for index := range legacy.Snapshot.Bodies {
+		legacy.Snapshot.Bodies[index].ChunkCount, unified.Bodies[index].ChunkCount = 0, 0
 	}
 	compareSnapshots(t, legacy, unified, false)
 	short := 0

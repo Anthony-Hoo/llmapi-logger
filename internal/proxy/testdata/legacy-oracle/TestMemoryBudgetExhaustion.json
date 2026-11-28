@@ -1,0 +1,4 @@
+{"source": "legacy capture write path at commit ce4e976",
+"values": {
+"view": {"BodyLength":51707,"BodySHA256":"c7e9160d939d082edeb2c5aa922493aea53a978ea6e1175318a47fad5c8640d5","Header":"map[Cache-Control:[no-cache] Content-Type:[text/event-stream; charset=utf-8] X-Oneapi-Request-Id:[request-large-stream]]","Status":200,"Trailer":"map[]"}
+}}

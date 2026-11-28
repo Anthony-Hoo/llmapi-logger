@@ -10,3 +10,6 @@
 # checkout so the archives are identical whichever platform builds them.
 skill/** text eol=lf
 internal/agentdist/testdata/*.golden text eol=lf
+
+# Frozen output of the removed legacy write path (internal/legacyoracle).
+**/testdata/legacy-oracle/*.json text eol=lf

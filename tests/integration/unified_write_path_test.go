@@ -3,7 +3,9 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/headerblock"
+	"llmapi-logger/internal/legacyoracle"
 	"llmapi-logger/internal/protofixture"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -180,7 +183,8 @@ func readStoredShape(t *testing.T, database *sql.DB, client *http.Client, adminU
 	}
 	conversation, _ := json.Marshal(detail["conversation"])
 	parsed, _ := json.Marshal(detail["parsed_result"])
-	shape.Detail = string(conversation) + string(parsedWithoutTimes(parsed))
+	// Kept as a digest when long, as the legacy oracle keeps it.
+	shape.Detail = legacyoracle.Digest(string(conversation) + string(parsedWithoutTimes(parsed)))
 	headers, _ := detail["headers"].([]any)
 	kept := make([]any, 0, len(headers))
 	for _, entry := range headers {
@@ -200,40 +204,101 @@ func readStoredShape(t *testing.T, database *sql.DB, client *http.Client, adminU
 	return shape
 }
 
+// legacyApp is the legacy side of a comparison: the app's database and key.
+type legacyApp struct {
+	db     *sql.DB
+	cipher security.Cipher
+	id     string
+}
+
+// frozenLegacy is the legacy oracle's value name: computed from the legacy
+// app and checked against the file (or recorded) when legacy is not nil, read
+// from the file otherwise. The values carry no audit id, time or ciphertext:
+// storedShape leaves them out, Header values are opened and the ones two runs
+// cannot agree on are masked (headerValueShown), and long texts are kept as
+// their digest (legacyoracle.Digest).
+func frozenLegacy[T any](t *testing.T, name string, legacy *legacyApp, value func(*legacyApp) T) T {
+	t.Helper()
+	if legacy == nil {
+		return legacyoracle.Value[T](t, name, nil)
+	}
+	computed := value(legacy)
+	return legacyoracle.Value(t, name, &computed)
+}
+
+// legacyExpectations is what the unified version 2 columns must hold, as the
+// legacy (version 1) Header rows of the same exchange decide it.
+type legacyExpectations struct {
+	UserAgents []string
+	// Content maps a stage to its Content-Type and Content-Encoding.
+	Content map[string][2]string
+}
+
 // requireCaptureVersionsAcross checks what differs by design between the two write
 // paths on PostgreSQL (B.10): legacy rows are version 1 with no block,
 // User-Agent or content columns; unified rows are version 2 with no header
 // rows, the User-Agent the list reads and the content headers the parser
 // would choose from the same Headers.
-func requireCaptureVersionsAcross(t *testing.T, label string, legacyDB, unifiedDB *sql.DB, legacyCipher, unifiedCipher security.Cipher, legacyID, unifiedID string) {
+func requireCaptureVersionsAcross(t *testing.T, label string, legacy *legacyApp, unifiedDB *sql.DB, unifiedCipher security.Cipher, unifiedID string) {
 	t.Helper()
-	var legacyVersion, unifiedVersion, legacyBlocks, unifiedRows, legacyContent int
-	var legacyAgent, unifiedAgent []byte
-	if err := legacyDB.QueryRow(`SELECT capture_version, user_agent_enc, (SELECT COUNT(*) FROM http_header_blocks WHERE audit_id = $1),
-		(SELECT COUNT(*) FROM http_stages WHERE audit_id = $1 AND (content_type IS NOT NULL OR content_encoding IS NOT NULL))
-		FROM audit_records WHERE audit_id = $1`, legacyID).Scan(&legacyVersion, &legacyAgent, &legacyBlocks, &legacyContent); err != nil {
-		t.Fatal(err)
+	var unifiedVersion, unifiedRows int
+	var unifiedAgent []byte
+	if legacy != nil {
+		var legacyVersion, legacyBlocks, legacyContent int
+		var legacyAgent []byte
+		if err := legacy.db.QueryRow(`SELECT capture_version, user_agent_enc, (SELECT COUNT(*) FROM http_header_blocks WHERE audit_id = $1),
+			(SELECT COUNT(*) FROM http_stages WHERE audit_id = $1 AND (content_type IS NOT NULL OR content_encoding IS NOT NULL))
+			FROM audit_records WHERE audit_id = $1`, legacy.id).Scan(&legacyVersion, &legacyAgent, &legacyBlocks, &legacyContent); err != nil {
+			t.Fatal(err)
+		}
+		if legacyVersion != 1 || legacyAgent != nil || legacyBlocks != 0 || legacyContent != 0 {
+			t.Fatalf("%s: legacy version %d (user agent %v, %d blocks, %d content columns)", label, legacyVersion, legacyAgent != nil, legacyBlocks, legacyContent)
+		}
 	}
 	if err := unifiedDB.QueryRow(`SELECT capture_version, user_agent_enc, (SELECT COUNT(*) FROM http_headers WHERE audit_id = $1)
 		FROM audit_records WHERE audit_id = $1`, unifiedID).Scan(&unifiedVersion, &unifiedAgent, &unifiedRows); err != nil {
 		t.Fatal(err)
 	}
-	if legacyVersion != 1 || legacyAgent != nil || legacyBlocks != 0 || legacyContent != 0 || unifiedVersion != 2 || unifiedRows != 0 {
-		t.Fatalf("%s: legacy version %d (user agent %v, %d blocks, %d content columns), unified version %d with %d header rows",
-			label, legacyVersion, legacyAgent != nil, legacyBlocks, legacyContent, unifiedVersion, unifiedRows)
+	if unifiedVersion != 2 || unifiedRows != 0 {
+		t.Fatalf("%s: unified version %d with %d header rows", label, unifiedVersion, unifiedRows)
 	}
-	legacyHeaders := expandStoredHeaders(t, legacyDB, legacyCipher, legacyID)
-	var fields []headerblock.Field
-	for _, value := range legacyHeaders {
-		if value.Stage == storage.StageRequestReceived && value.Kind == storage.HeaderKindHeader {
-			if len(fields) == 0 || fields[len(fields)-1].Name != value.Name {
-				fields = append(fields, headerblock.Field{Name: value.Name})
+	expected := frozenLegacy(t, "expectations/"+label, legacy, func(run *legacyApp) legacyExpectations {
+		legacyHeaders := expandStoredHeaders(t, run.db, run.cipher, run.id)
+		var fields []headerblock.Field
+		for _, value := range legacyHeaders {
+			if value.Stage == storage.StageRequestReceived && value.Kind == storage.HeaderKindHeader {
+				if len(fields) == 0 || fields[len(fields)-1].Name != value.Name {
+					fields = append(fields, headerblock.Field{Name: value.Name})
+				}
+				fields[len(fields)-1].Values = append(fields[len(fields)-1].Values, value.Value)
 			}
-			fields[len(fields)-1].Values = append(fields[len(fields)-1].Values, value.Value)
 		}
-	}
+		expected := legacyExpectations{UserAgents: headerblock.UserAgentValues(fields), Content: map[string][2]string{}}
+		for _, stage := range []string{storage.StageRequestReceived, storage.StageRequestSent, storage.StageResponseReceived, storage.StageResponseSent} {
+			// The parser's rule on the legacy rows (decryptContentHeaders): the
+			// first non-empty value of a Header whose lower-case name matches.
+			var wantType, wantEncoding string
+			for _, value := range legacyHeaders {
+				if value.Stage != stage || value.Kind != storage.HeaderKindHeader || len(value.Value) == 0 {
+					continue
+				}
+				switch strings.ToLower(value.Name) {
+				case "content-type":
+					if wantType == "" {
+						wantType = string(value.Value)
+					}
+				case "content-encoding":
+					if wantEncoding == "" {
+						wantEncoding = string(value.Value)
+					}
+				}
+			}
+			expected.Content[stage] = [2]string{wantType, wantEncoding}
+		}
+		return expected
+	})
 	agents, err := headerblock.OpenUserAgent(unifiedCipher, unifiedID, unifiedAgent)
-	if want := headerblock.UserAgentValues(fields); err != nil || !reflect.DeepEqual(agents, want) {
+	if want := expected.UserAgents; err != nil || !reflect.DeepEqual(agents, want) {
 		t.Fatalf("%s: user_agent_enc %q (%v), legacy User-Agent %q", label, agents, err, want)
 	}
 	rows, err := unifiedDB.Query(`SELECT stage, content_type, content_encoding FROM http_stages WHERE audit_id = $1`, unifiedID)
@@ -247,24 +312,7 @@ func requireCaptureVersionsAcross(t *testing.T, label string, legacyDB, unifiedD
 		if err := rows.Scan(&stage, &contentType, &contentEncoding); err != nil {
 			t.Fatal(err)
 		}
-		// The parser's rule on the legacy rows (decryptContentHeaders): the
-		// first non-empty value of a Header whose lower-case name matches.
-		var wantType, wantEncoding string
-		for _, value := range legacyHeaders {
-			if value.Stage != stage || value.Kind != storage.HeaderKindHeader || len(value.Value) == 0 {
-				continue
-			}
-			switch strings.ToLower(value.Name) {
-			case "content-type":
-				if wantType == "" {
-					wantType = string(value.Value)
-				}
-			case "content-encoding":
-				if wantEncoding == "" {
-					wantEncoding = string(value.Value)
-				}
-			}
-		}
+		wantType, wantEncoding := expected.Content[stage][0], expected.Content[stage][1]
 		if contentType.String != wantType || contentType.Valid != (wantType != "") ||
 			contentEncoding.String != wantEncoding || contentEncoding.Valid != (wantEncoding != "") {
 			t.Fatalf("%s: %s content columns %v %v, legacy headers say %q %q", label, stage, contentType, contentEncoding, wantType, wantEncoding)
@@ -315,9 +363,22 @@ func waitParsed(t *testing.T, database *sql.DB, auditID string) {
 	t.Fatalf("audit %s did not finish parsing", auditID)
 }
 
+// clientResult is what the client got, as the legacy oracle keeps it.
+type clientResult struct {
+	Status     int
+	BodyLength int
+	BodySHA256 string
+}
+
+func clientOf(status int, body []byte) clientResult {
+	sum := sha256.Sum256(body)
+	return clientResult{Status: status, BodyLength: len(body), BodySHA256: hex.EncodeToString(sum[:])}
+}
+
 // The unified write path on PostgreSQL stores capture version 2: a few
 // requests of every protocol, a large streamed answer and one cut after 2 MiB
-// are stored, parsed, verified and read back as on legacy (version 1).
+// are stored, parsed, verified and read back as on legacy (version 1), whose
+// side is the legacy oracle.
 func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 	upstream := protofixture.NewUpstream("ux")
 	server := httptest.NewServer(upstream)
@@ -362,6 +423,35 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 		waitParsed(t, database, auditID)
 		return response.StatusCode, body, auditID
 	}
+	// exchange sends one exchange through both apps and compares what the
+	// unified app's client got and stored with the legacy oracle's
+	// "client/<key>" and "shape/<key>".
+	exchange := func(key string, value protofixture.Exchange, versions bool) storedShape {
+		t.Helper()
+		var legacySide *legacyApp
+		var legacyStatus int
+		var legacyBody []byte
+		if legacy != nil {
+			var legacyID string
+			legacyStatus, legacyBody, legacyID = send(legacy, legacyDB, value)
+			legacySide = &legacyApp{db: legacyDB, cipher: cipher, id: legacyID}
+		}
+		unifiedStatus, unifiedBody, unifiedID := send(unified, unifiedDB, value)
+		if want := frozenLegacy(t, "client/"+key, legacySide, func(*legacyApp) clientResult { return clientOf(legacyStatus, legacyBody) }); want != clientOf(unifiedStatus, unifiedBody) {
+			t.Fatalf("%s: client saw %+v, unified %+v", key, want, clientOf(unifiedStatus, unifiedBody))
+		}
+		legacyShape := frozenLegacy(t, "shape/"+key, legacySide, func(run *legacyApp) storedShape {
+			return readStoredShape(t, run.db, client, legacy.adminURL, run.cipher, run.id)
+		})
+		unifiedShape := readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
+		if versions {
+			requireCaptureVersionsAcross(t, key, legacySide, unifiedDB, unifiedCipher, unifiedID)
+		}
+		if !reflect.DeepEqual(legacyShape, unifiedShape) {
+			t.Fatalf("%s: stored audits differ:\n legacy  %+v\n unified %+v", key, legacyShape, unifiedShape)
+		}
+		return unifiedShape
+	}
 
 	cases := 0
 	for _, protocol := range protofixture.Protocols() {
@@ -374,18 +464,8 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, exchange := range exchanges {
-				legacyStatus, legacyBody, legacyID := send(legacy, legacyDB, exchange)
-				unifiedStatus, unifiedBody, unifiedID := send(unified, unifiedDB, exchange)
-				if legacyStatus != unifiedStatus || !bytes.Equal(legacyBody, unifiedBody) {
-					t.Fatalf("%s: client saw %d and %d", value, legacyStatus, unifiedStatus)
-				}
-				legacyShape := readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID)
-				unifiedShape := readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
-				requireCaptureVersionsAcross(t, value.String(), legacyDB, unifiedDB, cipher, unifiedCipher, legacyID, unifiedID)
-				if !reflect.DeepEqual(legacyShape, unifiedShape) {
-					t.Fatalf("%s: stored audits differ:\n legacy  %+v\n unified %+v", value, legacyShape, unifiedShape)
-				}
+			for _, built := range exchanges {
+				unifiedShape := exchange(fmt.Sprintf("%02d %s", cases, value), built, true)
 				if !strings.HasPrefix(unifiedShape.Audit, "completed complete") || len(unifiedShape.Stages) != 4 {
 					t.Fatalf("%s: unified audit %s with %d stages", value, unifiedShape.Audit, len(unifiedShape.Stages))
 				}
@@ -399,31 +479,19 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exchange := large[0]
-	delta := exchange.Response.Chunks[1]
-	chunks := [][]byte{exchange.Response.Chunks[0]}
+	answer := large[0]
+	delta := answer.Response.Chunks[1]
+	chunks := [][]byte{answer.Response.Chunks[0]}
 	for size := 0; size < 5<<19; size += len(delta) {
 		chunks = append(chunks, delta)
 	}
-	exchange.Response.Chunks = append(chunks, exchange.Response.Chunks[1:]...)
-	legacyStatus, legacyBody, legacyID := send(legacy, legacyDB, exchange)
-	unifiedStatus, unifiedBody, unifiedID := send(unified, unifiedDB, exchange)
-	if legacyStatus != unifiedStatus || !bytes.Equal(legacyBody, unifiedBody) || len(unifiedBody) < 5<<19 {
-		t.Fatalf("large answer: client saw %d (%d bytes) and %d (%d bytes)", legacyStatus, len(legacyBody), unifiedStatus, len(unifiedBody))
-	}
-	if legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID); !reflect.DeepEqual(legacyShape, unifiedShape) {
-		t.Fatalf("large answer: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
-	}
+	answer.Response.Chunks = append(chunks, answer.Response.Chunks[1:]...)
+	exchange("large answer", answer, false)
 	cases++
 	// The same answer cut by the upstream after 2 MiB keeps its raw chunks:
 	// response_sent writes its own, sealed from the bytes it borrowed.
-	exchange.Response.CutAt, exchange.Response.Abort = 2<<20+333, true
-	legacyStatus, _, legacyID = send(legacy, legacyDB, exchange)
-	unifiedStatus, _, unifiedID = send(unified, unifiedDB, exchange)
-	legacyShape, unifiedShape := readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
-	if legacyStatus != unifiedStatus || !reflect.DeepEqual(legacyShape, unifiedShape) {
-		t.Fatalf("cut answer: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
-	}
+	answer.Response.CutAt, answer.Response.Abort = 2<<20+333, true
+	unifiedShape := exchange("cut answer", answer, false)
 	if responseChunks := strings.Count(strings.Join(unifiedShape.Chunks, "|"), "response_from_newapi_sent_to_nginx"); responseChunks < 2 {
 		t.Fatalf("cut answer: response_sent has %d chunks: %v", responseChunks, unifiedShape.Chunks)
 	}
@@ -438,12 +506,8 @@ func TestUnifiedWritePathOnPostgreSQL(t *testing.T) {
 	if len(heavy[0].RequestBody) < 2<<20 {
 		t.Fatalf("heavy request is only %d bytes", len(heavy[0].RequestBody))
 	}
-	legacyStatus, _, legacyID = send(legacy, legacyDB, heavy[0])
-	unifiedStatus, _, unifiedID = send(unified, unifiedDB, heavy[0])
-	legacyShape, unifiedShape = readStoredShape(t, legacyDB, client, legacy.adminURL, cipher, legacyID), readStoredShape(t, unifiedDB, client, unified.adminURL, unifiedCipher, unifiedID)
-	requireCaptureVersionsAcross(t, "heavy request", legacyDB, unifiedDB, cipher, unifiedCipher, legacyID, unifiedID)
-	if legacyStatus != unifiedStatus || !reflect.DeepEqual(legacyShape, unifiedShape) || !strings.HasPrefix(unifiedShape.Audit, "completed complete") {
-		t.Fatalf("heavy request: stored audits differ:\n legacy  %+v\n unified %+v", legacyShape, unifiedShape)
+	if unifiedShape := exchange("heavy request", heavy[0], true); !strings.HasPrefix(unifiedShape.Audit, "completed complete") {
+		t.Fatalf("heavy request: unified audit %s", unifiedShape.Audit)
 	}
 	cases++
 	if entries, err := os.ReadDir(unifiedConfigValue.Audit.Staging.Dir); err != nil || len(entries) != 0 {

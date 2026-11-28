@@ -22,6 +22,7 @@ import (
 
 	"llmapi-logger/internal/audit"
 	"llmapi-logger/internal/bodycodec"
+	"llmapi-logger/internal/legacyoracle"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -277,6 +278,23 @@ func sha256Hex(value string) []byte {
 	return sum[:]
 }
 
+// digestOps keeps long operations (chunk contents) as their digest.
+func digestOps(ops []string) []string {
+	for index := range ops {
+		ops[index] = legacyoracle.Digest(ops[index])
+	}
+	return ops
+}
+
+func frozenLegacySession(t *testing.T, legacy func() []string) []string {
+	t.Helper()
+	if legacy == nil {
+		return legacyoracle.Value[[]string](t, "session", nil)
+	}
+	ops := legacy()
+	return legacyoracle.Value(t, "session", &ops)
+}
+
 func TestHarnessLegacyModelMatchesSession(t *testing.T) {
 	cipher := harnessCipher(t)
 	sealer := harnessSealer{t: t, cipher: cipher}
@@ -300,8 +318,10 @@ func TestHarnessLegacyModelMatchesSession(t *testing.T) {
 			h := newHarness(t, &harnessClock{now: 1_000_000}, "model")
 			h.uri = "/v1/chat/completions?trace=x"
 			scenarioByName(t, test.scenario).build(h)
-			model := normalizeOps(t, cipher, h.legacyOps(sealer))
-			session := normalizeOps(t, cipher, driveSession(t, cipher, test.drive))
+			model := digestOps(normalizeOps(t, cipher, h.legacyOps(sealer)))
+			// The real legacy Session's operations, frozen by the legacy
+			// oracle: times and audit ids blanked, ciphertext opened.
+			session := frozenLegacySession(t, func() []string { return digestOps(normalizeOps(t, cipher, driveSession(t, cipher, test.drive))) })
 			if !reflect.DeepEqual(model, session) {
 				for index := 0; index < max(len(model), len(session)); index++ {
 					var left, right string
