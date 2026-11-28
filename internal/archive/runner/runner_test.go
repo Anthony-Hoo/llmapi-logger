@@ -439,6 +439,43 @@ func TestReconciliationDefersAMismatchedMember(t *testing.T) {
 	}
 }
 
+// The same through a conversation: holding back its middle turn leaves the
+// conversation below the turn threshold and the last turn without its
+// parent, which the pass writes in materialised form.
+func TestReconciliationDefersAMismatchedTurn(t *testing.T) {
+	h := newHarness(t)
+	turns := ids(h.addConversation("conv_r", protocolChat, 3, baseTimeNS))
+	h.options.Step = func(step string) error {
+		if step == StepAfterPublish {
+			return errors.New("crash")
+		}
+		return nil
+	}
+	if _, err := h.run(); !errors.Is(err, errCrash) {
+		t.Fatal(err)
+	}
+	h.options.Step = nil
+	h.sampler.compared = nil
+	h.sampler.differ = func(id string) bool { return id == turns[1] }
+	result := h.mustRun()
+	if result.SampleMismatched != 1 || result.Counts.ExportedAudits != 2 || h.store.deferred[turns[1]].Reason != storage.ArchiveDeferredExportFailed {
+		t.Fatalf("result %+v, deferred %+v", result, h.store.deferred)
+	}
+	if count := h.sampler.comparedCount(turns[1]); count != 1 {
+		t.Fatalf("middle turn compared %d times", count)
+	}
+	h.verifyAll()
+	h.requireEachOnce(turns[0], turns[2])
+
+	h.sampler.differ = nil
+	h.mustRun()
+	h.verifyAll()
+	h.requireEachOnce(turns...)
+	if len(h.store.deferred) != 0 {
+		t.Fatalf("deferred %+v", h.store.deferred)
+	}
+}
+
 // J.3: a sampled member that differs from the hot store voids the bundle
 // (renamed .rejected, intent dropped) unless its change stamp shows it
 // changed after the export, when it counts as stale and the bundle stands.
