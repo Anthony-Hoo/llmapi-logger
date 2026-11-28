@@ -16,7 +16,7 @@
 
 ## 0. 需要维护者决定的问题
 
-下面每一项都涉及证据语义、摘要与签名格式、归档里省略什么，或者库表结构，方案和决策 5.2 到 5.7 都没有定下来。每项给出选项、代价和推荐。正文按推荐写成；推荐被否决时，只需改对应的正文小节。纯机械的选择不在这里，见 P 节。
+下面十三项都涉及证据语义、摘要与签名格式、归档里省略什么，或者库表结构，方案和决策 5.2 到 5.7 都没有定下来。每项给出选项、代价和推荐。正文按推荐写成；推荐被否决时，只需改对应的正文小节。纯机械的选择不在这里，见 P 节。
 
 ### 0.1 问题清单
 
@@ -123,8 +123,9 @@
 
 - 甲：`parse_status` 为 `pending` 或 `processing`，或 `caller_status = 'pending'` 的记录推迟到终态之后再归档。`billing_state = 'unchecked'` 不等：计费回填可能永远不会运行（没有配置 NewAPI 管理凭据时）。代价：这些记录在热库里多留，超过 `retention_days` 加一天。
 - 乙：照常归档，之后变化的按 `stale` 重新收录。代价：上面说的“在变化之前被移除”。
+- 丙：甲，再加一个上限：到期后超过 N 天（例如 7 天）仍未到终态的照常归档。代价：卡住的记录在 P4 下会在解析之前被移除，等于对这些记录退回到乙。
 
-推荐甲。解析失败满 5 次会以 `error` 终结（`releaseProcessingParse`）〔核〕，调用者查找最终会变成 `resolved` 或 `unresolved`〔推〕，所以推迟是有界的。P 节第 7 条给了一个上限之后的处理。
+推荐甲，不设上限，每次运行在运行记录和日志里报告推迟的条数。解析失败满 5 次会以 `error` 终结（`releaseProcessingParse`）〔核〕，调用者查找最终会变成 `resolved` 或 `unresolved`〔推〕，所以正常情况下推迟是有界的；推迟的条数一直增长，说明解析或调用者查找卡住了，应当去修那里，而不是让归档绕过去。
 
 **Q9 记录摘要的编码**
 
@@ -162,9 +163,26 @@ I 节给出完整的 SQL。需要确认的结构选择：
 1. 分段多一个过渡状态 `publishing`：先在目录表登记意向（含各成员的记录摘要和变更戳），再 rename 发布，然后改为 `sealed`。方案 4.5 的顺序是先发布、后登记，崩溃后靠扫描归档目录补登记；但补登记时变更戳已经无从得知（它必须取自导出时的快照）。先登记意向，变更戳就始终在库里，崩溃后的对账只需要看文件在不在（H.6）。
 2. 成员状态沿用方案的 `sealed`、`hot_removed`、`stale`。对账时发现的、目录表里没有记录的包（例如数据库从备份恢复），它的成员登记为 `stale`：可以列出、可以读取，但永远不作为删除依据，到期记录会被重新收录。
 3. 变更戳列在 P3 的迁移里就加上，P3 起就计算并保存，P4 不需要第二个迁移。
-4. 另加两张小表：`archive_gap_members`（已导出的 gap，gap 只插入不更新〔核：`postgres/gaps.go` 只有 `insertAuditGaps`〕，所以不需要变更戳），和 `archive_runs`（每次运行的开始、结束、状态和计数，供补跑判断和状态展示）。
+4. 另加三张小表：
+   - `archive_gap_members`：已导出的 gap。gap 只插入不更新〔核：`postgres/gaps.go` 只有 `insertAuditGaps`〕，所以不需要变更戳；
+   - `archive_runs`：每次运行的开始、结束、状态和计数，以及选取水位（B.1），供补跑判断、水位和排障；
+   - `archive_deferred`：在水位之后被推迟或复核不过、需要回头再看的 audit（B.1）。没有它，就只能每趟对全部已导出的记录做一次反连接，`export_only` 下随表线性变慢（方案附录 A.4 的同类问题）。
+5. 同一 audit 至多一个非 `stale` 的成员（部分唯一索引）。重新收录时，登记新行的同一个操作先把旧行改为 `stale`（H.2 第 4 步）。
+6. 对账登记的包，分段行的 `run_id` 记为执行对账的那次运行（H.6）。
 
 推荐按 I 节。
+
+**Q13 行格式（C 节）**
+
+C 节的选择大多是机械的，但它们决定了第三方能否不依赖本仓库代码解析归档（方案 4.4），所以列出来请一并确认：
+
+1. 64 位整数写十进制字符串；文本列不是合法 UTF-8 时写 `{"b64": …}`；NULL 写 `null`，不允许省略键（C.1）。
+2. 内容对象、`parsed_json`、项目标识的明文写成 JSON 字符串，不作为嵌套 JSON 嵌入，以保住内容地址所依赖的原始字节（C.1）。
+3. 凡是进记录摘要的都在行里，包括对象的元数据、引用行、raw 块的元数据和哈希；对象文件只放大块字节（C.2）。
+4. 时间线写解密解压后的明文（base64），不写解码后的点列表。代价：格式文档要写清 `internal/streamtimeline` 的编码，模块文档里目前只有一句“offset/time delta 序列”（模块 04 §3.3）〔核〕，要从代码补全；好处：逐字节无损，与摘要的口径一致。另一种做法是写点列表、摘要也按点列表算，可读但要求编码是双射，没有核对过。
+5. 解开后超过 1 MiB 的 `parsed_json` 分段放进对象文件（C.2），使单行有界。
+
+推荐按 C 节。
 
 ### 0.2 方案与代码不符之处
 
@@ -304,6 +322,17 @@ I 节给出完整的 SQL。需要确认的结构选择：
 
 `capture_status = 'failed'` 的 audit 照常归档：它已终结、有 `capture_finalized` 事件，Header 按 `expandBlock` 的宽松规则读出（A.3）。没有轮次的 audit、只有请求的轮次（响应 layout 为 `none`）也照常归档，后者的半截回答在 `parsed_results` 里（C.2）。
 
+**水位。** 方案附录 A.4 量到过两个没有水位的回填查询：全部处理完以后每一轮仍要扫一遍整张表。`export_only` 下已导出的记录永远留在热库，“到期且没有当前成员”这个反连接也会随表线性变慢。所以选取分两部分：
+
+- **新范围**：`(started_at_ns, audit_id)` 大于水位、`started_at_ns < cutoff`，沿 `audit_records_started_idx` 升序取〔核：迁移 001 的索引〕。这一趟检查过的最后一行就是新水位，不论其中有多少条被推迟或跳过。
+- **回头的部分**：
+  - `archive_deferred` 里登记的记录（被推迟的、仍在进行的、复核不过的，见 I.1），现在满足 B.1 的就收录，否则留着；
+  - 状态为 `stale`、audit 还在热库、又没有当前成员的成员。
+
+  两者都是小集合，走主键或部分索引。
+
+水位存在 `archive_runs`，随格式版本记录。格式版本变化时（试行版 0 定为 1）水位归零，于是版本 0 的成员按 B.1 第 4 条全部重新收录。
+
 ### B.2 一次运行分几趟
 
 一次运行可能面对很大的积压：例如在一个未开过 retention 的库上首次开启归档。一个覆盖全部到期记录的长 REPEATABLE READ 快照会挡住 VACUUM 的清理水位。所以一次运行分若干“趟”，每趟一个快照：
@@ -387,17 +416,21 @@ JSON 编码规则：
     ]
   },
   "body_streams": [ { "stage": "…", "source_stage": "…", "…": "全部列" } ],
-  "raw": [ { "stage": "…", "chunk_count": "2", "plaintext_bytes": "1048576" } ],
+  "raw_chunks": [ { "stage": "…", "seq": "0", "offset": "0", "plaintext_length": "1048576",
+                    "observed_at_ns": "…", "sha256": "…" } ],
   "stream_timelines": [ { "stage": "…", "event_count": "…", "first_event_at_ns": "…", "last_event_at_ns": "…",
                           "timeline_complete": "1", "plaintext_length": "…", "timeline_b64": "…" } ],
-  "parsed_results": { "…": "全部列", "parsed_json": "<解开后的 JSON 原文>" },
+  "parsed_results": { "…": "全部列", "parsed_json": "<解开后的 JSON 原文；超过 1 MiB 时为 null>",
+                      "parsed_json_ref": null },
   "token_links": { "…": "全部列" },
   "turn": {
     "turns": { "…": "全部列，含原始血缘" },
     "request_context": { "form": "delta", "ops": [ { "op_index": "0", "operation": "retain", "item_count": "12", "slot": null, "object_hash": null, "semantic_hash": null } ] },
     "response_items": [ { "ordinal": "0", "slot": "…", "object_hash": "…", "semantic_hash": "…" } ],
-    "object_hashes": ["…"],
-    "binary_hashes": ["…"]
+    "objects": [ { "object_hash": "…", "semantic_hash": "…", "object_kind": "…", "plaintext_length": "…" } ],
+    "binary_refs": [ { "object_hash": "…", "json_pointer": "…", "binary_hash": "…", "media_type": "…", "encoding": "base64" } ],
+    "external_refs": [ { "object_hash": "…", "json_pointer": "…", "ref_kind": "file_id", "value_hash": "…", "value": "…" } ],
+    "binaries": [ { "binary_hash": "…", "media_type": "…", "plaintext_length": "…" } ]
   },
   "conversation": { "conversation_id": "…", "protocol": "…", "key_hash": "…", "created_at_ns": "…" },
   "audit_project_identity": { "…": "全部列", "identity": "<身份明文 JSON>" },
@@ -412,9 +445,17 @@ JSON 编码规则：
 - **行首字段**（`audit_id` 到 `revision`）与行内各表的值必须一致，重读时比对（J.2）。没有轮次时 `conversation_id` 为 `null`。
 - **可选部分**：没有对应行的表写 `null`（`parsed_results`、`token_links`、`turn`、`conversation`、`audit_project_identity`），列表为空写 `[]`。
 - **Header**：`headers.values` 是 `headerblock.Expand` 的扁平顺序（阶段顺序、header 先于 trailer、名称的字节序、`value_index`）〔核：`headerblock/expand.go`〕。版本 1 的 `block_present` 为 `false`、`block_stages` 为 `null`；版本 2 写块是否存在、块里有段的阶段集合（Q5 甲）。值的投影见 D.3。
-- **raw**：`raw` 只记每个 `full` 阶段有几块、多少字节，块本身在对象文件里（C.5）。`source_stage` 指向另一阶段的 Body（成对合并）没有自己的块，`raw` 里不出现，读取时按 `source_stage` 取来源阶段的块〔核：`deduplicateEquivalentBodyPair`、`StreamRaw`〕。
-- **`parsed_json`**：`parsed_json_enc` 解密后，若以 gzip 魔数开头就解开（`auditmodel.OpenParsedResult` 的规则）〔核〕，写出的是 JSON 原文。兜底会话 `conversation` 和 `partial_response_messages` 都在其中，读取工具同样经 `query.MergePartialResponse` 合并（K.3）。`parsed_json_enc` 为 NULL 时写 `null`。
-- **`turn.object_hashes`**：这一轮引用的全部内容对象（两个 envelope、物化请求引用和响应引用里的对象），去重后按字节序排序，与 `readTurnGraph` 读取的集合相同〔核：`postgres/graph_reader.go`〕。`binary_hashes` 是这些对象经 `content_binary_refs` 引用的二进制对象。
+- **记录摘要只凭这一行就能重算**（E.2）。凡是进摘要的东西都在行里；对象文件只放大块的字节，由行里记的哈希核对（J.2）。
+- **raw**：`raw_chunks` 是每个 `full` 阶段每一块的元数据和明文的 SHA-256，块的字节在对象文件里（C.5）。`source_stage` 指向另一阶段的 Body（成对合并）没有自己的块，读取时按 `source_stage` 取来源阶段的块〔核：`deduplicateEquivalentBodyPair`；`postgres/query_reader.go` 的 `StreamBodyChunks` 先查 `source_stage` 再按它取块〕。
+- **`parsed_json`**：`parsed_json_enc` 解密后，若以 gzip 魔数开头就解开（`auditmodel.OpenParsedResult` 的规则）〔核〕，写出的是 JSON 原文。
+  - 兜底会话 `conversation` 和 `partial_response_messages` 都在其中，读取工具同样经 `query.MergePartialResponse` 合并（K.3）。
+  - 解开后超过 1 MiB 时，`parsed_json` 为 `null`，正文按至多 1 MiB 一段放进对象文件（C.5 的 `parsed_json_part`），行里写 `parsed_json_ref = {"sha256", "length", "parts"}`。所以任何一行都不超过几 MiB；读取工具要导出这种记录的会话时，在内存里拼回整段，上界是 `auditmodel.MaxParsedResultBytes`（128 MiB）〔核〕。
+  - `parsed_json_enc` 为 NULL 时两者都是 `null`。
+- **`turn.objects`、`binaries`、两种引用行**：
+  - `objects` 是这一轮引用的全部内容对象（两个 envelope、物化请求引用和响应引用里的对象），去重后按字节序排序，与 `readTurnGraph` 读取的集合相同〔核：`postgres/graph_reader.go`〕；
+  - `binaries` 是这些对象经 `content_binary_refs` 引用的二进制对象；
+  - 两种引用行是这些对象的 `content_binary_refs`、`content_external_refs` 行。
+  这些都是很小的元数据，重复出现在共享同一对象的各行里；对象的明文和字节只在对象文件里存一次。
 - **原完整性事件**：该 audit 的全部事件，按 `sequence` 排序，原样抄录（方案 4.4）。
 
 ### C.3 两种采集版本与 `parsed_json_enc` 的两种形态
@@ -442,9 +483,10 @@ JSON 编码规则：
 | --- | --- |
 | `content_object` | `object_hash`、`semantic_hash`、`object_kind`、`plaintext_length`、`created_at_ns`、`data`（规范 JSON 原文的字符串） |
 | `binary_object` | `binary_hash`、`media_type`、`plaintext_length`、`created_at_ns`、`data_b64` |
-| `binary_ref` | `object_hash`、`json_pointer`、`binary_hash`、`media_type`、`encoding` |
-| `external_ref` | `object_hash`、`json_pointer`、`ref_kind`、`value_hash`、`value` |
-| `raw_chunk` | `audit_id`、`stage`、`seq`、`offset`、`plaintext_length`、`observed_at_ns`、`data_b64` |
+| `raw_chunk` | `audit_id`、`stage`、`seq`、`data_b64` |
+| `parsed_json_part` | `audit_id`、`part`、`data`（JSON 原文的一段，按 UTF-8 字符边界切分） |
+
+引用行（`content_binary_refs`、`content_external_refs`）在行里（C.2），不在对象文件里。
 
 - 对象在本分段里第一次被引用时写出，之后不再重复。写入器只在内存里保留已写对象的哈希集合。
 - raw 块一块一行。块至多 1 MiB：legacy 攒满 1 MiB 才 flush（方案 2.1），unified 离开内存的块也是整 1 MiB（`config/audit.go` 的 `MinAuditMemoryStageBytes` 注释）〔核：注释；unified 的块大小上限没有逐行读代码〕。所以单行至多约 1.4 MB。
@@ -471,7 +513,7 @@ JSON 编码规则：
 
 | 位置 | 是否可能有凭据值 | 归档怎么处理 |
 | --- | --- | --- |
-| `http_headers.value_enc`（版本 1） | 是：`Authorization`、`x-api-key`、`x-goog-api-key`、`Cookie`、响应的 `Set-Cookie` 等〔核：采集逐值加密，不过滤，`audit/session.go`〕 | 投影 |
+| `http_headers.value_enc`（版本 1） | 是：`Authorization`、`x-api-key`、`x-goog-api-key`、`Cookie`、响应的 `Set-Cookie` 等〔核：`audit/session.go` 的 `addHeadersLocked` 对 map 的全部键取值，不按名称过滤；它的三条分支里读了逐值加密的那一条，另两条（`addHeaderGroupLocked`、`snapshotHeadersLocked`）没有逐行读，方案 2.1 的结论相同〕 | 投影 |
 | `http_header_blocks.block_enc`（版本 2） | 是，同上，在块的明文里 | 块不写进归档；扁平列表逐值投影 |
 | `audit_records.user_agent_enc` | 只在值形如凭据时（例如以 `sk-` 开头） | 逐值投影 |
 | `audit_records.request_uri_enc` | 是：Gemini 的 `?key=` | 按 D.3 投影 |
@@ -480,7 +522,7 @@ JSON 编码规则：
 | `body_chunks`（`full` 的 raw） | 协议上不传 Key；内容里可能有 | 原样（Q4 甲） |
 | `content_objects`、`binary_objects` | 同上 | 原样（Q4 甲） |
 | `content_external_refs.value_enc` | 是 `file_id`、`image_file_id`、`attachment_id`、`asset_id` 的值，同时也在对象明文里〔核：`auditmodel/binary.go`〕 | 原样 |
-| `parsed_results.parsed_json_enc` | 只有统计摘要、兜底会话和半截回答，没有 Header〔核：三个 parser 的 `ParsedJSON`、`parser/worker.go`〕；会话内容里可能有 | 原样（Q4 甲） |
+| `parsed_results.parsed_json_enc` | 只有统计摘要、兜底会话和半截回答，没有 Header〔核：三个 parser 的 `ParsedJSON` 只有协议、端点、状态和三个计数；`parser/worker.go` 的 `parsedResultPlaintext` 只在其上加 `conversation` 或 `partial_response_messages`，`compactResultJSON` 只有解析结果的字段〕；会话内容里可能有 | 原样（Q4 甲） |
 | `audit_project_identity.identity_enc` | 否：远端地址经 `NormalizeRemote` 归一化为 `host/path`，用户名部分被去掉〔核：`orgreport/identity.go`〕 | 原样 |
 | `stream_timelines.timeline_enc` | 否：只有偏移和时间 | 原样 |
 | `token_links` | 否：用户名与 Token 名称，不是 Key | 原样 |
@@ -602,7 +644,7 @@ M("parsed_results") N(
   N(H(解开后的 parsed_json)) I(parsed_at_ns) )
 M("token_links") N(
   I(newapi_user_id) T(username) I(newapi_token_id) T(token_name) I(linked_at_ns)
-  T(billing_state) N(I(quota)) N(B(quota_per_unit 的 IEEE-754 位，8 字节大端)))
+  T(billing_state) N(I(quota)) N(B(quota_per_unit 的 IEEE-754 位，8 字节大端))
   N(I(billed_prompt_tokens)) N(I(billed_completion_tokens)) I(billing_attempts) )
 M("turn") N(
   T(turn_id) T(conversation_id) N(T(parent_turn_id)) T(parent_base) T(link_reason) I(link_confidence)
@@ -645,6 +687,7 @@ M("integrity_events") L(n)，按 sequence：
   - 行首的检索字段：它们与表里的值逐项比对；
   - 存储编码列（Q7）；
   - 增量操作（Q6 甲）。
+- **只凭行就能重算。** 上面每一项都在行里（C.2）：raw 块和大的 `parsed_json` 以它们明文的 SHA-256 出现，对象以内容地址和元数据出现。对象文件不参与摘要计算，只在 J.2 里与行里的哈希核对。所以重算摘要只需要逐行读，内存只有一行。
 - **热库一侧的计算。** 导出时从快照里解密出的值构造投影后的记录结构，用它同时算摘要、写行。重读时从解析出的 JSON 行重新构造同一个结构、重算摘要（J.2）。两条路共用摘要函数，但输入一个来自数据库行，一个来自 JSON 文本，序列化和解析的错误都会在比对时暴露。
 
 ### E.3 列覆盖清单
@@ -782,13 +825,13 @@ N( I(first_id) I(last_id) I(count) )                ; gaps
 
 | | 甲：仓库内，STREAM 构造加 AES-256-GCM | 乙：库 |
 | --- | --- | --- |
-| 依赖 | 只用标准库：`crypto/aes`、`crypto/cipher`、`crypto/hmac`、`crypto/sha256`；仓库已经在用 AES-256-GCM（`security/aesgcm.go`）〔核〕 | `filippo.io/age` 需要 `golang.org/x/crypto`；Tink 的 streaming AEAD 依赖更多，含 protobuf。`go.mod` 里两者都没有〔核〕 |
+| 依赖 | 只用标准库：`crypto/aes`、`crypto/cipher`、`crypto/hmac`、`crypto/sha256`；仓库已经在用 AES-256-GCM（`security/aesgcm.go`）〔核〕 | `filippo.io/age` 需要 `golang.org/x/crypto`；Tink 的 streaming AEAD 依赖更多，含 protobuf〔推：外部资料，没有在本仓库核对〕。`go.mod` 里两者都没有〔核〕 |
 | 测试环境 | 无影响 | 测试容器没有网络，新模块要预先进模块缓存或随仓库带上 |
 | 与需求的贴合 | 只做需要的部分：一把派生出的对称密钥加盐 | `age` 的文件头是 recipient 列表，要为“主密钥派生的对称密钥”写自定义 recipient；Tink 要用它的密钥集格式 |
 | 评审负担 | 约两三百行新的密码学代码，必须单独评审 | 库本身已经过评审，但接入代码和文件头的处理仍要评审 |
 | 测试向量 | 自己定，钉在 testdata | 用库的向量，另加接入层的向量 |
 
-推荐甲（Q11）。这个构造就是 `age` 和 Tink 用的 STREAM（Hoang、Reyhanitabar、Rogaway、Vizár 2015）：每个文件一把用随机盐派生的密钥，nonce 由帧序号和末帧标记组成。不同文件之间没有 nonce 复用的可能，同一文件内序号不重复。
+推荐甲（Q11）。这个构造就是 `age` 和 Tink 用的 STREAM（Hoang、Reyhanitabar、Rogaway、Vizár 2015）〔推：外部资料〕：每个文件一把用随机盐派生的密钥，nonce 由帧序号和末帧标记组成。不同文件之间没有 nonce 复用的可能，同一文件内序号不重复。
 
 ### G.2 帧格式〔设〕
 
@@ -882,12 +925,18 @@ K_file = HMAC-SHA-256(K_enc, "llmapi-logger/archive-file-key/v1\x00" || 文件�
    5. 写一行；本分段还没写过的对象和 raw 块写进对象文件。
 3. **关文件。** 依次关 gzip、关加密写入器（发出末帧）、`fsync`、关文件。
 4. **登记意向。** 一个 writer 操作，在目录表插入 `publishing` 状态的分段行和全部成员行（记录摘要、变更戳、修订号），以及 gap 成员行（I 节）。
+   - 重新收录的成员（B.1 第 4 条）如果还有一个非 `stale` 的旧行（只在试行格式分段里的 `sealed` 成员会这样），同一个操作先把旧行改为 `stale`，再插入新行，满足 `archive_members_current_idx`。
+   - 同一个操作在事务内重算这些成员的变更戳，与快照里算出的比对：不同的成员直接登记为 `stale`（快照之后它已经变了），下次运行重新收录。目录表与清单的成员列表因此始终一一对应。
 5. **发布。**
    1. 数据文件从临时名改为正式名。用 `os.Link` 加删除临时名，正式名已存在时失败，不覆盖。这与 `security/key.go` 发布密钥的做法相同〔核〕。
    2. 写清单的临时文件、`fsync`，同样以 link 发布。
    3. `fsync` 目录。Windows 上目录 `fsync` 是空操作，暂存目录也是如此〔核：`audit/staging/platform_windows.go`〕；部署目标是 Linux 容器。
 6. **重读核对。** 重新打开已发布的文件做 J.2 的全部检查，再按 `archive.verify_sample` 抽样做 J.3 的读出等价比对。
-7. **定稿。** 一个 writer 操作把分段改为 `sealed`。`archive_then_delete` 模式且分段的格式版本不低于 1 时，进入 M 节的移除。
+7. **定稿。** 一个 writer 操作把分段改为 `sealed`。
+
+移除不在这里做。一次运行的全部趟都结束（或到了期限）之后，`archive_then_delete` 模式下才统一进入 M 节，对象是全部 `sealed` 分段里格式版本不低于 1 的 `sealed` 成员。原因：同一个会话可能被滚动切进同一趟的 `_s0001` 和 `_s0002`，先移除 `_s0001` 里的父轮次会让检查点改写 `_s0002` 里的子轮次，子轮次随之变成 `stale`（0.2 第 9 条）。等全部分段都定稿后再按 M.2 的全局顺序删，子轮次总在父轮次之前。
+
+某个分段在第 6 步作废时，它的成员仍是热库里的普通 audit，不是成员；移除别的分段里它们的父轮次，由检查点照常处理，它们下次以检查点之后的形态重新收录。
 
 第 6 步任何一项不过：
 
@@ -913,7 +962,7 @@ K_file = HMAC-SHA-256(K_enc, "llmapi-logger/archive-file-key/v1\x00" || 文件�
 
 | 情形 | 处理 |
 | --- | --- |
-| 复核不过或解密失败的 audit | 不归档、不删除，留在热库；计入本次运行的 `integrity_failed_audits`；日志 `error_category=archive_integrity_failed`。存储的载荷校验状态置为失败，与后台载荷校验发现损坏时相同（P 节第 4 条） |
+| 复核不过或解密失败的 audit | 不归档、不删除，留在热库；登记进 `archive_deferred`（`integrity_failed`），之后每次运行再试一次；计入本次运行的 `integrity_failed_audits`；日志 `error_category=archive_integrity_failed`。存储的载荷校验状态置为失败，与后台载荷校验发现损坏时相同（P 节第 4 条） |
 | 磁盘满、写失败、`fsync` 失败 | 删掉本趟的临时文件（只删本次运行自己创建、自己记下名字的临时文件），不登记；本次运行以 `archive_failed` 结束，日志带 `error_category=archive_failed`；10 分钟后重试，直到 `run_deadline` |
 | 登记意向失败（writer 不可用） | 同上：临时文件删掉，未发布 |
 | 发布后、定稿前崩溃 | 下次运行对账（H.6） |
@@ -933,6 +982,8 @@ K_file = HMAC-SHA-256(K_enc, "llmapi-logger/archive-file-key/v1\x00" || 文件�
 
 1. **`publishing` 的分段**：清单已发布且通过 J.2 → 继续 H.2 第 6 步；否则删掉意向行，已发布的数据文件改名加 `.orphan`。
 2. **归档目录里有清单、目录表里没有的包**（数据库从备份恢复之类）：用密钥核对 J.2，通过的登记为 `sealed` 的分段，成员一律登记为 `stale`（Q12 第 2 点）：可以读，永远不作为删除依据。
+   - 分段行的 `run_id` 记为执行这次对账的运行，清单里原来的 `run_id` 只留在文件里，所以 `archive_runs` 的外键成立。
+   - 某个成员在目录表里已有非 `stale` 的行时，只登记分段，不登记这个成员。
 3. **残留的临时文件**：文件名形如 `.<名称>.tmp-<随机>`，只有归档器会这样命名，删除。**没有清单的数据文件**：改名加 `.orphan`，不删除。
 4. **`sealed` 分段里仍为 `sealed` 的成员**：`archive_then_delete` 模式下继续移除（M 节）。
 
@@ -971,8 +1022,23 @@ CREATE TABLE archive_runs (
     stale_audits BIGINT NOT NULL DEFAULT 0 CHECK (stale_audits >= 0),
     removed_audits BIGINT NOT NULL DEFAULT 0 CHECK (removed_audits >= 0),
     removed_gaps BIGINT NOT NULL DEFAULT 0 CHECK (removed_gaps >= 0),
+    deferred_audits BIGINT NOT NULL DEFAULT 0 CHECK (deferred_audits >= 0),
     segments BIGINT NOT NULL DEFAULT 0 CHECK (segments >= 0),
-    disk_bytes BIGINT NOT NULL DEFAULT 0 CHECK (disk_bytes >= 0)
+    disk_bytes BIGINT NOT NULL DEFAULT 0 CHECK (disk_bytes >= 0),
+    -- Selection watermark (B.1) after the last completed pass, for this format.
+    format_version BIGINT NOT NULL CHECK (format_version >= 0),
+    watermark_started_at_ns BIGINT,
+    watermark_audit_id TEXT COLLATE "C",
+    CHECK ((watermark_started_at_ns IS NULL) = (watermark_audit_id IS NULL))
+);
+
+-- Audits a pass looked at behind the watermark but did not export, which the
+-- next passes check again (B.1).
+CREATE TABLE archive_deferred (
+    audit_id TEXT COLLATE "C" PRIMARY KEY,
+    reason TEXT COLLATE "C" NOT NULL CHECK (reason IN ('open', 'parse_pending', 'caller_pending', 'integrity_failed')),
+    first_seen_at_ns BIGINT NOT NULL CHECK (first_seen_at_ns > 0),
+    last_checked_at_ns BIGINT NOT NULL CHECK (last_checked_at_ns >= first_seen_at_ns)
 );
 
 CREATE TABLE archive_segments (
@@ -1044,7 +1110,7 @@ CREATE INDEX archive_gap_members_segment_idx ON archive_gap_members (segment_id)
 | `doc/features/04-sqlite-storage-and-migrations.md` | 新增 §3.10 |
 | `doc/deployment/postgresql-migration.md` | 新增“回滚到 schema 版本 7”（I.3） |
 | 离线导入器、`audit-stage` | 不用改（0.2 第 5 条） |
-| SQLite 存储 | 不加迁移：归档只在 PostgreSQL 上（第 3 阶段 H.2 的先例）。`HasAudits` 同步改为也检查 `integrity_events`（L.3），两个存储语义一致 |
+| SQLite 存储 | 不加迁移：归档只在 PostgreSQL 上（第 3 阶段 H.2 的先例）。`HasAudits` 同步改为也检查 `integrity_events`（L.3），两个存储语义一致〔核：SQLite 的 `HasAudits` 与 PostgreSQL 的形状相同，`integrity_events` 由 SQLite 迁移 005 建立〕 |
 
 旧版本打开 schema 8 的库时，因版本过新（`errSchemaTooNew`）而审计存储不可用：`available` 模式照常转发、不留 audit，`strict` 模式回 `503`（方案 4.5 的更正）。旧版本的配置加载用 `KnownFields(true)`〔核：`config/load.go`〕，配置里有 `archive:` 段会拒绝启动。
 
@@ -1054,6 +1120,7 @@ CREATE INDEX archive_gap_members_segment_idx ON archive_gap_members (segment_id)
 -- 仅在回滚到不含迁移 008 的版本时执行；先把 archive.mode 设为 off 并停止新版本
 BEGIN;
 DROP TABLE archive_gap_members;
+DROP TABLE archive_deferred;
 DROP TABLE archive_members;
 DROP TABLE archive_segments;
 DROP TABLE archive_runs;
@@ -1064,7 +1131,7 @@ COMMIT;
 部署说明要写明三点：
 
 1. 归档目录里的包不受回滚影响，读取工具照常可读。
-2. 目录表是“哪些成员已从热库移除”的唯一库内记录。回滚前先 `pg_dump` 这四张表，留作对照；清单里也有同样的成员列表。
+2. 目录表是“哪些成员已从热库移除”的唯一库内记录。回滚前先 `pg_dump` 这五张表，留作对照；清单里也有同样的成员列表。
 3. 旧版本的 `HasAudits` 不看目录表。所以回滚后密钥文件绝不能缺失，否则会落进 0.2 第 8 条的隐患。
 
 ---
@@ -1110,14 +1177,16 @@ COMMIT;
 4. 对象：
    - `content_object`：`ContentHash(data)` 等于 `object_hash`；解析出的值用 `auditmodel.SemanticHash(kind, value)` 重算，等于 `semantic_hash`；明文长度相符；
    - `binary_object`：`BinaryHash(bytes)` 等于 `binary_hash`，长度相符；
-   - `external_ref`：`ExternalValueHash(ref_kind, value)` 等于 `value_hash`〔核：`auditmodel/canonical.go`〕。
-5. raw：
+   - 行里 `turn.objects`、`turn.binaries` 的每一项（语义哈希、kind、长度、媒体类型）与对象文件里同一哈希的那一项相同；
+   - 行里的 `external_refs`：`ExternalValueHash(ref_kind, value)` 等于 `value_hash`〔核：`auditmodel/canonical.go`〕。
+5. raw 与大的 `parsed_json`：
+   - 对象文件里每个 `raw_chunk` 的字节，SHA-256 和长度等于行里同一 `(stage, seq)` 的那一项；`parsed_json_part` 按序拼起来等于 `parsed_json_ref` 的长度和 SHA-256；
    - 每个 `full` 阶段的块按 `seq`、`offset` 连续，只有 `capture_chunk_missing` 允许前向跳过（与 `query.StreamRaw` 相同）；
    - 块数和字节数等于 `body_streams` 的 `chunk_count`、`stored_length`；
    - 完整的 Body 拼接后的 SHA-256 与长度等于 `sha256`、`observed_length`；
    - 残缺的 Body 由记录摘要逐块覆盖（第 3 步）。
 6. 引用闭合：
-   - 每行 `object_hashes`、`binary_hashes`、`request_context`、`response_items` 里出现的哈希都在本包的对象文件里；
+   - 每行 `turn.objects`、`turn.binaries`、`request_context`、`response_items`、`raw_chunks`、`parsed_json_ref` 里出现的东西都在本包的对象文件里；
    - `delta` 形式的轮次，父轮次在本分段且排在它前面，用 `auditmodel.ApplyDelta`（`post_turn` 时基底接上父轮次的响应引用）重建出的引用条数与 `SequenceHash` 等于 `request_item_count`、`request_sequence_hash`；
    - `materialized` 形式直接核对同样两项；
    - 包内没有任何指向热库的引用：每个被引用的东西要么在行里，要么在对象文件里。
@@ -1261,7 +1330,14 @@ SELECT EXISTS (SELECT 1 FROM audit_records)
 
 ### M.1 可能改动已归档行的全部语句
 
-范围：`internal/storage/postgres` 里所有对归档表做 INSERT、UPDATE、DELETE 或 upsert 的语句〔核：对 `UPDATE`、`DELETE FROM`、`INSERT INTO`、`ON CONFLICT` 逐一检索并读了上下文〕。“已归档成员”指按 B.1 选出、已终结、解析与调用者状态都已到终态的 audit。
+范围：仓库里所有对归档表做 INSERT、UPDATE、DELETE 或 upsert 的语句〔核：对 `UPDATE`、`DELETE FROM`、`INSERT INTO`、`ON CONFLICT` 在整个仓库检索，`internal/storage/postgres` 里的逐一读了上下文〕。
+
+`internal/storage/postgres` 之外只有两处：
+
+- `internal/storage/sqlite`：旧格式的离线导入验证与兼容测试用，生产不打开它（`app/storage.go` 只打开 PostgreSQL）〔核〕，归档也不在它上面运行；
+- `internal/storage/migrate` 的离线导入器：只写入一个只有 001 基线表、而且必须为空的目标库（0.2 第 5 条），碰不到已归档的成员。
+
+下表只列 PostgreSQL 的语句。“已归档成员”指按 B.1 选出、已终结、解析与调用者状态都已到终态的 audit。
 
 | # | 语句 | 位置 | 能否作用于已归档成员 | 方案的戳 | Q1 乙 |
 | --- | --- | --- | --- | --- | --- |
@@ -1469,9 +1545,9 @@ P4：
 | W-stream | `internal/archive/stream/*` | 无（只用 `K_enc` 的字节） |
 | W-query | `internal/query/{service.go, turn.go, timeline.go, raw.go, plain.go(新)}` 及其测试 | 无 |
 | W-format | `internal/archive/{columns.go, project.go, digest.go, record.go, line.go, manifest.go}`、`internal/archive/testdata/*` | W-sec 的接口（可以先约定）；W-query 的 `PlainDetail`（先约定字段） |
-| W-pg | `internal/storage/postgres/{migrate.go, migrations/008_archive_catalog.sql, archive_catalog.go(新), archive_snapshot.go(新), archive_stamp.go(新), reader.go}` 及测试，含已有迁移测试里的版本清单；`internal/storage/sqlite/reader.go` 及测试 | W-format 的列规格与记录结构 |
+| W-pg | `internal/storage/postgres/{migrate.go, migrations/008_archive_catalog.sql, archive_catalog.go(新), archive_snapshot.go(新), archive_stamp.go(新), reader.go, writer.go, types.go}` 及测试，含已有迁移测试里的版本清单；`internal/storage/{types.go, archive_types.go(新)}`；`internal/storage/sqlite/reader.go` 及测试 | W-format 的列规格与记录结构 |
 | W-bundle | `internal/archive/bundle/*` | W-format、W-stream |
-| W-runner | `internal/archive/runner/*`、`internal/config/{archive.go(新), validate.go, types.go}` 及测试、`internal/app/*` | W-pg、W-bundle |
+| W-runner | `internal/archive/runner/*`、`internal/config/{archive.go(新), validate.go, types.go}` 及测试、`internal/app/*`（含 `app/storage.go` 的 `runtimeStore` 接口） | W-pg、W-bundle |
 | W-cli | `cmd/audit-archive/*`；终端不回显读取从 `internal/agentcli/term*.go` 移到 `internal/termio`（新），`agentcli` 改为引用它 | W-bundle、W-query |
 | W-it | `tests/integration/archive_*_test.go` | 以上全部 |
 | W-doc | `doc/features/*`、`doc/deployment/*`、`AGENTS.md`、`configs/*.yaml`、`compose.yaml`（归档卷） | 以上全部 |
@@ -1481,7 +1557,10 @@ P4：
 - W-pg 与 W-bundle 可以并行。
 - W-runner、W-cli 在它们之后，W-it、W-doc 最后。
 - W-p4 整体在 P3 验收之后，内部按 O.1 第 13 到 16 个提交顺序做。
-- `internal/storage/postgres/writer.go` 的 `alone()` 与 `applyWrite` 分派只在 W-pg（P3 的目录表操作）和 W-p4（移除操作）里改，两者不同时进行。
+- 共享文件的归属：
+  - `internal/storage/postgres/{writer.go, types.go}` 的 `alone()`、`applyWrite` 分派和 writer 操作类型，P3 归 W-pg（目录表操作），P4 归 W-p4（移除操作），两者不同时进行；
+  - `internal/storage` 的共享类型归 W-pg，W-format 只引用、不修改，新增的跨包类型先在 W-pg 的第一个提交里约定；
+  - `app/storage.go` 归 W-runner。
 
 ---
 
@@ -1499,7 +1578,7 @@ P4：
    - 桶包写成 `bucket-<protocol>-<run_id 前 8 位>`，保证同一天的几次运行不重名；
    - 目录按最早 `started_at_ns` 的 UTC 年月；
    - 从不覆盖已有文件（H.2 第 5 步）。
-7. **推迟的上限**：Q8 推迟的记录，到期后超过 7 天仍未到终态的照常归档，并在运行记录和日志里计数。只在解析或调用者查找卡住时才会发生。
+7. **推迟的计数**：Q8 推迟的记录不设上限（Q8 的推荐），每次运行把条数写进 `archive_runs.deferred_audits` 和完成日志。
 8. **`export_only` 下每条到期记录只导出一次**，不检测 `stale`。切到 `archive_then_delete` 后，移除时的变更戳比对会把之后变化过的成员标成 `stale` 重新收录。
 9. **抽样**：`verify_sample` 默认 0.05，每个包至少一条（J.3）。
 10. **非加密包没有密钥时**：`cat`、`export` 要加 `--unauthenticated`（K.1）。
