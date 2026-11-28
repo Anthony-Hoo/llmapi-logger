@@ -5,48 +5,18 @@ import (
 	"llmapi-logger/internal/storage"
 )
 
-// Body capture has two layers (design H.1). The observation layer, shared by
-// both write paths, is observeBodyLocked and its callers: hash, length,
-// first and last observation time, the SSE timeline, the terminal-event probe
-// and the fault flags. The retention layer decides what happens to the
-// observed bytes and is a bodyRetainer:
-//
-//   - legacyRetainer stages at most one 1 MiB chunk in bodyCapture.pending and
-//     hands every full chunk, and the tail at the end of the body, to
-//     AddChunk;
-//   - unifiedRetainer keeps the plaintext in memory segments, lets a
-//     duplicate stage borrow its source's bytes instead of copying them, and
-//     seals chunks at the same boundaries only when a checkpoint or the commit
-//     writes them.
-type bodyRetainer interface {
-	// retain is called with every observed piece of a body, after the
-	// observation layer has accounted for it, under the session lock.
-	retain(session *Session, stage *stageCapture, body *bodyCapture, data []byte, observedAtNS int64)
-	// flush ends the open chunk when it is full, or always with force.
-	flush(session *Session, stage *stageCapture, body *bodyCapture, force bool)
-}
-
-// legacyRetainer is today's retention; its state lives in bodyCapture
-// (pending, pendingAtNS, nextSeq, storedLength, chunkCount).
-type legacyRetainer struct{}
-
-// retention returns the session's retainer. A Session without one, including
-// the zero value, uses the legacy retainer.
-func (session *Session) retention() bodyRetainer {
-	if session.retainer != nil {
-		return session.retainer
-	}
-	return legacyRetainer{}
-}
-
-// unifiedRetainer keeps body plaintext in memory until a checkpoint or the
-// commit writes it (design B.5, F.2). Chunk boundaries follow the legacy
-// rule: a chunk closes when it holds bodyChunkSize bytes or when the body
-// ends (force), so the chunk rows are the ones legacy writes. Plaintext the
-// budgets cannot hold is sealed and handed to the stager (F.3); only under
-// global budget pressure is a chunk closed early, shorter than 1 MiB.
-type unifiedRetainer struct{}
-
+// Body capture has two layers (design H.1). The observation layer is
+// observeBodyLocked and its callers: hash, length, first and last
+// observation time, the SSE timeline, the terminal-event probe and the fault
+// flags. The retention layer below decides what happens to the observed
+// bytes: it keeps the plaintext in memory segments, lets a duplicate stage
+// borrow its source's bytes instead of copying them, and seals chunks only
+// when a checkpoint or the commit writes them (design B.5, F.2). Chunk
+// boundaries follow the rule the legacy write path used: a chunk closes when
+// it holds bodyChunkSize bytes or when the body ends (force), so the chunk
+// rows are the ones it wrote. Plaintext the budgets cannot hold is sealed and
+// handed to the stager (F.3); only under global budget pressure is a chunk
+// closed early, shorter than 1 MiB.
 // heldChunk is one chunk of a stage's own chunk grid. data holds the bytes
 // the stage owns; a duplicate stage that borrows from its source owns only
 // the tail from where it diverged, or nothing.
@@ -62,7 +32,7 @@ type heldChunk struct {
 	staged *staging.Ref
 }
 
-// unifiedBody is the retention state of one stage body on the unified path.
+// unifiedBody is the retention state of one stage body.
 type unifiedBody struct {
 	chunks []*heldChunk
 	open   *heldChunk
@@ -104,7 +74,9 @@ func (held *unifiedBody) duplicateUse(chunk *heldChunk) (pending, needed bool) {
 	return false, chunk.offset < duplicate.borrowedPrefix()
 }
 
-func (unifiedRetainer) retain(session *Session, stage *stageCapture, body *bodyCapture, data []byte, observedAtNS int64) {
+// retainLocked is called with every observed piece of a body, after the
+// observation layer has accounted for it, under the session lock.
+func (session *Session) retainLocked(stage *stageCapture, body *bodyCapture, data []byte, observedAtNS int64) {
 	held := body.unified
 	if held == nil || held.exhausted || len(data) == 0 {
 		return
@@ -128,7 +100,9 @@ func (unifiedRetainer) retain(session *Session, stage *stageCapture, body *bodyC
 	session.appendRetainedLocked(stage, body, data, observedAtNS, true)
 }
 
-func (unifiedRetainer) flush(session *Session, stage *stageCapture, body *bodyCapture, force bool) {
+// flushRetainedLocked ends the open chunk when it is full, or always with
+// force.
+func (session *Session) flushRetainedLocked(body *bodyCapture, force bool) {
 	held := body.unified
 	if held == nil || held.open == nil {
 		return
@@ -428,8 +402,8 @@ func chunkPlaintext(body *bodyCapture, chunk *heldChunk) ([]byte, bool) {
 
 // sealUnwrittenLocked seals the closed chunks of a stage no write has taken
 // yet; a staged chunk is taken by its index entry. A chunk that cannot be
-// sealed is lost, like a legacy chunk whose flush failed: the body is faulted
-// and the chunk leaves the stored length. The returned chunks are handed to
+// sealed is lost, as a chunk whose flush failed was on the legacy path: the
+// body is faulted and the chunk leaves the stored length. The returned chunks are handed to
 // the store, which may keep them.
 func (session *Session) sealUnwrittenLocked(stage *stageCapture) chunkSet {
 	body := stage.body

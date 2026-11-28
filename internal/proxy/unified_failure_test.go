@@ -331,47 +331,11 @@ type freezingStore struct {
 	frozen atomic.Bool
 }
 
-func (store *freezingStore) StartStage(ctx context.Context, value sqlite.HTTPStage) error {
-	if store.frozen.Load() {
-		return nil
-	}
-	return store.Store.StartStage(ctx, value)
-}
-func (store *freezingStore) StartBody(ctx context.Context, value sqlite.BodyStream) error {
-	if store.frozen.Load() {
-		return nil
-	}
-	return store.Store.StartBody(ctx, value)
-}
-func (store *freezingStore) AddHeaders(ctx context.Context, value []sqlite.HTTPHeader) error {
-	if store.frozen.Load() {
-		return nil
-	}
-	return store.Store.AddHeaders(ctx, value)
-}
-func (store *freezingStore) AddChunk(ctx context.Context, value sqlite.BodyChunk) error {
-	if store.frozen.Load() {
-		return nil
-	}
-	return store.Store.AddChunk(ctx, value)
-}
-func (store *freezingStore) FinishStage(ctx context.Context, value sqlite.StageFinish) error {
-	if store.frozen.Load() {
-		return nil
-	}
-	return store.Store.FinishStage(ctx, value)
-}
 func (store *freezingStore) Checkpoint(ctx context.Context, value sqlite.AuditCheckpoint) error {
 	if store.frozen.Load() {
 		return nil
 	}
 	return store.Store.Checkpoint(ctx, value)
-}
-func (store *freezingStore) FinishAuditWithResult(ctx context.Context, value sqlite.AuditFinish) (sqlite.AuditFinish, error) {
-	if store.frozen.Load() {
-		return sqlite.AuditFinish{}, storage.ErrClosed
-	}
-	return store.Store.FinishAuditWithResult(ctx, value)
 }
 func (store *freezingStore) CommitAudit(ctx context.Context, value sqlite.AuditCommit) (sqlite.AuditFinish, error) {
 	if store.frozen.Load() {

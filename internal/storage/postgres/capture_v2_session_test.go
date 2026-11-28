@@ -317,15 +317,7 @@ func (store *v2RecordingStore) CommitAudit(_ context.Context, commit storage.Aud
 	store.add(writeCommitAudit, commit)
 	return commit.Finish, nil
 }
-func (*v2RecordingStore) StartStage(context.Context, storage.HTTPStage) error       { return nil }
-func (*v2RecordingStore) StartBody(context.Context, storage.BodyStream) error       { return nil }
-func (*v2RecordingStore) AddHeaders(context.Context, []storage.HTTPHeader) error    { return nil }
-func (*v2RecordingStore) AddChunk(context.Context, storage.BodyChunk) error         { return nil }
-func (*v2RecordingStore) FinishStage(context.Context, storage.StageFinish) error    { return nil }
 func (*v2RecordingStore) InsertAuditGaps(context.Context, []storage.AuditGap) error { return nil }
-func (*v2RecordingStore) FinishAuditWithResult(_ context.Context, finish storage.AuditFinish) (storage.AuditFinish, error) {
-	return finish, nil
-}
 
 // The statements of a typical unified version 2 request (B.9: four stages,
 // bodies under 8 MiB, both pairs merged, here with request and response

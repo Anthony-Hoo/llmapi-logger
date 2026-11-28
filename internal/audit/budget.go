@@ -8,7 +8,7 @@ import (
 	"llmapi-logger/internal/storage"
 )
 
-// memoryBudget is the process-wide plaintext budget of the unified write path
+// memoryBudget is the process-wide plaintext budget of the capture sessions
 // (design F.2), counted in plaintext bytes.
 type memoryBudget struct {
 	limit int64
@@ -72,7 +72,7 @@ func (queue queueBudget) Release(size int64) { queue.budget.release(size) }
 // chunk; the stage then stops retaining content (design F.6).
 var ErrStagingUnavailable = errors.New("audit: body staging unavailable")
 
-// ChunkStager is where local staging plugs into the unified write path
+// ChunkStager is where local staging plugs into the capture sessions
 // (design F.3 to F.5); *staging.Stager implements it. The retainer hands it a
 // sealed chunk whose plaintext the memory budget cannot hold and keeps only
 // the returned index entry, through which a checkpoint or the commit reads

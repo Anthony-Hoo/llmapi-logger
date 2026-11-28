@@ -10,12 +10,11 @@ import (
 	"llmapi-logger/internal/storage"
 )
 
-// finishUnified is Session.finish on the unified write path. The decisions
-// (forward status, stage and body states, mismatch, timelines, the clock
-// reads) are the legacy ones; instead of FinishStage per stage and
-// FinishAuditWithResult it builds one AuditCommit and waits for it, retrying
-// as design B.8 says.
-func (session *Session) finishUnified() error {
+// finish fixes the forward status and every stage and body state (the
+// decisions, mismatch, timelines and clock reads the legacy path made the
+// same way), builds one AuditCommit and waits for it, retrying as design B.8
+// says.
+func (session *Session) finish() error {
 	session.mu.Lock()
 	session.committing = true
 	if session.forwardStatus == storage.ForwardInProgress {

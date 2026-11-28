@@ -2,13 +2,9 @@ package audit
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +38,7 @@ type stageCapture struct {
 	faulted         bool
 	errorCode       string
 
-	// Unified write path bookkeeping (design B.1): what earlier writes took.
+	// Write bookkeeping (design B.1): what earlier writes took.
 	// groups are the sealed header groups in capture order.
 	groups         []headerGroup
 	rowWritten     bool
@@ -95,9 +91,7 @@ type Session struct {
 	gaps            *gapBuffer
 
 	// bodyEncoder is session-local and accessed only while holding mu.
-	bodyEncoder *bodycodec.Encoder
-	// retainer is the body retention layer; nil is the legacy retainer.
-	retainer        bodyRetainer
+	bodyEncoder     *bodycodec.Encoder
 	mu              sync.Mutex
 	stages          map[string]*stageCapture
 	captureFault    bool
@@ -113,10 +107,10 @@ type Session struct {
 	finishOnce sync.Once
 	finishErr  error
 
-	// manager is set only on the unified write path.
+	// manager is the session's manager: budgets, stager, capture version.
 	manager *Manager
 	// identity is what the parser needs of the audit row (Protocol,
-	// ParserName, Path), for the hand-over; unified write path only.
+	// ParserName, Path), for the hand-over.
 	identity storage.ParserAudit
 	// memoryHeld is the plaintext this session holds in the global budget.
 	memoryHeld int64
@@ -151,13 +145,10 @@ func newSession(manager *Manager, requestContext context.Context, auditID, route
 		callerNotify:  manager.callerNotifier(),
 		stages:        make(map[string]*stageCapture, 4),
 		forwardStatus: storage.ForwardInProgress,
+		manager:       manager,
 	}
 	if manager.mode == ModeAvailable {
 		session.gaps = manager.gaps
-	}
-	if manager.unified {
-		session.manager = manager
-		session.retainer = unifiedRetainer{}
 	}
 	return session
 }
@@ -361,128 +352,6 @@ func (session *Session) Finish() error {
 	return session.finishErr
 }
 
-func (session *Session) finish() error {
-	if session.manager != nil {
-		return session.finishUnified()
-	}
-	session.mu.Lock()
-	if session.forwardStatus == storage.ForwardInProgress {
-		if session.request != nil && session.request.Err() != nil && !session.responseLogicallyCompleteLocked() {
-			session.forwardStatus = storage.ForwardClientCancelled
-			session.errorCode = stringPointer("client_cancelled")
-		} else {
-			session.forwardStatus = storage.ForwardCompleted
-		}
-	}
-	if session.forwardStatus == storage.ForwardClientCancelled || session.forwardStatus == storage.ForwardNewAPIError || session.forwardStatus == storage.ForwardProxyError {
-		session.captureFault = true
-	}
-
-	stageNames := make([]string, 0, len(session.stages))
-	for name := range session.stages {
-		stageNames = append(stageNames, name)
-	}
-	sort.Slice(stageNames, func(left, right int) bool { return stageOrder(stageNames[left]) < stageOrder(stageNames[right]) })
-	finishes := make([]storage.StageFinish, 0, len(stageNames))
-	for _, name := range stageNames {
-		stage := session.stages[name]
-		finish := session.finishStageLocked(stage)
-		if stage.persisted {
-			finishes = append(finishes, finish)
-		}
-	}
-
-	if session.bodyEncoder != nil {
-		session.bodyEncoder.Release()
-		session.bodyEncoder = nil
-	}
-
-	forwardStatus := session.forwardStatus
-	statusCode := cloneInt(session.statusCode)
-	blockedBy := cloneString(session.blockedBy)
-	blockCode := cloneString(session.blockCode)
-	errorCode := cloneString(session.errorCode)
-	newAPIRequestID := cloneString(session.newAPIRequestID)
-	captureStatus := storage.CaptureComplete
-	if session.captureFault {
-		captureStatus = storage.CapturePartial
-	}
-	parseStatus := storage.ParsePending
-	if forwardStatus == storage.ForwardRejected {
-		parseStatus = storage.ParseSkipped
-	}
-	endedAtNS := session.now().UnixNano()
-	session.mu.Unlock()
-
-	var writeErrors []error
-	for _, finish := range finishes {
-		if err := session.store.FinishStage(session.writeCtx, finish); err != nil {
-			writeErrors = append(writeErrors, fmt.Errorf("finish stage %s: %w", finish.Stage, err))
-			captureStatus = storage.CapturePartial
-			session.recordGapReason(gapReasonForWrite(err))
-			session.logCaptureFailure(finish.Stage, "finish_stage_failed")
-		}
-	}
-	if len(writeErrors) != 0 && errorCode == nil {
-		errorCode = stringPointer("audit_finalize_failed")
-	}
-	finish := storage.AuditFinish{
-		AuditID:         session.auditID,
-		EndedAtNS:       endedAtNS,
-		StatusCode:      statusCode,
-		ForwardStatus:   forwardStatus,
-		CaptureStatus:   captureStatus,
-		ParseStatus:     parseStatus,
-		BlockedBy:       blockedBy,
-		BlockCode:       blockCode,
-		ErrorCode:       errorCode,
-		NewAPIRequestID: newAPIRequestID,
-	}
-	if responseStage := session.stages[storage.StageResponseSent]; responseStage != nil {
-		ttft := responseStage.startedAtNS - session.started.UnixNano()
-		if ttft < 0 {
-			ttft = 0
-		}
-		finish.TTFTNS = &ttft
-	}
-	if persisted, err := session.store.FinishAuditWithResult(session.writeCtx, finish); err != nil {
-		writeErrors = append(writeErrors, fmt.Errorf("finish audit: %w", err))
-		captureStatus = storage.CapturePartial
-		session.recordGapReason(gapReasonForWrite(err))
-		session.logCaptureFailure("", "finish_audit_failed")
-	} else {
-		captureStatus = persisted.CaptureStatus
-		errorCode = cloneString(persisted.ErrorCode)
-		if parseStatus == storage.ParsePending && session.notify != nil {
-			_ = session.notify(session.auditID)
-		}
-	}
-	if newAPIRequestID != nil && session.callerNotify != nil && len(writeErrors) == 0 {
-		_ = session.callerNotify(session.auditID)
-	}
-	terminalErrorCode := valueOrEmpty(errorCode)
-	if len(writeErrors) != 0 && terminalErrorCode == "" {
-		terminalErrorCode = "audit_finalize_failed"
-	}
-	terminal := TerminalSummary{
-		AuditID:       session.auditID,
-		ForwardStatus: forwardStatus,
-		CaptureStatus: captureStatus,
-		ParseStatus:   parseStatus,
-		BlockedBy:     valueOrEmpty(blockedBy),
-		BlockCode:     valueOrEmpty(blockCode),
-		ErrorCode:     terminalErrorCode,
-	}
-	if statusCode != nil {
-		terminal.StatusCode = *statusCode
-		terminal.HasStatusCode = true
-	}
-	session.mu.Lock()
-	session.terminal = &terminal
-	session.mu.Unlock()
-	return errors.Join(writeErrors...)
-}
-
 func (session *Session) finishStageLocked(stage *stageCapture) storage.StageFinish {
 	state := storage.StageStateComplete
 	errorCode := stage.errorCode
@@ -627,32 +496,8 @@ func (session *Session) startStage(name, proto, method, host string, statusCode 
 		session.statusCode = cloneInt(statusCode)
 	}
 
-	if session.manager != nil {
-		// Unified: the stage is written by a later checkpoint or the commit;
-		// its headers are sealed now, as legacy seals them at stage start.
-		stage.persisted = true
-		session.addHeadersLocked(stage, storage.HeaderKindHeader, headers)
-		return stage
-	}
-	write := storage.HTTPStage{
-		AuditID:       session.auditID,
-		Stage:         name,
-		State:         storage.StageStateStreaming,
-		Proto:         proto,
-		Method:        method,
-		Host:          host,
-		StatusCode:    cloneInt(statusCode),
-		ContentLength: cloneInt64(contentLength),
-		StartedAtNS:   stage.startedAtNS,
-	}
-	if err := session.store.StartStage(session.writeCtx, write); err != nil {
-		stage.faulted = true
-		stage.errorCode = "start_stage_failed"
-		session.captureFault = true
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.logCaptureFailure(name, stage.errorCode)
-		return stage
-	}
+	// The stage is written by a later checkpoint or the commit; its headers
+	// are sealed (or, for capture version 2, snapshotted) now, at stage start.
 	stage.persisted = true
 	session.addHeadersLocked(stage, storage.HeaderKindHeader, headers)
 	return stage
@@ -679,43 +524,7 @@ func (session *Session) addHeadersLocked(stage *stageCapture, kind string, heade
 		session.snapshotHeadersLocked(stage, kind, headers)
 		return
 	}
-	if session.manager != nil {
-		session.addHeaderGroupLocked(stage, kind, headers)
-		return
-	}
-	names := make([]string, 0, len(headers))
-	for name := range headers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	values := make([]storage.HTTPHeader, 0)
-	for _, name := range names {
-		for index, value := range headers.Values(name) {
-			aad, err := security.AAD(session.auditID, "header", stage.name, kind, name, strconv.Itoa(index))
-			if err != nil {
-				session.markStageFaultLocked(stage, "header_encryption_failed")
-				continue
-			}
-			encrypted, err := session.cipher.Encrypt(aad, []byte(value))
-			if err != nil {
-				session.markStageFaultLocked(stage, "header_encryption_failed")
-				continue
-			}
-			values = append(values, storage.HTTPHeader{
-				AuditID:     session.auditID,
-				Stage:       stage.name,
-				Kind:        kind,
-				Name:        name,
-				ValueIndex:  index,
-				ValueLength: len(value),
-				ValueEnc:    encrypted,
-			})
-		}
-	}
-	if err := session.store.AddHeaders(session.writeCtx, values); err != nil {
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.markStageFaultLocked(stage, "add_headers_failed")
-	}
+	session.addHeaderGroupLocked(stage, kind, headers)
 }
 
 func (session *Session) markStageFaultLocked(stage *stageCapture, errorCode string) {

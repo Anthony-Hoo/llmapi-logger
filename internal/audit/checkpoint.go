@@ -16,7 +16,8 @@ import (
 	"llmapi-logger/internal/storage"
 )
 
-// The unified write path (design B.1) writes an audit in at most four
+// The write path (design B.1, the "unified" path of stage 3; the legacy
+// per-operation path it was proved against is gone) writes an audit in at most four
 // operations: BeginAudit with the inbound stage, checkpoint 1 when the
 // request_sent body ends, checkpoint 2 when response_sent starts, and
 // CommitAudit at Finish. A checkpoint writes what is new since the previous
@@ -31,10 +32,10 @@ type headerGroup struct {
 	written bool
 }
 
-// beginUnified admits a request on the unified path: the inbound stage is
-// started in memory (snapshot and sealed headers) and written by the same
-// BeginAudit as the audit row.
-func (manager *Manager) beginUnified(ctx context.Context, request *http.Request, match routing.Match, record storage.AuditRecord, started time.Time) (*Session, error) {
+// beginSession admits a request: the inbound stage is started in memory
+// (snapshot and sealed headers) and written by the same BeginAudit as the
+// audit row.
+func (manager *Manager) beginSession(ctx context.Context, request *http.Request, match routing.Match, record storage.AuditRecord, started time.Time) (*Session, error) {
 	session := newSession(manager, ctx, record.AuditID, match.RouteID, started)
 	session.terminalMatcher = streamterminal.MatcherFor(match.Parser)
 	session.identity = storage.ParserAudit{AuditID: record.AuditID, Protocol: record.Protocol, ParserName: record.ParserName, Path: record.Path}

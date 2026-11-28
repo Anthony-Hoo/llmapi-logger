@@ -672,9 +672,8 @@ func TestUnifiedWritePathMatchesLegacyEndToEnd(t *testing.T) {
 	if err := unified.store.VerifyIntegrityPayloads(context.Background()); err != nil {
 		t.Fatalf("integrity: %v", err)
 	}
-	if counting.legacyOps.Load() != 0 || counting.commits.Load() != int64(len(ids)) || counting.checkpoints.Load() == 0 {
-		t.Fatalf("unified store saw %d legacy operations, %d commits for %d audits, %d checkpoints",
-			counting.legacyOps.Load(), counting.commits.Load(), len(ids), counting.checkpoints.Load())
+	if counting.commits.Load() != int64(len(ids)) || counting.checkpoints.Load() == 0 {
+		t.Fatalf("%d commits for %d audits, %d checkpoints", counting.commits.Load(), len(ids), counting.checkpoints.Load())
 	}
 	// The parse read no body back.
 	if unified.parserReads.chunks.Load() != 0 || unified.parserReads.stages.Load() != 0 || unified.idOnlyJobs != 0 {
@@ -992,23 +991,11 @@ func diffEqDumps(legacy, unified map[string][]eqRow) []string {
 // countingStore counts the write operations a session issues.
 type countingStore struct {
 	*sqlite.Store
-	legacyOps, checkpoints, commits atomic.Int64
-	checkpoint                      func(sqlite.AuditCheckpoint) error
-	commit                          func(sqlite.AuditCommit) (sqlite.AuditFinish, error, bool)
+	checkpoints, commits atomic.Int64
+	checkpoint           func(sqlite.AuditCheckpoint) error
+	commit               func(sqlite.AuditCommit) (sqlite.AuditFinish, error, bool)
 }
 
-func (store *countingStore) StartStage(ctx context.Context, stage sqlite.HTTPStage) error {
-	store.legacyOps.Add(1)
-	return store.Store.StartStage(ctx, stage)
-}
-func (store *countingStore) AddChunk(ctx context.Context, chunk sqlite.BodyChunk) error {
-	store.legacyOps.Add(1)
-	return store.Store.AddChunk(ctx, chunk)
-}
-func (store *countingStore) FinishAuditWithResult(ctx context.Context, finish sqlite.AuditFinish) (sqlite.AuditFinish, error) {
-	store.legacyOps.Add(1)
-	return store.Store.FinishAuditWithResult(ctx, finish)
-}
 func (store *countingStore) Checkpoint(ctx context.Context, checkpoint sqlite.AuditCheckpoint) error {
 	store.checkpoints.Add(1)
 	if store.checkpoint != nil {

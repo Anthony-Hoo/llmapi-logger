@@ -19,7 +19,6 @@ import (
 
 	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/parser/handover"
-	"llmapi-logger/internal/parser/streamterminal"
 	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
@@ -32,35 +31,28 @@ const (
 
 var ErrUnavailable = errors.New("audit unavailable")
 
-// ErrUnifiedUnsupported is NewManagerWithOptions refusing the unified write
-// path because the store cannot serve it.
-var ErrUnifiedUnsupported = errors.New("audit: the store cannot serve audit.write_path unified")
+// ErrUnifiedUnsupported is NewManagerWithOptions refusing a store that
+// cannot serve the capture write path.
+var ErrUnifiedUnsupported = errors.New("audit: the store cannot serve the capture write path")
 
-// Store is the ordered persistence surface used by a Session.
-// FinishAuditWithResult is a barrier for earlier asynchronous writes and
-// returns the effective committed outcome for the completion log.
-//
-// The legacy write path uses StartStage through FinishAuditWithResult. The
-// unified write path uses BeginAudit with the inbound stage, Checkpoint (not
-// waited for) and CommitAudit (waited for; a barrier like
-// FinishAuditWithResult). A store that implements the methods but cannot
-// serve the unified path says so through SupportsUnifiedWrite.
+// Store is the ordered persistence surface used by a Session: BeginAudit
+// with the inbound stage (waited for), Checkpoint (not waited for) and
+// CommitAudit, which is a barrier for the earlier writes, is waited for and
+// returns the effective committed outcome for the completion log. A store
+// that implements the methods but cannot serve them says so through
+// SupportsUnifiedWrite. The stores' per-operation writes (StartStage and the
+// others) are not part of it: no session issues them since the legacy write
+// path was removed.
 type Store interface {
 	Healthy() bool
 	BeginAudit(context.Context, storage.AuditRecord) error
-	StartStage(context.Context, storage.HTTPStage) error
-	StartBody(context.Context, storage.BodyStream) error
-	AddHeaders(context.Context, []storage.HTTPHeader) error
-	AddChunk(context.Context, storage.BodyChunk) error
-	FinishStage(context.Context, storage.StageFinish) error
-	FinishAuditWithResult(context.Context, storage.AuditFinish) (storage.AuditFinish, error)
 	Checkpoint(context.Context, storage.AuditCheckpoint) error
 	CommitAudit(context.Context, storage.AuditCommit) (storage.AuditFinish, error)
 	InsertAuditGaps(context.Context, []storage.AuditGap) error
 }
 
 // unifiedWriteSupport is implemented by a store that may be unable to serve
-// the unified write path. A store without the method serves it.
+// the capture write path. A store without the method serves it.
 type unifiedWriteSupport interface {
 	SupportsUnifiedWrite() bool
 }
@@ -71,13 +63,7 @@ type headerBlockSupport interface {
 	SupportsHeaderBlock() bool
 }
 
-// Write paths of Options.WritePath.
-const (
-	WritePathLegacy  = "legacy"
-	WritePathUnified = "unified"
-)
-
-// Defaults of the unified write path (design F.1, B.8).
+// Defaults of the capture write path (design F.1, B.8).
 const (
 	DefaultStageBytes    = 8 << 20
 	DefaultGlobalBytes   = 256 << 20
@@ -85,16 +71,14 @@ const (
 	MaxCommitRetries     = 5
 )
 
-// Options selects the write path of a Manager. The zero value is the unified
-// path.
+// Options are the run-time parameters of a Manager. The zero value is the
+// defaults without staging.
 type Options struct {
-	// WritePath is WritePathUnified (or empty) or WritePathLegacy.
-	WritePath string
 	// CommitRetries is the initial retry count of CommitAudit, 0 to 5; see
 	// SetCommitRetries.
 	CommitRetries int
-	// StageBytes and GlobalBytes are the plaintext the unified path keeps in
-	// memory per stage and for the whole process. Zero means the default.
+	// StageBytes and GlobalBytes are the plaintext a session keeps in memory
+	// per stage and for the whole process. Zero means the default.
 	StageBytes  int64
 	GlobalBytes int64
 	// Stager takes sealed chunks the memory budget cannot hold
@@ -133,12 +117,10 @@ type Manager struct {
 	notifyMu     sync.RWMutex
 	notify       func(string) bool
 	callerNotify func(string) bool
-	// handover takes committed audits on the unified write path (handover.go).
+	// handover takes committed audits (handover.go).
 	handover func(handover.Job) bool
 
-	// unified selects the unified write path for every session.
-	unified bool
-	// captureVersion is the capture_version the unified path writes.
+	// captureVersion is the capture_version the sessions write.
 	captureVersion int
 	// commitRetries is the live retry count of CommitAudit (SetCommitRetries).
 	commitRetries atomic.Int32
@@ -156,9 +138,9 @@ func NewManager(store Store, cipher security.Cipher, fingerprints *security.Cred
 	return NewManagerWithOptions(store, cipher, fingerprints, mode, logger, Options{})
 }
 
-// NewManagerWithOptions constructs a live audit manager with an explicit write
-// path. It refuses the unified path at construction, not per request, when
-// the store cannot serve it.
+// NewManagerWithOptions constructs a live audit manager with explicit
+// options. It refuses, at construction rather than per request, a store that
+// cannot serve the write path.
 func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *security.CredentialFingerprinter, mode string, logger *slog.Logger, options Options) (*Manager, error) {
 	if mode != ModeAvailable && mode != ModeStrict {
 		return nil, fmt.Errorf("audit: invalid mode %q", mode)
@@ -171,11 +153,6 @@ func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *se
 	}
 	if logger == nil {
 		logger = slog.Default()
-	}
-	switch options.WritePath {
-	case "", WritePathLegacy, WritePathUnified:
-	default:
-		return nil, fmt.Errorf("audit: invalid write path %q", options.WritePath)
 	}
 	if options.CommitRetries < 0 || options.CommitRetries > MaxCommitRetries {
 		return nil, fmt.Errorf("audit: commit retries must be between 0 and %d, got %d", MaxCommitRetries, options.CommitRetries)
@@ -219,19 +196,16 @@ func NewManagerWithOptions(store Store, cipher security.Cipher, fingerprints *se
 		manager.sleep = options.Sleep
 	}
 	manager.commitRetries.Store(int32(options.CommitRetries))
-	if options.WritePath == WritePathUnified || options.WritePath == "" {
-		if support, ok := store.(unifiedWriteSupport); ok && !support.SupportsUnifiedWrite() {
-			return nil, ErrUnifiedUnsupported
-		}
-		manager.unified = true
-		manager.captureVersion = captureVersionFor(store)
+	if support, ok := store.(unifiedWriteSupport); ok && !support.SupportsUnifiedWrite() {
+		return nil, ErrUnifiedUnsupported
 	}
+	manager.captureVersion = captureVersionFor(store)
 	manager.gaps = newGapBuffer(store, logger, func() time.Time { return manager.now() })
 	return manager, nil
 }
 
-// captureVersionFor is the single place that chooses the capture version of
-// the unified path: version 2 (the header block) on a store that writes it,
+// captureVersionFor is the single place that chooses the capture version the
+// sessions write: version 2 (the header block) on a store that writes it,
 // which is PostgreSQL; version 1 otherwise, which is SQLite (H.2).
 func captureVersionFor(store Store) int {
 	if support, ok := store.(headerBlockSupport); ok && support.SupportsHeaderBlock() {
@@ -243,8 +217,7 @@ func captureVersionFor(store Store) int {
 // SetCommitRetries changes how many times a session retries a CommitAudit
 // that failed with a retryable error, from 0 to 5; values outside the range
 // are clamped. Sessions read it once, when their first attempt is prepared,
-// so a change applies to commits that start afterwards. The legacy write path
-// does not use it.
+// so a change applies to commits that start afterwards.
 func (manager *Manager) SetCommitRetries(retries int) {
 	if manager == nil {
 		return
@@ -260,21 +233,13 @@ func (manager *Manager) CommitRetries() int {
 	return int(manager.commitRetries.Load())
 }
 
-// MemoryInUse returns the body plaintext the unified path's sessions hold in
-// the global memory budget.
+// MemoryInUse returns the body plaintext the sessions hold in the global
+// memory budget.
 func (manager *Manager) MemoryInUse() int64 {
 	if manager == nil {
 		return 0
 	}
 	return manager.budget.Used()
-}
-
-// WritePath returns the write path the manager's sessions use.
-func (manager *Manager) WritePath() string {
-	if manager != nil && manager.unified {
-		return WritePathUnified
-	}
-	return WritePathLegacy
 }
 
 // NewUnavailable constructs a manager that preserves configured admission
@@ -435,20 +400,7 @@ func (manager *Manager) Begin(ctx context.Context, request *http.Request, match 
 		// developer session see its own rejected requests too.
 		APIKeyFPR: manager.fingerprints.FingerprintRequest(request.Header, query),
 	}
-	if manager.unified {
-		return manager.beginUnified(ctx, request, match, record, started)
-	}
-	if err := manager.store.BeginAudit(ctx, record); err != nil {
-		manager.recordGap(gapReasonForWrite(err))
-		return nil, fmt.Errorf("audit: begin record: %w", err)
-	}
-	if manager.gaps != nil {
-		manager.gaps.trigger()
-	}
-	session := newSession(manager, ctx, auditID, match.RouteID, started)
-	session.terminalMatcher = streamterminal.MatcherFor(match.Parser)
-	session.WrapRequestReceived(request)
-	return session, nil
+	return manager.beginSession(ctx, request, match, record, started)
 }
 
 func gapReasonForWrite(err error) string {

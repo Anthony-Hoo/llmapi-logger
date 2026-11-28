@@ -19,14 +19,10 @@ import (
 type bodyCapture struct {
 	digest         hash.Hash
 	persisted      bool
-	persistChunks  bool
 	sourceStage    string
 	observedLength int64
 	storedLength   int64
-	nextSeq        int64
 	chunkCount     int64
-	pending        []byte
-	pendingAtNS    int64
 	firstAtNS      int64
 	lastAtNS       int64
 	eofSeen        bool
@@ -71,8 +67,8 @@ type bodyCapture struct {
 	streamLine         []byte
 	streamLineOverflow bool
 
-	// unified is the retention state of the unified write path, nil on the
-	// legacy path.
+	// unified is the retention state of the body (retain.go); nil only on a
+	// bodyCapture built by hand in a test.
 	unified *unifiedBody
 }
 
@@ -234,11 +230,10 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 	}
 	body := &bodyCapture{
 		digest:         sha256.New(),
-		persistChunks:  true,
 		sourceStage:    stage.name,
 		streamComplete: true,
 	}
-	body.stream = body.persistChunks && stage.name == storage.StageResponseReceived && isEventStream(stage.contentType)
+	body.stream = stage.name == storage.StageResponseReceived && isEventStream(stage.contentType)
 	if body.stream {
 		body.streamPoints = make([]streamtimeline.Point, 0, 256)
 		// The probe sees raw upstream bytes, so terminal detection is only
@@ -251,29 +246,7 @@ func (session *Session) ensureBodyLocked(stage *stageCapture) *bodyCapture {
 		}
 	}
 	stage.body = body
-	if session.manager != nil {
-		session.attachUnifiedBodyLocked(stage, body)
-		return body
-	}
-	if !stage.persisted {
-		body.faulted = true
-		body.errorCode = "start_stage_failed"
-		return body
-	}
-	if err := session.store.StartBody(session.writeCtx, storage.BodyStream{
-		AuditID:        session.auditID,
-		Stage:          stage.name,
-		SourceStage:    stage.name,
-		State:          storage.StageStateStreaming,
-		RetentionState: storage.RetentionPending,
-	}); err != nil {
-		body.faulted = true
-		body.errorCode = "start_body_failed"
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.markStageFaultLocked(stage, body.errorCode)
-		return body
-	}
-	body.persisted = true
+	session.attachUnifiedBodyLocked(stage, body)
 	return body
 }
 
@@ -291,7 +264,7 @@ func (session *Session) observeBodyLocked(stage *stageCapture, body *bodyCapture
 		observeStreamEvents(body, data, body.observedLength, observedAtNS)
 	}
 	body.observedLength += int64(len(data))
-	session.retention().retain(session, stage, body, data, observedAtNS)
+	session.retainLocked(stage, body, data, observedAtNS)
 }
 
 // flushBodyLocked ends the open chunk of a body: when it is full, or always
@@ -300,85 +273,12 @@ func (session *Session) flushBodyLocked(stage *stageCapture, body *bodyCapture, 
 	if body == nil {
 		return
 	}
-	session.retention().flush(session, stage, body, force)
+	session.flushRetainedLocked(body, force)
 }
 
-// retain is the legacy retainer's half of observeBodyLocked: it stages at
-// most one chunk and hands every full one to AddChunk.
-func (legacyRetainer) retain(session *Session, stage *stageCapture, body *bodyCapture, data []byte, observedAtNS int64) {
-	if !body.persistChunks || !body.persisted {
-		return
-	}
-	// Bound staging memory even when an upstream Reader returns a very large
-	// buffer. Small bodies allocate only what they need, not a full chunk.
-	for len(data) > 0 {
-		if len(body.pending) == 0 {
-			body.pendingAtNS = observedAtNS
-		}
-		count := min(len(data), bodyChunkSize-len(body.pending))
-		needed := len(body.pending) + count
-		if needed > cap(body.pending) {
-			capacity := min(bodyChunkSize, max(needed, 2*cap(body.pending)))
-			next := make([]byte, len(body.pending), capacity)
-			copy(next, body.pending)
-			clear(body.pending)
-			body.pending = next
-		}
-		body.pending = append(body.pending, data[:count]...)
-		data = data[count:]
-		if len(body.pending) == bodyChunkSize {
-			session.flushBodyLocked(stage, body, false)
-		}
-	}
-}
-
-func (legacyRetainer) flush(session *Session, stage *stageCapture, body *bodyCapture, force bool) {
-	if force {
-		// Completed request stages must not retain a chunk for the lifetime
-		// of a potentially long-running streaming response.
-		defer func() { clear(body.pending); body.pending = nil; body.pendingAtNS = 0 }()
-	}
-	if !body.persistChunks || !body.persisted || len(body.pending) == 0 {
-		return
-	}
-	if !force && len(body.pending) < bodyChunkSize {
-		return
-	}
-	// observeBodyLocked never stages more than one chunk. Encoding and
-	// encryption are synchronous; AddChunk receives only owned ciphertext.
-	plaintext := body.pending
-	observedAtNS := body.pendingAtNS
-	body.pending = body.pending[:0]
-	body.pendingAtNS = 0
-	defer clear(plaintext)
-
-	sequence := body.nextSeq
-	offset := body.storedLength
-	body.nextSeq++
-	chunk, failure := session.sealChunkLocked(stage, sequence, offset, plaintext, observedAtNS)
-	if failure != "" {
-		clear(plaintext)
-		body.faulted = true
-		body.errorCode = failure
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
-	}
-	if err := session.store.AddChunk(session.writeCtx, chunk); err != nil {
-		clear(plaintext)
-		body.faulted = true
-		body.errorCode = "add_chunk_failed"
-		session.recordGapReasonLocked(gapReasonForWrite(err))
-		session.markStageFaultLocked(stage, body.errorCode)
-		return
-	}
-	body.storedLength += int64(len(plaintext))
-	body.chunkCount++
-	clear(plaintext)
-}
-
-// sealChunkLocked compresses and encrypts one owning chunk of a stage. Both
-// retainers seal through it, so a chunk's ciphertext format is one piece of
-// code. It returns the stable error code of a failure, or "".
+// sealChunkLocked compresses and encrypts one owning chunk of a stage, with
+// the format and AAD the legacy path used, so the chunk rows are the same.
+// It returns the stable error code of a failure, or "".
 func (session *Session) sealChunkLocked(stage *stageCapture, sequence, offset int64, plaintext []byte, observedAtNS int64) (storage.BodyChunk, string) {
 	compression, encoded, err := session.encodeBodyLocked(plaintext, stage.contentType)
 	if err != nil {

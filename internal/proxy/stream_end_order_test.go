@@ -26,7 +26,7 @@ import (
 // These tests pin what the proxy's direct HTTP peer (Nginx in deployment)
 // observes while the audit's terminal commit is still pending. The handler
 // defers, in run order: CaptureTrailers, session.Finish (which waits for
-// FinishAuditWithResult with no timeout), then the completion log line; only
+// CommitAudit with no timeout), then the completion log line; only
 // after all three does ServeHTTP return to net/http. Moving work across the
 // terminal commit is client-visible exactly where these tests say so.
 
@@ -59,13 +59,7 @@ func newBlockingFinishStore(store *sqlite.Store) *blockingFinishStore {
 	return &blockingFinishStore{Store: store, entered: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (store *blockingFinishStore) FinishAuditWithResult(ctx context.Context, finish sqlite.AuditFinish) (sqlite.AuditFinish, error) {
-	store.enteredOnce.Do(func() { close(store.entered) })
-	<-store.release
-	return store.Store.FinishAuditWithResult(ctx, finish)
-}
-
-// CommitAudit is the terminal commit of the unified write path. Checkpoints
+// CommitAudit is the terminal commit. Checkpoints
 // are not blocked; checkpointsDone counts the ones that returned.
 func (store *blockingFinishStore) CommitAudit(ctx context.Context, commit sqlite.AuditCommit) (sqlite.AuditFinish, error) {
 	store.checkpointsAtCommit.Store(store.checkpointsDone.Load())

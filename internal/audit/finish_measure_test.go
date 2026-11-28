@@ -35,11 +35,6 @@ func (store *timingStore) mark() {
 	}
 }
 
-func (store *timingStore) FinishStage(ctx context.Context, finish storage.StageFinish) error {
-	store.mark()
-	return store.Store.FinishStage(ctx, finish)
-}
-
 func (store *timingStore) CommitAudit(ctx context.Context, commit storage.AuditCommit) (storage.AuditFinish, error) {
 	store.mark()
 	return store.Store.CommitAudit(ctx, commit)
