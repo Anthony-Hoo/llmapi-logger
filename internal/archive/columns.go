@@ -62,7 +62,8 @@ const (
 )
 
 // Columns is the column specification of E.3 and Q7: every column of every
-// archived table, as schema version 7 defines it.
+// archived table, as schema version 8 defines it (migration 008 added only
+// the catalog tables, which are not archived).
 var Columns = buildColumns()
 
 func buildColumns() []Column {
