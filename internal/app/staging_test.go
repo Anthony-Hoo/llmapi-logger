@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -119,9 +120,26 @@ func TestUnusableStagingDirectoryMakesTheAuditUnavailable(t *testing.T) {
 // A run left staged chunks; the next start imports them before recovery, and
 // recovery finalizes the audit with them.
 func TestStartImportsWhatThePreviousRunStaged(t *testing.T) {
+	startImportsOnSQLite(t, false)
+}
+
+// A start whose staging directory is unusable recovers nothing: the audit
+// stays open with its chunks staged, and the next start with the directory
+// back imports them and finalizes it (stage 3 design R.8, as R.3 item 2 for a
+// file the import cannot read).
+func TestUnusableStagingLeavesInterruptedAuditsOpen(t *testing.T) {
+	startImportsOnSQLite(t, true)
+}
+
+func TestUnusableStagingLeavesInterruptedAuditsOpenOnPostgreSQL(t *testing.T) {
+	startImportsOnPostgreSQL(t, true)
+}
+
+func startImportsOnSQLite(t *testing.T, unusableFirst bool) {
+	t.Helper()
 	directory := t.TempDir()
 	databasePath := filepath.Join(directory, "audit.db")
-	runImportAfterUnified(t, directory, 1,
+	runImportAfterUnified(t, directory, 1, unusableFirst,
 		func(ctx context.Context) (seedStore, error) { return sqlite.Open(ctx, databasePath) },
 		func(configuration *config.Config) { configuration.DBPath = databasePath },
 		func(ctx context.Context, configuration config.Config) auditRuntime {
@@ -135,12 +153,17 @@ func TestStartImportsWhatThePreviousRunStaged(t *testing.T) {
 // The same on PostgreSQL with a capture version 2 start row: the recovered
 // audit is signed over the version 2 payload and verifies.
 func TestStartImportsWhatThePreviousRunStagedOnPostgreSQL(t *testing.T) {
+	startImportsOnPostgreSQL(t, false)
+}
+
+func startImportsOnPostgreSQL(t *testing.T, unusableFirst bool) {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL required for PostgreSQL")
 	}
 	schemaURL := newStagingSchema(t, dsn)
-	runImportAfterUnified(t, t.TempDir(), 2,
+	runImportAfterUnified(t, t.TempDir(), 2, unusableFirst,
 		func(ctx context.Context) (seedStore, error) { return postgres.Open(ctx, schemaURL) },
 		func(configuration *config.Config) { configuration.DatabaseURL = schemaURL },
 		func(ctx context.Context, configuration config.Config) auditRuntime {
@@ -180,7 +203,16 @@ type seedStore interface {
 	Close() error
 }
 
-func runImportAfterUnified(t *testing.T, directory string, version int, open func(context.Context) (seedStore, error),
+// staleSnapshotter reads an audit back from a seed store.
+type staleSnapshotter interface {
+	Snapshot(context.Context, string) (storage.Snapshot, error)
+}
+
+// runImportAfterUnified seeds an audit left open with staged chunks, then
+// starts the application. With unusableFirst a first start sees a regular
+// file where the staging directory is (the files set aside): it must leave
+// everything as it was.
+func runImportAfterUnified(t *testing.T, directory string, version int, unusableFirst bool, open func(context.Context) (seedStore, error),
 	database func(*config.Config), assemble func(context.Context, config.Config) auditRuntime,
 	snapshotOf func(context.Context, runtimeStore, string) (storage.Snapshot, error)) {
 	t.Helper()
@@ -253,6 +285,9 @@ func runImportAfterUnified(t *testing.T, directory string, version int, open fun
 	database(&configuration)
 	configuration.KeyPath = keyPath
 	configuration.Audit.Staging.Dir = stagingDir
+	if unusableFirst {
+		startWithUnusableStaging(t, ctx, configuration, open, assemble, id)
+	}
 	runtime := assemble(ctx, configuration)
 	if runtime.store == nil || runtime.stager == nil || !runtime.manager.Healthy() {
 		t.Fatalf("start: store %v, stager %v", runtime.store != nil, runtime.stager != nil)
@@ -276,6 +311,67 @@ func runImportAfterUnified(t *testing.T, directory string, version int, open fun
 		t.Fatalf("integrity: %v", err)
 	}
 }
+
+// startWithUnusableStaging starts once with a regular file in place of the
+// staging directory: the audit is unavailable, nothing is recovered or
+// finalized, no chunk is added, and the staging files are untouched; then
+// the directory is put back.
+func startWithUnusableStaging(t *testing.T, ctx context.Context, configuration config.Config, open func(context.Context) (seedStore, error),
+	assemble func(context.Context, config.Config) auditRuntime, id string) {
+	t.Helper()
+	stagingDir := configuration.Audit.Staging.Dir
+	aside := stagingDir + "-aside"
+	before := stagingEntries(t, stagingDir)
+	if err := os.Rename(stagingDir, aside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stagingDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unusable := assemble(ctx, configuration)
+	if unusable.store != nil || unusable.stager != nil || unusable.manager.Healthy() {
+		t.Fatal("the audit started without a usable staging directory")
+	}
+	store, err := open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.(staleSnapshotter).Snapshot(ctx, id)
+	_ = store.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Audit.EndedAtNS != nil || len(snapshot.Chunks) != 0 || snapshot.Audit.ForwardStatus != storage.ForwardInProgress {
+		t.Fatalf("the unusable start changed the audit: %+v, %d chunks", snapshot.Audit, len(snapshot.Chunks))
+	}
+	if err := os.Remove(stagingDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(aside, stagingDir); err != nil {
+		t.Fatal(err)
+	}
+	if after := stagingEntries(t, stagingDir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("staging files %v became %v", before, after)
+	}
+}
+
+func stagingEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, fmt.Sprintf("%s %d", entry.Name(), info.Size()))
+	}
+	return names
+}
+
 func sealTestChunk(t *testing.T, cipher security.Cipher, auditID string, seq, offset int64, plaintext []byte) storage.BodyChunk {
 	t.Helper()
 	compression, encoded, err := (&bodycodec.Encoder{}).Encode(plaintext, "application/json")

@@ -1299,7 +1299,7 @@ A/B（R.7）之后维护者决定只保留 unified。这一节记录删了什么
 - 采集版本 1 的读取和校验（query、parser、完整性、`headerblock.Expand`）：旧数据照常可读、可校验，不重写任何已有的行。
 - 设置接口的 `write_path` 字段，总是 `unified`，接口形状不变；`unifiedWriteSupport` 检查（存储可以声明不能承担这条写入路径），日志码 `unified_unsupported` 沿用。
 
-**暂存目录必填。** 维护者的决定：`audit.staging.dir` 在两种模式下都必填（配置校验拒绝空值，仍要求绝对路径、与密钥目录分开）。启动时目录配置了却不可用（或没有配置），两种模式下审计都不可用，与此前 strict 的处理相同：关闭存储，记一条 `audit staging unavailable`（`error_category=staging_unavailable` 和原有的 `reason` 码，不带路径和错误原文），以 `audit.NewUnavailable` 运行；available 模式不审计照常转发，strict 模式拒绝。不提供不带暂存运行的降级方式，以前 available 模式退回 legacy 的做法已经没有了。判断的位置不变：在导入尝试和 `RecoverInterruptedAudits` 之后。
+**暂存目录必填。** 维护者的决定：`audit.staging.dir` 在两种模式下都必填（配置校验拒绝空值，仍要求绝对路径、与密钥目录分开）。启动时目录配置了却不可用（或没有配置），两种模式下审计都不可用，与此前 strict 的处理相同：关闭存储，记一条 `audit staging unavailable`（`error_category=staging_unavailable` 和原有的 `reason` 码，不带路径和错误原文），以 `audit.NewUnavailable` 运行；available 模式不审计照常转发，strict 模式拒绝。不提供不带暂存运行的降级方式，以前 available 模式退回 legacy 的做法已经没有了。这个判断在导入和 `RecoverInterruptedAudits` 之前：目录不可用就像暂存文件全都读不出来：此时恢复会把带着暂存块中断的 audit 不带这些块就终结（与导入读不出文件时中止的理由相同，第 3 阶段设计 R.3 第 2 条）；维护者的决定是目录不可用时整个审计不可用。于是不恢复、不终结任何记录，存储关闭，中断的 audit 原样保持未终结，暂存文件不动；目录修好、重启之后按正常顺序（验证完整性链 → 导入暂存 → 恢复），暂存块导入这些仍未终结的 audit。`TestUnusableStagingLeavesInterruptedAuditsOpen`（及 PostgreSQL 版）固定这一点。
 
 **证据怎样保住。** 会话层的等价测试原来让同一流量走两条路径再比行，是 unified 存下的与 legacy 相同的证明。删代码之前先把 legacy 一侧冻结成金文件（`internal/legacyoracle`，各包 `testdata/legacy-oracle`），选它而不是在测试代码里留一份 legacy 会话：会话分布在 `internal/proxy`、`internal/storage/postgres`、`tests/integration` 等包里，测试专用的 legacy 实现进不去这些包，要留就得留一整份会话。
 
@@ -1333,4 +1333,4 @@ A/B（R.7）之后维护者决定只保留 unified。这一节记录删了什么
 | `TestMeasureFinish`、`TestMeasureStaging` | 两条路径各量一遍 | 去掉 legacy 一侧，数字见 R.7 | 只剩一条路径 |
 | `internal/proxy` 端到端 | 数 unified 存储上的逐操作写（`legacyOps`）为 0 | 去掉：`audit.Store` 已没有这些方法，由编译器保证 | 接口收窄 |
 
-**待维护者决定。** 启动时暂存目录不可用，启动仍先跑 `RecoverInterruptedAudits`，再让审计不可用（与以前 strict 相同）。带着暂存块中断的 audit 于是不带这些块就被终结；目录修好后，导入发现它们已终结，把文件改名为 `.orphan`（R.3 第 7 条）。要不要把这个检查挪到恢复之前，还没有定。
+**已定：检查挪到恢复之前。** 本节起初把“暂存目录不可用时启动仍先跑 `RecoverInterruptedAudits`”列为待定（那样带着暂存块中断的 audit 会不带这些块就终结，目录修好后导入把文件改名为 `.orphan`）。维护者决定把检查挪到恢复之前，理由与 R.3 第 2 条相同，做法见上面“暂存目录必填”一段。

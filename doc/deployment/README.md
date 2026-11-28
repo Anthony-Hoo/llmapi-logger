@@ -120,7 +120,7 @@ curl -H 'Authorization: Bearer REPLACE_ME' \
 - 不能放在 `/tmp`：它是 64 MB 的 tmpfs，在内存里，容量不够，重启后清空，崩溃后导入不到任何东西。
 - 不能放在密钥所在的目录 `/data`，也不能包含它或位于其中：配置校验会拒绝。暂存的密文和打开它的密钥不应在同一个卷、同一份备份里。
 
-启动时检查目录：不存在就以 0700 创建；Linux 上要求属主是当前用户，权限不含组和其他用户；还要能在里面创建并删除一个探针文件。`audit.staging.dir` 必填。检查不通过时，两种模式下审计都不可用（以前 available 模式退回 legacy 写入，这条退路已经没有了）：日志 `audit staging unavailable` 的 `reason` 字段说明原因（`not_directory`、`wrong_owner`、`open_permissions`、`not_writable` 等），available 模式不审计照常转发，strict 模式准入回 503。
+启动时检查目录：不存在就以 0700 创建；Linux 上要求属主是当前用户，权限不含组和其他用户；还要能在里面创建并删除一个探针文件。`audit.staging.dir` 必填。检查不通过时，两种模式下审计都不可用（以前 available 模式退回 legacy 写入，这条退路已经没有了）：日志 `audit staging unavailable` 的 `reason` 字段说明原因（`not_directory`、`wrong_owner`、`open_permissions`、`not_writable` 等），available 模式不审计照常转发，strict 模式准入回 503。这时也不做中断恢复：上次没有终结的 audit 原样保持未终结，暂存文件不动，目录修好、重启之后先导入暂存块再恢复，块不会丢。
 
 `audit.staging.max_bytes`（默认 4 GiB）限制目录里全部文件的大小。写满、磁盘满或写文件出错时，该阶段停止保留后续字节，阶段记为 partial，错误码为 `capture_budget_exhausted`（写错误为 `staging_write_failed`），raw 全部保留，转发不受影响。
 

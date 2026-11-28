@@ -243,7 +243,7 @@ Body 标为故障，阶段 partial，`capture_status` 为 partial，raw 保留 `
 
 ### 13.6 启动导入
 
-启动顺序：验证完整性链 → 导入暂存 → `RecoverInterruptedAudits` → 构造 Manager（`internal/app/app.go` 的 `assembleAuditWithStore`）。`audit.staging.dir` 必填；目录可用时启动导入（`Stager.Import`），不可用时审计在两种模式下都不可用（模块 01 §4 第 18 项），这个判断在 `RecoverInterruptedAudits` 之后做。每个文件用一个 writer 操作 `RestoreStagedChunks`（模块 04 §5.1）：
+启动顺序：验证完整性链 → 检查暂存目录 → 导入暂存 → `RecoverInterruptedAudits` → 构造 Manager（`internal/app/app.go` 的 `assembleAuditWithStore`）。`audit.staging.dir` 必填；目录可用时启动导入（`Stager.Import`），不可用时审计在两种模式下都不可用（模块 01 §4 第 18 项），这个判断在导入和 `RecoverInterruptedAudits` 之前做：目录不可用就像暂存文件全都读不出来：此时恢复会把带着暂存块中断的 audit 不带这些块就终结（与导入读不出文件时中止的理由相同，第 3 阶段设计 R.3 第 2 条）。不可用时不恢复、不终结任何记录，中断的 audit 保持 `ended_at_ns IS NULL`，暂存文件不动；目录修好、重启之后，暂存块导入这些仍未终结的 audit，再由恢复收尾（`TestUnusableStagingLeavesInterruptedAuditsOpen`，SQLite 与 PostgreSQL）。每个文件用一个 writer 操作 `RestoreStagedChunks`（模块 04 §5.1）：
 
 | 情形 | 处理 |
 | --- | --- |

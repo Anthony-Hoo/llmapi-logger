@@ -991,22 +991,31 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 	}
 	// Local staging (design F.7): what a previous run staged is imported
 	// before interrupted audits are recovered, so that recovery finalizes
-	// them with those chunks.
+	// them with those chunks. A directory that cannot be used is checked
+	// first, before recovery, for the same reason a file the import cannot
+	// read stops the start (stage 3 design R.3 item 2): recovering now would
+	// finalize the interrupted audits without their staged chunks. Nothing is
+	// recovered or finalized; the audits stay open until a start with a
+	// usable directory imports their chunks. Without staging the session
+	// would also drop content beyond the memory budget, and there is no other
+	// write path: the audit is unavailable in both modes. Strict mode refuses
+	// requests; available mode forwards them without an audit.
 	stager, stagingErr := openStaging(configuration, cipher, logger)
-	if stager != nil {
-		if _, err := stager.Import(ctx, store); err != nil {
-			_ = stager.Close()
-			_ = store.Close()
-			logger.Warn("audit staging import failed", "mode", configuration.Mode, "error_category", "recovery_failed", "storage_error", storage.ErrorClass(err))
-			manager := audit.NewUnavailable(configuration.Mode, err, logger)
-			return auditRuntime{sink: manager, manager: manager}
-		}
+	if stager == nil {
+		_ = store.Close()
+		logger.Warn("audit staging unavailable", "mode", configuration.Mode,
+			"error_category", "staging_unavailable", "reason", staging.Reason(stagingErr))
+		manager := audit.NewUnavailable(configuration.Mode, stagingErr, logger)
+		return auditRuntime{sink: manager, manager: manager}
 	}
-	closeStager := func() {
-		if stager != nil {
-			_ = stager.Close()
-		}
+	if _, err := stager.Import(ctx, store); err != nil {
+		_ = stager.Close()
+		_ = store.Close()
+		logger.Warn("audit staging import failed", "mode", configuration.Mode, "error_category", "recovery_failed", "storage_error", storage.ErrorClass(err))
+		manager := audit.NewUnavailable(configuration.Mode, err, logger)
+		return auditRuntime{sink: manager, manager: manager}
 	}
+	closeStager := func() { _ = stager.Close() }
 	recovered, recoveryErr := store.RecoverInterruptedAudits(ctx, time.Now().UnixNano())
 	if recoveryErr != nil {
 		closeStager()
@@ -1016,17 +1025,6 @@ func assembleAuditWithStore(ctx context.Context, configuration config.Config, lo
 		return auditRuntime{sink: manager, manager: manager}
 	} else if recovered > 0 {
 		logger.Info("interrupted audits recovered", "recovered_audits", recovered)
-	}
-	if stager == nil {
-		// Without staging the session would drop content beyond the memory
-		// budget, and there is no other write path to fall back to: the
-		// audit is unavailable in both modes. Strict mode refuses requests;
-		// available mode forwards them without an audit.
-		_ = store.Close()
-		logger.Warn("audit staging unavailable", "mode", configuration.Mode,
-			"error_category", "staging_unavailable", "reason", staging.Reason(stagingErr))
-		manager := audit.NewUnavailable(configuration.Mode, stagingErr, logger)
-		return auditRuntime{sink: manager, manager: manager}
 	}
 	options := auditOptions(configuration.Audit)
 	options.Stager = stager
