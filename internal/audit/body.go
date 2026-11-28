@@ -143,6 +143,14 @@ func (session *Session) observeRead(stageName string, data []byte, readErr error
 		body.closed = true
 		return
 	}
+	if readErr != nil && body.eofSeen && len(data) == 0 {
+		// The body already ended at io.EOF, so every byte is captured. A
+		// later read that returns no data and an error (net/http's
+		// transport can read once more after the body was closed: "invalid
+		// Read on closed Body") loses nothing and does not make the body
+		// partial.
+		return
+	}
 	if readErr != nil {
 		if stageName == storage.StageResponseReceived &&
 			session.request != nil && session.request.Err() != nil &&
