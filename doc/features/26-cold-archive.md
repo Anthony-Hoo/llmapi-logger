@@ -1185,7 +1185,7 @@ PostgreSQL（只读快照）
 | 码 | 含义 |
 | --- | --- |
 | 0 | 完成 |
-| 1 | 有核对不过、有包读不了被跳过、密钥不符，或输出写不出去 |
+| 1 | 有核对不过、有包读不了被跳过、有清单被索引剔除（签名或密钥指纹不符、解析不了；`cat`、`export`、`fpr --dir` 照常输出核对通过的部分，再以码 `incomplete` 退出，因为被剔除的包可能装着结果的一部分）、密钥不符，或输出写不出去 |
 | 2 | 命令行用法错误 |
 | 3 | 找不到；该记录没有这种导出（`not_available`、`not_retained`、`not_ready`、`no_turn_graph`）；`fpr` 没有匹配 |
 
@@ -1195,7 +1195,7 @@ PostgreSQL（只读快照）
 audit-archive list --dir <archive> [--key <file>] [--conversation <id> | --audit <id>] [--json]
 ~~~
 
-按清单列出包：种类、协议、时间范围（UTC）、成员数、会话、是否加密、格式版本、清单相对 `--dir` 的路径。不需要密钥；给了 `--key` 时多一列 `AUTH`，标明清单签名是 `ok`、`key_mismatch` 还是 `mac_mismatch`（没给密钥为 `not_checked`）。解析不了的清单报到标准错误。不读数据文件。`--json` 每个包一行 JSON。过滤没有命中时退出码 3。
+按清单列出包：种类、协议、时间范围（UTC）、成员数、会话、是否加密、格式版本、清单相对 `--dir` 的路径。不需要密钥；给了 `--key` 时多一列 `AUTH`，标明清单签名是 `ok`、`key_mismatch` 还是 `mac_mismatch`（没给密钥为 `not_checked`）。解析不了的清单报到标准错误。不读数据文件。`--json` 每个包一行 JSON。过滤没有命中时退出码 3。签名不符的包照样列出并在 `AUTH` 里标明，不影响退出码：`list` 是清单盘点，核对由 `verify` 负责。
 
 ### 24.3 `verify`
 
@@ -1218,7 +1218,7 @@ audit-archive verify (--dir <archive> | --bundle <manifest>) [--key <file>] [--s
 audit-archive cat --dir <archive> (--key <file> | --unauthenticated) [--conversation <id> | --audit <id>] [--all-revisions] [--with-objects] [--skip-event-mac]
 ~~~
 
-把解密后的行按归档自己的行格式输出为 JSON Lines（`"type": "audit"` 的行，以及 gap 包的 `"type": "gap"` 行）：明文对话内容，凭据只有投影形式。涉及的每个包都先完整核对（同 `verify --key`）；核对不过的包跳过，原因写到标准错误，它的任何内容都不输出，退出码 1。输出的是核对通过后重新编码的行，与包里存的逐字节相同。
+把解密后的行按归档自己的行格式输出为 JSON Lines（`"type": "audit"` 的行，以及 gap 包的 `"type": "gap"` 行）：明文对话内容，凭据只有投影形式。涉及的每个包都先完整核对（同 `verify --key`）；核对不过的包跳过，原因写到标准错误，它的任何内容都不输出，退出码 1。索引因签名或密钥指纹不符、解析不了而剔除了任何清单时，同样以 1 退出（码 `incomplete`），不论有没有过滤：被剔除的清单不可信，说不清它装着哪些 audit，所以输出可能不全；过滤后什么都没找到时也报 `incomplete` 而不是“找不到”。输出的是核对通过后重新编码的行，与包里存的逐字节相同。
 
 - 不带过滤时输出全部包，含 gap 行；带过滤时只输出匹配的 audit，不含 gap 包。
 - 默认每条 audit 只输出最高修订号，`--all-revisions` 全部输出。
@@ -1242,7 +1242,7 @@ audit-archive export --dir <archive> (--key <file> | --unauthenticated) (--audit
 | `timeline-request`、`timeline-response` | 流式时间线 |
 | `detail` | 整条记录的详情，Request-URI、Header 和 User-Agent 是投影形式（门面没有这一种） |
 
-`--conversation` 按会话导出：这个会话在全部包里的每条 audit（各取最高修订号），按（`created_at_ns`，`audit_id`）排序，每行一个 `{"audit_id", "turn_id", "created_at_ns", "conversation"}`。不在归档里或没有这种导出时退出码 3。
+`--conversation` 按会话导出：这个会话在全部包里的每条 audit（各取最高修订号），按（`created_at_ns`，`audit_id`）排序，每行一个 `{"audit_id", "turn_id", "created_at_ns", "conversation"}`。不在归档里或没有这种导出时退出码 3。索引剔除了任何清单时，导出照常写出，然后以 1 退出（码 `incomplete`）：被剔除的包可能装着这条 audit 更高的修订号，或这个会话的更多轮次。
 
 门面的 JSON 形状是在 `internal/archivecli` 里照着重新声明的（引入 `internal/web` 会让工具链接存储），两边可能走样；运行时的抽样比对用的正是这套渲染。
 
@@ -1254,7 +1254,7 @@ audit-archive fpr --key <file> [--known-key-file <file>] [--dir <archive> [--con
 
 读入一个已知的 API Key，每行输出一个候选指纹 `<形式> <十六进制>`：`raw`、`bearer`、`api_key_fpr`（§12.4）。Key 从 `--known-key-file`（第一行）或标准输入读：标准输入是终端时不回显地读（`internal/termio`，与 `llmaudit` 共用），否则读第一行。Key 从不作为命令行的值，也从不输出。指纹以主密钥为键，没有它什么也看不出来。
 
-带 `--dir` 时在全部核对通过的包里（全部修订号，或只在给定的会话、audit 里）查找，每个匹配一行 `match <audit_id> revision <n> <位置> <形式>`，位置是 `header <stage> <kind> <name>`、`user_agent`、`request_uri <name>` 或 `api_key_fpr`。给了 `--dir` 而没有匹配时退出码 3。
+带 `--dir` 时在全部核对通过的包里（全部修订号，或只在给定的会话、audit 里）查找，每个匹配一行 `match <audit_id> revision <n> <位置> <形式>`，位置是 `header <stage> <kind> <name>`、`user_agent`、`request_uri <name>` 或 `api_key_fpr`。给了 `--dir` 而没有匹配时退出码 3；有包被跳过或有清单被索引剔除时退出码 1（被剔除的包里可能有匹配）。
 
 ### 24.7 测试
 

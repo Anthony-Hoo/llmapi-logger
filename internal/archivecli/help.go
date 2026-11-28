@@ -25,7 +25,11 @@ is not masked. Where the output goes is your responsibility.
 
 Output goes to standard output, diagnostics to standard error as
 "audit-archive: <code>: <message>". Exit codes: 0 done; 1 a check failed, a
-bundle could not be read or verified, the key does not match, or the output
+bundle could not be read or verified, a manifest was left out of the index
+(signature or key fingerprint does not verify, or it does not parse: cat,
+export and fpr --dir then print what verified and exit 1 with code
+incomplete, since the left-out bundle may hold part of the result), the key
+does not match, or the output
 could not be written; 2 invalid command line; 3 not found, no such export
 for the record, or (fpr) no match.`
 
@@ -67,7 +71,9 @@ Flags:
   --audit <id>          Only the bundles holding a revision of this audit.
   --json                One JSON object per bundle and line instead of a table.
 
-Exit codes: 0, or 3 when a filter matches no bundle.
+Exit codes: 0, or 3 when a filter matches no bundle. A manifest whose
+signature does not verify is listed with its AUTH result and does not change
+the exit code: list is an inventory, verify is the check.
 `
 
 const verifyUsage = `(--dir <archive> | --bundle <manifest>) [--key <file>] [--skip-event-mac] [--json]`
@@ -141,7 +147,9 @@ Flags:
   --with-objects        Also print the objects the printed lines refer to.
   --skip-event-mac      Do not check the integrity events' MACs.
 
-Exit codes: 0; 1 when a bundle was skipped; 3 when the filter matches nothing.
+Exit codes: 0; 1 when a bundle was skipped, or when a manifest was left out
+of the index (code incomplete: the output may lack its lines, whatever the
+filter); 3 when the filter matches nothing and no manifest was left out.
 `
 
 var exportUsage = `--dir <archive> (--key <file> | --unauthenticated) (--audit <id> --what <kind> | --conversation <id>) [--skip-event-mac]`
@@ -180,7 +188,10 @@ Flags:
   --what <kind>         The form, one of: ` + strings.Join(ExportKinds, ", ") + `.
   --skip-event-mac      Do not check the integrity events' MACs.
 
-Exit codes: 0; 1 a check failed; 3 not in the archive, or the record has no
+Exit codes: 0; 1 a check failed, or a manifest was left out of the index
+(code incomplete, after the export is written: the left-out bundle may hold a
+higher revision of the audit or more turns of the conversation); 3 not in the
+archive, or the record has no
 such export (not_available, not_retained, not_ready, no_turn_graph).
 `
 
@@ -212,5 +223,7 @@ Flags:
   --audit <id>             Search only this audit.
   --skip-event-mac         Do not check the integrity events' MACs.
 
-Exit codes: 0; 3 when --dir was given and nothing matched.
+Exit codes: 0; 1 when a bundle was skipped or a manifest was left out of the
+index (code incomplete: it may hold a match); 3 when --dir was given and
+nothing matched.
 `

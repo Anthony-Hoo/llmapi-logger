@@ -241,6 +241,9 @@ func runFpr(ctx context.Context, env *Env, args []string) error {
 	if err := out.flush(); err != nil {
 		return err
 	}
+	if err := reader.Incomplete(); err != nil {
+		return err
+	}
 	switch {
 	case skipped:
 		return &exitStatus{code: ExitFailed}

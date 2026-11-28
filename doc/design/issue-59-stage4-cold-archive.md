@@ -1824,10 +1824,10 @@ P4：
 
 ### R.7 读取工具 `cmd/audit-archive`（O.1 第 10 个提交，逻辑在 `internal/archivecli`）
 
-1. **五个子命令**：`list`、`verify`、`cat`、`export`、`fpr`。退出码：0 完成；1 有核对不过、有包被跳过、密钥不符或输出写不出去；2 用法错误；3 找不到、该记录没有这种导出，或 `fpr` 没有匹配。错误写到标准错误，形如 `audit-archive: <码>: <说明>`。
-2. **`list`** 不带密钥也能列出全部包；带 `--key` 时多一列，标明每个包的清单签名是 `ok`、`key_mismatch` 还是 `mac_mismatch`。
+1. **五个子命令**：`list`、`verify`、`cat`、`export`、`fpr`。退出码：0 完成；1 有核对不过、有包被跳过、有清单被索引剔除（`incomplete`）、密钥不符或输出写不出去；2 用法错误；3 找不到、该记录没有这种导出，或 `fpr` 没有匹配。错误写到标准错误，形如 `audit-archive: <码>: <说明>`。
+2. **`list`** 不带密钥也能列出全部包；带 `--key` 时多一列，标明每个包的清单签名是 `ok`、`key_mismatch` 还是 `mac_mismatch`；签名不符不改变退出码（`list` 只是盘点）。
 3. **`verify`** 有两个级别：不带密钥只核对文件大小和哈希（`files`，输出里标明较弱）；带密钥做 J.2 的全部检查（`full`）。带密钥时默认核对原完整性事件的 MAC，`--skip-event-mac` 可以关掉并给出告警。
-4. **`cat`** 输出的是核对通过后重新编码的行，测试表明与包里存的行逐字节相同；核对不过的包被跳过并以 1 退出。不带过滤时包含 gap 行。`--with-objects` 逐条流出对象文件（为此在 `bundle` 里加了一个 `Objects` 迭代）。
+4. **`cat`** 输出的是核对通过后重新编码的行，测试表明与包里存的行逐字节相同；核对不过的包被跳过并以 1 退出。索引因签名或密钥指纹不符、解析不了而剔除了任何清单时，`cat`、`export`（单条与按会话）和 `fpr --dir` 照常输出核对通过的部分，再以 1 退出（码 `incomplete`），不论有没有过滤：被剔除的清单不可信，说不清装着哪些记录，不全的输出不能看起来是全的。验收测试发现过最初的实现只数读取时跳过的包、漏了索引剔除的清单，伪造清单的唯一一个包会让 `cat` 以 0 退出、输出为空。不带过滤时包含 gap 行。`--with-objects` 逐条流出对象文件（为此在 `bundle` 里加了一个 `Objects` 迭代）。
 5. **`export`** 的种类：`conversation`（默认）、`headers`、`request`、`response`、`raw-request`、`raw-response`、`timeline-request`、`timeline-response`、`detail`。`detail` 是正文没有列的一种：投影后的详情。`--conversation` 按会话导出时每行一个对象 `{"audit_id","turn_id","created_at_ns","conversation"}`，每条 audit 取最高修订号，跨包按 `(created_at_ns, audit_id)` 排序。
 6. **JSON 的形状是照 Agent 门面重新声明的**，因为引入 `internal/web` 会破坏“不链接存储”的依赖守卫。集成测试要拿它与门面真实的 HTTP 输出比一次，防止两边走样。
 7. **`fpr`**：已知的 Key 从文件、管道或不回显的终端读入，从不作为命令行参数。输出三个候选（Key 本身、`Bearer ` 加 Key、`api_key_fpr`），带 `--dir` 时在全部修订号里查找并列出匹配。

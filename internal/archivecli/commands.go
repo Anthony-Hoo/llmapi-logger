@@ -403,7 +403,7 @@ func Cat(ctx context.Context, reader *Reader, options CatOptions, destination io
 		}
 	}
 	if filtered && printed == 0 && !skippedAny {
-		return 0, &cliError{code: codeNotFound, message: messages[codeNotFound]}
+		return 0, reader.missing()
 	}
 	return printed, nil
 }
@@ -483,6 +483,11 @@ func runCat(ctx context.Context, env *Env, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A manifest the index left out may hold lines of the selected scope:
+	// what was printed is good, but it may not be everything.
+	if err := reader.Incomplete(); err != nil {
+		return err
+	}
 	if skippedAny {
 		return &exitStatus{code: ExitFailed}
 	}
@@ -534,6 +539,11 @@ func runExport(ctx context.Context, env *Env, args []string) error {
 	}
 	if flushErr := out.flush(); err == nil {
 		err = flushErr
+	}
+	if err == nil {
+		// A left-out manifest may hold a higher revision of the audit or
+		// more turns of the conversation.
+		err = reader.Incomplete()
 	}
 	return err
 }

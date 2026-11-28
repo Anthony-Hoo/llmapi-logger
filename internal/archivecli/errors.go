@@ -41,6 +41,9 @@ const (
 	codeCanceled      = bundle.ReasonCanceled
 	codeInternal      = "internal"
 	codeArchiveAbsent = "archive_not_found"
+	// codeIncomplete: the index left out a manifest, so the output of a
+	// command that claims a complete scope may lack records.
+	codeIncomplete = "incomplete"
 )
 
 // cliError is a failure with a stable code and a message that carries no

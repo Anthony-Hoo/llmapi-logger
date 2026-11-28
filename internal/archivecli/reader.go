@@ -3,6 +3,7 @@ package archivecli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 
@@ -105,14 +106,31 @@ func (reader *Reader) Bundle(ctx context.Context, entry bundle.Entry) (*bundle.B
 
 // missing is the error of a lookup that found nothing: key_mismatch when
 // manifests were left out because the key does not match them (the wrong
-// key leaves the index empty), not_found otherwise.
+// key leaves the index empty), incomplete when other manifests were left
+// out (one of them may hold what was asked for), not_found otherwise.
 func (reader *Reader) missing() error {
 	for _, problem := range reader.index.Problems() {
 		if problem.Reason == bundle.ReasonKeyMismatch {
 			return &cliError{code: codeKeyMismatch, message: "not found under this key; the key does not match some bundles of the archive"}
 		}
 	}
+	if err := reader.Incomplete(); err != nil {
+		return err
+	}
 	return &cliError{code: codeNotFound, message: messages[codeNotFound]}
+}
+
+// Incomplete is the error of a read whose result may be incomplete because
+// the index left manifests out (a signature or key fingerprint that does
+// not verify, or a manifest that does not parse): nil when it left none
+// out. A left-out manifest cannot be trusted to say which audits or
+// conversations it holds, so any of them makes every result possibly
+// incomplete, filtered or not.
+func (reader *Reader) Incomplete() error {
+	if problems := reader.index.Problems(); len(problems) > 0 {
+		return &cliError{code: codeIncomplete, message: fmt.Sprintf("%d manifest(s) of the archive could not be used (listed above), so the result may be incomplete", len(problems))}
+	}
+	return nil
 }
 
 // errStop ends a pass over the lines early.
@@ -325,7 +343,7 @@ func (reader *Reader) ConversationTurns(ctx context.Context, conversationID stri
 		}
 	}
 	if len(positions) == 0 {
-		return &cliError{code: codeNotFound, message: messages[codeNotFound]}
+		return reader.missing()
 	}
 	sort.Slice(positions, func(left, right int) bool {
 		a, b := positions[left], positions[right]

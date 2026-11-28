@@ -509,3 +509,100 @@ func TestDependencyGuard(t *testing.T) {
 		}
 	}
 }
+
+// forge changes one field of a manifest without re-signing it: the index
+// leaves it out with mac_mismatch.
+func forge(t *testing.T, manifestPath string) {
+	t.Helper()
+	manifest, err := archive.DecodeManifest(mustRead(t, manifestPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.CreatedAtNS++
+	encoded, err := archive.EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An archive of one bundle whose manifest was changed without re-signing:
+// cat prints nothing and exits 1, it does not pass for an empty archive.
+func TestForgedOnlyManifest(t *testing.T) {
+	for _, encrypt := range modes() {
+		t.Run(modeName(encrypt), func(t *testing.T) {
+			f := newFixture(t)
+			c1 := f.audit("c1", minute(0), 2)
+			f.withRealTurn(c1, "conv_one", minute(0)+500, "only question")
+			manifest := f.writeSegment(encrypt, runA, bundleSpecBucket(), f.canonical(c1))
+			forge(t, manifest)
+			args := []string{"--dir", f.root, "--key", f.keyPath}
+			out := run(t, append([]string{"cat"}, args...)...).want(t, ExitFailed)
+			if out.stdout != "" || !strings.Contains(out.stderr, ": mac_mismatch") || !strings.Contains(out.stderr, "audit-archive: incomplete:") {
+				t.Fatalf("cat of a forged archive: %+v", out)
+			}
+			for _, command := range [][]string{
+				{"cat", "--audit", "c1"},
+				{"export", "--audit", "c1"},
+				{"export", "--conversation", "conv_one"},
+			} {
+				out := run(t, append(command, args...)...).want(t, ExitFailed)
+				if out.stdout != "" || !strings.Contains(out.stderr, "audit-archive: incomplete:") {
+					t.Fatalf("%v: %+v", command, out)
+				}
+			}
+			fpr := runWith(t, authKey("c1")+"\n", nil, append([]string{"fpr"}, args...)...).want(t, ExitFailed)
+			if !strings.Contains(fpr.stderr, "audit-archive: incomplete:") {
+				t.Fatalf("fpr: %+v", fpr)
+			}
+			// list is an inventory: it shows the forged bundle with its AUTH
+			// result and exits 0.
+			list := run(t, append([]string{"list"}, args...)...).want(t, ExitOK)
+			if !strings.Contains(list.stdout, "mac_mismatch") {
+				t.Fatalf("list: %s", list.stdout)
+			}
+		})
+	}
+}
+
+// One good and one forged bundle: every command prints what verified and
+// exits 1, whatever the filter.
+func TestForgedManifestBesideGoodOnes(t *testing.T) {
+	for _, encrypt := range modes() {
+		t.Run(modeName(encrypt), func(t *testing.T) {
+			s := newScenario(t, encrypt)
+			forge(t, s.bundles["bucket"])
+			cat := run(t, s.read("cat")...).want(t, ExitFailed)
+			if !strings.Contains(cat.stdout, `{"type":"audit","audit_id":"c1"`) || strings.Contains(cat.stdout, `"audit_id":"c3"`) ||
+				!strings.Contains(cat.stderr, ": mac_mismatch") || !strings.Contains(cat.stderr, "audit-archive: incomplete:") {
+				t.Fatalf("cat:\nstdout %.200s\nstderr %s", cat.stdout, cat.stderr)
+			}
+			// A filter on a good bundle: printed, still possibly incomplete.
+			if out := run(t, s.read("cat", "--audit", "c1")...).want(t, ExitFailed); len(out.lines()) != 1 {
+				t.Fatalf("cat --audit c1: %+v", out)
+			}
+			// A filter on the forged bundle: nothing, and not "not found".
+			if out := run(t, s.read("cat", "--audit", "c3")...).want(t, ExitFailed); out.stdout != "" || !strings.Contains(out.stderr, "incomplete") {
+				t.Fatalf("cat --audit c3: %+v", out)
+			}
+			request := run(t, s.read("export", "--audit", "c1", "--what", "request")...).want(t, ExitFailed)
+			if request.stdout == "" || !strings.Contains(request.stderr, "audit-archive: incomplete:") {
+				t.Fatalf("export --audit: %+v", request)
+			}
+			conversation := run(t, s.read("export", "--conversation", s.conversation)...).want(t, ExitFailed)
+			if len(conversation.lines()) != 2 || !strings.Contains(conversation.stderr, "audit-archive: incomplete:") {
+				t.Fatalf("export --conversation: %d lines, %s", len(conversation.lines()), conversation.stderr)
+			}
+			fpr := runWith(t, authKey("c1")+"\n", nil, "fpr", "--key", s.keyPath, "--dir", s.root).want(t, ExitFailed)
+			if !strings.Contains(fpr.stdout, "match c1 revision 1") || !strings.Contains(fpr.stderr, "audit-archive: incomplete:") {
+				t.Fatalf("fpr: %+v", fpr)
+			}
+			list := run(t, "list", "--dir", s.root, "--key", s.keyPath).want(t, ExitOK)
+			if strings.Count(list.stdout, "mac_mismatch") != 1 {
+				t.Fatalf("list:\n%s", list.stdout)
+			}
+		})
+	}
+}
