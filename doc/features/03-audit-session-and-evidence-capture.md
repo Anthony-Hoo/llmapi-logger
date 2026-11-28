@@ -204,6 +204,8 @@ worker 通过 NewAPI 全站日志精确查询该 request ID，成功后只保存
 
 重复阶段出现之后，来源阶段的块还没被它比对过时不能落暂存。两个阶段交替读取时重复阶段最多落后一次读（`ReverseProxy` 的拷贝缓冲 32 KiB），这一次读的字节越过预算照收，不结束保留。
 
+**全局预算被别处占满时。** 释放只看这个阶段自己的块。全局预算已满而这个阶段内存里没有自己的字节（别的会话、同一会话的别的阶段，或暂存队列里的密文占满了预算）时，没有可以释放的，这个阶段以 `capture_budget_exhausted` 结束保留：Body 为 partial，raw 保留为 full，转发照常。设计 F.2 第 2 点写的“其他会话新到的字节立即落暂存”因此只对已经有块在内存里的阶段成立。原因与取舍见设计文档实施记录 R.6 第 7 条。
+
 **应用里请求 Body 总是先读完。** 交替读取只在没有预读 Body 的拦截器时出现。应用给每条路由都加上 `uaguard` 和 `contentpolicy` 两个全局拦截器（`internal/app/app.go` 的 `WithGlobal`），它们不论有没有启用的规则都声明需要 Body，框架于是先把请求 Body 读到末尾再回放（`interceptor.readAndReplayBody`）：`request_received` 在 `request_sent` 出现之前就读完了。后果有两条：
 
 - 请求 Body 不超过 `stage_bytes`（默认 8 MiB）时没有影响，请求对照常在检查点 1 合并。
