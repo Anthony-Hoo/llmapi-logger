@@ -1744,6 +1744,8 @@ P4：
     - `Candidates`：对给定的 id 再看一遍（推迟的、要重新收录的），不在热库的不出现在结果里，不按截止时间过滤；
     - `ConversationCandidates`：给定会话里截止时间之前的全部 audit，不受水位限制（B.2 的补齐）；
     - `StaleCandidates`：有 `stale` 成员、仍在热库、没有当前成员的 audit。I.1 没有为 `state = 'stale'` 建索引，这个查询扫 `archive_members`。
+
+    PostgreSQL 测试逐项核对了四个查询：推迟原因与优先级、当前成员的规则、下一个修订号、分页（含开始时间相同的两条）、会话补齐越过水位、重新收录与再看一遍时略去已不在热库的。另一个测试在两万条 audit 的库上看 `Due` 的执行计划：沿 `audit_records_started_idx` 只读本页的行。
 12. 推迟原因的优先级：未终结（`open`）、解析未到终态（`parse_pending`）、调用者查找未到终态（`caller_pending`）。
 13. “当前成员”（B.1 第 4 条）取“不是 `stale`，且所在分段的格式版本等于当前版本”，分段在 `publishing` 时也算：部分唯一索引反正不允许同一 audit 有第二个非 `stale` 的行。
 
@@ -1759,11 +1761,13 @@ P4：
     原因：包写入器在取对象或 raw 块失败时作废整个分段（`SegmentWriter.Add`），所以不能把问题留到写的时候才暴露。
 16. 版本 2 的块经 `headerblock.Expand` 展开之后，再打开一次取有段的阶段集合（`block_stages`）。块很小，打开两次换来不复制 `Expand` 的宽松规则。
 17. **两项比 H.2 写得更严的检查**，在交给写入器之前做，都只排除这一条：
-    - raw 块的布局按 `bundle` 重读时的规则：每块属于某个 `full`、非 `streaming` 的 Body 的来源阶段，块号与偏移相接，块数与字节数等于 `chunk_count`、`stored_length`。否则原因是 `raw_unservable`。不这样，一条这样的记录要到 H.2 第 6 步的重读才被发现，而那时作废的是整个分段；
+    - raw 块的布局按 `bundle` 重读时的规则：每块属于某个 `full`、非 `streaming` 的 Body 的来源阶段，块号与偏移相接（只有带 `capture_chunk_missing` 的残缺 Body 允许向前跳，且不越出观察长度），块数与字节数等于 `chunk_count`、`stored_length`。否则原因是 `raw_unservable`。不这样，一条这样的记录要到 H.2 第 6 步的重读才被发现，而那时作废的是整个分段；
     - 时间线按 `query.TimelineFromPlain` 的边界核对，不过的原因是 `timeline`。
 18. **排除的原因**（`ArchiveMemberError.Reason`）：
     - 完整性类：`event_missing`、`event_payload`、`event_mac`、`decrypt`、`content_hash`、`turn_graph`。这一类把存储的载荷校验状态置为失败（P 第 4 条）；
     - 其余：`not_found`、`open`、`timeline`、`raw_unservable`、`record_format`。不改载荷校验状态；`record_format` 表示代码有缺陷，不是数据损坏。
+
+    **runner 必须把 `not_found` 以外的每一种排除都登记进 `archive_deferred`**，否则水位越过它们之后再也不会选到（第 3 条的同一个缺口）。`reason` 的取值里只有 `integrity_failed` 放得下，`timeline`、`raw_unservable`、`record_format` 也记成它。这三种是否要单独的取值，留给维护者决定，本阶段没有加。
 19. **快照本身的故障不当作损坏。** 上下文取消、存储已关闭、事务不再应答（失败之后用 `SELECT 1` 探一次）都原样返回，结束这一趟，不排除成员、不置失败。事件摘要函数在快照仍然可用时报的错，按 `event_payload` 处理。
 20. 内存：
     - 对象与二进制每个快照只核对一次，只记哈希，至多 2^20 个，满了清空重来；
@@ -1780,25 +1784,27 @@ P4：
     - `integrity_events` 的主键是 `sequence`；
     - 两张轮次子表经 `turns.audit_id` 找。
     audit 不存在时，戳是一组空行集合的戳，另返回“不存在”。测试用手写的字节序列核对了一条 audit 的前像。
-24. 在 PostgreSQL 18 上测过：重读、`VACUUM (FREEZE)`（测试要求 `relfrozenxid` 确实前进）、`VACUUM FULL` 不改戳；`SELECT … FOR UPDATE` 也不改；值不变的 `UPDATE`、M.1 第 1 到 3 行、每张表插入或删除一行都改戳；只动别的 audit、共享内容对象、`conversations.updated_at_ns` 的写不改戳。
+24. 在 PostgreSQL 18 上测过：重读、`VACUUM (FREEZE)`（测试要求成员行的 `xmin` 早于表的 `relfrozenxid`，也就是确实冻结了；共享库上别的会话的旧快照挡住冻结时这一项跳过）、`VACUUM FULL` 不改戳；`SELECT … FOR UPDATE` 也不改；值不变的 `UPDATE`、M.1 第 1 到 3 行、每张表插入或删除一行都改戳；只动别的 audit、共享内容对象、`conversations.updated_at_ns` 的写不改戳。
+
+25. 登记意向在 writer 上执行，变更戳对每个成员要查 14 张表。实现按每 400 个成员一批查（每张表一条语句），修订号与当前行也成批读，结果与逐条计算的戳逐字节相同（有测试）。本机 2000 个成员的意向约 0.3 秒；逐条计算时约 3.3 秒。
 
 **列覆盖与摘要敏感性（J.1 的 PostgreSQL 部分）**
 
-25. 列覆盖测试从 `information_schema.columns` 和 `pg_constraint` 读当前 schema，调 `archive.CheckSchema`。它也证明会失败：给 `http_stages` 加一列、新建一张引用 `audit_records` 的表、新建一张经 `audit_analysis` 间接引用的表，各自都被点名。
-26. 摘要敏感性测试对 `archive.Columns` 里每一个“进摘要”的列改库里的一行，重签它的事件，再导出。测试先删掉测试 schema 里的全部 CHECK 与外键，使任何值都写得进去。结果：
-    - 165 列：记录摘要变了，或者这一条被排除；
-    - 被排除的列各自写明预期的原因。它们被别的东西绑着：AAD、内容地址、序列哈希、长度、时间线的点、事件本身；
+26. 列覆盖测试从 `information_schema.columns` 和 `pg_constraint` 读当前 schema，调 `archive.CheckSchema`。它也证明会失败：给 `http_stages` 加一列、新建一张引用 `audit_records` 的表、新建一张经 `audit_analysis` 间接引用的表，各自都被点名。
+27. 摘要敏感性测试对 `archive.Columns` 里每一个“进摘要”的列改库里的一行，重签它的事件，再导出。测试先删掉测试 schema 里的全部 CHECK 与外键，使任何值都写得进去。结果：
+    - 116 列：记录摘要变了；
+    - 49 列：这一条被排除，各自写明预期的原因。它们被别的东西绑着：AAD、内容地址、序列哈希、长度、时间线的点、事件本身。其中有 Q6 的两个血缘列 `parent_turn_id`、`parent_base`：随便改成一个不存在的父轮次，轮次图就走不通，语义事件复核不过。这比任务要求的
     - 13 列跳过：11 个作为子表键的 `audit_id`，以及两种引用行的 `object_hash`（移到轮次够不着的对象，引用行就从记录里消失）。这些列的敏感性由主机上的摘要测试覆盖。
-27. 测试发现，0/1 的标志列在库里写成 2 时，摘要与 1 相同：归档把非零都读成真。CHECK 约束挡住了这种值，所以不是缺陷。测试对这几列改为翻转 0 与 1。
+28. 测试发现，0/1 的标志列在库里写成 2 时，摘要与 1 相同：归档把非零都读成真。CHECK 约束挡住了这种值，所以不是缺陷。测试对这几列改为翻转 0 与 1。
 
 **三层能接上**
 
-28. 端到端测试的路径：采集版本 2 的 audit 经真实的 unified 会话写入，版本 1 的经存储的逐操作写入；导出；用 `bundle.SegmentWriter` 写会话包和桶包；`bundle.Open(...).Verify` 重读。
+29. 端到端测试的路径：采集版本 2 的 audit 经真实的 unified 会话写入，版本 1 的经存储的逐操作写入；导出；用 `bundle.SegmentWriter` 写会话包和桶包；`bundle.Open(...).Verify` 重读。
     - 报告的摘要与快照算出的逐条相等；
     - 父轮次在同一分段的子轮次保留增量形式；
     - 后一次导出里父轮次不在本分段的孙轮次是物化形式，单独核对通过。
-    覆盖的形态：有轮次、无轮次的兜底会话、只有请求并带半截回答的轮次、失败的采集和被中断的采集（都有残缺 Body）、合并的请求对、压缩与明文两种 `parsed_json_enc`、二进制对象、分支、跨两次导出的会话。损坏的块和篡改的事件都只排除自己那一条。
-29. 三层之间没有发现摘要或格式上的不一致。发现的一处是文件名：包名只取运行 id 的前 8 位，同一会话的两个分段在同一秒内由前 8 位相同的运行写出时同名，发布报 `name_exists`。随机的运行 id 下几乎不会发生，测试里给每个包不同的前缀。
+    覆盖的形态：有轮次、无轮次的兜底会话、只有请求并带半截回答的轮次、失败的采集和被中断的采集（都有残缺 Body）、合并的请求对、压缩与明文两种 `parsed_json_enc`、二进制对象、分支、跨两次导出的会话，以及另一个测试里的两种 Header 形态：版本 1 的逐值行（`Authorization` 和 `?key=` 投影成长度加指纹，与已知值的指纹相同），版本 2 失败采集的块里有一段对应的阶段没有行（`Expand` 的宽松规则）。损坏的块和篡改的事件都只排除自己那一条。
+30. 三层之间没有发现摘要或格式上的不一致。发现的一处是文件名：包名只取运行 id 的前 8 位，同一会话的两个分段在同一秒内由前 8 位相同的运行写出时同名，发布报 `name_exists`。随机的运行 id 下几乎不会发生，测试里给每个包不同的前缀。
 
 **给 runner 的接口**
 
