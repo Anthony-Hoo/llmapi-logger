@@ -218,6 +218,11 @@ func (f *fixture) withTurn(record *archive.Record, conversationID string, option
 		turn.Row.ResponseSequenceHash = auditmodel.SequenceHash(turn.ResponseRefs())
 		turn.Row.ResponseID = text("response-" + record.Audit.AuditID)
 	} else {
+		// A request-only turn still has a response envelope (the column is
+		// NOT NULL), with layout none and no items.
+		responseEnvelope := f.object("response_envelope", map[string]any{}, true)
+		objects = append(objects, responseEnvelope)
+		turn.Row.ResponseEnvelopeHash = responseEnvelope.Hash
 		turn.Row.ResponseSequenceHash = auditmodel.SequenceHash(nil)
 	}
 	turn.Row.RequestItemCount = int64(len(refs))

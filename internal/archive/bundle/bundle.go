@@ -430,11 +430,11 @@ func checkTurnClosure(record *archive.Record) error {
 		referenced[string(hash)] = true
 		return nil
 	}
+	// turns.request_envelope_hash and response_envelope_hash are NOT NULL
+	// references to content objects, so both envelopes are always listed.
 	for _, envelope := range [][]byte{turn.Row.RequestEnvelopeHash, turn.Row.ResponseEnvelopeHash} {
-		if len(envelope) > 0 {
-			if err := reference(envelope, nil); err != nil {
-				return err
-			}
+		if err := reference(envelope, nil); err != nil {
+			return err
 		}
 	}
 	for _, ref := range turn.RequestRefs {

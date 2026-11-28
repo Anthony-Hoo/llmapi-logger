@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"llmapi-logger/internal/archive"
+	"llmapi-logger/internal/storage"
 )
 
 // writeAndPublish runs a whole segment through the writer and returns the
@@ -53,6 +54,12 @@ func TestFaultAtEveryStep(t *testing.T) {
 	}
 	f := newFixture(t)
 	records := f.conversation("conv_fault", "q", 0)
+	// An incompressible body makes the writes reach the file during Add,
+	// not only when the segment is sealed.
+	big := f.audit("q-4", "openai", minute(3), storage.CaptureVersion2)
+	f.withTurn(big, "conv_fault", turnOptions{parent: records[2], messages: []string{"big"}, response: "large", createdNS: minute(3) + 500})
+	f.withRaw(big, storage.StageResponseReceived, rawData(4, 300_000), 1<<20, true)
+	records = append(records, canonical(t, big))
 	spec := Spec{Kind: archive.BundleConversation, Protocol: "openai", ConversationID: "conv_fault", Index: 1}
 
 	counts := map[string]int{}
@@ -62,6 +69,9 @@ func TestFaultAtEveryStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("file system steps of one segment: %v", counts)
+	if counts[FaultWrite] <= 3 {
+		t.Fatal("no write reaches a file before the segment is sealed")
+	}
 	for operation, reason := range reasons {
 		if counts[operation] == 0 {
 			t.Fatalf("operation %s never happens", operation)
