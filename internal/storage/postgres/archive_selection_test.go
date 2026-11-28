@@ -209,7 +209,6 @@ func TestArchiveDueQueryStaysOnTheStartedIndex(t *testing.T) {
 // measured here for the runner: the stamp is recomputed for every member in
 // the writer transaction.
 func TestArchiveIntentRegistrationCost(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	store, _ := openTestStore(t)
 	members := 2000

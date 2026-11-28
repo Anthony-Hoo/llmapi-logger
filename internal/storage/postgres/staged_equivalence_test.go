@@ -587,7 +587,6 @@ func setSourceStage(t *testing.T, dump harnessDump, stage, source string) {
 // the legacy operations and once with BeginAudit, checkpoints and
 // CommitAudit, into two schemas, and compares every row (B.10).
 func TestStagedWriteMatchesLegacyRows(t *testing.T) {
-	t.Parallel()
 	legacyStore := openHarnessStore(t)
 	unifiedStore := openHarnessStore(t)
 	cipher := harnessCipher(t)
