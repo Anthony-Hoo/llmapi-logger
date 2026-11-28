@@ -221,8 +221,10 @@ func (runner *Runner) untilNextRun() time.Duration {
 // from the first attempt (H.4).
 func (runner *Runner) runDay(ctx context.Context) {
 	first := runner.options.Now()
+	deadline := first.Add(runner.options.RunDeadline)
 	for {
-		result, err := runner.RunOnce(ctx)
+		// A retry keeps the day's deadline, not a new one of its own.
+		result, err := runner.runOnce(ctx, deadline)
 		if err == nil && result.Status == storage.ArchiveRunCompleted || ctx.Err() != nil || errors.Is(err, errCrash) {
 			return
 		}
@@ -261,6 +263,11 @@ type Result struct {
 // next run marks it interrupted and reconciles what it left) and returns
 // ctx's error.
 func (runner *Runner) RunOnce(ctx context.Context) (Result, error) {
+	return runner.runOnce(ctx, time.Time{})
+}
+
+// runOnce is RunOnce with the run's deadline; zero is RunDeadline from now.
+func (runner *Runner) runOnce(ctx context.Context, deadline time.Time) (Result, error) {
 	if !runner.running.CompareAndSwap(false, true) {
 		return Result{}, ErrRunInProgress
 	}
@@ -271,10 +278,13 @@ func (runner *Runner) RunOnce(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if deadline.IsZero() {
+		deadline = started.Add(options.RunDeadline)
+	}
 	current := &run{
 		runner: runner, ctx: ctx, id: runID, started: started,
 		cutoffNS:     started.Add(-time.Duration(options.RetentionDays) * 24 * time.Hour).UnixNano(),
-		deadline:     started.Add(options.RunDeadline),
+		deadline:     deadline,
 		result:       Result{RunID: runID, Deferred: map[string]int64{}},
 		segmentIndex: map[string]int{},
 	}
