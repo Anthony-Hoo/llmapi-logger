@@ -376,12 +376,10 @@ func (source fileSource) Each(visit func(storage.BodyChunk) error) error {
 		return fmt.Errorf("staging: open %s: %w", source.scan.AuditID, err)
 	}
 	defer handle.Close()
-	var buffer []byte
 	for _, scanned := range source.scan.Records {
-		if int64(cap(buffer)) < scanned.Length {
-			buffer = make([]byte, scanned.Length)
-		}
-		buffer = buffer[:scanned.Length]
+		// A fresh buffer per record: a store keeps the chunks of one insert
+		// batch until it executes it (storage.ChunkSource).
+		buffer := make([]byte, scanned.Length)
 		if _, err := handle.ReadAt(buffer, scanned.Position); err != nil {
 			return fmt.Errorf("staging: read %s: %w", source.scan.AuditID, err)
 		}

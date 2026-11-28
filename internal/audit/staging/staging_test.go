@@ -359,7 +359,7 @@ func (store *fakeRestorer) RestoreStagedChunks(_ context.Context, restore storag
 	}
 	var inserted []storage.BodyChunk
 	if err := plan.Filter(restore.Chunks).Each(func(chunk storage.BodyChunk) error {
-		chunk.DataEnc = bytes.Clone(chunk.DataEnc)
+		// Kept without a copy, as the PostgreSQL store keeps an insert batch.
 		inserted = append(inserted, chunk)
 		return nil
 	}); err != nil {
@@ -592,6 +592,32 @@ func TestImportMustPrecedeStaging(t *testing.T) {
 	}
 	if _, err := stager.Import(context.Background(), newFakeRestorer()); err == nil {
 		t.Fatal("import ran over live files")
+	}
+}
+
+// The import's source hands out ciphertext that stays valid after the visit:
+// chunks kept across records of equal size still open and match the file.
+func TestFileSourceChunksOutliveTheVisit(t *testing.T) {
+	cipher := testCipher(t)
+	const id = "apx_kept"
+	dir := stagingDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	chunks := threeChunks(t, cipher, id, storage.StageRequestReceived)
+	path := writeFile(t, dir, id+Suffix, id, chunks, nil)
+	scan, err := ScanFile(cipher, id, path)
+	if err != nil || len(scan.Records) != len(chunks) {
+		t.Fatalf("scan %d records, %v", len(scan.Records), err)
+	}
+	var kept []storage.BodyChunk
+	if err := scan.Source().Each(func(chunk storage.BodyChunk) error { kept = append(kept, chunk); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for index, chunk := range kept {
+		if !bytes.Equal(chunk.DataEnc, chunks[index].DataEnc) {
+			t.Fatalf("chunk %d changed after its visit", index)
+		}
 	}
 }
 

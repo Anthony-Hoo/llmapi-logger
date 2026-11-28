@@ -802,7 +802,7 @@ body   = stage_code(1) seq(u64be) offset(u64be) plaintext_length(u32be)
 - CRC 只用来发现写了一半的尾部记录；真实性靠 AEAD。
 - 初稿里的阶段记录、Header 记录和终态记录都删掉了：阶段行和 Header 由落暂存时的检查点写进库（F.3），终态不再落暂存（决定 3）。
 
-块索引里的每一项，要么是内存密文，要么是文件中的位置；`ChunkSource` 按索引产出，可以重复遍历。读文件失败时，`Each` 返回本地错误，`CommitAudit` 按 B.8 处理：不重试，以 failed 终结，缺块由 `finalizeIncompleteCapture` 标记。
+块索引里的每一项，要么是内存密文，要么是文件中的位置；`ChunkSource` 按索引产出，可以重复遍历。交给 `visit` 的 `DataEnc` 在 `visit` 返回后仍须有效且不变：PostgreSQL 的 `insertChunkRows` 把一批块攒到条数或字节上限才执行 INSERT。所以从文件读出的每条记录各用一块新缓冲，不能复用同一块（启动导入曾经复用，两条等长记录就会让前一块的密文被后一块覆盖，见实施记录）。读文件失败时，`Each` 返回本地错误，`CommitAudit` 按 B.8 处理：不重试，以 failed 终结，缺块由 `finalizeIncompleteCapture` 标记。
 
 ### F.5 写盘与 fsync〔设〕
 
@@ -1177,6 +1177,7 @@ Body 采集拆成两层：
 5. **`max_bytes` 必须为正**，是新增的配置校验；它计入目录里的全部普通文件，包括导入改名保留的文件。
 6. **日志码。** 暂存 writer 写失败的日志与被拒绝的阶段用同一个错误码：目录或磁盘满为 `capture_budget_exhausted`，其他写错误为 `staging_write_failed`（F.6）。删除、改名暂存文件失败和审计管理器构造失败的日志只带稳定的 `reason` 码，不带错误原文（模块 13 §2.1）。
 7. **最终失败的提交，其暂存块由 writer 恢复写入。** F.5 只写了提交得到确认后删文件。提交交给 writer 之后最终失败时，存储在恢复表里记下对暂存块的引用（文件位置，`storage.StagedChunkHolder`）；恢复在把 audit 以 failed 终结的同一个事务里先插入这些块，再由 `finalizeIncompleteCapture` 收尾，提交后删文件。写入的是 `body_chunks` 的行，`body_streams` 的 `stored_length`、`chunk_count` 由随后的 `finalizeIncompleteCapture` 按块求出，都在签名之前；不改动任何已终结的 audit。启动导入遇到已终结、库里却缺文件中块的 audit 时，不写库，文件改名为 `.orphan`。两种顺序（进程活着时恢复，或先停下再由启动导入）写出的块相同；终态不同，分别是 failed 和 interrupted，与 legacy 在同样两种情况下的区别相同。
+8. **启动导入曾在 PostgreSQL 上存错密文（评审发现，已修）。** 导入读暂存文件时所有记录复用同一块缓冲，`insertChunkRows` 却要把一批块攒够才执行 INSERT，所以下一条不更长的记录会覆盖前面还在批里的块的 `data_enc`。被覆盖的块 AEAD 打不开，raw 读出报完整性错误；完整性事件的摘要算的是存进去的密文，校验照样通过，所以 `VerifyIntegrityPayloads` 看不出来。只影响 PostgreSQL 上崩溃后启动导入、一个文件里有两块及以上暂存块的 audit；SQLite 每块立即 INSERT，正常提交和失败提交的恢复都经 `Ref.Chunk` 每次新分配，不受影响。现在每条记录各用新缓冲，`ChunkSource` 的注释写明 `DataEnc` 在 `visit` 返回后仍须有效（F.4）。原有测试没有发现：PostgreSQL 的导入测试只核对块数、长度和完整性摘要，暂存包的假存储先复制了 `DataEnc`。
 
 ### R.4 parser
 

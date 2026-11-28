@@ -203,7 +203,9 @@ type HeaderBlock struct {
 }
 
 // ChunkSource can be iterated more than once; each chunk is either ciphertext
-// held in memory or a position in a staging file.
+// held in memory or a position in a staging file. The DataEnc of a chunk
+// handed to visit stays valid and unchanged after visit returns: a store may
+// keep several chunks before it inserts them.
 type ChunkSource interface {
 	Each(visit func(BodyChunk) error) error
 }
