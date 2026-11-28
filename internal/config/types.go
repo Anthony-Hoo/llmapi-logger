@@ -46,7 +46,7 @@ type Config struct {
 	AgentAccess            AgentAccessConfig            `yaml:"agent_access"`
 	Audit                  AuditConfig                  `yaml:"audit"`
 	Archive                ArchiveConfig                `yaml:"archive"`
-	Interceptors          map[string]InterceptorConfig `yaml:"interceptors"`
+	Interceptors           map[string]InterceptorConfig `yaml:"interceptors"`
 	Routes                 []RouteConfig                `yaml:"routes"`
 }
 
@@ -187,7 +187,7 @@ func Default() Config {
 		SessionAnalysis:        defaultSessionAnalysis(),
 		Audit:                  DefaultAudit(),
 		Archive:                DefaultArchive(),
-		Interceptors:          make(map[string]InterceptorConfig),
+		Interceptors:           make(map[string]InterceptorConfig),
 		Routes:                 make([]RouteConfig, 0),
 	}
 }
