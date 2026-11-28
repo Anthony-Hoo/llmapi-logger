@@ -443,6 +443,37 @@ func TestPlainAssemblyRejectsObjectsThatDoNotMatchTheirAddress(t *testing.T) {
 	}
 }
 
+// Only the objects and binaries the turn references are opened: one that is
+// carried but never referenced may hold anything, on both paths.
+func TestPlainAssemblyOpensOnlyReferencedObjects(t *testing.T) {
+	t.Parallel()
+	cipher := testCipher(t)
+	sample := newPlainSample(t, cipher, "audit-plain-unreferenced", storage.CaptureVersion2)
+	prepared, _, _ := plainResponsesTurn(t, cipher, "audit-plain-unreferenced")
+	sample.withTurn(t, cipher, prepared)
+	stored := *sample.stored.TurnGraph
+	stored.Objects = append(append([]auditmodel.StoredContent(nil), stored.Objects...), auditmodel.StoredContent{
+		Hash: bytes.Repeat([]byte{0xee}, 32), SemanticHash: bytes.Repeat([]byte{0xee}, 32), Kind: "user_message",
+		PlaintextLength: 3, DataEnc: []byte("not ciphertext"),
+	})
+	stored.Binaries = append(append([]auditmodel.StoredBinary(nil), stored.Binaries...), auditmodel.StoredBinary{
+		Hash: bytes.Repeat([]byte{0xef}, 32), MediaType: "image/png", PlaintextLength: 3, DataEnc: []byte("not ciphertext"),
+	})
+	sample.stored.TurnGraph = &stored
+	plain := *sample.plain.TurnGraph
+	plain.Objects = append(append([]PlainObject(nil), plain.Objects...), PlainObject{
+		Hash: bytes.Repeat([]byte{0xee}, 32), SemanticHash: bytes.Repeat([]byte{0xee}, 32), Kind: "user_message",
+		PlaintextLength: 3, Plaintext: []byte("bad"),
+	})
+	plain.Binaries = append(append([]PlainBinary(nil), plain.Binaries...), PlainBinary{
+		Hash: bytes.Repeat([]byte{0xef}, 32), MediaType: "image/png", PlaintextLength: 3, Data: []byte("bad"),
+	})
+	sample.plain.TurnGraph = &plain
+	if detail := assertSameOutputs(t, cipher, sample); detail.Turn == nil {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
 // The list row shows the same User-Agent as Service.List for a version 2 row.
 func TestPlainSummaryMatchesTheList(t *testing.T) {
 	t.Parallel()
