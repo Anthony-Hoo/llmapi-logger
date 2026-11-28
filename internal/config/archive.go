@@ -99,7 +99,7 @@ func ArchiveLocation(cfg Config) (*time.Location, error) {
 func validateArchive(cfg Config) error {
 	archive := cfg.Archive
 	switch archive.Mode {
-	case ArchiveModeOff:
+	case "", ArchiveModeOff:
 		return nil
 	case ArchiveModeExportOnly, ArchiveModeArchiveThenDelete:
 	default:
