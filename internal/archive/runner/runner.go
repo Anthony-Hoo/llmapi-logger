@@ -250,6 +250,11 @@ type Result struct {
 	Counts       storage.ArchiveRunCounts
 	Excluded     int64
 	ExportedGaps int64
+	// Refused counts the members the bundle writer refused, SampleMismatched
+	// those that read back differently from the hot store; both are deferred
+	// export_failed and also in Excluded.
+	Refused          int64
+	SampleMismatched int64
 	// Deferred counts the deferred audits by reason.
 	Deferred         map[string]int64
 	DeadlineReached  bool
@@ -345,6 +350,8 @@ func (current *run) logCompletion(runErr error) {
 		"excluded_audits", result.Excluded,
 		"stale_audits", result.Counts.StaleAudits,
 		"exported_gaps", result.ExportedGaps,
+		"refused_audits", result.Refused,
+		"sample_mismatch_audits", result.SampleMismatched,
 		"segments", result.Counts.Segments,
 		"disk_bytes", result.Counts.DiskBytes,
 		"duration_ms", result.Duration.Milliseconds(),

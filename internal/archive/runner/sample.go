@@ -249,7 +249,7 @@ func (current *run) sample(opened *bundle.Bundle, members map[string]memberInfo,
 			current.result.Counts.StaleAudits++
 			continue
 		}
-		return fail("sample_mismatch", errors.New("a sampled member differs from the hot store"))
+		return &failure{reason: "sample_mismatch", err: errors.New("a sampled member differs from the hot store"), auditID: record.Audit.AuditID}
 	}
 	return nil
 }

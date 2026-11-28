@@ -369,9 +369,11 @@ func TestReconciliationSamplesBeforeSealing(t *testing.T) {
 	}
 	h.options.Step = nil
 	h.sampler.differ = func(string) bool { return true }
-	result, err := h.run()
-	if err == nil || result.Reason != "sample_mismatch" || result.ReconciledSealed != 0 {
-		t.Fatalf("result %+v, %v", result, err)
+	// Reconciliation rejects the published bundle; the pass exports the audit
+	// again, it differs again and is deferred: the run itself completes.
+	result := h.mustRun()
+	if result.ReconciledSealed != 0 || result.SampleMismatched != 1 || h.store.deferred["only"].Reason != storage.ArchiveDeferredExportFailed {
+		t.Fatalf("result %+v, deferred %+v", result, h.store.deferred)
 	}
 	if countMatching(h.files(), func(file string) bool { return strings.HasSuffix(file, bundle.RejectedSuffix) }) == 0 {
 		t.Fatalf("files %q", h.files())
@@ -389,9 +391,12 @@ func TestSampleMismatch(t *testing.T) {
 		h := newHarness(t)
 		h.addTurnless("only", protocolChat, baseTimeNS)
 		h.sampler.differ = func(string) bool { return true }
-		result, err := h.run()
-		if err == nil || result.Reason != "sample_mismatch" {
-			t.Fatalf("result %+v, %v", result, err)
+		result := h.mustRun()
+		if result.SampleMismatched != 1 || result.Counts.Segments != 0 || h.store.deferred["only"].Reason != storage.ArchiveDeferredExportFailed {
+			t.Fatalf("result %+v, deferred %+v", result, h.store.deferred)
+		}
+		if !strings.Contains(h.logs.String(), `"sample_mismatch_audits":1`) {
+			t.Fatalf("logs %s", h.logs.String())
 		}
 		files := h.files()
 		if countMatching(files, func(file string) bool { return strings.HasSuffix(file, bundle.RejectedSuffix) }) == 0 ||

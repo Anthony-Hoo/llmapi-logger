@@ -208,8 +208,32 @@ type sink struct {
 	index        int
 	writer       *bundle.SegmentWriter
 	members      map[string]memberInfo
+	// pending lists, in order, the candidates written to the current
+	// segment, so the segment can be rebuilt from the snapshot when one
+	// member has to leave it.
+	pending []storage.ArchiveCandidate
 }
 
+// recordRefusals are the bundle writer's reasons that concern the record
+// being added, not the files or the snapshot: the record fails the format's
+// checks, its place in the segment order, its request context, or its
+// payloads differ from its own line, or one entry is too large. Any other
+// reason (I/O, a payload the snapshot cannot supply, names, closed writer)
+// fails the run.
+var recordRefusals = map[string]bool{
+	bundle.ReasonInvalidRecord:   true,
+	bundle.ReasonOrder:           true,
+	bundle.ReasonContextMismatch: true,
+	bundle.ReasonPayloadMismatch: true,
+	bundle.ReasonEntryTooLarge:   true,
+}
+
+// add writes one member to the bundle. A refusal of the record itself
+// excludes that member only: SegmentWriter.Add has then aborted the whole
+// segment (an error is final and removes its files, so no partial record can
+// be published), and the segment is rebuilt from its other members, read
+// again from the still open snapshot. A child whose refused parent is no
+// longer in the segment is written in materialised form by the writer.
 func (target *sink) add(item *exported) error {
 	work := target.work
 	if target.writer == nil {
@@ -229,11 +253,40 @@ func (target *sink) add(item *exported) error {
 	}
 	if err := target.writer.Add(item.export.Record); err != nil {
 		target.writer = nil // Add removed the segment's files
-		return work.run.writeFailure(err)
+		if work.run.ctx.Err() != nil || !recordRefusals[bundle.ReasonOf(err)] {
+			return work.run.writeFailure(err)
+		}
+		work.exclude(item.candidate.AuditID, "archive record refused", "archive_record_refused", bundle.ReasonOf(err))
+		work.run.result.Refused++
+		return target.rebuild("")
 	}
 	target.members[item.candidate.AuditID] = memberInfo{digest: item.export.Digest, stamp: item.export.ChangeStamp, turnCreated: item.export.TurnCreatedAtNS}
+	target.pending = append(target.pending, item.candidate)
 	if target.writer.Full() {
 		return target.seal()
+	}
+	return nil
+}
+
+// rebuild writes the members of the dropped current segment again, in
+// order, without skip. The new segment stays open as the old one was.
+func (target *sink) rebuild(skip string) error {
+	members := target.pending
+	target.pending, target.members = nil, nil
+	for _, candidate := range members {
+		if candidate.AuditID == skip {
+			continue
+		}
+		item, err := target.work.export(candidate)
+		if err != nil {
+			return err
+		}
+		if item == nil {
+			continue
+		}
+		if err := target.add(item); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -242,15 +295,39 @@ func (target *sink) seal() error {
 	if target.writer == nil {
 		return nil
 	}
-	writer, members := target.writer, target.members
-	target.writer, target.members = nil, nil
+	work := target.work
+	writer, members, pending := target.writer, target.members, target.pending
+	target.writer, target.members, target.pending = nil, nil, nil
 	sealed, err := writer.Seal()
 	if err != nil {
-		return target.work.run.writeFailure(err)
+		return work.run.writeFailure(err)
 	}
-	ids, err := target.work.run.commit(true, sealed, members, nil)
-	target.work.exported = append(target.work.exported, ids...)
+	ids, err := work.run.commit(true, sealed, members, nil)
+	work.exported = append(work.exported, ids...)
+	var mismatch *failure
+	if err != nil && errors.As(err, &mismatch) && mismatch.auditID != "" {
+		// The bundle was rejected and its intent dropped. A bundle with a
+		// member that does not read back equal must not stand, but the
+		// member is one record: defer it and write the others again now.
+		work.exclude(mismatch.auditID, "archive sample mismatch", "archive_sample_mismatch", "sample_mismatch")
+		work.run.result.SampleMismatched++
+		target.pending = pending
+		if err := target.rebuild(mismatch.auditID); err != nil {
+			return err
+		}
+		return target.seal()
+	}
 	return err
+}
+
+// exclude defers one member that the export read but the bundle cannot
+// hold (export_failed) and logs it with a stable code and no id. The audit
+// stays in the hot store; the deferred re-check of a later run looks at it
+// again.
+func (work *pass) exclude(auditID, message, category, reason string) {
+	work.deferred[auditID] = storage.ArchiveDeferredExportFailed
+	work.run.result.Excluded++
+	work.run.options().Logger.Warn(message, "error_category", category, "reason", reason)
 }
 
 func (target *sink) abort() {

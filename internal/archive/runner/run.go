@@ -16,6 +16,8 @@ import (
 type failure struct {
 	reason string
 	err    error
+	// auditID names the one member a sample mismatch is attributed to.
+	auditID string
 }
 
 func (failure *failure) Error() string { return "archive runner: " + failure.reason }
