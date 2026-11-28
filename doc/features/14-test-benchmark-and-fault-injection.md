@@ -343,7 +343,7 @@ CI 在 GitHub 托管的 runner 上跑 `go test -race ./...`：开了竞态检测
 | `internal/storage/postgres` | `TestTurnParentChoiceMatchesTheLegacyWalks` | 随机图从 120 + 60 个减到同一序列的前 40 + 30 个；两组限额下每种连接方式（root、continuation、branch、retry、context_edit、conversation_key、previous_response_id）和降低限额后的拒绝都仍须出现，两种构建都检查 |
 | `internal/storage/postgres` | `TestKeylessCandidateSearchKnowsTheProtocolAtScale` | 只跑 20,000 轮次一档（同 `-short`），不跑 317,000 轮次的重复 |
 | `internal/storage/postgres` | `TestArchiveIntentRegistrationCost` | 意向成员从 2,000 减到 200；耗时只是记录，race 下没有意义，过期检查保留 |
-| `tests/integration` | `TestArchiveReadEquivalenceCatalogue` | 不加密一臂只发目录的子集（每个协议的流式基本场景，其余场景各一次）；加密一臂始终全量 |
+| `tests/integration` | `TestArchiveReadEquivalenceCatalogue` | 不加密一臂只发目录的子集（基本场景的每个用例，即每个协议的流式和非流式；其余场景各一次，取目录里它第一次出现的协议和模式）；加密一臂始终全量 |
 | `tests/integration` | `TestUnifiedParseDoesNotReadBackOnPostgreSQL` | 计时轮数从 15 减到 2（同 `-short`），不回读的检查保留 |
 
 另外，彼此独立（各用自己的库、schema、目录，不改包级变量、不用 `t.Setenv`）且多半在等 writer 恢复轮次或数据库的测试改成 `t.Parallel()`：`internal/proxy` 的捕获失败用例和用 `eqRun` 的大部分测试（崩溃点测试仍串行，它们靠“几十毫秒内落库”模拟崩溃）、`internal/parser` 的两个目录级测试、`internal/app` 的归档测试和 `TestFailedFinalCommitKeepsStagedChunks` 的用例、`internal/storage/postgres` 的几个规模测试。
