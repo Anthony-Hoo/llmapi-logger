@@ -224,11 +224,11 @@ type AuditQuery interface {
 
 “周报与分析”里，会话分析的运行时间和模型阶段（地址、模型名、Key、并发、输出上限等）可以直接修改并保存，保存的值覆盖配置文件、从下一轮分析起生效，并提供“测试连接”和“恢复为配置文件的值”；可改的项、接口和生效规则见 24 §4.1。项目周报的合并间隔、排名客户端（从词表能识别的客户端里勾选，不能手输）和两个标记阈值同样可以修改并保存，保存后未冻结的周立即按新值计算，已冻结的周要“重新生成”；时区和每周起始日只读（23 §3）。developer 登录看不到“系统配置”。
 
-“审计写入”只有一项：unified 写入路径的终结提交（`CommitAudit`）因写入队列已满或整批事务失败而没有成功时重试几次，取值 0 到 5，0 表示只尝试一次。配置文件的 `audit.commit_retries`（默认 3）是底，页面保存的值覆盖它、立即生效：之后开始的终结提交按新值重试，不用重启；“恢复为配置文件的值”删掉保存的值。第 k 次重试之前等 `min(100 ms × 2^(k-1), 1 s)`，所以 3 次最多多等 0.7 秒、5 次最多多等 2.5 秒，另加各次尝试本身的时间；页面按每个取值列出这个时间。legacy 写入路径不用这个值，页面在实际使用的写入路径不是 unified 时会提示：接口返回的 `write_path` 是审计管理器的会话实际使用的路径，不是配置文件写的值，管理器不可用、或因暂存目录不可用退回 legacy 时它是 `legacy`（模块 01 §4 第 18 项）。生效的值放在审计管理器的原子变量里，请求不为它读库。接口：
+“审计写入”只有一项：采集会话的终结提交（`CommitAudit`）因写入队列已满或整批事务失败而没有成功时重试几次，取值 0 到 5，0 表示只尝试一次。配置文件的 `audit.commit_retries`（默认 3）是底，页面保存的值覆盖它、立即生效：之后开始的终结提交按新值重试，不用重启；“恢复为配置文件的值”删掉保存的值。第 k 次重试之前等 `min(100 ms × 2^(k-1), 1 s)`，所以 3 次最多多等 0.7 秒、5 次最多多等 2.5 秒，另加各次尝试本身的时间；页面按每个取值列出这个时间。接口返回的 `write_path` 总是 `unified`：写入路径只有这一条，字段留着是为了不改接口；页面不显示写入路径，也不再有 legacy 的提示。生效的值放在审计管理器的原子变量里，请求不为它读库。接口：
 
 | 端点 | 说明 |
 | --- | --- |
-| `GET /api/v1/settings/audit-capture` | `{source: file\|saved, updated_ns?, settings: {commit_retries}, file: {commit_retries}, write_path}`；库里保存的值读不出来时按配置文件回答 |
+| `GET /api/v1/settings/audit-capture` | `{source: file\|saved, updated_ns?, settings: {commit_retries}, file: {commit_retries}, write_path: "unified"}`；库里保存的值读不出来时按配置文件回答 |
 | `PUT /api/v1/settings/audit-capture` | 请求体只接受 `{"commit_retries": n}`，n 必须是整数；缺字段、`null`、小数、字符串、未知字段一律 `400 invalid_settings`；超出范围 `400 invalid_settings`，消息为 `audit.commit_retries must be between 0 and 5` |
 | `DELETE /api/v1/settings/audit-capture` | 恢复为配置文件的值 |
 

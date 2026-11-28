@@ -72,9 +72,9 @@ JSON 使用 `json.Decoder.UseNumber`，拒绝尾随第二个 JSON 值，再由�
 
 采集缓冲按实际字节量惰性增长，上限约 1 MiB；即使单次 Read 返回更大的数据也按块处理。Body 结束时立即 flush 尾块并释放暂存容量，避免长 SSE 会话继续持有已结束请求阶段的缓冲。四个观察点仍独立采集，只有终结事务验证长度与 hash 一致后才合并。 同一 Session 在已有互斥锁内复用最多一个 raw/timeline gzip writer，各块仍是独立可解码流；终结采集后立即释放 writer。该 writer 不跨请求共享，私有压缩缓冲只属于当前会话，可能保留部分明文直到复用或 GC，不声称安全擦除。
 
-legacy 写入路径下，flush 表示压缩、加密并向异步 writer 入队，不等于数据库事务已经提交，更不等于新增的 fsync 保证。进程崩溃可能丢失尚未 flush 的尾部，以及已经入队但仍未提交的块或批次；启动 recovery 将未完成记录标记 partial。FinishAudit 的同步完成屏障才确认终结事务处理完成，底层持久性仍服从数据库配置。
+已删去的 legacy 写入路径下，flush 表示压缩、加密并向异步 writer 入队，不等于数据库事务已经提交，更不等于新增的 fsync 保证。进程崩溃可能丢失尚未 flush 的尾部，以及已经入队但仍未提交的块或批次；启动 recovery 将未完成记录标记 partial。FinishAudit 的同步完成屏障才确认终结事务处理完成，底层持久性仍服从数据库配置。
 
-unified 写入路径（模块 03 §13）不改变保留规则：`retention_state` 的取值、按侧判定（下文与 `DecideRawRetention`）和释放 raw 的时机都不变，raw 仍在 `SaveParsedAudit` 里随 verified turn 释放。变的是块什么时候进库，以及解析读什么：
+现在唯一的写入路径（原来的 unified，模块 03 §13）不改变保留规则：`retention_state` 的取值、按侧判定（下文与 `DecideRawRetention`）和释放 raw 的时机都不变，raw 仍在 `SaveParsedAudit` 里随 verified turn 释放。变的是块什么时候进库，以及解析读什么：
 
 - flush 只结束内存里的块，不入队。块在写库时才压缩加密：请求侧在检查点 1，响应侧在 `CommitAudit`；超出内存预算的块先落本地暂存，再由检查点或提交写进库。崩溃时各阶段留下什么见模块 03 §13.7。
 - 块边界与 legacy 相同：满 1 MiB，或 Body 结束时的尾块；只有全局内存预算吃紧时可能提前结束一个块，它短于 1 MiB（模块 03 §13.4）。边界相同时块行逐行相同，`encoded_length` 随工具链变化的已知差异（§5）不变。

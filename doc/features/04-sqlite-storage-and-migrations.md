@@ -167,12 +167,12 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 - **锁与耗时。** 迁移在启动时、拿到 writer 锁之后的迁移事务里执行，对 `audit_records`、`http_stages`、`runtime_settings` 各持有 `ACCESS EXCLUSIVE` 直到提交，受连接的 5 秒 `lock_timeout` 约束，与迁移 005 相同；`http_header_blocks` 的外键另对 `audit_records` 取 `SHARE ROW EXCLUSIVE`。本机测量：30 万条 audit（`audit_records` 67 MiB，`http_stages` 42 MiB）上，迁移语句约 10 毫秒，含迁移的 `Open` 约 23 毫秒，与表大小无关。
 - **完整性。** 已有的 `capture_finalized` 事件仍按版本 1 校验：`capturePayloadDigest` 一个字节都不改，校验按 `capture_version` 分派（D.3）。离线导入的目标只有 001 基线，没有 `capture_version` 列，导入校验直接按版本 1 计算。
 - 与 002 到 006 一样只由运行时 `migrate()` 应用：离线导入的目标仍是 001 基线，导入的行在第一次启动时得到 `capture_version = 1`。001 不改。SQLite 不加迁移，永远只写版本 1。
-- 迁移本身不改变写入：只有 `audit.write_path: unified` 的会话在 PostgreSQL 上写版本 2（§5.1、模块 03 §13）；legacy 照旧写版本 1。
+- 迁移本身不改变写入；会话在 PostgreSQL 上写版本 2（§5.1、模块 03 §13）。迁移 007 之前和之后由已删去的 legacy 写入路径写下的都是版本 1，照常读取和校验。
 - `latestSchemaVersion` 为 7。**旧版本遇到版本 7 的库会拒绝打开审计存储**，表现与上面相同。回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-6)；一旦有了版本 2 的行，就没有只用 SQL 的回滚办法。
 
 ## 4. HTTP Body 保存方式
 
-每个阶段仍保存自己的 observed length、SHA-256、状态和时间。legacy 写入路径下，流式期间四阶段先独立写 owning chunks；`FinishAudit` 事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并（unified 在内存里按同样的条件判定，重复阶段的块不写，见模块 03 §13.3）：
+每个阶段仍保存自己的 observed length、SHA-256、状态和时间。成对阶段由会话在内存里判定，合并的重复阶段的块不写（模块 03 §13.3）；会话留给库里的那几对（`DedupInDB`，以及已删去的 legacy 写入路径的每一对），由终结事务验证两个阶段都完整、chunk 聚合与长度自洽且 SHA-256 一致后，才执行以下合并：
 
 - `request_sent_to_newapi.source_stage` 可以指向入站 request stage；
 - `response_from_newapi_sent_to_nginx.source_stage` 可以指向上游 response stage；
@@ -181,7 +181,7 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 
 若成对阶段长度或 hash 不同，两个 `source_stage` 都保持指向自身，重复删除不发生，并以 `body_stage_mismatch`/partial 保留完整异常证据。
 
-采集缓冲约 1 MiB 后才压缩、独立 AES-GCM 加密并提交，显著减少 SQLite 行、索引和 nonce/tag 开销。`retention_state` 固定为：
+Body 按约 1 MiB 的块压缩、独立 AES-GCM 加密后写入，显著减少 SQLite 行、索引和 nonce/tag 开销。`retention_state` 固定为：
 
 - `pending`：等待 parser、normalizer 和重建验证；
 - `metadata`：普通 2xx/3xx 成功且重建已验证，删除 raw chunks，`stored_length/chunk_count` 归零；
@@ -191,7 +191,7 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 
 ## 5. 单 writer 与原子边界
 
-writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交一个事务。BeginAudit 和 strict admission 使用同步 Ack；普通证据写入保持异步。
+writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交一个事务。BeginAudit、CommitAudit 和 strict admission 使用同步 Ack；检查点保持异步。
 
 每个操作拥有独立 SAVEPOINT；约束冲突或对象身份校验失败只回滚该操作，同批的其他操作继续按入队顺序执行。外层事务提交后，同步 Ack 逐条返回各自结果。局部操作失败不改变数据库可用性；事务开始、保存点管理或 COMMIT 失败则整批失败，所有同步 Ack 返回事务错误且 writer 标记不健康。异步操作仍只保证入队，无法单独返回落盘错误；但解析失败不会再撤销同批的正常采集。整批失败时，writer 在内存中记录受影响的 audit、阶段、缺块观察边界和待补写终态，供同一 writer 在存储恢复后处理；不会缓存或重放 Header value、Body、密文和 timeline payload。
 
@@ -201,7 +201,7 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 回滚范围与完整性健康状态独立：存量 content/binary object 或其引用的身份字段不匹配时，该解析操作仍隔离回滚，但 writer 会立即锁定 `IntegrityPayloadState=failed`，使 readiness 不健康。同批或后续正常写入、基于较旧快照完成的后台验证都不能清除该状态，排查并修复数据后需重启重新校验。读取身份元数据的数据库错误保留原始 error 类型，继续按存储级错误处理，不伪装为对象身份不匹配。
 
-异步 stage/body/header/chunk 采集操作以局部错误失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
+异步采集操作（检查点，以及存储保留的逐操作 stage/body/header/chunk 写入）以局部错误失败后，在保存点回滚完成后将对应未终结 audit 持久化为 `capture_status=failed`、`error_code=capture_write_failed`。该标记跨批次保留；后续 `FinishAudit` 保留失败状态，跳过成对 Body 合并、保留剩余 full raw，并按失败后的实际元数据签署完整性事件，不能被采集器传来的 complete 覆盖。Header 批次涉及多个 audit 时逐个标记，独立 audit 及 parser/管理操作不受影响。若失败标记本身也无法写入，则返回事务级错误，不能声称失败已被隔离并记录。
 
 存储级错误后的恢复由原 writer 每 5 秒执行一次，即使没有新流量也会运行；每轮最多处理 16 个 audit，轮转选择防止某个永久失败的记录饿死其他记录。各条恢复使用保存点隔离，只有外层 COMMIT 成功才清除对应内存记录；并发追加的终结信息使用版本检查保留。丢失的异步采集写入先补记 `capture_write_failed`，受影响阶段使用 `capture_headers_failed` 或 `capture_storage_failed`，已知缺块使用 `capture_chunk_missing` 并保留观察长度。正常终结即使早于恢复定时器，也必须在同一事务内先写这些标记；无法写标记时不能提交 complete。未落盘字节无法恢复，剩余证据保留 full raw。
 
@@ -211,17 +211,17 @@ writer queue 容量为 1024；最多聚合 64 个操作或等待 5 ms 后提交�
 
 Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `capture_headers_failed` 标记该观察阶段为 partial。后续 `FinishStage`、父记录终结与启动恢复都保留这个标记，不能因 Body 完整而把丢失 Header 的阶段重新标为 complete；未受影响的阶段不因此降级。
 
-失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`FinishAuditWithResult` 只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。
+失败 audit 终结前会将仍处于 streaming 的 stage/body 收尾为 partial：Body 长度、分块数根据已提交 owning chunks 恢复，清除未确认的完整 hash/EOF 标志，保留 full raw。该修复与父记录终结和签名同属一个操作；若修复失败，父记录不能先结束，避免留下启动恢复不再处理、raw 下载却永远 not-ready 的子记录。`CommitAudit`（以及存储保留的 `FinishAuditWithResult`）只在外层事务成功提交后返回实际终态，Session 用其 capture status/error code 生成完成日志；提交失败或等待取消时不返回未提交的结果。
 
 恢复过程已标为 `capture_storage_failed` 的阶段也必须参与收尾，包括没有 Body 的阶段；其结束时间为空时使用父 audit 的已知结束时间补齐，已有结束时间保持不变，不能在阶段未终结时签署父记录。
 
-阶段终结在入队前失败时，Session 会以 partial 和稳定 `audit_finalize_failed` 终结；同样修复未结束的子记录，并保持日志与已提交父记录的状态及错误码一致。Body 开始写入在入队前被拒绝时，采集器已把故障记在 stage 上；阶段终结只提交 stage 状态，不再提交该 Body 的终结，避免把采集器已知的故障变成 writer 写入失败。
+终结提交最终失败时，Session 以 partial 和稳定 `audit_finalize_failed` 生成完成日志，writer 恢复同样修复未结束的子记录（模块 03 §13.5）。
 
 修复还会核对已经 complete 的 Body：如果采集器上报的 stored length/chunk count 与实际 owning chunks 不符，或分块序号/偏移存在缺口，同样修正存储聚合、降级 stage/body 为 partial、清除不能验证的完整 hash/EOF 标志。stage 保留采集器已记录的错误码，只在没有错误码时写 `capture_write_failed`。已封存的 SSE 时间线描述观察到的事件，与分块是否落盘无关，因此 Body 的 `stream_timeline_complete` 与时间线行保持原值；只有仍为 streaming、尚无时间线行的 Body 才置为 false。已观察长度保留；未落盘的分块无法恢复。缺失分块以 `capture_chunk_missing` 标记，分块原序号、偏移和密文不重写；raw 可导出按原序号拼接的已保存片段，但必须明确声明不完整及存在缺块。
 
 主要写操作包括：
 
-- audit/stage/header/body 开始、分块和终结；
+- 采集的 `BeginAudit`、`Checkpoint`、`CommitAudit`、`RestoreStagedChunks`；逐操作的 audit/stage/header/body 开始、分块和终结仍由存储实现（SQLite 的检查点和提交由它们组成，版本 1 夹具与离线导入也用），会话不再发出；
 - audit 终态、调用者关联和 gap；
 - parser claim/release；
 - `SaveParsedAudit`；
@@ -239,9 +239,9 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 
 任一步失败都回滚该 `SaveParsedAudit` 操作的全部修改，不会出现“raw 已删但 turn 未写完”的中间状态。以局部错误失败时不会撤销同批其他操作；存储级或无法分类的错误仍按本节规则回滚整批。
 
-### 5.1 unified 写入路径的操作
+### 5.1 采集会话的操作
 
-`audit.write_path: unified`（模块 03 §13）不用 `StartStage` 到 `FinishAudit` 那一串操作，而用下面四个。PostgreSQL 和 SQLite 存储都实现它们；SQLite 只写采集版本 1，`SupportsHeaderBlock` 报告 false。每个操作照旧在自己的 SAVEPOINT 里执行。
+会话（模块 03 §13）不用 `StartStage` 到 `FinishAudit` 那一串操作（那是已删去的 legacy 写入路径用的，存储仍保留它们），而用下面四个。PostgreSQL 和 SQLite 存储都实现它们；SQLite 只写采集版本 1，`SupportsHeaderBlock` 报告 false。每个操作照旧在自己的 SAVEPOINT 里执行。
 
 | 操作 | 等待 | 在一个操作里做什么 |
 | --- | --- | --- |
@@ -252,7 +252,7 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 
 **已标 failed 的 audit。** 失败标记可能意味着某个父行缺失（被拒绝的入站阶段、失败的检查点）。这时检查点和提交只写有父行的部分：Header 行要有阶段行，Body 行要有自己和来源的阶段行，块要有 Body 行；提交时缺行的阶段跳过 `finishStage`，由 `finalizeIncompleteCapture` 对账，与 legacy 下那些操作逐个失败的结果相同。版本 2 的块照样整块写：存储没有密钥，打不开块去掉缺行阶段的段，读取规则见模块 09 §8。已存状态不是 failed 却遇到缺行，`finishStage` 照常报 0 行错误。
 
-**失败记账。** 两个新操作按它们取代的 legacy 操作记账（`markCaptureWriteFailed`、`rememberFailedWrite`）：
+**失败记账。** 两个操作按它们取代的 legacy 操作记账（`markCaptureWriteFailed`、`rememberFailedWrite`）：
 
 | 失败 | `Checkpoint` | `CommitAudit` |
 | --- | --- | --- |
@@ -262,7 +262,7 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 
 块来源读失败（暂存文件读不出来）在 PostgreSQL 上也按本地错误处理，只回滚这一个操作，不让整批失败、writer 变为不健康，与 SQLite 一致。失败记账取块的边界时用 `EachMetadata`，不在恢复锁和提交锁下读暂存文件。
 
-**批次。** PostgreSQL 上，携带密文超过 16 MiB 的检查点或提交独占一个事务；批次里这类载荷累计到 32 MiB 就不再收集新的操作（`aloneWritePayloadBytes`、`batchPayloadBytes`）。legacy 操作的载荷记为 0，分批不变。SQLite 没有这两条。
+**批次。** PostgreSQL 上，携带密文超过 16 MiB 的检查点或提交独占一个事务；批次里这类载荷累计到 32 MiB 就不再收集新的操作（`aloneWritePayloadBytes`、`batchPayloadBytes`）。逐操作写入的载荷记为 0，分批不变。SQLite 没有这两条。
 
 **语句数。** `internal/storage/postgres/staged_counts_test.go` 的 `TestStagedWriteStatementCounts` 对一条典型流式请求（四个阶段，各 Body 小于 1 MiB，没有 Trailer，两对都合并）逐操作计数，含 SAVEPOINT 和 RELEASE、不含 BEGIN 和 COMMIT，断言 legacy 22 个操作、unified 4 个，且 unified 的语句更少。提交 `6a3d5c5` 时以采集版本 1 量得 legacy 105 条语句、unified 38 条；之后入站阶段改用嵌套 SAVEPOINT、PostgreSQL 改写版本 2，这两个数没有重新记录。批次的提交数取决于并发和时序，不能从代码推出。
 

@@ -149,7 +149,7 @@ SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
 
 迁移 007 为采集版本 2 加库表，schema 版本升到 7：`audit_records` 加 `capture_version`（默认 1）和 `user_agent_enc`，`http_stages` 加 `content_type`、`content_encoding`，新表 `http_header_blocks`，`runtime_settings` 的分区约束加上 `audit_capture`（[模块 04 §3.9](../features/04-sqlite-storage-and-migrations.md#39-采集版本-2header-块postgresql-migration-007)）。它在代理启动时自动应用，不回填、不重写任何已有的行：新列的 CHECK 以 `NOT VALID` 添加，不扫描旧行。迁移对 `audit_records`、`http_stages` 和 `runtime_settings` 短暂持有 `ACCESS EXCLUSIVE`，受连接的 5 秒 `lock_timeout` 约束；本机 30 万条 audit 上约 10 毫秒，与表大小无关。启动时恰好有会话在读这几张表（例如 `pg_dump`）而超过 5 秒时，迁移整体回滚，代理以审计存储不可用的状态运行，等那个会话结束后重启即可。
 
-迁移本身不改变写入：`audit.write_path` 为 `legacy`（默认）时，新写入仍是版本 1。只有切到 `unified` 之后，PostgreSQL 上的新 audit 才按版本 2 写：Header 存成每条 audit 一个密封块，User-Agent 和 parser 用的内容头存在新列里，`capture_finalized` 事件的摘要按版本 2 计算。
+迁移本身不改写已有的行。第 3 阶段的版本里 `audit.write_path` 默认 `legacy`，新写入仍是版本 1，切到 `unified` 之后才写版本 2；legacy 写入路径删去之后（设计实施记录 R.8），PostgreSQL 上的新 audit 一律按版本 2 写：Header 存成每条 audit 一个密封块，User-Agent 和 parser 用的内容头存在新列里，`capture_finalized` 事件的摘要按版本 2 计算。
 
 **一旦有了版本 2 的行，就没有只用 SQL 就能让旧版本保持健康的回滚办法：**
 
@@ -157,11 +157,11 @@ SELECT analysis_version, count(*) FROM audit_analysis GROUP BY 1 ORDER BY 1;
 - 版本 2 的行没有 `http_headers` 行，旧版本的详情、列表 User-Agent 和 parser 都读不到它们的 Header；
 - 直接删除这些 audit 会被 `turns.parent_turn_id` 的 `ON DELETE RESTRICT` 挡住。
 
-所以按“先扩展、后启用”的顺序发布：先发带迁移 007 的版本、`audit.write_path` 保持默认的 `legacy`，这时还可以按本节回滚；确认正常后再切到 `unified`。想退回旧的写法，把 `write_path` 改回 `legacy` 即可，不需要回滚 schema。完整步骤，包括暂存目录和配置段的处理，见[部署说明](README.md) 3.3。
+现在没有切回旧写法的开关了：不含 legacy 路径的版本一启动就写版本 2，回滚只能换回上一个版本的二进制。含迁移 007 的上一个版本读得了版本 2 的行；更早、不含迁移 007 的版本读不了，库里有了版本 2 的行之后只能从此前的备份恢复，并放弃之后的审计数据。要保留按本节回滚的余地，就在升级到不含 legacy 的版本之前，先在含迁移 007、仍用 legacy 的版本上确认运行正常。完整步骤，包括暂存目录和配置段的处理，见[部署说明](README.md) 3.3。
 
 旧版本打开版本 7 的库时会因 schema 版本过新（`schema is newer than supported`）而无法使用审计存储，表现与下面两节相同。旧版本的配置加载拒绝不认识的键，配置文件里有 `audit:` 段时会直接拒绝启动，回滚前要先删掉这一段。回滚到不含迁移 007 的版本：
 
-1. 先按部署说明 3.3 第 4 步处理暂存目录，再停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+1. 先按部署说明 3.3 回滚的第 1 步处理暂存目录，再停止新版本。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
 2. 执行下面的 SQL。它先检查有没有版本 2 的 audit 或 Header 块，有就报错、什么都不改；否则删除 `audit_capture` 设置、恢复分区约束，删掉新表和新列，并删除 `schema_migrations` 里版本为 7 的行。代理使用独立 schema 时先 `SET search_path = <schema>;`。
 3. 删掉配置文件里的 `audit:` 段，再启动旧版本。之后重新升级时，迁移 007 会再次加上这些列和表。
 

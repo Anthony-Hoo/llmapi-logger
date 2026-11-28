@@ -1,6 +1,6 @@
 # Issue #59 第 3 阶段详细设计：阶段性提交、单一 Header 块、解析不读回
 
-状态：已实施（提交 `0faae0a` 之后的第 3 阶段提交，到 `008f3fc` 为止）。正文是实施前的定稿，保留原样；代码与正文不同的地方列在文末“实施记录”，以那里和模块文档为准：会话见模块 03 §13，writer 操作见模块 04 §5.1，迁移见模块 04 §3.8、§3.9，parser 见模块 05 §5，Header 块与明文边界见模块 09。迁移编号取 007，因为 006 是另一项改动加的 `turns (created_at_ns, turn_id)` 索引。
+状态：已实施（提交 `0faae0a` 之后的第 3 阶段提交，到 `008f3fc` 为止）。正文是实施前的定稿，保留原样；代码与正文不同的地方列在文末“实施记录”，以那里和模块文档为准：会话见模块 03 §13，writer 操作见模块 04 §5.1，迁移见模块 04 §3.8、§3.9，parser 见模块 05 §5，Header 块与明文边界见模块 09。迁移编号取 007，因为 006 是另一项改动加的 `turns (created_at_ns, turn_id)` 索引。A/B 之后 legacy 写入路径已删去，unified 是唯一的写入路径，正文里的开关与回退都是历史，见实施记录 R.8。
 
 本阶段对应方案 `doc/design/issue-59-unified-write-cold-archive.md` 第 6 节的 P2：4.2 的第一步和第二步、决策 5.10、`audit.write_path` 开关。4.2 第三步不在范围内。
 
@@ -1277,4 +1277,60 @@ Body 采集拆成两层：
 
 方案 4.2 的第三步（规范化先于提交：解析在提交之前完成，一个事务写完采集与轮次图，见方案 4.2 与 5.1）以这次 A/B 为前提，本阶段没有做，仍待决定。
 
-更正：这里早先把第三步写成“删去 legacy 路径、把 unified 设为默认”，是错的，那是另一件事。A/B 之后维护者决定只保留 unified 这一条写入路径；删去 legacy 路径在下一个分支上实施，与第三步无关。
+更正：这里早先把第三步写成“删去 legacy 路径、把 unified 设为默认”，是错的，那是另一件事。A/B 之后维护者决定只保留 unified 这一条写入路径；删去 legacy 路径在下一个分支上实施，与第三步无关，见 R.8。
+
+### R.8 删去 legacy 写入路径
+
+A/B（R.7）之后维护者决定只保留 unified。这一节记录删了什么、留了什么、证据怎样保住，以及因此改变的测试断言。正文 F.1、H.1 的开关与退回 legacy 是历史，不再改写。
+
+**删去的。**
+
+- `internal/audit`：会话里只为 legacy 存在的分支（会话自己逐操作调用 `StartStage`、`AddHeaders`、`StartBody`、`AddChunk`、`FinishStage`、`FinishAuditWithResult` 的地方，`finish` 的 legacy 实现），`legacyRetainer` 与保留层接口，`bodyCapture` 里只给它用的字段，`Options.WritePath`、`WritePathLegacy`/`WritePathUnified` 常量和 `Manager.WritePath`。`audit.Store` 收窄为 `Healthy`、`BeginAudit`、`Checkpoint`、`CommitAudit`、`InsertAuditGaps`：没有会话再发出逐操作写，由编译器保证。`audit.NewManager` 构造的就是 unified 管理器。
+- `internal/config`：`audit.write_path` 不再选择任何东西，省略或写 `unified` 照常；写 `legacy` 时校验失败，错误说明 legacy 写入路径已在这个版本删去，不悄悄忽略。
+- `internal/app`：开关和 available 模式退回 legacy 的做法（`audit staging unavailable, using the legacy write path`），以及 legacy 下暂存不可用时的 `audit staging directory unusable, nothing imported`；交接总是装 `parser.Worker.Submit`。
+- 设置页上的写入路径说明和 legacy 提示。
+- `cmd/audit-bench` 的 legacy 运行：`--write-path` 只接受 `unified`（也是默认），写 `legacy` 时拒绝并提示用提交 `b807047` 构建的二进制。
+
+**留下的，以及为什么。**
+
+- 存储的逐操作写和 SQL（PostgreSQL、SQLite 的 `insertStage`、`insertHeaders`、`insertBody`、`insertChunk`、`finishStage`、`finishAudit` 与导出的 `StartStage` 等）：SQLite 的 `Checkpoint`、`CommitAudit` 由它们组成，版本 1 夹具、离线导入的测试和存储层等价测试（`TestStagedWriteMatchesLegacyRows`、`TestUnifiedWriteMatchesLegacyRows`）用它们。
+- `RecoverInterruptedAudits` 与 writer 的采集恢复：上一个版本以 legacy 路径留下、未终结的 audit（采集版本 1）要在新版本第一次启动时终结。新增 `internal/app` 的 `TestFirstStartRecoversAnAuditTheLegacyPathLeftOpen`：用存储的逐操作写造出 legacy 在响应流到一半时已提交的行（A.4 第三行），在 SQLite 和 PostgreSQL 上各启动一次应用，audit 恢复为 interrupted/partial、raw `full`，存储长度等于已提交的块，载荷校验通过，请求 raw 和详情 Header 读得回来，新会话照常准入。
+- 库内成对合并（`deduplicateEquivalentBodyPair`、`DedupInDB`）、`parser.Worker.Notify` 和 pending 扫描：unified 仍在用。
+- 采集版本 1 的读取和校验（query、parser、完整性、`headerblock.Expand`）：旧数据照常可读、可校验，不重写任何已有的行。
+- 设置接口的 `write_path` 字段，总是 `unified`，接口形状不变；`unifiedWriteSupport` 检查（存储可以声明不能承担这条写入路径），日志码 `unified_unsupported` 沿用。
+
+**暂存目录必填。** 维护者的决定：`audit.staging.dir` 在两种模式下都必填（配置校验拒绝空值，仍要求绝对路径、与密钥目录分开）。启动时目录配置了却不可用（或没有配置），两种模式下审计都不可用，与此前 strict 的处理相同：关闭存储，记一条 `audit staging unavailable`（`error_category=staging_unavailable` 和原有的 `reason` 码，不带路径和错误原文），以 `audit.NewUnavailable` 运行；available 模式不审计照常转发，strict 模式拒绝。不提供不带暂存运行的降级方式，以前 available 模式退回 legacy 的做法已经没有了。判断的位置不变：在导入尝试和 `RecoverInterruptedAudits` 之后。
+
+**证据怎样保住。** 会话层的等价测试原来让同一流量走两条路径再比行，是 unified 存下的与 legacy 相同的证明。删代码之前先把 legacy 一侧冻结成金文件（`internal/legacyoracle`，各包 `testdata/legacy-oracle`），选它而不是在测试代码里留一份 legacy 会话：会话分布在 `internal/proxy`、`internal/storage/postgres`、`tests/integration` 等包里，测试专用的 legacy 实现进不去这些包，要留就得留一整份会话。
+
+- 生成：oracle 提交 `5fcb4c0` 的非测试代码就是 `ce4e976`；每个测试在那里同时跑 legacy 和 unified，legacy 的值按 `LLMAPI_WRITE_LEGACY_ORACLE` 写进文件，不写时与文件比对，unified 与文件比。之后的提交去掉 legacy 一侧，只拿 unified 比文件。代码已删，文件不能再生成。
+- 规范化：SQLite 上 audit id 来自带种子的随机源，采集时间来自计数时钟，clock 读取次数也冻结；密文按自己行的 AAD 打开，记为明文长度和 SHA-256，其他密文记长度，parser 自己时钟盖的列遮掉。PostgreSQL 上 audit id 和时间不进比较（`normalizeSessionDump`、`storedShape`），两次运行必然不同的 Header 值（请求 id、夹具交换 id、`Date`）去掉或只记长度。长文本（查询视图、导出、Agent 门面输出）记为长度、SHA-256 和开头一段。超过 1 MiB 的文件 gzip 压缩。
+- 复核：生成之后各重跑一遍，legacy 与 unified 都与文件一致：SQLite 的在 Windows 和 Linux 上各一遍，PostgreSQL 的在容器里一遍；文件里没有路径、用户名和端口。
+- 覆盖：`internal/proxy` 的端到端、暂存和故障测试，`internal/audit` 的分歧与暂存测试，`internal/storage/postgres` 的会话测试和 harness 的 legacy 模型（`TestHarnessLegacyModelMatchesSession`，冻结真实 legacy 会话的操作流），`tests/integration` 的版本 2 与写入路径测试。
+
+**改变的断言。** 没有发现正文与 R.1 到 R.6 解释不了的行为差别：每一处都由 B.8、R.6 或维护者的暂存决定说明。
+
+| 测试 | 以前断言 | 现在断言 | 原因 |
+| --- | --- | --- | --- |
+| `internal/proxy` `TestAsyncCaptureFailuresMatchCompletionLogAndAllowRetainedRaw` → `TestCaptureWriteFailuresEndTheAuditFailed` | legacy 下可隔离的写失败只回滚那一个操作；完成日志等于已存终态（failed/`capture_write_failed`）；其余块保留，raw 除丢的块外可读；SSE 时间线保持完整；“stage enqueue”（`FinishStage` 队列满）为 partial/`audit_finalize_failed` | 被拒绝的检查点整个回滚，请求侧的行一起没有（B.8 第 2 行）；被拒绝的提交立即最终失败：完成日志 partial/`audit_finalize_failed`，之后 writer 恢复以 failed/`capture_write_failed` 终结，响应 Body 和时间线没有（B.8 第 4 行、R.6 第 2 条）；其余已存证据可读、校验通过；“stage enqueue”去掉（不再有 `FinishStage`） | B.8、R.6 第 2 条、模块 03 §13.5 |
+| `internal/proxy` `TestCollectorQueueRejectionKeepsCollectorFaultLabels` | `StartBody`/`AddChunk` 入队被拒是采集器故障 | 删去，只测 legacy 机制；unified 的入队被拒由 `TestCheckpointQueueFullIsFoldedIntoTheNextWrite`、`TestCommitAuditRetries` 覆盖 | 只属于 legacy |
+| `internal/audit` `TestManagerOptionsDefaultToLegacy` → `TestNewManagerWritesThroughTheUnifiedPath` | `NewManager` 是 legacy | 起始行带入站阶段、一次提交、没有逐操作写 | 只剩一条路径 |
+| `internal/audit` `TestManagerRefusesUnifiedOnAStoreThatCannotServeIt` → `TestManagerRefusesAStoreThatCannotServeTheWritePath`；`TestManagerOptionsValidation` | 这样的存储 legacy 可以用；未知写入路径被拒 | 只断言拒绝；未知写入路径一项去掉（选项没有了） | 只属于 legacy |
+| `internal/audit` `TestBodyBufferLazyBoundedAndReleased`、`TestBodyBufferForceReleasesEmptyAndFaulted` | legacy 保留层的暂存缓冲 | 删去，改为 `TestBodyChunksFollowTheGridAndAreReleased`（块网格、Finish 后释放） | 只属于 legacy |
+| `internal/audit` `TestBodyEncoderReleasedOnFinish`、`TestBodyEncoderConcurrentStages`；`TestBodyEncoderReleasedAfterDeferredFlushAndFailedFinish` → `TestBodyEncoderReleasedAfterFailedFinish`；两个基准 | 在 legacy 会话上；未满的块在失败的 `FinishStage` 之前由 `AddChunk` 写出 | 在 unified 会话上；未满的块封进失败的提交 | 写库方式不同 |
+| `internal/proxy` `TestMemoryBudgetExhaustion` | 断言不变 | 断言不变，明说管理器没有暂存（以前靠 nil 默认） | 测试管理器一律带暂存 |
+| 各等价测试（`internal/proxy` 端到端、暂存、故障；`internal/audit` 分歧与暂存；`internal/storage/postgres` 会话；`tests/integration` 版本 2 与写入路径） | 与并排的 legacy 运行比 | 与 legacy oracle 比，比较项不变；去掉只关于 legacy 一侧的断言：legacy 解析读回块、legacy 的完整性校验、legacy 的版本 1 列检查、版本 2 测试里 legacy Header 字节的测量日志、入站阶段测试里 legacy 的完成日志检查。`sendAgainstOracle` 另比响应头和 Trailer，比以前严 | legacy 已删 |
+| `internal/proxy` stream_end_order 各测试 | 两条路径各一遍 | legacy 子测试去掉，表照旧在 unified 上断言 | 只剩一条路径 |
+| `internal/storage/postgres` `TestHarnessLegacyModelMatchesSession` | 与真实 legacy 会话比 | 与冻结的操作流比 | legacy 已删 |
+| `internal/app` `TestUnifiedWritePathHandsCommittedAuditsToTheParser` → `TestCommittedAuditsAreHandedToTheParser` | legacy 子测试断言不交接 | 去掉 | 只属于 legacy |
+| `internal/app` `TestFailedFinalCommitKeepsStagedChunks` | 两条路径同一故障下的终态 | 去掉 legacy 运行，它到过的终态在 unified 上断言 | 只剩一条路径 |
+| `internal/app` `TestUnusableStagingDirectory` → `TestUnusableStagingDirectoryMakesTheAuditUnavailable` | available 退回 legacy、保持健康 | 两种模式下审计都不可用；没有配置、不是目录、在文件下面、对他人开放（仅 Unix）；断言日志行和什么都没采集 | 维护者的暂存决定 |
+| `internal/app` `TestLegacyStartImportsWhatUnifiedStaged`（含 PostgreSQL） → `TestStartImportsWhatThePreviousRunStaged` | legacy 启动、没有 stager | 启动带 stager；恢复的断言不变 | 只剩一条路径 |
+| `internal/app` `TestCaptureSettingsWithTheUnavailableManager` | `write_path` 为 `legacy` | `unified` | 字段总是 unified |
+| `tests/integration` `TestAuditPersistsFourEncryptedBodyStages` | Header 和 Trailer 读版本 1 的 `http_headers` 行（默认走 legacy） | 经 `headerblock.Expand` 读版本 2 的块，并要求没有逐值行 | PostgreSQL 上写版本 2（C、D） |
+| `tests/integration` `TestUnifiedParseDoesNotReadBackOnPostgreSQL` | 与 legacy 比读回次数和延迟 | 去掉 legacy 运行 | 只属于 legacy |
+| `internal/config` `TestAuditDefaultsToLegacy` → `TestAuditDefaults`；`TestValidateAudit`；新增 `TestLoadAuditRefusesTheRemovedLegacyWritePath`、`TestLoadAuditRequiresTheStagingDirectory`；`TestExampleConfigsLoad` | 默认 legacy；只有 unified 要求暂存目录 | 默认 unified；两种模式都要求暂存目录；`legacy` 被拒；Windows 上把示例的 Unix 暂存路径换成本机绝对路径 | 配置变更 |
+| `TestMeasureFinish`、`TestMeasureStaging` | 两条路径各量一遍 | 去掉 legacy 一侧，数字见 R.7 | 只剩一条路径 |
+| `internal/proxy` 端到端 | 数 unified 存储上的逐操作写（`legacyOps`）为 0 | 去掉：`audit.Store` 已没有这些方法，由编译器保证 | 接口收窄 |
+
+**待维护者决定。** 启动时暂存目录不可用，启动仍先跑 `RecoverInterruptedAudits`，再让审计不可用（与以前 strict 相同）。带着暂存块中断的 audit 于是不带这些块就被终结；目录修好后，导入发现它们已终结，把文件改名为 `.orphan`（R.3 第 7 条）。要不要把这个检查挪到恢复之前，还没有定。

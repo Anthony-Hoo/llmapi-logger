@@ -2,7 +2,7 @@
 
 ## 1. 目标与边界
 
-parser 在 HTTP 请求完成后异步读取已落盘证据（unified 写入路径下改用采集会话交来的同一份明文，§5.1），生成模型、usage、错误和工具调用数量等窄摘要。实现 `AuditNormalizer` 的协议还会把 provider request/response 拆成可复用的 envelope、context item、response item 和 binary object，并在保存前完成精确重建校验。
+parser 在 HTTP 请求完成后异步读取已落盘证据（条件满足时改用采集会话交来的同一份明文，§5.1），生成模型、usage、错误和工具调用数量等窄摘要。实现 `AuditNormalizer` 的协议还会把 provider request/response 拆成可复用的 envelope、context item、response item 和 binary object，并在保存前完成精确重建校验。
 
 硬性边界：
 
@@ -169,7 +169,7 @@ type Result struct {
 
 ## 5. 队列与 worker
 
-- 一个有界 FIFO（容量 `FinalizeQueueCapacity` = 4096），两种输入共用：`Notify` 和 pending 扫描在队列里已有 100 个作业（`QueueCapacity`，不论作业从哪里来）时拒绝，unified 写入路径的 `Submit`（§5.1）在 4096 个时拒绝。解析顺序就是入队顺序。`/readyz` 的 `parser_queue` 报告这个队列的长度，最多到 4096；
+- 一个有界 FIFO（容量 `FinalizeQueueCapacity` = 4096），两种输入共用：`Notify` 和 pending 扫描在队列里已有 100 个作业（`QueueCapacity`，不论作业从哪里来）时拒绝，`Submit`（§5.1）在 4096 个时拒绝。解析顺序就是入队顺序。`/readyz` 的 `parser_queue` 报告这个队列的长度，最多到 4096；
 - 固定一个 worker，避免多个大 JSON normalizer 同时放大内存；
 - audit 完成后非阻塞 Notify 或 Submit；队列满时 DB 行保持 pending；
 - 每 30 秒扫描 pending；
@@ -177,7 +177,7 @@ type Result struct {
 - claim 使用条件更新，重复通知不会重复处理同一完成状态；
 - parser panic 被 recover，并写稳定 `parser_panic`；
 - normalization 和轮次准备（`NormalizeAudit`、`PrepareWithLookup`）也在 recover 之下（`prepareSafely`）：panic 时什么都不保存，以 `normalize_panic` 记日志并 release，release 计一次失败，所以每次都 panic 的记录在第 5 次后终结为 `parsed_result_save_failed`；
-- 每个出队的作业（`Notify`、扫描、`Submit`，两条写入路径都一样）从读审计行、claim 到保存最多 2 分钟。超时后以 `parse_deadline_exceeded` 记日志，并显式 release：在保存之前到期，或者保存的等待因到期而结束（这时 release 排在那次保存之后执行，保存已提交时 release 不改变任何东西，并按确认丢失的规则记 `backfillUnsure`）；claim 的等待到期时同样 release。期限打断不了不看 context 的计算，它限住的是每次等待存储，并在保存之前检查一次。保存之后的分析不受期限约束；worker 自己停止时仍把 processing 留给启动恢复。
+- 每个出队的作业（`Notify`、扫描、`Submit`）从读审计行、claim 到保存最多 2 分钟。超时后以 `parse_deadline_exceeded` 记日志，并显式 release：在保存之前到期，或者保存的等待因到期而结束（这时 release 排在那次保存之后执行，保存已提交时 release 不改变任何东西，并按确认丢失的规则记 `backfillUnsure`）；claim 的等待到期时同样 release。期限打断不了不看 context 的计算，它限住的是每次等待存储，并在保存之前检查一次。保存之后的分析不受期限约束；worker 自己停止时仍把 processing 留给启动恢复。
 
 保存使用 `SaveParsedAudit` 在一个 writer 操作内原子写入 parsed summary、turn graph、对象、raw retention 和完整性事件；保存点隔离保证它以局部错误（约束冲突、对象身份、turn 图或重建校验失败）失败时不会回滚同批采集；存储级错误仍按 writer 规则整批失败。保存失败后的 release 将失败次数持久化，前四次分别退避 30、60、120、240 秒并回到 pending；扫描和 claim 都检查到期时间，重复通知不能绕过退避，重启也不清空预算。第 5 次失败写入 `parse_status=error` 和 `parsed_results.error_code=parsed_result_save_failed`，保留 full raw，不再自动重试。错误摘要不保存底层错误文本，无法确定 parser 版本时标记为 `unknown`。迟到的 release 不改变已提交的成功结果。
 
@@ -187,14 +187,14 @@ worker 生命周期取消导致的保存中止不计入写入失败预算，也�
 
 ### 5.1 `Submit` 与终结器
 
-unified 写入路径（模块 03 §13.8）在 `CommitAudit` 成功之后调 `Worker.Submit(job)`；`internal/app` 只在 unified 下把它装到审计管理器上，legacy 仍用 `Notify`。终结器就是这个 worker 的 goroutine，多了一种输入，不另起 goroutine：回填水位、`pendingReleases` 等状态只由它访问（`internal/parser/backfill.go`），另起一个会破坏“每条保存为 ok 或 partial 的解析都走到 analyze”这一不变式。
+采集会话（模块 03 §13.8）在 `CommitAudit` 成功之后调 `Worker.Submit(job)`；`internal/app` 总是把它装到审计管理器上（已删去的 legacy 写入路径用的是 `Notify`）。终结器就是这个 worker 的 goroutine，多了一种输入，不另起 goroutine：回填水位、`pendingReleases` 等状态只由它访问（`internal/parser/backfill.go`），另起一个会破坏“每条保存为 ok 或 partial 的解析都走到 analyze”这一不变式。
 
 - **作业。** `parser.FinalizeJob`（即 `internal/parser/handover` 的 `Job`）是已提交 audit 的身份与终态，加可选的明文证据 `Evidence`。没有证据的是 id 作业，处理与 `Notify` 进来的 audit 完全相同，从库里读。会话什么时候只交 id 见模块 03 §13.8：终态被降级、起始行没有入站阶段、有块落过暂存、明文不完整或全局预算不够时。
 - **明文的归属。** `Submit` 接管作业的明文；作业的 `Release` 恰好调用一次：被拒绝时、处理完之后，或 `Close` 时清掉 goroutine 没有处理到的作业时。它清零明文，并把这份明文占的内存预算还给审计管理器。
 - **带证据的作业**（`finalize`）与 `process` 只差两处：不调 `LoadParserAudit`；`Input` 从证据构造（`inputFromEvidence`），不从库里读。claim 保留，因为 `SaveParsedAudit` 只更新 `processing` 的行；解析、normalization、准备、保存和分析是同一段代码（`parseClaimed`）。
 - **从证据构造的 `Input` 就是库里那份。** Body 经同一个 `assembleBody`（§6 的每项检查：seq 与 offset 连续、解码上限、存储长度、行上的 SHA-256 和完整性），块来自会话的内存段；内容头按采集版本取：版本 2 对 Header 字段用 `headerblock.ContentHeaders`，也就是阶段行上两列的取值规则，版本 1 解密已加密的 `content-type`、`content-encoding` 行；白名单 Header 按同样的过滤与排序取，版本 2 过滤字段并清掉其余的值，版本 1 只解密选中的行；状态码取自提交的阶段行。`internal/parser/finalize_equivalence_test.go` 对夹具流量比较两种方式构造的 `Input`。
 - **失败时。** 带证据的作业 panic、超时或保存失败，都按上一节 release，记录保持 pending，失败计数和退避照旧，之后由现有路径从库里解析。`retention_state` 不动，仍是 `pending`，不预先标 `full`。
-- **顺序。** 只有一个 FIFO，id 作业也在其中，所以除了队列满退到扫描的记录以外，解析顺序就是各请求 `CommitAudit` 确认的顺序，与 `Notify` 的保证相同。退到扫描的记录可能被交接在它之后的记录超过，这在 legacy 下同样存在，而且 `Notify` 的上限更低。
+- **顺序。** 只有一个 FIFO，id 作业也在其中，所以除了队列满退到扫描的记录以外，解析顺序就是各请求 `CommitAudit` 确认的顺序，与 `Notify` 的保证相同。退到扫描的记录可能被交接在它之后的记录超过，这在 legacy 写入路径下同样存在，而且 `Notify` 的上限更低。
 
 ## 6. 证据读取
 
@@ -256,7 +256,7 @@ Anthropic Messages 的拆分规则见[模块 07](07-anthropic-protocol-parser.md
 ## 10. 最少测试
 
 - queue 满、pending scan、processing 恢复、panic 隔离、保存失败持久化退避及终态、release 暂时失败后不重启恢复、迟到 release 的幂等性。
-- normalization panic 与作业期限：release 计入失败、第 5 次终结、保存后到期的 release 不改已提交的结果，两条写入路径都覆盖；失败后 `retention_state` 仍是 `pending`。
+- normalization panic 与作业期限：release 计入失败、第 5 次终结、保存后到期的 release 不改已提交的结果，`Notify`、扫描和 `Submit` 的作业都覆盖；失败后 `retention_state` 仍是 `pending`。
 - `Submit`：从证据构造的 `Input` 与读库构造的相同；同一会话紧挨着结束的两轮，前一轮带明文、只交 id 或退到扫描时，后一轮都挂在它下面；明文的预算在作业完成后归还；终态被降级的提交只交 id；经 `Submit` 解析的记录同样进入回填水位；PostgreSQL 上带明文的解析不读任何阶段和块（`tests/integration`）。
 - chunk 顺序、offset、压缩、GCM、SHA-256、gzip ratio 和 64 MiB 限额。
 - OpenAI Chat/Responses/Completions JSON 与 SSE 摘要。

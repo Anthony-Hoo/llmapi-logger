@@ -108,7 +108,7 @@ curl -H 'Authorization: Bearer REPLACE_ME' \
 
 ### 3.2 本地暂存目录（`audit.staging`）
 
-`audit.write_path: unified` 把 Body 留在内存里：请求 Body 读完时、响应 Body 在请求结束时才写库（[模块 03](../features/03-audit-session-and-evidence-capture.md) §13）。单个阶段超过 `audit.memory.stage_bytes`（默认 8 MiB），或全进程预算 `global_bytes` 已满时，超出的部分先封成与 `body_chunks` 相同的密文块，写到 `audit.staging.dir` 下每条 audit 一个文件，提交时再读出写库，提交成功后删除文件。进程在提交前退出时，下次启动先把这些文件里的块导入数据库，再做中断恢复。
+采集会话把 Body 留在内存里：请求 Body 读完时、响应 Body 在请求结束时才写库（[模块 03](../features/03-audit-session-and-evidence-capture.md) §13）。单个阶段超过 `audit.memory.stage_bytes`（默认 8 MiB），或全进程预算 `global_bytes` 已满时，超出的部分先封成与 `body_chunks` 相同的密文块，写到 `audit.staging.dir` 下每条 audit 一个文件，提交时再读出写库，提交成功后删除文件。进程在提交前退出时，下次启动先把这些文件里的块导入数据库，再做中断恢复。
 
 暂存目录里只有密文和块的元数据（阶段、序号、偏移、长度、时间），没有密钥；但它与数据库一样是证据的一部分，备份和权限按审计数据对待。
 
@@ -120,7 +120,7 @@ curl -H 'Authorization: Bearer REPLACE_ME' \
 - 不能放在 `/tmp`：它是 64 MB 的 tmpfs，在内存里，容量不够，重启后清空，崩溃后导入不到任何东西。
 - 不能放在密钥所在的目录 `/data`，也不能包含它或位于其中：配置校验会拒绝。暂存的密文和打开它的密钥不应在同一个卷、同一份备份里。
 
-启动时检查目录：不存在就以 0700 创建；Linux 上要求属主是当前用户，权限不含组和其他用户；还要能在里面创建并删除一个探针文件。检查不通过时，available 模式退回 legacy 写入并告警，日志 `reason` 字段说明原因（`not_directory`、`wrong_owner`、`open_permissions`、`not_writable` 等）；strict 模式下审计不可用，准入回 503。
+启动时检查目录：不存在就以 0700 创建；Linux 上要求属主是当前用户，权限不含组和其他用户；还要能在里面创建并删除一个探针文件。`audit.staging.dir` 必填。检查不通过时，两种模式下审计都不可用（以前 available 模式退回 legacy 写入，这条退路已经没有了）：日志 `audit staging unavailable` 的 `reason` 字段说明原因（`not_directory`、`wrong_owner`、`open_permissions`、`not_writable` 等），available 模式不审计照常转发，strict 模式准入回 503。
 
 `audit.staging.max_bytes`（默认 4 GiB）限制目录里全部文件的大小。写满、磁盘满或写文件出错时，该阶段停止保留后续字节，阶段记为 partial，错误码为 `capture_budget_exhausted`（写错误为 `staging_write_failed`），raw 全部保留，转发不受影响。
 
@@ -128,19 +128,22 @@ curl -H 'Authorization: Bearer REPLACE_ME' \
 
 终结提交最终失败时文件也留在目录里，计入 `max_bytes`。数据库恢复可写之后，writer 的恢复在把这条 audit 以 failed 终结的同一个事务里先写入暂存的块，提交后删除文件；进程在那之前退出时，下次启动照常导入。恢复插入暂存块被拒绝时 audit 照样终结，文件保留，下次启动改名为 `.orphan`（[模块 03](../features/03-audit-session-and-evidence-capture.md) §13.5）。
 
-### 3.3 写入路径的发布与回滚顺序
+### 3.3 升级与回滚
 
-迁移 007 和 `audit.write_path: unified` 分两步发布，因为 PostgreSQL 上一旦写入了采集版本 2 的行，就没有只用 SQL 的回滚办法（[回滚到 schema 版本 6](postgresql-migration.md#回滚到-schema-版本-6)）：
+legacy 写入路径已删去，`audit.write_path` 不再选择任何东西（[模块 01](../features/01-configuration-and-route-boundary.md) §4 第 18 项；设计实施记录 R.8）。升级之前：
 
-1. 部署带迁移 006、007 的版本，配置里不写 `audit:` 段（等于 `write_path: legacy`）。迁移在启动时自动应用，新写入仍是版本 1。这一步可以按迁移文档的各节回滚。
-2. 确认运行正常后，准备暂存卷（3.2），写入 `audit:` 段，设 `write_path: unified` 和 `staging.dir`，重启。启动日志里不应出现 `staging_unavailable`：`available` 模式下暂存不可用会静默退回 legacy，管理页面“系统配置 → 审计写入”显示的是实际使用的写入路径。从这一步起，回滚到不含迁移 007 的版本只能靠此前的备份，并放弃之后的审计数据。
-3. 想退回旧的写法时，把 `write_path` 改回 `legacy` 重启即可：新写入回到版本 1，已写入的版本 2 行照常可读、可校验。保留 `audit.staging.dir`，直到目录里没有 `.stg` 文件为止：配置了目录，legacy 启动也会先导入；去掉配置，残留文件就再也不会导入。
-4. 回滚到更早的二进制：
-   1. 处理暂存目录。等待不会让它变空：`.stg` 文件只在提交得到确认或启动导入时删除，`.orphan`、`.corrupt` 从不自动删除。用 legacy 加原来的 `staging.dir` 启动一次，确认目录里没有 `.stg` 文件；改名保留的文件由运维确认后手动处理（3.2）。
-   2. 停止新版本，做数据库与 `audit.key` 的联合备份。
-   3. 删掉配置文件里的整个 `audit:` 段：旧版本按 `KnownFields` 加载配置，遇到不认识的段会拒绝启动。
-   4. 撤销迁移。这个库从没跑过 unified 时，按 [PostgreSQL 运行与离线迁移](postgresql-migration.md)的回滚各节从新到旧撤销（版本 7、6，再往前按需要）；跑过 unified、已有版本 2 的行时，版本 7 的回滚 SQL 会报错并什么都不改，只能从启用 unified 之前的备份恢复，并放弃之后的审计数据（第 2 步）。
-   5. 启动旧版本。
+1. **必须先准备暂存卷并配置 `audit.staging.dir`**（3.2）。这一项现在两种模式下都必填，没有它配置校验失败，进程拒绝启动。Docker 部署用 `compose.yaml` 的 `audit-staging` 卷和示例配置里的 `audit:` 段。
+2. 配置里有 `write_path: legacy` 的要删掉这一行（或改成 `unified`）：它会被拒绝，错误说明 legacy 写入路径已在这个版本删去。
+3. 以前 available 模式下暂存不可用会退回 legacy 写入；这个退路已经没有了。启动时暂存目录不可用（属主、权限、不是目录、不能写等），两种模式下审计都不可用：日志 `audit staging unavailable`（`error_category=staging_unavailable`，`reason` 说明原因），available 模式不审计照常转发，`/readyz` 降级；strict 模式拒绝白名单请求（503）。所以升级后看一眼启动日志和 `/readyz`。
+4. 上一个版本留下的未终结 audit（legacy 写的采集版本 1）在第一次启动时照常恢复终结；版本 1 的旧行照常读取和校验，不改写。
+
+回滚：没有切回的开关。回滚只能换回上一个版本的二进制，而 PostgreSQL 上这个版本写的是采集版本 2，更早的版本（不含迁移 007 的）读不了这些行，也打不开版本 7 的库：
+
+1. 处理暂存目录。等待不会让它变空：`.stg` 文件只在提交得到确认或启动导入时删除，`.orphan`、`.corrupt` 从不自动删除。用当前版本加原来的 `staging.dir` 启动一次，确认目录里没有 `.stg` 文件；改名保留的文件由运维确认后手动处理（3.2）。
+2. 停止新版本，做数据库与 `audit.key` 的联合备份。
+3. 回到含迁移 007、仍有 legacy 路径的上一个版本时，它能读版本 2 的行，配置里的 `audit:` 段可以保留（去掉 `write_path` 或写 `unified`/`legacy`，那个版本两者都认）。
+4. 回到更早、不含迁移 007 的版本时：删掉配置文件里的整个 `audit:` 段（旧版本按 `KnownFields` 加载配置，遇到不认识的段会拒绝启动），并撤销迁移。库里有版本 2 的行时，版本 7 的回滚 SQL 会报错并什么都不改，只能从写入版本 2 之前的备份恢复，并放弃之后的审计数据（[回滚到 schema 版本 6](postgresql-migration.md#回滚到-schema-版本-6)）。
+5. 启动旧版本。
 
 ## 4. 显式上游代理（Podman/WSL/Clash）
 

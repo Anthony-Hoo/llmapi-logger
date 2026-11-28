@@ -61,7 +61,7 @@ insights:
 | 基于 pi-ai SDK 的框架 | 自动压缩无需设置 | pi-ai / pi-coding-agent 自动压缩请求的系统提示词以 `You are a context summarization assistant.` 开头，默认词表据此把它识别为 `compaction` 附属请求（对任何客户端生效，包括未识别的客户端）；Agent 身份仍按 §6 加 Header |
 | 其他/自研 | 见 §6 | 在每个请求上加 `X-Agent-*` Header；可选按 §6.4 单列为一个客户端 |
 
-这些 Header 由客户端本身发送，代理只读取不改写，原样转发给 NewAPI 与上游。它们与其他 Header 一样只以 AES-256-GCM 密文存储（legacy 写入路径逐个值加密，unified 写入路径在 PostgreSQL 上每条 audit 整块加密，[模块 09](../features/09-security-encryption-and-redaction.md) §5.2），明文列里只有不可反查的 keyed 指纹。
+这些 Header 由客户端本身发送，代理只读取不改写，原样转发给 NewAPI 与上游。它们与其他 Header 一样只以 AES-256-GCM 密文存储（PostgreSQL 上每条 audit 整块加密，SQLite 和已删去的 legacy 写入路径留下的旧记录逐个值加密，[模块 09](../features/09-security-encryption-and-redaction.md) §5.2），明文列里只有不可反查的 keyed 指纹。
 
 ## 6. 自研 Agent 的 Header 约定
 

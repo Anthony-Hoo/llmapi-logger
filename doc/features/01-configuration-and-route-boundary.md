@@ -45,14 +45,13 @@ agent_access:              # 可选，默认关闭（模块 25）；整段可省
   enabled: false
   allow_write: false
   public_url: ""
-audit:                     # 可选，采集写入路径（模块 03 §13）；整段可省略
-  write_path: legacy
+audit:                     # 采集（模块 03 §13）；staging.dir 必填
   commit_retries: 3
   memory:
     stage_bytes: 8388608
     global_bytes: 268435456
   staging:
-    dir: ""
+    dir: /var/lib/llmapi-logger/staging
     max_bytes: 4294967296
 
 interceptors:
@@ -125,24 +124,20 @@ routes:
 15. interceptor id 唯一，type 已注册，type-specific config 可解析；未知 type 启动失败。
 16. route id 唯一，method/path/parser 非空，引用的 interceptor 必须存在。
 17. match 只能是 exact 或 template，规则不得重叠。
-18. `audit` 段选择采集写入路径（模块 03 §13），整段可省略；加载从默认值开始解码，只写部分字段时其余取默认（`internal/config/audit.go`）：
+18. `audit` 段是采集会话的参数（模块 03 §13）；`staging.dir` 必填，其余可省略。加载从默认值开始解码，只写部分字段时其余取默认（`internal/config/audit.go`）：
 
     | 键 | 默认 | 校验 |
     | --- | --- | --- |
-    | `write_path` | `legacy` | 只能是 `legacy` 或 `unified` |
-    | `commit_retries` | 3 | 0–5；unified 的 `CommitAudit` 失败后重试几次，管理页面保存的值覆盖它（模块 10 §11）；legacy 不用 |
+    | `write_path` | `unified` | 不选择任何东西，可以省略或写 `unified`；写 `legacy` 时校验失败，错误说明 legacy 写入路径已在这个版本删去；其他值也拒绝 |
+    | `commit_retries` | 3 | 0–5；`CommitAudit` 失败后重试几次，管理页面保存的值覆盖它（模块 10 §11） |
     | `memory.stage_bytes` | 8 MiB（8388608） | 不小于 1 MiB（1048576），不大于 `memory.global_bytes` |
     | `memory.global_bytes` | 256 MiB（268435456） | 只受上一行约束 |
-    | `staging.dir` | 空 | unified 时必填；非空时必须是绝对路径，不能是 `key_path` 所在的目录，也不能包含它或位于其中 |
+    | `staging.dir` | 空 | 两种模式下都必填；必须是绝对路径，不能是 `key_path` 所在的目录，也不能包含它或位于其中 |
     | `staging.max_bytes` | 4 GiB（4294967296） | 必须为正；限制暂存目录里全部普通文件的大小，包括导入时改名保留的文件 |
 
-    `staging.dir` 只在启动时检查（`internal/audit/staging` 的 `PrepareDirectory`），validate-config 不检查：不存在就以 0700 创建；Unix 上要求属主是进程用户、组和其他用户没有任何权限，Windows 上交给目录 ACL；还要能在里面创建并删除一个探针文件。检查不通过时：
+    `staging.dir` 只在启动时检查（`internal/audit/staging` 的 `PrepareDirectory`），validate-config 不检查：不存在就以 0700 创建；Unix 上要求属主是进程用户、组和其他用户没有任何权限，Windows 上交给目录 ACL；还要能在里面创建并删除一个探针文件。检查不通过（或目录没有配置）时，两种模式下审计都不可用，与此前 strict 的处理相同：关闭存储，记一条 `audit staging unavailable`（带 `mode`、`error_category=staging_unavailable` 和 `reason`：`not_absolute`、`create_failed`、`inspect_failed`、`not_directory`、`wrong_owner`、`open_permissions`、`not_writable`，没有配置时为 `staging_unavailable`；不带路径和错误原文），以不可用的审计管理器运行：available 模式照常转发、不建 audit，strict 模式在准入时回 `503`。没有暂存就会丢掉超出内存预算的 Body，又没有别的写入路径可退，所以不提供不带暂存运行的方式；以前 available 模式退回 legacy 写入的做法已经没有了。这个判断在启动导入和 `RecoverInterruptedAudits` 之后做，位置与以前 strict 相同。
 
-    - `unified` 且 `available`：退回 legacy 写入，日志 `audit staging unavailable, using the legacy write path`；
-    - `unified` 且 `strict`：审计不可用，白名单请求在准入时回 `503`，日志 `audit staging unavailable`；
-    - `legacy`：照常运行，日志 `audit staging directory unusable, nothing imported`。
-
-    三条日志都带 `error_category=staging_unavailable` 和 `reason`（`not_absolute`、`create_failed`、`inspect_failed`、`not_directory`、`wrong_owner`、`open_permissions`、`not_writable`）。只要配置了 `staging.dir` 且目录可用，不论 `write_path`，启动都先导入上次留下的暂存文件（模块 03 §13.6）；导入时存储报错或有文件读不出来，审计在两种模式下都不可用（日志 `audit staging import failed`）。所以切回 legacy 之后要保留这一项，直到目录里没有 `.stg` 文件。配置加载是严格模式，不认识这一段的旧版本会拒绝启动：升级时先部署新版本再写这一段，回滚前先删掉整段（[部署说明](../deployment/README.md) 3.3）。
+    目录可用时，启动先导入上次留下的暂存文件（模块 03 §13.6）；导入时存储报错或有文件读不出来，审计在两种模式下都不可用（日志 `audit staging import failed`）。配置加载是严格模式，不认识这一段的旧版本会拒绝启动；这个版本又要求这一段，所以升级前先准备暂存卷并写好 `staging.dir`（[部署说明](../deployment/README.md) 3.3）。
 
 validate-config 只检查配置，不要求 DB 或 NewAPI 在线。
 

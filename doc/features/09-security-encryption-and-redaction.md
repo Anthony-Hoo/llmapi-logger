@@ -83,7 +83,7 @@ JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`
 
 ### 5.2 Header 块与入站 User-Agent
 
-`internal/headerblock` 实现第 3 阶段设计（`doc/design/issue-59-stage3-write-path.md` C.3 到 C.8）的存储格式。PostgreSQL 上 `audit.write_path: unified` 的新记录按它写（`capture_version=2`，迁移 007）；legacy 写入路径和 SQLite 存储照旧逐值加密写 `http_headers` 行（`capture_version=1`）。两种记录并存，读取方一律按 `capture_version` 分派。
+`internal/headerblock` 实现第 3 阶段设计（`doc/design/issue-59-stage3-write-path.md` C.3 到 C.8）的存储格式。PostgreSQL 上的新记录按它写（`capture_version=2`，迁移 007）；SQLite 存储照旧逐值加密写 `http_headers` 行（`capture_version=1`），已删去的 legacy 写入路径留下的旧记录也是版本 1。两种记录并存，读取方一律按 `capture_version` 分派。
 
 - **块明文：** `"LLHB" 0x01`，之后每个已写入的阶段一段：阶段码（1 到 4，按阶段顺序严格递增），header 段，trailer 段。每段是 `u32be(名称数)`，每个名称是 `u32be(长度) 名称 u32be(值数) (u32be(长度) 值)+`，整数都是大端。名称按字节序严格递增，值数至少为 1，明文不超过 64 MiB。解码逐条校验这些规则和长度，不允许尾随字节，所以一段明文只有一种解码。
 - **存储：** 明文经 `bodycodec` 按 `application/x-llmapi-header-block` 判定是否 gzip，再 AES-GCM 加密，存 `compression`、`plaintext_length` 和密文三项。读取时依次认证解密、按 `plaintext_length` 解压核对长度、严格解码。
@@ -115,7 +115,7 @@ JSON 文本不可能以 `0x1f` 开头，两种形式不会混淆。写入端（`
 
 ### 5.4 本地暂存文件
 
-unified 写入路径把超出内存预算的 Body 块写到 `audit.staging.dir`（模块 03 §13.4）。文件里只有密文和块的元数据，不加任何新的密钥或密码学结构：
+采集会话把超出内存预算的 Body 块写到 `audit.staging.dir`（模块 03 §13.4）。文件里只有密文和块的元数据，不加任何新的密钥或密码学结构：
 
 - 每个块就是 `body_chunks.data_enc` 那份密文，AAD 同上表的 raw Body chunk v2，所以可以原样插入库里；
 - 明文的元数据是文件头里的 audit id，以及每块的阶段码、seq、offset、明文长度、编码长度、观察时间和压缩方式，与库里同一行的非密文列相同；
@@ -172,7 +172,7 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 - 列表只定向解密入站 User-Agent；不读取其他 Header、Request-URI、Body 或 content objects。版本 2 的行直接解密列表查询已经带回的 `user_agent_enc`，版本 1 的行照旧每行查一次 `http_headers`。
 - 详情在鉴权后解密 Request-URI、Header/Trailer、窄 parsed result 和 verified turn 所需对象。两个版本都经 `headerblock.Expand` 得到同一个扁平列表，Web、Agent 门面的凭据掩码和导出看到的完全相同。
 - parser 读白名单内的入站 Header（洞察和项目标识用）时，版本 1 在 SQL 里按名称过滤、只解密名单内的值；版本 2 的 Header 是一段密文，parser 在进程内解密整块，按白名单过滤后立即清掉其余的值。这是维护者接受的明文边界变化（第 3 阶段设计决定 2）：这是内网的内部工具，parser 进程本来就持有主密钥。parser 判断内容类型不打开块，读阶段行上的两个明文列。
-- unified 写入路径的会话在内存里持有明文，比 legacy 久：Body 明文在单阶段和全局预算之内，从观察到它直到写库，以及交给 parser 的那一份（模块 03 §13.4、§13.8）；版本 2 的 Header 字段从阶段开始深拷贝，直到 `CommitAudit` 得到应答后清零。版本 2 的交接作业还带着两个接收阶段的 Header 字段明文（凭据类 Header 也在其中），在 parser 内存里直到作业的 `Release`；版本 1 的作业带的是密文行。这些明文都只在进程内存里，不写日志、不落盘；超出预算的部分落暂存时已经加密（§5.4）。与压缩器的私有缓冲一样，释放后的内存不声称安全擦除。
+- 采集会话在内存里持有明文，比已删去的 legacy 写入路径久：Body 明文在单阶段和全局预算之内，从观察到它直到写库，以及交给 parser 的那一份（模块 03 §13.4、§13.8）；版本 2 的 Header 字段从阶段开始深拷贝，直到 `CommitAudit` 得到应答后清零。版本 2 的交接作业还带着两个接收阶段的 Header 字段明文（凭据类 Header 也在其中），在 parser 内存里直到作业的 `Release`；版本 1 的作业带的是密文行。这些明文都只在进程内存里，不写日志、不落盘；超出预算的部分落暂存时已经加密（§5.4）。与压缩器的私有缓冲一样，释放后的内存不声称安全擦除。
 - OpenAI 与 Anthropic verified conversation 从对象重建；没有 normalizer 或异常记录可以使用 `parsed_json_enc` 内的加密回退 conversation。
 - raw API 只对 `retention_state=full` 开放；metadata 返回 `410 raw_not_retained`。
 - reconstructed API 返回 verified provider JSON；timeline API 返回认证后的逻辑 SSE 时间点。
@@ -190,7 +190,7 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 
 `forward_status = 'interrupted'` 只由启动恢复（`RecoverInterruptedAudits`）写入，会话的终结从不使用它；`capture_status` 为 `partial` 时 `error_code` 恒为 `process_exit`，而失败的 audit 保留自己的错误码，所以取 `forward_status` 作为标记，两种情形都能覆盖。
 
-这两种 audit 照常可读，与 legacy 写入路径上同样的写失败一致（`headerblock.Expand` 是唯一的判定处，详情、Agent 门面、导出和 parser 的白名单读取都经过它）：
+这两种 audit 照常可读，与 legacy 写入路径上同样的写失败时一致（`headerblock.Expand` 是唯一的判定处，详情、Agent 门面、导出和 parser 的白名单读取都经过它）：
 
 - 有阶段行、块里没有它的段，或者根本没有块：这个阶段的 Header 不显示，等同 legacy 上 Header 写失败时没有行。
 - 块里有段、却没有阶段行：照常显示。legacy 在这种情形下没有 Header 行，只是因为它的 Header 写依赖阶段行；块用这条 audit 的 AAD 认证过，又被签名的摘要覆盖，是已存且真实的证据，隐藏它没有理由。

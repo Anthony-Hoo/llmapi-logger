@@ -178,12 +178,12 @@ fake upstream（`protofixture.Upstream`）是一个 `http.Handler`：客户端�
 
 写入路径参数（设计 `issue-59-stage3-write-path.md` I.6）：
 
-- `--write-path legacy|unified`：即 `audit.write_path`，默认 legacy。
+- `--write-path unified`：只接受 `unified`，也是默认值；legacy 写入路径已删去，`--write-path legacy` 被拒绝，提示用提交 `b807047` 构建的二进制（最后一个同时有两条路径的版本）。
 - `--stage-bytes`：即 `audit.memory.stage_bytes`，0 取默认 8 MiB，最小 1 MiB，不超过 `audit.memory.global_bytes`（默认 256 MiB）。
-- `--staging-dir`：即 `audit.staging.dir`，必须是绝对路径。unified 不给时，工具在系统临时目录里新建一个（与密钥目录并列，不在其中），运行结束、应用停止之后删除；只删这一个目录。给了就原样使用，不删。
+- `--staging-dir`：即 `audit.staging.dir`，必须是绝对路径。不给时，工具在系统临时目录里新建一个（与密钥目录并列，不在其中），运行结束、应用停止之后删除；只删这一个目录。给了就原样使用，不删。
 - `--count-statements`：默认开，见下文。
 
-结果里的写入路径取自运行中的应用（`GET /api/v1/settings/audit-capture` 的 `write_path`，即 manager 实际使用的路径），不取参数。暂存目录不可用时应用会退回 legacy 并告警，这时实际路径与请求不符，`run` 在发送流量之前失败退出，不写结果文件，所以退回的运行不会被标成 unified。
+结果里的写入路径取自运行中的应用（`GET /api/v1/settings/audit-capture` 的 `write_path`，现在总是 `unified`），与请求不符时 `run` 在发送流量之前失败退出。结果文件照旧带写入路径一节，所以 `compare` 仍能读第 3 阶段 A/B 里 legacy 一侧的结果。暂存目录不可用时应用的审计不可用（模块 01 §4 第 18 项），`run` 不会得到可用的结果。
 
 PostgreSQL 的事务计数只到数据库一级，没有按会话的提交数（PostgreSQL 18 按会话只有 WAL 和 IO），存储也不对外暴露 writer 的批次数。所以 `--count-statements` 让应用的数据库连接经过工具进程内的一个协议中继：字节原样转发，中继只读消息头、Parse 与 Query 里的 SQL 文本和 CommandComplete 的标签，按连接计数。
 
@@ -273,6 +273,8 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" `
 
 ### 9.5 写入路径 A/B
 
+legacy 写入路径已删去（设计实施记录 R.8）。本节的 A/B 只能用提交 `b807047` 构建的二进制重现 legacy 一侧：那是第 3 阶段 A/B（R.7）用的二进制，`--write-path legacy` 只在它上面有效；当前版本的 `audit-bench` 只跑 unified，它的结果可以与那个二进制得出的 legacy 结果 `compare`。下面的步骤按当时的写法保留，`--write-path legacy` 的运行要换成那个二进制。
+
 工作负载要让待解析积压保持在 100 以内（附录 B.2、I.6）。不加新参数，用现有的上游首字节延迟控制节奏：
 
 | 档 | 参数 | 并发 | 说明 |
@@ -296,4 +298,4 @@ podman run --rm --network container:<pg-container> -v "<scratch>:/t" -w /t -e "A
 podman run --rm -v "<scratch>:/t" <go-image> sh -c "/t/audit-bench compare /t/heavy-legacy.json /t/heavy-unified.json; /t/audit-bench compare /t/heavy-legacy-lat.json /t/heavy-unified-lat.json"
 ~~~
 
-small 档把 `--profile heavy --upstream-first-byte 400ms` 换成 `--profile small --upstream-first-byte 300ms`。unified 不给 `--staging-dir` 时用工具自己的临时目录。默认 8 MiB 的 stage 预算下，heavy 档约 1 MB 的 Body 不会落暂存，暂存计数是 0；要看暂存的代价，另加 `--stage-bytes 1048576 --item-bytes 9200`（约 2 MB 的请求），这是另一个工作负载，不与上面的运行比较。
+small 档把 `--profile heavy --upstream-first-byte 400ms` 换成 `--profile small --upstream-first-byte 300ms`。不给 `--staging-dir` 时用工具自己的临时目录。默认 8 MiB 的 stage 预算下，heavy 档约 1 MB 的 Body 不会落暂存，暂存计数是 0；要看暂存的代价，另加 `--stage-bytes 1048576 --item-bytes 9200`（约 2 MB 的请求），这是另一个工作负载，不与上面的运行比较。

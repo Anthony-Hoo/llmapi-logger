@@ -862,7 +862,7 @@
 | `GET`、`POST`、`DELETE /api/v1/session` | 网页的登录、注销与身份；命令行有自己的 `login`、`logout`、`whoami` |
 | `GET /`、`GET /ui`、`GET /ui/*` | 静态页面 |
 | `/api/v1/agent-access/*` | 本模块为网页新增的接口，供授权页与接入页使用 |
-| `GET`、`PUT`、`DELETE /api/v1/settings/audit-capture` | 采集写入的运行参数（unified 写入路径终结提交的重试次数，模块 10 §11），只在管理界面修改，不扩大门面的合同 |
+| `GET`、`PUT`、`DELETE /api/v1/settings/audit-capture` | 采集写入的运行参数（采集终结提交的重试次数，模块 10 §11），只在管理界面修改，不扩大门面的合同 |
 
 读取上门面比网页少的，除了上面这些例外，只有一处：凭据的值（§4.3.2）。
 
