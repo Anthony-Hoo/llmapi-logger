@@ -134,7 +134,7 @@ legacy 写入路径已删去，`audit.write_path` 不再选择任何东西（[�
 
 1. **必须先准备暂存卷并配置 `audit.staging.dir`**（3.2）。这一项现在两种模式下都必填，没有它配置校验失败，进程拒绝启动。Docker 部署用 `compose.yaml` 的 `audit-staging` 卷和示例配置里的 `audit:` 段。
 2. 配置里有 `write_path: legacy` 的要删掉这一行（或改成 `unified`）：它会被拒绝，错误说明 legacy 写入路径已在这个版本删去。
-3. 以前 available 模式下暂存不可用会退回 legacy 写入；这个退路已经没有了。启动时暂存目录不可用（属主、权限、不是目录、不能写等），两种模式下审计都不可用：日志 `audit staging unavailable`（`error_category=staging_unavailable`，`reason` 说明原因），available 模式不审计照常转发，`/readyz` 降级；strict 模式拒绝白名单请求（503）。所以升级后看一眼启动日志和 `/readyz`。
+3. 以前 available 模式下暂存不可用会退回 legacy 写入；这个退路已经没有了。启动时暂存目录不可用（属主、权限、不是目录、不能写等），两种模式下审计都不可用：日志 `audit staging unavailable`（`error_category=staging_unavailable`，`reason` 说明原因），available 模式不审计照常转发，`/readyz` 降级；strict 模式拒绝白名单请求（503）。两种模式下审计存储都已关闭，管理端的查询、导出和 Agent 门面也读不到已有的记录，直到修好目录后重启。所以升级后看一眼启动日志和 `/readyz`。
 4. 上一个版本留下的未终结 audit（legacy 写的采集版本 1）在第一次启动时照常恢复终结；版本 1 的旧行照常读取和校验，不改写。
 
 回滚：没有切回的开关。回滚只能换回上一个版本的二进制，而 PostgreSQL 上这个版本写的是采集版本 2，更早的版本（不含迁移 007 的）读不了这些行，也打不开版本 7 的库：

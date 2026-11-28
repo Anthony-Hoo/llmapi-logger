@@ -53,8 +53,7 @@ type ImportReport struct {
 
 // Import puts every staging file in the directory back into the store (F.7).
 // It runs at start-up, before RecoverInterruptedAudits and before any chunk
-// is staged, whatever the write path: a file left by a unified run is
-// imported by a legacy run too. Each file is handled on its own:
+// is staged. Each file is handled on its own:
 //
 //   - audit finalized with every chunk stored (stopped after its commit, or
 //     after recovery stored the chunks of a failed commit, before cleanup):
