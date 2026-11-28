@@ -931,8 +931,13 @@ func TestPostgresArchiveRemovalWaitsForTheCurrentCutoff(t *testing.T) {
 	t.Parallel()
 	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIResponses}, 1)
+	ended := time.Now().UnixNano()
+	if _, err := env.db.Exec(`INSERT INTO audit_gaps (started_at_ns, ended_at_ns, reason, request_count, detail, created_at_ns)
+VALUES ($1, $2, 'queue_full', 1, '', $2)`, ended-1000, ended); err != nil {
+		t.Fatal(err)
+	}
 	env.due()
-	if result := env.mustRun(); result.Counts.ExportedAudits != int64(env.sent) {
+	if result := env.mustRun(); result.Counts.ExportedAudits != int64(env.sent) || result.ExportedGaps != 1 {
 		t.Fatalf("export_only run %+v", result)
 	}
 	if err := env.app.Close(); err != nil {
@@ -944,13 +949,14 @@ func TestPostgresArchiveRemovalWaitsForTheCurrentCutoff(t *testing.T) {
 	env.logs = &lockedBuffer{}
 	env.start()
 	kept := env.mustRun()
-	if kept.Counts.ExportedAudits != 0 || kept.Removal.Removed != 0 || env.tableCounts()["audit_records"] != int64(env.sent) {
+	if kept.Counts.ExportedAudits != 0 || kept.Removal.Removed != 0 || kept.Removal.RemovedGaps != 0 ||
+		env.tableCounts()["audit_records"] != int64(env.sent) || env.tableCounts()["audit_gaps"] != 1 {
 		t.Fatalf("run under the raised retention %+v, %d audits hot", kept, env.tableCounts()["audit_records"])
 	}
 
 	env.offset.Store(int64(31 * 24 * time.Hour))
 	due := env.mustRun()
-	if due.Removal.Removed != int64(env.sent) || env.tableCounts()["audit_records"] != 0 {
+	if due.Removal.Removed != int64(env.sent) || due.Removal.RemovedGaps != 1 || env.tableCounts()["audit_records"] != 0 || env.tableCounts()["audit_gaps"] != 0 {
 		t.Fatalf("run once due %+v, %d audits hot", due, env.tableCounts()["audit_records"])
 	}
 }
