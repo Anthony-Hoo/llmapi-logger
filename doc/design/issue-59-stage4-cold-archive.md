@@ -1648,6 +1648,42 @@ P4：
 - **来源阶段的解析在存储里。** `StreamBodyChunks` 读的是 `body_streams.source_stage` 的块；`QueryStreamTimeline` 的时间线和 `Stage` 取自来源阶段，`ObservedLength` 取自所选阶段自己的行。读取工具要照做。
 - **版本 1 的 User-Agent 顺序**来自 `QueryRequestHeaderEvidence` 返回行的顺序，`BuildSummary` 要求传入的值已经是这个顺序。
 
+### R.3 密钥与分帧加密（O.1 第 2、3 个提交）
+
+实施时定下、格式文档要写进去的细节：
+
+1. **`SignManifest` 不加域字符串**，对传入的字节直接做 HMAC。清单的域字符串（F.2）由 `internal/archive` 的清单编码加在 MAC 输入的最前面，只加一次。密钥指纹与清单 MAC 共用签名密钥，靠这个前缀区分。
+2. **`CredentialFingerprint` 对空值照常给出 32 字节的指纹**（D.4 没有特例）；现有的 `CredentialFingerprinter` 对空输入返回空。
+3. **加密文件的布局**（`internal/archive/stream`）：
+   - 文件头 40 字节：`4C 4C 41 52`（“LLAR”）、流格式版本 `01`、帧大小的对数 `10`、两个保留字节 `00 00`、32 字节随机盐。流格式版本与归档格式版本各自独立。
+   - 文件密钥：`HMAC-SHA-256(K_enc, "llmapi-logger/archive-file-key/v1\x00" ‖ 文件头的 40 字节)`。
+   - 第 i 帧的 nonce 12 字节：三个 `00`、8 字节大端的帧序号、末帧为 `01` 否则 `00`。AAD 为空。
+   - 明文按 65,536 字节切帧，每帧密文后接 16 字节认证标签；没有长度字段，读到文件末尾的那一帧就是末帧。明文为空时文件是文件头加一个 16 字节的末帧。
+4. **规范性**：其他帧之后的空末帧被拒绝（写入方从不产生），所以每段明文只有一种编码。
+5. **错误**：文件头不对是格式错误，文件头不全或末帧不足 16 字节是截断，其余（在帧边界处截断、追加字节、换盐、错误密钥）都表现为认证失败。追加在末帧之后的字节没有单独的错误。调用方把任何错误都当作整个文件作废。
+6. **向量**在 `internal/archive/stream/testdata/vectors.json`；密钥派生的向量和 0、1 字节的完整密文用仓库之外的实现独立算过，结果相同。
+
+### R.4 格式核心（O.1 第 5 个提交）
+
+1. **记录摘要不能只凭一行增量形式的行算出来。** E.2 覆盖物化后的请求引用，而增量形式的行只有操作（C.4）。实现保持 E.2 的字节不变：读取方先用同一分段里排在前面的父行把轮次物化（`Turn.Materialize`），再算摘要；没有物化时 `Digest` 返回 `ErrNotMaterialized`。E.2 里“只凭这一行就能重算”的说法对增量形式不成立。
+2. **增量操作的应用移到了 `internal/auditmodel`**（`ApplyImmutableDelta` 等），两个存储改为调用它，行为不变。
+3. **行的形状**：
+   - `audit_records` 的 29 列全部在行里；子表省去 `audit_id`，轮次的子表省去 `turn_id`，列清单把它们映射到行首的字段；
+   - `ended_at_ns` 不会是 `null`（只归档已终结的记录）；
+   - 库里取 0/1 的列写成字符串 `"0"`、`"1"`；JSON 布尔值只用于 `has_query`、`has_equals`、`block_present`、`encrypted`；
+   - 投影后的值要么是 `{value}`，要么是 `{value_omitted, length, value_fpr}`；
+   - `user_agent` 是 `null` 或非空列表；
+   - `op_index`、`ordinal` 严格递增，不要求连续；
+   - `request_context` 只有 `{form, ops}` 和 `{form, refs}` 两种。
+4. **解码的严格程度**：未知、缺失、重复的键都拒绝；整数、十六进制、base64、浮点数只接受规范写法；合法 UTF-8 的文本不允许写成 `{"b64"}`；行首字段和列表顺序在解码时核对。没有拦住的：孤立的代理项转义（`\ud800`）会被解成 U+FFFD。
+5. **`parsed_json` 的拆分**：严格大于 1 MiB 才拆，分段从 0 编号；切点落在 UTF-8 序列中间时最多前移 3 字节。
+6. **NULL**：内存模型里 nil 表示 NULL，所以导出时“存在但为空”的值要给非 nil 的空切片；空的 `parsed_json_enc` 按 NULL 导出（查询层把非 nil 的空值当完整性错误）。
+7. **凭据投影**：名称和值各自用 `url.QueryUnescape` 解码，失败就用原始字节；`;` 和 `#` 不特殊处理；`value_fpr` 和 `length` 按解码后的值算；空的凭据值长度为 0，照常有指纹。已知 Key 的核对给出两个候选（Key 本身，和 `Bearer ` 加 Key）；第三种（归一化后与 `api_key_fpr` 比）要用 `security` 里另一把指纹密钥。
+8. **版本 1 的列表 User-Agent 顺序**：按名称小写、`value_index`、名称排序（名称只有大小写不同时，SQL 的顺序没有定义）。
+9. **清单**：`archive` 在 MAC 输入最前面加一次 `…/archive-manifest/v0\x00`；`source_schema_version` 是十进制文本，分段和运行的 id 是 32 位小写十六进制；会话包恰好一个会话，桶包有协议、没有 gap 范围，gap 包协议为 `null`、成员为空；文件角色只有 `lines` 和 `objects`。
+10. **列清单的类别**：摘要里有其明文哈希的密文列（`body_chunks.data_enc`、`timeline_enc`、`parsed_json_enc`、`value_enc`、`identity_enc`）算“进摘要”；内容对象与二进制对象的 `data_enc`、`created_at_ns`，`turn_context_ops` 的全部列，`audit_gaps` 的全部列算“归档、不进摘要”。主机测试直接解析迁移 SQL 来核对列清单，迁移 008 落地后同一个测试会覆盖它。
+11. **没有独立核对的部分**：整条记录的摘要向量只与编码器自己的输出比过；手写的 E.2 字节序列独立核对了 `audit_records`（含 Request-URI 投影）、阶段和 Header 三段，其余九段在其中只以空或 NULL 出现。
+
 ### R.2 `HasAudits`（O.1 第 1 个提交）
 
 两个存储的 `HasAudits` 现在是“`audit_records` 或 `integrity_events` 有行”。目录表加进这个判断留给迁移 008 的提交。新增的启动测试 `TestStartupDoesNotReplaceMissingKeyWhileIntegrityEventsRemain` 是仓库里第一个“密钥文件缺失”的启动测试；把查询改回旧的写法时，它会看到启动新建了密钥并报 `integrity_unavailable`。
