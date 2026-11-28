@@ -996,7 +996,7 @@ archive:
 
 任何一条不满足而密钥文件缺失时，不新建密钥，审计按密钥不可用处理（available 不审计照常转发，strict 准入回 `503`）。因为归档目录里有清单而拒绝时，日志 `audit key unavailable` 另带 `reason=archive_manifests_present`。这一条防的是数据库整个丢失、只剩归档目录时，新密钥让旧包全部打不开。
 
-归档 runner 组装时检查归档目录，规则与暂存目录相同：不存在就以 0700 创建；Unix 上要求属主是进程用户、组和其他用户没有任何权限；要能在里面创建并删除一个探针文件。检查不过时 runner 不组装，日志 `archive runner unavailable`（`error_category=archive_unavailable`，`reason=dir_<码>`，码为 `not_absolute`、`create_failed`、`inspect_failed`、`not_directory`、`wrong_owner`、`open_permissions`、`not_writable`），代理和审计照常工作，retention 的直接删除仍然不组装。
+归档 runner 组装时检查归档目录，规则与暂存目录相同：不存在就以 0700 创建；Unix 上要求属主是进程用户、组和其他用户没有任何权限；要能在里面创建并删除一个探针文件。检查不过时 runner 不组装，日志 `archive runner unavailable`（`error_category=archive_unavailable`，`reason=dir_<码>`，码为 `not_absolute`、`create_failed`、`inspect_failed`、`not_directory`、`wrong_owner`、`open_permissions`、`not_writable`），代理和审计照常工作，retention 的直接删除仍然不组装。容器镜像像暂存目录一样预建了 `/archive`（属主是运行用户 65532，权限 0700），`compose.yaml` 把命名卷 `audit-archive` 挂在那里，新建的卷继承这个属主和权限，开启归档时检查直接通过；改挂宿主目录时要自己设好属主和权限（[部署说明](../deployment/README.md) 3.4）。
 
 ## 18. 一次运行
 

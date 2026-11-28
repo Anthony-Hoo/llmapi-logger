@@ -1009,4 +1009,4 @@ Responses 的单轮数字里包含回显的 `instructions` 和 `tools`，之前�
 - **格式定为版本 1**，以及版本 1 的冻结夹具包（设计 N.1 的 `testdata/frozen/`，版本 0 的也还没有）。
 - **集成测试**：经真实代理写入的四协议全部夹具逐条读出等价（J.3），同样流量下扫描归档盘（N.1）。现有的读出等价与扫描用合成记录或少量真实轮次。
 - **阈值**：`conversation_min_turns`、`conversation_min_bytes` 与 5.4 的膨胀比要靠 `audit-bench dist` 在真实库上的分布来定，还没有量过。
-- **容器镜像没有预建 `/archive`**：`compose.yaml` 的归档挂载只能注释着，开启要挂一个属主正确的宿主目录（部署说明 3.4）。
+- **容器镜像的 `/archive`**（已做，不再待定）：镜像像 `/staging` 一样预建 `/archive`（属主 65532、权限 0700），`compose.yaml` 挂命名卷 `audit-archive:/archive`（部署说明 3.4）。

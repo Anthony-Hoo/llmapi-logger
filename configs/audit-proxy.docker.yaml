@@ -41,9 +41,10 @@ audit:
     max_bytes: 4294967296
 # Cold archive (doc/features/26-cold-archive.md); see audit-proxy.example.yaml.
 # Off by default. This version only exports: with a mode other than off,
-# retention stops deleting and the hot database keeps growing. Uncomment the
-# /archive mount in compose.yaml too; the directory must be owned by the
-# container user (65532) with mode 0700.
+# retention stops deleting and the hot database keeps growing. compose.yaml
+# mounts the audit-archive volume at /archive; the image creates it owned by
+# the container user (65532) with mode 0700. A host directory mounted there
+# instead must have the same owner and mode.
 # archive:
 #   mode: "off"
 #   dir: /archive

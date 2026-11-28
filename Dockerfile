@@ -29,7 +29,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" -o /out/audit-proxy ./cmd/audit-proxy && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/audit-import ./cmd/audit-import && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/audit-archive ./cmd/audit-archive && \
-    mkdir -p /out/rootfs/data /out/rootfs/staging /out/rootfs/etc/audit-proxy
+    mkdir -p /out/rootfs/data /out/rootfs/etc/audit-proxy /out/private/staging /out/private/archive && \
+    chmod 0700 /out/private/staging /out/private/archive
 
 
 # Agent access Skill packages (doc/features/25-agent-access-contract.md
@@ -49,10 +50,14 @@ COPY --from=go-build /out/audit-import /audit-import
 COPY --from=go-build /out/audit-archive /audit-archive
 COPY --from=agent-packages /out/agent-packages /agent-packages
 COPY --from=go-build --chown=65532:65532 /out/rootfs/data /data
-# audit.staging.dir: the start-up check refuses a directory open to group or
-# others, so it is created 0700 for the non-root user. A new named volume
-# mounted here copies this owner and mode.
-COPY --from=go-build --chown=65532:65532 --chmod=0700 /out/rootfs/staging /staging
+# audit.staging.dir and archive.dir (cold archive, off by default): the
+# start-up check refuses a directory open to group or others, so /staging and
+# /archive are created 0700 for the non-root user. They are copied as entries
+# of their parent so the mode is kept: COPY --chmod on a directory source
+# applies to its contents, and podman build then leaves the destination 0755.
+# A new named volume mounted here copies this owner and mode; a host directory
+# or a volume that already exists keeps its own.
+COPY --from=go-build --chown=65532:65532 /out/private/ /
 COPY --from=go-build --chown=65532:65532 /out/rootfs/etc/audit-proxy /etc/audit-proxy
 
 USER 65532:65532
