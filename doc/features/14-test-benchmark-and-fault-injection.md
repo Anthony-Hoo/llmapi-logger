@@ -318,3 +318,32 @@ small 档把 `--profile heavy --upstream-first-byte 400ms` 换成 `--profile sma
 | `internal/app`（`archive_postgres_test.go`） | 在真实存储上跑整条运行：导出全部到期 audit、篡改的 audit 留在热库、抽样时记录已改变按 `stale` 处理、一条成员读不回来时只有它留在热库而其余照常定稿、对账收尾中断的运行、磁盘满时什么都不发布、启动护栏 | 是 |
 
 依赖 PostgreSQL 的测试读 `TEST_DATABASE_URL`，没有时跳过，所以主机上 `go test ./...` 通过不代表它们跑过；验收报告要分别写明。设计 J.3 与 N.1 要求的“经真实代理写入的四协议全部夹具，逐条读出等价”和“同样流量下扫描归档盘”在 `tests/integration` 里还没有对应的测试：上面的读出等价与扫描用的是合成记录或少量真实轮次，运行时的抽样比对（每个包至少一条）是现在在真实流量上检查读出等价的地方。冻结夹具包见上面 `internal/archivecli` 一行（`internal/archive/testdata/frozen/v1/`，模块 26 §2）。
+
+## 11. 慢机器与 race 构建
+
+CI 在 GitHub 托管的 runner 上跑 `go test -race ./...`：开了竞态检测，代码比本机普通运行慢 6 到 10 倍，runner 之间还差 1.5 倍。测试里等管线（audit 定稿、解析完、分析完、交接、归档运行结束、日志出现）的地方都是轮询或 select，所以上限只在失败时才会等满，放宽上限不拖慢通过的运行。上限按所等的东西推出来，每个包一个常量，旁边写着推导：
+
+| 包 | 常量 | 值 | 依据 |
+| --- | --- | --- | --- |
+| `internal/proxy` | `parseWait` | 2 分 15 秒 | parser 的单任务期限（2 分钟），过了它 worker 就放弃这条 audit |
+| `internal/proxy` | `recoveryWait` | 60 秒 | writer 的捕获恢复每 5 秒一轮，十二轮；也用于等排队的 checkpoint 落库和 stream 顺序事件 |
+| `internal/parser` | `PipelineWait` | 1 分钟 | 一次解析、交接或释放本机不到一秒，慢十倍再乘 runner 差异约 20 秒，并低于 2 分钟的任务期限 |
+| `internal/app` | `pipelineWait` | 1 分钟 | 提交、调用方解析、解析与分析，最多一轮 5 秒的恢复，(10 + 5) × 2 再留一倍；归档测试另用 `terminalWait`（含 parser 30 秒的待解析扫描） |
+| `internal/storage/postgres`、`internal/storage/sqlite` | `storeWait` / `recoveryWait` | 30 秒 / 十二轮恢复 | 交给 writer 或从 writer 返回的一次交接（入队、开始、结束、等行锁） |
+| `tests/integration` | `integrationTimeout` | 30 秒 | 管线一步本机不到一秒：(10 秒 + 一轮 5 秒恢复) × 2；写成它三倍的等待随之放宽 |
+
+“在 X 毫秒内什么都没发生”这类以超时为通过的探针，以及断言时间上限的测试，不放宽。
+
+`internal/proxy` 的 `waitParse` 只读 audit 行（不再每 2 毫秒读整条 audit 的全部 Body 块），间隔逐步加长，队列里最多留一个 id-only 任务；超时时报告 `parse_status`、`capture_status`、`forward_status`、`error_code`、`ended_at_ns` 是否已设、`parse_save_failures` 和 `parse_next_at_ns`。
+
+开了竞态检测的构建（`//go:build race`）里，有些为覆盖面而跑大批生成负载的测试只跑有代表性的一部分，普通构建跑全量。每个包一个常量 `raceBuild`（`race_test.go` / `norace_test.go`），每个场景仍至少跑一次：
+
+| 包 | 测试 | race 构建少跑的部分 |
+| --- | --- | --- |
+| `internal/storage/postgres` | `TestTurnParentChoiceMatchesTheLegacyWalks` | 随机图从 120 + 60 个减到同一序列的前 40 + 30 个；两组限额下每种连接方式（root、continuation、branch、retry、context_edit、conversation_key、previous_response_id）和降低限额后的拒绝都仍须出现，两种构建都检查 |
+| `internal/storage/postgres` | `TestKeylessCandidateSearchKnowsTheProtocolAtScale` | 只跑 20,000 轮次一档（同 `-short`），不跑 317,000 轮次的重复 |
+| `internal/storage/postgres` | `TestArchiveIntentRegistrationCost` | 意向成员从 2,000 减到 200；耗时只是记录，race 下没有意义，过期检查保留 |
+| `tests/integration` | `TestArchiveReadEquivalenceCatalogue` | 不加密一臂只发目录的子集（每个协议的流式基本场景，其余场景各一次）；加密一臂始终全量 |
+| `tests/integration` | `TestUnifiedParseDoesNotReadBackOnPostgreSQL` | 计时轮数从 15 减到 2（同 `-short`），不回读的检查保留 |
+
+另外，彼此独立（各用自己的库、schema、目录，不改包级变量、不用 `t.Setenv`）且多半在等 writer 恢复轮次或数据库的测试改成 `t.Parallel()`：`internal/proxy` 的捕获失败用例和用 `eqRun` 的大部分测试（崩溃点测试仍串行，它们靠“几十毫秒内落库”模拟崩溃）、`internal/parser` 的两个目录级测试、`internal/app` 的归档测试和 `TestFailedFinalCommitKeepsStagedChunks` 的用例、`internal/storage/postgres` 的几个规模测试。
