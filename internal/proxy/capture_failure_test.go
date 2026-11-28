@@ -31,6 +31,12 @@ import (
 // when the commit saw the failure, partial with audit_finalize_failed when
 // the commit itself was rejected.
 func TestCaptureWriteFailuresEndTheAuditFailed(t *testing.T) {
+	valueOrEmpty := func(value *string) string {
+		if value == nil {
+			return ""
+		}
+		return *value
+	}
 	requestBody := `{"model":"model-example","messages":[{"role":"user","content":"hello"}]}`
 	responseBody := `{"id":"response-example","choices":[{"message":{"role":"assistant","content":"hi"}}]}`
 	large := strings.Repeat("A", 1<<20) + strings.Repeat("B", 1<<20) + strings.Repeat("C", 1<<20)
@@ -68,6 +74,11 @@ WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test capture failure'); E
 		{name: "middle chunk SSE", trigger: `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 1 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`,
 			request: sse, response: sse, eventStream: true, commitRejected: true, stages: 3},
 		{name: "last chunk", trigger: `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`,
+			request: large, response: large, commitRejected: true, stages: 3},
+		{name: "all chunks", trigger: `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks BEGIN SELECT RAISE(ABORT, 'test capture failure'); END`,
+			request: large, response: large, commitRejected: true, stages: 3},
+		{name: "last chunk and stage finish", trigger: `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'test capture failure'); END;
+CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test finish failure'); END`,
 			request: large, response: large, commitRejected: true, stages: 3},
 		{name: "all chunks and stage finish", trigger: `CREATE TRIGGER fail_chunk BEFORE INSERT ON body_chunks BEGIN SELECT RAISE(ABORT, 'test capture failure'); END;
 CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state = 'complete' BEGIN SELECT RAISE(ABORT, 'test finish failure'); END`,
@@ -154,16 +165,37 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 			if len(snapshot.Stages) != test.stages {
 				t.Fatalf("%d stages, want %d", len(snapshot.Stages), test.stages)
 			}
+			// What the session reached stays as it was; what the failed
+			// write left streaming is closed by finalizeIncompleteCapture:
+			// partial, capture_write_failed, hash and EOF not confirmed.
 			for _, stage := range snapshot.Stages {
-				if stage.EndedAtNS == nil {
-					t.Errorf("stage %s not terminated: %s", stage.Stage, stage.State)
+				wantState, wantCode := sqlite.StageStatePartial, "capture_write_failed"
+				if !test.commitRejected {
+					// The rejected inbound Headers mark only that stage.
+					wantState, wantCode = sqlite.StageStateComplete, ""
+					if stage.Stage == sqlite.StageRequestReceived {
+						wantState, wantCode = sqlite.StageStatePartial, "capture_headers_failed"
+					}
+				}
+				if stage.EndedAtNS == nil || stage.State != wantState || valueOrEmpty(stage.ErrorCode) != wantCode {
+					t.Errorf("stage %s %s/%s, want %s/%s", stage.Stage, stage.State, valueOrEmpty(stage.ErrorCode), wantState, wantCode)
 				}
 			}
 			kept := map[string]bool{}
+			chunks := map[string]int64{}
+			for _, chunk := range snapshot.Chunks {
+				chunks[chunk.Stage]++
+			}
 			for _, body := range snapshot.Bodies {
 				kept[body.Stage] = true
-				if body.RetentionState != sqlite.RetentionFull {
-					t.Errorf("body %s raw not kept in full", body.Stage)
+				if body.RetentionState != sqlite.RetentionFull || body.StoredLength != body.ObservedLength || body.ChunkCount != chunks[body.SourceStage] {
+					t.Errorf("body %s: raw %s, stored %d of %d, %d chunks of %d", body.Stage, body.RetentionState, body.StoredLength, body.ObservedLength, body.ChunkCount, chunks[body.SourceStage])
+				}
+				if test.commitRejected && (body.State != sqlite.StageStatePartial || body.HashComplete || body.EOFSeen || valueOrEmpty(body.ErrorCode) != "capture_write_failed") {
+					t.Errorf("body %s not closed as partial: %+v", body.Stage, body)
+				}
+				if !test.commitRejected && (body.State != sqlite.StageStateComplete || !body.HashComplete || !body.EOFSeen) {
+					t.Errorf("unaffected body %s downgraded: %+v", body.Stage, body)
 				}
 			}
 			queries, err := query.New(store, cipher)
@@ -184,6 +216,11 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 					}
 				}
 				if !want.kept {
+					// No body row: the side reads as missing, never as empty.
+					var raw bytes.Buffer
+					if err := queries.StreamRaw(ctx, auditID, side, &raw); err == nil {
+						t.Fatalf("%s raw without a body row read as %d bytes", side, raw.Len())
+					}
 					continue
 				}
 				var raw bytes.Buffer
