@@ -50,7 +50,7 @@ func TestArchiveExportsMatchTheAgentFacade(t *testing.T) {
 	defer database.Close()
 	cli := agentLogin(t, running)
 	token := cli.savedToken()
-	client := &http.Client{Timeout: 3 * integrationTimeout}
+	client := &http.Client{Timeout: archiveClientTimeout}
 
 	seen := []string{}
 	send := func(method, path string, header http.Header, body []byte) string {
@@ -66,7 +66,7 @@ func TestArchiveExportsMatchTheAgentFacade(t *testing.T) {
 		_, _ = io.Copy(io.Discard, response.Body)
 		response.Body.Close()
 		var id string
-		deadline := time.Now().Add(3 * integrationTimeout)
+		deadline := time.Now().Add(archiveSettleTimeout)
 		for id == "" && time.Now().Before(deadline) {
 			_ = database.QueryRow(`SELECT audit_id FROM audit_records WHERE NOT (audit_id = ANY($1)) ORDER BY started_at_ns DESC LIMIT 1`, seen).Scan(&id)
 			time.Sleep(10 * time.Millisecond)
@@ -75,7 +75,7 @@ func TestArchiveExportsMatchTheAgentFacade(t *testing.T) {
 			t.Fatal("no audit")
 		}
 		seen = append(seen, id)
-		waitParsed(t, database, id)
+		archiveWaitFinal(t, database, id)
 		return id
 	}
 	sendExchange := func(exchange protofixture.Exchange) string {

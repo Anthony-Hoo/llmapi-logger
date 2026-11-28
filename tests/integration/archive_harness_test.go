@@ -122,6 +122,8 @@ type archiveRig struct {
 	offset atomic.Int64
 	fault  atomic.Pointer[func(operation, path string) error]
 	step   atomic.Pointer[func(step string) error]
+	// readerRoots is the directory of every reader rig.reader opened.
+	readerRoots map[*archivecli.Reader]string
 	// seen lists the audit ids found so far, in sending order.
 	seen []string
 }
@@ -129,7 +131,7 @@ type archiveRig struct {
 func newArchiveRig(t *testing.T, options archiveRigOptions) *archiveRig {
 	t.Helper()
 	ctx := context.Background()
-	rig := &archiveRig{t: t, ctx: ctx, options: options, logs: &archiveLogBuffer{}, client: &http.Client{Timeout: 60 * time.Second}}
+	rig := &archiveRig{t: t, ctx: ctx, options: options, logs: &archiveLogBuffer{}, client: &http.Client{Timeout: archiveClientTimeout}}
 	rig.dsn = options.dsn
 	if rig.dsn == "" {
 		rig.dsn = newIntegrationDatabaseURL(t)
@@ -218,7 +220,9 @@ func newArchiveRig(t *testing.T, options archiveRigOptions) *archiveRig {
 	}
 	rig.upstream = protofixture.NewUpstream("ar")
 	rig.upstream.SetRequestID = false
-	rig.upstream.CancelWait = 30 * time.Second
+	// A client-cancel answer waits at its cut for the client to go away;
+	// the client closes at once, so this only bounds a slow machine.
+	rig.upstream.CancelWait = 2 * time.Minute
 	var provider http.Handler = rig.upstream
 	if options.wrapUpstream != nil {
 		provider = options.wrapUpstream(provider)
@@ -265,9 +269,13 @@ func (rig *archiveRig) buildRunner() {
 		Mode: storage.ArchiveModeExportOnly, Dir: filepath.Clean(rig.dir), Encrypt: rig.options.encrypt, RunAt: config.DefaultArchiveRunAt,
 		Location: time.UTC, RetentionDays: 1, SegmentMaxBytes: segmentMax, ConversationMinTurns: minTurns,
 		ConversationMinBytes: config.DefaultArchiveConversationMinBytes, PassAudits: config.DefaultArchivePassAudits,
-		RunDeadline: time.Duration(config.DefaultArchiveRunDeadlineMinutes) * time.Minute, VerifySample: 1,
-		Store: runner.FromPostgres(rig.store, postgres.ArchiveSnapshotOptions{Cipher: rig.cipher, Fingerprinter: rig.keys}),
-		Keys:  rig.keys, Events: rig.events,
+		RunDeadline: time.Duration(config.DefaultArchiveRunDeadlineMinutes) * time.Minute,
+		// The default sample (at least one member per bundle): the tests
+		// compare every member themselves (compare), and a full sample
+		// would repeat that pass inside every run.
+		VerifySample: config.DefaultArchiveVerifySample,
+		Store:        runner.FromPostgres(rig.store, postgres.ArchiveSnapshotOptions{Cipher: rig.cipher, Fingerprinter: rig.keys}),
+		Keys:         rig.keys, Events: rig.events,
 		Sampler:             runner.QuerySampler{Hot: rig.hot, Fingerprinter: rig.keys},
 		SourceSchemaVersion: strconv.Itoa(postgres.LatestSchemaVersion),
 		Logger:              slog.New(slog.NewJSONHandler(rig.logs, nil)),
@@ -378,7 +386,7 @@ func (rig *archiveRig) sendRequest(method, path string, header http.Header, body
 func (rig *archiveRig) newestAudit() string {
 	t := rig.t
 	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(archiveSettleTimeout)
 	seen := append([]string{}, rig.seen...)
 	var id string
 	for {
@@ -408,7 +416,7 @@ func (rig *archiveRig) newestAudit() string {
 func (rig *archiveRig) waitParsed() {
 	t := rig.t
 	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(archiveSettleTimeout)
 	for {
 		var open int
 		if err := rig.db.QueryRow(`SELECT COUNT(*) FROM audit_records WHERE ended_at_ns IS NULL OR parse_status IN ('pending', 'processing')`).Scan(&open); err == nil && open == 0 {
@@ -459,6 +467,10 @@ func (rig *archiveRig) reader(dir string) *archivecli.Reader {
 		t.Fatal(err)
 	}
 	t.Cleanup(reader.Close)
+	if rig.readerRoots == nil {
+		rig.readerRoots = map[*archivecli.Reader]string{}
+	}
+	rig.readerRoots[reader] = dir
 	if problems := reader.Index().Problems(); len(problems) > 0 {
 		t.Fatalf("index problems %+v", problems)
 	}
@@ -713,4 +725,204 @@ func (rig *archiveRig) postgresTargets(tables ...string) []scanTarget {
 		out = append(out, scanTarget{name: "table " + table, data: data.Bytes()})
 	}
 	return out
+}
+
+// describeAudit is what the hot store holds for one audit and the log lines
+// that name it, for a failure message that explains itself: the outcome
+// columns, each stage and body, the parse result, the turn, and the log.
+func (rig *archiveRig) describeAudit(id string) string {
+	var out strings.Builder
+	var forward, capture, parse string
+	var status, ended sql.NullInt64
+	var errorCode sql.NullString
+	var started int64
+	if err := rig.db.QueryRow(`SELECT forward_status, capture_status, parse_status, error_code, status_code, started_at_ns, ended_at_ns FROM audit_records WHERE audit_id = $1`, id).
+		Scan(&forward, &capture, &parse, &errorCode, &status, &started, &ended); err != nil {
+		return fmt.Sprintf("audit %s not readable: %v", id, err)
+	}
+	fmt.Fprintf(&out, "audit %s: forward_status=%s capture_status=%s parse_status=%s error_code=%v status_code=%v duration_ms=%d\n",
+		id, forward, capture, parse, errorCode.String, status.Int64, (ended.Int64-started)/1e6)
+	if rows, err := rig.db.Query(`SELECT s.stage, s.state, COALESCE(s.error_code, ''), COALESCE(b.observed_length, -1), COALESCE(b.stored_length, -1),
+  COALESCE(b.state, ''), COALESCE(b.retention_state, ''), COALESCE(b.error_code, ''), COALESCE(b.chunk_count, -1), COALESCE(b.eof_seen, 0), COALESCE(b.source_stage, '')
+FROM http_stages AS s LEFT JOIN body_streams AS b ON b.audit_id = s.audit_id AND b.stage = s.stage WHERE s.audit_id = $1 ORDER BY s.started_at_ns`, id); err == nil {
+		for rows.Next() {
+			var stage, state, stageError, bodyState, retention, bodyError, source string
+			var observed, stored, chunks, eof int64
+			if rows.Scan(&stage, &state, &stageError, &observed, &stored, &bodyState, &retention, &bodyError, &chunks, &eof, &source) == nil {
+				fmt.Fprintf(&out, "  stage %s state=%s error=%s body observed=%d stored=%d state=%s retention=%s error=%s chunks=%d eof=%d source=%s\n",
+					stage, state, stageError, observed, stored, bodyState, retention, bodyError, chunks, eof, source)
+			}
+		}
+		rows.Close()
+	}
+	var parsedStatus, parsedError, parsedClass sql.NullString
+	if err := rig.db.QueryRow(`SELECT status, error_code, upstream_error_class FROM parsed_results WHERE audit_id = $1`, id).Scan(&parsedStatus, &parsedError, &parsedClass); err == nil {
+		fmt.Fprintf(&out, "  parsed status=%s error_code=%s upstream_error_class=%s\n", parsedStatus.String, parsedError.String, parsedClass.String)
+	}
+	var turns int
+	_ = rig.db.QueryRow(`SELECT COUNT(*) FROM turns WHERE audit_id = $1`, id).Scan(&turns)
+	fmt.Fprintf(&out, "  turns=%d\n", turns)
+	for _, line := range strings.Split(string(rig.logs.Bytes()), "\n") {
+		if strings.Contains(line, id) {
+			out.WriteString("  log " + line + "\n")
+		}
+	}
+	return out.String()
+}
+
+// Waits of the harness, derived from what they wait for, so that a machine
+// many times slower than a workstation (the race detector on a shared CI
+// runner) does not turn a slow audit into a failure:
+//
+//   - archiveSettleTimeout: an audit ends and its parse becomes final. A
+//     handover the parser misses is picked up by its pending scan (every
+//     30 s, parser.defaultScanInterval) and one parse may take up to the
+//     parser's job deadline (2 min); a minute of margin on top.
+//   - archiveClientTimeout: one request through the proxy, bounded by the
+//     proxy's own response header timeout (5 min by default).
+const (
+	archiveSettleTimeout = 30*time.Second + 2*time.Minute + time.Minute
+	archiveClientTimeout = 5*time.Minute + time.Minute
+)
+
+// archiveSendWorkers is how many conversations sendConversations sends at
+// once.
+const archiveSendWorkers = 4
+
+// sendConversations sends independent conversations through the proxy, up
+// to archiveSendWorkers at a time, each conversation's exchanges in order
+// (one exchange's audit is final before the next is sent). Each audit is
+// found by the SHA-256 of its request body (body_streams.sha256 of the
+// inbound stage), which every exchange of the set must have to itself. It
+// returns the audit id of every exchange.
+func (rig *archiveRig) sendConversations(conversations [][]protofixture.Exchange) map[string]protofixture.Exchange {
+	t := rig.t
+	t.Helper()
+	owner := map[[32]byte]bool{}
+	for _, conversation := range conversations {
+		for _, exchange := range conversation {
+			sum := sha256.Sum256(exchange.RequestBody)
+			if owner[sum] {
+				t.Fatalf("two exchanges send the same request body (%s/%s)", exchange.Protocol, exchange.Scenario)
+			}
+			owner[sum] = true
+		}
+	}
+	database, err := sql.Open("pgx", rig.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	type sent struct {
+		id       string
+		exchange protofixture.Exchange
+		err      error
+	}
+	work := make(chan []protofixture.Exchange)
+	results := make(chan sent)
+	var workers sync.WaitGroup
+	for range archiveSendWorkers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for conversation := range work {
+				for _, exchange := range conversation {
+					id, err := rig.sendOne(database, exchange)
+					results <- sent{id: id, exchange: exchange, err: err}
+					if err != nil {
+						break
+					}
+				}
+			}
+		}()
+	}
+	go func() {
+		for _, conversation := range conversations {
+			work <- conversation
+		}
+		close(work)
+		workers.Wait()
+		close(results)
+	}()
+	out := map[string]protofixture.Exchange{}
+	var failures []string
+	for result := range results {
+		if result.err != nil {
+			failures = append(failures, result.err.Error())
+			continue
+		}
+		out[result.id] = result.exchange
+		rig.seen = append(rig.seen, result.id)
+	}
+	if len(failures) > 0 {
+		t.Fatalf("%d sends failed:\n%s", len(failures), strings.Join(failures, "\n"))
+	}
+	return out
+}
+
+// sendOne sends one exchange and waits, on its own connection, for its
+// audit to be final; it may run on any goroutine.
+func (rig *archiveRig) sendOne(database *sql.DB, exchange protofixture.Exchange) (string, error) {
+	label := fmt.Sprintf("%s/%s stream=%v turn %d", exchange.Protocol, exchange.Scenario, exchange.Stream, exchange.Turn)
+	registered := rig.upstream.Register(&exchange)
+	request, err := http.NewRequest(exchange.Method, rig.server.URL+exchange.Path, bytes.NewReader(exchange.RequestBody))
+	if err != nil {
+		return "", err
+	}
+	request.Header = exchange.RequestHeader.Clone()
+	request.Header.Set(protofixture.ExchangeHeader, registered)
+	response, err := rig.client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", label, err)
+	}
+	if exchange.Response.ClientCancel {
+		_, err = io.ReadFull(response.Body, make([]byte, exchange.Response.CutAt))
+	} else {
+		// An upstream abort ends the answer early: the error is the scenario.
+		_, _ = io.Copy(io.Discard, response.Body)
+	}
+	response.Body.Close()
+	if err != nil {
+		return "", fmt.Errorf("%s: read the answer: %w", label, err)
+	}
+	sum := sha256.Sum256(exchange.RequestBody)
+	deadline := time.Now().Add(archiveSettleTimeout)
+	var id string
+	for {
+		if id == "" {
+			_ = database.QueryRow(`SELECT audit_id FROM body_streams WHERE stage = $1 AND sha256 = $2`, storage.StageRequestReceived, sum[:]).Scan(&id)
+		}
+		if id != "" {
+			var ended sql.NullInt64
+			var parse, caller string
+			if err := database.QueryRow(`SELECT ended_at_ns, parse_status, caller_status FROM audit_records WHERE audit_id = $1`, id).Scan(&ended, &parse, &caller); err == nil &&
+				ended.Valid && parse != storage.ParsePending && parse != storage.ParseProcessing {
+				if caller == storage.CallerPending {
+					return "", fmt.Errorf("%s: audit %s waits for a caller lookup", label, id)
+				}
+				return id, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("%s: no final audit after %v (found %q)", label, archiveSettleTimeout, id)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// archiveWaitFinal waits up to archiveSettleTimeout until one audit ended
+// and its parse is final.
+func archiveWaitFinal(t *testing.T, database *sql.DB, auditID string) {
+	t.Helper()
+	deadline := time.Now().Add(archiveSettleTimeout)
+	for time.Now().Before(deadline) {
+		var parse string
+		var ended sql.NullInt64
+		if err := database.QueryRow(`SELECT parse_status, ended_at_ns FROM audit_records WHERE audit_id = $1`, auditID).Scan(&parse, &ended); err == nil &&
+			ended.Valid && parse != storage.ParsePending && parse != storage.ParseProcessing {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("audit %s not final after %v", auditID, archiveSettleTimeout)
 }

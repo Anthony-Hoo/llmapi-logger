@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"llmapi-logger/internal/archivecli"
 	"llmapi-logger/internal/auditmodel"
@@ -34,36 +35,53 @@ import (
 // turn with its provider request and response, the session conversation,
 // timeline, raw metadata and raw bytes of each side, and every export kind,
 // or the same error class where the hot side has none. Once with encryption
-// on, once off.
+// on, once off, the two arms in parallel on their own schemas and directories.
+// The conversations are sent up to archiveSendWorkers at a time, each one's
+// turns in order.
+//
+// In a build with the race detector (archiveRaceBuild), the encryption-off
+// arm sends a subset of the catalogue: every protocol streamed and not in
+// the basic scenario, and every other scenario once (on the first protocol
+// and mode the catalogue lists it for). The encryption-on arm always sends
+// the whole catalogue.
 func TestArchiveReadEquivalenceCatalogue(t *testing.T) {
 	if testing.Short() {
 		t.Skip("the fixture catalogue")
 	}
 	for _, encrypt := range []bool{true, false} {
 		t.Run(fmt.Sprintf("encrypt=%v", encrypt), func(t *testing.T) {
+			t.Parallel()
+			started := time.Now()
 			rig := newArchiveRig(t, archiveRigOptions{encrypt: encrypt})
-			exchanges := map[string]protofixture.Exchange{}
+			var conversations [][]protofixture.Exchange
+			scenarios := map[protofixture.Scenario]bool{}
 			for index, value := range protofixture.Catalog() {
+				if archiveRaceBuild && !encrypt && value.Scenario != protofixture.ScenarioBasic && scenarios[value.Scenario] {
+					continue
+				}
+				scenarios[value.Scenario] = true
 				built, err := protofixture.Build(value, protofixture.Options{Seed: uint64(index + 1)})
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, exchange := range built {
-					exchanges[rig.send(exchange)] = exchange
-				}
+				conversations = append(conversations, built)
 			}
+			exchanges := rig.sendConversations(conversations)
 			if stats := rig.upstream.Stats(); stats.Mismatched != 0 || stats.Unknown != 0 {
 				t.Fatalf("upstream stats %+v", stats)
 			}
 			blocked := rig.sendBlocked()
 			hostile := rig.sendHostile()
 			ids := rig.auditIDs()
+			sentAt := time.Now()
 			rig.due()
 			result := rig.mustRun()
 			rig.requireCleanRun(result, len(ids))
+			ranAt := time.Now()
 			reader := rig.reader(rig.dir)
 			comparison := rig.compare(reader, ids)
-			t.Logf("%d audits, %d segments\n%s", len(ids), result.Counts.Segments, comparison.report())
+			t.Logf("%d audits, %d segments; send %v, run %v, compare %v\n%s", len(ids), result.Counts.Segments,
+				sentAt.Sub(started).Round(time.Millisecond), ranAt.Sub(sentAt).Round(time.Millisecond), time.Since(ranAt).Round(time.Millisecond), comparison.report())
 			for _, difference := range comparison.differences {
 				t.Error(difference)
 			}
@@ -77,7 +95,7 @@ func TestArchiveReadEquivalenceCatalogue(t *testing.T) {
 				comparison.classes["raw.request"]["not_retained"] == 0 || comparison.classes["turn"]["no_turn_graph"] == 0 {
 				t.Fatalf("too little compared:\n%s", comparison.report())
 			}
-			rig.anchorToFixtures(reader, exchanges)
+			rig.anchorToFixtures(comparison, exchanges)
 			for _, id := range []string{blocked, hostile} {
 				if _, err := reader.Audit(rig.ctx, id); err != nil {
 					t.Fatalf("%s: %v", id, err)
@@ -93,19 +111,19 @@ func TestArchiveReadEquivalenceCatalogue(t *testing.T) {
 // kept raw request is the request the client sent, a kept raw response of a
 // complete exchange is what the provider sent, and a rebuilt request is
 // JSON-equivalent to the request body.
-func (rig *archiveRig) anchorToFixtures(reader *archivecli.Reader, exchanges map[string]protofixture.Exchange) {
+func (rig *archiveRig) anchorToFixtures(comparison *archiveComparison, exchanges map[string]protofixture.Exchange) {
 	t := rig.t
 	t.Helper()
 	rawRequests, rawResponses, rebuilt := 0, 0, 0
 	for id, exchange := range exchanges {
-		audit, err := reader.Audit(rig.ctx, id)
-		if err != nil {
-			t.Fatal(err)
+		audit := comparison.audits[id]
+		if audit == nil {
+			t.Fatalf("%s was not compared", id)
 		}
 		var raw bytes.Buffer
 		if err := audit.StreamRaw(rig.ctx, query.SideRequest, &raw); err == nil {
 			if !bytes.Equal(raw.Bytes(), exchange.RequestBody) {
-				t.Errorf("%s %s: archived raw request differs from the request sent", id, exchange.Scenario)
+				t.Errorf("%s %s/%s: archived raw request differs from the request sent (%d bytes, sent %d)\n%s", id, exchange.Protocol, exchange.Scenario, raw.Len(), len(exchange.RequestBody), rig.describeAudit(id))
 			}
 			rawRequests++
 		}
@@ -113,7 +131,7 @@ func (rig *archiveRig) anchorToFixtures(reader *archivecli.Reader, exchanges map
 		complete := exchange.Response.CutAt == 0
 		if err := audit.StreamRaw(rig.ctx, query.SideResponse, &raw); err == nil && complete {
 			if !bytes.Equal(raw.Bytes(), exchange.Response.Body()) {
-				t.Errorf("%s %s: archived raw response differs from the answer", id, exchange.Scenario)
+				t.Errorf("%s %s/%s: archived raw response differs from the answer (%d bytes, answer %d)\n%s", id, exchange.Protocol, exchange.Scenario, raw.Len(), len(exchange.Response.Body()), rig.describeAudit(id))
 			}
 			rawResponses++
 		}
@@ -121,9 +139,11 @@ func (rig *archiveRig) anchorToFixtures(reader *archivecli.Reader, exchanges map
 			got, _ := json.Marshal(turn.Request)
 			var left, right any
 			if json.Unmarshal(got, &left) != nil || json.Unmarshal(exchange.RequestBody, &right) != nil || !reflect.DeepEqual(left, right) {
-				t.Errorf("%s %s/%s: rebuilt request differs from the request sent", id, exchange.Protocol, exchange.Scenario)
+				t.Errorf("%s %s/%s: rebuilt request differs from the request sent\n%s", id, exchange.Protocol, exchange.Scenario, rig.describeAudit(id))
 			}
 			rebuilt++
+		} else if !exchange.IsAbnormal() {
+			t.Errorf("%s %s/%s stream=%v: a healthy exchange has no turn (%s)\n%s", id, exchange.Protocol, exchange.Scenario, exchange.Stream, archivecli.ErrorCode(err), rig.describeAudit(id))
 		}
 	}
 	t.Logf("anchored to the fixtures: %d raw requests, %d raw responses, %d rebuilt requests", rawRequests, rawResponses, rebuilt)
