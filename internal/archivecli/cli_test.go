@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	"llmapi-logger/internal/archive"
+	"llmapi-logger/internal/archive/bundle"
 	"llmapi-logger/internal/archive/stream"
 )
 
@@ -53,7 +55,8 @@ func TestListWithAndWithoutKey(t *testing.T) {
 				}
 				kinds = append(kinds, info.Kind)
 			}
-			if strings.Join(kinds, ",") != "gaps,bucket,bucket,conversation" && len(kinds) != 4 {
+			sort.Strings(kinds)
+			if strings.Join(kinds, ",") != "bucket,bucket,conversation,gaps" {
 				t.Fatalf("kinds %v", kinds)
 			}
 			// A conversation is found through every bundle that holds it.
@@ -157,6 +160,12 @@ func TestTamperedBundleFailsAndIsSkipped(t *testing.T) {
 				if !strings.Contains(out.stdout, "file_mismatch") || !strings.Contains(out.stdout, "3 ok, 1 failed") {
 					t.Fatalf("%v:\n%s", args, out.stdout)
 				}
+			}
+			// A filter whose only bundle fails reports the failure, not "not
+			// found".
+			filteredCat := run(t, s.read("cat", "--audit", "c3")...).want(t, ExitFailed)
+			if !strings.Contains(filteredCat.stderr, "file_mismatch") || filteredCat.stdout != "" {
+				t.Fatalf("filtered cat of a tampered bundle: %+v", filteredCat)
 			}
 			failed := run(t, s.read("export", "--audit", "c3", "--what", "request")...).want(t, ExitFailed)
 			if !strings.Contains(failed.stderr, "audit-archive: file_mismatch:") || failed.stdout != "" {
@@ -279,6 +288,17 @@ func TestCat(t *testing.T) {
 			if len(turn) < 5 {
 				t.Fatalf("c1 with objects: %d lines", len(turn))
 			}
+			// Unfiltered, the objects of a revision that is not printed are
+			// not printed either: c2's raw chunks appear once, from revision 2.
+			want := len(s.records["c2"].RawChunks)
+			unfiltered := run(t, s.read("cat", "--with-objects")...).want(t, ExitOK).stdout
+			if got := strings.Count(unfiltered, `{"type":"raw_chunk","audit_id":"c2"`); got != want {
+				t.Fatalf("c2 raw chunks printed %d times, want %d", got, want)
+			}
+			everyRevision := run(t, s.read("cat", "--with-objects", "--all-revisions")...).want(t, ExitOK).stdout
+			if got := strings.Count(everyRevision, `{"type":"raw_chunk","audit_id":"c2"`); got != 2*want {
+				t.Fatalf("c2 raw chunks of every revision printed %d times, want %d", got, 2*want)
+			}
 		})
 	}
 }
@@ -316,17 +336,48 @@ func TestKeyRequirements(t *testing.T) {
 }
 
 func TestWrongKey(t *testing.T) {
-	s := newScenario(t, true)
-	other := s.otherKeyFile()
-	for _, args := range [][]string{
-		{"export", "--dir", s.root, "--key", other, "--audit", "c1"},
-		{"export", "--dir", s.root, "--key", other, "--conversation", s.conversation},
-		{"cat", "--dir", s.root, "--key", other, "--audit", "c1"},
-	} {
-		out := run(t, args...).want(t, ExitFailed)
-		if !strings.Contains(out.stderr, "audit-archive: key_mismatch:") || !strings.Contains(out.stderr, "key does not match") || out.stdout != "" {
-			t.Fatalf("%v: %+v", args, out)
-		}
+	for _, encrypt := range modes() {
+		t.Run(modeName(encrypt), func(t *testing.T) {
+			s := newScenario(t, encrypt)
+			other := s.otherKeyFile()
+			for _, args := range [][]string{
+				{"export", "--dir", s.root, "--key", other, "--audit", "c1"},
+				{"export", "--dir", s.root, "--key", other, "--conversation", s.conversation},
+				{"cat", "--dir", s.root, "--key", other, "--audit", "c1"},
+			} {
+				out := run(t, args...).want(t, ExitFailed)
+				if !strings.Contains(out.stderr, "audit-archive: key_mismatch:") || !strings.Contains(out.stderr, "key does not match") || out.stdout != "" {
+					t.Fatalf("%v: %+v", args, out)
+				}
+			}
+		})
+	}
+}
+
+// A rejected bundle is not part of the archive any more: the revision it
+// held is gone from every lookup and the earlier revision is served.
+func TestRejectedBundleIsIgnored(t *testing.T) {
+	for _, encrypt := range modes() {
+		t.Run(modeName(encrypt), func(t *testing.T) {
+			s := newScenario(t, encrypt)
+			if err := bundle.Reject(s.bundles["revision"]); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(run(t, "list", "--dir", s.root, "--json").want(t, ExitOK).lines()); got != 3 {
+				t.Fatalf("list shows %d bundles, want 3", got)
+			}
+			c2 := run(t, s.read("cat", "--audit", "c2")...).want(t, ExitOK).lines()
+			if len(c2) != 1 || !strings.Contains(c2[0], `"revision":"1"`) {
+				t.Fatal("cat does not serve revision 1 after the rejection")
+			}
+			detail := run(t, s.read("export", "--audit", "c2", "--what", "detail")...).want(t, ExitOK).stdout
+			if !strings.Contains(detail, `"token_link":null`) {
+				t.Fatal("export serves the rejected revision 2")
+			}
+			if out := run(t, s.read("verify")...).want(t, ExitOK); !strings.Contains(out.stdout, "3 bundles, 3 ok") || strings.Contains(out.stdout, "rejected") {
+				t.Fatalf("verify after a rejection:\n%s", out.stdout)
+			}
+		})
 	}
 }
 

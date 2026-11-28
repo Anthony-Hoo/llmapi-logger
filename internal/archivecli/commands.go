@@ -340,13 +340,14 @@ func Cat(ctx context.Context, reader *Reader, options CatOptions, destination io
 		return 0, reader.missing()
 	}
 	sort.SliceStable(entries, func(left, right int) bool { return entries[left].ManifestPath < entries[right].ManifestPath })
-	printed := 0
+	printed, skippedAny := 0, false
 	for _, entry := range entries {
 		opened, err := reader.Bundle(ctx, entry)
 		if err != nil {
 			if bundle.ReasonOf(err) == bundle.ReasonCanceled {
 				return printed, err
 			}
+			skippedAny = true
 			skipped(entry.ManifestPath, err)
 			continue
 		}
@@ -363,7 +364,9 @@ func Cat(ctx context.Context, reader *Reader, options CatOptions, destination io
 			}
 			continue
 		}
-		selection := newSelection(!filtered)
+		// Everything in the objects file belongs to a printed line only when
+		// every line is printed.
+		selection := newSelection(!filtered && options.AllRevisions)
 		err = opened.Records(ctx, func(line bundle.Line) error {
 			record := line.Record
 			switch {
@@ -399,7 +402,7 @@ func Cat(ctx context.Context, reader *Reader, options CatOptions, destination io
 			}
 		}
 	}
-	if filtered && printed == 0 {
+	if filtered && printed == 0 && !skippedAny {
 		return 0, &cliError{code: codeNotFound, message: messages[codeNotFound]}
 	}
 	return printed, nil

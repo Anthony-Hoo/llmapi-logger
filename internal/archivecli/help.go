@@ -91,10 +91,12 @@ closure of every reference, and the MACs of the copied integrity events
 (those are signed with the integrity key derived from the same master key;
 --skip-event-mac leaves this one check out).
 
+Without --key an encrypted bundle is never decrypted: it shows ok at level
+files when its files are intact.
+
 Result codes: ok; file_missing, file_mismatch (a file differs from the
-manifest), manifest_invalid, mac_mismatch, key_mismatch, key_required (an
-encrypted bundle without --key is never decrypted, only the file layer runs),
-decrypt_failed, decompress_failed, line_invalid, count_mismatch,
+manifest), manifest_invalid, mac_mismatch, key_mismatch, decrypt_failed,
+decompress_failed, line_invalid, count_mismatch,
 member_mismatch, order, context_mismatch, digest_mismatch, object_mismatch,
 raw_mismatch, reference_open, event_mac_mismatch, read_failed. With --dir, a
 manifest that does not parse counts as a failed bundle; data files without a

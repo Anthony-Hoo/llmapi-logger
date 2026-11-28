@@ -10,7 +10,13 @@ import (
 )
 
 func TestFpr(t *testing.T) {
-	s := newScenario(t, true)
+	for _, encrypt := range modes() {
+		t.Run(modeName(encrypt), func(t *testing.T) { testFpr(t, encrypt) })
+	}
+}
+
+func testFpr(t *testing.T, encrypt bool) {
+	s := newScenario(t, encrypt)
 	keyFile := filepath.Join(t.TempDir(), "known.txt")
 	writeFile(t, keyFile, authKey("c1")+"\r\n")
 
