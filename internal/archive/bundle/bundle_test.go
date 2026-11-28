@@ -64,7 +64,7 @@ func digestOf(t *testing.T, record *archive.Record) [32]byte {
 	return digest
 }
 
-var segmentName = regexp.MustCompile(`^sessions/2025/11/20251128T\d{6}Z_20251128T\d{6}Z_(conv_[a-z]+|bucket-openai-01234567)_s\d{4}\.(jsonl\.gz(\.enc)?|objects\.jsonl\.gz(\.enc)?|manifest\.json)$`)
+var segmentName = regexp.MustCompile(`^sessions/2025/11/20251128T\d{6}Z_20251128T\d{6}Z_(conv_[a-z]+-01234567|bucket-openai-01234567)_s\d{4}\.(jsonl\.gz(\.enc)?|objects\.jsonl\.gz(\.enc)?|manifest\.json)$`)
 
 func TestRoundTrip(t *testing.T) {
 	for _, encrypt := range []bool{true, false} {
@@ -302,7 +302,7 @@ func TestGapBundle(t *testing.T) {
 	if err := sealed.Publish(); err != nil {
 		t.Fatal(err)
 	}
-	if files := listFiles(t, root); describe(files) != describe([]string{"gaps/gaps-7-9.jsonl.gz.enc", "gaps/gaps-7-9.manifest.json"}) {
+	if files := listFiles(t, root); describe(files) != describe([]string{"gaps/gaps-7-9-01234567.jsonl.gz.enc", "gaps/gaps-7-9-01234567.manifest.json"}) {
 		t.Fatalf("files = %s", describe(files))
 	}
 	bundle, report := f.verify(sealed.ManifestPath(), true)
@@ -561,5 +561,73 @@ func TestErrorMessagesCarryOnlyTheReason(t *testing.T) {
 	var target *Error
 	if !errors.As(err, &target) || target.Reason() != ReasonNotFound {
 		t.Fatal("not a *Error")
+	}
+}
+
+// The same members exported again by a later run at a higher revision (a
+// stale member re-included, B.1 item 4) publish next to the first export,
+// and the index returns the higher revision. The same run exporting the
+// same members again is a true collision and still fails.
+func TestReExportPublishesSideBySide(t *testing.T) {
+	f := newFixture(t)
+	root := t.TempDir()
+	records := f.conversation("conv_again", "ag", 0)
+	spec := Spec{Kind: archive.BundleConversation, Protocol: "openai", ConversationID: "conv_again", Index: 1}
+	first := f.writeSegment(f.options(root, true), spec, records...)
+
+	revised := make([]*archive.Record, len(records))
+	for index, record := range records {
+		copied := *record
+		copied.Revision = 2
+		revised[index] = &copied
+	}
+	later := f.options(root, true)
+	later.RunID = "fedcba9876543210fedcba9876543210"
+	second := f.writeSegment(later, spec, revised...)
+	if filepath.Dir(first.ManifestPath()) != filepath.Dir(second.ManifestPath()) || first.ManifestPath() == second.ManifestPath() {
+		t.Fatalf("manifests %s and %s", first.ManifestPath(), second.ManifestPath())
+	}
+	for path, run := range map[string]string{first.ManifestPath(): "_conv_again-01234567_s0001", second.ManifestPath(): "_conv_again-fedcba98_s0001"} {
+		if !strings.HasSuffix(filepath.Base(path), run+ManifestSuffix) {
+			t.Fatalf("name %s, want the run suffix %s", filepath.Base(path), run)
+		}
+		f.verify(path, true)
+	}
+
+	index, err := BuildIndex(context.Background(), root, f.keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		location, ok := index.Audit(record.Audit.AuditID)
+		if !ok || location.Member.Revision != 2 || location.Entry.ManifestPath != second.ManifestPath() {
+			t.Fatalf("%s: %+v", record.Audit.AuditID, location)
+		}
+		if revisions := index.AuditRevisions(record.Audit.AuditID); len(revisions) != 2 || revisions[1].Member.Revision != 1 {
+			t.Fatalf("%s revisions: %+v", record.Audit.AuditID, revisions)
+		}
+	}
+	if entries := index.Conversation("conv_again"); len(entries) != 2 {
+		t.Fatalf("conversation in %d bundles, want 2", len(entries))
+	}
+
+	writer, err := NewSegment(later, spec, f.payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range revised {
+		if err := writer.Add(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = writer.Seal()
+	wantReason(t, err, ReasonNameExists)
+	assertNoTemps(t, root)
+}
+
+func assertNoTemps(t *testing.T, root string) {
+	t.Helper()
+	if count := countTemps(listFiles(t, root)); count != 0 {
+		t.Fatalf("%d temporary files left", count)
 	}
 }

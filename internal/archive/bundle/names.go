@@ -67,8 +67,14 @@ func tempName(segmentID, role, random string) string {
 func formatTimestamp(ns int64) string { return time.Unix(0, ns).UTC().Format(timestampLayout) }
 
 // segmentBase is the name of a segment without suffix (C.1, P.6):
-// <first>_<last>_<conversation_id>_s<NNNN> or
+// <first>_<last>_<conversation_id>-<run_id[:8]>_s<NNNN> or
 // <first>_<last>_bucket-<protocol>-<run_id[:8]>_s<NNNN>.
+//
+// Both kinds carry the run disambiguator P.6 gives buckets: re-exporting the
+// same members in a later run (a stale member at a higher revision) yields
+// the same time range, and without it the new segment could not be
+// published next to the old one. Names are for people only; lookups go
+// through the manifests.
 func segmentBase(kind, protocol, conversationID, runID string, first, last int64, index int) (string, error) {
 	var middle string
 	switch kind {
@@ -76,7 +82,7 @@ func segmentBase(kind, protocol, conversationID, runID string, first, last int64
 		if !safeComponent.MatchString(conversationID) {
 			return "", fail(ReasonUnsafeName, fmt.Errorf("conversation id is not usable in a file name"))
 		}
-		middle = conversationID
+		middle = conversationID + "-" + runID[:8]
 	case archive.BundleBucket:
 		if !safeComponent.MatchString(protocol) {
 			return "", fail(ReasonUnsafeName, fmt.Errorf("protocol is not usable in a file name"))
@@ -88,7 +94,12 @@ func segmentBase(kind, protocol, conversationID, runID string, first, last int64
 	return fmt.Sprintf("%s_%s_%s_s%04d", formatTimestamp(first), formatTimestamp(last), middle, index), nil
 }
 
-func gapBase(firstID, lastID int64) string { return fmt.Sprintf("gaps-%d-%d", firstID, lastID) }
+// gapBase is gaps-<first_id>-<last_id>-<run_id[:8]>: the same gap range
+// exported again by a later run (for example after the catalog was restored
+// from a backup) gets its own name.
+func gapBase(firstID, lastID int64, runID string) string {
+	return fmt.Sprintf("gaps-%d-%d-%s", firstID, lastID, runID[:8])
+}
 
 func dataSuffix(encrypted bool) string {
 	if encrypted {

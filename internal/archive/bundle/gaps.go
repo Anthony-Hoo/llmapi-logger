@@ -7,7 +7,7 @@ import (
 	"llmapi-logger/internal/archive"
 )
 
-// GapWriter writes one gap bundle: gaps/gaps-<first_id>-<last_id> with a
+// GapWriter writes one gap bundle: gaps/gaps-<first_id>-<last_id>-<run_id[:8]> with a
 // lines file of audit_gaps rows (C.6) and a manifest whose members are empty
 // and whose gaps field holds the id range (F.1). Gaps are added in strictly
 // increasing id order. Errors are final, as for SegmentWriter.
@@ -103,7 +103,7 @@ func (writer *GapWriter) seal() (*Sealed, error) {
 	if err := writer.lines.close(); err != nil {
 		return nil, err
 	}
-	base := gapBase(writer.firstID, writer.lastID)
+	base := gapBase(writer.firstID, writer.lastID, writer.options.RunID)
 	manifest := &archive.Manifest{
 		Format: archive.FormatName, FormatVersion: archive.FormatVersion, SourceSchemaVersion: writer.options.SourceSchemaVersion,
 		SegmentID: writer.segmentID, RunID: writer.options.RunID, BundleKind: archive.BundleGaps,
