@@ -282,8 +282,10 @@ func TestFailedFinalCommitKeepsStagedChunks(t *testing.T) {
 				}
 				// Every staged chunk is a whole 1 MiB chunk; the tail the session
 				// still held in memory is lost. Legacy loses the operations that
-				// shared the failed batch with its FinishAudit instead.
-				if unified.stored[response] != int64(unified.chunks[response])<<20 || legacy.stored[response] == 0 {
+				// shared the failed batch with its FinishAudit instead: how many
+				// depends on how the writer batched them, down to none of the
+				// response, so legacy is logged and not asserted.
+				if unified.stored[response] != int64(unified.chunks[response])<<20 {
 					t.Fatalf("response stored %d (unified) and %d (legacy)", unified.stored[response], legacy.stored[response])
 				}
 			})
