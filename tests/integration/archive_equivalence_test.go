@@ -39,7 +39,7 @@ import (
 // The conversations are sent up to archiveSendWorkers at a time, each one's
 // turns in order.
 //
-// In a build with the race detector (archiveRaceBuild), the encryption-off
+// In a build with the race detector (raceBuild), the encryption-off
 // arm sends a subset of the catalogue: every protocol streamed and not in
 // the basic scenario, and every other scenario once (on the first protocol
 // and mode the catalogue lists it for). The encryption-on arm always sends
@@ -56,7 +56,7 @@ func TestArchiveReadEquivalenceCatalogue(t *testing.T) {
 			var conversations [][]protofixture.Exchange
 			scenarios := map[protofixture.Scenario]bool{}
 			for index, value := range protofixture.Catalog() {
-				if archiveRaceBuild && !encrypt && value.Scenario != protofixture.ScenarioBasic && scenarios[value.Scenario] {
+				if raceBuild && !encrypt && value.Scenario != protofixture.ScenarioBasic && scenarios[value.Scenario] {
 					continue
 				}
 				scenarios[value.Scenario] = true

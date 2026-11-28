@@ -175,7 +175,9 @@ func TestUnifiedParseDoesNotReadBackOnPostgreSQL(t *testing.T) {
 	}
 	unified := newFinalizeRun(t)
 	rounds := 15
-	if testing.Short() {
+	if testing.Short() || raceBuild {
+		// The timings mean nothing under the race detector; two rounds keep
+		// the read-back check.
 		rounds = 2
 	}
 	for _, size := range []struct {
