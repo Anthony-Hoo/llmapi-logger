@@ -488,26 +488,89 @@ func (run *eqRun) waitParsedWithoutNotify(id string) {
 	run.waitParse(id, false)
 }
 
+// waitParse polls the audit row until its parse has ended, for at most
+// parseWait; it fails with what the row looked like then.
+//
+// With notify it keeps one id-only job queued while the audit is pending:
+// the harness hides the worker's pending scan, so nothing else would start
+// the parse. More than one queued job only makes the worker load and fail to
+// claim the same audit again and again, behind the next audit's job. Without
+// notify the submitted job starts the parse; only an audit whose attempt was
+// released back to pending (parse_save_failures > 0) is notified, since its
+// job is gone and the hidden scan would have picked it up after the backoff.
 func (run *eqRun) waitParse(id string, notify bool) {
 	run.t.Helper()
 	if id == "" {
 		return
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		snapshot, err := run.store.Snapshot(context.Background(), id)
+	database, err := sql.Open("sqlite", "file:"+filepath.ToSlash(run.dbPath)+"?mode=ro")
+	if err != nil {
+		run.t.Fatal(err)
+	}
+	defer database.Close()
+	deadline := time.Now().Add(parseWait)
+	polls, accepted, refused := 0, 0, 0
+	for delay := time.Millisecond; ; delay = min(2*delay, 50*time.Millisecond) {
+		state, err := readParseState(database, id)
 		if err != nil {
 			run.t.Fatal(err)
 		}
-		if status := snapshot.Audit.ParseStatus; status != "pending" && status != "processing" {
+		polls++
+		if state.parseStatus != "pending" && state.parseStatus != "processing" {
 			return
 		}
-		if notify {
-			run.worker.Notify(id)
+		if time.Now().After(deadline) {
+			run.t.Fatalf("audit %s was not parsed within %v (%d polls, %d notifies accepted, %d refused, %d jobs queued): %s",
+				id, parseWait, polls, accepted, refused, run.worker.QueueLength(), state)
 		}
-		time.Sleep(2 * time.Millisecond)
+		if (notify || state.parseSaveFailures > 0) && state.parseStatus == "pending" && run.worker.QueueLength() == 0 {
+			if run.worker.Notify(id) {
+				accepted++
+			} else {
+				refused++
+			}
+		}
+		time.Sleep(delay)
 	}
-	run.t.Fatalf("audit %s was not parsed", id)
+}
+
+// parseState is what waitParse sees of an audit, and what its failure
+// message reports.
+type parseState struct {
+	parseStatus, captureStatus, forwardStatus string
+	errorCode                                 sql.NullString
+	endedAtNS, parseNextAtNS                  sql.NullInt64
+	parseSaveFailures                         int64
+}
+
+func (state parseState) String() string {
+	return fmt.Sprintf("parse_status=%s capture_status=%s forward_status=%s error_code=%v ended_at_ns set=%v parse_save_failures=%d parse_next_at_ns=%v",
+		state.parseStatus, state.captureStatus, state.forwardStatus, nullText(state.errorCode), state.endedAtNS.Valid, state.parseSaveFailures, nullInt(state.parseNextAtNS))
+}
+
+func nullText(value sql.NullString) string {
+	if !value.Valid {
+		return "NULL"
+	}
+	return value.String
+}
+
+func nullInt(value sql.NullInt64) string {
+	if !value.Valid {
+		return "NULL"
+	}
+	return strconv.FormatInt(value.Int64, 10)
+}
+
+// readParseState reads the audit row only: Snapshot would also read every
+// body chunk, several MiB per poll for the large cases, from the database the
+// parse is working on.
+func readParseState(database *sql.DB, id string) (parseState, error) {
+	var state parseState
+	err := database.QueryRow(`SELECT parse_status, capture_status, forward_status, error_code, ended_at_ns, parse_save_failures, parse_next_at_ns
+FROM audit_records WHERE audit_id = ?`, id).Scan(&state.parseStatus, &state.captureStatus, &state.forwardStatus,
+		&state.errorCode, &state.endedAtNS, &state.parseSaveFailures, &state.parseNextAtNS)
+	return state, err
 }
 
 // eqExchanges is the traffic of I.1: the protofixture catalogue on all four

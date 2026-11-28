@@ -32,7 +32,10 @@ import (
 
 const (
 	// streamOrderDeadline bounds every wait for something that must happen.
-	streamOrderDeadline = 10 * time.Second
+	// Each happens within milliseconds here; the bound is that of the waits
+	// for the writer (recoveryWait), which is ample under -race on a slow
+	// runner and costs a passing run nothing.
+	streamOrderDeadline = recoveryWait
 	// streamOrderAbsenceProbe is the one bounded wait used to show that an
 	// event has not happened while the terminal commit is blocked. Current
 	// behaviour can never fail it: the event is gated on the handler

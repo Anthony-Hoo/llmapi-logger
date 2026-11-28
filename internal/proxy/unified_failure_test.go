@@ -171,7 +171,7 @@ func TestCommitAuditRetries(t *testing.T) {
 			record := completionLogRecords(t, unified.logs.Bytes())[0]
 			snapshot, err := unified.store.Snapshot(context.Background(), id)
 			// A failed commit is no barrier: wait for the checkpoints.
-			for deadline := time.Now().Add(5 * time.Second); err == nil && test.finalError && len(snapshot.Stages) < 4 && time.Now().Before(deadline); {
+			for deadline := time.Now().Add(recoveryWait); err == nil && test.finalError && len(snapshot.Stages) < 4 && time.Now().Before(deadline); {
 				time.Sleep(5 * time.Millisecond)
 				snapshot, err = unified.store.Snapshot(context.Background(), id)
 			}
@@ -615,7 +615,7 @@ func TestCommitConstraintFailureOnTheRealStore(t *testing.T) {
 		t.Fatalf("commit attempts %d", counting.commits.Load())
 	}
 	record := completionLogRecords(t, unified.logs.Bytes())[0]
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(recoveryWait)
 	for {
 		snapshot, err := unified.store.Snapshot(context.Background(), id)
 		if err != nil {

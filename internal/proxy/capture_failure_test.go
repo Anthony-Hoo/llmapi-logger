@@ -85,6 +85,9 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 			request: large, response: large, commitRejected: true, stages: 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// Each case has its own store and upstream; most wait for a
+			// recovery round of the writer.
+			t.Parallel()
 			ctx := context.Background()
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
@@ -147,7 +150,7 @@ CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON body_streams WHEN NEW.state
 			}
 			// A rejected commit is finalized by the writer's recovery.
 			var snapshot sqlite.Snapshot
-			for deadline := time.Now().Add(15 * time.Second); ; {
+			for deadline := time.Now().Add(recoveryWait); ; {
 				if snapshot, err = store.Snapshot(ctx, auditID); err != nil {
 					t.Fatal(err)
 				}
