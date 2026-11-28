@@ -169,7 +169,8 @@ func TestCallersHelpSaysWhereTokenIDsAre(t *testing.T) {
 }
 
 // TestStandardLibraryOnly: the client imports nothing but the standard
-// library and the shared agentapi package.
+// library, the shared agentapi package and the standard-library-only
+// terminal reader termio.
 func TestStandardLibraryOnly(t *testing.T) {
 	var files []string
 	for _, pattern := range []string{"*.go", filepath.Join("..", "..", "cmd", "llmaudit", "*.go")} {
@@ -191,7 +192,8 @@ func TestStandardLibraryOnly(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			path, _ := strconv.Unquote(spec.Path.Value)
 			first := strings.SplitN(path, "/", 2)[0]
-			allowed := path == "llmapi-logger/internal/agentapi" || path == "llmapi-logger/internal/agentcli" && strings.Contains(file, "llmaudit")
+			allowed := path == "llmapi-logger/internal/agentapi" || path == "llmapi-logger/internal/termio" ||
+				path == "llmapi-logger/internal/agentcli" && strings.Contains(file, "llmaudit")
 			if !allowed && strings.Contains(first, ".") || !allowed && strings.HasPrefix(path, "llmapi-logger/") {
 				t.Errorf("%s imports %s", file, path)
 			}

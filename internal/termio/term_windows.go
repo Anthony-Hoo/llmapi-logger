@@ -1,6 +1,6 @@
 //go:build windows
 
-package agentcli
+package termio
 
 import "syscall"
 
@@ -13,7 +13,10 @@ const (
 	enableEchoInput      = 0x0004
 )
 
-var procSetConsoleMode = modKernel32.NewProc("SetConsoleMode")
+var (
+	modKernel32        = syscall.NewLazyDLL("kernel32.dll")
+	procSetConsoleMode = modKernel32.NewProc("SetConsoleMode")
+)
 
 func setConsoleMode(handle syscall.Handle, mode uint32) error {
 	result, _, err := procSetConsoleMode.Call(uintptr(handle), uintptr(mode))

@@ -1,6 +1,6 @@
 //go:build windows
 
-package agentcli
+package termio
 
 import (
 	"os"

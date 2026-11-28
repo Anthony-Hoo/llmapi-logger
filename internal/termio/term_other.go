@@ -1,6 +1,6 @@
 //go:build !windows && !linux && !darwin
 
-package agentcli
+package termio
 
 import "errors"
 

@@ -1,6 +1,6 @@
 //go:build darwin
 
-package agentcli
+package termio
 
 import "syscall"
 
