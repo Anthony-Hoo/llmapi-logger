@@ -69,7 +69,7 @@ func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
 	early.earlyAnswer = 1300 << 10
 	for _, exchange := range []*eqExchange{large, largeResponseExchange(t, 5<<19), unmerged, preRead, early} {
 		t.Run(exchange.name, func(t *testing.T) {
-			stager := openEqStager(t, filepath.Join(t.TempDir(), "staging"), staging.Options{})
+			stager := &countingStager{Stager: openEqStager(t, filepath.Join(t.TempDir(), "staging"), staging.Options{})}
 			unified := newEqRun(t, audit.Options{StageBytes: stagingTestBudget, Stager: stager}, nil)
 			sendAgainstOracle(t, unified, exchange)
 			ids := make([]string, 0, 1)
@@ -80,10 +80,12 @@ func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
 				compareQueryViews(t, id, unified)
 			}
 			compareRuns(t, unified, nil)
-			if stats := stager.Stats(); stats.Records == 0 {
+			// Counted at Stage: a record still queued when the commit is
+			// acknowledged is never written, so Stats().Records can be 0.
+			if stager.staged.Load() == 0 {
 				t.Fatal("nothing was staged")
 			}
-			requireNoStagingFiles(t, stager)
+			requireNoStagingFiles(t, stager.Stager)
 			if used := unified.manager.MemoryInUse(); used != 0 {
 				t.Fatalf("budget holds %d bytes", used)
 			}
@@ -92,6 +94,20 @@ func TestStagedBodiesThroughProxyMatchLegacy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countingStager counts the chunks the sessions staged.
+type countingStager struct {
+	*staging.Stager
+	staged atomic.Int64
+}
+
+func (stager *countingStager) Stage(chunk storage.BodyChunk) (*staging.Ref, error) {
+	ref, err := stager.Stager.Stage(chunk)
+	if err == nil {
+		stager.staged.Add(1)
+	}
+	return ref, err
 }
 
 // Staging full (F.6, I.3): the stage stops retaining with
