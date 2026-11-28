@@ -325,12 +325,12 @@ CI 在 GitHub 托管的 runner 上跑 `go test -race ./...`：开了竞态检测
 
 | 包 | 常量 | 值 | 依据 |
 | --- | --- | --- | --- |
-| `internal/proxy` | `parseWait` | 2 分 15 秒 | parser 的单任务期限（2 分钟），过了它 worker 就放弃这条 audit |
+| `internal/proxy` | `parseWait` | 2 分 15 秒 | parser 的单任务期限（2 分钟），过了它 worker 就放弃这条 audit；被释放的解析不等扫描，`waitParse` 自己再通知 |
 | `internal/proxy` | `recoveryWait` | 60 秒 | writer 的捕获恢复每 5 秒一轮，十二轮；也用于等排队的 checkpoint 落库和 stream 顺序事件 |
-| `internal/parser` | `PipelineWait` | 1 分钟 | 一次解析、交接或释放本机不到一秒，慢十倍再乘 runner 差异约 20 秒，并低于 2 分钟的任务期限 |
-| `internal/app` | `pipelineWait` | 1 分钟 | 提交、调用方解析、解析与分析，最多一轮 5 秒的恢复，(10 + 5) × 2 再留一倍；归档测试另用 `terminalWait`（含 parser 30 秒的待解析扫描） |
+| `internal/parser` | `PipelineWait` | 2 分钟 | 最长的正常路径是解析被释放一次后重试：30 秒退避，加上最多 30 秒等下一次待解析扫描，再加解析本身（本机不到一秒，race 下几秒）；第二次释放（60 秒退避）在这些测试里不正常，应当失败 |
+| `internal/app` | `pipelineWait` | 2 分钟 | 提交、调用方解析、解析与分析；最长的正常路径是一轮 5 秒的恢复之后靠 30 秒一次的待解析扫描才被解析，或解析释放一次（30 秒退避加下一次扫描）；归档测试另用 `terminalWait` |
 | `internal/storage/postgres`、`internal/storage/sqlite` | `storeWait` / `recoveryWait` | 30 秒 / 十二轮恢复 | 交给 writer 或从 writer 返回的一次交接（入队、开始、结束、等行锁） |
-| `tests/integration` | `integrationTimeout` | 30 秒 | 管线一步本机不到一秒：(10 秒 + 一轮 5 秒恢复) × 2；写成它三倍的等待随之放宽 |
+| `tests/integration` | `integrationTimeout` | 90 秒 | 管线一步本机不到一秒、race 下约 10 秒，加一轮 5 秒恢复和恢复定稿后等 30 秒的待解析扫描：(10 + 5 + 30) 秒 × 2；写成它三倍的等待随之放宽 |
 
 “在 X 毫秒内什么都没发生”这类以超时为通过的探针，以及断言时间上限的测试，不放宽。
 
@@ -346,4 +346,4 @@ CI 在 GitHub 托管的 runner 上跑 `go test -race ./...`：开了竞态检测
 | `tests/integration` | `TestArchiveReadEquivalenceCatalogue` | 不加密一臂只发目录的子集（基本场景的每个用例，即每个协议的流式和非流式；其余场景各一次，取目录里它第一次出现的协议和模式）；加密一臂始终全量 |
 | `tests/integration` | `TestUnifiedParseDoesNotReadBackOnPostgreSQL` | 计时轮数从 15 减到 2（同 `-short`），不回读的检查保留 |
 
-另外，彼此独立（各用自己的库、schema、目录，不改包级变量、不用 `t.Setenv`）且多半在等 writer 恢复轮次或数据库的测试改成 `t.Parallel()`：`internal/proxy` 的捕获失败用例和用 `eqRun` 的大部分测试（崩溃点测试仍串行，它们靠“几十毫秒内落库”模拟崩溃）、`internal/parser` 的两个目录级测试、`internal/app` 的归档测试和 `TestFailedFinalCommitKeepsStagedChunks` 的用例、`internal/storage/postgres` 的几个规模测试。
+另外，彼此独立（各用自己的库、schema、目录、worker 和上游，不改包级变量、不用 `t.Setenv`，不断言执行计划、行数、缓冲区计数或耗时）且多半在等 writer 恢复轮次的测试改成了 `t.Parallel()`：`internal/proxy` 的捕获失败用例和用 `eqRun` 的大部分测试（崩溃点测试仍串行，它们靠“几十毫秒内落库”模拟崩溃）、`internal/app` 的归档测试和 `TestFailedFinalCommitKeepsStagedChunks` 的用例。断言计划或行数的 `internal/storage/postgres` 规模测试、等价测试和 `internal/parser` 的目录级测试保持串行：与别的测试并行时，autovacuum 的时机和服务器共享的资源会改变计划的输入，CPU 争用也会让 parser 的任务期限和单个 worker 的队列变成测试的一部分。
