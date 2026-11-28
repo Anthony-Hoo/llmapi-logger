@@ -118,6 +118,7 @@ AND EXISTS (SELECT 1 FROM audit_records AS a WHERE a.audit_id = m.audit_id)`); m
 // verification passes; HasAudits stays true, and a start without the key
 // file does not create a new key.
 func TestPostgresArchiveRemovesVerifiedAudits(t *testing.T) {
+	t.Parallel()
 	env := newRemovalEnv(t)
 	logs := env.logs.String()
 	if !strings.Contains(logs, `"error_category":"archive_removal_active","format_version":1`) || strings.Contains(logs, "trial") ||
@@ -241,6 +242,7 @@ func trialVersion(env *archiveEnv) { version := int64(0); env.formatVersion = &v
 // member, and asked directly to remove a version 0 member with its own
 // segment, revision and change stamp, it skips it.
 func TestPostgresArchiveTrialFormatIsNeverRemoved(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnvWith(t, config.ArchiveModeArchiveThenDelete, trialVersion)
 	if env.app.archive.FormatVersion() != 0 {
 		t.Fatalf("runner at format version %d", env.app.archive.FormatVersion())
@@ -312,6 +314,7 @@ WHERE m.state = 'sealed' AND s.state = 'sealed' AND s.format_version = 0`); seal
 // version 0 is not exported again (archive_gap_members is keyed by the gap
 // id) and so it is never removed: it stays in audit_gaps.
 func TestPostgresArchiveTrialFormatIsExportedAgain(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnvWith(t, config.ArchiveModeExportOnly, trialVersion)
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIResponses, protofixture.AnthropicMessages}, 3)
 	if _, err := env.db.Exec(`INSERT INTO audit_gaps (started_at_ns, ended_at_ns, reason, request_count, detail, created_at_ns)
@@ -458,6 +461,7 @@ JOIN archive_segments AS s USING (segment_id) WHERE m.audit_id = $1 ORDER BY m.r
 // The next run exports the three again at revision 2 and removes them; the
 // archive reads revision 2.
 func TestPostgresArchiveRemovalStampGate(t *testing.T) {
+	t.Parallel()
 	env := newRemovalEnv(t)
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat, protofixture.AnthropicMessages}, 3)
 	ids := env.auditIDs()
@@ -613,6 +617,7 @@ FROM turns AS t`)
 // rewrites a member before its own removal, no member turns stale, and no
 // turn is left a retention checkpoint.
 func TestPostgresArchiveRemovalTakesChildrenBeforeParents(t *testing.T) {
+	t.Parallel()
 	env := newRemovalEnv(t)
 	options := protofixture.Options{Seed: 7, ItemBytes: 120, SystemBytes: 200}
 	chain := protofixture.NewConversation(protofixture.OpenAIResponses, true, options, 40)
@@ -674,6 +679,7 @@ func TestPostgresArchiveRemovalTakesChildrenBeforeParents(t *testing.T) {
 // to be removed, which then turns stale. The same members in RemovalOrder
 // turn none stale.
 func TestPostgresArchiveStartOrderMakesFalseStaleMembers(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		order func([]storage.ArchiveRemovable) []storage.ArchiveRemovable
@@ -738,6 +744,7 @@ func sortByStartDescending(members []storage.ArchiveRemovable) {
 // removal; the objects it references are kept and no object is left that
 // nothing references; the removed turns read from the archive.
 func TestPostgresArchiveRemovalKeepsTheActiveConversation(t *testing.T) {
+	t.Parallel()
 	env := newRemovalEnv(t)
 	options := protofixture.Options{Seed: 11, ItemBytes: 150, SystemBytes: 300, ToolDefinitions: 1}
 	conversation := protofixture.NewConversation(protofixture.AnthropicMessages, true, options, 60)
@@ -881,6 +888,7 @@ func contains(values []string, value string) bool {
 // point is a sealed member's audit gone or a hot_removed member's audit
 // still hot.
 func TestPostgresArchiveRemovalCrashPoints(t *testing.T) {
+	t.Parallel()
 	for _, point := range []string{"before_commit", runner.StepBetweenRemovalBatches, runner.StepAfterRemoval} {
 		t.Run(point, func(t *testing.T) {
 			env := newRemovalEnv(t)
@@ -951,6 +959,7 @@ FOR EACH ROW WHEN (NEW.state = 'hot_removed') EXECUTE FUNCTION fail_archive_remo
 // with the segment counted and logged with a stable code. Once the file is
 // back, the next run removes them.
 func TestPostgresArchiveRemovalHoldsBackADamagedBundle(t *testing.T) {
+	t.Parallel()
 	env := newRemovalEnv(t)
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat, protofixture.AnthropicMessages}, 4)
 	ids := env.auditIDs()

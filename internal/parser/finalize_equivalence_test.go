@@ -24,8 +24,11 @@ func TestInputFromHandedOverEvidenceEqualsTheStoredInput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("the fixture catalogue through the unified write path")
 	}
+	t.Parallel()
 	for name, open := range finalizeStores(t) {
 		t.Run(name, func(t *testing.T) {
+			// Each store has its own harness, upstream and database.
+			t.Parallel()
 			harness := newFinalizeHarness(t, open(t), audit.Options{}, builtin.All())
 			unreachable := harness.proxyTo("http://127.0.0.1:1")
 			traffic := finalizeTraffic(t)

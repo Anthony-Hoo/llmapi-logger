@@ -181,7 +181,7 @@ func newStagingSchema(t *testing.T, dsn string) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	schema := fmt.Sprintf("app_staging_%d", time.Now().UnixNano())
+	schema := fmt.Sprintf("app_staging_%d_%d", time.Now().UnixNano(), testSchemas.Add(1))
 	if _, err := db.Exec("CREATE SCHEMA " + schema); err != nil {
 		t.Fatal(err)
 	}

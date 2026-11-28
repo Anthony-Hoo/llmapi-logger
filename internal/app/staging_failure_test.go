@@ -255,6 +255,9 @@ func TestFailedFinalCommitKeepsStagedChunks(t *testing.T) {
 		}{{"process alive", false, false}, {"stopped while failing", true, false}, {"operation failure, process alive", false, true}} {
 			restart := variant.restart
 			t.Run(backend.name+"/"+variant.name, func(t *testing.T) {
+				// Each case has its own database and staging directory; most
+				// wait for a recovery round of the writer.
+				t.Parallel()
 				unified := runFailedCommit(t, backend, restart, variant.isolated)
 				t.Logf("%s/%s chunks %v stored %v, %d staged",
 					unified.audit.ForwardStatus, unified.audit.CaptureStatus, unified.chunks, unified.stored, unified.staged)

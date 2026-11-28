@@ -69,6 +69,10 @@ type archiveEnv struct {
 	formatVersion *int64
 }
 
+// testSchemas keeps the schema names of tests that run in parallel apart
+// even when two read the same clock value.
+var testSchemas atomic.Uint64
+
 func archiveDSN(t *testing.T) (string, *sql.DB) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -80,7 +84,7 @@ func archiveDSN(t *testing.T) (string, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	schema := fmt.Sprintf("app_archive_%d", time.Now().UnixNano())
+	schema := fmt.Sprintf("app_archive_%d_%d", time.Now().UnixNano(), testSchemas.Add(1))
 	if _, err := db.Exec("CREATE SCHEMA " + schema); err != nil {
 		t.Fatal(err)
 	}
@@ -457,6 +461,7 @@ func manifestCount(files map[string][32]byte) int {
 // conversation gets after it was archived go to a new bundle in a later run
 // and the old bundle stays as it was; expired gaps are exported once.
 func TestPostgresArchiveExportsEveryDueAudit(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
 	if env.app.retention != nil {
 		t.Fatal("direct retention assembled with the archive on")
@@ -599,6 +604,7 @@ VALUES (1000, 2000, 'queue_full', 3, '', 2001), (3000, 4000, 'db_unavailable', 1
 // archived; the store's payload state is failed as after the background
 // verification finds damage (P item 4).
 func TestPostgresArchiveKeepsATamperedAuditHot(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat}, 2)
 	ids := env.auditIDs()
@@ -643,6 +649,7 @@ WHERE audit_id = $1 AND event_type = 'capture_finalized'`, tampered); err != nil
 // differently from the hot store, but its change stamp (ArchiveChangeStamp)
 // shows the change, so it counts as stale and the bundle stands.
 func TestPostgresArchiveSampleTreatsAChangedRecordAsStale(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat}, 1)
 	ids := env.auditIDs()
@@ -684,6 +691,7 @@ func TestPostgresArchiveSampleTreatsAChangedRecordAsStale(t *testing.T) {
 // checks first and excludes such a record itself. The refusal path is
 // covered by the runner's host tests.
 func TestPostgresArchiveDefersOneUnarchivableMember(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat, protofixture.AnthropicMessages}, 2)
 	ids := env.auditIDs()
@@ -781,6 +789,7 @@ func (env *archiveEnv) isLastStarted(id string) bool {
 // reconciliation: every audit in exactly one sealed member, no duplicate
 // line in the archive, no temporary file left.
 func TestPostgresArchiveReconcilesAnInterruptedRun(t *testing.T) {
+	t.Parallel()
 	for _, stop := range []string{runner.StepAfterIntent, runner.StepAfterPublish, runner.StepBeforeSeal, runner.StepBeforeRecordPass} {
 		t.Run(stop, func(t *testing.T) {
 			env := newArchiveEnv(t, config.ArchiveModeExportOnly)
@@ -828,6 +837,7 @@ func TestPostgresArchiveReconcilesAnInterruptedRun(t *testing.T) {
 // A full disk while writing leaves no published manifest, registers nothing
 // as sealed, and the audits remain due for the next run.
 func TestPostgresArchiveDiskFullPublishesNothing(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
 	env.traffic([]protofixture.Protocol{protofixture.Gemini}, 2)
 	ids := env.auditIDs()
@@ -869,6 +879,7 @@ func TestPostgresArchiveDiskFullPublishesNothing(t *testing.T) {
 // archive path that is not a directory leaves the runner off and the audit
 // working.
 func TestPostgresArchiveStartupGuards(t *testing.T) {
+	t.Parallel()
 	env := newArchiveEnv(t, config.ArchiveModeArchiveThenDelete)
 	if !strings.Contains(env.logs.String(), `"error_category":"archive_removal_active","format_version":1`) ||
 		strings.Contains(env.logs.String(), "trial") || env.app.retention != nil {
