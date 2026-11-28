@@ -16,7 +16,7 @@ import (
 )
 
 // The capture setting saved from the management UI (design H.3): how many
-// times the unified write path retries a CommitAudit that failed with a
+// times the capture session retries a CommitAudit that failed with a
 // retryable error. The configuration file's audit.commit_retries stays the
 // base; a saved section overrides it. The value in use lives in the
 // Manager's atomic (SetCommitRetries), so no request reads the store for it.
@@ -40,9 +40,8 @@ type CaptureSettingsView struct {
 	Settings  CaptureEditableSettings `json:"settings"`
 	// File is what the configuration file says, i.e. what a reset returns to.
 	File CaptureEditableSettings `json:"file"`
-	// WritePath is the write path the audit manager runs: audit.write_path,
-	// or legacy when unified fell back (staging unusable in available mode).
-	// Shown read-only: the legacy path does not use the retry count.
+	// WritePath is always "unified", the only write path. It stays in the
+	// view so that a page built for both paths still reads it.
 	WritePath string `json:"write_path"`
 }
 
@@ -81,9 +80,6 @@ type CommitRetrySetter interface {
 type CaptureSettingsOptions struct {
 	// FileRetries is audit.commit_retries from the configuration file.
 	FileRetries int
-	// WritePath is the write path the audit manager runs (Manager.WritePath),
-	// which may differ from audit.write_path after a fallback.
-	WritePath string
 	// Store is nil when the audit store could not be opened: reads answer
 	// with the file, writes refuse with ErrSettingsUnavailable.
 	Store SettingsStore
@@ -99,7 +95,6 @@ type CaptureSettingsOptions struct {
 type CaptureSettings struct {
 	settingsMu sync.Mutex
 	file       CaptureEditableSettings
-	writePath  string
 	saved      SettingsStore
 	manager    CommitRetrySetter
 	logger     *slog.Logger
@@ -126,7 +121,7 @@ func NewCaptureSettings(ctx context.Context, options CaptureSettingsOptions) (*C
 		options.Now = time.Now
 	}
 	service := &CaptureSettings{
-		file: CaptureEditableSettings{CommitRetries: options.FileRetries}, writePath: options.WritePath,
+		file:  CaptureEditableSettings{CommitRetries: options.FileRetries},
 		saved: options.Store, manager: options.Manager, logger: options.Logger, now: options.Now,
 	}
 	service.loadSavedSettings(ctx)
@@ -190,7 +185,7 @@ func (service *CaptureSettings) loadSavedSettings(ctx context.Context) {
 
 func (service *CaptureSettings) view(effective CaptureEditableSettings, updatedNS int64) CaptureSettingsView {
 	view := CaptureSettingsView{
-		Source: CaptureSettingsSourceFile, UpdatedNS: updatedNS, Settings: effective, File: service.file, WritePath: service.writePath,
+		Source: CaptureSettingsSourceFile, UpdatedNS: updatedNS, Settings: effective, File: service.file, WritePath: captureWritePath,
 	}
 	if updatedNS != 0 {
 		view.Source = CaptureSettingsSourceSaved
@@ -265,3 +260,6 @@ func (service *CaptureSettings) Reset(ctx context.Context) (CaptureSettingsView,
 	service.logger.Info("audit capture settings reset to the configuration file", "commit_retries", service.file.CommitRetries)
 	return service.view(service.file, 0), nil
 }
+
+// captureWritePath is what CaptureSettingsView.WritePath always says.
+const captureWritePath = "unified"

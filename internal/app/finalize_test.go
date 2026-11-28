@@ -6,22 +6,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"llmapi-logger/internal/audit"
-	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
-// On the unified write path the application hands committed audits to the
-// parser worker's Submit with the plaintext their session held (design G):
-// served before the worker runs, the request's plaintext stays in the
-// capture budget with its queued job and is released once it is parsed. On
-// the legacy path nothing is handed over.
-func TestUnifiedWritePathHandsCommittedAuditsToTheParser(t *testing.T) {
+// The application hands committed audits to the parser worker's Submit with
+// the plaintext their session held (design G): served before the worker
+// runs, the request's plaintext stays in the capture budget with its queued
+// job and is released once it is parsed.
+func TestCommittedAuditsAreHandedToTheParser(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		_, _ = io.Copy(io.Discard, request.Body)
 		response.Header().Set("Content-Type", "application/json")
@@ -31,21 +27,14 @@ func TestUnifiedWritePathHandsCommittedAuditsToTheParser(t *testing.T) {
 	}))
 	defer upstream.Close()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	for _, writePath := range []string{config.AuditWritePathLegacy, config.AuditWritePathUnified} {
-		t.Run(writePath, func(t *testing.T) {
+	{
+		{
 			configuration := insightsTestConfig(t, upstream.URL, true, "")
-			configuration.Audit.WritePath = writePath
-			// The unified path needs a staging directory; without one the
-			// application falls back to the legacy path.
-			configuration.Audit.Staging.Dir = filepath.Join(t.TempDir(), "staging")
 			application, err := newSQLiteTest(configuration, logger)
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = application.Close() })
-			if got := application.auditManager.WritePath(); got != writePath {
-				t.Fatalf("manager write path %s", got)
-			}
 			request := httptest.NewRequest(http.MethodPost, "http://audit-proxy/v1/chat/completions",
 				strings.NewReader(`{"model":"model-example","messages":[{"role":"user","content":"task"}]}`))
 			request.Header.Set("Content-Type", "application/json")
@@ -55,12 +44,8 @@ func TestUnifiedWritePathHandsCommittedAuditsToTheParser(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("proxy status = %d", response.Code)
 			}
-			held := application.auditManager.MemoryInUse()
-			if writePath == audit.WritePathUnified && (held == 0 || application.parserWorker.QueueLength() != 1) {
-				t.Fatalf("unified: %d bytes held and %d jobs queued before the worker runs", held, application.parserWorker.QueueLength())
-			}
-			if writePath == audit.WritePathLegacy && held != 0 {
-				t.Fatalf("legacy holds %d bytes", held)
+			if held := application.auditManager.MemoryInUse(); held == 0 || application.parserWorker.QueueLength() != 1 {
+				t.Fatalf("%d bytes held and %d jobs queued before the worker runs", held, application.parserWorker.QueueLength())
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -89,6 +74,6 @@ func TestUnifiedWritePathHandsCommittedAuditsToTheParser(t *testing.T) {
 			if used := application.auditManager.MemoryInUse(); used != 0 {
 				t.Fatalf("%d bytes held after the parse", used)
 			}
-		})
+		}
 	}
 }

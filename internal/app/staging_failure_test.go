@@ -155,15 +155,14 @@ type failedCommitOutcome struct {
 // attempt. Then either the store recovers while the process lives
 // (restart=false), or the process stops while the store still fails and
 // starts again once it works.
-func runFailedCommit(t *testing.T, backend failureBackend, writePath string, restart, isolated bool) failedCommitOutcome {
+func runFailedCommit(t *testing.T, backend failureBackend, restart, isolated bool) failedCommitOutcome {
 	t.Helper()
 	ctx := context.Background()
 	directory := t.TempDir()
-	cfg := config.Default()
+	cfg := testConfig(t)
 	cfg.KeyPath = filepath.Join(directory, "key", "audit.key")
 	backend.database(t, &cfg, directory)
 	cfg.Mode = audit.ModeAvailable
-	cfg.Audit.WritePath = writePath
 	cfg.Audit.CommitRetries = 1
 	cfg.Audit.Memory.StageBytes = 1 << 20
 	cfg.Audit.Staging.Dir = filepath.Join(directory, "staging")
@@ -244,9 +243,10 @@ func runFailedCommit(t *testing.T, backend failureBackend, writePath string, res
 // Once the store can write again its staged chunks are stored under their
 // body rows before the audit is finalized as failed, raw is kept in full,
 // integrity verifies and the staging file is gone: while the process lives,
-// and after a stop while the store still failed (the start-up import). Both
-// are compared with the legacy path under the same failure; the test log
-// shows the chunks each keeps.
+// and after a stop while the store still failed (the start-up import). The
+// final states are the ones the legacy path reached under the same failure
+// (failed while the process lives, interrupted after a restart); the test log
+// shows the chunks kept.
 func TestFailedFinalCommitKeepsStagedChunks(t *testing.T) {
 	for _, backend := range failureBackends() {
 		for _, variant := range []struct {
@@ -255,10 +255,8 @@ func TestFailedFinalCommitKeepsStagedChunks(t *testing.T) {
 		}{{"process alive", false, false}, {"stopped while failing", true, false}, {"operation failure, process alive", false, true}} {
 			restart := variant.restart
 			t.Run(backend.name+"/"+variant.name, func(t *testing.T) {
-				legacy := runFailedCommit(t, backend, audit.WritePathLegacy, restart, variant.isolated)
-				unified := runFailedCommit(t, backend, audit.WritePathUnified, restart, variant.isolated)
-				t.Logf("legacy %s/%s chunks %v stored %v; unified %s/%s chunks %v stored %v, %d staged",
-					legacy.audit.ForwardStatus, legacy.audit.CaptureStatus, legacy.chunks, legacy.stored,
+				unified := runFailedCommit(t, backend, restart, variant.isolated)
+				t.Logf("%s/%s chunks %v stored %v, %d staged",
 					unified.audit.ForwardStatus, unified.audit.CaptureStatus, unified.chunks, unified.stored, unified.staged)
 				if unified.staged == 0 {
 					t.Fatal("nothing was staged")
@@ -271,22 +269,18 @@ func TestFailedFinalCommitKeepsStagedChunks(t *testing.T) {
 				if restart {
 					wantForward, wantCapture = storage.ForwardInterrupted, storage.CapturePartial
 				}
-				for _, outcome := range []failedCommitOutcome{legacy, unified} {
-					if outcome.audit.ForwardStatus != wantForward || outcome.audit.CaptureStatus != wantCapture {
-						t.Fatalf("audit %s/%s, want %s/%s", outcome.audit.ForwardStatus, outcome.audit.CaptureStatus, wantForward, wantCapture)
-					}
+				// The legacy path ended the same way under the same failure.
+				if unified.audit.ForwardStatus != wantForward || unified.audit.CaptureStatus != wantCapture {
+					t.Fatalf("audit %s/%s, want %s/%s", unified.audit.ForwardStatus, unified.audit.CaptureStatus, wantForward, wantCapture)
 				}
 				response := storage.StageResponseReceived
 				if int64(unified.chunks[response]) != unified.staged {
 					t.Fatalf("%d of %d staged response chunks stored", unified.chunks[response], unified.staged)
 				}
 				// Every staged chunk is a whole 1 MiB chunk; the tail the session
-				// still held in memory is lost. Legacy loses the operations that
-				// shared the failed batch with its FinishAudit instead: how many
-				// depends on how the writer batched them, down to none of the
-				// response, so legacy is logged and not asserted.
+				// still held in memory is lost (R.6 item 2).
 				if unified.stored[response] != int64(unified.chunks[response])<<20 {
-					t.Fatalf("response stored %d (unified) and %d (legacy)", unified.stored[response], legacy.stored[response])
+					t.Fatalf("response stored %d of %d whole chunks", unified.stored[response], unified.chunks[response])
 				}
 			})
 		}

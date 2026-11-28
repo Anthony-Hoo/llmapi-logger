@@ -29,17 +29,16 @@ insights:
   vocabulary_file: ""
   # Optional per-model context-window overrides in tokens.
   context_windows: {}
-# Audit capture write path (legacy or unified); see audit-proxy.example.yaml.
-# staging.dir is the audit-staging volume of compose.yaml; unified needs it.
-# audit:
-#   write_path: legacy
-#   commit_retries: 3
-#   memory:
-#     stage_bytes: 8388608
-#     global_bytes: 268435456
-#   staging:
-#     dir: /staging
-#     max_bytes: 4294967296
+# Audit capture; see audit-proxy.example.yaml. staging.dir is required and is
+# the audit-staging volume of compose.yaml.
+audit:
+  commit_retries: 3
+  memory:
+    stage_bytes: 8388608
+    global_bytes: 268435456
+  staging:
+    dir: /staging
+    max_bytes: 4294967296
 
 interceptors:
   require-client-credential:

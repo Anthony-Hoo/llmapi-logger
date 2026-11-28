@@ -87,7 +87,7 @@ func savedCapture(retries string, version int64) map[string]storage.RuntimeSetti
 
 func newCaptureSettings(t *testing.T, store SettingsStore, manager CommitRetrySetter, logs *bytes.Buffer) *CaptureSettings {
 	t.Helper()
-	options := CaptureSettingsOptions{FileRetries: 3, WritePath: WritePathUnified, Store: store, Manager: manager}
+	options := CaptureSettingsOptions{FileRetries: 3, Store: store, Manager: manager}
 	if logs != nil {
 		options.Logger = slog.New(slog.NewTextHandler(logs, nil))
 	}
@@ -108,7 +108,7 @@ func TestCaptureSettingsSaveAndResetReachTheManager(t *testing.T) {
 	service := newCaptureSettings(t, store, manager, nil)
 	initial, err := service.Get(ctx)
 	if err != nil || initial.Source != CaptureSettingsSourceFile || initial.Settings.CommitRetries != 3 || initial.File.CommitRetries != 3 ||
-		initial.UpdatedNS != 0 || initial.WritePath != WritePathUnified || manager.CommitRetries() != 3 {
+		initial.UpdatedNS != 0 || initial.WritePath != "unified" || manager.CommitRetries() != 3 {
 		t.Fatalf("initial = %+v, %v; manager %d", initial, err, manager.CommitRetries())
 	}
 

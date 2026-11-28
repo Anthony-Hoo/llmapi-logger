@@ -59,7 +59,9 @@ describe("audit capture settings form", () => {
     expect(html).toMatch(/id="capture-commit_retries"[^>]*value="3"/);
     expect(html).toContain("配置文件的值是 3");
     expect(html).toContain("audit.commit_retries");
-    expect(html).toContain("只在 <span class=\"font-mono\">audit.write_path</span> 为 <span class=\"font-mono\">unified</span> 时生效");
+    // There is one write path: the page names none and warns about none.
+    expect(html).not.toContain("write_path");
+    expect(html).not.toContain("legacy");
     expect(html).toContain("0 表示只尝试一次，不重试");
     expect(html).toContain("第 1 次重试之前等 100 毫秒，之后每次翻倍，最长 1 秒");
     expect(html).toContain("填 3 时最多尝试 4 次，处理这条请求最多多等 0.7 秒，另加各次尝试本身的时间");
@@ -78,9 +80,6 @@ describe("audit capture settings form", () => {
     );
     expect(saved).toContain("覆盖配置文件");
     expect(saved).toContain("保存于");
-    // On the legacy path the value is not used, and the page says so.
-    const legacy = renderToStaticMarkup(<CaptureSettingsFields view={captureView({ write_path: "legacy" })} draft={{ commit_retries: "3" }} busy={false} onChange={noop} />);
-    expect(legacy).toContain("当前写入路径是 <span class=\"font-mono\">legacy</span>");
     expect(renderToStaticMarkup(<CaptureSettingsCard client={{} as ApiClient} />)).toContain(">审计写入<");
   });
 

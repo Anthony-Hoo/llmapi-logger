@@ -38,7 +38,6 @@ func unifiedConfig(t *testing.T, upstreamURL string) config.Config {
 	cfg.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	cfg.AdminToken = "integration-admin-token"
 	cfg.RetentionDays = 0
-	cfg.Audit.WritePath = config.AuditWritePathUnified
 	// A one-chunk stage budget sends every body over 1 MiB through local
 	// staging (design F), so the large cases below cover it on PostgreSQL.
 	cfg.Audit.Memory.StageBytes = 1 << 20

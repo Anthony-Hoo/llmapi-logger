@@ -29,7 +29,8 @@ services:
     volumes:
       - audit-data:/data
       # Local staging of body content beyond the memory budget
-      # (audit.staging.dir). Its own volume: never the key's /data, never
+      # (audit.staging.dir, required: without a usable directory the proxy
+      # runs without audit). Its own volume: never the key's /data, never
       # the read-only root or the tmpfs /tmp. doc/deployment/README.md 3.2.
       - audit-staging:/staging
       - ./configs/audit-proxy.docker.yaml:/etc/audit-proxy/config.yaml:ro

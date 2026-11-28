@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage/postgres"
 	"llmapi-logger/internal/storage/sqlite"
@@ -47,7 +46,7 @@ func TestStartupDoesNotReplaceMissingKeyWhileIntegrityEventsRemain(t *testing.T)
 		} {
 			t.Run(backend.name+"/"+scenario.name, func(t *testing.T) {
 				open := backend.seed(t, scenario.retention)
-				configuration := config.Default()
+				configuration := testConfig(t)
 				configuration.KeyPath = filepath.Join(t.TempDir(), "key", "audit.key")
 				var logs bytes.Buffer
 

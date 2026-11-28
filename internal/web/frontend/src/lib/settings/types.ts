@@ -92,7 +92,7 @@ export interface CaptureSettingsView {
   settings: CaptureEditableSettings;
   /** What the configuration file says, i.e. what a reset returns to. */
   file: CaptureEditableSettings;
-  /** audit.write_path from the configuration file; only "unified" uses the retries. */
+  /** Always "unified", the only capture write path; the page does not show it. */
   write_path: string;
 }
 

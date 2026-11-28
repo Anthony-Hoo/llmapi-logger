@@ -274,7 +274,7 @@ func TestCaptureSettingsRoutes(t *testing.T) {
 	t.Parallel()
 	rows := &settingsRows{}
 	sink := &retrySink{}
-	service, err := audit.NewCaptureSettings(context.Background(), audit.CaptureSettingsOptions{FileRetries: 3, WritePath: audit.WritePathUnified, Store: rows, Manager: sink})
+	service, err := audit.NewCaptureSettings(context.Background(), audit.CaptureSettingsOptions{FileRetries: 3, Store: rows, Manager: sink})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestCaptureSettingsRoutes(t *testing.T) {
 	response := serveBody(handler, http.MethodGet, path, "", nil)
 	initial := decodeOrg[audit.CaptureSettingsView](t, response)
 	if response.Code != http.StatusOK || initial.Source != audit.CaptureSettingsSourceFile || initial.Settings.CommitRetries != 3 ||
-		initial.File.CommitRetries != 3 || initial.WritePath != audit.WritePathUnified || strings.Contains(response.Body.String(), "updated_ns") {
+		initial.File.CommitRetries != 3 || initial.WritePath != "unified" || strings.Contains(response.Body.String(), "updated_ns") {
 		t.Fatalf("initial = %d %s", response.Code, response.Body.String())
 	}
 	assertNoStore(t, response, "capture settings")

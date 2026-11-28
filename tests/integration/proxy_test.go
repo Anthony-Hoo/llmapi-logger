@@ -383,6 +383,9 @@ newapi:
 mode: available
 database_url: '%s'
 key_path: '%s'
+audit:
+  staging:
+    dir: '%s'
 admin_token: integration-admin-token
 retention_days: 0
 %sroutes:
@@ -391,7 +394,7 @@ retention_days: 0
     path: '%s'
     match: exact
     parser: openai.chat_completions%s
-`, yamlQuote(upstreamURL), yamlQuote(newIntegrationDatabaseURL(t)), yamlQuote(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))), interceptorYAML, yamlQuote(routePath), routeInterceptorYAML)
+`, yamlQuote(upstreamURL), yamlQuote(newIntegrationDatabaseURL(t)), yamlQuote(filepath.ToSlash(filepath.Join(tempDir, "audit.key"))), yamlQuote(filepath.Join(t.TempDir(), "staging")), interceptorYAML, yamlQuote(routePath), routeInterceptorYAML)
 
 	path := filepath.Join(tempDir, "config.yaml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {

@@ -32,7 +32,7 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.NewAPI.URL = upstream.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
@@ -66,7 +66,7 @@ func TestNewAssemblesDataPlaneHandler(t *testing.T) {
 }
 
 func TestNewContextRejectsCanceledStartup(t *testing.T) {
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	configuration.AdminToken = "app-test-admin-token"
@@ -84,7 +84,7 @@ func TestNewContextRejectsCanceledStartup(t *testing.T) {
 }
 
 func TestNewKeepsAvailableModeRunningWhenAuditStoreUnavailable(t *testing.T) {
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.Mode = audit.ModeAvailable
 	configuration.DBPath = t.TempDir()
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
@@ -116,7 +116,7 @@ func TestUserAgentRuleBlocksGPTBeforeNewAPIAndUpdatesImmediately(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.NewAPI.URL = upstream.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
@@ -189,7 +189,7 @@ func TestContentPolicyRuleBlocksBeforeNewAPIAndUpdatesImmediately(t *testing.T) 
 	}))
 	defer upstream.Close()
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.NewAPI.URL = upstream.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
 	configuration.KeyPath = filepath.Join(t.TempDir(), "audit.key")
@@ -281,7 +281,7 @@ func TestNewUsesConfiguredHostAndTimeoutOptions(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.NewAPI.URL = upstream.URL
 	configuration.NewAPI.ResponseHeaderTimeoutSeconds = 3900
 	configuration.NewAPI.PreserveHost = true
@@ -334,7 +334,7 @@ func TestNewRoutesNewAPIRequestsThroughConfiguredProxy(t *testing.T) {
 	}))
 	defer upstreamProxy.Close()
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.NewAPI.URL = "http://newapi.invalid"
 	configuration.NewAPI.ProxyURL = upstreamProxy.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
@@ -384,7 +384,7 @@ func TestNewRoutesPassthroughThroughConfiguredProxyWithoutAudit(t *testing.T) {
 	}))
 	defer upstreamProxy.Close()
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.NewAPI.URL = "http://newapi.invalid"
 	configuration.NewAPI.ProxyURL = upstreamProxy.URL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")
@@ -502,7 +502,7 @@ func TestNewAPIManagementUsesConfiguredProxyAndResolvesCaller(t *testing.T) {
 	}))
 	defer upstreamProxy.Close()
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.NewAPI.URL = "http://newapi.invalid"
 	configuration.NewAPI.ProxyURL = upstreamProxy.URL
 	configuration.NewAPI.AccessToken = managementAccessToken
@@ -728,7 +728,7 @@ END`); err != nil {
 
 	for _, mode := range []string{audit.ModeAvailable, audit.ModeStrict} {
 		t.Run(mode, func(t *testing.T) {
-			configuration := config.Default()
+			configuration := testConfig(t)
 			configuration.Mode = mode
 			configuration.DBPath = databasePath
 			configuration.KeyPath = keyPath

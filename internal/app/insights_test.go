@@ -24,7 +24,7 @@ import (
 
 func insightsTestConfig(t *testing.T, upstreamURL string, enabled bool, vocabularyFile string) config.Config {
 	t.Helper()
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.DatabaseURL = "postgres://localhost/test?sslmode=disable"
 	configuration.NewAPI.URL = upstreamURL
 	configuration.DBPath = filepath.Join(t.TempDir(), "audit.db")

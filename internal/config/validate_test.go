@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -213,5 +215,7 @@ func testConfig() Config {
 	cfg.Listen = "127.0.0.1:18080"
 	cfg.AdminListen = "127.0.0.1:18081"
 	cfg.AdminToken = "test-token"
+	// Required; validation does not touch it.
+	cfg.Audit.Staging.Dir = filepath.Join(os.TempDir(), "llmapi-config-test", "staging")
 	return cfg
 }

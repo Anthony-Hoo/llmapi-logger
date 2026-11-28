@@ -49,7 +49,7 @@ func TestPostgresAgentAccessFlow(t *testing.T) {
 	values.Set("search_path", schema)
 	parsed.RawQuery = values.Encode()
 
-	cfg := config.Default()
+	cfg := testConfig(t)
 	cfg.DatabaseURL = parsed.String()
 	cfg.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	cfg.AdminToken = "synthetic-test-admin-token-0123456789"
@@ -177,7 +177,7 @@ func TestPostgresAgentWriteFlow(t *testing.T) {
 	values.Set("search_path", schema)
 	parsed.RawQuery = values.Encode()
 
-	cfg := config.Default()
+	cfg := testConfig(t)
 	cfg.DatabaseURL = parsed.String()
 	cfg.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	cfg.AdminToken = "synthetic-test-admin-token-0123456789"

@@ -52,7 +52,7 @@ func TestPostgresApplicationHTTPPersistence(t *testing.T) {
 		io.WriteString(w, `{"id":"test","object":"chat.completion","model":"lab-model","choices":[{"index":0,"message":{"role":"assistant","content":"safe reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}`)
 	}))
 	defer upstream.Close()
-	cfg := config.Default()
+	cfg := testConfig(t)
 	cfg.DatabaseURL = u.String()
 	cfg.KeyPath = filepath.Join(t.TempDir(), "audit.key")
 	cfg.AdminToken = "synthetic-test-admin"

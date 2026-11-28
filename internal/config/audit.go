@@ -7,11 +7,13 @@ import (
 	"strings"
 )
 
-// Audit write paths (doc/design/issue-59-stage3-write-path.md H.1).
-const (
-	AuditWritePathLegacy  = "legacy"
-	AuditWritePathUnified = "unified"
-)
+// AuditWritePathUnified is the only capture write path. audit.write_path
+// may still name it; the legacy path it used to select against was removed
+// (doc/design/issue-59-stage3-write-path.md R.8).
+const AuditWritePathUnified = "unified"
+
+// auditWritePathLegacy is the removed value, recognised to say so.
+const auditWritePathLegacy = "legacy"
 
 // Audit capture defaults (design F.1 and H.3).
 const (
@@ -26,11 +28,12 @@ const (
 	DefaultAuditStagingMaxBytes = 4 << 30
 )
 
-// AuditConfig selects how the capture session writes an audit. The default,
-// legacy, is the per-operation write path; unified keeps bodies in memory and
-// writes an audit in at most four writer operations, plus one for each stage
-// that spills to staging.
+// AuditConfig is how the capture session writes an audit: bodies are kept
+// in memory and an audit is written in at most four writer operations, plus
+// one for each stage that spills to staging.
 type AuditConfig struct {
+	// WritePath is accepted when absent or "unified" and selects nothing; the
+	// removed "legacy" is refused.
 	WritePath string `yaml:"write_path"`
 	// CommitRetries bounds the retries of the final write of the unified path.
 	// The management UI can override it at run time.
@@ -40,15 +43,14 @@ type AuditConfig struct {
 }
 
 // AuditStagingConfig is the local staging of body content beyond the memory
-// budget (design F.1). Dir is required for unified; when it is set the start
-// imports what a previous run left there whatever the write path, so it stays
-// configured after switching back to legacy until the directory is empty.
+// budget (design F.1). Dir is required; the start imports what a previous run
+// left there before interrupted audits are recovered.
 type AuditStagingConfig struct {
 	Dir      string `yaml:"dir"`
 	MaxBytes int64  `yaml:"max_bytes"`
 }
 
-// AuditMemoryConfig is the plaintext budget the unified path holds in memory,
+// AuditMemoryConfig is the plaintext budget the capture session holds in memory,
 // per stage and for the whole process.
 type AuditMemoryConfig struct {
 	StageBytes  int64 `yaml:"stage_bytes"`
@@ -58,7 +60,7 @@ type AuditMemoryConfig struct {
 // DefaultAudit returns the audit section with every default filled.
 func DefaultAudit() AuditConfig {
 	return AuditConfig{
-		WritePath:     AuditWritePathLegacy,
+		WritePath:     AuditWritePathUnified,
 		CommitRetries: DefaultAuditCommitRetries,
 		Memory: AuditMemoryConfig{
 			StageBytes:  DefaultAuditMemoryStageBytes,
@@ -69,8 +71,12 @@ func DefaultAudit() AuditConfig {
 }
 
 func validateAudit(audit AuditConfig, keyPath string) error {
-	if audit.WritePath != AuditWritePathLegacy && audit.WritePath != AuditWritePathUnified {
-		return fmt.Errorf("audit.write_path must be legacy or unified, got %q", audit.WritePath)
+	switch audit.WritePath {
+	case "", AuditWritePathUnified:
+	case auditWritePathLegacy:
+		return errors.New("audit.write_path legacy was removed in this version: unified is the only write path; remove the key or set it to unified, and configure audit.staging.dir")
+	default:
+		return fmt.Errorf("audit.write_path must be unified (or absent), got %q", audit.WritePath)
 	}
 	if err := ValidateAuditCommitRetries(audit.CommitRetries); err != nil {
 		return err
@@ -84,8 +90,7 @@ func validateAudit(audit AuditConfig, keyPath string) error {
 	return validateAuditStaging(audit, keyPath)
 }
 
-// validateAuditStaging checks audit.staging: required for unified, an
-// absolute path, and apart from the key: not the key's directory, nor
+// validateAuditStaging checks audit.staging: required, an absolute path, and apart from the key: not the key's directory, nor
 // containing it or inside it, so that a volume holding staged ciphertext
 // never holds the key that opens it.
 func validateAuditStaging(audit AuditConfig, keyPath string) error {
@@ -94,10 +99,7 @@ func validateAuditStaging(audit AuditConfig, keyPath string) error {
 		return fmt.Errorf("audit.staging.max_bytes must be positive, got %d", staging.MaxBytes)
 	}
 	if staging.Dir == "" {
-		if audit.WritePath == AuditWritePathUnified {
-			return errors.New("audit.staging.dir is required when audit.write_path is unified")
-		}
-		return nil
+		return errors.New("audit.staging.dir is required: the capture session keeps body content beyond the memory budget there")
 	}
 	if !filepath.IsAbs(staging.Dir) {
 		return fmt.Errorf("audit.staging.dir must be an absolute path, got %q", staging.Dir)

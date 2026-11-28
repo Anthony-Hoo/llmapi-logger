@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,58 +24,101 @@ import (
 	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/headerblock"
+	"llmapi-logger/internal/routing"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/postgres"
 	"llmapi-logger/internal/storage/sqlite"
 )
 
-// K item 10: a staging directory that cannot be used makes available mode
-// fall back to the legacy write path with a warning that says why, and
-// strict mode refuse to audit.
-func TestUnusableStagingDirectory(t *testing.T) {
-	for _, mode := range []string{audit.ModeAvailable, audit.ModeStrict} {
-		t.Run(mode, func(t *testing.T) {
-			directory := t.TempDir()
-			notADirectory := filepath.Join(directory, "staging")
-			if err := os.WriteFile(notADirectory, []byte("x"), 0o600); err != nil {
+// A staging directory that cannot be used at start-up makes the audit
+// unavailable in both modes: there is no other write path to fall back to
+// (the legacy fallback no longer exists). The store is closed, one warning
+// says why with a stable reason and no path or error text, and nothing is
+// captured: strict mode refuses the request, available mode forwards it
+// without an audit.
+func TestUnusableStagingDirectoryMakesTheAuditUnavailable(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// reasons are the stable codes the platform may give.
+		reasons []string
+		unix    bool
+		setup   func(t *testing.T, directory string) string
+	}{
+		{"not configured", []string{"staging_unavailable"}, false, func(*testing.T, string) string { return "" }},
+		{"not a directory", []string{"not_directory"}, false, func(t *testing.T, directory string) string {
+			path := filepath.Join(directory, "staging")
+			if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			configuration := config.Default()
-			configuration.Mode = mode
-			configuration.DBPath = filepath.Join(directory, "audit.db")
-			configuration.KeyPath = filepath.Join(directory, "key", "audit.key")
-			configuration.Audit.WritePath = config.AuditWritePathUnified
-			configuration.Audit.Staging.Dir = notADirectory
-			var logs bytes.Buffer
-			runtime := assembleSQLiteTest(context.Background(), configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
-			if runtime.store != nil {
-				defer runtime.store.Close()
+			return path
+		}},
+		{"below a file", []string{"create_failed", "inspect_failed"}, false, func(t *testing.T, directory string) string {
+			parent := filepath.Join(directory, "file")
+			if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
 			}
-			switch mode {
-			case audit.ModeAvailable:
-				if !runtime.manager.Healthy() || runtime.manager.WritePath() != audit.WritePathLegacy || runtime.stager != nil {
-					t.Fatalf("healthy %v, write path %s", runtime.manager.Healthy(), runtime.manager.WritePath())
-				}
-				if !strings.Contains(logs.String(), `"msg":"audit staging unavailable, using the legacy write path"`) ||
-					!strings.Contains(logs.String(), `"reason":"not_directory"`) {
-					t.Fatalf("no warning with the reason: %s", logs.String())
-				}
-			default:
-				if runtime.store != nil || runtime.manager.Healthy() {
-					t.Fatal("strict mode audits without staging")
-				}
-				if !strings.Contains(logs.String(), `"reason":"not_directory"`) {
-					t.Fatalf("no reason logged: %s", logs.String())
-				}
+			return filepath.Join(parent, "staging")
+		}},
+		{"open to others", []string{"open_permissions"}, true, func(t *testing.T, directory string) string {
+			path := filepath.Join(directory, "staging")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
 			}
-		})
+			if err := os.Chmod(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		for _, mode := range []string{audit.ModeAvailable, audit.ModeStrict} {
+			t.Run(test.name+"/"+mode, func(t *testing.T) {
+				if test.unix && runtime.GOOS == "windows" {
+					t.Skip("directory permission bits are not checked on Windows")
+				}
+				directory := t.TempDir()
+				configuration := testConfig(t)
+				configuration.Mode = mode
+				configuration.DBPath = filepath.Join(directory, "audit.db")
+				configuration.KeyPath = filepath.Join(directory, "key", "audit.key")
+				configuration.Audit.Staging.Dir = test.setup(t, directory)
+				var logs bytes.Buffer
+				assembled := assembleSQLiteTest(context.Background(), configuration, slog.New(slog.NewJSONHandler(&logs, nil)))
+				if assembled.store != nil || assembled.stager != nil || assembled.manager.Healthy() {
+					t.Fatal("the audit runs without a usable staging directory")
+				}
+				text := logs.String()
+				reasoned := false
+				for _, reason := range test.reasons {
+					reasoned = reasoned || strings.Contains(text, `"reason":"`+reason+`"`)
+				}
+				if !strings.Contains(text, `"msg":"audit staging unavailable"`) || !strings.Contains(text, `"error_category":"staging_unavailable"`) ||
+					!reasoned || strings.Contains(text, "legacy") ||
+					(configuration.Audit.Staging.Dir != "" && strings.Contains(text, filepath.Base(directory))) {
+					t.Fatalf("log %s", text)
+				}
+				request := httptest.NewRequest(http.MethodPost, "http://proxy.example.com/v1/chat/completions", strings.NewReader(`{}`))
+				session, err := assembled.sink.Begin(context.Background(), request, routing.Match{RouteID: "chat", Parser: "openai.chat_completions"})
+				if session != nil || !errors.Is(err, audit.ErrUnavailable) || assembled.sink.Mode() != mode {
+					t.Fatalf("Begin = %v, %v (mode %s)", session, err, assembled.sink.Mode())
+				}
+				// Nothing reached the database either.
+				store, err := sqlite.Open(context.Background(), configuration.DBPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer store.Close()
+				if has, err := store.HasAudits(context.Background()); err != nil || has {
+					t.Fatalf("audits stored: %v, %v", has, err)
+				}
+			})
+		}
 	}
 }
 
-// A run on unified left staged chunks; the next start, on legacy, imports
-// them before recovery, and recovery finalizes the audit with them.
-func TestLegacyStartImportsWhatUnifiedStaged(t *testing.T) {
+// A run left staged chunks; the next start imports them before recovery, and
+// recovery finalizes the audit with them.
+func TestStartImportsWhatThePreviousRunStaged(t *testing.T) {
 	directory := t.TempDir()
 	databasePath := filepath.Join(directory, "audit.db")
 	runImportAfterUnified(t, directory, 1,
@@ -88,7 +134,7 @@ func TestLegacyStartImportsWhatUnifiedStaged(t *testing.T) {
 
 // The same on PostgreSQL with a capture version 2 start row: the recovered
 // audit is signed over the version 2 payload and verifies.
-func TestLegacyStartImportsWhatUnifiedStagedOnPostgreSQL(t *testing.T) {
+func TestStartImportsWhatThePreviousRunStagedOnPostgreSQL(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL required for PostgreSQL")
@@ -156,7 +202,7 @@ func runImportAfterUnified(t *testing.T, directory string, version int, open fun
 	if err := store.EnableIntegrity(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	const id = "apx_staged_then_legacy"
+	const id = "apx_staged_then_restarted"
 	started := time.Now().Add(-time.Minute).UnixNano()
 	if err := store.BeginAudit(ctx, storage.AuditRecord{AuditID: id, StartedAtNS: started, RouteID: "chat", Protocol: "openai",
 		ParserName: "openai.chat_completions", Method: http.MethodPost, Path: "/v1/chat/completions", RequestURIEnc: []byte{1},
@@ -203,15 +249,16 @@ func runImportAfterUnified(t *testing.T, directory string, version int, open fun
 		t.Fatal(err)
 	}
 
-	configuration := config.Default()
+	configuration := testConfig(t)
 	database(&configuration)
 	configuration.KeyPath = keyPath
 	configuration.Audit.Staging.Dir = stagingDir
 	runtime := assemble(ctx, configuration)
-	if runtime.store == nil || runtime.manager.WritePath() != audit.WritePathLegacy || runtime.stager != nil {
-		t.Fatalf("legacy start: store %v, write path %s", runtime.store != nil, runtime.manager.WritePath())
+	if runtime.store == nil || runtime.stager == nil || !runtime.manager.Healthy() {
+		t.Fatalf("start: store %v, stager %v", runtime.store != nil, runtime.stager != nil)
 	}
 	defer runtime.store.Close()
+	defer runtime.stager.Close()
 	if entries, _ := os.ReadDir(stagingDir); len(entries) != 0 {
 		t.Fatalf("staging left %v", entries)
 	}
@@ -251,14 +298,13 @@ type noUnifiedStore struct{ *sqlite.Store }
 
 func (noUnifiedStore) SupportsUnifiedWrite() bool { return false }
 
-// A manager that refuses unified is logged with a stable reason, never the
+// A manager that refuses the store is logged with a stable reason, never the
 // error text (AGENTS.md, module 13).
 func TestManagerRefusalLogsAStableReason(t *testing.T) {
 	directory := t.TempDir()
-	configuration := config.Default()
+	configuration := testConfig(t)
 	configuration.DBPath = filepath.Join(directory, "audit.db")
 	configuration.KeyPath = filepath.Join(directory, "key", "audit.key")
-	configuration.Audit.WritePath = config.AuditWritePathUnified
 	configuration.Audit.Staging.Dir = filepath.Join(directory, "staging")
 	var logs bytes.Buffer
 	runtime := assembleAuditWithStore(context.Background(), configuration, slog.New(slog.NewJSONHandler(&logs, nil)),

@@ -138,16 +138,6 @@ export function CaptureSettingsFields({
       <p className="text-body-sm text-muted">
         一条请求结束时，它的审计记录在一次“终结提交”里写进数据库。这次写入因为写入队列已满或整批事务失败而没有成功时，按这里的次数重试；约束冲突这类重试也不会成功的错误不重试。重试都失败时，这条记录照常标为写入失败，由恢复流程收尾。
       </p>
-      <p className="text-body-sm text-muted">
-        只在 <span className="font-mono">audit.write_path</span> 为 <span className="font-mono">unified</span> 时生效；legacy 写入路径不使用这个值。
-      </p>
-      {view.write_path !== "unified" ? (
-        <Alert variant="warning">
-          <AlertDescription>
-            当前写入路径是 <span className="font-mono">{view.write_path || "legacy"}</span>，这里的值保存后也不会被用到；配置文件改为 unified 并重启后才生效。
-          </AlertDescription>
-        </Alert>
-      ) : null}
       <div className="space-y-1">
         <label htmlFor="capture-commit_retries" className="block text-body-sm font-medium">
           终结提交失败时的重试次数

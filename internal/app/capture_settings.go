@@ -29,12 +29,9 @@ func assembleCaptureSettings(ctx context.Context, configuration config.Config, r
 	defer cancel()
 	service, err := audit.NewCaptureSettings(loadContext, audit.CaptureSettingsOptions{
 		FileRetries: configuration.Audit.CommitRetries,
-		// The path the sessions actually use, not the file's: it is legacy
-		// when the manager is the unavailable one or fell back to legacy.
-		WritePath: runtime.manager.WritePath(),
-		Store:     store,
-		Manager:   runtime.manager,
-		Logger:    logger,
+		Store:       store,
+		Manager:     runtime.manager,
+		Logger:      logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("assemble audit capture settings: %w", err)
