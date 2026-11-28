@@ -154,7 +154,7 @@ routes:
 
     | 键 | 默认 | 校验 |
     | --- | --- | --- |
-    | `mode` | `off` | `off`、`export_only`、`archive_then_delete` 之一。本版本两种开启的模式都只导出、不删除（模块 26 §17.2） |
+    | `mode` | `off` | `off`、`export_only`、`archive_then_delete` 之一。`export_only` 只导出；`archive_then_delete` 在导出之后校验并移除格式版本不低于 1 的分段里的成员，格式版本 0 的包只导出、不移除（模块 26 §17.2、§18.7） |
     | `dir` | 空 | 必填，绝对路径；不能是 `key_path` 所在的目录、包含它或位于其中（5.7 第 4 条护栏）；也不能与 `audit.staging.dir` 相同、包含它或位于其中 |
     | `encrypt` | `true` | `false` 时数据文件是不加密的 `.jsonl.gz` |
     | `run_at` | `03:00` | `HH:MM`，每天运行的本地时间 |
