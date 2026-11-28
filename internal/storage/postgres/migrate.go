@@ -28,10 +28,11 @@ var derivedMigrations = []struct {
 	{5, "migrations/005_drop_content_objects_semantic_idx.sql"},
 	{6, "migrations/006_turns_created_idx.sql"},
 	{7, "migrations/007_header_block.sql"},
+	{8, "migrations/008_archive_catalog.sql"},
 }
 
 // latestSchemaVersion is the newest version this binary understands.
-const latestSchemaVersion = 7
+const latestSchemaVersion = 8
 
 var errSchemaTooNew = errors.New("postgres: schema is newer than supported")
 

@@ -71,7 +71,7 @@ func requireTurnsCreatedIndex(t *testing.T, db rowQueryer, present bool) {
 
 func TestFreshStoreEndsAtVersionSixWithTurnsCreatedIndex(t *testing.T) {
 	store, _ := openTestStore(t)
-	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6, 7)
+	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6, 7, 8)
 	requireTurnsCreatedIndex(t, store.readerDB, true)
 }
 
@@ -89,7 +89,7 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 
 	// The documented rollbacks, 007 and then 006, leave exactly the version 5
 	// state, which a binary that understands version 5 accepts.
-	for _, rollback := range []string{rollbackToSchemaSixSQL, rollbackToSchemaFiveSQL} {
+	for _, rollback := range []string{rollbackToSchemaSevenSQL, rollbackToSchemaSixSQL, rollbackToSchemaFiveSQL} {
 		if _, err := admin.ExecContext(ctx, rollback); err != nil {
 			t.Fatalf("documented rollback SQL: %v", err)
 		}
@@ -108,7 +108,7 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	if err := upgraded.Close(); err != nil {
 		t.Fatal(err)
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7, 8)
 	requireTurnsCreatedIndex(t, admin, true)
 
 	// A version 5 database on which an operator built the index beforehand,
@@ -116,7 +116,7 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	// builds it CONCURRENTLY; that leaves the same catalog entry, but here it
 	// waits on every transaction in the shared test database and fails when a
 	// parallel test drops its schema meanwhile, so the test builds it plainly.
-	for _, rollback := range []string{rollbackToSchemaSixSQL, rollbackToSchemaFiveSQL} {
+	for _, rollback := range []string{rollbackToSchemaSevenSQL, rollbackToSchemaSixSQL, rollbackToSchemaFiveSQL} {
 		if _, err := admin.ExecContext(ctx, rollback); err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +131,7 @@ func TestMigrationSixUpgradesVersionFiveDatabase(t *testing.T) {
 	if err := upgraded.Close(); err != nil {
 		t.Fatal(err)
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7, 8)
 	requireTurnsCreatedIndex(t, admin, true)
 }
 
@@ -164,7 +164,7 @@ func TestMigrationSixIsIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7, 8)
 	requireTurnsCreatedIndex(t, admin, true)
 }
 

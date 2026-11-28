@@ -113,7 +113,7 @@ WHERE conrelid = to_regclass($1) AND contype = 'c'`, table)
 func TestFreshStoreEndsAtVersionSevenWithHeaderBlock(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openTestStore(t)
-	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6, 7)
+	requireVersions(t, appliedSchemaVersions(t, store.readerDB), 1, 2, 3, 4, 5, 6, 7, 8)
 	requireVersionSevenShape(t, store.readerDB, true)
 	audits := constraintDefinitions(t, store.readerDB, "audit_records")
 	if got := audits["audit_records_capture_version_check"]; got != "CHECK ((capture_version = ANY (ARRAY[(1)::bigint, (2)::bigint]))) NOT VALID" {
@@ -208,8 +208,10 @@ func TestMigrationSevenUpgradesVersionSixDatabaseWithoutRewrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer admin.Close()
-	if _, err := admin.ExecContext(ctx, rollbackToSchemaSixSQL); err != nil {
-		t.Fatalf("documented rollback SQL: %v", err)
+	for _, rollback := range []string{rollbackToSchemaSevenSQL, rollbackToSchemaSixSQL} {
+		if _, err := admin.ExecContext(ctx, rollback); err != nil {
+			t.Fatalf("documented rollback SQL: %v", err)
+		}
 	}
 	versions := appliedSchemaVersions(t, admin)
 	requireVersions(t, versions, 1, 2, 3, 4, 5, 6)
@@ -322,7 +324,7 @@ ORDER BY c.relname, l.mode`)
 		t.Fatalf("open version 6 database: %v", err)
 	}
 	t.Logf("Open with migration 007: %v", time.Since(openStarted).Round(time.Millisecond))
-	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7)
+	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6, 7, 8)
 	requireVersionSevenShape(t, admin, true)
 	if after := relationFiles(t, admin, tables...); !slices.Equal(before, after) {
 		t.Fatalf("relation files before %v, after %v", before, after)
@@ -342,9 +344,12 @@ SELECT (SELECT COUNT(*) FROM audit_records WHERE capture_version = 1),
 	}
 
 	// The documented rollback undoes 007 on a database with version 1 rows,
-	// and refuses once a version 2 audit exists.
-	if _, err := admin.ExecContext(ctx, rollbackToSchemaSixSQL); err != nil {
-		t.Fatalf("documented rollback SQL with rows: %v", err)
+	// and refuses once a version 2 audit exists. Migration 008 is rolled back
+	// first each time.
+	for _, rollback := range []string{rollbackToSchemaSevenSQL, rollbackToSchemaSixSQL} {
+		if _, err := admin.ExecContext(ctx, rollback); err != nil {
+			t.Fatalf("documented rollback SQL with rows: %v", err)
+		}
 	}
 	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
 	requireVersionSevenShape(t, admin, false)
@@ -356,6 +361,9 @@ SELECT (SELECT COUNT(*) FROM audit_records WHERE capture_version = 1),
 		t.Fatal(err)
 	}
 	if _, err := admin.ExecContext(ctx, `UPDATE audit_records SET capture_version = 2 WHERE audit_id = 'seed-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, rollbackToSchemaSevenSQL); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.ExecContext(ctx, rollbackToSchemaSixSQL); err == nil || !strings.Contains(err.Error(), "capture version 2 audits exist") {

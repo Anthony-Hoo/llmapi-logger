@@ -57,6 +57,9 @@ const (
 	// writeRestoreStagedChunks is the start-up import of local staging
 	// (staged_restore.go).
 	writeRestoreStagedChunks
+	// writeArchive carries one cold archive catalog write (archive_catalog.go)
+	// as an archiveWrite closure. Each one is alone in its transaction.
+	writeArchive
 )
 
 type writeRequest struct {
@@ -86,9 +89,12 @@ const (
 // write has its own deadline. A retention batch is a write whose cost grows
 // with the stored data, and a storage error fails a whole batch, so it must
 // not share its fate with audit writes that happened to queue beside it. A
-// large checkpoint or commit is alone for the same reason.
+// large checkpoint or commit is alone for the same reason. An archive catalog
+// write is alone so that its outcome (an intent registered, a segment sealed)
+// is never rolled back by an unrelated failure in the same batch (design I).
 func (request writeRequest) alone() bool {
-	return request.policy != nil || request.kind == writeDeleteExpired || request.payloadBytes > aloneWritePayloadBytes
+	return request.policy != nil || request.kind == writeDeleteExpired || request.kind == writeArchive ||
+		request.payloadBytes > aloneWritePayloadBytes
 }
 
 // BeginAudit enqueues a parent audit row and waits until its batch commits.
@@ -626,6 +632,8 @@ func (store *Store) applyWrite(transaction dbTransaction, request writeRequest) 
 		return request.data.(orgWrite)(transaction)
 	case writeDerived:
 		return request.data.(derivedWrite)(transaction)
+	case writeArchive:
+		return request.data.(archiveWrite)(transaction)
 	default:
 		return fmt.Errorf("postgres writer: unknown operation %d", request.kind)
 	}

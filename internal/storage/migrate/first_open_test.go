@@ -42,7 +42,7 @@ func TestImportThenFirstOpenVerifies(t *testing.T) {
 		FROM schema_migrations`).Scan(&version, &audits, &versionOne); err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 || audits == 0 || versionOne != audits {
+	if version != 8 || audits == 0 || versionOne != audits {
 		t.Fatalf("after the first open: schema %d, %d audits, %d of them version 1", version, audits, versionOne)
 	}
 }

@@ -184,6 +184,27 @@ type HeaderBlock = storage.HeaderBlock
 // ChunkSource can be iterated more than once over sealed owning chunks.
 type ChunkSource = storage.ChunkSource
 
+// Cold archive catalog types (archive_catalog.go, storage/archive_types.go).
+type (
+	ArchiveRun              = storage.ArchiveRun
+	ArchiveRunFinish        = storage.ArchiveRunFinish
+	ArchiveRunCounts        = storage.ArchiveRunCounts
+	ArchivePosition         = storage.ArchivePosition
+	ArchivePass             = storage.ArchivePass
+	ArchiveDeferred         = storage.ArchiveDeferred
+	ArchiveSegment          = storage.ArchiveSegment
+	ArchiveMember           = storage.ArchiveMember
+	ArchiveMemberKey        = storage.ArchiveMemberKey
+	ArchiveGapMember        = storage.ArchiveGapMember
+	ArchiveIntent           = storage.ArchiveIntent
+	ArchiveIntentResult     = storage.ArchiveIntentResult
+	ArchiveSeal             = storage.ArchiveSeal
+	ArchiveReconciled       = storage.ArchiveReconciled
+	ArchiveReconciledResult = storage.ArchiveReconciledResult
+	ArchiveCandidate        = storage.ArchiveCandidate
+	ArchiveDuePage          = storage.ArchiveDuePage
+)
+
 func validateAuditRecord(record AuditRecord) error {
 	if record.AuditID == "" || record.RouteID == "" || record.Protocol == "" || record.ParserName == "" || record.Method == "" || record.Path == "" {
 		return errors.New("postgres: audit record has empty required field")

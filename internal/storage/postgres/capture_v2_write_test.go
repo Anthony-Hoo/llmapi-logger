@@ -674,8 +674,10 @@ func TestVersionSixDatabaseUpgradesAndVerifies(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer admin.Close()
-	if _, err := admin.ExecContext(ctx, rollbackToSchemaSixSQL); err != nil {
-		t.Fatal(err)
+	for _, rollback := range []string{rollbackToSchemaSevenSQL, rollbackToSchemaSixSQL} {
+		if _, err := admin.ExecContext(ctx, rollback); err != nil {
+			t.Fatal(err)
+		}
 	}
 	requireVersions(t, appliedSchemaVersions(t, admin), 1, 2, 3, 4, 5, 6)
 	// The version 6 database verifies without a capture_version column.
