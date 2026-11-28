@@ -143,7 +143,8 @@ type ProjectedSummary struct {
 }
 
 // ProjectDetail projects the hot side's Detail as the archive stores it
-// (D.5 item 3, J.3). The input is not changed.
+// (D.5 item 3, J.3), with Audit.ConversationTurns cleared as ProjectSummary
+// does. The input is not changed.
 func ProjectDetail(fingerprinter CredentialFingerprinter, detail query.Detail) ProjectedDetail {
 	projected := ProjectedDetail{
 		RequestURI: ProjectRequestURI(fingerprinter, []byte(detail.RequestURI)),
@@ -164,7 +165,10 @@ func ProjectDetail(fingerprinter CredentialFingerprinter, detail query.Detail) P
 	return projected
 }
 
-// ProjectSummary projects the User-Agent of one list row.
+// ProjectSummary projects the User-Agent of one list row. It also clears
+// ConversationTurns, which J.3 leaves out of the comparison: it is a
+// query-time count over the hot conversation (A.3) that an archive cannot
+// reproduce.
 func ProjectSummary(fingerprinter CredentialFingerprinter, summary query.AuditSummary) ProjectedSummary {
 	projected := ProjectedSummary{Summary: summary}
 	if summary.UserAgent != nil {
@@ -172,6 +176,7 @@ func ProjectSummary(fingerprinter CredentialFingerprinter, summary query.AuditSu
 		projected.UserAgent = &value
 	}
 	projected.Summary.UserAgent = nil
+	projected.Summary.ConversationTurns = nil
 	return projected
 }
 

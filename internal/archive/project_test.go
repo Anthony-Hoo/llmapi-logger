@@ -200,8 +200,9 @@ func TestProjectDetailAndSummary(t *testing.T) {
 	if detail.RequestURI != "/v1/x?key=sk-q&y=1" || detail.Headers[0].Value != "Bearer sk" || *detail.Audit.UserAgent != agent {
 		t.Fatal("projection changed its input")
 	}
-	summary := ProjectSummary(keys, query.AuditSummary{AuditID: "b"})
-	if summary.UserAgent != nil || summary.Summary.AuditID != "b" {
+	turns := int64(12)
+	summary := ProjectSummary(keys, query.AuditSummary{AuditID: "b", ConversationTurns: &turns})
+	if summary.UserAgent != nil || summary.Summary.AuditID != "b" || summary.Summary.ConversationTurns != nil {
 		t.Fatalf("summary without a User-Agent = %+v", summary)
 	}
 }
