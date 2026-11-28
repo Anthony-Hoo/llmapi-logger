@@ -1334,3 +1334,27 @@ A/B（R.7）之后维护者决定只保留 unified。这一节记录删了什么
 | `internal/proxy` 端到端 | 数 unified 存储上的逐操作写（`legacyOps`）为 0 | 去掉：`audit.Store` 已没有这些方法，由编译器保证 | 接口收窄 |
 
 **已定：检查挪到恢复之前。** 本节起初把“暂存目录不可用时启动仍先跑 `RecoverInterruptedAudits`”列为待定（那样带着暂存块中断的 audit 会不带这些块就终结，目录修好后导入把文件改名为 `.orphan`）。维护者决定把检查挪到恢复之前，理由与 R.3 第 2 条相同，做法见上面“暂存目录必填”一段。
+
+### R.9 偶发的未终结或未解析
+
+**看到的。** unified 成为唯一写入路径之后，整包运行偶尔有一条 audit 在几秒内没有终结或没有解析，单独重跑总是通过，各一次：`internal/parser` `TestInputFromHandedOverEvidenceEqualsTheStoredInput/postgres`（“no job was handed over”）；`internal/app` `TestPostgresArchiveDiskFullPublishesNothing`（6 条 audit 30 秒后只有 5 条终态）；`tests/integration` `TestAgentJourneyPaging`（9 条里 1 条 open）；`internal/proxy` `TestCaptureWriteFailuresEndTheAuditFailed`（SQLite，主机上与编译并行时）；另有 `internal/app` `TestFailedFinalCommitKeepsStagedChunks` 与 `internal/web` `TestWebRegenerateIsNotDelayedByAWriteToAnotherWeek` 各一次。
+
+**复现。** 临时插桩（已移除，没有提交）把 writer 批次失败、操作级失败、队列满、恢复终结、提交的每次失败和降级、检查点推迟、交接被拒、parser 的 claim/读取/保存失败打到标准错误，在 PostgreSQL 容器里同时最多跑三个测试二进制：`internal/parser` 36 遍、`internal/app` 12 遍、`tests/integration` 7 遍。`internal/parser` 失败一次，正是上面那条：
+
+- 检查点 2 被 `ValidateAuditCheckpoint` 拒绝（`capture version 2 checkpoint inserting stages requires a header block`），会话记 `capture_checkpoint_deferred`；
+- `CommitAudit` 在发送前被 `ValidateAuditCommit` 以同一原因拒绝（不重试，耗时 2 µs），会话以 partial、`audit_finalize_failed` 结束，不交接。
+
+其余失败事件全部来自测试注入的故障；没有出现未注入的批次失败、队列满或恢复终结，PostgreSQL 日志里也没有死锁、锁超时或语句超时。所以“提交批次失败、由 5 秒一次的恢复以 failed 终结、再等 30 秒的 pending 扫描”这一假设不成立。
+
+**原因。** `blockShape.with`（`internal/audit/header_block.go`）用会话的 `stageOrder` 计算位，它从 1 开始编号，而范围检查是 0 到 3，于是 `response_sent` 从不进入形状（C.8 的“与上次写的块相同就不带块”）。只有 `response_sent` 变化的写因此不带块：
+
+- 上游在 `request_sent` 的 Body 被看到结束（EOF 或 Close）之前就回了响应头时，检查点 1 已带上 `response_received`，检查点 2 只插入 `response_sent`；它和随后的提交都插入了阶段却没有块，被存储拒绝。提交在发送前失败，恢复表里没有记录，audit 一直不终结（`ended_at_ns` 为空、不解析），直到下次启动由 `RecoverInterruptedAudits` 收尾（R.1 第 10 条的路径）。这个先后取决于 Transport 何时读到请求 Body 的结束，负载下才偶尔出现。
+- 响应写出方在检查点 2 之后捕获的 `response_sent` Trailer 不改变形状，提交不带块，存下的块里没有这些 Trailer，audit 却以 complete 终结。
+
+SQLite 写版本 1，没有块，不受影响；`internal/proxy` 那一次（SQLite）不是这个原因，在主机上与容器里的测试并行循环 12 遍没有复现，见下。
+
+**改了什么。** 提交 `98863ba`：形状改用 `storage.StageOrder`（0 到 3）。形状只在内存里；没有碰到上面两种先后的 audit，每次写带不带块与之前相同，存下的行不变。新增 `TestHeaderBlockCoversTheResponseSentStage`（会话测试，桩存储按两个存储的规则校验）：上游先回响应时两个检查点和提交都合法、检查点 2 带四个阶段的块；`response_sent` 有 Trailer 时提交带上含它们的块。修复前两个子测试都失败。修复后 `internal/parser` 在同样条件下 40 遍、`tests/integration` 4 遍，没有失败，也没有任何检查点推迟。
+
+**生产上的影响。** PostgreSQL 部署里，上游响应头先于请求 Body 的结束被观察到的请求，会以一条未终结的 audit 留到下次启动，期间不解析，启动时由 `RecoverInterruptedAudits` 收尾；带下游 Trailer 的响应丢了 `response_sent` 的 Trailer。客户端收到的响应不受影响。
+
+**没有解决的。** `internal/proxy` `TestCaptureWriteFailuresEndTheAuditFailed`、`TestFailedFinalCommitKeepsStagedChunks` 和 `internal/web` 那一次没有复现，原因未定。一个可能：同一个“上游先回”的先后会让检查点 1 带上 `response_received`，故障注入用例对哪一次写带哪些行的断言（例如“header insert”的 3 个阶段）就不再成立。提交 `a96c20a` 把 archive harness 的等待放宽到 90 秒，说明里的原因（交接在负载下被错过）不对：那条 audit 根本没有终结，等多久都一样；修复之后 30 秒也够，是否改回由维护者决定。
