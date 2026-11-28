@@ -609,6 +609,11 @@ func (record *Record) CheckCanonical() error {
 		return formatError("stream_timelines not in stage order")
 	}
 	if turn := record.Turn; turn != nil {
+		// Both envelope columns are NOT NULL with length 32 in both stores'
+		// turns tables, and auditmodel.Prepare always builds both envelopes.
+		if len(turn.Row.RequestEnvelopeHash) != sha256.Size || len(turn.Row.ResponseEnvelopeHash) != sha256.Size {
+			return formatError("turn envelope hash is not 32 bytes")
+		}
 		if !strictlySorted(turn.Context.Ops, func(left, right ContextOp) int { return cmp.Compare(left.OpIndex, right.OpIndex) }) {
 			return formatError("context operations not in op_index order")
 		}

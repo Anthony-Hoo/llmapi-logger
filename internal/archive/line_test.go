@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -402,5 +403,43 @@ func TestObjectEntriesAndGaps(t *testing.T) {
 	}
 	if _, err := DecodeGap([]byte(strings.Replace(string(encoded), `"gap"`, `"audit"`, 1))); !errors.Is(err, ErrFormat) {
 		t.Fatalf("gap type err=%v", err)
+	}
+}
+
+// A turn must carry both envelope hashes at their stored length: the turns
+// columns are NOT NULL and CHECK (length = 32) in both stores.
+func TestTurnEnvelopeHashesHaveTheStoredLength(t *testing.T) {
+	line, _, _, err := EncodeLine(fullRecord(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"request_envelope_hash", "response_envelope_hash"} {
+		for name, replacement := range map[string]string{"empty": `""`, "short": `"` + strings.Repeat("5", 62) + `"`} {
+			t.Run(column+" "+name, func(t *testing.T) {
+				pattern := regexp.MustCompile(`"` + column + `":"[0-9a-f]{64}"`)
+				if !pattern.Match(line) {
+					t.Fatalf("line has no %s", column)
+				}
+				changed := pattern.ReplaceAll(line, []byte(`"`+column+`":`+replacement))
+				if _, _, err := DecodeLine(changed); !errors.Is(err, ErrFormat) {
+					t.Fatalf("decode err = %v, want ErrFormat", err)
+				}
+			})
+		}
+	}
+	for name, mutate := range map[string]func(*TurnRow){
+		"nil request envelope":    func(row *TurnRow) { row.RequestEnvelopeHash = nil },
+		"short response envelope": func(row *TurnRow) { row.ResponseEnvelopeHash = row.ResponseEnvelopeHash[:31] },
+	} {
+		t.Run(name, func(t *testing.T) {
+			record := fullRecord(t)
+			mutate(&record.Turn.Row)
+			if err := record.CheckCanonical(); !errors.Is(err, ErrFormat) {
+				t.Fatalf("CheckCanonical err = %v, want ErrFormat", err)
+			}
+			if _, err := Digest(record); !errors.Is(err, ErrFormat) {
+				t.Fatalf("Digest err = %v, want ErrFormat", err)
+			}
+		})
 	}
 }
