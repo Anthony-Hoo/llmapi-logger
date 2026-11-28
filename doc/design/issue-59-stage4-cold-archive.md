@@ -1054,7 +1054,7 @@ CREATE TABLE archive_runs (
 -- next passes check again (B.1).
 CREATE TABLE archive_deferred (
     audit_id TEXT COLLATE "C" PRIMARY KEY,
-    reason TEXT COLLATE "C" NOT NULL CHECK (reason IN ('open', 'parse_pending', 'caller_pending', 'integrity_failed')),
+    reason TEXT COLLATE "C" NOT NULL CHECK (reason IN ('open', 'parse_pending', 'caller_pending', 'integrity_failed', 'export_failed')),
     first_seen_at_ns BIGINT NOT NULL CHECK (first_seen_at_ns > 0),
     last_checked_at_ns BIGINT NOT NULL CHECK (last_checked_at_ns >= first_seen_at_ns)
 );
@@ -1767,7 +1767,7 @@ P4：
     - 完整性类：`event_missing`、`event_payload`、`event_mac`、`decrypt`、`content_hash`、`turn_graph`。这一类把存储的载荷校验状态置为失败（P 第 4 条）；
     - 其余：`not_found`、`open`、`timeline`、`raw_unservable`、`record_format`。不改载荷校验状态；`record_format` 表示代码有缺陷，不是数据损坏。
 
-    **runner 必须把 `not_found` 以外的每一种排除都登记进 `archive_deferred`**，否则水位越过它们之后再也不会选到（第 3 条的同一个缺口）。`reason` 的取值里只有 `integrity_failed` 放得下，`timeline`、`raw_unservable`、`record_format` 也记成它。这三种是否要单独的取值，留给维护者决定，本阶段没有加。
+    **runner 必须把 `not_found` 以外的每一种排除都登记进 `archive_deferred`**，否则水位越过它们之后再也不会选到（第 3 条的同一个缺口）。完整性类记 `integrity_failed`；`timeline`、`raw_unservable`、`record_format` 不是损坏，记成另加的取值 `export_failed`（迁移 008 未发布，原地修改了 CHECK），不与完整性失败混在一起。
 19. **快照本身的故障不当作损坏。** 上下文取消、存储已关闭、事务不再应答（失败之后用 `SELECT 1` 探一次）都原样返回，结束这一趟，不排除成员、不置失败。事件摘要函数在快照仍然可用时报的错，按 `event_payload` 处理。
 20. 内存：
     - 对象与二进制每个快照只核对一次，只记哈希，至多 2^20 个，满了清空重来；

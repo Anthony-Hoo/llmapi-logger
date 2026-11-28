@@ -25,10 +25,12 @@ CREATE TABLE archive_runs (
 );
 
 -- Audits a pass looked at behind the watermark but did not export, which the
--- next passes check again (B.1).
+-- next passes check again (B.1). export_failed is an exclusion that is not an
+-- integrity failure: a timeline, raw layout or record format the export
+-- refuses.
 CREATE TABLE archive_deferred (
     audit_id TEXT COLLATE "C" PRIMARY KEY,
-    reason TEXT COLLATE "C" NOT NULL CHECK (reason IN ('open', 'parse_pending', 'caller_pending', 'integrity_failed')),
+    reason TEXT COLLATE "C" NOT NULL CHECK (reason IN ('open', 'parse_pending', 'caller_pending', 'integrity_failed', 'export_failed')),
     first_seen_at_ns BIGINT NOT NULL CHECK (first_seen_at_ns > 0),
     last_checked_at_ns BIGINT NOT NULL CHECK (last_checked_at_ns >= first_seen_at_ns)
 );

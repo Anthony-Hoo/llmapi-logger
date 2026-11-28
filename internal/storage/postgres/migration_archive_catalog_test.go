@@ -86,6 +86,9 @@ WHERE c.contype = 'f' AND c.connamespace = to_regnamespace(current_schema())
 		 VALUES ('a-1', 1, '0000000000000000000000000000000a', decode(repeat('22', 32), 'hex'), decode(repeat('33', 32), 'hex'), 'sealed', 1, 1)`,
 		`INSERT INTO archive_members (audit_id, revision, segment_id, record_digest, change_stamp, state, started_at_ns, state_changed_at_ns)
 		 VALUES ('a-1', 2, '0000000000000000000000000000000a', decode(repeat('22', 32), 'hex'), NULL, 'stale', 1, 1)`,
+		`INSERT INTO archive_deferred (audit_id, reason, first_seen_at_ns, last_checked_at_ns) VALUES
+		 ('d-1', 'open', 1, 1), ('d-2', 'parse_pending', 1, 1), ('d-3', 'caller_pending', 1, 1),
+		 ('d-4', 'integrity_failed', 1, 1), ('d-5', 'export_failed', 1, 2)`,
 	} {
 		if err := exec(statement); err != nil {
 			t.Fatalf("rejected: %s: %v", statement, err)

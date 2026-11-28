@@ -51,11 +51,15 @@ const (
 )
 
 // Reasons an audit behind the watermark is deferred (Q8, H.4).
+// IntegrityFailed is an exclusion whose stored evidence does not verify;
+// ExportFailed one that is not an integrity failure (a timeline, raw layout
+// or record format the export refuses), so it is not reported as damage.
 const (
 	ArchiveDeferredOpen            = "open"
 	ArchiveDeferredParsePending    = "parse_pending"
 	ArchiveDeferredCallerPending   = "caller_pending"
 	ArchiveDeferredIntegrityFailed = "integrity_failed"
+	ArchiveDeferredExportFailed    = "export_failed"
 )
 
 // ArchiveDigestSize is the length of a record digest, change stamp, manifest
@@ -261,7 +265,8 @@ func validArchiveMode(mode string) bool {
 
 func validArchiveDeferredReason(reason string) bool {
 	switch reason {
-	case ArchiveDeferredOpen, ArchiveDeferredParsePending, ArchiveDeferredCallerPending, ArchiveDeferredIntegrityFailed:
+	case ArchiveDeferredOpen, ArchiveDeferredParsePending, ArchiveDeferredCallerPending, ArchiveDeferredIntegrityFailed,
+		ArchiveDeferredExportFailed:
 		return true
 	}
 	return false

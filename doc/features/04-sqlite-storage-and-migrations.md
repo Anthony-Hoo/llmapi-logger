@@ -177,7 +177,7 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 | 表 | 一行是什么 |
 | --- | --- |
 | `archive_runs` | 一次归档运行：模式（`export_only`、`archive_then_delete`）、截止时间、开始与结束时间、状态（`running`、`completed`、`archive_failed`、`interrupted`）、各项计数，以及本格式版本的选取水位 `(watermark_started_at_ns, watermark_audit_id)` |
-| `archive_deferred` | 水位之后被推迟、需要回头再看的 audit：原因（`open`、`parse_pending`、`caller_pending`、`integrity_failed`），首次见到与最近检查的时间 |
+| `archive_deferred` | 水位之后被推迟、需要回头再看的 audit：原因（`open`、`parse_pending`、`caller_pending`、`integrity_failed`、`export_failed`；最后一种是不属于完整性失败的排除：时间线、raw 布局或记录格式不过），首次见到与最近检查的时间 |
 | `archive_segments` | 一个分段：所属运行、包的种类（`conversation`、`bucket`、`gaps`）、格式版本、清单的相对路径（唯一，不能以 `/` 开头）、清单 SHA-256、密钥指纹、是否加密、成员数、落盘字节、时间范围，状态 `publishing`、`sealed`、`hot_removed` |
 | `archive_members` | 分段里的一条 audit：修订号、记录摘要、变更戳、状态（`sealed`、`hot_removed`、`stale`）、`started_at_ns`、导出时的 `turns.created_at_ns`。主键 `(audit_id, revision)`；部分唯一索引 `archive_members_current_idx` 保证同一 audit 至多一行不是 `stale`。只有对账登记的 `stale` 成员可以没有变更戳 |
 | `archive_gap_members` | 已导出的 gap：主键 `gap_id`，所属分段，状态 `sealed`、`hot_removed` |
