@@ -1834,3 +1834,72 @@ P4：
 8. **密钥**：主密钥文件用应用同一个读取函数读，只读不建；带密钥时索引带着签名校验建立，伪造的清单不能顶替真的修订号；因密钥不符而查不到时报“密钥不符”，不报“找不到”。
 9. **不回显读取移到了 `internal/termio`**（P 第 14 条），`llmaudit` 改为引用它；`agentcli` 里检查“只用标准库”的测试相应放行这个包。模块 25 里说 `llmaudit` 只依赖标准库加 `agentapi` 的两处要更正。
 10. 发布脚本和镜像按 `audit-import` 的方式带上了 `audit-archive`。
+
+### R.8 归档运行、配置与接线（O.1 第 9 个提交）
+
+runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，组装与启动护栏在 `internal/app/archive.go`。模块文档是 `doc/features/26-cold-archive.md`（第二部分）。下面是与 B、H、L 节不同或正文没有写到的地方。
+
+**这一步只导出。** `archive_then_delete` 与 `export_only` 做的事完全相同；runner 在全部趟和 gap 之后留了一个移除阶段的接缝（`removalPhase`），现在什么都不做。启动日志在 `archive_then_delete` 下另加一条 `archive_removal_inactive`。唯一的模式差别是 `stale` 成员的重新收录只在 `archive_then_delete` 下进行（P 第 8 条）。
+
+**配置（L.1）**
+
+1. `mode` 省略、为空串或为 `off` 都是关闭，这时整段不做任何检查（不看 `dir`、阈值和时区）。
+2. 比 L.1 多的上界：`conversation_min_turns` 至多 1,000,000，`conversation_min_bytes` 至多 4 GiB，`pass_audits` 至多 10,000（导出快照一页的上限），`run_deadline_minutes` 至多 1440。
+3. `timezone` 为空时取 `org_reports.timezone`，不论组织周报是否开启（P 第 1 条），并在配置校验里加载一次。`archive.dir` 不得与 `audit.staging.dir` 重叠（P 第 13 条）。
+4. 归档目录的启动检查复用暂存目录的 `staging.PrepareDirectory`（不存在就以 0700 创建，Unix 上属主是进程用户、没有组和其他用户的权限，能写入探针文件）。不过时 runner 不组装，日志 `archive runner unavailable`，`reason` 是 `dir_` 加暂存目录的码；审计和代理照常工作，retention 的直接删除仍然不组装。其他不能组装的原因：`audit_unavailable`（存储、查询服务或归档子密钥不在）、`invalid_timezone`、`invalid_options`。
+
+**护栏（L.2）**
+
+5. 第 2 条：`archive.mode` 不为 `off` 时 `retention.Runner` 不组装，audit 和 gap 都不再直接删除；启动日志 `archive export only: hot store keeps growing`（`archive_export_only`）。
+6. **第 3 条比 L.2 宽。** L.2 的条件是“目录表里有 `hot_removed` 的成员或 `mode = 'archive_then_delete'` 的运行记录”；实现是目录表里有**任何一条**运行记录（`LastArchiveRun` 不限状态），在 10 秒的超时里查。这一版没有任何成员会是 `hot_removed`，按 L.2 的条件这条提示永远不会出现，而 `export_only` 之后关掉归档同样会恢复直接删除。
+7. 第 5 条：`HasAudits`（R.6）之外，归档开启时启动递归查 `archive.dir` 里有没有 `*.manifest.json`（P 第 12 条）；目录读不了按“有”处理，目录不存在按“没有”。因此拒绝新建密钥时，`audit key unavailable` 另带 `reason=archive_manifests_present`。归档关闭时不查目录。
+8. 归档子密钥和核对抄录事件用的完整性签名密钥只在归档开启时派生，与其他子密钥一起、主密钥清零之前；派生失败时审计不可用（`audit archive keys unavailable`）。
+
+**调度（H.1、H.4）**
+
+9. 补跑：最近一次 `completed` 的运行开始于 24 小时之前，或者没有，启动后立即运行一次；目录表读不出来时也运行，由运行自己报告失败。
+10. 重试：失败后每 10 分钟一次，直到某次 `completed`，或者下一次尝试的开始时间距当天第一次尝试超过 `run_deadline_minutes`。重试沿用当天第一次尝试的期限，不各自另起一个（提交 `f67d4bc`）。
+11. 进程关闭时取消正在进行的运行：运行在目录表里留在 `running`（日志 `archive run interrupted`），下一次 `BeginArchiveRun` 把它改为 `interrupted`，它留下的分段由对账处理。
+
+**一趟（B.1、B.2）**
+
+12. 一趟的预算 `pass_audits` 依次分给：推迟过的 audit（每次运行开始时读出全部推迟行，每条每次运行再看一次）、`stale` 的成员（只在 `archive_then_delete` 下，且推迟的看完之后）、水位之后的新范围。B.2 只说新范围。
+13. 期限只在趟与趟之间检查，至少做一趟；到了期限这次运行仍以 `completed` 结束，完成日志带 `deadline_reached`。**到了期限时 gap 不导出**，留给下一次。
+14. 推迟：快照给出的 `open`、`parse_pending`、`caller_pending`，导出时完整性类的排除记 `integrity_failed`，其余排除记 `export_failed`（R.6 第 18 条）。`not_found` 的和已有当前成员的从推迟表里去掉。不能导出的成员留在热库、登记推迟、按原因计数报告，之后每次运行再看。
+15. 水位只在这一趟的分段全部定稿之后，随计数、推迟和不再推迟的 audit 一起由 `RecordArchivePass` 写入（R.6 第 3 条）；新范围这一页没有任何行时水位不动。
+
+**分组与装包（B.3、B.4）**
+
+16. 会话的轮次阈值数的是这一趟选中的该会话到期 audit 的条数（包括随后导出时被排除的）。
+17. 字节阈值按估算累计：每条记录编码后的行长、拆出的 `parsed_json` 段，加上本会话还没算过的对象与二进制的明文长度和 raw 块的长度。达到之前的记录先留在内存里，达到时一起写进会话包，会话结束仍不够就进桶包。所以低于阈值的会话至多在内存里留 `conversation_min_bytes` 的估算量。
+18. 会话 id 不匹配文件名规则（`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`），或会话里的 audit 不全是同一个协议时，这个会话不独立成包，各条 audit 进各自协议的桶包。
+19. 桶包每趟每个协议一个，协议是 `audit_records.protocol`（解析器名的前缀），所以 OpenAI Chat、Completions 与 Responses 共用 `openai` 桶。会话按 id 的字节序处理，桶按协议名的字节序封包。
+20. 分段号以（种类、协议、会话）为键，在一次运行的各趟之间连续编号：两趟的桶包可能覆盖同样的秒数，名字里又有运行 id，靠分段号区分。R.6 第 30 条说的“两个运行 id 前 8 位相同的运行在同一秒写出同名分段”仍可能发生，只是概率极小。
+
+**一个分段（H.2 第 3 到 7 步）**
+
+21. 每个分段写满或这一趟写完就立即封包、登记、发布、核对、定稿，再写下一个包；H.2 把关文件、登记、发布写成一趟的第 3 到 7 步，没有说是逐个分段做。分段的清单临时文件在登记之前就已写好并 fsync（R.5 第 6 条）。
+22. 重读核对之后，每个成员重算的摘要要等于导出快照里的；gap 包比较 gap 数。
+23. **抽样（J.3）。** 抽 `ceil(verify_sample × n)` 条，至少一条：`verify_sample` 为 0 时每个包也比对一条。登记意向时已是 `stale` 的成员不参加；gap 包不抽样。比较的是读取工具的渲染：详情（经 `archive.ProjectDetail` 投影的热库详情）、Header、重建的 Turn 与 provider 请求和响应、会话、两侧时间线、两侧 raw 的元数据和字节的 SHA-256；一侧出错时比较错误类别。**`List` 那一行的摘要不比**（J.3 的表里有）。
+24. 比较不等时，在只读连接池上开一个 REPEATABLE READ 快照重算这条成员此刻的变更戳（`ArchiveChangeStamp`）：与导出时不同或 audit 已不在，计入这次运行的 `stale_audits`，不作废这个包；相同则 `sample_mismatch`，包作废。**这条成员在目录表里仍是 `sealed`**，只有计数记下它；`exported_audits` 也照样算上它（`exported_audits` 只减去登记意向时就是 `stale` 的）。移除上线时，移除前的变更戳比对会把它挡下。
+25. 核对或抽样的任何一种失败都作废这个包（改名 `.rejected`、删意向行），**包括抽样时热库读不出来（`sample_failed`）**：那并不说明包有问题。对账里同一情形不作废，分段留在 `publishing`，这次运行以失败结束、下次再试。两处的处理不一致，记在这里。
+
+**对账（H.6）**
+
+26. `publishing` 的分段：清单不在就删意向行；在就重读核对，与意向行的成员、修订号、摘要比对，再按第 23、24 条抽样，都通过才定稿（提交 `a2c2420`：对账也要先抽样）。抽样时热库读不出来，见第 25 条。
+27. 目录表不认识的包：`bundle.Open` 失败（例如密钥不符）的静默跳过；`Verify` 不过的只记一条 Warn，不改名；通过的按 R.6 第 10 条登记，成员一律 `stale`，已有当前成员的 audit 不登记。
+28. 写入方命名的临时文件删除；没有清单列出的数据文件改名 `.orphan`；有清单解析不了或签名不对时 Warn 一条 `archive_manifest_unusable`。H.6 第 4 步（继续移除）属于移除阶段，现在不做。
+
+**gap（C.6）**
+
+29. 结束于截止时间之前、不在任何 gap 成员行里的 gap，每包至多 10,000 条，按 id 升序，与分段一样登记、发布、核对、定稿，不抽样。gap 只插入不更新，所以每条只导出一次，没有修订号。
+
+**日志与运行记录（H.5）**
+
+30. 完成日志 `archive run completed` 与失败日志 `archive run failed` 的字段：`status`、`exported_audits`、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`、`stale_audits`、`exported_gaps`、`segments`、`disk_bytes`、`duration_ms`，推迟数大于 0 的原因各一个 `deferred_<原因>`，可选 `reconciled_segments`、`deadline_reached`；失败时加 `error_category=archive_failed`、`reason` 和（不是包层的错误时）`storage_error`。失败的 `reason`：`catalog_failed`、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`、`sample_mismatch`、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及 `internal/archive/bundle` 的码。
+31. 一条 audit 的完整性类排除另记一条 Error `archive integrity check failed`（`archive_integrity_failed`，`reason` 是 R.6 第 18 条的原因）。
+32. `archive_runs.disk_bytes` 和完成日志的 `disk_bytes` 含清单本身的字节；分段行的 `disk_bytes` 同样含清单。
+
+**给后续提交的说明**
+
+33. `internal/archive/columns.go` 的注释说列规格是“schema version 7 定义的”，现在是 8（迁移 008 只建目录表，没有改归档表，内容不受影响）。R.6 第 27 条第 2 项末尾的“这比任务要求的”是一句没写完的话，原文没有动。
