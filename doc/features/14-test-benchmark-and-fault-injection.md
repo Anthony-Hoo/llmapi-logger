@@ -307,14 +307,14 @@ small 档把 `--profile heavy --upstream-first-byte 400ms` 换成 `--profile sma
 | --- | --- | --- |
 | `internal/security`（`archive_keys_test.go`） | 三把归档子密钥、密钥指纹和 `value_fpr` 的固定向量（期望值由仓库之外的 HMAC 实现算出），与已有子密钥互相独立，换主密钥算不出同样的值 | 否 |
 | `internal/archive/stream` | 分帧加密的固定向量（`testdata/vectors.json`）和篡改用例：在每个帧边界截断、交换帧、删帧、拼入另一个盐的帧、追加字节、翻转文件头每一位和每帧末字节，都读取失败，失败的帧不交出明文 | 否 |
-| `internal/archive` | 列规格与迁移 SQL 的比对（直接解析迁移文件）；记录摘要的敏感性（每个进摘要的列单独改动都改变摘要，可空列的 NULL 与空值不同）；行、对象条目、gap 和清单的往返与严格解码；凭据投影；摘要与清单编码的固定向量（`testdata/*_v0.*`） | 否 |
+| `internal/archive` | 列规格与迁移 SQL 的比对（直接解析迁移文件）；记录摘要的敏感性（每个进摘要的列单独改动都改变摘要，可空列的 NULL 与空值不同）；行、对象条目、gap 和清单的往返与严格解码；凭据投影；摘要与清单编码的固定向量（`testdata/*_v1.*`）；冻结的格式版本与它的两个域字符串；`format_version` 是别的规范十进制时（`0`、`2`）先于解码和签名拒绝为不受支持 | 否 |
 | `internal/archive/bundle` | 包的写入、滚动、发布与核对；篡改（改清单字段、删对象条目后重新加密、交换两行、换成员摘要）、磁盘满与各步写入失败、从不覆盖与只改名不删除、索引、内存上界、raw 块与真实轮次经查询层的组装；`TestNoPlaintextOrCredentialOnDisk` 扫描临时文件和发布后的目录，加密时找不到测试正文，两种配置下都找不到凭据值（合成记录） | 否 |
 | `internal/archive/runner` | 用假存储驱动整条运行：分组成会话包与桶包、字节阈值、按大小滚动、水位与分趟、推迟与排除、到期限停在趟间、写入与登记意向失败、在每个步骤中断后的对账、对账在定稿前抽样、抽样不一致、写入方拒绝一条记录或抽样读出不同时只排除那一条（`refusal_test.go`）、重读失败作废、目录表不认识的包登记为 `stale`、gap 只导出一次、取消、不重叠；调度的时区、补跑和期限内重试 | 否 |
-| `internal/archivecli` | 五个子命令、退出码、各种导出形态与查询层的输出相同（`TestExportFormsEqualTheQueryLayer`）、跨包按会话导出、`fpr`，以及 `TestDependencyGuard`：`go list -deps` 断言读取工具不链接任何存储实现和数据库驱动 | 否 |
+| `internal/archivecli` | 五个子命令、退出码、各种导出形态与查询层的输出相同（`TestExportFormsEqualTheQueryLayer`）、跨包按会话导出、`fpr`，以及 `TestDependencyGuard`：`go list -deps` 断言读取工具不链接任何存储实现和数据库驱动；兼容承诺：`TestFrozenFixturesRead` 用当前的读取工具打开、核对、读出 `internal/archive/testdata/frozen/` 下每个发布过的格式版本的夹具，记录摘要和 raw 的哈希是钉住的值；`TestTrialAndFutureFormatVersionsAreRefused` 证明试行版本 0 的夹具（`testdata/trial/v0`）和改成版本 2 的清单以 `unsupported_format_version` 被拒，不顶替版本 1 的成员 | 否 |
 | `internal/termio` | 不回显读取：Linux 上用伪终端确认回显关闭再恢复；Windows 控制台测试只在有控制台时运行 | 否 |
 | `internal/config`（`archive_test.go`） | `archive` 段的默认值与每个字段的校验，护栏 1、4 和暂存目录的重叠 | 否 |
 | `internal/app`（`archive_test.go`） | 组装：开启归档时不组装 retention、归档目录里有清单时不新建密钥、启动时派生归档子密钥；启动日志 | 否 |
 | `internal/storage/postgres`（`archive_*_test.go`、`migration_archive_catalog_test.go`） | 迁移 008 与回滚；目录表的每个写操作；四个选取查询与执行计划；导出快照、复核不过只排除那一条；变更戳；列覆盖测试（读 `information_schema` 与 `pg_constraint`，并证明给表加一列、加一张引用表时它会失败）；对每个进摘要的列改库里的一行再导出的摘要敏感性 | 是 |
 | `internal/app`（`archive_postgres_test.go`） | 在真实存储上跑整条运行：导出全部到期 audit、篡改的 audit 留在热库、抽样时记录已改变按 `stale` 处理、一条成员读不回来时只有它留在热库而其余照常定稿、对账收尾中断的运行、磁盘满时什么都不发布、启动护栏 | 是 |
 
-依赖 PostgreSQL 的测试读 `TEST_DATABASE_URL`，没有时跳过，所以主机上 `go test ./...` 通过不代表它们跑过；验收报告要分别写明。设计 J.3 与 N.1 要求的“经真实代理写入的四协议全部夹具，逐条读出等价”和“同样流量下扫描归档盘”在 `tests/integration` 里还没有对应的测试：上面的读出等价与扫描用的是合成记录或少量真实轮次，运行时的抽样比对（每个包至少一条）是现在在真实流量上检查读出等价的地方。冻结夹具包（设计 N.1 的 `testdata/frozen/v0/`）也还没有。
+依赖 PostgreSQL 的测试读 `TEST_DATABASE_URL`，没有时跳过，所以主机上 `go test ./...` 通过不代表它们跑过；验收报告要分别写明。设计 J.3 与 N.1 要求的“经真实代理写入的四协议全部夹具，逐条读出等价”和“同样流量下扫描归档盘”在 `tests/integration` 里还没有对应的测试：上面的读出等价与扫描用的是合成记录或少量真实轮次，运行时的抽样比对（每个包至少一条）是现在在真实流量上检查读出等价的地方。冻结夹具包见上面 `internal/archivecli` 一行（`internal/archive/testdata/frozen/v1/`，模块 26 §2）。

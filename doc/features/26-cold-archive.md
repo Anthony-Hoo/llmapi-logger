@@ -1,7 +1,7 @@
 # 模块 26：冷归档（只导出）与归档格式
 
-> 状态：issue #59 第 4 阶段的 P3（只导出）与 P4（校验后移除）已实现，格式版本 0（试行）。移除只作用于格式版本不低于 1 的包，所以在内置格式版本仍是 0 的这个版本里，`archive_then_delete` 实际上不从热库删除任何东西（§18.7）。
-> 设计：[第 4 阶段详细设计](../design/issue-59-stage4-cold-archive.md)；实际做成的样子以它末尾的实施记录 R.1 到 R.9 为准。
+> 状态：issue #59 第 4 阶段的 P3（只导出）与 P4（校验后移除）已实现。格式定为版本 1 并已冻结（§2）：`archive_then_delete` 对格式版本 1 的包做校验后移除（§18.7）。试行的版本 0 的包读取工具不读，也从不作为移除的依据，其中的 audit 在升级后的运行里重新导出。
+> 设计：[第 4 阶段详细设计](../design/issue-59-stage4-cold-archive.md)；实际做成的样子以它末尾的实施记录 R.1 到 R.10 为准。
 
 本文分两部分。第一部分（§2 到 §16）是归档格式规范：写到不读本仓库代码也能解析一个包、核对它的签名和每条记录的摘要。第二部分（§17 到 §24）是模块本身：模式、配置、一次运行做什么、日志、对账、读取工具和风险。
 
@@ -9,37 +9,40 @@
 
 冷归档把 retention 本来要删除的 audit 导出到一个目录里，每天一次。导出的是解密之后的明文行，按会话或协议装成包，整包压缩并加密（可以关闭），每个包有一份签名的明文清单。归档目录离开数据库、离开运行中的代理，只凭主密钥文件和读取工具 `audit-archive` 就能核对和读出。
 
-- **只有校验后移除会删热库。** 打开归档以后 retention 的直接删除不再组装（§17.3）。`export_only` 从不删除，热库会一直增长；`archive_then_delete` 在每次运行导出之后，把已定稿、格式版本不低于 1 的包里变更戳没变的成员从热库移除（§18.7）。内置格式版本是试行的 0，所以这个版本里 `archive_then_delete` 同样什么都不删。
+- **只有校验后移除会删热库。** 打开归档以后 retention 的直接删除不再组装（§17.3）。`export_only` 从不删除，热库会一直增长；`archive_then_delete` 在每次运行导出之后，把已定稿、格式版本不低于 1 的包里变更戳没变的成员从热库移除（§18.7）。试行格式版本 0 的包永远不作为移除的依据（§2）。
 - **不做恢复。** 归档读不回 PostgreSQL，也不进管理界面；已归档的记录只能用读取工具查看。
 - **只在 PostgreSQL 上。** SQLite 存储没有目录表，也不归档。
 - 归档的完整性要靠检查来证明（设计 J 节）：列覆盖测试保证每一列要么进了归档、要么写明了为什么不进；每个包发布后重读核对；再抽样与热库的读出比对。
 
 ---
 
-# 第一部分　归档格式（版本 0）
+# 第一部分　归档格式（版本 1）
 
 ## 2. 格式版本与兼容承诺
 
-格式版本 0 是试行版本：
+格式版本 1 是第一个正式发布的版本，已经冻结（维护者的决定见设计 0.0，实施见设计实施记录 R.10）：
 
-- **版本 0 的包永远不作为从热库删除数据的依据。** 移除（§18.7）只作用于格式版本不低于 1 的分段，这个条件写在移除事务的加锁语句里。
-- 格式在版本 0 期间可以改动，改动之后旧包要重新导出。现在的读取工具只接受 `format_version` 为 `"0"` 的清单。
-- 本地验收通过后，格式定为版本 1，这是单独的一个改动（维护者的决定，见设计 0.0）。从那以后的承诺是：任何正式发布过的格式版本，当前和以后的读取工具都能读。清单带着各表的列清单（§14），每个发布过的版本还要冻结一个夹具包，用当前的读取工具逐个读一遍；版本 1 的冻结夹具随那次改动提交。
+- **任何正式发布过的格式版本，当前和以后的读取工具都能读。** 版本 1 的包一旦写出，它的字段、编码和域字符串都不再改变；格式要变只能出新的版本号，而新版本的读取工具仍要读版本 1。清单带着各表的列清单（§14），库表以后加列、改列不影响旧包的解读。
+- **每个发布过的版本冻结一个夹具。** `internal/archive/testdata/frozen/v<N>/` 是版本 N 发布时写出的一个小归档目录，测试 `TestFrozenFixturesRead`（`internal/archivecli/frozen_test.go`）用当前的读取工具逐个打开、完整核对、读出，记录摘要和 raw 的 SHA-256 必须等于测试里钉住的值。版本 1 的夹具（约 40 KiB）有三个包：一个加密的会话包，根轮次带内联图片（二进制对象）、raw 请求与响应、响应时间线和项目标识，它的子轮次因父轮次在同一分段而保留增量形式、带计费过的 token 关联；一个不加密的桶包，采集版本 1 的孙轮次因父轮次不在本分段而是物化形式，一个只有请求、`parsed_results` 里带半截回答的轮次，一条没有轮次、解析失败、兜底会话超过内联上限而拆进对象文件、raw 请求残缺的 audit；一个不加密的 gap 包。每条 audit 都有投影过的凭据，抄录的完整性事件带用主密钥算出的真实 MAC；主密钥是测试用的字节 `00` 到 `1f`，内容全是合成的。夹具提交以后从不重新生成或改动（生成器 `internal/archivecli/frozen_write_test.go` 只在设置了 `ARCHIVE_WRITE_FIXTURE` 时运行；分段 id 和加密盐是随机的，本来也不能逐字节重现）。发布新版本时，它的夹具随那次改动一起提交，做法写在 `frozen_test.go` 的开头。
+- **版本 0 是试行格式，从未发布。** 它与版本 1 只差 §2.1 表里的几个值。读取工具不读版本 0：清单的 `format` 是本格式、`format_version` 是规范十进制却不是 `<格式版本>` 时（试行的 `"0"`，或读取工具之后才有的版本），在严格解码和签名核对之前就拒绝，码 `unsupported_format_version`，`list` 和 `verify` 写出它的版本（§16.1、§24）。这样的包不进索引，修订号再高也顶替不了版本 1 的成员；它列出的数据文件不算孤儿，对账不改名（§20）。`internal/archive/testdata/trial/v0/` 是同样内容的试行版本 0 目录（冻结前的代码写出），测试证明它被拒绝。
+- **版本 0 的包永远不作为从热库删除数据的依据。** 移除只作用于格式版本不低于 1 的分段，这个条件写在移除事务的加锁语句里（§18.7）。在版本 0 下运行过归档的部署，升级后的第一次运行把这些 audit 以更高的修订号重新导出成版本 1 的包（§18.3），之后的移除只凭版本 1 的成员。版本 0 留下的东西怎么处理见 §23。
 
 ### 2.1 随格式版本变化的字符串
 
-定为版本 1 时只改这一节列出的值，本文其他地方用左列的名字指代它们。
+定为版本 1 时只改了这一节列出的值，本文其他地方用左列的名字指代它们。两个域字符串在代码里写成字面量（`internal/archive` 的 `recordDigestDomain`、`manifestDomain`），不由格式版本常量拼出，所以以后的版本号不会改动版本 1 的摘要和 MAC。
 
-| 名字 | 版本 0 的值 | 用在 |
-| --- | --- | --- |
-| `<格式版本>` | `0`（清单里写成字符串 `"0"`） | 清单的 `format_version`（§14） |
-| `<记录摘要域>` | `llmapi-logger/archive-record/v0` 加一个 `0x00` 字节 | 记录摘要的开头（§13） |
-| `<清单域>` | `llmapi-logger/archive-manifest/v0` 加一个 `0x00` 字节 | 清单 MAC 的输入开头（§14.2） |
-| 测试向量文件 | `internal/archive/testdata/record_full_v0.jsonl`、`record_full_v0.digest`、`record_hand_v0.jsonl`、`record_hand_v0.digest`、`manifest_v0.json`、`manifest_v0.encoding.hex` | §13.3、§14.4 |
-| `record_full_v0` 的摘要 | `2a101c5f55d7d10792ded30f13b2e6778103db600f5675ca4e75dcc998e77cbf` | §13.3 |
-| `record_hand_v0` 的摘要 | `2f0edc602dc5407b3f1f936af139584b43928fc49a26ded79c2d40b8bf915730` | §13.3 |
+| 名字 | 版本 1 的值 | 试行版本 0 的值 | 用在 |
+| --- | --- | --- | --- |
+| `<格式版本>` | `1`（清单里写成字符串 `"1"`） | `0` | 清单的 `format_version`（§14） |
+| `<记录摘要域>` | `llmapi-logger/archive-record/v1` 加一个 `0x00` 字节 | `…/archive-record/v0` 加 `0x00` | 记录摘要的开头（§13） |
+| `<清单域>` | `llmapi-logger/archive-manifest/v1` 加一个 `0x00` 字节 | `…/archive-manifest/v0` 加 `0x00` | 清单 MAC 的输入开头（§14.2） |
+| 测试向量文件 | `internal/archive/testdata/record_full_v1.jsonl`、`record_full_v1.digest`、`record_hand_v1.jsonl`、`record_hand_v1.digest`、`manifest_v1.json`、`manifest_v1.encoding.hex` | 同名的 `_v0` 文件（已改名重生成） | §13.3、§14.4 |
+| `record_full_v1` 的摘要 | `0bea6c0bbe4b997ceedf399af83fc5f502530eff811fd48712dd70a91df0a8ee` | `2a101c5f55d7d10792ded30f13b2e6778103db600f5675ca4e75dcc998e77cbf` | §13.3 |
+| `record_hand_v1` 的摘要 | `a28029b701f243b967ae4fc591a0bde0e033a91749c443a017890d9b912fd11d` | `2f0edc602dc5407b3f1f936af139584b43928fc49a26ded79c2d40b8bf915730` | §13.3 |
+| 独立手写序列的摘要（`digest_independent_test.go`） | `4cfe35155fed5adda6e62907973656920a7abdfed05f43da3746f9d60e90b6f6` | `8e50300a767d596dd1e678968f13755774ec7fc3aff137afa481537bf40c3b6a` | §13.3 |
+| `manifest_v1.json` 的 `mac` | `ff6367840f56bf000c3ca5e8d997df69b35cc2d68ca7fecc9a00d718eeb1f203` | `1273577148f447fd006a321761c719b147cdfe4e25e2ddfa9c7862d17506a163` | §14.4 |
 
-不随格式版本变化的：密钥派生的五个域字符串（都是 `…/v1`，§6）、文件密钥的域字符串和加密流的文件头版本字节 `0x01`（§5，流格式版本与归档格式版本各自独立）、内容地址和序列哈希的域字符串（§10.2、§9.3）、`streamtimeline` 的版本字节（§8.7）。
+不随格式版本变化的：密钥派生的五个域字符串（都是 `…/v1`，§6）、文件密钥的域字符串和加密流的文件头版本字节 `0x01`（§5，流格式版本与归档格式版本各自独立）、内容地址和序列哈希的域字符串（§10.2、§9.3）、`streamtimeline` 的版本字节（§8.7），以及只存在于目录表里、不进包的变更戳的域字符串 `llmapi-logger/archive-change-stamp/v1`（§18.7）。
 
 ## 3. 目录与文件
 
@@ -595,7 +598,7 @@ M("integrity_events") L(n)，每项：
 
 ### 13.3 测试向量
 
-`internal/archive/testdata/record_full_v0.jsonl` 是一条每列都非空、`materialized` 形式、每个投影位置都有一个凭据的采集版本 2 记录，`record_full_v0.digest` 是它的摘要；`record_hand_v0.jsonl` 是一条按手写字节序列核对过的最小记录（Gemini，`?key=`、`X-Goog-Api-Key` 和一个 User-Agent 值是凭据）。两个摘要的值见 §2.1。生成它们用的不是派生出的子密钥，而是两把固定的测试密钥：`K_fpr` 为字节 `01` 到 `20`，`K_sign` 为字节 `80` 到 `9f`。手写的字节序列独立核对了 `audit_records`（含 Request-URI 投影）、`http_stages` 和 `headers` 三段；其余各段在向量里只以空或 NULL 出现，整条记录的摘要只与编码器自己的输出比过（设计实施记录 R.4 第 11 条）。
+`internal/archive/testdata/record_full_v1.jsonl` 是一条每列都非空、`materialized` 形式、每个投影位置都有一个凭据的采集版本 2 记录，`record_full_v1.digest` 是它的摘要；`record_hand_v1.jsonl` 是一条按手写字节序列核对过的最小记录（Gemini，`?key=`、`X-Goog-Api-Key` 和一个 User-Agent 值是凭据）。两个摘要的值见 §2.1。生成它们用的不是派生出的子密钥，而是两把固定的测试密钥：`K_fpr` 为字节 `01` 到 `20`，`K_sign` 为字节 `80` 到 `9f`。手写的字节序列独立核对了 `audit_records`（含 Request-URI 投影）、`http_stages` 和 `headers` 三段；其余各段在向量里只以空或 NULL 出现，整条记录的摘要只与编码器自己的输出比过（设计实施记录 R.4 第 11 条）。`internal/archive/digest_independent_test.go` 另有一条十二段都非空的记录：测试按设计的文字逐字段手写 E.2 的字节序列，只用记录类型和 `Digest`，要求两者相等，并钉住序列的 SHA-256（值见 §2.1）；这个值在 Go 之外（.NET 的 SHA-256）对同一段 6176 字节复算过。
 
 ## 14. 清单
 
@@ -656,7 +659,7 @@ N( I(first_id) I(last_id) I(count) )                  ; gaps
 
 ### 14.4 测试向量
 
-`internal/archive/testdata/manifest_v0.json` 是一份会话包的清单（`K_sign` 为字节 `80` 到 `9f`，§13.3），`manifest_v0.encoding.hex` 是它的清单编码（不含 `<清单域>`）的十六进制。
+`internal/archive/testdata/manifest_v1.json` 是一份会话包的清单（`K_sign` 为字节 `80` 到 `9f`，§13.3），`manifest_v1.encoding.hex` 是它的清单编码（不含 `<清单域>`）的十六进制。它的 `mac` 在 Go 之外用 .NET 的 HMACSHA256 对 `<清单域>` 加这段编码复算过。`internal/security` 的测试另外核对：主密钥为字节 `00` 到 `1f` 时派生出的 `K_sign` 对同一输入的 MAC 是 `717a4960de98d9e151383cdd6d2a9669fac3bb45312f5a2b2be606c353e8112b`（同样在 Go 之外算出），而 `internal/archive` 加在清单编码前面的正是这个 `<清单域>`。
 
 ## 15. 列规格
 
@@ -884,7 +887,7 @@ N( I(first_id) I(last_id) I(count) )                  ; gaps
 
 ### 16.1 清单
 
-1. 清单是普通文件、不超过 256 MiB、是合法 UTF-8，按 §7 严格解码，满足 §14.1 的有效性规则（`manifest_invalid`）。`files[].name` 必须是裸文件名（不含 `/`、`\`、`:`，不以 `.` 开头）。
+1. 清单是普通文件、不超过 256 MiB、是合法 UTF-8。`format` 是 `llmapi-logger-archive`、`format_version` 是规范十进制而不是 `<格式版本>` 时，先于严格解码和签名就拒绝（`unsupported_format_version`）：别的版本可能有别的键和含义，版本 0 的签名在版本 1 的 `<清单域>` 下也不会通过，那不是篡改。其余的按 §7 严格解码，满足 §14.1 的有效性规则（`manifest_invalid`）。`files[].name` 必须是裸文件名（不含 `/`、`\`、`:`，不以 `.` 开头）。
 2. 有密钥时：`key_fingerprint` 等于手里密钥的指纹（`key_mismatch`，这时什么都不解密），再重算 `mac`（`mac_mismatch`）。
 3. 每个数据文件的落盘字节数和 SHA-256 等于清单（`file_missing`、`file_mismatch`）。不带密钥的 `verify` 只做到这一步（§24.3）。
 
@@ -973,7 +976,7 @@ archive:
 | 模式 | 现在的行为 |
 | --- | --- |
 | `export_only` | 每天导出到期的 audit 和 gap。热库里什么都不删，会一直增长 |
-| `archive_then_delete` | 每天导出，然后做校验后移除（§18.7）：已定稿、格式版本不低于 1 的分段里，包核对通过、变更戳没变的成员从热库删除。**内置格式版本是 0，所以这个版本里什么都不删**，启动日志说明这一点（`archive_removal_trial_format`） |
+| `archive_then_delete` | 每天导出，然后做校验后移除（§18.7）：已定稿、格式版本不低于 1 的分段里，包核对通过、变更戳没变的成员从热库删除。内置格式版本是 1，启动日志 `archive_removal_active` 写出它。目录表里试行版本 0 的分段从不移除，其中的 audit 重新导出后按版本 1 的成员移除（§2） |
 
 除了移除，两者的不同只有重新收录：`archive_then_delete` 下，目录表里状态为 `stale`、仍在热库、又没有当前成员的 audit 会以更高的修订号重新导出；`export_only` 下每条到期记录只导出一次，之后的变化不再跟踪（设计 P 第 8 条）。
 
@@ -1036,7 +1039,7 @@ archive:
 
 不能导出的 audit 留在热库，登记进 `archive_deferred` 并写明原因，之后每次运行再看一次；每次运行按原因报告推迟的条数（§19）。推迟没有上限：推迟数一直不降，说明解析、调用者查找或数据本身卡住了，应当去修那里。已不在热库的 audit 从推迟表里去掉。
 
-**水位**：新范围从上一个水位之后开始，一趟看过的最后一条就是新水位，不论其中多少条被推迟。**一趟的全部分段都定稿之后**，水位、计数、推迟和不再推迟的 audit 才由一个 writer 操作一起写进目录表；这一趟有分段失败时水位不推进，下次运行从旧水位重来。水位按格式版本记录：格式定为版本 1 时水位归零，版本 0 的成员全部重新导出。
+**水位**：新范围从上一个水位之后开始，一趟看过的最后一条就是新水位，不论其中多少条被推迟。**一趟的全部分段都定稿之后**，水位、计数、推迟和不再推迟的 audit 才由一个 writer 操作一起写进目录表；这一趟有分段失败时水位不推进，下次运行从旧水位重来。水位按格式版本记录（最近一次开始的、格式版本相同且记了水位的运行的水位）。格式定为版本 1 之后，版本 1 的水位从空开始，第一次运行从头看起；版本 0 的成员不是当前成员，于是每条还在热库的 audit 都以已有最大修订号加一重新导出，登记新行时旧的版本 0 行改为 `stale`。两种开启的模式都这样。
 
 ### 18.4 分组与装包
 
@@ -1047,7 +1050,7 @@ archive:
 3. 其余会话和没有轮次的 audit 装进本趟的桶包（`bundle_kind: bucket`），**每个协议一个**。协议是 `audit_records.protocol`，也就是协议族：OpenAI Chat、Completions 与 Responses 同在 `openai` 桶里。一个会话的 audit 混有多个协议时，各条进各自协议的桶。没有轮次的 audit 排在桶包末尾，按（`started_at_ns`，`audit_id`）。
 4. 一个包累计的未压缩字节超过 `segment_max_bytes` 时，在下一条 audit 之前封好当前分段、开下一个分段。一条 audit 从不跨分段，所以一个分段可能超出上限一条 audit 的量。
 
-阈值是推测的默认值（设计 B.3）：真实分布没有量过，格式版本 0 期间可以调整，调整不影响已写的包。
+阈值是推测的默认值（设计 B.3）：真实分布没有量过，可以随时调整。分组不是格式的一部分，调整不影响已写的包：读取工具按清单建索引，不靠包的划分。
 
 ### 18.5 一个分段的发布
 
@@ -1090,7 +1093,7 @@ archive:
 
 移除是归档里唯一删除热库证据的地方（设计 M 节、实施记录 R.9）。一次运行的全部趟和 gap 导出之后，期限没到时进入移除：
 
-1. **对象。** 全部 `sealed` 分段里、格式版本不低于 1 的 `sealed` 成员，包括以前的运行留下没移除完的。内置格式版本是 0，所以这个版本里一个都没有：**`archive_then_delete` 不删除任何东西**，热库照样增长。
+1. **对象。** 全部 `sealed` 分段里、格式版本不低于 1 的 `sealed` 成员，包括以前的运行留下没移除完的。内置格式版本是 1，新写的包都满足；目录表里试行版本 0 的分段从不进入（§2）。
 2. **顺序。** 按 `turn_created_at_ns` 降序、没有轮次的在最前、相同时按 `audit_id` 降序：子轮次总在父轮次之前，移除一个父轮次时不会改写一个还要移除的子轮次。
 3. **批量与让路。** 与 retention 相同：从 1 条起，整批且不超过 0.5 秒时翻倍（上限 200），超过 1 秒按比例缩小，慢失败降到 1；每批之后暂停同样长，至多 5 秒。到了期限或进程关闭就停在批与批之间，没做完的成员下一次运行继续。
 4. **包的核对。** 一个分段的成员进入第一批之前，这次运行核对一次它的包：清单和它列出的每个数据文件都在；清单能解析，密钥指纹和签名用归档签名密钥核对通过；每个数据文件的大小和 SHA-256 与清单相同；清单文件的 SHA-256 等于定稿时目录表记下的 `manifest_sha256`。只算一遍哈希，不解密、不解压。核对不过的分段，这次运行一条成员也不移除：成员保持 `sealed`、数据留在热库，日志 Warn `archive bundle check failed before removal: its members stay in the hot store`（`error_category=archive_bundle_check_failed`、`reason` 是核对的码、`bundle_kind`），完成日志计入 `bundle_check_failed_segments` 和 `held_back_members`；运行照常完成，其余分段照常移除。包修好以后，下一次运行移除它们。核对在移除事务之外，核对之后、删除之前文件仍可能消失，这个窗口是接受的。
@@ -1099,7 +1102,7 @@ archive:
    - 戳与导出时不同（导出之后它变过：计费回填、项目标识、检查点、任何一行的增删改）：成员标成 `stale`，**什么都不删**，下一次运行以更高的修订号重新导出它，再移除；读取工具取最高修订号；
    - 戳相同：用 retention 同一段代码删除，保留的子轮次先改写成检查点根，叶到根删轮次，修剪派生明细，回收不再被引用的会话、内容对象和二进制对象；成员标成 `hot_removed`。
    删除与目录表的更新在同一个事务里，不存在“删了没记”或反过来。分段里不再有 `sealed` 成员时改为 `hot_removed`。
-6. **gap。** audit 之后，逐个格式版本不低于 1 的 gap 分段，先做第 4 步的核对，再按 200 条一批删 `audit_gaps` 并标成 `hot_removed`；核对不过的分段的 gap 留着（`held_back_gaps`）。
+6. **gap。** audit 之后，逐个格式版本不低于 1 的 gap 分段，先做第 4 步的核对，再按 200 条一批删 `audit_gaps` 并标成 `hot_removed`；核对不过的分段的 gap 留着（`held_back_gaps`）。试行版本 0 导出过的 gap 不会再导出（`archive_gap_members` 以 gap id 为主键，一条 gap 只有一行），所以永远不移除，留在热库（§23）。
 7. 一批失败时这次运行以 `archive_failed` 结束（`reason=removal_failed`），已提交的批保留，之后按 §18.1 重试。
 
 被移除 audit 的完整性事件留在热库的链上，启动校验和后台载荷校验跳过已不存在的 audit。`HasAudits` 因为事件和目录表还在而为真，密钥文件缺失时不会新建密钥。
@@ -1128,7 +1131,6 @@ archive:
 | --- | --- | --- | --- |
 | `archive export only: hot store keeps growing` | Warn | `error_category=archive_export_only` | 启动，模式为 `export_only` |
 | `archive verified removal active: archived audits are removed from the hot store once their bundle of format version 1 or later is sealed and their change stamp is unchanged` | Warn | `error_category=archive_removal_active`、`format_version` | 启动，模式为 `archive_then_delete` |
-| `archive format version 0 is the trial format: its bundles are exported but never removed, so nothing is removed from the hot store and it keeps growing` | Warn | `error_category=archive_removal_trial_format`、`format_version` | 启动，模式为 `archive_then_delete` 而格式版本低于 1（这个版本总是如此） |
 | `archive is off and retention deletes directly again; to pause archiving set retention_days: 0` | Warn | `error_category=archive_direct_delete_resumed`、`retention_days` | 启动，护栏 3 |
 | `archive runner unavailable` | Warn | `error_category=archive_unavailable`、`reason`（`audit_unavailable`、`dir_<码>`、`invalid_timezone`、`invalid_options`） | 开启了归档而 runner 不能组装；代理与审计照常 |
 | `audit key unavailable` | Warn | `mode`、`error_category=key_unavailable`，因归档目录里有清单而拒绝新建密钥时另有 `reason=archive_manifests_present` | 启动 |
@@ -1142,7 +1144,7 @@ archive:
 | `archive removal completed` | Info | `event=archive_removal_completed`、`removed_audits`、`stale_audits`、`already_gone_audits`、`skipped_audits`、`removed_gaps`、`removed_segments`、`bundle_check_failed_segments`、`held_back_members`、`held_back_gaps`、`batches`、`duration_ms`，到了期限时 `deadline_reached=true` | 移除阶段结束（§18.7） |
 | `archive bundle check failed before removal: its members stay in the hot store` | Warn | `error_category=archive_bundle_check_failed`、`reason`、`bundle_kind` | 一个分段的包核对不过，这次运行不移除它的成员（§18.7 第 4 步）；每个分段每次运行一条 |
 | `archive removal batch reduced to one audit` | Info | `failed_audit_batch` | 多条的一批慢失败，批量降到 1 |
-| `archive directory has manifests that do not verify` | Warn | `error_category=archive_manifest_unusable`、`manifests` | 对账时有清单解析不了或签名不对 |
+| `archive directory has manifests that do not verify` | Warn | `error_category=archive_manifest_unusable`、`manifests`、`unsupported_format_version` | 对账时有清单解析不了、签名不对或格式版本不受支持；`unsupported_format_version` 是其中格式版本不受支持的个数（例如留在目录里的试行版本 0 的包，§2），它们不算损坏 |
 | `archive bundle unknown to the catalog does not verify` | Warn | `error_category=archive_manifest_unusable`、`reason` | 对账时一个目录表不认识的包核对不过 |
 | `archive bundle registered from the directory` | Info | `bundle_kind`、`members` | 对账登记了一个目录表不认识的包 |
 
@@ -1154,9 +1156,9 @@ archive:
 
 每次运行开始时先把目录表和归档目录对齐。对账只读、改名和登记；唯一删除的是写入方自己命名的临时文件。
 
-1. **`publishing` 的分段**（上次发布后、定稿前中断）：清单不在，删掉意向行，已链上的数据文件留给第 3 步当孤儿；清单在，就按 §16 重读核对，成员与修订号、摘要都与意向行一致，再做 §18.5 第 5 步的抽样，都通过就定稿。核对或抽样不一致时，包改名 `.rejected`、意向行删掉。抽样发现一条成员读出不同而变更戳没变时，与 §18.5 一样只排除这一条：它推迟为 `export_failed`（日志 Warn `archive sample mismatch`，计入 `sample_mismatch_audits`），这次运行的各趟都不再选它，包里其余的成员照常到期，由随后的一趟重新导出。抽样时热库读不出来，这次运行以失败结束（`sample_failed`），分段留在 `publishing`，下一次再试；新发布的分段遇到同样情形时也这样处理（§18.5）。
+1. **`publishing` 的分段**（上次发布后、定稿前中断）：清单不在，删掉意向行，已链上的数据文件留给第 3 步当孤儿；清单在，就按 §16 重读核对，成员与修订号、摘要都与意向行一致，再做 §18.5 第 5 步的抽样，都通过就定稿。核对或抽样不一致时，包改名 `.rejected`、意向行删掉。试行版本 0 留在 `publishing` 的分段（冻结前中断的运行）当前的读取工具核对不了，按核对不过处理：清单改名 `.rejected`、意向行删掉，它的数据文件在第 3 步改名 `.orphan`；什么都不删，其中的 audit 重新导出。抽样发现一条成员读出不同而变更戳没变时，与 §18.5 一样只排除这一条：它推迟为 `export_failed`（日志 Warn `archive sample mismatch`，计入 `sample_mismatch_audits`），这次运行的各趟都不再选它，包里其余的成员照常到期，由随后的一趟重新导出。抽样时热库读不出来，这次运行以失败结束（`sample_failed`），分段留在 `publishing`，下一次再试；新发布的分段遇到同样情形时也这样处理（§18.5）。
 2. **目录表不认识的包**（例如数据库从备份恢复，或回滚后重新升级）：用密钥核对通过的，登记为 `sealed` 的分段；成员一律登记为 `stale`、没有变更戳，可以列出和读取，但永远不作为删除依据；某个 audit 已经有当前成员时只登记分段、不登记它。分段行的 `run_id` 记为执行对账的这次运行。核对不过的只记日志，不改名。
-3. **残留文件**：写入方命名的临时文件（§3.2）删掉；没有任何清单列出的数据文件改名加 `.orphan`，不删除。
+3. **残留文件**：写入方命名的临时文件（§3.2）删掉；没有任何清单列出的数据文件改名加 `.orphan`，不删除。解析不了的清单（含格式版本不受支持的）旁边、同名前缀的数据文件不算孤儿，不改名。
 
 暂存目录不在对账范围里，归档也从不读它（§23）。
 
@@ -1190,13 +1192,17 @@ PostgreSQL（只读快照）
 - **归档里没有凭据值。** `Authorization`、`x-api-key`、`?key=` 这类值只剩名称、长度和 keyed 指纹，原值无法从归档找回；指纹只能核对已知的 Key。
 - **内容里的凭据原样归档。** 用户贴进对话的 Key、上游错误里回显的 Key 随 raw、内容对象和 `parsed_json` 进入归档（§12.5）。加密开启时它们在密文里，关闭时是明文。
 - **明文会经读取工具流出。** `cat` 和 `export` 的输出是解密后的对话内容，没有凭据值，但内容不遮蔽；输出去向由使用者负责。
-- **热库持续增长。** 内置格式版本是 0，开启归档后两种模式都不删（§17.2、§18.7）。要控制热库大小，只能关掉归档（这会恢复直接删除，护栏 3），或者接受增长，直到格式定为版本 1。
+- **`export_only` 下热库持续增长**（§17.2）。要控制热库大小用 `archive_then_delete`；关掉归档会恢复直接删除（护栏 3）。
+- **试行版本 0 留下的东西。** 在版本 0 下运行过归档的部署升级以后：
+  - 版本 0 的包留在 `archive.dir` 里，读取工具不读它们。只要它们在，`cat`、`export` 和 `fpr --dir` 照常输出版本 1 的内容后以码 `incomplete` 退出，`verify --dir` 把它们算作失败，每次运行的对账 Warn 一次 `archive_manifest_unusable`（`unsupported_format_version` 是它们的个数）。版本 0 的包不是任何删除的依据，确认其中的 audit 都已有版本 1 的包（升级后的运行完成、`verify --dir --key` 只剩 `unsupported_format_version` 的失败）之后，可以把它们的清单和数据文件一起挪出 `archive.dir` 另存。
+  - 版本 0 导出过的 gap 不会再导出，也就永远不从热库移除（§18.7 第 6 步）：gap 行很小，只是留着；它们在版本 0 的包里。
+  - 目录表里版本 0 的分段行一直是 `sealed`，成员行在重新导出时改为 `stale`，之后都不再变化；它们只记录曾经导出过什么。
 - **移除之后数据只在归档里**（§18.7），回滚或切换模式都不会让它回来。包在定稿后、移除前坏掉或丢失由移除前的核对拦住；核对之后、删除之前的那一小段时间里文件消失，拦不住。
 - **对账会把清单坏掉的包的数据文件改名为 `.orphan`。** 一个已定稿的分段，清单丢了或签名不对时，下一次运行的对账把它的数据文件当作孤儿改名（§20 第 3 条）；它的成员因为核对不过不会被移除，但修复时要把清单和数据文件的原名一起恢复。
 - **暂存目录里的残留不在归档里。** 启动导入改名留下的 `.orphan`、`.corrupt` 暂存文件可能是某条已终结 audit 的一部分 raw 的唯一副本；归档只读数据库，按库里的样子归档这条 audit，暂存目录里的文件既不读也不删，需要人工处理（模块 03 §13）。
 - **调用者查找关掉之后**，遗留的 `caller_status = 'pending'` 记录会一直被推迟。
 - **长快照。** 每趟一个 REPEATABLE READ 快照；一个极长的会话会让单趟变长，挡住 VACUUM 的清理水位。没有在大库上量过。
-- **阈值是推测的**（§18.4），格式版本 0 期间可以改。
+- **阈值是推测的**（§18.4），可以改；改它不是格式改动。
 - **新增的密码学代码**（§5）只用标准库，有固定向量和篡改测试，需要单独评审。
 - **Windows 上目录 fsync 是空操作**；部署目标是 Linux。
 
@@ -1217,7 +1223,7 @@ PostgreSQL（只读快照）
 | 码 | 含义 |
 | --- | --- |
 | 0 | 完成 |
-| 1 | 有核对不过、有包读不了被跳过、有清单被索引剔除（签名或密钥指纹不符、解析不了；`cat`、`export`、`fpr --dir` 照常输出核对通过的部分，再以码 `incomplete` 退出，因为被剔除的包可能装着结果的一部分）、密钥不符，或输出写不出去 |
+| 1 | 有核对不过、有包读不了被跳过、有清单被索引剔除（签名或密钥指纹不符、解析不了、格式版本不受支持；`cat`、`export`、`fpr --dir` 照常输出核对通过的部分，再以码 `incomplete` 退出，因为被剔除的包可能装着结果的一部分）、密钥不符，或输出写不出去 |
 | 2 | 命令行用法错误 |
 | 3 | 找不到；该记录没有这种导出（`not_available`、`not_retained`、`not_ready`、`no_turn_graph`）；`fpr` 没有匹配 |
 
@@ -1227,7 +1233,7 @@ PostgreSQL（只读快照）
 audit-archive list --dir <archive> [--key <file>] [--conversation <id> | --audit <id>] [--json]
 ~~~
 
-按清单列出包：种类、协议、时间范围（UTC）、成员数、会话、是否加密、格式版本、清单相对 `--dir` 的路径。不需要密钥；给了 `--key` 时多一列 `AUTH`，标明清单签名是 `ok`、`key_mismatch` 还是 `mac_mismatch`（没给密钥为 `not_checked`）。解析不了的清单报到标准错误。不读数据文件。`--json` 每个包一行 JSON。过滤没有命中时退出码 3。签名不符的包照样列出并在 `AUTH` 里标明，不影响退出码：`list` 是清单盘点，核对由 `verify` 负责。
+按清单列出包：种类、协议、时间范围（UTC）、成员数、会话、是否加密、格式版本、清单相对 `--dir` 的路径。不需要密钥；给了 `--key` 时多一列 `AUTH`，标明清单签名是 `ok`、`key_mismatch` 还是 `mac_mismatch`（没给密钥为 `not_checked`）。解析不了的清单报到标准错误；格式版本不受支持的写成 `unsupported_format_version (format_version "0"; this reader reads format version 1)`，带上它的版本，不进表格和 `--json` 的输出，也不改变退出码。不读数据文件。`--json` 每个包一行 JSON。过滤没有命中时退出码 3。签名不符的包照样列出并在 `AUTH` 里标明，不影响退出码：`list` 是清单盘点，核对由 `verify` 负责。
 
 ### 24.3 `verify`
 
@@ -1242,7 +1248,7 @@ audit-archive verify (--dir <archive> | --bundle <manifest>) [--key <file>] [--s
 | `files` | 不带 `--key` | 较弱：清单能解析，每个数据文件的大小和 SHA-256 等于清单（§16.1 第 1、3 步）。能发现损坏，发现不了伪造；加密的包不解密 |
 | `full` | 带 `--key` | §16 的全部检查，含抄录事件的 MAC（`--skip-event-mac` 只跳过这一项） |
 
-结果码：`ok`；`file_missing`、`file_mismatch`、`manifest_invalid`、`mac_mismatch`、`key_mismatch`、`decrypt_failed`、`decompress_failed`、`line_invalid`、`count_mismatch`、`member_mismatch`、`order`、`context_mismatch`、`digest_mismatch`、`object_mismatch`、`raw_mismatch`、`reference_open`、`event_mac_mismatch`、`read_failed`。用 `--dir` 时，解析不了的清单算一个失败的包；没有清单的数据文件和中断留下的临时文件作为提示写到标准错误，不算失败。全部通过时退出码 0，有失败时 1。
+结果码：`ok`；`file_missing`、`file_mismatch`、`manifest_invalid`、`unsupported_format_version`（试行版本 0 或读取工具之后的版本，什么都不读，带不带密钥都一样）、`mac_mismatch`、`key_mismatch`、`decrypt_failed`、`decompress_failed`、`line_invalid`、`count_mismatch`、`member_mismatch`、`order`、`context_mismatch`、`digest_mismatch`、`object_mismatch`、`raw_mismatch`、`reference_open`、`event_mac_mismatch`、`read_failed`。用 `--dir` 时，解析不了的清单算一个失败的包；没有清单的数据文件和中断留下的临时文件作为提示写到标准错误，不算失败。全部通过时退出码 0，有失败时 1。
 
 ### 24.4 `cat`
 

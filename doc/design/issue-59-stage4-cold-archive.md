@@ -22,7 +22,7 @@
 
 维护者在实施会话里答复：“只保留 unified，归档版本确定为 1，现在开始做第四阶段。”据此：
 
-- **Q14 取乙**：本地验收（4.6 的三层检查与 N 节的全部用例）通过后，格式定为版本 1，对象放在包内。`archive_then_delete` 随之真正移除。以后若真实分布显示 5.4 的膨胀比超过界限，改用共享对象库要出版本 2。
+- **Q14 取乙**：本地验收（4.6 的三层检查与 N 节的全部用例）通过后，格式定为版本 1，对象放在包内。`archive_then_delete` 随之真正移除。以后若真实分布显示 5.4 的膨胀比超过界限，改用共享对象库要出版本 2。**已完成**：提交 `2cc247f` 把格式定为版本 1 并冻结（R.10）。
 - **Q1 到 Q13** 没有逐项答复。按“开始做”实施正文里的推荐；这不是逐项确认，维护者对任何一项有异议时改对应的小节。
 - **只保留 unified 写入路径**不是本文的问题，但影响本文两处：M.1 第 18 行（legacy 的逐操作写）随 legacy 路径一起删去；新写入的记录在 PostgreSQL 上都是采集版本 2，版本 1 只剩旧数据，归档仍要能表达两种（Q5）。
 
@@ -143,7 +143,7 @@ E 节给出完整的字节序列。其中需要确认的取舍：
 2. 明文哈希的口径。推荐对“归档里写的那个明文”求哈希：`parsed_json_enc` 取解开 gzip 之后的 JSON；Header 取 D 节投影之后的项；时间线取解密解压后的明文。
 3. raw 块的覆盖。方案 4.6 说“`full` 记录的 raw 字节对回 `body_streams` 里记的 SHA-256 和长度”，但残缺的 Body 的 `sha256` 是 NULL（`finalizeIncompleteCapture` 把它置空）〔核〕，异常记录最要紧的那部分 raw 没有任何哈希可比。推荐记录摘要逐块覆盖 `body_chunks`：阶段、序号、偏移、明文长度、观察时间、明文的 SHA-256。这超出了“比照现有两个摘要”的范围，但只有这样残缺 raw 才受保护。
 4. 对象只取内容地址（方案已定），对象明文不进摘要：内容地址本身就是对明文的哈希，重读时重算（J.2）。
-5. 域字符串带格式版本：试行期为 `llmapi-logger/archive-record/v0\x00`，格式定为版本 1 时改为 `…/v1\x00`。试行包不作为删除依据（方案 4.4），所以版本切换时旧摘要作废不影响任何删除。
+5. 域字符串带格式版本：试行期为 `llmapi-logger/archive-record/v0\x00`，格式定为版本 1 时改为 `…/v1\x00`。试行包不作为删除依据（方案 4.4），所以版本切换时旧摘要作废不影响任何删除。（已完成，R.10。）
 
 推荐按 E 节。
 
@@ -201,6 +201,8 @@ C 节的选择大多是机械的，但它们决定了第三方能否不依赖本
 - 丙：定为版本 1，但 `archive_then_delete` 另加一个显式的确认开关，默认关闭。代价：多一个配置项；格式仍然先冻结。
 
 推荐甲。冻结格式是一个不能撤回的承诺，而缺的只是一次只读的测量。
+
+**已完成：** 维护者取乙（0.0），格式在提交 `2cc247f` 定为版本 1（R.10）。
 
 ### 0.2 方案与代码不符之处
 
@@ -384,7 +386,7 @@ C 节的选择大多是机械的，但它们决定了第三方能否不依赖本
 
 ---
 
-## C. 行格式（格式版本 0）〔设〕
+## C. 行格式（写于格式版本 0；定为版本 1 时没有改动）〔设〕
 
 ### C.1 文件与编码规则
 
@@ -1481,7 +1483,7 @@ gap 的移除是另一个同样独占事务的操作：按 `archive_gap_members`
 | 原事件复核不过的 audit 不进归档 | 绕过 writer 用 SQL 改一段密文或一个事件的载荷摘要，运行归档：该 audit 留在热库，`integrity_failed_audits` 为 1，载荷校验状态为失败 | 是 |
 | 扫描归档目录和临时文件：加密时扫不到测试正文，两种配置下都扫不到凭据值 | 夹具的请求体带唯一标记串，`Authorization`、`x-api-key`、`x-goog-api-key`、`?key=`、`Cookie`、`Set-Cookie` 各带唯一的合成凭据。用测试钩子在临时文件写完、发布之前暂停并扫描；发布后扫描整个目录，非加密配置下先解开 gzip 再扫 | 是 |
 | 凭据指纹：入站出站相同；已知 Key 算出同一个；换主密钥算不出 | 主机测试 | 否 |
-| 冻结夹具包 | `internal/archive/testdata/frozen/v0/` 一个小包，当前读取工具读一遍；格式定为 1 时再冻结一个 v1 包 | 否 |
+| 冻结夹具包 | `internal/archive/testdata/frozen/v1/` 一个小归档目录（会话包、桶包、gap 包），当前读取工具读一遍（`TestFrozenFixturesRead`）；版本 0 从未发布，没有冻结夹具，试行写出的 `testdata/trial/v0/` 用来证明它被拒读（R.10） | 否 |
 
 ### N.2 第 6 节 P3 的门槛
 
@@ -1544,7 +1546,7 @@ P3：
 | 11 | `test(integration)`：J.3 全量、扫描、对账与故障用例 | N.1、N.2（PG） |
 | 12 | `docs`：归档格式文档（版本 0）、模块 04、09、18、`AGENTS.md` 的加密边界、部署说明、配置示例 | — |
 
-P3 验收通过后：格式定为版本 1（域字符串 `v0 → v1`，冻结 v1 夹具包），单独一个提交。
+P3 验收通过后：格式定为版本 1（域字符串 `v0 → v1`，冻结 v1 夹具包），单独一个提交。已完成：`2cc247f`（R.10）。
 
 P4：
 
@@ -1954,3 +1956,78 @@ M、H.6 和 4.5 只在导出时（H.2 第 6 步）重开已发布的文件做完
 20. **与对账的交互。** 一个已定稿分段的清单丢了或签名不对时，下一次运行开头的对账把它的数据文件当作没有清单的数据文件改名加 `.orphan`（H.6 第 3 步）。成员因为核对不过不会被移除；修复时要把清单和数据文件的原名一起恢复，只放回清单不够。这是对账原有的行为，没有改。
 
 测试：`bundle` 的主机测试覆盖 `CheckFiles` 的完好、清单缺失、对象文件缺失、数据文件截断、清单被改、换一把密钥；runner 的主机测试对一个分段的包缺失、数据文件截断、清单被改、清单与目录表记下的不同各跑一遍：只扣下那个分段的成员，其余的移除，每个分段每次运行只查一次，包恢复后下一次运行移除它们；gap 分段同样。PostgreSQL 上导出之后删掉一个会话包的对象文件：它的成员和全部行留在热库、仍是 `sealed`，其余包的成员被移除，日志和计数显示出来，文件放回后下一次运行移除它们。
+
+### R.10 格式冻结为版本 1（O.1 里 P3 之后“单独一个提交”）
+
+维护者批准冻结后（0.0、Q14 取乙），提交 `2cc247f` 把格式定为版本 1，`2060376` 补了两个测试。从此每个以后的读取工具都要读出版本 1 的包（方案 4.4 的兼容承诺）。
+
+**改了的字符串，只有这三个**
+
+1. `archive.FormatVersion`：`"0"` → `"1"`，清单的 `format_version` 随之写 `"1"`。
+2. 记录摘要的域（`internal/archive/digest.go` 的 `recordDigestDomain`）：`llmapi-logger/archive-record/v0\x00` → `llmapi-logger/archive-record/v1\x00`。
+3. 清单 MAC 的域（`manifest.go` 的 `manifestDomain`）：`llmapi-logger/archive-manifest/v0\x00` → `llmapi-logger/archive-manifest/v1\x00`。
+
+两个域原来由 `FormatVersion` 拼出，现在写成字面量：以后改版本号不会悄悄改掉版本 1 的摘要和 MAC。`TestFormatVersionOneIsFrozen` 钉住这三个值。没有增删、改名或调换任何字段，没有改任何编码；冻结时没有发现格式本身需要改的地方。
+
+**看起来带版本号、但不是格式版本、没有改的**
+
+- 密钥派生的五个域 `archive-encryption-key/v1`、`archive-signing-key/v1`、`archive-credential-fingerprint-key/v1`、`archive-key-fingerprint/v1`、`archive-credential-value/v1`（`internal/security/archive_keys.go`）：密钥派生自己的版本，一开始就是 v1；
+- 文件密钥的域 `archive-file-key/v1` 和加密流文件头的版本字节 `0x01`（`internal/archive/stream`）：流格式自己的版本（R.3 第 3 条）；
+- 变更戳的域 `archive-change-stamp/v1`（`postgres/archive_stamp.go`）：只在目录表里，不进包；
+- `auditmodel` 的内容、二进制、序列、重建、会话 key、外部引用的域和 `streamtimeline` 的版本字节：热库自己的格式，归档照抄；
+- 在 `internal/archive/**` 里搜 `/v0` 的其余命中只有测试数据里的 `/v1/chat/completions` 一类请求路径。
+
+**向量**
+
+4. `internal/archive/testdata/*_v0.*` 用 `git mv` 改名为 `*_v1.*`，再用 `-update` 重新生成。与版本 0 相比只变了：清单的 `format_version` 文本和 `mac`、清单编码里的版本文本、两条记录行末尾的 `record_digest`。新值：`record_full_v1` 为 `0bea6c0b…a8ee`，`record_hand_v1` 为 `a28029b7…d11d`，`manifest_v1.json` 的 `mac` 为 `ff636784…f203`（在 Go 之外用 .NET 的 HMACSHA256 复算过）。全文在模块 26 §2.1。
+5. 独立的摘要向量（`digest_independent_test.go`）：手写的 E.2 序列只改了域里的版本数字，钉住的值从 `8e50300a…3b6a` 改为 `4cfe3515…b6f6`。新值是手写序列（6176 字节）的 SHA-256，没有抄编码器的输出：把序列导出后用 .NET 的 SHA-256 算出同一个值，并确认把那一个数字改回 `0` 得到原来的 `8e50300a…`。
+6. `internal/security/archive_keys_test.go` 的清单 MAC 向量本来就是在 `…/archive-manifest/v1\x00` 这个“示例前缀”上（用 .NET）算的，值不变。新的外部测试 `internal/security/archive_domain_test.go` 证明它是真实的域：`archive.ManifestMACInput` 加在版本 1 向量清单编码前面的正是这个前缀，主密钥为 `00` 到 `1f` 时派生的 `K_sign` 对这段输入的 MAC 是 `717a4960…112b`（同样在 Go 之外算出），`Sign` 用的也是它。`internal/archive/bundle` 没有固定向量。
+
+**版本 0 在冻结之后**
+
+7. **读取。** `archive.DecodeManifest` 先宽松地看 `format` 和 `format_version` 两个键（按键名精确匹配）：本格式、`format_version` 是规范十进制而不是 `"1"` 时返回 `*UnsupportedFormatVersionError`（它同时是 `ErrUnsupportedFormatVersion` 和 `ErrFormat`），不再严格解码，也不核对签名，因为别的版本可以有别的键和含义；不是规范十进制的仍是普通的格式错误。版本 0 只差两个域字符串，读它在技术上不难，但兼容承诺只覆盖发布过的版本，方案 4.4 规定试行包要重新导出，所以保守地拒读、不猜。写入一侧（`Sign`、`EncodeManifest`）照旧只接受 `"1"`。`internal/archive/bundle` 把它报成 `unsupported_format_version`：`Open`（带不带签名器都一样）、`VerifyFiles`、`CheckFiles`、`BuildIndex` 都给这个码，而不是 `mac_mismatch`（版本 0 的签名在 v1 的域下当然不过，那不是篡改）。
+8. **索引。** 这样的清单进 `Problems`，带 `FormatVersion`，不进任何查找：它的成员修订号再高也顶替不了版本 1 的成员。它的数据文件按原有规则（解析不了的清单的同名前缀）不算孤儿，对账不改名。
+9. **读取工具。** `list` 在标准错误上写 `unreadable manifest <路径>: unsupported_format_version (format_version "0"; this reader reads format version 1)`，不进表格和 `--json`，不改变退出码（选择了不为它造一行没有内容的表格行）；`verify` 的结果码是 `unsupported_format_version`；`cat`、`export`、`fpr --dir` 照常输出核对通过的部分后以 `incomplete` 退出：被拒的包可能装着结果的一部分。以后的版本（测试用 `"2"` 加一个新键）同样处理。帮助文本列了这个码。
+10. **runner。** 选取和水位本来就以格式版本为参数（`Due`、`Candidates`、`ConversationCandidates`、`StaleCandidates`、`ArchiveWatermark`），“当前成员”要求分段的版本等于 runner 的版本（R.6 第 13 条）。所以版本 0 的成员不是当前成员，版本 1 的水位从空开始，第一次运行把还在热库的每条 audit 以已有最大修订号加一重新导出，登记新行时旧的版本 0 行改为 `stale`（R.6 第 5 条）。这在两种开启的模式下都会发生：B.1 第 4 条写的“在 `archive_then_delete` 模式下重新收录”只对 `stale` 成员成立，版本 0 的成员靠水位重来，`export_only` 下同样重新导出。
+11. **移除。** 门槛 `s.format_version >= 1` 写在加锁语句里（R.9 第 2 条），版本 0 的分段永远不满足：`ListRemovableArchiveMembers` 不列它的成员；直接调 `RemoveArchived`，给出版本 0 成员自己的分段、修订号和戳，结果是 `skipped`；`RemoveArchivedGaps` 对版本 0 的 gap 分段什么都不删。
+12. **对账。** 版本 0 的清单在 `index.Problems()` 里，`archive_manifest_unusable` 的 Warn 另带 `unsupported_format_version`（其中格式版本不受支持的个数），它们不算损坏。冻结前中断、留在 `publishing` 的版本 0 分段，现在的读取工具核对不了，按核对不过处理：清单改名 `.rejected`，意向行删掉，数据文件随后改名 `.orphan`；什么都不删，其中的 audit 重新导出（`TestTrialFormatSegmentLeftPublishingIsRejected`）。“旧文件不动”只对已定稿的版本 0 分段成立。
+13. **发现：版本 0 导出过的 gap 永远留在热库。** gap 的选取是“不在任何 gap 成员行里”（R.8 第 29 条），不看格式版本；`archive_gap_members` 以 `gap_id` 为主键，一条 gap 不能再登记进版本 1 的分段；版本 0 的 gap 分段又不满足移除门槛。所以这些 gap 不再导出，也不从热库删除，主机测试和 PostgreSQL 测试都钉住了这一点。改它要改目录表的主键（新迁移），不在这次冻结里做；gap 行很小，个数等于冻结前导出过的停写区间数。这是目录表的问题，不是包格式的问题，不影响冻结。
+14. **启动日志。** 内置版本是 1 以后，`warnArchiveMode` 里“格式版本低于 1”只能经测试接缝出现，`archive_removal_trial_format` 连同它的文档去掉了；`archive_removal_active` 照旧带 `format_version`。目录表里还有版本 0 的分段时没有单独的启动提示，对账的 Warn 会说。
+15. **测试接缝。** `runner.Options.FormatVersionOverride` 改为 `*int64`：原来 0 表示“没设”，表达不了版本 0。`app` 的 `archiveSeams.formatVersion` 同样。它只改目录表一侧（选取、水位、登记分段的 `format_version`），包仍按 `archive.FormatVersion` 写。
+
+**冻结的夹具（方案 4.4、N.1）**
+
+16. `internal/archive/testdata/frozen/v1/` 是版本 1 写出的一个小归档目录（8 个文件，约 39 KiB），三个包：
+    - 加密的会话包 `conv_frozen`：`frozen-a1`，采集版本 2 的根轮次（OpenAI Responses 解析器和 `auditmodel.Prepare` 产出的真实轮次），内联图片作为二进制对象，raw 请求与响应（请求阶段和发送阶段共用同一份 raw），响应时间线，项目标识；`frozen-a2`，它的子轮次，父轮次在同一分段所以保留增量形式，带计费过的 token 关联；
+    - 不加密的桶包：`frozen-a3`，采集版本 1，`frozen-a2` 的子轮次，父轮次不在本分段所以是物化形式；`frozen-a4`，会话 `conv_frozen_open` 里只有请求的轮次，`parsed_results` 里带半截回答；`frozen-loose`，没有轮次、解析失败，兜底会话超过内联上限而拆进对象文件（`parsed_json_part`），raw 请求残缺；
+    - 不加密的 gap 包，一条 gap。
+    每条 audit 都有投影过的凭据（`Authorization`、`x-api-key`、`Cookie`、`Set-Cookie`、`?key=`，采集版本 2 还有一个 User-Agent 值），抄录的完整性事件带主密钥算出的真实 MAC。主密钥是字节 `00` 到 `1f`，运行 id、时间和内容都是固定的合成值（`example.com`、编出来的提问和凭据）。生成器是 `internal/archivecli/frozen_write_test.go` 的 `TestWriteFrozenFixture`，只在设置 `ARCHIVE_WRITE_FIXTURE`（一个还不存在的目录）时运行；分段 id 和加密盐由写入方随机取，输出不能逐字节重现，所以夹具提交以后从不重新生成。`.gitattributes` 把 `frozen/` 与 `trial/` 设为 `-text`，其中的 `.gz`、`.enc` 设为 `binary`。
+17. `TestFrozenFixturesRead`（`internal/archivecli/frozen_test.go`）对 `frozen/` 下每个版本目录：带签名器建索引，没有问题、三个包；每个包 `bundle.Open` 加 `Verify`（含事件 MAC）通过；记录摘要逐条等于钉住的值（`frozen-a1` `7a5a37e1…49f7`、`frozen-a2` `6ae57dfe…f502`、`frozen-a3` `fdf98c8c…12eb`、`frozen-a4` `ddd73382…9cba`、`frozen-loose` `04449be6…34c8`）；读取工具的 `verify --key` 退出 0，`list --json` 三个包都是 `ok`，`cat` 输出 5 条 audit 加 1 条 gap，`export --what raw-request` 的字节 SHA-256 等于钉住的值（`frozen-a1` `7b0262a9…c8e3`、`frozen-loose` `ccdbc666…5be0`），按会话导出 3 个轮次，`fpr` 找到 `frozen-a1` 的 `Authorization`。渲染出来的会话、Header、详情和时间线只核对其中应有的内容（提问、半截回答、凭据的 `value_fpr` 等），不钉字节：渲染可以随读取工具改进，构成它的数据不能变。每个版本目录都必须在测试里有期望值，内置版本也必须有一个。
+18. `internal/archive/testdata/trial/v0/` 是同一个生成器在冻结前的提交 `61d06d8` 上、以 `ARCHIVE_FIXTURE_REVISION=2` 写出的试行版本 0 目录（同样约 39 KiB）。修订号不在记录摘要里（模块 26 §13.2），这些摘要与同一内容在修订号 1 下的相同；修订号由清单 MAC 和 `Verify` 逐行比对清单成员来绑定，`2060376` 加了两个篡改用例（改清单成员的修订号、改行里的修订号，都重新签名）证明它们报 `member_mismatch`。`TestTrialAndFutureFormatVersionsAreRefused` 用它和改成版本 2 的 v1 清单证明第 7 到 9 条；`internal/archive/runner` 的 `TestTrialFormatBundlesInTheDirectoryAreLeftAlone` 把它放进归档目录跑一次：每个字节不变、没有文件被改名、不登记任何分段，Warn 计 3 个不受支持的清单。
+
+**前提变了的测试（之前 → 之后）**
+
+19. - `runner` `newRemovalHarness`：经 `FormatVersionOverride = 1` 到版本 1 → 不设，用内置版本；
+    - `runner` `TestRemovalGates/format version 0`：“内置版本 0 下什么都不删”（覆盖值 0 等于没设） → 接缝设为 0：导出、不删，再跑一次仍不删；去掉接缝后以修订号 2 重新导出、只凭版本 1 的成员全部移除，旧成员 `stale`，版本 0 的分段不移除，版本 0 的 gap 不再导出也不删；
+    - `runner` `TestPassesFollowTheWatermark`、`TestRefusedParentLeavesItsChildrenMaterialised`：读水位时写死的版本 0 → runner 的版本；
+    - `app` `newRemovalEnv`、`TestPostgresArchiveStartOrderMakesFalseStaleMembers`：经接缝到版本 1 → 不用接缝；
+    - `app` `TestPostgresArchiveRemovesVerifiedAudits`：启动日志的断言加上 `"format_version":1`，不能出现 trial；
+    - `app` `TestPostgresArchiveRemovalAtFormatVersionZero`（内置版本 0 下 `archive_then_delete` 不改热库） → `TestPostgresArchiveTrialFormatIsNeverRemoved`（接缝写版本 0，同样的保证，另加直接调存储的移除被跳过）和新的 `TestPostgresArchiveTrialFormatIsExportedAgain`（`export_only` 下以版本 0 导出、清单改标为 `"0"`，重启到版本 1 的 `archive_then_delete`：水位从空开始、全部以修订号 2 重新导出、只凭版本 1 的成员全部移除、每条 audit 的成员是“1:stale:v0 分段 sealed”和“2:hot_removed:v1 分段 hot_removed”、版本 0 的分段仍是 `sealed`、gap 留在热库、旧文件逐字节不变也没有改名、读取工具读到修订号 2）；
+    - `app` `TestPostgresArchiveStartupGuards`：“版本 0 下 `archive_then_delete` 不删热库” → 版本 1 下导出并全部移除，启动日志没有 trial；
+    - `app` `TestArchiveModeReplacesDirectRetention`：期望 `archive_removal_trial_format` → 只有带 `"format_version":1` 的 `archive_removal_active`；
+    - `archive` `TestManifestTamper` 的 `format_version` 改动、`TestManifestValidate` 的 `version` 用例：改成 `"1"`（冻结后是空操作） → 改成 `"2"`；
+    - `archive` 的向量测试与 `handDigestInput`：`_v0` 和 v0 的域 → `_v1` 和 v1 的域。
+    没有删掉任何测试而不替换。
+20. 移除第一次在清单写着版本 1、目录表也是版本 1 的包上端到端运行（`internal/app` 的移除测试，不用接缝），全部通过，没有发现问题。
+
+**PostgreSQL 上的“版本 0”是目录表一侧的**
+
+21. 接缝让 runner 以版本 0 登记分段、选取和记水位，包本身仍是版本 1 写的；`TestPostgresArchiveTrialFormatIsExportedAgain` 再把清单的 `format_version` 改成 `"0"`，使当前的读取工具像对待真的试行包一样拒读它们（拒读只看这个字段）。真正由试行代码写出的文件，由主机测试用 `trial/v0` 覆盖。
+
+**对正文的更正**
+
+- 0.0、Q14、Q9 第 5 条：已完成，见上。
+- B.1 第 4 条：见第 10 条。
+- C 节写于版本 0，内容就是版本 1 的行格式，冻结时没有改动。
+- N.1 冻结夹具一行：路径是 `internal/archive/testdata/frozen/v1/`；版本 0 没有冻结夹具（它从未发布），试行的目录是 `testdata/trial/v0/`。
+- R.9 第 11 条：`archive_removal_trial_format` 已去掉（第 14 条）。第 12 条：接缝改为 `*int64`，现在用来写版本 0（第 15 条）。

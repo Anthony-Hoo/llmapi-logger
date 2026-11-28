@@ -79,8 +79,7 @@ parser 的两个码：`parser normalization failed`（`error_code=normalize_pani
 | 日志 | 字段 | 何时 |
 | --- | --- | --- |
 | `archive export only: hot store keeps growing` | `error_category=archive_export_only` | 启动，`archive.mode` 为 `export_only`：retention 的直接删除不组装，热库持续增长（Warn） |
-| `archive verified removal active: …` | `error_category=archive_removal_active`、`format_version` | 启动，`archive_then_delete`：校验后移除对格式版本不低于 1 的包生效（Warn） |
-| `archive format version 0 is the trial format: …` | `error_category=archive_removal_trial_format`、`format_version` | 启动，`archive_then_delete` 而格式版本低于 1：包只导出、从不作为移除依据，热库什么都不删（Warn；这个版本总是如此） |
+| `archive verified removal active: …` | `error_category=archive_removal_active`、`format_version` | 启动，`archive_then_delete`：校验后移除对格式版本不低于 1 的包生效，`format_version` 是内置的 1（Warn）。原来格式版本低于 1 时另有的 `archive_removal_trial_format` 随格式冻结去掉了：runner 不再写版本 0 |
 | `archive bundle check failed before removal: its members stay in the hot store` | `error_category=archive_bundle_check_failed`、`reason`、`bundle_kind` | 移除阶段，一个分段的包在它的第一批之前核对不过（文件缺失、大小或哈希不符、清单签名不对、清单与定稿时记下的 SHA-256 不同）：这次运行不移除它的成员，运行照常完成（Warn；每个分段每次运行一条，模块 26 §18.7） |
 | `archive removal completed` | `event=archive_removal_completed` 与计数 | 移除阶段结束（Info，字段见模块 26 §19） |
 | `archive is off and retention deletes directly again; to pause archiving set retention_days: 0` | `error_category=archive_direct_delete_resumed`、`retention_days` | 启动，归档关闭、`retention_days > 0`，而目录表里有运行记录（Warn） |
@@ -92,7 +91,7 @@ parser 的两个码：`parser normalization failed`（`error_code=normalize_pani
 | `archive integrity check failed` | `error_category=archive_integrity_failed`、`reason` | 一条 audit 的原完整性事件复核或密文认证不过：它留在热库、登记推迟，存储的载荷校验状态置为失败（Error） |
 | `archive record refused` | `error_category=archive_record_refused`、`reason`（包写入方的码：`invalid_record`、`order`、`context_mismatch`、`payload_mismatch`、`entry_too_large`） | 写入方拒绝一条记录：只有它留在热库、推迟为 `export_failed`，其余成员重写进分段，运行继续（Warn） |
 | `archive sample mismatch` | `error_category=archive_sample_mismatch`、`reason=sample_mismatch` | 抽样时一条成员读出与热库不同而变更戳没变，不论是新发布的分段还是对账时 `publishing` 的分段：包作废，这条推迟为 `export_failed`，其余成员写进新包，运行继续（Warn） |
-| `archive directory has manifests that do not verify`、`archive bundle unknown to the catalog does not verify` | `error_category=archive_manifest_unusable`，`manifests` 或 `reason` | 对账时有清单解析不了、签名不对，或目录表不认识的包核对不过（Warn） |
+| `archive directory has manifests that do not verify`、`archive bundle unknown to the catalog does not verify` | `error_category=archive_manifest_unusable`，`manifests` 和 `unsupported_format_version`（其中格式版本不受支持的个数，例如留下的试行版本 0 的包），或 `reason` | 对账时有清单解析不了、签名不对、格式版本不受支持，或目录表不认识的包核对不过（Warn） |
 | `archive bundle registered from the directory` | `bundle_kind`、`members` | 对账登记了一个目录表不认识、核对通过的包（Info） |
 
 归档不加健康状态，也不进 `/readyz` 的字段。唯一的影响是复核不过时载荷校验状态置为失败，与后台载荷校验发现损坏时相同，database 因此报告不健康。运行记录只在 `archive_runs` 表里，管理界面不展示。

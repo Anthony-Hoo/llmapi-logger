@@ -150,7 +150,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 23 | [组织项目周报与使用合规（可选，默认关闭）](23-org-project-reports.md) |
 | 24 | [会话记录分析（可选，默认关闭）](24-session-analysis.md) |
 | 25 | [Agent 接入（可选，默认关闭；全部阶段已实现，端到端旅程在 PostgreSQL 上通过；未验证：真实浏览器、容器镜像、真实 NewAPI、`-race`）](25-agent-access.md)，[接口合同](25-agent-access-contract.md) |
-| 26 | [冷归档与归档格式（可选，默认关闭；只导出，格式版本 0 试行）](26-cold-archive.md) |
+| 26 | [冷归档与归档格式（可选，默认关闭；导出与校验后移除，格式版本 1）](26-cold-archive.md) |
 
 ## 10. 当前实现范围
 
@@ -212,6 +212,6 @@ issue #59 第 3 阶段（设计与实施记录见 [`doc/design/issue-59-stage3-w
 issue #59 第 4 阶段的 P3（设计与实施记录见 [`doc/design/issue-59-stage4-cold-archive.md`](../design/issue-59-stage4-cold-archive.md)）加了冷归档，默认关闭（[模块 26](26-cold-archive.md)）：
 
 - `archive.mode` 为 `export_only` 或 `archive_then_delete` 时，每天一次把 retention 本来要删除的 audit 和 gap 导出到 `archive.dir`：明文行按会话或协议装包，gzip 后分帧加密，每个包有一份签名的明文清单；发布前登记意向，发布后重读核对、抽样与热库比对，再定稿。凭据值不进归档，只留名称、长度和 keyed 指纹。
-- 本版本只导出：开启后 retention 的直接删除不再组装，热库持续增长；`archive_then_delete` 现在与 `export_only` 相同，校验后移除以后单独上线。格式版本 0 是试行，版本 0 的包永远不作为删除的依据。
+- 开启后 retention 的直接删除不再组装。`export_only` 只导出，热库持续增长；`archive_then_delete` 在导出之后做校验后移除。格式定为版本 1 并冻结，每个发布过的版本有一个冻结夹具，当前的读取工具必须能读；试行的版本 0 的包不读，也永远不作为删除的依据。
 - 迁移 008 加目录表，schema 版本 8（[模块 04](04-sqlite-storage-and-migrations.md) §3.10）；旧版本打不开版本 8 的库。主密钥的新建另外要求目录表没有分段、归档目录里没有清单（[模块 09](09-security-encryption-and-redaction.md) §3）。
 - 独立读取工具 `cmd/audit-archive` 只读归档目录，不连数据库：列出、核对、输出明文行、按单条导出的形态导出、拿已知 Key 核对指纹（模块 26 §24）。

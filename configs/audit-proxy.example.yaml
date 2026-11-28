@@ -123,9 +123,11 @@ audit:
 # section may be omitted. Once a day it exports the audits and gaps retention
 # would delete into dir: plaintext lines, gzip, framed encryption under keys
 # derived from key_path, and a signed plaintext manifest per bundle. No
-# credential value is archived. THIS VERSION ONLY EXPORTS: with export_only or
-# archive_then_delete, retention no longer deletes anything and the hot
-# database keeps growing; archive_then_delete behaves like export_only.
+# credential value is archived. With the archive on, retention no longer
+# deletes directly: export_only only exports and the hot database keeps
+# growing; archive_then_delete removes from the hot database what a sealed,
+# checked bundle of format version 1 holds unchanged. Removed audits are only
+# in the archive (read them with audit-archive).
 # Requires retention_days > 0. dir is an absolute path on its own disk, not the
 # key's directory and not audit.staging.dir; back up the key apart from it.
 # timezone empty means org_reports.timezone. verify_sample compares at least

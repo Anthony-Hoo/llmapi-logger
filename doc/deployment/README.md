@@ -147,11 +147,13 @@ legacy 写入路径已删去，`audit.write_path` 不再选择任何东西（[�
 
 ### 3.4 冷归档（`archive`）
 
-冷归档默认关闭（`archive.mode: "off"`）。开启后每天一次把 retention 本来要删除的 audit 和 gap 导出到 `archive.dir`，格式与运行见[模块 26](../features/26-cold-archive.md)。`archive_then_delete` 在导出之后做校验后移除（模块 26 §18.7），但移除只作用于格式版本不低于 1 的包，**这个版本的内置格式版本是试行的 0：两种模式都不删除，开启以后热库会一直增长**。
+冷归档默认关闭（`archive.mode: "off"`）。开启后每天一次把 retention 本来要删除的 audit 和 gap 导出到 `archive.dir`，格式与运行见[模块 26](../features/26-cold-archive.md)。`archive_then_delete` 在导出之后做校验后移除（模块 26 §18.7），移除只作用于格式版本不低于 1 的包；格式已定为版本 1 并冻结，新写的包都是版本 1。`export_only` 不删除任何东西，开启以后热库会一直增长。
 
-**热库持续增长是什么意思。** 开启归档时 retention 的直接删除不再组装（决策 5.7 的护栏）。`export_only` 不删除任何东西；`archive_then_delete` 只删除格式版本不低于 1 的包里的成员，版本 0 的包永远不作为删除依据（定为版本 1 时会重新导出）。所以在这个版本里数据库会按流量一直变大，`retention_days` 只决定什么时候导出。要开启，先确认数据库盘的余量。
+**热库持续增长是什么意思。** 开启归档时 retention 的直接删除不再组装（决策 5.7 的护栏）。`export_only` 不删除任何东西，数据库会按流量一直变大，`retention_days` 只决定什么时候导出；要开启它，先确认数据库盘的余量。控制热库大小用 `archive_then_delete`。
 
-**`archive_then_delete` 删除什么（格式定为版本 1 之后）。** 每天的运行导出之后，已定稿的包里的成员从热库删除：audit 的全部行，以及不再被热库里任何轮次引用的内容对象和二进制对象，然后是已导出的 gap。删除之前每条成员重算变更戳，导出之后变过的（迟到的计费回填、项目标识、父轮次被删后的检查点，或任何一行的改动）不删，标成 `stale`，下一次运行以更高的修订号重新导出后再删。每个包在它的成员第一次被删之前核对一次（文件都在、签名对、哈希与清单和定稿时的记录相同），核对不过的包的成员留在热库，日志 `archive_bundle_check_failed`，修好之后的运行再删。启动日志 `archive_removal_active`，格式版本仍是 0 时另有 `archive_removal_trial_format`；每次运行的移除结果在 `archive removal completed` 里。
+**以前在试行格式（版本 0）下开过归档的部署。** 升级到格式版本 1 之后，版本 0 的包读取工具不读（`unsupported_format_version`），也永远不作为删除依据。第一次运行把其中仍在热库的 audit 以更高的修订号重新导出成版本 1 的包，之后 `archive_then_delete` 凭这些版本 1 的成员移除；版本 0 导出过的 gap 不会再导出，留在热库。版本 0 的包留在 `archive.dir` 时，`audit-archive cat`、`export`、`fpr --dir` 以 `incomplete` 退出，每次运行的对账 Warn 一次 `archive_manifest_unusable`；确认升级后的运行完成、`audit-archive verify --dir <archive.dir> --key <key>` 只剩 `unsupported_format_version` 的失败以后，可以把这些包（清单和数据文件一起）挪出 `archive.dir` 另存（模块 26 §23）。
+
+**`archive_then_delete` 删除什么。** 每天的运行导出之后，已定稿的包里的成员从热库删除：audit 的全部行，以及不再被热库里任何轮次引用的内容对象和二进制对象，然后是已导出的 gap。删除之前每条成员重算变更戳，导出之后变过的（迟到的计费回填、项目标识、父轮次被删后的检查点，或任何一行的改动）不删，标成 `stale`，下一次运行以更高的修订号重新导出后再删。每个包在它的成员第一次被删之前核对一次（文件都在、签名对、哈希与清单和定稿时的记录相同），核对不过的包的成员留在热库，日志 `archive_bundle_check_failed`，修好之后的运行再删。启动日志 `archive_removal_active`（带 `format_version`）；每次运行的移除结果在 `archive removal completed` 里。
 
 - **删除的数据回不来。** 删除之后它只在归档目录里，用 `audit-archive` 查看，不回到管理界面、洞察和周报；切换模式或回滚版本都不会让它回来。开启之前要让使用者清楚这一点，并且确认主密钥的备份（见下）。
 - **暂停：** 把 `retention_days` 设为 0（导出和删除都停）。不要改成 `off`：`retention_days > 0` 时 `off` 会立刻恢复不经归档的直接删除（启动日志 `archive_direct_delete_resumed`）。
