@@ -500,7 +500,7 @@ DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.state = 'hot_removed') EXEC
 }
 
 // Gap removal (M.2): the audit_gaps rows of sealed gap members of sealed
-// gaps segments of version 1 or later are deleted and the members and, once
+// gaps segment of version 1 or later are deleted and the members and, once
 // empty, the segment marked hot_removed; a trial segment's gaps stay; a gap
 // row already gone is still marked; a repeat removes nothing.
 func TestRemoveArchivedGaps(t *testing.T) {
@@ -533,15 +533,20 @@ VALUES ($1, $2, 'queue_full', 1, '', $2) RETURNING id`, 1000+index, 1001+index).
 	register("55000000000000000000000000000011", 1, gapIDs[1:])
 	mustExecWriter(t, store, `DELETE FROM audit_gaps WHERE id = $1`, gapIDs[4])
 
-	first, err := store.RemoveArchivedGaps(ctx, 2, 5000)
+	// The trial segment is never removed, asked for by name or not.
+	if trial, err := store.RemoveArchivedGaps(ctx, "55000000000000000000000000000010", 2, 5000); err != nil || trial != (ArchiveGapRemovalResult{}) {
+		t.Fatalf("trial %+v, %v", trial, err)
+	}
+	current := "55000000000000000000000000000011"
+	first, err := store.RemoveArchivedGaps(ctx, current, 2, 5000)
 	if err != nil || first.RemovedGaps != 2 || first.DeletedRows != 2 || first.RemovedSegments != 0 {
 		t.Fatalf("first %+v, %v", first, err)
 	}
-	second, err := store.RemoveArchivedGaps(ctx, 2, 5000)
+	second, err := store.RemoveArchivedGaps(ctx, current, 2, 5000)
 	if err != nil || second.RemovedGaps != 2 || second.DeletedRows != 1 || second.RemovedSegments != 1 {
 		t.Fatalf("second %+v, %v", second, err)
 	}
-	if third, err := store.RemoveArchivedGaps(ctx, 2, 5000); err != nil || third != (ArchiveGapRemovalResult{}) {
+	if third, err := store.RemoveArchivedGaps(ctx, current, 2, 5000); err != nil || third != (ArchiveGapRemovalResult{}) {
 		t.Fatalf("third %+v, %v", third, err)
 	}
 	var left []int64
@@ -564,7 +569,7 @@ VALUES ($1, $2, 'queue_full', 1, '', $2) RETURNING id`, 1000+index, 1001+index).
 	if state, _ := segmentState(t, store, "55000000000000000000000000000010"); state != storage.ArchiveSegmentSealed {
 		t.Fatalf("trial gap segment %s", state)
 	}
-	if _, err := store.RemoveArchivedGaps(ctx, RetentionBatchLimit+1, 1); err == nil {
+	if _, err := store.RemoveArchivedGaps(ctx, current, RetentionBatchLimit+1, 1); err == nil {
 		t.Fatal("an oversized gap batch was accepted")
 	}
 }

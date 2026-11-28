@@ -49,6 +49,8 @@ type fakeStore struct {
 	checkpoints    int
 	removedGaps    map[int64]bool
 	calls          []string
+	// segmentLookups counts Segment calls per segment id.
+	segmentLookups map[string]int
 }
 
 func newFakeStore(payloads *payloads) *fakeStore {
@@ -320,6 +322,10 @@ func (store *fakeStore) RegisterReconciled(_ context.Context, reconciled storage
 func (store *fakeStore) Segment(_ context.Context, segmentID string) (storage.ArchiveSegment, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.segmentLookups == nil {
+		store.segmentLookups = map[string]int{}
+	}
+	store.segmentLookups[segmentID]++
 	if segment, ok := store.segments[segmentID]; ok {
 		return *segment, true, nil
 	}

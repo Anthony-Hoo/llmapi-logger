@@ -1,9 +1,12 @@
 package runner
 
 import (
+	"bytes"
+	"path/filepath"
 	"sort"
 	"time"
 
+	"llmapi-logger/internal/archive/bundle"
 	"llmapi-logger/internal/retention"
 	"llmapi-logger/internal/storage"
 )
@@ -25,8 +28,24 @@ type RemovalResult struct {
 	RemovedSegments int64
 	Batches         int64
 	GapBatches      int64
-	Duration        time.Duration
+	// BundleCheckFailedSegments counts the segments whose bundle failed the
+	// check before removal (checkBundle); their members (HeldBackMembers)
+	// and gaps (HeldBackGaps) stay sealed in the hot store for a later run.
+	BundleCheckFailedSegments int64
+	HeldBackMembers           int64
+	HeldBackGaps              int64
+	Duration                  time.Duration
 }
+
+// Reasons of a failed bundle check that are not the bundle package's.
+const (
+	// ReasonManifestDigestMismatch: the manifest verifies but is not the one
+	// whose SHA-256 the catalog recorded when the segment was sealed.
+	ReasonManifestDigestMismatch = "manifest_digest_mismatch"
+	// ReasonSegmentMismatch: the manifest at the catalog's name describes
+	// another segment.
+	ReasonSegmentMismatch = "segment_mismatch"
+)
 
 // RemovalOrder returns the members in the order removal takes them (M.2,
 // decision 5.2 item 2): turn_created_at_ns descending, members without a
@@ -54,6 +73,56 @@ func RemovalOrder(members []storage.ArchiveRemovable) []storage.ArchiveRemovable
 	return ordered
 }
 
+// checkBundle checks a segment's bundle once per run before its first
+// removal batch (design R.9, the maintainer's option B): the manifest and
+// every data file it lists exist, the manifest's key fingerprint and MAC
+// verify with the archive signing key, each data file's size and SHA-256
+// equal the manifest's (bundle.CheckFiles: nothing is decrypted or
+// decompressed), and the manifest's SHA-256 equals the one the catalog
+// stored when the segment was sealed. It reports whether the segment's
+// members may be removed. A failure is logged once with a stable code and
+// counted; the members stay sealed. The check is outside the removal
+// transaction, so a file can still go between it and the delete: that
+// window is accepted. It is a condition in addition to the store's, never in
+// place of them. A segment the catalog does not know or that is no longer
+// sealed is left to the store, which skips its members.
+func (current *run) checkBundle(checked map[string]bool, segmentID string) (bool, error) {
+	if ok, done := checked[segmentID]; done {
+		return ok, nil
+	}
+	options := current.options()
+	segment, found, err := options.Store.Segment(current.ctx, segmentID)
+	if err != nil {
+		return false, current.removalFailure(err)
+	}
+	if !found || segment.State != storage.ArchiveSegmentSealed {
+		checked[segmentID] = true
+		return true, nil
+	}
+	reason := ""
+	path := filepath.Join(options.Dir, filepath.FromSlash(segment.ManifestName))
+	manifest, digest, err := bundle.CheckFiles(current.ctx, path, options.Keys)
+	switch {
+	case err != nil && current.ctx.Err() != nil:
+		return false, current.ctx.Err()
+	case err != nil:
+		if reason = bundle.ReasonOf(err); reason == "" {
+			reason = "check_failed"
+		}
+	case !bytes.Equal(digest[:], segment.ManifestSHA256):
+		reason = ReasonManifestDigestMismatch
+	case manifest.SegmentID != segmentID:
+		reason = ReasonSegmentMismatch
+	}
+	checked[segmentID] = reason == ""
+	if reason != "" {
+		current.result.Removal.BundleCheckFailedSegments++
+		options.Logger.Warn("archive bundle check failed before removal: its members stay in the hot store",
+			"error_category", "archive_bundle_check_failed", "reason", reason, "bundle_kind", segment.BundleKind)
+	}
+	return reason == "", nil
+}
+
 // remove is the removal phase: every removable member in RemovalOrder, in
 // batches sized by the retention Batcher (from one audit, doubling after a
 // full batch within half a second, shrinking above a second), each followed
@@ -75,6 +144,7 @@ func (current *run) remove() error {
 		return current.removalFailure(err)
 	}
 	ordered := RemovalOrder(members)
+	checked := map[string]bool{}
 	var last time.Duration
 	ran := false
 	// between runs before each batch but the first: the crash point of M.3
@@ -104,11 +174,26 @@ func (current *run) remove() error {
 			return current.endRemoval(err, proceed, started)
 		}
 		size := batcher.Size()
-		take := min(size, len(ordered))
-		batch := make([]storage.ArchiveRemoval, take)
-		for index, member := range ordered[:take] {
-			batch[index] = member.ArchiveRemoval
+		// The batch takes the next members in order whose bundle passed its
+		// check; the members of a segment that failed are held back.
+		batch := make([]storage.ArchiveRemoval, 0, size)
+		for len(ordered) > 0 && len(batch) < size {
+			member := ordered[0]
+			ordered = ordered[1:]
+			ok, err := current.checkBundle(checked, member.SegmentID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				stats.HeldBackMembers++
+				continue
+			}
+			batch = append(batch, member.ArchiveRemoval)
 		}
+		if len(batch) == 0 {
+			break
+		}
+		take := len(batch)
 		begin := current.now()
 		result, err := options.Store.RemoveArchived(current.ctx, batch, begin.UnixNano())
 		elapsed := current.now().Sub(begin)
@@ -120,27 +205,44 @@ func (current *run) remove() error {
 		}
 		current.tally(result)
 		batcher.Done(size, take, take, elapsed)
-		ordered = ordered[take:]
 		ran, last = true, elapsed
 	}
-	// P item 16: the gaps after the audits.
-	for {
-		proceed, err := between()
-		if err != nil || !proceed {
-			return current.endRemoval(err, proceed, started)
+	// P item 16: the gaps after the audits, one gaps segment at a time, each
+	// after the same bundle check.
+	sealedSegments, err := options.Store.Segments(current.ctx, storage.ArchiveSegmentSealed)
+	if err != nil {
+		return current.removalFailure(err)
+	}
+	for _, segment := range sealedSegments {
+		if segment.BundleKind != storage.ArchiveBundleGaps || segment.FormatVersion < storage.ArchiveRemovalMinFormatVersion {
+			continue
 		}
-		begin := current.now()
-		result, err := options.Store.RemoveArchivedGaps(current.ctx, storage.RetentionBatchLimit, begin.UnixNano())
-		if err != nil {
-			return current.removalFailure(err)
-		}
-		ran, last = true, current.now().Sub(begin)
-		stats.GapBatches++
-		stats.RemovedGaps += result.RemovedGaps
-		stats.RemovedSegments += result.RemovedSegments
-		current.result.Counts.RemovedGaps += result.RemovedGaps
-		if result.RemovedGaps < storage.RetentionBatchLimit {
-			break
+		for {
+			proceed, err := between()
+			if err != nil || !proceed {
+				return current.endRemoval(err, proceed, started)
+			}
+			ok, err := current.checkBundle(checked, segment.SegmentID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				stats.HeldBackGaps += segment.MemberCount
+				break
+			}
+			begin := current.now()
+			result, err := options.Store.RemoveArchivedGaps(current.ctx, segment.SegmentID, storage.RetentionBatchLimit, begin.UnixNano())
+			if err != nil {
+				return current.removalFailure(err)
+			}
+			ran, last = true, current.now().Sub(begin)
+			stats.GapBatches++
+			stats.RemovedGaps += result.RemovedGaps
+			stats.RemovedSegments += result.RemovedSegments
+			current.result.Counts.RemovedGaps += result.RemovedGaps
+			if result.RemovedGaps < storage.RetentionBatchLimit {
+				break
+			}
 		}
 	}
 	batcher.EndRun()
@@ -205,6 +307,9 @@ func (current *run) logRemoval(started time.Time) {
 		"skipped_audits", stats.Skipped,
 		"removed_gaps", stats.RemovedGaps,
 		"removed_segments", stats.RemovedSegments,
+		"bundle_check_failed_segments", stats.BundleCheckFailedSegments,
+		"held_back_members", stats.HeldBackMembers,
+		"held_back_gaps", stats.HeldBackGaps,
 		"batches", stats.Batches + stats.GapBatches,
 		"duration_ms", current.now().Sub(started).Milliseconds(),
 	}

@@ -54,8 +54,9 @@ type Store interface {
 	// RemoveArchived removes one batch from the hot store after the change
 	// stamp check (postgres.Store.RemoveArchived).
 	RemoveArchived(ctx context.Context, batch []storage.ArchiveRemoval, removedAtNS int64) (storage.ArchiveRemovalResult, error)
-	// RemoveArchivedGaps removes up to limit exported gaps.
-	RemoveArchivedGaps(ctx context.Context, limit int, removedAtNS int64) (storage.ArchiveGapRemovalResult, error)
+	// RemoveArchivedGaps removes up to limit exported gaps of one gaps
+	// segment.
+	RemoveArchivedGaps(ctx context.Context, segmentID string, limit int, removedAtNS int64) (storage.ArchiveGapRemovalResult, error)
 }
 
 // Snapshot is one export snapshot: the selection queries, the export of one
@@ -114,7 +115,7 @@ type PostgresStore interface {
 	ArchiveChangeStamp(context.Context, string) ([32]byte, bool, error)
 	ListRemovableArchiveMembers(context.Context, *postgres.ArchiveMemberKey, int) ([]postgres.ArchiveRemovable, error)
 	RemoveArchived(context.Context, []postgres.ArchiveRemoval, int64) (postgres.ArchiveRemovalResult, error)
-	RemoveArchivedGaps(context.Context, int, int64) (postgres.ArchiveGapRemovalResult, error)
+	RemoveArchivedGaps(context.Context, string, int, int64) (postgres.ArchiveGapRemovalResult, error)
 }
 
 // FromPostgres adapts the PostgreSQL store. options carries the audit cipher
@@ -293,8 +294,8 @@ func (adapter *pgStore) RemoveArchived(ctx context.Context, batch []storage.Arch
 	return adapter.store.RemoveArchived(ctx, batch, removedAtNS)
 }
 
-func (adapter *pgStore) RemoveArchivedGaps(ctx context.Context, limit int, removedAtNS int64) (storage.ArchiveGapRemovalResult, error) {
-	return adapter.store.RemoveArchivedGaps(ctx, limit, removedAtNS)
+func (adapter *pgStore) RemoveArchivedGaps(ctx context.Context, segmentID string, limit int, removedAtNS int64) (storage.ArchiveGapRemovalResult, error) {
+	return adapter.store.RemoveArchivedGaps(ctx, segmentID, limit, removedAtNS)
 }
 
 type pgSnapshot struct{ *postgres.ArchiveSnapshot }

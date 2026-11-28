@@ -131,7 +131,7 @@ func (store *fakeStore) segmentEmptyLocked(segmentID string) bool {
 	return true
 }
 
-func (store *fakeStore) RemoveArchivedGaps(_ context.Context, limit int, _ int64) (storage.ArchiveGapRemovalResult, error) {
+func (store *fakeStore) RemoveArchivedGaps(_ context.Context, segmentID string, limit int, _ int64) (storage.ArchiveGapRemovalResult, error) {
 	if err := store.injected("RemoveArchivedGaps"); err != nil {
 		return storage.ArchiveGapRemovalResult{}, err
 	}
@@ -141,7 +141,7 @@ func (store *fakeStore) RemoveArchivedGaps(_ context.Context, limit int, _ int64
 	var ids []int64
 	for gapID, owner := range store.gapMembers {
 		segment := store.segments[owner]
-		if !store.removedGaps[gapID] && segment.State == storage.ArchiveSegmentSealed && segment.FormatVersion >= storage.ArchiveRemovalMinFormatVersion {
+		if owner == segmentID && !store.removedGaps[gapID] && segment.State == storage.ArchiveSegmentSealed && segment.FormatVersion >= storage.ArchiveRemovalMinFormatVersion {
 			ids = append(ids, gapID)
 		}
 	}

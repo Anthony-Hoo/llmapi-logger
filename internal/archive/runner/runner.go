@@ -394,6 +394,10 @@ func (current *run) logCompletion(runErr error) {
 			attributes = append(attributes, "deferred_"+reason, count)
 		}
 	}
+	if removal := result.Removal; removal.BundleCheckFailedSegments > 0 {
+		attributes = append(attributes, "bundle_check_failed_segments", removal.BundleCheckFailedSegments,
+			"held_back_members", removal.HeldBackMembers, "held_back_gaps", removal.HeldBackGaps)
+	}
 	if result.ReconciledSealed > 0 {
 		attributes = append(attributes, "reconciled_segments", result.ReconciledSealed)
 	}

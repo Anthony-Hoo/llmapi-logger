@@ -26,6 +26,7 @@ type archiveRemovalRequest struct {
 
 // archiveGapRemovalRequest is one writeRemoveArchivedGaps operation.
 type archiveGapRemovalRequest struct {
+	SegmentID   string
 	Limit       int
 	RemovedAtNS int64
 	Result      ArchiveGapRemovalResult
@@ -224,14 +225,18 @@ WHERE s.segment_id IN (`+placeholders(len(ids), 1)+`)
 	return marked, nil
 }
 
-// RemoveArchivedGaps removes up to limit exported gaps from the hot store
-// (M.2), in one transaction alone on the writer: the sealed gap members of
-// sealed gaps segments of format version storage.ArchiveRemovalMinFormatVersion
-// or later are locked in gap id order, their audit_gaps rows deleted, the
+// RemoveArchivedGaps removes up to limit exported gaps of one gaps segment
+// from the hot store (M.2), in one transaction alone on the writer: the
+// sealed gap members of the segment, which must be sealed and of format
+// version storage.ArchiveRemovalMinFormatVersion or later, are locked in gap
+// id order, their audit_gaps rows deleted, the
 // members marked hot_removed, and the segments left without a sealed gap
 // marked hot_removed. Gaps are only ever inserted (C.6), so they carry no
 // change stamp. A result below limit means none is left.
-func (store *Store) RemoveArchivedGaps(ctx context.Context, limit int, removedAtNS int64) (ArchiveGapRemovalResult, error) {
+func (store *Store) RemoveArchivedGaps(ctx context.Context, segmentID string, limit int, removedAtNS int64) (ArchiveGapRemovalResult, error) {
+	if !storage.ValidArchiveID(segmentID) {
+		return ArchiveGapRemovalResult{}, localWriteError("postgres: invalid archive segment id")
+	}
 	if limit < 1 || limit > RetentionBatchLimit {
 		return ArchiveGapRemovalResult{}, localWriteError(fmt.Sprintf("postgres: an archive gap removal batch holds 1 to %d gaps", RetentionBatchLimit))
 	}
@@ -244,7 +249,7 @@ func (store *Store) RemoveArchivedGaps(ctx context.Context, limit int, removedAt
 	if store == nil || store.isClosed() {
 		return ArchiveGapRemovalResult{}, ErrClosed
 	}
-	request := &archiveGapRemovalRequest{Limit: limit, RemovedAtNS: removedAtNS}
+	request := &archiveGapRemovalRequest{SegmentID: segmentID, Limit: limit, RemovedAtNS: removedAtNS}
 	if err := store.submitSync(ctx, writeRequest{kind: writeRemoveArchivedGaps, data: request}); err != nil {
 		return ArchiveGapRemovalResult{}, err
 	}
@@ -252,7 +257,7 @@ func (store *Store) RemoveArchivedGaps(ctx context.Context, limit int, removedAt
 }
 
 func removeArchivedGaps(transaction dbTransaction, request *archiveGapRemovalRequest) error {
-	if request == nil || request.Limit < 1 || request.Limit > RetentionBatchLimit || request.RemovedAtNS <= 0 {
+	if request == nil || !storage.ValidArchiveID(request.SegmentID) || request.Limit < 1 || request.Limit > RetentionBatchLimit || request.RemovedAtNS <= 0 {
 		return errors.New("postgres writer: invalid archive gap removal request")
 	}
 	request.Result = ArchiveGapRemovalResult{}
@@ -264,9 +269,10 @@ WHERE g.state = 'sealed'
   AND s.state = 'sealed'
   AND s.format_version >= $1
   AND s.bundle_kind = 'gaps'
+  AND g.segment_id = $3
 ORDER BY g.gap_id
 LIMIT $2
-FOR UPDATE OF g, s`, storage.ArchiveRemovalMinFormatVersion, request.Limit)
+FOR UPDATE OF g, s`, storage.ArchiveRemovalMinFormatVersion, request.Limit, request.SegmentID)
 	if err != nil {
 		return fmt.Errorf("postgres archive: lock removable gaps: %w", err)
 	}

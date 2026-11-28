@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -754,5 +755,85 @@ FOR EACH ROW WHEN (NEW.state = 'hot_removed') EXECUTE FUNCTION fail_archive_remo
 			}
 			env.requireNoUnrecordedRemoval()
 		})
+	}
+}
+
+// Option B of R.9 on PostgreSQL: after the export, one conversation bundle
+// loses its objects file. In the removal of the same run that bundle fails
+// its check: its members stay sealed and every row of theirs stays in the
+// hot store, the other bundles' members are removed, and the run completes
+// with the segment counted and logged with a stable code. Once the file is
+// back, the next run removes them.
+func TestPostgresArchiveRemovalHoldsBackADamagedBundle(t *testing.T) {
+	env := newRemovalEnv(t)
+	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat, protofixture.AnthropicMessages}, 4)
+	ids := env.auditIDs()
+	env.due()
+	var held []string
+	var objects string
+	damage := func(step string) error {
+		if step != runner.StepBeforeRecordPass || objects != "" {
+			return nil
+		}
+		reader, _ := env.readArchive()
+		for _, entry := range reader.Index().Bundles() {
+			if entry.Manifest.BundleKind != "conversation" || objects != "" {
+				continue
+			}
+			for _, file := range entry.Manifest.Files {
+				if file.Role == "objects" {
+					objects = filepath.Join(filepath.Dir(entry.ManifestPath), file.Name)
+				}
+			}
+			for _, member := range entry.Manifest.Members {
+				held = append(held, member.AuditID)
+			}
+		}
+		if objects == "" {
+			t.Fatal("no conversation bundle with an objects file")
+		}
+		if err := os.Rename(objects, objects+".aside"); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	env.step.Store(&damage)
+	before := map[string]map[string]int{}
+	result := env.mustRun()
+	env.step.Store(nil)
+	removal := result.Removal
+	if removal.BundleCheckFailedSegments != 1 || removal.HeldBackMembers != int64(len(held)) || removal.Removed != int64(len(ids)-len(held)) ||
+		removal.Stale != 0 || removal.Skipped != 0 {
+		t.Fatalf("removal %+v, %d held", removal, len(held))
+	}
+	if hot := env.auditIDs(); len(hot) != len(held) {
+		t.Fatalf("%d audits hot, %d held back", len(hot), len(held))
+	}
+	for _, id := range held {
+		var state string
+		if err := env.db.QueryRow(`SELECT state FROM archive_members WHERE audit_id = $1`, id).Scan(&state); err != nil || state != storage.ArchiveMemberSealed {
+			t.Fatalf("%s member %q (%v)", id, state, err)
+		}
+		before[id] = map[string]int{}
+		for _, table := range []string{"audit_records", "http_stages", "body_streams", "body_chunks", "parsed_results", "turns", "integrity_events"} {
+			before[id][table] = env.count(`SELECT COUNT(*) FROM `+table+` WHERE audit_id = $1`, id)
+		}
+		if before[id]["audit_records"] != 1 || before[id]["turns"] != 1 || before[id]["integrity_events"] == 0 {
+			t.Fatalf("%s rows %v", id, before[id])
+		}
+	}
+	env.requireNoUnrecordedRemoval()
+	logs := env.logs.String()
+	if strings.Count(logs, `"error_category":"archive_bundle_check_failed"`) != 1 || !strings.Contains(logs, `"reason":"file_missing"`) ||
+		!strings.Contains(logs, `"bundle_check_failed_segments":1`) || strings.Contains(logs, env.cfg.Archive.Dir) {
+		t.Fatalf("logs %s", logs)
+	}
+
+	if err := os.Rename(objects+".aside", objects); err != nil {
+		t.Fatal(err)
+	}
+	next := env.mustRun()
+	if next.Removal.Removed != int64(len(held)) || next.Removal.BundleCheckFailedSegments != 0 || len(env.auditIDs()) != 0 {
+		t.Fatalf("next run %+v", next.Removal)
 	}
 }
