@@ -88,7 +88,7 @@ parser 的两个码：`parser normalization failed`（`error_code=normalize_pani
 | `archive run interrupted` | `error_category=archive_interrupted`、`exported_audits`、`duration_ms` | 运行被进程关闭取消（Warn） |
 | `archive integrity check failed` | `error_category=archive_integrity_failed`、`reason` | 一条 audit 的原完整性事件复核或密文认证不过：它留在热库、登记推迟，存储的载荷校验状态置为失败（Error） |
 | `archive record refused` | `error_category=archive_record_refused`、`reason`（包写入方的码：`invalid_record`、`order`、`context_mismatch`、`payload_mismatch`、`entry_too_large`） | 写入方拒绝一条记录：只有它留在热库、推迟为 `export_failed`，其余成员重写进分段，运行继续（Warn） |
-| `archive sample mismatch` | `error_category=archive_sample_mismatch`、`reason=sample_mismatch` | 抽样时一条成员读出与热库不同而变更戳没变：包作废，这条推迟为 `export_failed`，其余成员写进新包，运行继续（Warn） |
+| `archive sample mismatch` | `error_category=archive_sample_mismatch`、`reason=sample_mismatch` | 抽样时一条成员读出与热库不同而变更戳没变，不论是新发布的分段还是对账时 `publishing` 的分段：包作废，这条推迟为 `export_failed`，其余成员写进新包，运行继续（Warn） |
 | `archive directory has manifests that do not verify`、`archive bundle unknown to the catalog does not verify` | `error_category=archive_manifest_unusable`，`manifests` 或 `reason` | 对账时有清单解析不了、签名不对，或目录表不认识的包核对不过（Warn） |
 | `archive bundle registered from the directory` | `bundle_kind`、`members` | 对账登记了一个目录表不认识、核对通过的包（Info） |
 

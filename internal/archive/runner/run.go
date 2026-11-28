@@ -77,6 +77,30 @@ type run struct {
 	staleDone  bool
 	// segmentIndex numbers the segments of each bundle across passes.
 	segmentIndex map[string]int
+	// held are the members reconciliation found reading back differently
+	// with an unchanged change stamp: no pass of this run selects them, and
+	// the first pass records them deferred (export_failed). unrecorded lists
+	// those the first pass has still to record.
+	held       map[string]bool
+	unrecorded []string
+}
+
+// holdMismatch defers a member of a publishing segment that reconciliation
+// voided because it reads back differently (H.6 item 1, J.3), as the normal
+// path does (pass.exclude): the other members are exported again by the
+// passes of this run without it.
+func (current *run) holdMismatch(auditID string) {
+	if current.held == nil {
+		current.held = map[string]bool{}
+	}
+	if current.held[auditID] {
+		return
+	}
+	current.held[auditID] = true
+	current.unrecorded = append(current.unrecorded, auditID)
+	current.result.Excluded++
+	current.result.SampleMismatched++
+	current.options().Logger.Warn("archive sample mismatch", "error_category", "archive_sample_mismatch", "reason", "sample_mismatch")
 }
 
 func (current *run) options() Options { return current.runner.options }
@@ -196,6 +220,10 @@ func (current *run) pass() (bool, error) {
 	}
 	defer snapshot.Close()
 	work := &pass{run: current, snapshot: snapshot, buckets: map[string]*sink{}, deferred: map[string]string{}, resolved: map[string]bool{}}
+	for _, id := range current.unrecorded {
+		work.deferred[id] = storage.ArchiveDeferredExportFailed
+	}
+	current.unrecorded = nil
 
 	budget := options.PassAudits
 	var looked []storage.ArchiveCandidate
@@ -302,9 +330,13 @@ func (current *run) snapshotFailure(err error) error {
 }
 
 // classify sorts one candidate: due ones into selected (true), deferred ones
-// into the pass's deferrals, current ones (already archived) out.
+// into the pass's deferrals, current ones (already archived) out. A member
+// reconciliation held back is left out altogether: the first pass records
+// its deferral.
 func (work *pass) classify(candidate storage.ArchiveCandidate, selected map[string]storage.ArchiveCandidate) bool {
 	switch {
+	case work.run.held[candidate.AuditID]:
+		return false
 	case candidate.Current:
 		work.resolved[candidate.AuditID] = true
 		return false

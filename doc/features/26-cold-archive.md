@@ -1114,7 +1114,7 @@ archive:
 | `archive run interrupted` | Warn | `error_category=archive_interrupted`、`exported_audits`、`duration_ms` | 运行被取消（进程关闭） |
 | `archive integrity check failed` | Error | `error_category=archive_integrity_failed`、`reason` | 一条 audit 复核不过（§18.6） |
 | `archive record refused` | Warn | `error_category=archive_record_refused`、`reason`（写入方的码） | 包写入方以记录本身的原因拒绝一条记录，只排除它（§18.5） |
-| `archive sample mismatch` | Warn | `error_category=archive_sample_mismatch`、`reason=sample_mismatch` | 抽样时一条成员读出不同而变更戳没变：包作废，只排除它，其余成员重写（§18.5） |
+| `archive sample mismatch` | Warn | `error_category=archive_sample_mismatch`、`reason=sample_mismatch` | 抽样时（新发布的分段或对账里 `publishing` 的分段）一条成员读出不同而变更戳没变：包作废，只排除它，其余成员重写（§18.5、§20） |
 | `archive directory has manifests that do not verify` | Warn | `error_category=archive_manifest_unusable`、`manifests` | 对账时有清单解析不了或签名不对 |
 | `archive bundle unknown to the catalog does not verify` | Warn | `error_category=archive_manifest_unusable`、`reason` | 对账时一个目录表不认识的包核对不过 |
 | `archive bundle registered from the directory` | Info | `bundle_kind`、`members` | 对账登记了一个目录表不认识的包 |
@@ -1127,7 +1127,7 @@ archive:
 
 每次运行开始时先把目录表和归档目录对齐。对账只读、改名和登记；唯一删除的是写入方自己命名的临时文件。
 
-1. **`publishing` 的分段**（上次发布后、定稿前中断）：清单不在，删掉意向行，已链上的数据文件留给第 3 步当孤儿；清单在，就按 §16 重读核对，成员与修订号、摘要都与意向行一致，再做 §18.5 第 5 步的抽样，都通过就定稿。核对或抽样不一致时，包改名 `.rejected`、意向行删掉。抽样时热库读不出来，这次运行以失败结束（`sample_failed`），分段留在 `publishing`，下一次再试；新发布的分段遇到同样情形时也这样处理（§18.5）。
+1. **`publishing` 的分段**（上次发布后、定稿前中断）：清单不在，删掉意向行，已链上的数据文件留给第 3 步当孤儿；清单在，就按 §16 重读核对，成员与修订号、摘要都与意向行一致，再做 §18.5 第 5 步的抽样，都通过就定稿。核对或抽样不一致时，包改名 `.rejected`、意向行删掉。抽样发现一条成员读出不同而变更戳没变时，与 §18.5 一样只排除这一条：它推迟为 `export_failed`（日志 Warn `archive sample mismatch`，计入 `sample_mismatch_audits`），这次运行的各趟都不再选它，包里其余的成员照常到期，由随后的一趟重新导出。抽样时热库读不出来，这次运行以失败结束（`sample_failed`），分段留在 `publishing`，下一次再试；新发布的分段遇到同样情形时也这样处理（§18.5）。
 2. **目录表不认识的包**（例如数据库从备份恢复，或回滚后重新升级）：用密钥核对通过的，登记为 `sealed` 的分段；成员一律登记为 `stale`、没有变更戳，可以列出和读取，但永远不作为删除依据；某个 audit 已经有当前成员时只登记分段、不登记它。分段行的 `run_id` 记为执行对账的这次运行。核对不过的只记日志，不改名。
 3. **残留文件**：写入方命名的临时文件（§3.2）删掉；没有任何清单列出的数据文件改名加 `.orphan`，不删除。
 

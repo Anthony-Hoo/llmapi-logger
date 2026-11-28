@@ -166,6 +166,12 @@ func (current *run) verifyAgainstCatalog(path string, segment storage.ArchiveSeg
 			return false, current.ctx.Err()
 		}
 		if reasonOf(err) == "sample_mismatch" {
+			// The bundle is void; the member that differs is deferred and
+			// the passes export the others again without it.
+			var mismatch *failure
+			if errors.As(err, &mismatch) && mismatch.auditID != "" {
+				current.holdMismatch(mismatch.auditID)
+			}
 			return false, nil
 		}
 		// No comparison was possible: leave the segment publishing for the

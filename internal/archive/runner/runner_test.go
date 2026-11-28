@@ -369,8 +369,8 @@ func TestReconciliationSamplesBeforeSealing(t *testing.T) {
 	}
 	h.options.Step = nil
 	h.sampler.differ = func(string) bool { return true }
-	// Reconciliation rejects the published bundle; the pass exports the audit
-	// again, it differs again and is deferred: the run itself completes.
+	// Reconciliation rejects the published bundle and defers the audit, which
+	// the pass then leaves alone: the run itself completes.
 	result := h.mustRun()
 	if result.ReconciledSealed != 0 || result.SampleMismatched != 1 || h.store.deferred["only"].Reason != storage.ArchiveDeferredExportFailed {
 		t.Fatalf("result %+v, deferred %+v", result, h.store.deferred)
@@ -381,6 +381,62 @@ func TestReconciliationSamplesBeforeSealing(t *testing.T) {
 	h.sampler.differ = nil
 	h.mustRun()
 	h.requireEachOnce("only")
+}
+
+// H.6 item 1 with J.3 as on the normal path: reconciliation voids a
+// publishing bundle with a member that reads back differently, defers that
+// member (export_failed) and the pass exports the other members again
+// without it, in the same run.
+func TestReconciliationDefersAMismatchedMember(t *testing.T) {
+	h := newHarness(t)
+	for index, id := range []string{"r-a", "r-b", "r-c"} {
+		h.addTurnless(id, protocolChat, baseTimeNS+int64(index))
+	}
+	h.options.Step = func(step string) error {
+		if step == StepAfterPublish {
+			return errors.New("crash")
+		}
+		return nil
+	}
+	if _, err := h.run(); !errors.Is(err, errCrash) {
+		t.Fatal(err)
+	}
+	h.options.Step = nil
+	h.sampler.compared = nil
+	h.sampler.differ = func(id string) bool { return id == "r-b" }
+	result := h.mustRun()
+	if result.ReconciledSealed != 0 || result.SampleMismatched != 1 || result.Excluded != 1 ||
+		result.Counts.Segments != 1 || result.Counts.ExportedAudits != 2 || result.Deferred[storage.ArchiveDeferredExportFailed] != 1 {
+		t.Fatalf("result %+v", result)
+	}
+	if h.store.deferred["r-b"].Reason != storage.ArchiveDeferredExportFailed || len(h.store.deferred) != 1 {
+		t.Fatalf("deferred %+v", h.store.deferred)
+	}
+	// Only the reconciled bundle was voided; the pass did not export r-b again.
+	if count := h.sampler.comparedCount("r-b"); count != 1 {
+		t.Fatalf("r-b compared %d times", count)
+	}
+	files := h.files()
+	if countMatching(files, isRejectedManifest) != 1 {
+		t.Fatalf("files %q", files)
+	}
+	if strings.Count(h.logs.String(), `"error_category":"archive_sample_mismatch"`) != 1 || !strings.Contains(h.logs.String(), `"sample_mismatch_audits":1`) {
+		t.Fatalf("logs %s", h.logs.String())
+	}
+	h.verifyAll()
+	h.requireEachOnce("r-a", "r-c")
+	if len(h.store.sealedMembers()["r-b"]) != 0 {
+		t.Fatalf("r-b sealed %+v", h.store.sealedMembers()["r-b"])
+	}
+
+	// The deferred re-check of the next run exports it once it reads back
+	// equal.
+	h.sampler.differ = nil
+	h.mustRun()
+	h.requireEachOnce("r-a", "r-b", "r-c")
+	if len(h.store.deferred) != 0 {
+		t.Fatalf("deferred %+v", h.store.deferred)
+	}
 }
 
 // J.3: a sampled member that differs from the hot store voids the bundle
