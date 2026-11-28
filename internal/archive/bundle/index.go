@@ -74,9 +74,20 @@ func BuildIndex(ctx context.Context, root string, signer archive.ManifestSigner)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		return nil, fail(ReasonNotFound, errors.New("archive root is not a directory"))
 	}
+	// WalkDir does not follow a symlink given as its root: a symlinked
+	// archive directory would index as empty. The walk goes through the
+	// resolved directory, and every path it reports is put back under root,
+	// so callers see the paths they would through root itself.
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fail(ReasonNotFound, errors.New("archive root is not a directory"))
+	}
 	index := &Index{audits: map[string][]Location{}, conversations: map[string][]int{}}
 	var manifests, data []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(resolved, func(path string, entry fs.DirEntry, err error) error {
+		if relative, relErr := filepath.Rel(resolved, path); relErr == nil {
+			path = filepath.Join(root, relative)
+		}
 		if err != nil {
 			index.problems = append(index.problems, Problem{Path: path, Reason: ReasonReadFailed})
 			if entry != nil && entry.IsDir() {

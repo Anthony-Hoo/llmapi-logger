@@ -146,3 +146,32 @@ func TestIndex(t *testing.T) {
 		}
 	}
 }
+
+// A symlinked archive root is indexed through the directory it points to,
+// and every path is reported under the root as given: the frozen v1 fixture
+// has three bundles through its real path and through a symlink to it.
+func TestIndexFollowsASymlinkedRoot(t *testing.T) {
+	target, err := filepath.Abs(filepath.Join("..", "testdata", "frozen", "v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "archive")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create a directory symlink here (%v); this test runs on Linux", err)
+	}
+	for _, root := range []string{target, link} {
+		index, err := BuildIndex(context.Background(), root, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundles := index.Bundles()
+		if len(bundles) != 3 || len(index.Problems()) != 0 {
+			t.Fatalf("%s: %d bundles, problems %+v", root, len(bundles), index.Problems())
+		}
+		for _, entry := range bundles {
+			if relative, err := filepath.Rel(root, entry.ManifestPath); err != nil || strings.HasPrefix(relative, "..") {
+				t.Fatalf("%s: manifest path %s is not under the root", root, entry.ManifestPath)
+			}
+		}
+	}
+}

@@ -1854,7 +1854,7 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
 
 5. 第 2 条：`archive.mode` 不为 `off` 时 `retention.Runner` 不组装，audit 和 gap 都不再直接删除；启动日志 `archive export only: hot store keeps growing`（`archive_export_only`）。
 6. **第 3 条比 L.2 宽。** L.2 的条件是“目录表里有 `hot_removed` 的成员或 `mode = 'archive_then_delete'` 的运行记录”；实现是目录表里有**任何一条**运行记录（`LastArchiveRun` 不限状态），在 10 秒的超时里查。这一版没有任何成员会是 `hot_removed`，按 L.2 的条件这条提示永远不会出现，而 `export_only` 之后关掉归档同样会恢复直接删除。
-7. 第 5 条：`HasAudits`（R.6）之外，归档开启时启动递归查 `archive.dir` 里有没有 `*.manifest.json`（P 第 12 条）；目录读不了按“有”处理，目录不存在按“没有”。因此拒绝新建密钥时，`audit key unavailable` 另带 `reason=archive_manifests_present`。归档关闭时不查目录。
+7. 第 5 条：`HasAudits`（R.6）之外，归档开启时启动递归查 `archive.dir` 里有没有 `*.manifest.json`（P 第 12 条）；目录读不了按“有”处理，目录不存在按“没有”。因此拒绝新建密钥时，`audit key unavailable` 另带 `reason=archive_manifests_present`。归档关闭时不查目录。`archive.dir` 本身是指向目录的符号链接时（审查意见），`filepath.WalkDir` 不跟随作为根的符号链接，原先这里和 `bundle.BuildIndex` 都把它看成空目录：密钥会被新建，对账看不到任何包，`audit-archive list` 什么都不列。现在两处都先 `filepath.EvalSymlinks` 再遍历；`BuildIndex` 报告的路径换回给定的根之下，所以对账登记的 `manifest_name` 和读取工具里的相对路径与经真实路径时相同。目录里面的符号链接仍不跟随（不索引、不改名、不删除）。暂存目录用 `os.ReadDir`，它跟随作为根的符号链接，没有这个问题。
 8. 归档子密钥和核对抄录事件用的完整性签名密钥只在归档开启时派生，与其他子密钥一起、主密钥清零之前；派生失败时审计不可用（`audit archive keys unavailable`）。
 
 **调度（H.1、H.4）**

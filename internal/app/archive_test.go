@@ -153,3 +153,26 @@ func TestArchiveKeysAreDerivedAtStart(t *testing.T) {
 		t.Fatal("archive keys derived with the archive off")
 	}
 }
+
+// A symlinked archive directory is searched through the directory it points
+// to: its manifests forbid creating a key as they do through the real path.
+// A directory that does not exist holds none.
+func TestArchiveManifestsPresentFollowsASymlinkedDirectory(t *testing.T) {
+	cfg := archiveTestConfig(t, config.ArchiveModeExportOnly)
+	real := filepath.Join(t.TempDir(), "real")
+	if err := os.MkdirAll(filepath.Join(real, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "sessions", "x_s0001.manifest.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if archiveManifestsPresent(cfg) {
+		t.Fatal("a missing archive directory holds a manifest")
+	}
+	if err := os.Symlink(real, cfg.Archive.Dir); err != nil {
+		t.Skipf("cannot create a directory symlink here (%v); this test runs on Linux", err)
+	}
+	if !archiveManifestsPresent(cfg) {
+		t.Fatal("the manifest behind a symlinked archive directory was not found")
+	}
+}

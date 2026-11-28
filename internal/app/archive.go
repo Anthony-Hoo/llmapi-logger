@@ -60,10 +60,16 @@ func archiveManifestsPresent(configuration config.Config) bool {
 	if !configuration.Archive.Enabled() || configuration.Archive.Dir == "" {
 		return false
 	}
+	// WalkDir does not follow a symlink given as its root: walk the
+	// directory a symlinked archive directory points to, as BuildIndex does.
+	root, err := filepath.EvalSymlinks(configuration.Archive.Dir)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
 	found := false
-	err := filepath.WalkDir(configuration.Archive.Dir, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) && path == configuration.Archive.Dir {
+			if errors.Is(err, fs.ErrNotExist) && path == root {
 				return fs.SkipAll
 			}
 			return err

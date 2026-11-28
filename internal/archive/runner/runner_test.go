@@ -723,3 +723,42 @@ func TestRunNeverOverlaps(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// H.6 through a symlinked archive directory: reconciliation sees the bundles
+// behind the link and registers an unknown one under the same manifest name
+// as the run that wrote it, a path relative to the configured directory.
+func TestReconciliationThroughASymlinkedDirectory(t *testing.T) {
+	h := newHarness(t)
+	link := filepath.Join(t.TempDir(), "archive-link")
+	if err := os.Symlink(h.dir, link); err != nil {
+		t.Skipf("cannot create a directory symlink here (%v); this test runs on Linux", err)
+	}
+	h.options.Dir = link
+	h.addConversation("conv_l", protocolChat, 3, baseTimeNS)
+	h.addTurnless("loose", protocolChat, baseTimeNS+100)
+	h.mustRun()
+	written := map[string]bool{}
+	for _, segment := range h.store.segments {
+		written[segment.ManifestName] = true
+	}
+	if len(written) == 0 {
+		t.Fatal("no segment written")
+	}
+	restored := newFakeStore(h.fixture.payloads)
+	restored.audits = h.store.audits
+	h.store = restored
+	h.options.Store = restored
+	h.mustRun()
+	registered := 0
+	for _, segment := range restored.segments {
+		if written[segment.ManifestName] {
+			registered++
+		}
+		if strings.HasPrefix(segment.ManifestName, "..") || filepath.IsAbs(segment.ManifestName) {
+			t.Fatalf("manifest name %s", segment.ManifestName)
+		}
+	}
+	if registered != len(written) {
+		t.Fatalf("%d of %d bundles registered from the directory; segments %+v", registered, len(written), restored.segments)
+	}
+}
