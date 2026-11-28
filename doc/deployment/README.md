@@ -71,7 +71,7 @@ bin/agent-packages/            # Agent 接入的 Skill 安装包（五个平台�
 - 只有 Nginx 的 `80` 对外发布。
 - 管理端只发布为 `127.0.0.1:8081`。
 - audit-proxy 数据端、PostgreSQL 和 NewAPI 只存在于 Compose 私有 bridge 网络，没有 host 端口；NewAPI 仍可访问外部模型供应商。
-- audit 数据、本地暂存（3.2）、PostgreSQL 数据和 NewAPI 数据使用不同 volume。
+- audit 数据、本地暂存（3.2）、PostgreSQL 数据和 NewAPI 数据使用不同 volume；冷归档（3.4）的挂载在 `compose.yaml` 里是注释掉的，开启时另挂一个。
 - PostgreSQL 显式设置了几项内存、检查点和自动清理参数，起点按约 8 GB 内存的单机定，未经实测；各项作用、覆盖变量和改后要看的指标见[数据库参数](postgresql-migration.md#数据库参数)。
 
 首次启动前编辑 `configs/audit-proxy.docker.yaml`，把示例 `admin_token` 替换为随机长 token，并限制文件权限。需要 NewAPI 调用者识别时同时填写 `newapi.access_token` 和正整数 `newapi.user_id`；两项都留空/0 时关闭该功能。正式使用时也应把 `compose.yaml` 中的 NewAPI 镜像固定到自己验证过的 tag 或 digest。
@@ -144,6 +144,50 @@ legacy 写入路径已删去，`audit.write_path` 不再选择任何东西（[�
 3. 回到含迁移 007、仍有 legacy 路径的上一个版本时，它能读版本 2 的行，配置里的 `audit:` 段可以保留（去掉 `write_path` 或写 `unified`/`legacy`，那个版本两者都认）。
 4. 回到更早、不含迁移 007 的版本时：删掉配置文件里的整个 `audit:` 段（旧版本按 `KnownFields` 加载配置，遇到不认识的段会拒绝启动），并撤销迁移。库里有版本 2 的行时，版本 7 的回滚 SQL 会报错并什么都不改，只能从写入版本 2 之前的备份恢复，并放弃之后的审计数据（[回滚到 schema 版本 6](postgresql-migration.md#回滚到-schema-版本-6)）。
 5. 启动旧版本。
+
+### 3.4 冷归档（`archive`）
+
+冷归档默认关闭（`archive.mode: "off"`）。开启后每天一次把 retention 本来要删除的 audit 和 gap 导出到 `archive.dir`，格式与运行见[模块 26](../features/26-cold-archive.md)。**这个版本只导出、不删除：开启以后热库会一直增长**，`archive_then_delete` 现在与 `export_only` 行为相同。
+
+**热库持续增长是什么意思。** 开启归档时 retention 的直接删除不再组装（决策 5.7 的护栏），而归档本身不删除任何东西：数据库会按流量一直变大，`retention_days` 只决定什么时候导出，不再决定什么时候删除。要开启，先确认数据库盘的余量；校验后移除要等格式定为版本 1 之后单独上线，而且只作用于版本 1 及以后导出的包，现在导出的版本 0 的包永远不作为删除依据（定为版本 1 时会重新导出）。
+
+**归档卷。** 归档目录要单独一个卷或一块盘：
+
+- 不能是密钥所在的目录 `/data`，不能包含它或位于其中；也不能与暂存目录 `audit.staging.dir` 重叠。配置校验会拒绝。归档的密文和打开它的密钥不应在同一个卷、同一份备份里。
+- 不能放在只读根文件系统或 `/tmp` 上。
+- 启动时检查目录，规则与暂存目录相同：不存在就以 0700 创建；Linux 上要求属主是运行用户、权限不含组和其他用户；要能在里面创建并删除一个探针文件。检查不通过时归档不运行，日志 `archive runner unavailable`（`reason=dir_wrong_owner`、`dir_open_permissions`、`dir_not_writable` 等），代理和审计照常工作，直接删除仍然不组装。
+- **镜像里没有预建归档目录。** `compose.yaml` 里归档卷是注释掉的：新建的命名卷挂在镜像里不存在的路径上时，挂载点属主是 root，检查会因 `wrong_owner` 失败。开启前把一个属主为运行用户 65532、权限 0700 的宿主目录（例如单独的一块盘上）挂到 `/archive`，再取消注释并在配置里写 `archive.dir: /archive`。
+
+**主密钥的备份必须与归档盘分开存放，这是硬性要求。** 归档的加密密钥、签名密钥和凭据指纹密钥都由 `audit.key` 派生：密钥丢了，加密的包全部打不开，也没有任何办法恢复；密钥和归档放在同一块盘或同一份备份里，丢一次就两样都没了。另外，数据库为空、而归档目录里有包时，代理不会新建密钥（审计按密钥不可用处理），以免新密钥让旧包读不了。
+
+**开启 `export_only`：**
+
+~~~yaml
+retention_days: 30            # 必须大于 0：决定哪些记录到期
+archive:
+  mode: export_only
+  dir: /archive               # 绝对路径，单独的卷
+  encrypt: true               # 默认；false 时归档盘上的对话内容是明文（凭据值仍然没有）
+  run_at: "03:00"             # 本地时间；timezone 为空时取 org_reports.timezone
+~~~
+
+其余键的默认值和范围见[模块 01](../features/01-configuration-and-route-boundary.md) §4 第 19 项。启动日志会有一条 `archive export only: hot store keeps growing`；第一次运行在启动后立即补跑一次，之后每天 `run_at` 一次，失败后 10 分钟重试，至多到 `run_deadline_minutes`。每次运行的结果在日志 `archive run completed`（或 `archive run failed`）里：导出、推迟、复核不过和登记为 `stale` 的条数，分段数和落盘字节。推迟数一直不降，说明有记录的解析或调用者查找卡住了。
+
+**暂停归档。** 想停下来而不让 retention 恢复直接删除，把 `retention_days` 设为 0。把 `archive.mode` 改回 `off` 而 `retention_days > 0` 会立刻恢复没有归档的直接删除，启动日志醒目提示一条 `archive_direct_delete_resumed`。
+
+**用 `audit-archive` 核对。** 镜像里带着 `/audit-archive`，它只读归档目录，不连数据库（模块 26 §24）。只读挂上归档卷和密钥文件运行：
+
+~~~bash
+# 不带密钥：只核对清单与文件大小、SHA-256（能发现损坏，发现不了伪造）
+audit-archive verify --dir /archive
+# 带密钥：全部检查，含签名、解密、每条记录的摘要和引用闭合
+audit-archive verify --dir /archive --key /data/audit.key
+audit-archive list --dir /archive --key /data/audit.key
+~~~
+
+有失败时退出码为 1，每个包一行结果码。`cat` 和 `export` 输出解密后的对话内容（没有凭据值），输出去向由使用者负责。`.rejected`（核对不过的包）和 `.orphan`（没有清单的数据文件）从不被自动删除，确认无用后由运维手动处理；只有归档器自己的临时文件会被自动清掉。
+
+**升级。** 这个版本带迁移 008（目录表，schema 版本 8），启动时自动应用，只建新表。**升级之后旧版本打不开审计存储**（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。配置加载是严格模式：先部署这个版本、确认运行正常，再把 `archive:` 段写进配置。回滚到不含迁移 008 的版本时，先把 `archive.mode` 设为 `off`，从配置里删掉整个 `archive:` 段，再按[回滚到 schema 版本 7](postgresql-migration.md#回滚到-schema-版本-7) 撤销迁移；归档目录里的包不受回滚影响，回滚之后密钥文件绝不能缺失。
 
 ## 4. 显式上游代理（Podman/WSL/Clash）
 
@@ -230,7 +274,7 @@ docker compose exec nginx nginx -t
 
 ## 7. 数据、保留状态和备份
 
-PostgreSQL 数据库与 `audit.key` 必须作为一个备份集保存，使用一致快照备份与已验证的恢复流程。具体流程见 [备份与恢复](backup-and-restore.md)。
+PostgreSQL 数据库与 `audit.key` 必须作为一个备份集保存，使用一致快照备份与已验证的恢复流程。具体流程见 [备份与恢复](backup-and-restore.md)。开启冷归档时，`audit.key` 的备份还必须与归档盘分开存放（3.4）。
 
 普通 OpenAI 与 Anthropic 2xx/3xx 在 provider reconstruction 校验通过后进入 `metadata`：raw chunks 已释放，但长度、SHA-256、Content-Type、时间、对象图、重建 hash、SSE timeline 和完整性事件仍在。拦截、解析/normalization/重建失败和没有 turn 的异常保持两侧 `full`；两个请求阶段不完整或不一致时请求侧也保持 `full`。有 verified turn 的上游异常按侧保留（模块 18 §6）：响应侧 `full`；5xx、401、403、408、409、429、499、客户端取消，以及带 `upstream_error_class` 的 400/422，在两个请求阶段一致时请求侧释放为 `metadata`；`upstream_error_class` 为空的 400/422 和其他未列出的状态请求侧仍 `full`。验收脚本应分别验证 reconstructed API 与 full raw，不能把正常记录 raw、或异常记录的请求 raw 返回 410 误判为丢失。回滚到旧二进制能照常读取这些行，但按新规则写入的记录没有请求 raw 可以返回。
 
@@ -271,7 +315,7 @@ agent_access:
 - **升级**：先部署包含模块 25 的版本，此时配置里没有 `agent_access`，功能关闭，迁移 004 在启动时自动应用；确认运行正常后，再把 `agent_access` 段写进配置并重启。
 - **回滚到不含模块 25 的版本**：
   1. 从配置里删掉整个 `agent_access` 段（包括 `enabled: false` 的写法），否则旧版本因未知键启动失败。
-  2. 停止新版本后，在库里删除 `agent_tokens`、`agent_audit_log` 两张表，并删除 `schema_migrations` 里版本为 4 的行，否则旧版本因 schema 版本过新打不开审计存储（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。库的版本高于 4 时，先按 [PostgreSQL 运行与离线迁移](postgresql-migration.md)里的回滚各节，从新到旧撤销之后的迁移（现在是 007、006、005），再做这一步。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
+  2. 停止新版本后，在库里删除 `agent_tokens`、`agent_audit_log` 两张表，并删除 `schema_migrations` 里版本为 4 的行，否则旧版本因 schema 版本过新打不开审计存储（进程照常起来，`available` 模式不留 audit 照常转发，`strict` 模式回 `503`）。库的版本高于 4 时，先按 [PostgreSQL 运行与离线迁移](postgresql-migration.md)里的回滚各节，从新到旧撤销之后的迁移（现在是 008、007、006、005），再做这一步。操作前先做数据库与 `audit.key` 的联合备份（[备份与恢复](backup-and-restore.md)）。
   3. 再启动旧版本。已签发的 Agent 令牌随表一起消失；重新升级后用户需要重新授权。
 
 ~~~sql
