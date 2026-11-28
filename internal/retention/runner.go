@@ -18,25 +18,6 @@ const (
 	cleanupInterval      = time.Hour
 	cleanupRetryInterval = time.Minute
 	maxRowsPerKindPerRun = 5000
-
-	// targetBatchTime is how long a batch of audits should hold the writer.
-	// What an audit costs to delete depends on the disk and on how much the
-	// audit holds, so the batch size is found by measuring: it starts at one
-	// audit, doubles after a full batch that took at most half the target,
-	// and shrinks in proportion after a batch that took longer than the
-	// target.
-	//
-	// Measuring cannot foresee a run of expensive audits behind cheap ones: a
-	// batch sized on the cheap ones can then fail at the store's statement
-	// timeout. After a batch of several audits that failed slowly, the size
-	// drops to one and stays there for the rest of that run and the next;
-	// every later run that completes lets it grow twice as far as the one
-	// before.
-	targetBatchTime = time.Second
-	// maxBatchPause caps the pause after a batch, which is otherwise as long
-	// as the batch took. Cleanup then holds the writer at most half of the
-	// time, unless single batches take longer than the cap.
-	maxBatchPause = 5 * time.Second
 )
 
 // Store is the bounded maintenance operation required by Runner.
@@ -60,10 +41,8 @@ type Runner struct {
 	retryInterval time.Duration
 	pause         func(context.Context, time.Duration)
 
-	batchMu      sync.Mutex
-	auditBatch   int  // audits asked for per batch; kept across runs
-	auditCeiling int  // how far auditBatch may grow
-	completedRun bool // the previous run ended without an error
+	// batcher sizes the audit batches (batcher.go); kept across runs.
+	batcher *Batcher
 
 	mu      sync.Mutex
 	started bool
@@ -92,8 +71,7 @@ func New(store Store, retentionDays int, logger *slog.Logger) (*Runner, error) {
 		interval:      cleanupInterval,
 		retryInterval: cleanupRetryInterval,
 		pause:         pauseFor,
-		auditBatch:    1,
-		auditCeiling:  storage.RetentionBatchLimit,
+		batcher:       NewBatcher(),
 		done:          make(chan struct{}),
 	}, nil
 }
@@ -164,7 +142,7 @@ func (runner *Runner) RunOnce(ctx context.Context) (Result, error) {
 		ctx = context.Background()
 	}
 	cutoff := runner.now().Add(-time.Duration(runner.retentionDays) * 24 * time.Hour).UnixNano()
-	runner.beginRun()
+	runner.batcher.BeginRun()
 	var total Result
 	auditsDone := false
 	gapsDone := false
@@ -186,8 +164,7 @@ func (runner *Runner) RunOnce(ctx context.Context) (Result, error) {
 			// target time may have failed for its size, by running into the
 			// statement timeout. The retry asks for one audit, the smallest
 			// step there is. A batch that failed at once did not.
-			if auditLimit > 1 && elapsed > targetBatchTime && ctx.Err() == nil {
-				runner.failedAtSize()
+			if runner.batcher.Failed(ctx, auditLimit, elapsed) {
 				runner.logger.Info("retention batch reduced to one audit", "failed_audit_batch", auditLimit)
 			}
 			return total, err
@@ -201,84 +178,23 @@ func (runner *Runner) RunOnce(ctx context.Context) (Result, error) {
 			gapsDone = true
 		}
 		if auditLimit > 0 {
-			runner.setBatchSize(nextBatchSize(size, auditLimit, batch.DeletedAudits, elapsed))
+			runner.batcher.Done(size, auditLimit, batch.DeletedAudits, elapsed)
 		}
 		if (auditsDone || total.DeletedAudits >= maxRowsPerKindPerRun) && (gapsDone || total.DeletedGaps >= maxRowsPerKindPerRun) {
 			break
 		}
-		runner.pause(ctx, min(elapsed, maxBatchPause))
+		runner.pause(ctx, PauseAfter(elapsed))
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
 	}
-	runner.endRun()
+	runner.batcher.EndRun()
 	return total, nil
 }
 
-// nextBatchSize returns the batch size to use after a batch that asked for
-// limit audits out of a batch size of size, deleted the given number and took
-// elapsed. A slow batch shrinks the size in proportion to how far it missed
-// the target. A fast one doubles it, but only when it was a full batch of the
-// whole size: a batch cut short says little about what a larger one costs.
-func nextBatchSize(size, limit, deleted int, elapsed time.Duration) int {
-	switch {
-	case elapsed > targetBatchTime:
-		return max(int(int64(limit)*int64(targetBatchTime)/int64(elapsed)), 1)
-	case limit == size && deleted == limit && elapsed <= targetBatchTime/2:
-		return min(size*2, storage.RetentionBatchLimit)
-	default:
-		return size
-	}
-}
+func (runner *Runner) batchSize() int { return runner.batcher.Size() }
 
-func (runner *Runner) batchSize() int {
-	runner.batchMu.Lock()
-	defer runner.batchMu.Unlock()
-	return runner.auditBatch
-}
-
-func (runner *Runner) setBatchSize(size int) {
-	runner.batchMu.Lock()
-	defer runner.batchMu.Unlock()
-	runner.auditBatch = min(max(size, 1), runner.auditCeiling)
-}
-
-// beginRun lets the batch grow twice as far as before when the previous run
-// completed, which undoes the ceiling of a failed batch step by step.
-func (runner *Runner) beginRun() {
-	runner.batchMu.Lock()
-	defer runner.batchMu.Unlock()
-	if runner.completedRun {
-		runner.auditCeiling = min(runner.auditCeiling*2, storage.RetentionBatchLimit)
-	}
-	runner.completedRun = false
-}
-
-func (runner *Runner) endRun() {
-	runner.batchMu.Lock()
-	defer runner.batchMu.Unlock()
-	runner.completedRun = true
-}
-
-func (runner *Runner) failedAtSize() {
-	runner.batchMu.Lock()
-	defer runner.batchMu.Unlock()
-	runner.auditBatch, runner.auditCeiling = 1, 1
-}
-
-// pauseFor waits for the duration or until the context ends.
-func pauseFor(ctx context.Context, duration time.Duration) {
-	if duration <= 0 {
-		return
-	}
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-ctx.Done():
-	}
-}
-
+func (runner *Runner) setBatchSize(size int) { runner.batcher.SetSize(size) }
 func (runner *Runner) loop(ctx context.Context) {
 	defer close(runner.done)
 	delay := runner.cleanupAndLog(ctx)
