@@ -28,7 +28,7 @@
 
 - 固定 32 个随机字节，AES-256-GCM。
 - key 文件存在时只读，不覆盖。
-- 数据库里既没有 audit 记录、也没有完整性事件时，才允许原子创建；两者有其一而 key 缺失时，禁止生成替代 key。完整性事件不会被 retention 删除：retention 删光 audit 后事件仍要用原来的 key 校验，换成新 key 会让链校验失败、审计存储不可用，所以这时同样不生成新 key，启动按 key 不可用处理。
+- 数据库里既没有 audit 记录、也没有完整性事件、也没有冷归档分段（`archive_segments`），并且冷归档开启时 `archive.dir` 下没有任何 `*.manifest.json`，才允许原子创建；有其一而 key 缺失时，禁止生成替代 key，启动按 key 不可用处理（因归档清单而拒绝时日志带 `reason=archive_manifests_present`）。完整性事件不会被 retention 删除：retention 删光 audit 后事件仍要用原来的 key 校验，换成新 key 会让链校验失败、审计存储不可用。归档的包由这把 key 派生的子密钥加密和签名（§7.2），数据库整个丢失、只剩归档目录时，新 key 会让旧包全部打不开，所以归档目录里有清单时同样不生成。归档目录读不了时按“有清单”处理。
 - POSIX 建议 `0600`；Windows 使用仅维护账户可读的 ACL。
 - key 长度错误、不可读或 GCM 初始化失败时不允许明文降级；available 只做代理，strict 返回 `503`。
 
@@ -164,7 +164,31 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 
 同样从主密钥用 HMAC-SHA-256 域分离（`llmapi-logger/credential-fingerprint-key/v1\x00`）派生独立子密钥，对规约后的入站凭据生成 32 字节标签，用于把开发者会话限定在自己 Key 的记录上（[模块 19](19-developer-key-session.md)）。
 
-规约逐字复刻 NewAPI 的 token 解析：去 `Bearer ` 前缀、去 `sk-` 前缀、取首个 `-` 之前的片段。指纹是 keyed 标签，无主密钥不可验证也不可反查，且不出现在任何 API 响应、日志或错误文本中。系统仍不保存完整或打码的 API Key。
+规约逐字复刻 NewAPI 的 token 解析：去 `Bearer ` 前缀、去 `sk-` 前缀、取首个 `-` 之前的片段。指纹是 keyed 标签，无主密钥不可验证也不可反查，且不出现在任何 API 响应、日志或错误文本中。系统仍不保存完整或打码的 API Key。冷归档原样保留 `api_key_fpr`（§7.2），读取工具的 `fpr` 子命令可以拿一个已知的 Key 算出它来比对。
+
+## 7.2 冷归档的密钥与明文边界
+
+冷归档（[模块 26](26-cold-archive.md)，默认关闭）把到期的 audit 解密后写成明文行，再整包压缩、分帧加密。格式和字节序列以模块 26 为准，这里只列边界。
+
+**三把归档子密钥**，与其他子密钥一样是 `HMAC-SHA-256(主密钥, 域字符串)`，域字符串互不相同，也不同于完整性、凭据指纹和分析指纹三把，彼此独立：
+
+| 密钥 | 域字符串 | 用途 |
+| --- | --- | --- |
+| `K_enc` | `llmapi-logger/archive-encryption-key/v1\x00` | 数据文件的分帧加密；每个文件再以随机盐派生自己的文件密钥（模块 26 §5） |
+| `K_sign` | `llmapi-logger/archive-signing-key/v1\x00` | 清单的 HMAC 签名，以及清单里的密钥指纹 `HMAC-SHA-256(K_sign, "llmapi-logger/archive-key-fingerprint/v1\x00")` |
+| `K_fpr` | `llmapi-logger/archive-credential-fingerprint-key/v1\x00` | 凭据值的 keyed 指纹 `value_fpr` |
+
+`security.ArchiveKeys` 只持有派生结果，不持有主密钥；代理在启动时与其他子密钥一起派生（只在归档开启时），之后主密钥照常清零。发布后的重读还用完整性签名密钥核对行里抄录的原完整性事件的 MAC。
+
+**凭据不进归档。** 加密开启与关闭一律如此：Header、Trailer、User-Agent 的每个值和 Request-URI 的每个查询分段，按 Agent 门面同一个判定函数（`agentapi.IsCredential`）判为凭据的，只留名称、字节长度、`value_omitted: "credential"` 和 `value_fpr = HMAC-SHA-256(K_fpr, "llmapi-logger/archive-credential-value/v1\x00" || 原值)`。同一个值在入站与出站阶段指纹相同；指纹只能核对已知的值，不能反推。导出快照解密 Header 块、User-Agent 和 Request-URI 之后立即投影，记录结构、摘要和行里只有投影后的形式，日志里也没有它们。Body、内容对象、`parsed_json` 和外部引用的值不做投影：内容里出现的 Key 原样归档（模块 26 §12.5）。
+
+**明文的清单。** 每个包的 `*.manifest.json` 不加密，不拿密钥就能读到：格式与来源 schema 版本、包的种类和协议、会话 ID 列表、每个成员的 `audit_id`、修订号、会话 ID、开始与结束时间和记录摘要、各文件的大小和 SHA-256、各表的列清单、密钥指纹和签名。没有对话内容、Header 值或凭据。会话 ID 和时间范围也出现在文件名里（文件名只给人看，查找走清单）。
+
+**加密开启时**，明文和未加密的压缩流只在进程内存里，归档盘上只有密文和明文清单。`archive.encrypt: false` 时数据文件是普通的 `.jsonl.gz`，对话内容在盘上是明文（凭据值仍然没有）。
+
+**读取工具 `audit-archive`** 用代理同一个函数读主密钥文件，只读、从不新建，派生出三把归档子密钥、完整性签名密钥和凭据指纹密钥后清除主密钥；先比对清单的密钥指纹，不符就报 `key_mismatch`，不尝试解密。密钥与已知 Key 只从文件、管道或不回显的终端读入，从不作为命令行参数，也不输出。`cat` 与 `export` 的输出是解密后的对话内容（没有凭据值），去向由使用者负责。
+
+**位置。** 配置校验禁止 `archive.dir` 与 `key_path` 的目录相同或互相包含，也禁止它与 `audit.staging.dir` 重叠；目录以 0700、文件以 0600 创建，Unix 上要求属主是进程用户、组和其他用户没有权限。主密钥的备份必须与归档盘分开保存：主密钥丢了，加密的包全部打不开。
 
 ## 8. 明文边界
 
@@ -211,7 +235,7 @@ data URL 先严格 Base64 解码，再按原始字节寻址。实际媒体类型
 
 数据库与 key 必须作为同一备份集。在线数据库使用 SQLite backup API；不能只复制 `audit.db`、`-wal` 或 `-shm`。恢复后启动过程会同时验证数据库结构、GCM、对象 hash 和事件链。
 
-项目不提供在线 key rotation 或多 key 解密。更换 key 时应保留旧数据库/旧 key 的联合备份，再创建新的空审计库和新 key。
+项目不提供在线 key rotation 或多 key 解密。更换 key 时应保留旧数据库/旧 key 的联合备份，再创建新的空审计库和新 key。冷归档的包只能用写它时的那把 key 读：换 key 之后旧包要继续可读，旧 key 就必须一直保存（与归档盘分开）。
 
 ## 11. 测试
 

@@ -53,6 +53,18 @@ audit:                     # 采集（模块 03 §13）；staging.dir 必填
   staging:
     dir: /var/lib/llmapi-logger/staging
     max_bytes: 4294967296
+archive:                   # 冷归档（模块 26），默认关闭；整段可省略
+  mode: "off"
+  dir: ""
+  encrypt: true
+  run_at: "03:00"
+  timezone: ""
+  segment_max_bytes: 268435456
+  conversation_min_turns: 16
+  conversation_min_bytes: 16777216
+  pass_audits: 5000
+  run_deadline_minutes: 240
+  verify_sample: 0.05
 
 interceptors:
   require-client-credential:
@@ -115,7 +127,7 @@ routes:
 6. mode 只能是 available 或 strict。
 7. database_url 为 PostgreSQL URL，key_path 非空且父目录可创建；旧 YAML db_path 被拒绝。
 8. `shutdown_timeout_seconds` 为 1–86400；默认 30 秒。
-9. retention_days 为 0 或 1–3650；0 表示禁用自动清理。
+9. retention_days 为 0 或 1–3650；0 表示禁用自动清理。开启冷归档时它决定哪些记录到期可归档，必须大于 0，而直接删除不再组装（第 19 项）。
 10. admin_token 在任何 admin_listen 下都必须非空且不能包含空白字符；监听非 loopback 时还必须由部署者提供 TLS 或可信反代。
 11. `developer_login.enabled` 默认 false。启用后开发者用 NewAPI 用户 API Key 登录并只读取自己 Key 的记录（[模块 19](19-developer-key-session.md)）；它只依赖已必填的 `newapi.url`，不需要 `newapi.access_token`/`user_id`。主密钥不可用时该登录自动保持关闭。
 12. `insights.enabled` 默认 true，控制上下文分析与用量洞察（[模块 20](20-context-insights.md)）；省略整个 `insights` 块或只写部分字段时保持默认。`insights.vocabulary_file`（工具词表 / 注入标记 / Agent 标识覆盖）可选，为空表示只用内嵌默认值；非空时不能带前后空白，且启动时必须已存在并且是普通文件。配置校验只检查文件存在，不读取内容，格式由加载方解析。路径应放在仓库外。`insights.context_windows` 可选，按模型 id 覆盖内嵌的上下文窗口：键不能为空、不能含空白或 NUL，仅大小写不同的键视为重复；值必须为正整数。`insights.pricing_file` 已废弃（成本改为 NewAPI 实际计费，见[模块 21](21-newapi-billing.md)）：仍可解析以免旧配置启动失败，但不校验、不读取，启动时输出一次警告。
@@ -138,6 +150,23 @@ routes:
     `staging.dir` 只在启动时检查（`internal/audit/staging` 的 `PrepareDirectory`），validate-config 不检查：不存在就以 0700 创建；Unix 上要求属主是进程用户、组和其他用户没有任何权限，Windows 上交给目录 ACL；还要能在里面创建并删除一个探针文件。检查不通过（或目录没有配置）时，两种模式下审计都不可用，与此前 strict 的处理相同：关闭存储，记一条 `audit staging unavailable`（带 `mode`、`error_category=staging_unavailable` 和 `reason`：`not_absolute`、`create_failed`、`inspect_failed`、`not_directory`、`wrong_owner`、`open_permissions`、`not_writable`，没有配置时为 `staging_unavailable`；不带路径和错误原文），以不可用的审计管理器运行：available 模式照常转发、不建 audit，strict 模式在准入时回 `503`。没有暂存就会丢掉超出内存预算的 Body，又没有别的写入路径可退，所以不提供不带暂存运行的方式；以前 available 模式退回 legacy 写入的做法已经没有了。这个判断在启动导入和 `RecoverInterruptedAudits` 之前做：目录不可用就像暂存文件全都读不出来：此时恢复会把带着暂存块中断的 audit 不带这些块就终结（与导入读不出文件时中止的理由相同，第 3 阶段设计 R.3 第 2 条）。所以不恢复、不终结任何记录，中断的 audit 原样保持未终结；目录修好、重启之后按正常顺序先导入暂存块，再恢复。
 
     目录可用时，启动先导入上次留下的暂存文件（模块 03 §13.6）；导入时存储报错或有文件读不出来，审计在两种模式下都不可用（日志 `audit staging import failed`）。配置加载是严格模式，不认识这一段的旧版本会拒绝启动；这个版本又要求这一段，所以升级前先准备暂存卷并写好 `staging.dir`（[部署说明](../deployment/README.md) 3.3）。
+19. `archive` 段是冷归档（[模块 26](26-cold-archive.md)），整段可省略；加载从默认值开始解码，只写部分字段时其余取默认（`internal/config/archive.go`）。`mode` 省略、为空或为 `off` 时这一段不做任何其他检查。开启时：
+
+    | 键 | 默认 | 校验 |
+    | --- | --- | --- |
+    | `mode` | `off` | `off`、`export_only`、`archive_then_delete` 之一。本版本两种开启的模式都只导出、不删除（模块 26 §17.2） |
+    | `dir` | 空 | 必填，绝对路径；不能是 `key_path` 所在的目录、包含它或位于其中（5.7 第 4 条护栏）；也不能与 `audit.staging.dir` 相同、包含它或位于其中 |
+    | `encrypt` | `true` | `false` 时数据文件是不加密的 `.jsonl.gz` |
+    | `run_at` | `03:00` | `HH:MM`，每天运行的本地时间 |
+    | `timezone` | 空 | 非空时是可加载的 IANA 名称；为空时取 `org_reports.timezone`，不论组织周报是否开启 |
+    | `segment_max_bytes` | 268435456（256 MiB） | 16 MiB 到 4 GiB |
+    | `conversation_min_turns` | 16 | 1 到 1000000 |
+    | `conversation_min_bytes` | 16777216（16 MiB） | 1 到 4 GiB |
+    | `pass_audits` | 5000 | 1 到 10000 |
+    | `run_deadline_minutes` | 240 | 1 到 1440 |
+    | `verify_sample` | 0.05 | 0 到 1；每个包至少比对一条 |
+
+    另外要求 `retention_days > 0`（5.7 第 1 条护栏：到期的判定与 retention 相同）。开启后 retention 的直接删除不组装（第 2 条），启动日志提示热库会持续增长。归档目录本身只在启动时检查，规则与 `staging.dir` 相同（不存在就以 0700 创建，Unix 上属主是进程用户、没有组和其他用户的权限，能写）；不过时归档 runner 不组装、记 `archive runner unavailable`，代理和审计照常工作。配置加载是严格模式：先部署含模块 26 的版本，再写这一段；回滚前先删掉它（[部署说明](../deployment/README.md)）。
 
 validate-config 只检查配置，不要求 DB 或 NewAPI 在线。
 
@@ -207,7 +236,7 @@ metadata interceptor 只读取克隆后的 Method、Path、Query、Header、Cont
 
 ## 9. Key 与模式
 
-key_path 指向 32-byte 主密钥：存在则读取；不存在且数据库既没有 audit 记录也没有完整性事件时用 crypto/rand 原子生成（规则见[模块 09](09-security-encryption-and-redaction.md) §3）。Unix 创建权限设为 0600；Windows 依赖 key 所在目录的当前用户 ACL，并在文档中明确要求使用私有数据目录。key 内容不写日志或数据库。
+key_path 指向 32-byte 主密钥：存在则读取；不存在时，只有数据库里没有 audit 记录、没有完整性事件、也没有冷归档分段，并且（`archive.mode` 不为 `off` 时）归档目录里没有任何 `*.manifest.json`，才用 crypto/rand 原子生成（规则见[模块 09](09-security-encryption-and-redaction.md) §3）；否则按密钥不可用处理。归档的包全部由这把密钥派生的子密钥加密和签名，它的备份必须与归档盘分开存放（模块 26 §23）。Unix 创建权限设为 0600；Windows 依赖 key 所在目录的当前用户 ACL，并在文档中明确要求使用私有数据目录。key 内容不写日志或数据库。
 
 服务可先启动 listener，再检查审计依赖。
 

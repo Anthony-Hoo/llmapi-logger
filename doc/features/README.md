@@ -49,7 +49,9 @@ Nginx -> Data-plane dispatcher -> Matcher
 
 ~~~text
 cmd/audit-proxy/
+cmd/audit-archive/                       # 冷归档的独立读取工具（模块 26）
 internal/{config,routing,proxy,audit,conversation,storage/sqlite,parser,query,web}/
+internal/archive/{,stream,bundle,runner}/ # 冷归档的格式、分帧加密、包与每日运行
 internal/storage/sqlite/migrations/
 configs/
 ~~~
@@ -101,11 +103,11 @@ PostgreSQL 使用独立 schema 版本，并保留旧证据模型的关系约束�
 
 启动恢复同样对已知采集失败执行分块对账，保留缺块标记和可读取片段。存储级错误（如只读、磁盘满和 I/O）不参与局部失败隔离，必须令整批失败并使数据库健康状态降级。
 
-保留清理按每事务最多 200 条、每轮每类 5000 条有界执行；每批在 writer 中独占事务，批量按上一批的耗时调整并在批间让出 writer（[模块 12](12-retention-and-maintenance.md) §5.1）；积压或失败时一分钟后继续，追平后每小时检查，避免固定每日上限长期落后于请求量。失败日志只增加安全的存储错误类别，不输出底层异常文本。
+保留清理按每事务最多 200 条、每轮每类 5000 条有界执行；每批在 writer 中独占事务，批量按上一批的耗时调整并在批间让出 writer（[模块 12](12-retention-and-maintenance.md) §5.1）；积压或失败时一分钟后继续，追平后每小时检查，避免固定每日上限长期落后于请求量。失败日志只增加安全的存储错误类别，不输出底层异常文本。开启冷归档（`archive.mode` 不为 `off`）时这条直接删除不组装：到期记录改由每天一次的归档导出，本版本导出后不删除，热库持续增长（[模块 26](26-cold-archive.md)）。
 
 存量对象及引用身份不匹配会触发进程内不可自动清除的完整性失败；隔离该次解析写入不意味着数据库仍可报告健康。
 
-key_path 存放 32-byte 主密钥：存在则读取，不存在且数据库既没有 audit 记录也没有完整性事件时自动生成。每个 Header 值（采集版本 2 为每条 audit 一个 Header 块和一个入站 User-Agent）、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
+key_path 存放 32-byte 主密钥：存在则读取；不存在时，只有数据库里没有 audit 记录、没有完整性事件、也没有冷归档分段，并且（归档开启时）归档目录里没有任何清单，才自动生成，否则按密钥不可用处理（[模块 09](09-security-encryption-and-redaction.md) §3）。每个 Header 值（采集版本 2 为每条 audit 一个 Header 块和一个入站 User-Agent）、压缩后的 raw chunk、原始 Request-URI、解析结果、content/binary object、外部引用和 stream timeline 用 AES-256-GCM 独立随机 nonce 加密。域分离 SHA-256 提供内容地址与重建校验，从主密钥派生的 HMAC-SHA-256 提供 append-only 完整性事件链；首版不提供密钥轮换工具。
 
 详细设计见 [03](03-audit-session-and-evidence-capture.md) 与 [04](04-sqlite-storage-and-migrations.md)。
 
@@ -148,6 +150,7 @@ Finalize 后把 audit_records.parse_status 设为 pending，并把 audit_id 放�
 | 23 | [组织项目周报与使用合规（可选，默认关闭）](23-org-project-reports.md) |
 | 24 | [会话记录分析（可选，默认关闭）](24-session-analysis.md) |
 | 25 | [Agent 接入（可选，默认关闭；全部阶段已实现，端到端旅程在 PostgreSQL 上通过；未验证：真实浏览器、容器镜像、真实 NewAPI、`-race`）](25-agent-access.md)，[接口合同](25-agent-access-contract.md) |
+| 26 | [冷归档与归档格式（可选，默认关闭；只导出，格式版本 0 试行）](26-cold-archive.md) |
 
 ## 10. 当前实现范围
 
@@ -205,3 +208,10 @@ issue #59 第 3 阶段（设计与实施记录见 [`doc/design/issue-59-stage3-w
 - PostgreSQL 上 unified 写采集版本 2（迁移 007，schema 版本 7）：每条 audit 一个密封的 Header 块、单独密封的入站 User-Agent、阶段行上的内容类型与编码两列、版本 2 的 capture 摘要；版本 1 的行照常读取和校验（模块 04 §3.9、[模块 09](09-security-encryption-and-redaction.md) §5.2）。SQLite 只写版本 1。
 - parser 只有一个 4096 个作业的 FIFO。已提交的 audit 交给 `Submit`，条件满足时带着会话手里的明文，解析不读回 raw；`Notify` 和 pending 扫描照旧；normalization 有 recover，给每个作业加了 2 分钟期限（[模块 05](05-parser-framework.md) §5）。
 - `audit.staging.dir` 必填；启动时暂存目录不可用，两种模式下审计都不可用（available 不审计照常转发，strict 拒绝）。`audit.write_path` 可以省略或写 `unified`，写 `legacy` 时配置校验失败。没有切回的开关；回滚只能换回上一个版本的二进制，它读不了采集版本 2 的行（[部署说明](../deployment/README.md) 3.3）。
+
+issue #59 第 4 阶段的 P3（设计与实施记录见 [`doc/design/issue-59-stage4-cold-archive.md`](../design/issue-59-stage4-cold-archive.md)）加了冷归档，默认关闭（[模块 26](26-cold-archive.md)）：
+
+- `archive.mode` 为 `export_only` 或 `archive_then_delete` 时，每天一次把 retention 本来要删除的 audit 和 gap 导出到 `archive.dir`：明文行按会话或协议装包，gzip 后分帧加密，每个包有一份签名的明文清单；发布前登记意向，发布后重读核对、抽样与热库比对，再定稿。凭据值不进归档，只留名称、长度和 keyed 指纹。
+- 本版本只导出：开启后 retention 的直接删除不再组装，热库持续增长；`archive_then_delete` 现在与 `export_only` 相同，校验后移除以后单独上线。格式版本 0 是试行，版本 0 的包永远不作为删除的依据。
+- 迁移 008 加目录表，schema 版本 8（[模块 04](04-sqlite-storage-and-migrations.md) §3.10）；旧版本打不开版本 8 的库。主密钥的新建另外要求目录表没有分段、归档目录里没有清单（[模块 09](09-security-encryption-and-redaction.md) §3）。
+- 独立读取工具 `cmd/audit-archive` 只读归档目录，不连数据库：列出、核对、输出明文行、按单条导出的形态导出、拿已知 Key 核对指纹（模块 26 §24）。

@@ -4,7 +4,7 @@
 
 本模块只实现个人单机需要的自动保留清理。它删除过期 HTTP audit 和不再可达的 conversation/content/binary 对象，同时保证仍在保留期内的分支轮次不依赖已经删除的父历史。
 
-不提供单条 DELETE API、在线导出、gaps 页面或自动 VACUUM。完整性事件使用全局 append-only 链，不随普通 audit retention 删除中间事件。
+不提供单条 DELETE API、在线导出、gaps 页面或自动 VACUUM。完整性事件使用全局 append-only 链，不随普通 audit retention 删除中间事件。把到期记录导出到归档目录的冷归档是另一个模块（[模块 26](26-cold-archive.md)），开启时本模块不运行（§2）。
 
 ## 2. 选择规则
 
@@ -13,6 +13,11 @@
 - `0`：关闭 runner；
 - `1..3650`：按当前时间减去天数计算 cutoff；
 - 其他值：配置无效，拒绝启动。
+
+**开启冷归档时不直接删除。** `archive.mode` 不为 `off`（`export_only` 或 `archive_then_delete`，[模块 26](26-cold-archive.md)）时，本模块的 runner 不组装：audit 和 gap 都不再被直接删除，到期判定（同一个 cutoff 算法）改由每天一次的归档运行使用。这是决策 5.7 的第 2 条护栏：启用归档以后，任何情况下都不会跳过归档直接删。本版本的归档只导出、不移除，两种开启的模式下热库都持续增长；校验后移除上线之前，本模块是唯一会删除 audit 的代码。
+
+- 开启归档要求 `retention_days > 0`，否则配置校验拒绝（第 1 条护栏）。
+- **暂停归档**而不恢复直接删除：把 `retention_days` 设为 0。把 `archive.mode` 改回 `off` 而 `retention_days > 0`，本模块的直接删除立刻恢复，没有归档就删；以前运行过归档（目录表里有运行记录）时启动日志 Warn 一条 `archive_direct_delete_resumed`（第 3 条护栏）。
 
 只选择同时满足以下条件的 `audit_records`：
 

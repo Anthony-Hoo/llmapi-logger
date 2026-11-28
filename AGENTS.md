@@ -58,7 +58,11 @@ internal/
   parser/handover/              # 采集会话交给 parser 的已提交 audit 与明文证据（只有数据类型）
   security/                     # 本地 AES-GCM 加密
   query/                        # 受保护的查询与证据解密
-  retention/                    # 简单保留清理
+  retention/                    # 简单保留清理（开启冷归档时不组装）
+  archive/                      # 冷归档格式：记录、列规格、凭据投影、记录摘要、行与清单编解码（模块 26）
+  archive/stream/               # 冷归档数据文件的分帧认证加密
+  archive/bundle/               # 冷归档包的写入、发布、重读核对与按清单建索引
+  archive/runner/               # 每日归档运行：选取、分组装包、登记、抽样比对、对账、gap 导出
   streamtimeline/               # SSE offset/time delta 编解码
   observability/                # 安全 JSON 请求日志
   agentapi/                     # Agent 门面与命令行共用的信封、错误码、接口登记表（只依赖标准库）
@@ -87,10 +91,11 @@ tests/                          # 跨模块集成测试
 - passthrough 与审计代理共享 NewAPI rewrite 和显式上游代理设置，但 passthrough 不创建 audit、不解析、不执行 interceptor，也不写 LLM 请求完成日志。
 - `audit` 采集层只处理字节、长度、哈希、时间和完整性状态；四阶段先独立采集，只有确认成对 Body 完全一致才合并 `source_stage`。写入路径只有一条（原来的 `unified`，模块 03 §13）：一条 audit 写成至多四个 writer 操作（落暂存的阶段各另加一个），Body 在内存预算内保留、超出的加密落本地暂存（`audit.staging.dir` 必填），成对阶段在内存里判定，PostgreSQL 上每条 audit 的 Header 存成一个密封块（采集版本 2）。逐操作写库的 legacy 路径已删去，它写下的采集版本 1 行照常可读、可校验。parser 在请求完成后异步生成摘要（条件满足时直接用会话交来的明文）；OpenAI、Anthropic 与 Gemini normalizer 再写可分支 turn、content/binary object、重建 hash 和 raw retention，失败不影响转发。
 - 可选的 `newapi` 集成只读同步安全用户目录，并用上游 `X-Oneapi-Request-Id` 查询全站日志回填用户与 Token 身份；不读取或保存完整 API Key，解析失败不影响转发。
-- PostgreSQL 使用持有 session advisory lock 的固定连接和单 writer goroutine，查询使用独立只读连接；多语句证据快照使用 repeatable read。启动恢复、gap 和 retention 只维护审计数据，不改变代理字节路径。
+- PostgreSQL 使用持有 session advisory lock 的固定连接和单 writer goroutine，查询使用独立只读连接；多语句证据快照使用 repeatable read。启动恢复、gap、retention 和冷归档只维护审计数据，不改变代理字节路径。
+- 可选的冷归档（`archive.mode`，默认 `off`，模块 26）每天把到期的 audit 和 gap 从只读快照导出成目录里的包：复核原完整性事件后写明文行，整包压缩并分帧加密，清单签名，发布后重读核对并抽样与热库比对。开启时 retention 的直接删除不组装；本版本只导出、不删除热库数据，格式版本 0 的包永远不作为删除依据。独立的 `audit-archive` 只读归档目录、不连数据库。
 - 管理 API、health 和 ready 在任何监听地址都必须鉴权：CLI 使用静态 Admin Token，Web UI 使用由该 Token 登录换取的七天 HttpOnly Cookie。可选的 `developer_login` 提供第二种身份：NewAPI 用户用自己的 API Key 登录，以同等只读深度只能看到该 Key 产生的记录；管理端点返回 403，他人记录与本地策略拦截记录返回 404。作用域由主密钥派生的 keyed 指纹加既有 token 关联判定，系统仍不保存完整或打码 API Key。审计主列表只展示调用者、时间、模型、入站 User-Agent、会话归属标识与 scope 内轮次计数；普通列表会逐条只解密该 User-Agent 供展示和子串筛选，不读取其他 Header、Request-URI、Body 或 conversation 内容。详情按需重建 verified conversation/provider JSON；raw request/response Body 只对 `retention_state=full` 开放；assistant 文本使用禁用原始 HTML 的安全 Markdown 展示。
 - 可选的 `agent_access`（默认关闭，模块 25）提供第三种管理面凭据 Agent 令牌：由网页会话在授权确认页签发给本机命令行 `llmaudit`，只能调用 `/api/agent/v1/*` 门面，身份与可见范围同签发它的会话，库里只存 HMAC；门面不接受 Cookie 与管理 Token，`/api/v1/*` 也不接受 Agent 令牌。门面下只有两条匿名路径：`POST /api/agent/v1/token`（一次性授权码加 PKCE 兑换令牌）与 `GET /api/agent/v1/dl/<签名>/<文件名>`（凭 `admin_token` 派生密钥签名、30 分钟有效的链接下载清单内的 Skill 安装包）。门面只组合既有服务，不复制业务校验；凭据类 Header 与查询参数的值不输出，分析模型的 API Key 只能由用户在终端输入。
-- 敏感 Header、raw Body、Query、fallback conversation、content/binary object 和 timeline 使用一个本地 AES-256-GCM key 加密；管理证据响应使用 `Cache-Control: no-store`。
+- 敏感 Header、raw Body、Query、fallback conversation、content/binary object 和 timeline 使用一个本地 AES-256-GCM key 加密；管理证据响应使用 `Cache-Control: no-store`。冷归档的加密、签名和凭据指纹用由同一主密钥按域字符串派生的独立子密钥；归档里不保留任何凭据值，只留名称、长度和 keyed 指纹；归档目录不能与密钥目录重叠，主密钥的备份要与归档盘分开。
 - 普通 JSON 日志只记录稳定状态和耗时，不记录 Query、Header value、Body、Token、key、密文或底层错误文本。
 
 ## 方向原则

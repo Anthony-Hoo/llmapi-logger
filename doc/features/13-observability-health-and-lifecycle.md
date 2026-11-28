@@ -72,6 +72,26 @@ parser 的两个码：`parser normalization failed`（`error_code=normalize_pani
 
 `/v1/models` 等安全非 LLM 请求即使经本程序 passthrough，也不创建 audit、不执行 interceptor，并且不写 `llm request completed`。错误 Method、受保护路径族和危险路径在分发边界 fail-closed，也不伪装成 LLM audit。
 
+### 2.2 冷归档
+
+冷归档（[模块 26](26-cold-archive.md)，默认关闭）只写稳定的码、计数、字节数和耗时，不写路径、文件名、会话内容或底层错误原文。完整的字段和失败的 `reason` 取值见模块 26 §19。
+
+| 日志 | 字段 | 何时 |
+| --- | --- | --- |
+| `archive export only: hot store keeps growing` | `error_category=archive_export_only` | 启动，`archive.mode` 为 `export_only` 或 `archive_then_delete`：retention 的直接删除不组装，热库持续增长（Warn） |
+| `archive removal is not active in this build: archive_then_delete exports only` | `error_category=archive_removal_inactive` | 启动，`archive_then_delete`：这个版本只导出（Warn） |
+| `archive is off and retention deletes directly again; to pause archiving set retention_days: 0` | `error_category=archive_direct_delete_resumed`、`retention_days` | 启动，归档关闭、`retention_days > 0`，而目录表里有运行记录（Warn） |
+| `archive runner unavailable` | `error_category=archive_unavailable`、`reason`（`audit_unavailable`、`dir_<目录检查的码>`、`invalid_timezone`、`invalid_options`） | 归档开启而 runner 不能组装；代理和审计照常，直接删除仍不组装（Warn） |
+| `audit key unavailable` | 原有字段，另加 `reason=archive_manifests_present` | 密钥文件缺失、数据库为空，而归档目录里有清单，所以不新建密钥（Warn） |
+| `audit archive keys unavailable` | `mode`、`error_category=key_unavailable` | 归档子密钥派生失败，审计不可用（Warn） |
+| `archive run completed` / `archive run failed` | `status`、`exported_audits`、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`、`stale_audits`、`exported_gaps`、`segments`、`disk_bytes`、`duration_ms`，按原因的 `deferred_<原因>`，可选 `reconciled_segments`、`deadline_reached`；失败时另有 `error_category=archive_failed`、`reason`、`storage_error` | 一次运行结束（Info / Warn）；失败后 10 分钟重试 |
+| `archive run interrupted` | `error_category=archive_interrupted`、`exported_audits`、`duration_ms` | 运行被进程关闭取消（Warn） |
+| `archive integrity check failed` | `error_category=archive_integrity_failed`、`reason` | 一条 audit 的原完整性事件复核或密文认证不过：它留在热库、登记推迟，存储的载荷校验状态置为失败（Error） |
+| `archive directory has manifests that do not verify`、`archive bundle unknown to the catalog does not verify` | `error_category=archive_manifest_unusable`，`manifests` 或 `reason` | 对账时有清单解析不了、签名不对，或目录表不认识的包核对不过（Warn） |
+| `archive bundle registered from the directory` | `bundle_kind`、`members` | 对账登记了一个目录表不认识、核对通过的包（Info） |
+
+归档不加健康状态，也不进 `/readyz` 的字段。唯一的影响是复核不过时载荷校验状态置为失败，与后台载荷校验发现损坏时相同，database 因此报告不健康。运行记录只在 `archive_runs` 表里，管理界面不展示。
+
 ## 3. 管理面健康接口
 
 管理 listener 提供：

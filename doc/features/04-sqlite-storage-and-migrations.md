@@ -183,7 +183,8 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 | `archive_gap_members` | 已导出的 gap：主键 `gap_id`，所属分段，状态 `sealed`、`hot_removed` |
 
 - **只建表。** 迁移不改已有的表，不读任何行。测试在有两种采集版本的 audit、带完整性事件的版本 7 库上确认：已有表的 `relfilenode` 和每行的 `xmin` 都不变，升级前后链校验与载荷校验都通过，回滚 SQL 之后再升级同样如此。
-- **`HasAudits`**：`audit_records`、`integrity_events`、`archive_segments` 任一有行就为真，启动时不会在已有归档包的库上新建主密钥（设计 L.3）。只有运行记录、没有分段时为假。SQLite 没有目录表，`HasAudits` 只看前两张表。
+- **`HasAudits`**：`audit_records`、`integrity_events`、`archive_segments` 任一有行就为真，启动时不会在已有归档包的库上新建主密钥（设计 L.3）。只有运行记录、没有分段时为假。SQLite 没有目录表，`HasAudits` 只看前两张表。归档开启时启动另外查归档目录里有没有清单（[模块 26](26-cold-archive.md) §17.4）。
+- 归档运行怎样使用这些表（意向、定稿、水位、推迟、对账）见模块 26 §18 到 §20。
 - **写入**都是 writer 操作，各自独占一个事务（§5）；读取走只读连接池。导出快照另见 §6。
 - 与 002 到 007 一样只由运行时 `migrate()` 应用。SQLite 不加迁移：归档只在 PostgreSQL 上。
 - `latestSchemaVersion` 为 8。**旧版本遇到版本 8 的库会拒绝打开审计存储**，表现与上面相同。回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-7)。
