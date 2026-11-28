@@ -143,7 +143,17 @@ func (current *run) remove() error {
 	if err != nil {
 		return current.removalFailure(err)
 	}
-	ordered := RemovalOrder(members)
+	// Removal never deletes what direct retention with the current setting
+	// would keep: a member sealed under a shorter retention_days (an
+	// export_only run, or a removal an earlier run did not finish) waits
+	// until its audit is due again.
+	due := members[:0]
+	for _, member := range members {
+		if member.StartedAtNS < current.cutoffNS {
+			due = append(due, member)
+		}
+	}
+	ordered := RemovalOrder(due)
 	checked := map[string]bool{}
 	var last time.Duration
 	ran := false
@@ -217,6 +227,11 @@ func (current *run) remove() error {
 		// A reconciled gaps segment has no gap members (H.6 item 2): nothing
 		// to check or remove.
 		if segment.BundleKind != storage.ArchiveBundleGaps || segment.FormatVersion < storage.ArchiveRemovalMinFormatVersion || segment.MemberCount == 0 {
+			continue
+		}
+		// As for the audits: a gaps segment waits until its last gap ended
+		// before the current cutoff, which direct retention requires.
+		if segment.LastEndedAtNS == nil || *segment.LastEndedAtNS >= current.cutoffNS {
 			continue
 		}
 		for {

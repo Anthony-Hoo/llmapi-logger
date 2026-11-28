@@ -243,7 +243,17 @@ func (current *run) pass() (bool, error) {
 				work.resolved[id] = true // no longer in the hot store
 			}
 		}
-		looked = append(looked, candidates...)
+		for _, candidate := range candidates {
+			// Looked at by id, not through the cutoff-bounded page: an audit
+			// that would be due but is younger than the current cutoff
+			// (retention_days raised since it was deferred) is not exported,
+			// and its deferred row stays as it is, since the watermark has
+			// passed it.
+			if candidate.Due() && candidate.StartedAtNS >= current.cutoffNS {
+				continue
+			}
+			looked = append(looked, candidate)
+		}
 		budget -= count
 	}
 	if !current.staleDone && budget > 0 && len(current.lookback) == 0 {

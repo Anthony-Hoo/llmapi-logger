@@ -922,3 +922,35 @@ func TestPostgresArchiveStartupGuards(t *testing.T) {
 		t.Fatalf("archive %v logs %s", env.app.archive, env.logs.String())
 	}
 }
+
+// Removal follows the current retention_days: members sealed by an
+// export_only run under a short retention stay in the hot store after the
+// switch to archive_then_delete with a longer one, until they are due under
+// it.
+func TestPostgresArchiveRemovalWaitsForTheCurrentCutoff(t *testing.T) {
+	t.Parallel()
+	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
+	env.traffic([]protofixture.Protocol{protofixture.OpenAIResponses}, 1)
+	env.due()
+	if result := env.mustRun(); result.Counts.ExportedAudits != int64(env.sent) {
+		t.Fatalf("export_only run %+v", result)
+	}
+	if err := env.app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	env.cfg.Archive.Mode = config.ArchiveModeArchiveThenDelete
+	env.cfg.RetentionDays = 30
+	env.logs = &lockedBuffer{}
+	env.start()
+	kept := env.mustRun()
+	if kept.Counts.ExportedAudits != 0 || kept.Removal.Removed != 0 || env.tableCounts()["audit_records"] != int64(env.sent) {
+		t.Fatalf("run under the raised retention %+v, %d audits hot", kept, env.tableCounts()["audit_records"])
+	}
+
+	env.offset.Store(int64(31 * 24 * time.Hour))
+	due := env.mustRun()
+	if due.Removal.Removed != int64(env.sent) || env.tableCounts()["audit_records"] != 0 {
+		t.Fatalf("run once due %+v, %d audits hot", due, env.tableCounts()["audit_records"])
+	}
+}

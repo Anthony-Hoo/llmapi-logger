@@ -559,3 +559,71 @@ func TestRemovalGates(t *testing.T) {
 		}
 	})
 }
+
+// A deferred audit is looked at again by id, outside the cutoff-bounded
+// page. When retention_days was raised while it was deferred, it is not
+// exported (and so not removed) until it is due under the current cutoff;
+// its deferred row stays, because the watermark has already passed it.
+func TestDeferredAuditWaitsForTheCurrentCutoff(t *testing.T) {
+	h := newRemovalHarness(t)
+	pending := h.addTurnless("pending", protocolChat, baseTimeNS+1)
+	pending.deferral = storage.ArchiveDeferredParsePending
+	h.addTurnless("fine", protocolChat, baseTimeNS+2)
+	h.mustRun()
+	if h.store.deferred["pending"].Reason != storage.ArchiveDeferredParsePending {
+		t.Fatalf("deferred %+v", h.store.deferred)
+	}
+
+	// The audit is ten days old; retention is raised to 30 days and its
+	// parse completes.
+	h.options.RetentionDays = 30
+	pending.deferral = ""
+	again := h.mustRun()
+	if again.Counts.ExportedAudits != 0 || again.Removal.Removed != 0 {
+		t.Fatalf("an audit younger than the cutoff was archived: %+v", again)
+	}
+	if _, hot := h.store.audits["pending"]; !hot {
+		t.Fatal("an audit younger than the cutoff was removed")
+	}
+	if _, kept := h.store.deferred["pending"]; !kept {
+		t.Fatalf("the deferred row was dropped: %+v", h.store.deferred)
+	}
+
+	// Once it is due under the new cutoff it is archived and removed.
+	h.clock.advance(21 * 24 * time.Hour)
+	due := h.mustRun()
+	if due.Counts.ExportedAudits != 1 || due.Removal.Removed != 1 {
+		t.Fatalf("due run %+v", due)
+	}
+	if _, kept := h.store.deferred["pending"]; kept || len(h.store.audits) != 0 {
+		t.Fatalf("deferred %+v, hot %d", h.store.deferred, len(h.store.audits))
+	}
+}
+
+// Members sealed under a shorter retention (an export_only run, or a
+// removal an earlier run did not finish) are not removed while they are
+// younger than the current cutoff: removal never deletes what direct
+// retention with the current setting would keep. The same holds for the
+// gaps of a gaps segment.
+func TestRemovalKeepsWhatTheCurrentCutoffKeeps(t *testing.T) {
+	h := newHarness(t)
+	h.addTurnless("young", protocolChat, baseTimeNS+1)
+	h.store.gaps = []archive.Gap{{ID: 1, StartedAtNS: baseTimeNS, EndedAtNS: baseTimeNS + 10, Reason: "queue_full", RequestCount: 1, CreatedAtNS: baseTimeNS + 11}}
+	first := h.mustRun()
+	if first.Counts.ExportedAudits != 1 || first.ExportedGaps != 1 {
+		t.Fatalf("export_only run %+v", first)
+	}
+
+	h.options.Mode = storage.ArchiveModeArchiveThenDelete
+	h.options.RetentionDays = 30
+	kept := h.mustRun()
+	if kept.Removal.Removed != 0 || kept.Removal.RemovedGaps != 0 || len(h.store.audits) != 1 || len(h.store.gaps) != 1 {
+		t.Fatalf("removal under the raised retention %+v, hot %d audits %d gaps", kept.Removal, len(h.store.audits), len(h.store.gaps))
+	}
+
+	h.clock.advance(21 * 24 * time.Hour)
+	due := h.mustRun()
+	if due.Removal.Removed != 1 || due.Removal.RemovedGaps != 1 || len(h.store.audits) != 0 || len(h.store.gaps) != 0 {
+		t.Fatalf("removal once due %+v, hot %d audits %d gaps", due.Removal, len(h.store.audits), len(h.store.gaps))
+	}
+}

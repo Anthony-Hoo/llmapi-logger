@@ -1865,7 +1865,7 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
 
 **一趟（B.1、B.2）**
 
-12. 一趟的预算 `pass_audits` 依次分给：推迟过的 audit（每次运行开始时读出全部推迟行，每条每次运行再看一次）、`stale` 的成员（只在 `archive_then_delete` 下，且推迟的看完之后）、水位之后的新范围。B.2 只说新范围。
+12. 一趟的预算 `pass_audits` 依次分给：推迟过的 audit（每次运行开始时读出全部推迟行，每条每次运行再看一次）、`stale` 的成员（只在 `archive_then_delete` 下，且推迟的看完之后）、水位之后的新范围。B.2 只说新范围。推迟的 audit 按 id 复查，不经过截止时间约束的那一页：推迟期间调大了 `retention_days` 时，复查时已满足条件 1 到 3、但 `started_at_ns` 不在当前截止时间之前的，这一趟不导出，推迟行原样留着（不更新原因和检查时间，不计入这次的推迟数），到期后照常导出。不能去掉这一行：水位已经越过它，去掉就再也不会归档。推迟行不因此变多，只是晚一些出表。`stale` 的重新收录和 B.2 的会话补全本来就带当前截止时间。
 13. 期限只在趟与趟之间检查，至少做一趟；到了期限这次运行仍以 `completed` 结束，完成日志带 `deadline_reached`。**到了期限时 gap 不导出**，留给下一次。
 14. 推迟：快照给出的 `open`、`parse_pending`、`caller_pending`，导出时完整性类的排除记 `integrity_failed`，其余排除记 `export_failed`（R.6 第 18 条）；包写入方拒绝的记录和抽样读出不同的成员（第 25 条）也记 `export_failed`。`not_found` 的和已有当前成员的从推迟表里去掉。不能导出的成员留在热库、登记推迟、按原因计数报告，之后每次运行再看。
 15. 水位只在这一趟的分段全部定稿之后，随计数、推迟和不再推迟的 audit 一起由 `RecordArchivePass` 写入（R.6 第 3 条）；新范围这一页没有任何行时水位不动。
@@ -1956,6 +1956,10 @@ M、H.6 和 4.5 只在导出时（H.2 第 6 步）重开已发布的文件做完
 20. **与对账的交互。** 一个已定稿分段的清单丢了或签名不对时，下一次运行开头的对账把它的数据文件当作没有清单的数据文件改名加 `.orphan`（H.6 第 3 步）。成员因为核对不过不会被移除；修复时要把清单和数据文件的原名一起恢复，只放回清单不够。这是对账原有的行为，没有改。
 
 测试：`bundle` 的主机测试覆盖 `CheckFiles` 的完好、清单缺失、对象文件缺失、数据文件截断、清单被改、换一把密钥；runner 的主机测试对一个分段的包缺失、数据文件截断、清单被改、清单与目录表记下的不同各跑一遍：只扣下那个分段的成员，其余的移除，每个分段每次运行只查一次，包恢复后下一次运行移除它们；gap 分段同样。PostgreSQL 上导出之后删掉一个会话包的对象文件：它的成员和全部行留在热库、仍是 `sealed`，其余包的成员被移除，日志和计数显示出来，文件放回后下一次运行移除它们。
+
+**按当前截止时间移除（审查意见）**
+
+21. 移除只取 `started_at_ns` 在这次运行的截止时间之前的成员，gap 分段只在它的 `last_ended_at_ns` 在截止时间之前时移除。原先移除阶段列出全部可移除成员，不看截止时间：在较短的 `retention_days` 下定稿的成员（`export_only` 的运行，或者上一次没移除完），调大 `retention_days` 之后仍会被删掉，比同样设置下直接 retention 删的多（PostgreSQL 上 `export_only` 之后改成 `archive_then_delete`、保留期从 1 天改成 30 天，下一次运行删了全部 5 条）。现在它们保持 `sealed` 留在热库，到期后的运行照常移除。这只让移除的东西更少。一个到期的父轮次被删、它还没到期的子轮次留下时，子轮次被改写成检查点根，它的成员到期移除时变 `stale`，再以更高的修订号重新导出后移除，这是安全的一侧。推迟复查的同一个问题见 R.8 第 12 条。测试：runner 的主机测试 `TestDeferredAuditWaitsForTheCurrentCutoff`、`TestRemovalKeepsWhatTheCurrentCutoffKeeps`（含 gap），PostgreSQL 上 `TestPostgresArchiveRemovalWaitsForTheCurrentCutoff`。
 
 ### R.10 格式冻结为版本 1（O.1 里 P3 之后“单独一个提交”）
 
