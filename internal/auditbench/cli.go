@@ -56,11 +56,12 @@ it creates its own schema in the target database and leaves it in place unless
 every other session; the result flags such sessions and also reports the
 per-table and the writer-backend (PostgreSQL 18) figures, which are isolated.
 
---write-path selects audit.write_path. unified needs a staging directory: give
---staging-dir, or the tool creates a temporary one beside its key directory
-and removes it after the run. The result records the write path the running
-application reports, and the run fails when it differs from the request (the
-application falls back to legacy when staging is unusable).
+The application always runs the unified write path, the only one, which
+needs a staging directory: give --staging-dir, or the tool creates a
+temporary one beside its key directory and removes it after the run.
+--write-path accepts only unified; the legacy arm of an A/B can be run only
+with the binary built at commit b807047, the last one with both paths. The
+result records the write path the running application reports.
 
 With --count-statements (the default) the application's PostgreSQL
 connections run through a protocol relay in this process, which counts writer
@@ -149,9 +150,9 @@ func mainRun(ctx context.Context, args []string, getenv func(string) string, std
 	dropSchema := flags.Bool("drop-schema", false, "drop the schema created by --fresh-schema after the run")
 	output := flags.String("output", "audit-bench-result", "output path prefix; writes <prefix>.json and <prefix>.md")
 	commit := flags.String("commit", "", "commit to record when the binary carries no VCS information")
-	writePath := flags.String("write-path", "legacy", "capture write path: legacy, or unified (needs a staging directory)")
+	writePath := flags.String("write-path", "unified", "capture write path: unified, the only one (legacy needs the binary built at b807047)")
 	stageBytes := flags.Int64("stage-bytes", 0, "audit.memory.stage_bytes: plaintext a stage keeps in memory before staging (0: the default, 8 MiB; at least 1 MiB)")
-	stagingDir := flags.String("staging-dir", "", "audit.staging.dir, an absolute path (unified without it: a temporary directory the tool removes)")
+	stagingDir := flags.String("staging-dir", "", "audit.staging.dir, an absolute path (without it: a temporary directory the tool removes)")
 	countStatements := flags.Bool("count-statements", true, "relay the application's PostgreSQL connections to count writer operations, commits and reader statements (plain TCP only)")
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -195,8 +196,13 @@ func mainRun(ctx context.Context, args []string, getenv func(string) string, std
 		fmt.Fprintln(stderr, "--org-reports needs --caller-lookups and --insights")
 		return 2
 	}
-	if *writePath != "legacy" && *writePath != "unified" {
-		fmt.Fprintf(stderr, "--write-path must be legacy or unified, got %q\n", *writePath)
+	switch *writePath {
+	case "unified":
+	case "legacy":
+		fmt.Fprintln(stderr, "--write-path legacy was removed with the legacy write path; run the legacy arm with the binary built at commit b807047")
+		return 2
+	default:
+		fmt.Fprintf(stderr, "--write-path must be unified, got %q\n", *writePath)
 		return 2
 	}
 	if *stageBytes != 0 && (*stageBytes < 1<<20 || *stageBytes > 256<<20) {

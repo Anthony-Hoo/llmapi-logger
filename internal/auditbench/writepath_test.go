@@ -3,6 +3,7 @@ package auditbench
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -252,5 +253,16 @@ func TestCompareWarnsAboutWritePathLabels(t *testing.T) {
 	compareResults(old, unified, "old.json", "new.json", &output)
 	if text := output.String(); !strings.Contains(text, "does not record the write path") || !strings.Contains(text, "| writer commits per audit | count | n/a |") {
 		t.Fatalf("format 1 comparison:\n%s", text)
+	}
+}
+
+// The legacy write path is gone: --write-path names only unified, and a
+// request for legacy says which binary still has it.
+func TestRunRefusesTheRemovedLegacyWritePath(t *testing.T) {
+	for value, want := range map[string]string{"legacy": "b807047", "fast": "must be unified"} {
+		var stdout, stderr strings.Builder
+		if code := Main(context.Background(), []string{"run", "--write-path", value}, func(string) string { return "" }, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), want) {
+			t.Fatalf("--write-path %s: exit %d, stderr %q", value, code, stderr.String())
+		}
 	}
 }

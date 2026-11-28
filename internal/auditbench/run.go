@@ -427,17 +427,16 @@ func runBench(ctx context.Context, options runOptions, getenv func(string) strin
 
 	capture := options.capture
 	if capture.writePath == "" {
-		capture.writePath = config.AuditWritePathLegacy
+		capture.writePath = config.AuditWritePathUnified
 	}
 	bench.result.WritePath = WritePathInfo{Requested: capture.writePath, StageBytes: capture.stageBytes,
 		GlobalBytes: config.DefaultAuditMemoryGlobalBytes, StagingMaxBytes: config.DefaultAuditStagingMaxBytes}
 	if capture.stageBytes == 0 {
 		bench.result.WritePath.StageBytes = config.DefaultAuditMemoryStageBytes
 	}
-	switch {
-	case capture.stagingDir != "":
+	if capture.stagingDir != "" {
 		bench.result.WritePath.StagingDir = "flag"
-	case capture.writePath == config.AuditWritePathUnified:
+	} else {
 		// A sibling of the key directory: staging must not be inside it.
 		temporary, err := os.MkdirTemp("", "audit-bench-staging-")
 		if err != nil {
@@ -531,7 +530,7 @@ func runBench(ctx context.Context, options runOptions, getenv func(string) strin
 	}
 	bench.result.WritePath.Effective = effective
 	if effective != capture.writePath {
-		return fmt.Errorf("the application runs the %s write path, not the requested %s (is the staging directory usable?)", effective, capture.writePath)
+		return fmt.Errorf("the application runs the %s write path, not the requested %s", effective, capture.writePath)
 	}
 	for attempt := 0; attempt < 50 && bench.writerPID == 0; attempt++ {
 		pid, err := bench.stats.writerPID(ctx)
