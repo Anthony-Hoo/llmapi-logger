@@ -142,8 +142,11 @@ func (unifiedRetainer) flush(session *Session, stage *stageCapture, body *bodyCa
 }
 
 // matching returns how many leading bytes of data equal this body's retained
-// bytes at position. Staged bytes are not compared: a source stages a chunk
-// only after its duplicate compared it.
+// bytes at position. Staged bytes are not compared. Once the duplicate
+// exists a source stages a chunk only after the duplicate compared it; a
+// source read to its end before the duplicate started (a body interceptor's
+// pre-read, which the application always has) may already have staged
+// chunks, and the duplicate then owns its bytes from the first of them.
 func (held *unifiedBody) matching(position int64, data []byte) int {
 	if held == nil {
 		return 0
