@@ -152,7 +152,9 @@ func newFinalizeHarness(t *testing.T, store finalizeStore, options audit.Options
 	harness.worker.SetHeaderAllowlist([]string{"user-agent", "content-type", protofixture.ExchangeHeader, "x-missing"})
 	t.Cleanup(harness.worker.Close)
 	harness.upstream = protofixture.NewUpstream("fx")
-	harness.upstream.CancelWait = 2 * time.Second
+	// Bounds the wait at a client-cancel cut for the client to go away; it
+	// returns as soon as the client does.
+	harness.upstream.CancelWait = parser.PipelineWait
 	server := httptest.NewServer(harness.upstream)
 	t.Cleanup(server.Close)
 	harness.handler = harness.proxyTo(server.URL)

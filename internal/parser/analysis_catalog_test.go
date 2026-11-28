@@ -316,7 +316,7 @@ func analyzeExchanges(name string, exchanges []protofixture.Exchange) ([]string,
 	}
 	defer closeManager()
 	fake := protofixture.NewUpstream("fx-")
-	fake.CancelWait = 10 * time.Second
+	fake.CancelWait = parser.PipelineWait
 	// Answering only after the proxy's transport has finished sending the
 	// request body avoids most loopbackFault retries (see there).
 	fake.FirstByteDelay = 20 * time.Millisecond
