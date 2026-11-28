@@ -1699,6 +1699,19 @@ P4：
 11. **索引里修订号相同的两份**：清单的 `created_at_ns` 较晚的优先，再按路径。
 12. **行解码补了一项校验**：轮次的两个信封哈希必须是 32 字节（两个存储的列定义都是 `NOT NULL` 且长度为 32）。
 
+### R.7 读取工具 `cmd/audit-archive`（O.1 第 10 个提交，逻辑在 `internal/archivecli`）
+
+1. **五个子命令**：`list`、`verify`、`cat`、`export`、`fpr`。退出码：0 完成；1 有核对不过、有包被跳过、密钥不符或输出写不出去；2 用法错误；3 找不到、该记录没有这种导出，或 `fpr` 没有匹配。错误写到标准错误，形如 `audit-archive: <码>: <说明>`。
+2. **`list`** 不带密钥也能列出全部包；带 `--key` 时多一列，标明每个包的清单签名是 `ok`、`key_mismatch` 还是 `mac_mismatch`。
+3. **`verify`** 有两个级别：不带密钥只核对文件大小和哈希（`files`，输出里标明较弱）；带密钥做 J.2 的全部检查（`full`）。带密钥时默认核对原完整性事件的 MAC，`--skip-event-mac` 可以关掉并给出告警。
+4. **`cat`** 输出的是核对通过后重新编码的行，测试表明与包里存的行逐字节相同；核对不过的包被跳过并以 1 退出。不带过滤时包含 gap 行。`--with-objects` 逐条流出对象文件（为此在 `bundle` 里加了一个 `Objects` 迭代）。
+5. **`export`** 的种类：`conversation`（默认）、`headers`、`request`、`response`、`raw-request`、`raw-response`、`timeline-request`、`timeline-response`、`detail`。`detail` 是正文没有列的一种：投影后的详情。`--conversation` 按会话导出时每行一个对象 `{"audit_id","turn_id","created_at_ns","conversation"}`，每条 audit 取最高修订号，跨包按 `(created_at_ns, audit_id)` 排序。
+6. **JSON 的形状是照 Agent 门面重新声明的**，因为引入 `internal/web` 会破坏“不链接存储”的依赖守卫。集成测试要拿它与门面真实的 HTTP 输出比一次，防止两边走样。
+7. **`fpr`**：已知的 Key 从文件、管道或不回显的终端读入，从不作为命令行参数。输出三个候选（Key 本身、`Bearer ` 加 Key、`api_key_fpr`），带 `--dir` 时在全部修订号里查找并列出匹配。
+8. **密钥**：主密钥文件用应用同一个读取函数读，只读不建；带密钥时索引带着签名校验建立，伪造的清单不能顶替真的修订号；因密钥不符而查不到时报“密钥不符”，不报“找不到”。
+9. **不回显读取移到了 `internal/termio`**（P 第 14 条），`llmaudit` 改为引用它；`agentcli` 里检查“只用标准库”的测试相应放行这个包。模块 25 里说 `llmaudit` 只依赖标准库加 `agentapi` 的两处要更正。
+10. 发布脚本和镜像按 `audit-import` 的方式带上了 `audit-archive`。
+
 ### R.2 `HasAudits`（O.1 第 1 个提交）
 
 两个存储的 `HasAudits` 现在是“`audit_records` 或 `integrity_events` 有行”。目录表加进这个判断留给迁移 008 的提交。新增的启动测试 `TestStartupDoesNotReplaceMissingKeyWhileIntegrityEventsRemain` 是仓库里第一个“密钥文件缺失”的启动测试；把查询改回旧的写法时，它会看到启动新建了密钥并报 `integrity_unavailable`。
