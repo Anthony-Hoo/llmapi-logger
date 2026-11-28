@@ -28,6 +28,7 @@ COPY --from=web-build /src/internal/web/dist/ ./internal/web/dist/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" -o /out/audit-proxy ./cmd/audit-proxy && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/audit-import ./cmd/audit-import && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/audit-archive ./cmd/audit-archive && \
     mkdir -p /out/rootfs/data /out/rootfs/staging /out/rootfs/etc/audit-proxy
 
 
@@ -45,6 +46,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=go-build /out/audit-proxy /audit-proxy
 COPY --from=go-build /out/audit-import /audit-import
+COPY --from=go-build /out/audit-archive /audit-archive
 COPY --from=agent-packages /out/agent-packages /agent-packages
 COPY --from=go-build --chown=65532:65532 /out/rootfs/data /data
 # audit.staging.dir: the start-up check refuses a directory open to group or

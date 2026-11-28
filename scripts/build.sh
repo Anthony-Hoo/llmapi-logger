@@ -30,11 +30,13 @@ mkdir -p "$output_directory"
         -o "$output_directory/audit-proxy-windows-amd64.exe" ./cmd/audit-proxy
 
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output_directory/audit-import-windows-amd64.exe" ./cmd/audit-import
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output_directory/audit-archive-windows-amd64.exe" ./cmd/audit-archive
 
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
         go build -trimpath -ldflags="-s -w" \
         -o "$output_directory/audit-proxy-linux-amd64" ./cmd/audit-proxy
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output_directory/audit-import-linux-amd64" ./cmd/audit-import
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output_directory/audit-archive-linux-amd64" ./cmd/audit-archive
 )
 
 # Agent access Skill packages: cross-compiles llmaudit for every platform and
@@ -50,4 +52,5 @@ printf 'Built:\n  %s\n  %s\n' \
     "$output_directory/audit-proxy-linux-amd64"
 
 printf "Import tools: %s and %s\n" "$output_directory/audit-import-windows-amd64.exe" "$output_directory/audit-import-linux-amd64"
+printf "Archive readers: %s and %s\n" "$output_directory/audit-archive-windows-amd64.exe" "$output_directory/audit-archive-linux-amd64"
 printf "Agent packages: %s\n" "$output_directory/agent-packages"

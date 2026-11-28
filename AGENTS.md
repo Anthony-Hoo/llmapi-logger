@@ -36,6 +36,7 @@ Dockerfile / compose.yaml       # 多阶段镜像与单机 Compose
 cmd/audit-proxy/                # 程序入口
 cmd/llmaudit/                   # Agent 接入的命令行（入口；逻辑在 internal/agentcli）
 cmd/audit-bench/                # A/B 压测与存储 IO 测量工具（入口；逻辑在 internal/auditbench）
+cmd/audit-archive/              # 冷归档的独立读取工具，不连数据库（入口；逻辑在 internal/archivecli）
 skill/llmapi-audit/             # Agent 接入的 Skill 包源文件（SKILL.md、references/）
 internal/
   app/                          # 启动、组件组装和数据面三态分发
@@ -63,6 +64,8 @@ internal/
   agentapi/                     # Agent 门面与命令行共用的信封、错误码、接口登记表（只依赖标准库）
   agentaccess/                  # Agent 令牌、授权码、计划、限流与审计
   agentcli/                     # 命令行 llmaudit 的实现
+  termio/                       # 终端不回显读取一行（llmaudit 与 audit-archive 共用，只依赖标准库）
+  archivecli/                   # audit-archive 的实现：清单索引、校验、明文输出与单条导出
   agentdist/                    # Skill 安装包：清单、签名下载链接、下载处理、安装提示词、可重复打包
   protofixture/                 # 四协议确定性合成流量夹具与 fake upstream
   auditbench/                   # audit-bench 的实现：负载驱动、统计快照、结果与对比、只读分布

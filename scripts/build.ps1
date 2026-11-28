@@ -49,11 +49,16 @@ try {
         & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-import-windows-amd64.exe") ./cmd/audit-import
         if ($LASTEXITCODE -ne 0) { throw "Windows importer build failed" }
 
+        & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-archive-windows-amd64.exe") ./cmd/audit-archive
+        if ($LASTEXITCODE -ne 0) { throw "Windows archive reader build failed" }
+
         $env:GOOS = "linux"
         & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-proxy-linux-amd64") ./cmd/audit-proxy
         if ($LASTEXITCODE -ne 0) { throw "Linux build failed with exit code $LASTEXITCODE" }
         & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-import-linux-amd64") ./cmd/audit-import
         if ($LASTEXITCODE -ne 0) { throw "Linux importer build failed" }
+        & go build -trimpath -ldflags "-s -w" -o (Join-Path $outputPath "audit-archive-linux-amd64") ./cmd/audit-archive
+        if ($LASTEXITCODE -ne 0) { throw "Linux archive reader build failed" }
     }
     finally {
         Pop-Location
@@ -85,4 +90,6 @@ Write-Host "  $(Join-Path $outputPath 'audit-proxy-linux-amd64')"
 
 Write-Host "  $(Join-Path $outputPath 'audit-import-windows-amd64.exe')"
 Write-Host "  $(Join-Path $outputPath 'audit-import-linux-amd64')"
+Write-Host "  $(Join-Path $outputPath 'audit-archive-windows-amd64.exe')"
+Write-Host "  $(Join-Path $outputPath 'audit-archive-linux-amd64')"
 Write-Host "  $agentPackages"
