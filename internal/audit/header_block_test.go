@@ -230,3 +230,46 @@ func TestHeaderBlockCoversTheResponseSentStage(t *testing.T) {
 		})
 	}
 }
+
+// The upstream fails after the request body was sent: checkpoint 1 wrote the
+// request stages, there is no response_received, and the proxy's error
+// response is the only new stage. The commit inserts it and must carry a
+// block that holds it.
+func TestHeaderBlockCoversAnErrorResponseAfterTheRequestBody(t *testing.T) {
+	cipher, err := security.NewAESGCM(bytes.Repeat([]byte{7}, security.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &blockStore{validate: true}
+	manager := newTestManager(t, store, cipher, nil, ModeAvailable, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
+	ctx := context.Background()
+	inbound := httptest.NewRequest(http.MethodPost, "http://proxy.example.com/v1/chat/completions", strings.NewReader(`{"model":"model-example"}`))
+	inbound.Header.Set("Content-Type", "application/json")
+	session, err := manager.Begin(ctx, inbound, routing.Match{RouteID: "chat", Parser: "openai.chat_completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbound := inbound.Clone(ctx)
+	outbound.Body = inbound.Body
+	outbound.Host = "newapi.example.com"
+	session.WrapRequestSent(outbound)
+	_, _ = io.Copy(io.Discard, outbound.Body)
+	_ = outbound.Body.Close()
+	session.MarkNewAPIError("upstream_unavailable")
+	writer := session.WrapResponseWriter(httptest.NewRecorder(), inbound)
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusBadGateway)
+	_, _ = io.WriteString(writer, `{"error":"bad gateway"}`)
+	writer.CaptureTrailers()
+	if err := session.Finish(); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	id := session.ID()
+	if len(store.checkpoints) != 1 || !reflect.DeepEqual(blockStages(t, cipher, id, store.checkpoints[0].HeaderBlock), []string{storage.StageRequestReceived, storage.StageRequestSent}) {
+		t.Fatalf("checkpoints %+v", store.checkpoints)
+	}
+	want := []string{storage.StageRequestReceived, storage.StageRequestSent, storage.StageResponseSent}
+	if len(store.commits) != 1 || !reflect.DeepEqual(blockStages(t, cipher, id, store.commits[0].HeaderBlock), want) {
+		t.Fatalf("commit block, want %v", want)
+	}
+}
