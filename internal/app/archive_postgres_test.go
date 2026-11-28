@@ -229,6 +229,35 @@ func (env *archiveEnv) traffic(protocols []protofixture.Protocol, turns int) []*
 	return conversations
 }
 
+// blockedRequest sends a request a content policy rule rejects before
+// NewAPI: an audit without a turn.
+func (env *archiveEnv) blockedRequest() {
+	t := env.t
+	t.Helper()
+	admin := httptest.NewServer(env.app.adminServer.Handler())
+	defer admin.Close()
+	post := func(base, path, body string) int {
+		request, _ := http.NewRequest(http.MethodPost, base+path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+env.cfg.AdminToken)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		return response.StatusCode
+	}
+	if status := post(admin.URL, "/api/v1/content-policy-rules", `{"name":"archive-test","enabled":true,"action":"block","scan_scopes":["latest_user"],"keywords":["ARCHIVE_BLOCK"]}`); status != http.StatusCreated {
+		t.Fatalf("rule status %d", status)
+	}
+	if status := post(env.data.URL, "/v1/chat/completions", `{"model":"lab-model","messages":[{"role":"user","content":"ARCHIVE_BLOCK"}]}`); status != http.StatusBadRequest {
+		t.Fatalf("block status %d", status)
+	}
+	env.sent++
+	env.waitTerminal()
+}
+
 // waitTerminal waits until every sent request is an ended audit whose parse
 // is final.
 func (env *archiveEnv) waitTerminal() {
@@ -415,6 +444,7 @@ func TestPostgresArchiveExportsEveryDueAudit(t *testing.T) {
 		t.Fatalf("start-up logs %s", env.logs.String())
 	}
 	conversations := env.traffic(protofixture.Protocols(), 3)
+	env.blockedRequest()
 	if _, err := env.db.Exec(`INSERT INTO audit_gaps (started_at_ns, ended_at_ns, reason, request_count, detail, created_at_ns)
 VALUES (1000, 2000, 'queue_full', 3, '', 2001), (3000, 4000, 'db_unavailable', 1, '', 4001)`); err != nil {
 		t.Fatal(err)
@@ -443,6 +473,32 @@ VALUES (1000, 2000, 'queue_full', 3, '', 2001), (3000, 4000, 'db_unavailable', 1
 	if kinds["conversation"] != 4 || kinds["bucket"] < 1 || kinds["gaps"] != 1 {
 		t.Fatalf("bundle kinds %v", kinds)
 	}
+	// The blocked request has no turn: it is the last line of its bucket.
+	turnless := 0
+	for _, entry := range reader.Index().Bundles() {
+		members := entry.Manifest.Members
+		for index, member := range members {
+			if member.ConversationID == nil {
+				turnless++
+				if entry.Manifest.BundleKind != "bucket" || index != len(members)-1 {
+					t.Fatalf("turnless audit at line %d of %d in a %s bundle", index, len(members), entry.Manifest.BundleKind)
+				}
+			}
+		}
+	}
+	if turnless != 1 {
+		t.Fatalf("%d turnless members", turnless)
+	}
+	var protocols []string
+	if rows, err := env.db.Query(`SELECT DISTINCT protocol FROM audit_records ORDER BY protocol`); err == nil {
+		for rows.Next() {
+			var protocol string
+			_ = rows.Scan(&protocol)
+			protocols = append(protocols, protocol)
+		}
+		rows.Close()
+	}
+	t.Logf("bundle kinds %v, audit protocols %v", kinds, protocols)
 	keys, err := archivecli.LoadKeys(env.cfg.KeyPath)
 	if err != nil {
 		t.Fatal(err)
@@ -560,6 +616,37 @@ WHERE audit_id = $1 AND event_type = 'capture_finalized'`, tampered); err != nil
 	if again := env.mustRun(); again.Counts.IntegrityFailedAudits != 1 || again.Counts.ExportedAudits != 0 {
 		t.Fatalf("second run %+v", again)
 	}
+}
+
+// J.3: a member that changes between the export and the sample reads
+// differently from the hot store, but its change stamp (ArchiveChangeStamp)
+// shows the change, so it counts as stale and the bundle stands.
+func TestPostgresArchiveSampleTreatsAChangedRecordAsStale(t *testing.T) {
+	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
+	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat}, 1)
+	ids := env.auditIDs()
+	env.due()
+	changed := false
+	late := func(step string) error {
+		if step == runner.StepAfterPublish && !changed {
+			changed = true
+			if _, err := env.db.Exec(`UPDATE audit_records SET ttft_ns = COALESCE(ttft_ns, 0) + 1 WHERE audit_id = $1`, ids[0]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return nil
+	}
+	env.step.Store(&late)
+	result := env.mustRun()
+	if !changed || result.Counts.StaleAudits < 1 || result.Counts.Segments < 1 {
+		t.Fatalf("result %+v", result)
+	}
+	for name := range env.fileDigests() {
+		if strings.HasSuffix(name, bundle.RejectedSuffix) {
+			t.Fatalf("bundle rejected: %s", name)
+		}
+	}
+	env.requireOneSealedMember(ids)
 }
 
 // A run interrupted after the intent, after publication, before the seal
