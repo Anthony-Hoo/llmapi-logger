@@ -94,7 +94,7 @@ func TestUnusableStagingDirectoryMakesTheAuditUnavailable(t *testing.T) {
 				}
 				if !strings.Contains(text, `"msg":"audit staging unavailable"`) || !strings.Contains(text, `"error_category":"staging_unavailable"`) ||
 					!reasoned || strings.Contains(text, "legacy") ||
-					(configuration.Audit.Staging.Dir != "" && strings.Contains(text, filepath.Base(directory))) {
+					strings.Contains(text, directory) || strings.Contains(text, strings.ReplaceAll(directory, `\`, `\\`)) {
 					t.Fatalf("log %s", text)
 				}
 				request := httptest.NewRequest(http.MethodPost, "http://proxy.example.com/v1/chat/completions", strings.NewReader(`{}`))
