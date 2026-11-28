@@ -1,0 +1,46 @@
+{
+  "description": "Test vectors for internal/archive/stream (stage 4 design G.2, G.3). Key and salt are synthetic. The plaintext of length n is block j = SHA-256(\"llmapi-logger/archive-stream-test-plaintext\\x00\" || uint64_be(j)) for j = 0, 1, ..., concatenated and cut to n bytes. file_key_hex is K_file for this key and salt. ciphertext_hex is the whole file when it is short. All hex is lower case.",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "salt_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "file_key_hex": "245856e1ffe88923ff6a55d80805d267da74c80896074eb24411512324435645",
+  "cases": [
+    {
+      "plaintext_length": 0,
+      "file_length": 56,
+      "sha256": "ddc62ddfb2cd30552fc6f9c45ae34793a3091688d7216dc8f0f5c6daf25b8a39",
+      "first_64_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf092d68d1fd63af80bbe7f5f33d90eed7",
+      "ciphertext_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf092d68d1fd63af80bbe7f5f33d90eed7"
+    },
+    {
+      "plaintext_length": 1,
+      "file_length": 57,
+      "sha256": "52cb90727272d6ca59782714d4751a0ce33724e03286a5dd3c4fc953ee370c99",
+      "first_64_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfcc381ccb8e0b65e356901e054a4aaf2b29",
+      "ciphertext_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfcc381ccb8e0b65e356901e054a4aaf2b29"
+    },
+    {
+      "plaintext_length": 65535,
+      "file_length": 65591,
+      "sha256": "bf06dbc2d68a3ad9518fef3f4c997f4065d941006bf2e1725c4154c9c231c0f1",
+      "first_64_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfccf0e470e80872b81d14fda944c6b2319e493fbfd90e8d5a"
+    },
+    {
+      "plaintext_length": 65536,
+      "file_length": 65592,
+      "sha256": "80a9feb8fc18d068f7ef4cecbb97becf4fbafafd6e9f8710cd8bc5dc6c1f3751",
+      "first_64_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfccf0e470e80872b81d14fda944c6b2319e493fbfd90e8d5a"
+    },
+    {
+      "plaintext_length": 65537,
+      "file_length": 65609,
+      "sha256": "fe1809f8960add5810777e145ba7b8d01ed47f4cd8a4e0495f494684efdea210",
+      "first_64_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf58546559426fa1034abf5abb7db7cbec3d6986c1a52489c4"
+    },
+    {
+      "plaintext_length": 200000,
+      "file_length": 200104,
+      "sha256": "50b815a5bc6e8558fdeb9ee1f049c5c0c901c1b036cc54145c4118ac2edaa1d5",
+      "first_64_hex": "4c4c415201100000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf58546559426fa1034abf5abb7db7cbec3d6986c1a52489c4"
+    }
+  ]
+}
