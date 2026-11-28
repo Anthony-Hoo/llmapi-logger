@@ -241,6 +241,21 @@ func TestTamperIsDetected(t *testing.T) {
 				m.LineCount--
 			})
 		}},
+		// The revision is not in the record digest; it is bound by the
+		// manifest MAC and by the member check of every line.
+		{name: "member revision changed", encrypt: true, reason: ReasonMemberMismatch, tamper: func(f *fixture, target tamperTarget) {
+			f.resign(target.manifest, func(m *archive.Manifest) { m.Members[0].Revision++ })
+		}},
+		{name: "line revision changed", encrypt: true, reason: ReasonMemberMismatch, tamper: func(f *fixture, target tamperTarget) {
+			entries := decodeFile(f.t, target.lines, target.key)
+			changed := bytes.Replace(entries[0], []byte(`"revision":"1"`), []byte(`"revision":"2"`), 1)
+			if bytes.Equal(changed, entries[0]) {
+				f.t.Fatal("line revision not changed")
+			}
+			entries[0] = changed
+			encodeFile(f.t, target.lines, target.key, entries)
+			f.resign(target.manifest, nil)
+		}},
 		{name: "member digest changed", encrypt: true, reason: ReasonDigestMismatch, tamper: func(f *fixture, target tamperTarget) {
 			f.resign(target.manifest, func(m *archive.Manifest) { m.Members[1].RecordDigest[0] ^= 1 })
 		}},
