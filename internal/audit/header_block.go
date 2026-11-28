@@ -21,7 +21,9 @@ import (
 type blockShape uint8
 
 func (shape blockShape) with(stage *stageCapture) blockShape {
-	order := stageOrder(stage.name)
+	// storage.StageOrder is 0 to 3. The session's stageOrder starts at 1 and
+	// would leave response_sent out of the shape.
+	order := storage.StageOrder(stage.name)
 	if order < 0 || order > 3 {
 		return shape
 	}
