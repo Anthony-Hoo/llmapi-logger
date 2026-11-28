@@ -1,7 +1,7 @@
 # 模块 26：冷归档（只导出）与归档格式
 
-> 状态：issue #59 第 4 阶段的 P3（只导出）已实现，格式版本 0（试行）。校验后移除（P4）还没有生效。
-> 设计：[第 4 阶段详细设计](../design/issue-59-stage4-cold-archive.md)；实际做成的样子以它末尾的实施记录 R.1 到 R.8 为准。
+> 状态：issue #59 第 4 阶段的 P3（只导出）与 P4（校验后移除）已实现，格式版本 0（试行）。移除只作用于格式版本不低于 1 的包，所以在内置格式版本仍是 0 的这个版本里，`archive_then_delete` 实际上不从热库删除任何东西（§18.7）。
+> 设计：[第 4 阶段详细设计](../design/issue-59-stage4-cold-archive.md)；实际做成的样子以它末尾的实施记录 R.1 到 R.9 为准。
 
 本文分两部分。第一部分（§2 到 §16）是归档格式规范：写到不读本仓库代码也能解析一个包、核对它的签名和每条记录的摘要。第二部分（§17 到 §24）是模块本身：模式、配置、一次运行做什么、日志、对账、读取工具和风险。
 
@@ -9,7 +9,7 @@
 
 冷归档把 retention 本来要删除的 audit 导出到一个目录里，每天一次。导出的是解密之后的明文行，按会话或协议装成包，整包压缩并加密（可以关闭），每个包有一份签名的明文清单。归档目录离开数据库、离开运行中的代理，只凭主密钥文件和读取工具 `audit-archive` 就能核对和读出。
 
-- **本版本只导出。** `export_only` 与 `archive_then_delete` 两种模式都不从热库删除任何 audit 或 gap：打开归档以后 retention 的直接删除不再组装，热库会一直增长（§17.3）。`archive_then_delete` 现在的行为与 `export_only` 相同，校验后移除（设计 M 节）是以后单独的改动。
+- **只有校验后移除会删热库。** 打开归档以后 retention 的直接删除不再组装（§17.3）。`export_only` 从不删除，热库会一直增长；`archive_then_delete` 在每次运行导出之后，把已定稿、格式版本不低于 1 的包里变更戳没变的成员从热库移除（§18.7）。内置格式版本是试行的 0，所以这个版本里 `archive_then_delete` 同样什么都不删。
 - **不做恢复。** 归档读不回 PostgreSQL，也不进管理界面；已归档的记录只能用读取工具查看。
 - **只在 PostgreSQL 上。** SQLite 存储没有目录表，也不归档。
 - 归档的完整性要靠检查来证明（设计 J 节）：列覆盖测试保证每一列要么进了归档、要么写明了为什么不进；每个包发布后重读核对；再抽样与热库的读出比对。
@@ -22,7 +22,7 @@
 
 格式版本 0 是试行版本：
 
-- **版本 0 的包永远不作为从热库删除数据的依据。** 将来的移除只作用于格式版本不低于 1 的分段。
+- **版本 0 的包永远不作为从热库删除数据的依据。** 移除（§18.7）只作用于格式版本不低于 1 的分段，这个条件写在移除事务的加锁语句里。
 - 格式在版本 0 期间可以改动，改动之后旧包要重新导出。现在的读取工具只接受 `format_version` 为 `"0"` 的清单。
 - 本地验收通过后，格式定为版本 1，这是单独的一个改动（维护者的决定，见设计 0.0）。从那以后的承诺是：任何正式发布过的格式版本，当前和以后的读取工具都能读。清单带着各表的列清单（§14），每个发布过的版本还要冻结一个夹具包，用当前的读取工具逐个读一遍；版本 1 的冻结夹具随那次改动提交。
 
@@ -973,16 +973,16 @@ archive:
 | 模式 | 现在的行为 |
 | --- | --- |
 | `export_only` | 每天导出到期的 audit 和 gap。热库里什么都不删，会一直增长 |
-| `archive_then_delete` | **现在与 `export_only` 完全相同**：只导出，不移除。启动日志另加一条 `archive_removal_inactive`。校验后移除（设计 M 节）以后单独上线，并且只作用于格式版本不低于 1 的分段 |
+| `archive_then_delete` | 每天导出，然后做校验后移除（§18.7）：已定稿、格式版本不低于 1 的分段里，包核对通过、变更戳没变的成员从热库删除。**内置格式版本是 0，所以这个版本里什么都不删**，启动日志说明这一点（`archive_removal_trial_format`） |
 
-两者唯一的不同是重新收录：`archive_then_delete` 下，目录表里状态为 `stale`、仍在热库、又没有当前成员的 audit 会以更高的修订号重新导出；`export_only` 下每条到期记录只导出一次，之后的变化不再跟踪（设计 P 第 8 条）。
+除了移除，两者的不同只有重新收录：`archive_then_delete` 下，目录表里状态为 `stale`、仍在热库、又没有当前成员的 audit 会以更高的修订号重新导出；`export_only` 下每条到期记录只导出一次，之后的变化不再跟踪（设计 P 第 8 条）。
 
 ### 17.3 五条护栏（决策 5.7）
 
 | # | 护栏 | 落在哪里 |
 | --- | --- | --- |
 | 1 | `archive.mode` 不为 `off` 而 `retention_days` 为 0：拒绝 | 配置校验 |
-| 2 | 开启归档时不做任何直接删除 | 组装：`archive.mode` 不为 `off` 时不组装 retention runner（audit 和 gap 都不再直接删除）；归档 runner 本身不删除任何东西。启动日志 Warn `archive export only: hot store keeps growing`，`error_category=archive_export_only` |
+| 2 | 开启归档时不做任何直接删除 | 组装：`archive.mode` 不为 `off` 时不组装 retention runner（audit 和 gap 都不再直接删除）。`export_only` 下归档 runner 不删除任何东西，启动日志 Warn `archive export only: hot store keeps growing`（`error_category=archive_export_only`）；`archive_then_delete` 下唯一的删除是 §18.7 的校验后移除，启动日志见 §19 |
 | 3 | 归档关掉、`retention_days > 0`，而以前运行过归档：醒目提示直接删除已经恢复 | 启动：目录表里有任何一条运行记录时 Warn `archive is off and retention deletes directly again; to pause archiving set retention_days: 0`，`error_category=archive_direct_delete_resumed`，带 `retention_days`。想暂停归档而不恢复直接删除，应把 `retention_days` 设为 0 |
 | 4 | `archive.dir` 与 `key_path` 的目录相同或互相包含：拒绝 | 配置校验（暂存目录同样不许，见上表） |
 | 5 | 已有数据或已有归档包时不新建主密钥 | 启动：见 §17.4 |
@@ -1018,9 +1018,9 @@ archive:
    - 水位之后、截止时间之前的新范围，沿 `(started_at_ns, audit_id)` 升序。
    然后把这些 audit 所在会话里其余到期的 audit 补进来，使一个会话的到期轮次总在同一趟里。
 3. **gap。** 期限没到时，把结束于截止时间之前、还不在任何分段里的 gap 导出成 gap 包，每包至多 10,000 条，与分段一样登记、发布、重读、定稿。期限到了就留给下一次。
-4. 移除阶段的接缝：本版本什么都不做。
+4. **移除**（只在 `archive_then_delete` 下，§18.7）。期限没到时才开始。
 
-一次运行只导出，不删除热库里的任何行。
+`export_only` 的运行只导出，不删除热库里的任何行。
 
 ### 18.3 选取、推迟与水位
 
@@ -1086,6 +1086,29 @@ archive:
 
 启用归档以后，任何情况下都不会跳过归档直接删除。
 
+### 18.7 校验后移除（`archive_then_delete`）
+
+移除是归档里唯一删除热库证据的地方（设计 M 节、实施记录 R.9）。一次运行的全部趟和 gap 导出之后，期限没到时进入移除：
+
+1. **对象。** 全部 `sealed` 分段里、格式版本不低于 1 的 `sealed` 成员，包括以前的运行留下没移除完的。内置格式版本是 0，所以这个版本里一个都没有：**`archive_then_delete` 不删除任何东西**，热库照样增长。
+2. **顺序。** 按 `turn_created_at_ns` 降序、没有轮次的在最前、相同时按 `audit_id` 降序：子轮次总在父轮次之前，移除一个父轮次时不会改写一个还要移除的子轮次。
+3. **批量与让路。** 与 retention 相同：从 1 条起，整批且不超过 0.5 秒时翻倍（上限 200），超过 1 秒按比例缩小，慢失败降到 1；每批之后暂停同样长，至多 5 秒。到了期限或进程关闭就停在批与批之间，没做完的成员下一次运行继续。
+4. **包的核对。** 一个分段的成员进入第一批之前，这次运行核对一次它的包：清单和它列出的每个数据文件都在；清单能解析，密钥指纹和签名用归档签名密钥核对通过；每个数据文件的大小和 SHA-256 与清单相同；清单文件的 SHA-256 等于定稿时目录表记下的 `manifest_sha256`。只算一遍哈希，不解密、不解压。核对不过的分段，这次运行一条成员也不移除：成员保持 `sealed`、数据留在热库，日志 Warn `archive bundle check failed before removal: its members stay in the hot store`（`error_category=archive_bundle_check_failed`、`reason` 是核对的码、`bundle_kind`），完成日志计入 `bundle_check_failed_segments` 和 `held_back_members`；运行照常完成，其余分段照常移除。包修好以后，下一次运行移除它们。核对在移除事务之外，核对之后、删除之前文件仍可能消失，这个窗口是接受的。
+5. **每一批一个 writer 事务**（独占，与 retention 的批相同）。事务里锁住成员行和分段行，只处理状态仍为 `sealed`、分段 `sealed` 且格式版本不低于 1 的成员；对每条重算变更戳（§18.5 用的同一个函数）：
+   - audit 已不在热库：只把成员标成 `hot_removed`；
+   - 戳与导出时不同（导出之后它变过：计费回填、项目标识、检查点、任何一行的增删改）：成员标成 `stale`，**什么都不删**，下一次运行以更高的修订号重新导出它，再移除；读取工具取最高修订号；
+   - 戳相同：用 retention 同一段代码删除，保留的子轮次先改写成检查点根，叶到根删轮次，修剪派生明细，回收不再被引用的会话、内容对象和二进制对象；成员标成 `hot_removed`。
+   删除与目录表的更新在同一个事务里，不存在“删了没记”或反过来。分段里不再有 `sealed` 成员时改为 `hot_removed`。
+6. **gap。** audit 之后，逐个格式版本不低于 1 的 gap 分段，先做第 4 步的核对，再按 200 条一批删 `audit_gaps` 并标成 `hot_removed`；核对不过的分段的 gap 留着（`held_back_gaps`）。
+7. 一批失败时这次运行以 `archive_failed` 结束（`reason=removal_failed`），已提交的批保留，之后按 §18.1 重试。
+
+被移除 audit 的完整性事件留在热库的链上，启动校验和后台载荷校验跳过已不存在的 audit。`HasAudits` 因为事件和目录表还在而为真，密钥文件缺失时不会新建密钥。
+
+**移除的数据回不来。** 移除之后它只在归档里，用 `audit-archive` 查看；不回到管理界面、洞察和周报，切回 `export_only` 或 `off` 也不会回来。
+
+- **暂停移除**（也暂停导出）：把 `retention_days` 设为 0。不要为了暂停切到 `off`：`retention_days > 0` 时那会恢复不经归档的直接删除（护栏 3）。
+- **回到只导出**：把 `archive.mode` 改为 `export_only`。之后不再移除，已经移除的仍然只在归档里。
+
 ## 19. 状态、计数与日志
 
 每次运行在 `archive_runs` 留一行（表结构见[模块 04](04-sqlite-storage-and-migrations.md#310-冷归档目录表postgresql-migration-008) §3.10）：
@@ -1103,8 +1126,9 @@ archive:
 
 | 日志 | 级别 | 字段 | 何时 |
 | --- | --- | --- | --- |
-| `archive export only: hot store keeps growing` | Warn | `error_category=archive_export_only` | 启动，模式为 `export_only` 或 `archive_then_delete` |
-| `archive removal is not active in this build: archive_then_delete exports only` | Warn | `error_category=archive_removal_inactive` | 启动，模式为 `archive_then_delete` |
+| `archive export only: hot store keeps growing` | Warn | `error_category=archive_export_only` | 启动，模式为 `export_only` |
+| `archive verified removal active: archived audits are removed from the hot store once their bundle of format version 1 or later is sealed and their change stamp is unchanged` | Warn | `error_category=archive_removal_active`、`format_version` | 启动，模式为 `archive_then_delete` |
+| `archive format version 0 is the trial format: its bundles are exported but never removed, so nothing is removed from the hot store and it keeps growing` | Warn | `error_category=archive_removal_trial_format`、`format_version` | 启动，模式为 `archive_then_delete` 而格式版本低于 1（这个版本总是如此） |
 | `archive is off and retention deletes directly again; to pause archiving set retention_days: 0` | Warn | `error_category=archive_direct_delete_resumed`、`retention_days` | 启动，护栏 3 |
 | `archive runner unavailable` | Warn | `error_category=archive_unavailable`、`reason`（`audit_unavailable`、`dir_<码>`、`invalid_timezone`、`invalid_options`） | 开启了归档而 runner 不能组装；代理与审计照常 |
 | `audit key unavailable` | Warn | `mode`、`error_category=key_unavailable`，因归档目录里有清单而拒绝新建密钥时另有 `reason=archive_manifests_present` | 启动 |
@@ -1115,13 +1139,16 @@ archive:
 | `archive integrity check failed` | Error | `error_category=archive_integrity_failed`、`reason` | 一条 audit 复核不过（§18.6） |
 | `archive record refused` | Warn | `error_category=archive_record_refused`、`reason`（写入方的码） | 包写入方以记录本身的原因拒绝一条记录，只排除它（§18.5） |
 | `archive sample mismatch` | Warn | `error_category=archive_sample_mismatch`、`reason=sample_mismatch` | 抽样时（新发布的分段或对账里 `publishing` 的分段）一条成员读出不同而变更戳没变：包作废，只排除它，其余成员重写（§18.5、§20） |
+| `archive removal completed` | Info | `event=archive_removal_completed`、`removed_audits`、`stale_audits`、`already_gone_audits`、`skipped_audits`、`removed_gaps`、`removed_segments`、`bundle_check_failed_segments`、`held_back_members`、`held_back_gaps`、`batches`、`duration_ms`，到了期限时 `deadline_reached=true` | 移除阶段结束（§18.7） |
+| `archive bundle check failed before removal: its members stay in the hot store` | Warn | `error_category=archive_bundle_check_failed`、`reason`、`bundle_kind` | 一个分段的包核对不过，这次运行不移除它的成员（§18.7 第 4 步）；每个分段每次运行一条 |
+| `archive removal batch reduced to one audit` | Info | `failed_audit_batch` | 多条的一批慢失败，批量降到 1 |
 | `archive directory has manifests that do not verify` | Warn | `error_category=archive_manifest_unusable`、`manifests` | 对账时有清单解析不了或签名不对 |
 | `archive bundle unknown to the catalog does not verify` | Warn | `error_category=archive_manifest_unusable`、`reason` | 对账时一个目录表不认识的包核对不过 |
 | `archive bundle registered from the directory` | Info | `bundle_kind`、`members` | 对账登记了一个目录表不认识的包 |
 
-**完成日志的字段**：`status`、`exported_audits`（登记为当前成员的条数，不含登记时已是 `stale` 的）、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`（被排除的条数，含下两项）、`stale_audits`、`exported_gaps`、`refused_audits`（写入方拒绝的）、`sample_mismatch_audits`（抽样读出不同的）、`segments`、`disk_bytes`、`duration_ms`；推迟数大于 0 的原因各有一个 `deferred_<原因>`；对账定稿了分段时有 `reconciled_segments`；到了期限时有 `deadline_reached=true`。
+**完成日志的字段**：`status`、`exported_audits`（登记为当前成员的条数，不含登记时已是 `stale` 的）、`deferred_audits`、`integrity_failed_audits`、`excluded_audits`（被排除的条数，含下两项）、`stale_audits`、`exported_gaps`、`refused_audits`（写入方拒绝的）、`sample_mismatch_audits`（抽样读出不同的）、`segments`、`disk_bytes`、`removed_audits`、`removed_gaps`、`duration_ms`；移除时有包核对不过时另有 `bundle_check_failed_segments`、`held_back_members`、`held_back_gaps`；推迟数大于 0 的原因各有一个 `deferred_<原因>`；对账定稿了分段时有 `reconciled_segments`；到了期限时有 `deadline_reached=true`。
 
-**失败的 `reason`**：`catalog_failed`（目录表读写失败）、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`（抽样时热库读不出来；包是否作废见 §18.5）、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及写入、发布和核对时 `internal/archive/bundle` 的码（如 `disk_full`、`write_failed`、`sync_failed`、`name_exists`、`link_failed`，§24.3 的结果码）。
+**失败的 `reason`**：`catalog_failed`（目录表读写失败）、`snapshot_failed`、`intent_failed`、`seal_failed`、`sample_failed`（抽样时热库读不出来；包是否作废见 §18.5）、`removal_failed`（移除的一批或它要读的目录表失败，§18.7）、`count_mismatch`、`digest_mismatch`、`manifest_name`，以及写入、发布和核对时 `internal/archive/bundle` 的码（如 `disk_full`、`write_failed`、`sync_failed`、`name_exists`、`link_failed`，§24.3 的结果码）。
 
 ## 20. 对账
 
@@ -1163,7 +1190,9 @@ PostgreSQL（只读快照）
 - **归档里没有凭据值。** `Authorization`、`x-api-key`、`?key=` 这类值只剩名称、长度和 keyed 指纹，原值无法从归档找回；指纹只能核对已知的 Key。
 - **内容里的凭据原样归档。** 用户贴进对话的 Key、上游错误里回显的 Key 随 raw、内容对象和 `parsed_json` 进入归档（§12.5）。加密开启时它们在密文里，关闭时是明文。
 - **明文会经读取工具流出。** `cat` 和 `export` 的输出是解密后的对话内容，没有凭据值，但内容不遮蔽；输出去向由使用者负责。
-- **热库持续增长。** 本版本开启归档后什么都不删（§17.2）。要控制热库大小，只能在移除上线之前关掉归档（这会恢复直接删除，护栏 3），或者接受增长。
+- **热库持续增长。** 内置格式版本是 0，开启归档后两种模式都不删（§17.2、§18.7）。要控制热库大小，只能关掉归档（这会恢复直接删除，护栏 3），或者接受增长，直到格式定为版本 1。
+- **移除之后数据只在归档里**（§18.7），回滚或切换模式都不会让它回来。包在定稿后、移除前坏掉或丢失由移除前的核对拦住；核对之后、删除之前的那一小段时间里文件消失，拦不住。
+- **对账会把清单坏掉的包的数据文件改名为 `.orphan`。** 一个已定稿的分段，清单丢了或签名不对时，下一次运行的对账把它的数据文件当作孤儿改名（§20 第 3 条）；它的成员因为核对不过不会被移除，但修复时要把清单和数据文件的原名一起恢复。
 - **暂存目录里的残留不在归档里。** 启动导入改名留下的 `.orphan`、`.corrupt` 暂存文件可能是某条已终结 audit 的一部分 raw 的唯一副本；归档只读数据库，按库里的样子归档这条 audit，暂存目录里的文件既不读也不删，需要人工处理（模块 03 §13）。
 - **调用者查找关掉之后**，遗留的 `caller_status = 'pending'` 记录会一直被推迟。
 - **长快照。** 每趟一个 REPEATABLE READ 快照；一个极长的会话会让单趟变长，挡住 VACUUM 的清理水位。没有在大库上量过。

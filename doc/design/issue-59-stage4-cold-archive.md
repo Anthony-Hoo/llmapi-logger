@@ -1923,7 +1923,7 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
    - 调用方给的 `(segment_id, revision, change_stamp)` 只作为额外的匹配条件：与目录表里的行不一致就跳过（`skipped`），删除的依据始终是事务内重算的戳与目录表里存的戳相等；
    - 全部成员的戳在调用 `deleteAuditBatch` 之前算完，同一批里父轮次的检查点不会算到子轮次头上；
    - 每条成员的结果是 `removed`、`stale`、`already_gone`、`skipped` 之一，按请求顺序返回；没有 `sealed` 成员的分段改为 `hot_removed`，`removed_at_ns` 取本批时间。全部成员变 `stale`、一条也没删的分段同样改为 `hot_removed`（M.2 第 4 步的字面意思）。
-3. `RemoveArchivedGaps(ctx, limit, removedAtNS)`：按 gap id 升序锁至多 `limit`（≤ 200）条可移除的 gap 成员，删 `audit_gaps`，改 `hot_removed`，空了的 gap 分段改 `hot_removed`。行已不在的 gap 照样标记，结果分别给出标记数和实际删除的行数。
+3. `RemoveArchivedGaps(ctx, segmentID, limit, removedAtNS)`（第 17 条改成按分段）：按 gap id 升序锁这个分段至多 `limit`（≤ 200）条可移除的 gap 成员，删 `audit_gaps`，改 `hot_removed`，空了的 gap 分段改 `hot_removed`。行已不在的 gap 照样标记，结果分别给出标记数和实际删除的行数。
 4. `ListRemovableArchiveMembers(ctx, after, limit)` 在只读池上按 `(audit_id, revision)` 分页列出可移除成员，排序由 runner 做（第 6 条）。新增的共享类型在 `storage/archive_types.go`：`ArchiveRemoval`、`ArchiveRemovable`、`ArchiveRemovalOutcome`、`ArchiveRemovalResult`、`ArchiveGapRemovalResult`、`ArchiveRemovalMinFormatVersion`（= 1）、四个结果常量和 `ValidateArchiveRemovals`。没有迁移。
 
 **runner（第 15 个提交，`archive/runner/remove.go`）**
@@ -1943,12 +1943,14 @@ runner 在 `internal/archive/runner`，配置在 `internal/config/archive.go`，
 14. M.1 第 1 行（计费回填）的完整循环（变 `stale`、下次以修订号 2 导出并移除）只在存储测试里做了：测试流量没有 `X-Oneapi-Request-Id`，补上调用者字段会让 `capture_finalized` 复核不过。应用层的循环用项目标识的首次写入与升级、以及检查点三种写。
 15. 按 `started_at_ns` 降序（A/B 情形，测试里只改目录表里的 `started_at_ns` 副本）逐条移除一个四轮会话：2 条成员误成 `stale`、2 个轮次被检查点改写；按 `RemovalOrder` 都是 0。
 
-**待维护者决定：删除之前是否再核对一次包**
+**删除之前核对包（维护者选了乙）**
 
-M、H.6 和 4.5 只在导出时（H.2 第 6 步）重开已发布的文件做完整核对，删除时只核对变更戳，不看盘上的包。实现照此办理，没有加额外的核对。所以分段定稿之后、移除之前包被删掉或损坏，成员仍会被移除，热库里的数据就只剩坏掉的包。可选的做法：
+M、H.6 和 4.5 只在导出时（H.2 第 6 步）重开已发布的文件做完整核对，删除时只核对变更戳。维护者在第一版实施之后选了乙：每个分段在它的第一批移除之前便宜地核对一次包。实现：
 
-- 甲，照现在：不再核对。代价：上面的情形无人发现，直到有人去读那个包。
-- 乙，每个分段在它的第一批移除之前做一次便宜的核对：文件存在、清单 MAC、清单与数据文件的 SHA-256 与目录表的 `manifest_sha256` 相符。代价：每个分段读一遍文件求哈希（每个分段至多 `segment_max_bytes` 的压缩后字节），不解密、不解析；失败时这个分段的成员不移除并报一个稳定码。
-- 丙，乙再加 J.2 的完整重读。代价：与导出时的重读相同，移除阶段的耗时大约翻倍，而它与导出时的重读重复。
+16. **核对什么。** `bundle.CheckFiles(ctx, manifestPath, signer)`（新的导出函数）读一次清单，解析并按与 `Open` 相同的规则检查文件列表，用归档签名密钥核对密钥指纹和 MAC，再对清单列出的每个数据文件核对大小和 SHA-256，返回清单和所读字节的 SHA-256。不解密、不解压、不做 J.2 的重读。runner 再要求这个 SHA-256 等于定稿时目录表记下的 `manifest_sha256`、清单的分段号等于目录表的。
+17. **什么时候。** 移除阶段按 `RemovalOrder` 往下取成员组批时，遇到一个这次运行还没核对过的分段就先核对它，结果在这次运行里缓存，所以每个分段每次运行至多核对一次，批的大小怎样变都一样。gap 分段在删它的第一批 gap 之前同样核对；为此 `RemoveArchivedGaps` 改为只删一个指定分段的 gap（`RemoveArchivedGaps(ctx, segmentID, limit, removedAtNS)`），runner 逐个列出格式版本不低于 1 的 `sealed` gap 分段。
+18. **不过时。** 这个分段的成员这次运行一条也不送进移除事务：保持 `sealed`，不改成 `stale` 或别的状态，数据留在热库（这是安全的一侧）。日志每个分段每次运行一条 Warn `archive bundle check failed before removal: its members stay in the hot store`，`error_category=archive_bundle_check_failed`，`reason` 是 `bundle` 的码（`not_found`、`file_missing`、`file_mismatch`、`manifest_invalid`、`key_mismatch`、`mac_mismatch`、`read_failed`）或 runner 的 `manifest_digest_mismatch`、`segment_mismatch`，另带 `bundle_kind`；不带路径和 id。其余分段照常移除，留下的成员顺序和分批不变。运行照常 `completed`：runner 没有“完成但有问题”的状态，与 `refused_audits`、`sample_mismatch_audits` 一样，问题只出现在结果和完成日志里：`Result.Removal` 的 `BundleCheckFailedSegments`、`HeldBackMembers`、`HeldBackGaps`，移除完成日志和运行完成日志的 `bundle_check_failed_segments`、`held_back_members`、`held_back_gaps`。`archive_runs` 没有对应的列，没有为它加迁移。
+19. **接受的窗口。** 核对在 runner 里、移除事务之外，核对之后、删除之前文件仍可能消失或被改。这个窗口是接受的。核对是在事务自己的条件（状态、格式版本不低于 1、变更戳）之外多加的一个条件，不替代其中任何一个：它只会让移除的东西更少。
+20. **与对账的交互。** 一个已定稿分段的清单丢了或签名不对时，下一次运行开头的对账把它的数据文件当作没有清单的数据文件改名加 `.orphan`（H.6 第 3 步）。成员因为核对不过不会被移除；修复时要把清单和数据文件的原名一起恢复，只放回清单不够。这是对账原有的行为，没有改。
 
-推荐乙。
+测试：`bundle` 的主机测试覆盖 `CheckFiles` 的完好、清单缺失、对象文件缺失、数据文件截断、清单被改、换一把密钥；runner 的主机测试对一个分段的包缺失、数据文件截断、清单被改、清单与目录表记下的不同各跑一遍：只扣下那个分段的成员，其余的移除，每个分段每次运行只查一次，包恢复后下一次运行移除它们；gap 分段同样。PostgreSQL 上导出之后删掉一个会话包的对象文件：它的成员和全部行留在热库、仍是 `sealed`，其余包的成员被移除，日志和计数显示出来，文件放回后下一次运行移除它们。

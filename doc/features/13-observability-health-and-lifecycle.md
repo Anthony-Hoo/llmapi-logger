@@ -78,8 +78,11 @@ parser 的两个码：`parser normalization failed`（`error_code=normalize_pani
 
 | 日志 | 字段 | 何时 |
 | --- | --- | --- |
-| `archive export only: hot store keeps growing` | `error_category=archive_export_only` | 启动，`archive.mode` 为 `export_only` 或 `archive_then_delete`：retention 的直接删除不组装，热库持续增长（Warn） |
-| `archive removal is not active in this build: archive_then_delete exports only` | `error_category=archive_removal_inactive` | 启动，`archive_then_delete`：这个版本只导出（Warn） |
+| `archive export only: hot store keeps growing` | `error_category=archive_export_only` | 启动，`archive.mode` 为 `export_only`：retention 的直接删除不组装，热库持续增长（Warn） |
+| `archive verified removal active: …` | `error_category=archive_removal_active`、`format_version` | 启动，`archive_then_delete`：校验后移除对格式版本不低于 1 的包生效（Warn） |
+| `archive format version 0 is the trial format: …` | `error_category=archive_removal_trial_format`、`format_version` | 启动，`archive_then_delete` 而格式版本低于 1：包只导出、从不作为移除依据，热库什么都不删（Warn；这个版本总是如此） |
+| `archive bundle check failed before removal: its members stay in the hot store` | `error_category=archive_bundle_check_failed`、`reason`、`bundle_kind` | 移除阶段，一个分段的包在它的第一批之前核对不过（文件缺失、大小或哈希不符、清单签名不对、清单与定稿时记下的 SHA-256 不同）：这次运行不移除它的成员，运行照常完成（Warn；每个分段每次运行一条，模块 26 §18.7） |
+| `archive removal completed` | `event=archive_removal_completed` 与计数 | 移除阶段结束（Info，字段见模块 26 §19） |
 | `archive is off and retention deletes directly again; to pause archiving set retention_days: 0` | `error_category=archive_direct_delete_resumed`、`retention_days` | 启动，归档关闭、`retention_days > 0`，而目录表里有运行记录（Warn） |
 | `archive runner unavailable` | `error_category=archive_unavailable`、`reason`（`audit_unavailable`、`dir_<目录检查的码>`、`invalid_timezone`、`invalid_options`） | 归档开启而 runner 不能组装；代理和审计照常，直接删除仍不组装（Warn） |
 | `audit key unavailable` | 原有字段，另加 `reason=archive_manifests_present` | 密钥文件缺失、数据库为空，而归档目录里有清单，所以不新建密钥（Warn） |
