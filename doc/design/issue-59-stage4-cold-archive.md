@@ -1715,3 +1715,116 @@ P4：
 ### R.2 `HasAudits`（O.1 第 1 个提交）
 
 两个存储的 `HasAudits` 现在是“`audit_records` 或 `integrity_events` 有行”。目录表加进这个判断留给迁移 008 的提交。新增的启动测试 `TestStartupDoesNotReplaceMissingKeyWhileIntegrityEventsRemain` 是仓库里第一个“密钥文件缺失”的启动测试；把查询改回旧的写法时，它会看到启动新建了密钥并报 `integrity_unavailable`。
+
+### R.6 目录表与快照读取（O.1 第 6、7 个提交）
+
+迁移 008 按 I.1 原样建表；`HasAudits` 加上 `archive_segments`（L.3），只有运行记录时仍为假。目录表的写、导出快照、变更戳和事件复核在 `internal/storage/postgres` 的 `archive_catalog.go`、`archive_snapshot.go`、`archive_stamp.go`、`archive_events.go`，跨包的类型与输入校验在 `internal/storage/archive_types.go`。下面是与 B、H、I、M.1 不同或正文没有写到的地方。
+
+**目录表的写（I、H.2 第 4 与第 7 步、H.6）**
+
+1. 目录表的每个写操作都独占一个 writer 事务，不只 I 节点名的那几个：登记意向、定稿之类的结果不能被同批无关操作的失败一起回滚。
+2. `BeginArchiveRun` 在同一操作里把仍为 `running` 的旧运行改为 `interrupted`，结束时间取新运行的开始时间（M.3 的“下次启动改为 interrupted”）。
+3. **水位的缺口。** 一趟里被选中、写进了后来作废的分段（H.2 第 6 步）的 audit 在水位之后，既不是当前成员，也不在 `archive_deferred` 里，而 `reason` 的取值里没有给它们的一种。所以水位、计数、推迟和不再推迟的 audit 由一个操作 `RecordArchivePass` 一起写，runner 只在这一趟的分段全部定稿（或一个都没写）之后调用它；有分段作废时这一趟不推进水位，下次运行从旧水位重来。
+4. **水位按格式版本取**：最近一次开始的、格式版本相同且记了水位的运行的水位，不论那次运行的最终状态。
+5. **登记意向时成员的状态由存储定。** 调用方只给摘要、变更戳、修订号和时间：
+   - 事务内重算的戳与快照的不同，或 audit 已不在热库，登记为 `stale`；
+   - 同一 audit 已有 `sealed` 的行时，先把它改为 `stale`（H.2 第 4 步）；已有 `hot_removed` 的行时，新行登记为 `stale`；
+   - 修订号必须大于该 audit 已有的全部修订号，否则整个意向被拒绝。
+   结果列出登记为 `stale` 的成员和被改为 `stale` 的旧行。
+6. gap 成员在登记意向时就是 `sealed`（I.1 的取值里没有过渡状态），是否可移除由分段的状态把关。
+7. `member_count` 是分段的成员行数：会话包与桶包数 `archive_members`，gap 包数 `archive_gap_members`。
+8. 清单的 SHA-256 可以在登记意向时给出，定稿时必须给出。同一摘要的重复定稿什么都不做，便于确认丢失后重试。
+9. 删除意向只删 `publishing` 的分段；登记意向时被改为 `stale` 的旧行不恢复。`stale` 从不作为删除依据，这些 audit 下次重新收录。
+10. **对账登记**（H.6 第 2 步）：分段总是插入（清单名或分段号重复则报错）；成员一律 `stale`、没有变更戳，`(audit_id, revision)` 已存在的跳过；gap 成员 `sealed`，已在别的分段里的跳过。两种跳过都在结果里列出（Q12 第 2 点没有说主键冲突怎么办）。
+
+**选取（B.1、B.2）**
+
+11. 选取的四个查询都在导出快照里，与导出共用一个快照（H.2 第 1 步）：
+    - `Due`：沿 `audit_records_started_idx` 取水位之后、截止时间之前的一页。页里是看过的每一条，已到期和推迟的都在，最后一条就是新水位；
+    - `Candidates`：对给定的 id 再看一遍（推迟的、要重新收录的），不在热库的不出现在结果里，不按截止时间过滤；
+    - `ConversationCandidates`：给定会话里截止时间之前的全部 audit，不受水位限制（B.2 的补齐）；
+    - `StaleCandidates`：有 `stale` 成员、仍在热库、没有当前成员的 audit。I.1 没有为 `state = 'stale'` 建索引，这个查询扫 `archive_members`。
+12. 推迟原因的优先级：未终结（`open`）、解析未到终态（`parse_pending`）、调用者查找未到终态（`caller_pending`）。
+13. “当前成员”（B.1 第 4 条）取“不是 `stale`，且所在分段的格式版本等于当前版本”，分段在 `publishing` 时也算：部分唯一索引反正不允许同一 audit 有第二个非 `stale` 的行。
+
+**导出（H.2 第 2 步、H.3、H.4、H.7）**
+
+14. 导出快照要求已经 `EnableIntegrity`，否则打不开。
+15. 一条 audit 导出前要全部证明完：
+    - 事件复核（H.3）；
+    - 每一段密文的认证解密：Header（经 `headerblock.Expand`，用与查询层相同的 `HeaderSource`，含失败与中断的宽松规则）、Request-URI、User-Agent、`parsed_json_enc`、时间线、项目标识、外部引用值、每一个 raw 块、每一个内容对象与二进制对象；
+    - 完整 Body 的 SHA-256；
+    - 对象的内容地址与语义哈希；
+    - 引用的语义哈希与对象一致。
+    原因：包写入器在取对象或 raw 块失败时作废整个分段（`SegmentWriter.Add`），所以不能把问题留到写的时候才暴露。
+16. 版本 2 的块经 `headerblock.Expand` 展开之后，再打开一次取有段的阶段集合（`block_stages`）。块很小，打开两次换来不复制 `Expand` 的宽松规则。
+17. **两项比 H.2 写得更严的检查**，在交给写入器之前做，都只排除这一条：
+    - raw 块的布局按 `bundle` 重读时的规则：每块属于某个 `full`、非 `streaming` 的 Body 的来源阶段，块号与偏移相接，块数与字节数等于 `chunk_count`、`stored_length`。否则原因是 `raw_unservable`。不这样，一条这样的记录要到 H.2 第 6 步的重读才被发现，而那时作废的是整个分段；
+    - 时间线按 `query.TimelineFromPlain` 的边界核对，不过的原因是 `timeline`。
+18. **排除的原因**（`ArchiveMemberError.Reason`）：
+    - 完整性类：`event_missing`、`event_payload`、`event_mac`、`decrypt`、`content_hash`、`turn_graph`。这一类把存储的载荷校验状态置为失败（P 第 4 条）；
+    - 其余：`not_found`、`open`、`timeline`、`raw_unservable`、`record_format`。不改载荷校验状态；`record_format` 表示代码有缺陷，不是数据损坏。
+19. **快照本身的故障不当作损坏。** 上下文取消、存储已关闭、事务不再应答（失败之后用 `SELECT 1` 探一次）都原样返回，结束这一趟，不排除成员、不置失败。事件摘要函数在快照仍然可用时报的错，按 `event_payload` 处理。
+20. 内存：
+    - 对象与二进制每个快照只核对一次，只记哈希，至多 2^20 个，满了清空重来；
+    - 写入器要对象时再解密一次；
+    - raw 块一次一块；
+    - `parsed_json` 整段在记录里，上界 128 MiB（H.7）。
+21. NULL 的约定（R.4 第 6 条）：空的 `parsed_json_enc` 导出为 NULL；解密出来为空的值写成非 nil 的空切片。
+22. 外部引用的值和内容对象的规范 JSON 原文以前没有读取方。`auditmodel` 为此加了两个薄的导出函数 `OpenContent`、`OpenExternalReference`，AAD 与解压的代码不复制。
+
+**变更戳（M.1）**
+
+23. 字节按 M.1，没有改动：
+    - 主键按列的排序规则（`C`）排序，所以阶段按名称的字节序，不按采集顺序；
+    - `integrity_events` 的主键是 `sequence`；
+    - 两张轮次子表经 `turns.audit_id` 找。
+    audit 不存在时，戳是一组空行集合的戳，另返回“不存在”。测试用手写的字节序列核对了一条 audit 的前像。
+24. 在 PostgreSQL 18 上测过：重读、`VACUUM (FREEZE)`（测试要求 `relfrozenxid` 确实前进）、`VACUUM FULL` 不改戳；`SELECT … FOR UPDATE` 也不改；值不变的 `UPDATE`、M.1 第 1 到 3 行、每张表插入或删除一行都改戳；只动别的 audit、共享内容对象、`conversations.updated_at_ns` 的写不改戳。
+
+**列覆盖与摘要敏感性（J.1 的 PostgreSQL 部分）**
+
+25. 列覆盖测试从 `information_schema.columns` 和 `pg_constraint` 读当前 schema，调 `archive.CheckSchema`。它也证明会失败：给 `http_stages` 加一列、新建一张引用 `audit_records` 的表、新建一张经 `audit_analysis` 间接引用的表，各自都被点名。
+26. 摘要敏感性测试对 `archive.Columns` 里每一个“进摘要”的列改库里的一行，重签它的事件，再导出。测试先删掉测试 schema 里的全部 CHECK 与外键，使任何值都写得进去。结果：
+    - 165 列：记录摘要变了，或者这一条被排除；
+    - 被排除的列各自写明预期的原因。它们被别的东西绑着：AAD、内容地址、序列哈希、长度、时间线的点、事件本身；
+    - 13 列跳过：11 个作为子表键的 `audit_id`，以及两种引用行的 `object_hash`（移到轮次够不着的对象，引用行就从记录里消失）。这些列的敏感性由主机上的摘要测试覆盖。
+27. 测试发现，0/1 的标志列在库里写成 2 时，摘要与 1 相同：归档把非零都读成真。CHECK 约束挡住了这种值，所以不是缺陷。测试对这几列改为翻转 0 与 1。
+
+**三层能接上**
+
+28. 端到端测试的路径：采集版本 2 的 audit 经真实的 unified 会话写入，版本 1 的经存储的逐操作写入；导出；用 `bundle.SegmentWriter` 写会话包和桶包；`bundle.Open(...).Verify` 重读。
+    - 报告的摘要与快照算出的逐条相等；
+    - 父轮次在同一分段的子轮次保留增量形式；
+    - 后一次导出里父轮次不在本分段的孙轮次是物化形式，单独核对通过。
+    覆盖的形态：有轮次、无轮次的兜底会话、只有请求并带半截回答的轮次、失败的采集和被中断的采集（都有残缺 Body）、合并的请求对、压缩与明文两种 `parsed_json_enc`、二进制对象、分支、跨两次导出的会话。损坏的块和篡改的事件都只排除自己那一条。
+29. 三层之间没有发现摘要或格式上的不一致。发现的一处是文件名：包名只取运行 id 的前 8 位，同一会话的两个分段在同一秒内由前 8 位相同的运行写出时同名，发布报 `name_exists`。随机的运行 id 下几乎不会发生，测试里给每个包不同的前缀。
+
+**给 runner 的接口**
+
+| 名称 | 用途 |
+| --- | --- |
+| `(*Store).OpenArchiveSnapshot(ctx, ArchiveSnapshotOptions{Cipher, Fingerprinter})` | 开导出快照，`Fingerprinter` 用 `*security.ArchiveKeys` |
+| `(*ArchiveSnapshot).Due(after, cutoffNS, formatVersion, limit) (ArchiveDuePage, error)` | 水位之后的一页候选 |
+| `(*ArchiveSnapshot).Candidates(ids, formatVersion)` | 推迟的与要重新收录的 audit 再看一遍 |
+| `(*ArchiveSnapshot).ConversationCandidates(conversationIDs, cutoffNS, formatVersion)` | 补齐一趟涉及的会话 |
+| `(*ArchiveSnapshot).StaleCandidates(cutoffNS, formatVersion, after, limit)` | 有 `stale` 成员、要重新收录的 audit |
+| `(*ArchiveSnapshot).Export(auditID, revision) (*ArchiveExport, error)` | 一条记录、摘要、变更戳、`turn_created_at_ns`；单条失败为 `*ArchiveMemberError` |
+| `(*ArchiveSnapshot).ContentObject`、`BinaryObject`、`RawChunk` | 实现 `bundle.Payloads`，快照本身就是写入器的 `payloads` 参数 |
+| `(*ArchiveSnapshot).Close()` | 结束快照，在包写完之后 |
+| `ArchiveMemberError{AuditID, Reason}`、`Integrity()`、`ArchiveReason*` | 排除的原因 |
+| `(*Store).BeginArchiveRun(ctx, ArchiveRun) (int64, error)` | 开始运行，返回改为 `interrupted` 的旧运行数 |
+| `(*Store).RecordArchivePass(ctx, ArchivePass)` | 一趟结束：水位、计数、推迟、不再推迟 |
+| `(*Store).UpsertArchiveDeferred`、`DeleteArchiveDeferred` | 单独维护推迟的 audit |
+| `(*Store).RegisterArchiveIntent(ctx, ArchiveIntent) (ArchiveIntentResult, error)` | 登记意向 |
+| `(*Store).SealArchiveSegment(ctx, ArchiveSeal)` | 定稿 |
+| `(*Store).DropArchiveIntent(ctx, segmentID) (bool, error)` | 删掉意向 |
+| `(*Store).RegisterReconciledArchive(ctx, ArchiveReconciled) (ArchiveReconciledResult, error)` | 对账登记不认识的包 |
+| `(*Store).FinishArchiveRun(ctx, ArchiveRunFinish)` | 结束运行 |
+| `(*Store).LastArchiveRun(ctx, status)`、`ArchiveWatermark(ctx, formatVersion)` | 补跑判断与水位 |
+| `(*Store).ArchiveSegment`、`ListArchiveSegments(ctx, state, after, limit)` | 分段，对账找 `publishing` 的 |
+| `(*Store).ListArchiveMembers(ctx, ArchiveMemberQuery)`、`ListArchiveGapMembers`、`ArchiveCurrentRevision` | 按状态或分段列成员，取一条 audit 的最高修订号 |
+| `(*Store).ListArchiveDeferred(ctx, after, limit)` | 推迟的 audit |
+| `storage.Archive*` 类型与常量 | 运行、分段、成员、推迟、意向等的形状与取值，以及它们的校验函数 |
+
+快照的类型在 `postgres` 包里：记录类型 `archive.Record` 依赖 `internal/storage`，所以返回记录的接口不能放进 `internal/storage`。runner 如果要用接口隔离存储，需要在自己一侧定义接口，并为 `*postgres.ArchiveSnapshot` 写一层薄的适配。

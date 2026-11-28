@@ -461,16 +461,16 @@ Header 的写入随这一步重写（5.10）：四个阶段的 Header 和 Traile
 - P4 依赖 P3。
 - P0b 只依赖 P0 的基线。5.9 不依赖 4.2；5.10 跟着 4.2 的第一步。
 
-库表改动按落地顺序各占一个迁移版本，从 005 起依次取号，不预先绑定编号。已经落地的取号如下，归档目录表排在它们之后：
+库表改动按落地顺序各占一个迁移版本，从 005 起依次取号，不预先绑定编号。已经落地的取号如下：
 
 | 迁移 | 阶段 | 改动 |
 | --- | --- | --- |
 | 005 | P0b | 删除 `content_objects_semantic_idx` |
 | 006 | 附录 C.6 | 索引 `turns (created_at_ns, turn_id)`，没有会话 key 的轮次找父轮次候选用 |
 | 007 | P2 | 采集版本 2：`audit_records.capture_version`、`user_agent_enc`，`http_stages.content_type`、`content_encoding`，`http_header_blocks`，`runtime_settings` 的 `audit_capture` 分区 |
-| 之后 | P3 | 归档目录表 |
+| 008 | P3 | 冷归档目录表：`archive_runs`、`archive_deferred`、`archive_segments`、`archive_members`、`archive_gap_members`，只建新表，不引用任何归档表 |
 
-各迁移的内容见模块 04 §3.7 到 §3.9，回滚见 `doc/deployment/postgresql-migration.md` 的回滚各节。
+各迁移的内容见模块 04 §3.7 到 §3.10，回滚见 `doc/deployment/postgresql-migration.md` 的回滚各节。
 
 ## 7. 验证
 
@@ -516,7 +516,7 @@ Header 的写入随这一步重写（5.10）：四个阶段的 Header 和 Traile
 - **内存预算是新的失效方式。** 现在的上限是隐式的（队列容量），改造后是显式的，而且内存里放的是明文。预算设小了会让大请求频繁走暂存，设大了有内存风险。默认值由 P0 的压测给出。
 - **终结器单线程可能成为瓶颈。** 现在的解析 worker 也是单线程，所以不会比现在差，但“结束到可查询延迟”在高并发下可能不如预期。
 - **完整性链持续增长。** 事件从不删除，启动校验把全部事件读进内存。归档让长期运行的库更常见，这个既有问题会更早显现。不在本 issue 范围内，建议另开 issue。
-- **新的迁移版本不可被旧版本读取。** 本方案新增的每个迁移版本（第 6 节）都会让旧版本打不开审计存储，从 P0b 删索引的迁移 005 开始就是如此。回滚到旧版本前要从新到旧撤销对应的库表改动并删掉迁移记录，005 到 007 的步骤见 `doc/deployment/postgresql-migration.md`。
+- **新的迁移版本不可被旧版本读取。** 本方案新增的每个迁移版本（第 6 节）都会让旧版本打不开审计存储，从 P0b 删索引的迁移 005 开始就是如此。回滚到旧版本前要从新到旧撤销对应的库表改动并删掉迁移记录，005 到 008 的步骤见 `doc/deployment/postgresql-migration.md`。
 - **压缩后的解析结果旧版本读不了。** P0b 之后新写入的 `parsed_json_enc` 在达到 4 KiB 且压缩有收益时，密文里是 gzip 流。更早的版本不认识它，读这些行的详情和会话会报完整性错误，而且这不能用 SQL 撤销：行被完整性事件按密文签名，不能原地改写回去。回滚到 P0b 之前的版本意味着这段时间里解析不完整的记录在旧版本里看不了兜底会话；它们的 raw 仍然保留。P2 之后写入的行使用单一 Header 块和 `capture_version` 2，旧版本读不了，回滚前要先确认这段数据的去留。归档目录本身不受回滚影响。
 - **归档里没有凭据原值。** 归档并移除之后，`Authorization`、`x-api-key` 这类值只剩名称、长度和 keyed 指纹，原值无法找回（5.5）。指纹只能用来核对一个已知的 Key，不能反推。
 - **回滚手段。** P1 靠 parser 版本共存；P2 靠 `audit.write_path` 切回 `legacy`；P3、P4 靠 `archive.mode` 切回 `off`。注意从 `archive_then_delete` 切回 `off` 而 `retention_days > 0` 时，会立刻恢复没有归档的直接删除；只想暂停归档应当把 `retention_days` 设为 0（5.7）。已经发布的归档包始终保留，默认不自动销毁。已经从热库移除的数据不会因为回滚而回来。

@@ -168,7 +168,25 @@ PostgreSQL 的 `002_org_reports.sql` 和 `003_session_analysis.sql`（[模块 24
 - **完整性。** 已有的 `capture_finalized` 事件仍按版本 1 校验：`capturePayloadDigest` 一个字节都不改，校验按 `capture_version` 分派（D.3）。离线导入的目标只有 001 基线，没有 `capture_version` 列，导入校验直接按版本 1 计算。
 - 与 002 到 006 一样只由运行时 `migrate()` 应用：离线导入的目标仍是 001 基线，导入的行在第一次启动时得到 `capture_version = 1`。001 不改。SQLite 不加迁移，永远只写版本 1。
 - 迁移本身不改变写入；会话在 PostgreSQL 上写版本 2（§5.1、模块 03 §13）。迁移 007 之前和之后由已删去的 legacy 写入路径写下的都是版本 1，照常读取和校验。
-- `latestSchemaVersion` 为 7。**旧版本遇到版本 7 的库会拒绝打开审计存储**，表现与上面相同。回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-6)；一旦有了版本 2 的行，就没有只用 SQL 的回滚办法。
+- 迁移 008 之前 `latestSchemaVersion` 为 7。**旧版本遇到版本 7 的库会拒绝打开审计存储**，表现与上面相同。回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-6)；一旦有了版本 2 的行，就没有只用 SQL 的回滚办法。
+
+### 3.10 冷归档目录表（PostgreSQL migration 008）
+
+`008_archive_catalog.sql` 建冷归档的目录表（[issue #59 第 4 阶段设计](../design/issue-59-stage4-cold-archive.md) I 节）。目录表是管理数据：不在完整性事件链里，不引用 `audit_records` 或任何归档表（被归档的 audit 之后会从热库移除，成员行要留下），离线导入器也看不到它们。
+
+| 表 | 一行是什么 |
+| --- | --- |
+| `archive_runs` | 一次归档运行：模式（`export_only`、`archive_then_delete`）、截止时间、开始与结束时间、状态（`running`、`completed`、`archive_failed`、`interrupted`）、各项计数，以及本格式版本的选取水位 `(watermark_started_at_ns, watermark_audit_id)` |
+| `archive_deferred` | 水位之后被推迟、需要回头再看的 audit：原因（`open`、`parse_pending`、`caller_pending`、`integrity_failed`），首次见到与最近检查的时间 |
+| `archive_segments` | 一个分段：所属运行、包的种类（`conversation`、`bucket`、`gaps`）、格式版本、清单的相对路径（唯一，不能以 `/` 开头）、清单 SHA-256、密钥指纹、是否加密、成员数、落盘字节、时间范围，状态 `publishing`、`sealed`、`hot_removed` |
+| `archive_members` | 分段里的一条 audit：修订号、记录摘要、变更戳、状态（`sealed`、`hot_removed`、`stale`）、`started_at_ns`、导出时的 `turns.created_at_ns`。主键 `(audit_id, revision)`；部分唯一索引 `archive_members_current_idx` 保证同一 audit 至多一行不是 `stale`。只有对账登记的 `stale` 成员可以没有变更戳 |
+| `archive_gap_members` | 已导出的 gap：主键 `gap_id`，所属分段，状态 `sealed`、`hot_removed` |
+
+- **只建表。** 迁移不改已有的表，不读任何行。测试在有两种采集版本的 audit、带完整性事件的版本 7 库上确认：已有表的 `relfilenode` 和每行的 `xmin` 都不变，升级前后链校验与载荷校验都通过，回滚 SQL 之后再升级同样如此。
+- **`HasAudits`**：`audit_records`、`integrity_events`、`archive_segments` 任一有行就为真，启动时不会在已有归档包的库上新建主密钥（设计 L.3）。只有运行记录、没有分段时为假。SQLite 没有目录表，`HasAudits` 只看前两张表。
+- **写入**都是 writer 操作，各自独占一个事务（§5）；读取走只读连接池。导出快照另见 §6。
+- 与 002 到 007 一样只由运行时 `migrate()` 应用。SQLite 不加迁移：归档只在 PostgreSQL 上。
+- `latestSchemaVersion` 为 8。**旧版本遇到版本 8 的库会拒绝打开审计存储**，表现与上面相同。回滚步骤见 [PostgreSQL 运行与离线迁移](../deployment/postgresql-migration.md#回滚到-schema-版本-7)。
 
 ## 4. HTTP Body 保存方式
 
@@ -225,7 +243,21 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 - audit 终态、调用者关联和 gap；
 - parser claim/release；
 - `SaveParsedAudit`；
-- retention、UA 规则与关键词规则 CRUD。
+- retention、UA 规则与关键词规则 CRUD；
+- 冷归档目录表的写（PostgreSQL，§3.10），每个操作独占一个事务，不与其他写同批：
+
+| 操作 | 做什么 |
+| --- | --- |
+| `BeginArchiveRun` | 插入 `running` 的运行；仍为 `running` 的旧运行在同一操作里改为 `interrupted` |
+| `RecordArchivePass` | 一趟结束后一起写：新的水位、计数、要推迟的 audit（已推迟的保留首次见到的时间）和不再推迟的 audit。运行必须仍在 `running` |
+| `UpsertArchiveDeferred`、`DeleteArchiveDeferred` | 单独增改或删除推迟的 audit |
+| `RegisterArchiveIntent` | 插入 `publishing` 的分段和全部成员、gap 成员。每个成员在事务内用导出快照同一个函数重算变更戳：audit 已不在或戳不同就登记为 `stale`；同一 audit 已有 `sealed` 的旧行时先把它改为 `stale`；已有 `hot_removed` 的行时新行登记为 `stale`；修订号必须大于该 audit 已有的全部修订号 |
+| `SealArchiveSegment` | `publishing` 改为 `sealed`，写清单 SHA-256、落盘字节和定稿时间；已是同一清单摘要的 `sealed` 时什么都不做 |
+| `DropArchiveIntent` | 删掉 `publishing` 的分段，成员与 gap 成员级联删除；不存在时什么都不做，其他状态拒绝 |
+| `RegisterReconciledArchive` | 对账登记目录表不认识的包：`sealed` 的分段，成员一律 `stale`、没有变更戳，gap 成员 `sealed`；已有的 `(audit_id, revision)` 和已在别的分段里的 gap 跳过并列出 |
+| `FinishArchiveRun` | `running` 改为 `completed` 或 `archive_failed`，写最终计数 |
+
+输入的校验在 `internal/storage/archive_types.go`，不过的输入是本地错误，只回滚这一个操作。
 
 `SaveParsedAudit` 在同一事务内完成：
 
@@ -277,6 +309,8 @@ Header/Trailer 组写入失败还会逐个记录受影响的 audit/stage，以 `
 - 交给 query 层认证解密并重建 provider JSON。
 
 raw API 只对 `retention_state=full` 开放；`pending` 返回未就绪，`metadata` 返回 `410 raw_not_retained`。reconstructed API 对 verified turn 返回重建后的 provider request/response JSON。timeline API 按需认证解密 SSE 时间点。
+
+冷归档的导出快照（PostgreSQL，`OpenArchiveSnapshot`）是只读连接池上的一个 REPEATABLE READ 只读事务，一趟归档的选取、全部记录、变更戳和包写入器要的对象与 raw 块都在它里面读，不占用 writer。每条 audit 导出前先在同一快照里复核它的原完整性事件（用后台载荷校验的同一个摘要函数和签名校验），再认证解密每一段它用到的密文；某条 audit 不过只排除这一条，完整性类的失败把载荷校验状态置为失败，与后台校验发现损坏时相同。规则和接口见第 4 阶段设计的实施记录 R.6。
 
 ## 7. 启动恢复与完整性链
 
