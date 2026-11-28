@@ -8,6 +8,7 @@ import (
 
 	"llmapi-logger/internal/bodycodec"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/streamtimeline"
 )
 
@@ -50,8 +51,18 @@ func (service *Service) Timeline(ctx context.Context, auditID string, side Side)
 	if err != nil {
 		return StreamTimeline{}, ErrIntegrity
 	}
+	defer clear(plaintext)
+	return timelineFromPlaintext(stored, plaintext)
+}
+
+// timelineFromPlaintext is Timeline after decryption and decompression: it
+// decodes and checks the points against the stored timeline row. DataEnc and
+// Compression of stored are not read, and plaintext is not kept.
+func timelineFromPlaintext(stored storage.StoredStreamTimeline, plaintext []byte) (StreamTimeline, error) {
+	if stored.EventCount <= 0 || stored.PlaintextLength <= 0 || int64(len(plaintext)) != stored.PlaintextLength {
+		return StreamTimeline{}, ErrIntegrity
+	}
 	points, err := streamtimeline.Decode(plaintext, maxTimelinePoints)
-	clear(plaintext)
 	if err != nil || len(points) == 0 || len(points) > maxTimelinePoints || int64(len(points)) > stored.EventCount {
 		return StreamTimeline{}, ErrIntegrity
 	}

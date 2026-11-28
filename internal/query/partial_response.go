@@ -32,6 +32,12 @@ func openParsedEnvelope(cipher security.Cipher, auditID string, parsed *storage.
 		return parsedEnvelope{}, ErrIntegrity
 	}
 	defer clear(plaintext)
+	return decodeParsedEnvelope(plaintext)
+}
+
+// decodeParsedEnvelope decodes the JSON held in parsed_json_enc once it has
+// been decrypted and decompressed. It does not keep plaintext.
+func decodeParsedEnvelope(plaintext []byte) (parsedEnvelope, error) {
 	var envelope parsedEnvelope
 	if err := json.Unmarshal(plaintext, &envelope); err != nil || !validConversation(envelope.Conversation) {
 		return parsedEnvelope{}, ErrIntegrity
@@ -46,14 +52,27 @@ func openParsedEnvelope(cipher security.Cipher, auditID string, parsed *storage.
 // conversation goes through here, so the detail view, the session
 // conversation, the exports and the backfills see the same messages.
 func reconstructAuditTurn(cipher security.Cipher, detail storage.AuditQueryDetail) (ReconstructedTurn, error) {
-	reconstructed, err := reconstructTurnGraph(cipher, detail.Audit.ParserName, detail.TurnGraph)
+	return completeAuditTurn(
+		func() (ReconstructedTurn, error) {
+			return reconstructTurnGraph(cipher, detail.Audit.ParserName, detail.TurnGraph)
+		},
+		func() (parsedEnvelope, error) {
+			return openParsedEnvelope(cipher, detail.Audit.AuditID, detail.ParsedResult)
+		},
+	)
+}
+
+// completeAuditTurn is reconstructAuditTurn without decryption. The parsed
+// envelope is opened only for a request-only turn.
+func completeAuditTurn(reconstruct func() (ReconstructedTurn, error), openParsed func() (parsedEnvelope, error)) (ReconstructedTurn, error) {
+	reconstructed, err := reconstruct()
 	if err != nil {
 		return ReconstructedTurn{}, err
 	}
-	if detail.TurnGraph.ResponseLayout != auditmodel.LayoutNone {
+	if reconstructed.Turn.ResponseLayout != auditmodel.LayoutNone {
 		return reconstructed, nil
 	}
-	envelope, err := openParsedEnvelope(cipher, detail.Audit.AuditID, detail.ParsedResult)
+	envelope, err := openParsed()
 	if err != nil {
 		return ReconstructedTurn{}, err
 	}

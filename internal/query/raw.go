@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"strconv"
 
@@ -33,36 +34,16 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 	if err != nil {
 		return fmt.Errorf("query: read raw metadata: %w", err)
 	}
-	if metadata.State == storage.StageStateStreaming {
-		return ErrNotReady
+	verifier, err := newRawVerifier(metadata)
+	if err != nil {
+		return err
 	}
-	if metadata.RetentionState == storage.RetentionPending {
-		return ErrNotReady
-	}
-	if metadata.RetentionState == storage.RetentionMetadata {
-		return ErrNotRetained
-	}
-
-	digest := sha256.New()
-	var written int64
-	var expectedSequence int64
-	var expectedOffset int64
-	complete := metadata.State == storage.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength
-	missingChunks := rawHasMissingChunks(metadata)
 	err = service.store.StreamBodyChunks(ctx, auditID, stage, func(chunk storage.BodyChunk) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if chunk.Seq != expectedSequence || chunk.Offset != expectedOffset {
-			// Only a capture-time, explicitly recorded loss permits a forward
-			// gap. Keep original sequence/AAD and offsets; never renumber or
-			// fabricate missing bytes. Other gaps still mean corruption.
-			if !missingChunks || chunk.Seq <= expectedSequence || chunk.Offset < expectedOffset {
-				return ErrIntegrity
-			}
-		}
-		if missingChunks && (chunk.PlaintextLength < 0 || chunk.Offset > metadata.ObservedLength || int64(chunk.PlaintextLength) > metadata.ObservedLength-chunk.Offset) {
-			return ErrIntegrity
+		if err := verifier.accept(chunk.Seq, chunk.Offset, chunk.PlaintextLength); err != nil {
+			return err
 		}
 		compression := chunk.Compression
 		if compression == "" {
@@ -88,29 +69,89 @@ func (service *Service) StreamRaw(ctx context.Context, auditID string, side Side
 		if decodeErr != nil {
 			return ErrIntegrity
 		}
-		if complete {
-			_, _ = digest.Write(plaintext)
-		}
-		count, err := destination.Write(plaintext)
-		written += int64(count)
-		if err != nil {
-			return err
-		}
-		if count != len(plaintext) {
-			return io.ErrShortWrite
-		}
-		expectedSequence = chunk.Seq + 1
-		expectedOffset = chunk.Offset + int64(len(plaintext))
-		return nil
+		return verifier.write(destination, chunk.Seq, chunk.Offset, plaintext)
 	})
 	if err != nil {
 		return fmt.Errorf("query: stream raw body: %w", err)
 	}
-	if written != metadata.StoredLength {
+	return verifier.finish()
+}
+
+// rawVerifier is the part of StreamRaw that needs no decryption: the state
+// gate, chunk continuity, the written length and, for a complete body, the
+// SHA-256 of what was written.
+type rawVerifier struct {
+	metadata         storage.RawBodyMetadata
+	digest           hash.Hash
+	written          int64
+	expectedSequence int64
+	expectedOffset   int64
+	complete         bool
+	missingChunks    bool
+}
+
+// newRawVerifier refuses a body that is still streaming, pending or not
+// retained, before any chunk is read.
+func newRawVerifier(metadata storage.RawBodyMetadata) (*rawVerifier, error) {
+	if metadata.State == storage.StageStateStreaming {
+		return nil, ErrNotReady
+	}
+	if metadata.RetentionState == storage.RetentionPending {
+		return nil, ErrNotReady
+	}
+	if metadata.RetentionState == storage.RetentionMetadata {
+		return nil, ErrNotRetained
+	}
+	return &rawVerifier{
+		metadata:      metadata,
+		digest:        sha256.New(),
+		complete:      metadata.State == storage.StageStateComplete && metadata.HashComplete && metadata.EOFSeen && metadata.StoredLength == metadata.ObservedLength,
+		missingChunks: rawHasMissingChunks(metadata),
+	}, nil
+}
+
+// accept checks the position of the next chunk before it is opened.
+func (verifier *rawVerifier) accept(sequence, offset int64, plaintextLength int) error {
+	if sequence != verifier.expectedSequence || offset != verifier.expectedOffset {
+		// Only a capture-time, explicitly recorded loss permits a forward
+		// gap. Keep original sequence/AAD and offsets; never renumber or
+		// fabricate missing bytes. Other gaps still mean corruption.
+		if !verifier.missingChunks || sequence <= verifier.expectedSequence || offset < verifier.expectedOffset {
+			return ErrIntegrity
+		}
+	}
+	observed := verifier.metadata.ObservedLength
+	if verifier.missingChunks && (plaintextLength < 0 || offset > observed || int64(plaintextLength) > observed-offset) {
 		return ErrIntegrity
 	}
-	if complete {
-		if len(metadata.SHA256) != sha256.Size || !equalBytes(digest.Sum(nil), metadata.SHA256) {
+	return nil
+}
+
+// write hashes and writes one opened chunk that accept let through.
+func (verifier *rawVerifier) write(destination io.Writer, sequence, offset int64, plaintext []byte) error {
+	if verifier.complete {
+		_, _ = verifier.digest.Write(plaintext)
+	}
+	count, err := destination.Write(plaintext)
+	verifier.written += int64(count)
+	if err != nil {
+		return err
+	}
+	if count != len(plaintext) {
+		return io.ErrShortWrite
+	}
+	verifier.expectedSequence = sequence + 1
+	verifier.expectedOffset = offset + int64(len(plaintext))
+	return nil
+}
+
+// finish checks the written length and, for a complete body, its digest.
+func (verifier *rawVerifier) finish() error {
+	if verifier.written != verifier.metadata.StoredLength {
+		return ErrIntegrity
+	}
+	if verifier.complete {
+		if len(verifier.metadata.SHA256) != sha256.Size || !equalBytes(verifier.digest.Sum(nil), verifier.metadata.SHA256) {
 			return ErrIntegrity
 		}
 	}

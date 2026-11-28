@@ -28,18 +28,30 @@ func (service *Service) SessionConversation(ctx context.Context, auditID string)
 	if err != nil {
 		return nil, fmt.Errorf("query: read session conversation: %w", err)
 	}
+	var turn func() (ReconstructedTurn, error)
 	if detail.TurnGraph != nil {
-		reconstructed, err := reconstructAuditTurn(service.cipher, detail)
+		turn = func() (ReconstructedTurn, error) { return reconstructAuditTurn(service.cipher, detail) }
+	}
+	parsed := detail.ParsedResult
+	return sessionConversation(turn, parsed != nil && len(parsed.ParsedJSONEnc) != 0,
+		func() (parsedEnvelope, error) { return openParsedEnvelope(service.cipher, auditID, parsed) })
+}
+
+// sessionConversation is SessionConversation without decryption: turn, when
+// not nil, reconstructs the audit's turn; hasParsed says the parsed result
+// has a payload, which openParsed opens.
+func sessionConversation(turn func() (ReconstructedTurn, error), hasParsed bool, openParsed func() (parsedEnvelope, error)) (*conversation.Conversation, error) {
+	if turn != nil {
+		reconstructed, err := turn()
 		if err != nil {
 			return nil, err
 		}
 		return reconstructed.Conversation, nil
 	}
-	parsed := detail.ParsedResult
-	if parsed == nil || len(parsed.ParsedJSONEnc) == 0 {
+	if !hasParsed {
 		return nil, ErrNotFound
 	}
-	envelope, err := openParsedEnvelope(service.cipher, auditID, parsed)
+	envelope, err := openParsed()
 	if err != nil {
 		return nil, err
 	}
