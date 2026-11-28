@@ -14,6 +14,7 @@ import (
 )
 
 func TestCompactInsightsActualPostgresGrowth(t *testing.T) {
+	t.Parallel()
 	store, _ := openTestStore(t)
 	ctx := context.Background()
 	key := bytes.Repeat([]byte{0x64}, security.KeySize)

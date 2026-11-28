@@ -777,6 +777,7 @@ func (fixture *scaleFixture) keylessCandidateWalk(protocol string, before int64)
 // a hundredth of each table, so a statement that starts scanning fails it by
 // two orders of magnitude.
 func TestTurnGraphQueriesStayInsideTheTurnAtScale(t *testing.T) {
+	t.Parallel()
 	store, _ := openTestStore(t)
 	fixture := seedTurnGraphAtScale(t, store)
 	counts := map[string]float64{}
@@ -1015,8 +1016,11 @@ FROM unnest($1::text[], $2::text[], $3::bigint[]) AS u(id, c, s)`, []any{ids, co
 // the rare protocol's five turns are the oldest, so walking the index would
 // read every turn, and the common protocol's newest 32 turns are contiguous.
 func TestKeylessCandidateSearchKnowsTheProtocolAtScale(t *testing.T) {
+	t.Parallel()
 	sizes := []int{20_000, 317_000}
-	if testing.Short() {
+	if testing.Short() || raceBuild {
+		// The plan is checked at 20,000 turns as well; the race build leaves
+		// out the 317,000-turn repetition, which seeds for most of the time.
 		sizes = sizes[:1]
 	}
 	for _, size := range sizes {

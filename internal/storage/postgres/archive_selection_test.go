@@ -209,9 +209,15 @@ func TestArchiveDueQueryStaysOnTheStartedIndex(t *testing.T) {
 // measured here for the runner: the stamp is recomputed for every member in
 // the writer transaction.
 func TestArchiveIntentRegistrationCost(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := openTestStore(t)
-	const members = 2000
+	members := 2000
+	if raceBuild {
+		// The measurement means nothing under the race detector; the race
+		// build registers a smaller intent and keeps the stale check.
+		members = 200
+	}
 	seedProcessedAudits(t, store, members)
 	run := testArchiveRun("53000000000000000000000000000001", 10)
 	if _, err := store.BeginArchiveRun(ctx, run); err != nil {
@@ -237,5 +243,5 @@ func TestArchiveIntentRegistrationCost(t *testing.T) {
 	if err != nil || len(result.Stale) != 0 {
 		t.Fatalf("intent: %d stale, %v", len(result.Stale), err)
 	}
-	t.Logf("RegisterArchiveIntent with %d members: %v (%v per member)", members, elapsed.Round(time.Millisecond), (elapsed / members).Round(time.Microsecond))
+	t.Logf("RegisterArchiveIntent with %d members: %v (%v per member)", members, elapsed.Round(time.Millisecond), (elapsed / time.Duration(members)).Round(time.Microsecond))
 }

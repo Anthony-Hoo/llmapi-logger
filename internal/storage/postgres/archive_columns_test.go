@@ -378,6 +378,7 @@ var digestExpectations = map[string]digestExpectation{
 }
 
 func TestArchiveDigestCoversEveryDigestColumn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := buildDigestSensitivityFixture(t)
 	store := fixture.store

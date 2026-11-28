@@ -467,13 +467,30 @@ VALUES ($1, $2::bigint, $2::bigint + 1, 'route', $3, 'parser', 'POST', '/v1/test
 	// same generator and seeds and runs a prefix that still hits every
 	// outcome, so the package stays quick.
 	graphs, limitedGraphs := 120, 60
+	if raceBuild {
+		// The race build runs a shorter prefix of the same graphs; it still
+		// reaches every outcome at both limits, which the end requires.
+		graphs, limitedGraphs = 40, 30
+	}
 	if os.Getenv("LLMAPI_TEST_PARENT_EQUIVALENCE") == "full" {
 		graphs, limitedGraphs = 2000, 500
+	}
+	// Every way a turn links is reached, so a shorter prefix (raceBuild)
+	// cannot silently stop covering one.
+	reasons := []string{"root", "continuation", "branch", "retry", "context_edit", "conversation_key", "previous_response_id"}
+	requireReasons := func(limits string) {
+		t.Helper()
+		for _, reason := range reasons {
+			if outcomes[reason] == 0 {
+				t.Fatalf("no save at the %s limits linked by %s: %v", limits, reason, outcomes)
+			}
+		}
 	}
 	for graph := 0; graph < graphs; graph++ {
 		runGraph(graph)
 	}
 	t.Logf("saves by outcome at the production limits: %v", outcomes)
+	requireReasons("production")
 	clear(outcomes)
 
 	headers, references, chainRefs := maxAncestorHeaders, maxAncestorReferenceRows, candidateChainRefLimit
@@ -485,6 +502,7 @@ VALUES ($1, $2::bigint, $2::bigint + 1, 'route', $3, 'parser', 'POST', '/v1/test
 		runGraph(graph)
 	}
 	t.Logf("saves by outcome at lowered limits: %v", outcomes)
+	requireReasons("lowered")
 	if outcomes["refused"] == 0 {
 		t.Fatal("the lowered limits refused nothing")
 	}
