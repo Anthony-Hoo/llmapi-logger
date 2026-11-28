@@ -64,6 +64,9 @@ type archiveEnv struct {
 	fault    atomic.Pointer[func(operation, path string) error]
 	step     atomic.Pointer[func(step string) error]
 	sent     int
+	// formatVersion, when positive, overrides the runner's format version
+	// (archive_remove_postgres_test.go).
+	formatVersion int64
 }
 
 func archiveDSN(t *testing.T) (string, *sql.DB) {
@@ -99,6 +102,13 @@ func archiveDSN(t *testing.T) (string, *sql.DB) {
 
 func newArchiveEnv(t *testing.T, mode string) *archiveEnv {
 	t.Helper()
+	return newArchiveEnvWith(t, mode, nil)
+}
+
+// newArchiveEnvWith is newArchiveEnv with a hook that adjusts the
+// environment before the application starts.
+func newArchiveEnvWith(t *testing.T, mode string, configure func(*archiveEnv)) *archiveEnv {
+	t.Helper()
 	dsn, db := archiveDSN(t)
 	base := t.TempDir()
 	upstream := protofixture.NewUpstream("ar")
@@ -126,6 +136,9 @@ func newArchiveEnv(t *testing.T, mode string) *archiveEnv {
 		{ID: "gemini-stream-generate-content", Method: http.MethodPost, Path: "/v1beta/models/{model}:streamGenerateContent", Match: "template", Parser: "gemini.stream_generate_content"},
 	}
 	env := &archiveEnv{t: t, ctx: context.Background(), cfg: cfg, db: db, upstream: upstream, logs: &lockedBuffer{}}
+	if configure != nil {
+		configure(env)
+	}
 	env.start()
 	return env
 }
@@ -148,6 +161,7 @@ func (env *archiveEnv) start() {
 			}
 			return nil
 		},
+		formatVersion: env.formatVersion,
 	}
 	application, err := NewContext(env.ctx, env.cfg, slog.New(slog.NewJSONHandler(env.logs, nil)), withArchiveSeams(seams))
 	if err != nil {
@@ -841,14 +855,16 @@ func TestPostgresArchiveDiskFullPublishesNothing(t *testing.T) {
 	env.requireOneSealedMember(ids)
 }
 
-// Guards on PostgreSQL: archive_then_delete exports as export_only and says
-// removal is not active; turning the archive off with retention on after
+// Guards on PostgreSQL: archive_then_delete at the built-in trial format
+// version 0 says so, exports and removes nothing; turning the archive off
+// with retention on after
 // runs warns that direct deletion resumed and assembles retention again; an
 // archive path that is not a directory leaves the runner off and the audit
 // working.
 func TestPostgresArchiveStartupGuards(t *testing.T) {
 	env := newArchiveEnv(t, config.ArchiveModeArchiveThenDelete)
-	if !strings.Contains(env.logs.String(), `"error_category":"archive_removal_inactive"`) || env.app.retention != nil {
+	if !strings.Contains(env.logs.String(), `"error_category":"archive_removal_active"`) ||
+		!strings.Contains(env.logs.String(), `"error_category":"archive_removal_trial_format"`) || env.app.retention != nil {
 		t.Fatalf("logs %s", env.logs.String())
 	}
 	env.traffic([]protofixture.Protocol{protofixture.OpenAIResponses}, 1)
@@ -859,7 +875,7 @@ func TestPostgresArchiveStartupGuards(t *testing.T) {
 		t.Fatalf("result %+v", result)
 	}
 	if after := env.tableCounts(); fmt.Sprint(after) != fmt.Sprint(before) {
-		t.Fatal("archive_then_delete removed hot rows in this build step")
+		t.Fatal("archive_then_delete removed hot rows at format version 0")
 	}
 	if err := env.app.Close(); err != nil {
 		t.Fatal(err)

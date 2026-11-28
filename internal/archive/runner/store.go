@@ -46,6 +46,16 @@ type Store interface {
 	Watermark(ctx context.Context, formatVersion int64) (*storage.ArchivePosition, error)
 	// ChangeStamp is the audit's change stamp as the hot store holds it now.
 	ChangeStamp(ctx context.Context, auditID string) ([32]byte, bool, error)
+
+	// RemovableMembers lists every member a removal may take (design M.2):
+	// sealed members of sealed segments of format version
+	// storage.ArchiveRemovalMinFormatVersion or later, in no particular order.
+	RemovableMembers(ctx context.Context) ([]storage.ArchiveRemovable, error)
+	// RemoveArchived removes one batch from the hot store after the change
+	// stamp check (postgres.Store.RemoveArchived).
+	RemoveArchived(ctx context.Context, batch []storage.ArchiveRemoval, removedAtNS int64) (storage.ArchiveRemovalResult, error)
+	// RemoveArchivedGaps removes up to limit exported gaps.
+	RemoveArchivedGaps(ctx context.Context, limit int, removedAtNS int64) (storage.ArchiveGapRemovalResult, error)
 }
 
 // Snapshot is one export snapshot: the selection queries, the export of one
@@ -102,6 +112,9 @@ type PostgresStore interface {
 	LastArchiveRun(context.Context, string) (*postgres.ArchiveRun, error)
 	ArchiveWatermark(context.Context, int64) (*postgres.ArchivePosition, error)
 	ArchiveChangeStamp(context.Context, string) ([32]byte, bool, error)
+	ListRemovableArchiveMembers(context.Context, *postgres.ArchiveMemberKey, int) ([]postgres.ArchiveRemovable, error)
+	RemoveArchived(context.Context, []postgres.ArchiveRemoval, int64) (postgres.ArchiveRemovalResult, error)
+	RemoveArchivedGaps(context.Context, int, int64) (postgres.ArchiveGapRemovalResult, error)
 }
 
 // FromPostgres adapts the PostgreSQL store. options carries the audit cipher
@@ -257,6 +270,31 @@ func (adapter *pgStore) Watermark(ctx context.Context, formatVersion int64) (*st
 
 func (adapter *pgStore) ChangeStamp(ctx context.Context, auditID string) ([32]byte, bool, error) {
 	return adapter.store.ArchiveChangeStamp(ctx, auditID)
+}
+
+func (adapter *pgStore) RemovableMembers(ctx context.Context) ([]storage.ArchiveRemovable, error) {
+	var all []storage.ArchiveRemovable
+	var after *storage.ArchiveMemberKey
+	for {
+		page, err := adapter.store.ListRemovableArchiveMembers(ctx, after, listPage)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < listPage {
+			return all, nil
+		}
+		last := page[len(page)-1]
+		after = &storage.ArchiveMemberKey{AuditID: last.AuditID, Revision: last.Revision}
+	}
+}
+
+func (adapter *pgStore) RemoveArchived(ctx context.Context, batch []storage.ArchiveRemoval, removedAtNS int64) (storage.ArchiveRemovalResult, error) {
+	return adapter.store.RemoveArchived(ctx, batch, removedAtNS)
+}
+
+func (adapter *pgStore) RemoveArchivedGaps(ctx context.Context, limit int, removedAtNS int64) (storage.ArchiveGapRemovalResult, error) {
+	return adapter.store.RemoveArchivedGaps(ctx, limit, removedAtNS)
 }
 
 type pgSnapshot struct{ *postgres.ArchiveSnapshot }

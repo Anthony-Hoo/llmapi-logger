@@ -145,6 +145,7 @@ func (h *harness) addTurnless(id, protocol string, startedNS int64) *fakeAudit {
 func (h *harness) addConversation(conversationID, protocol string, turns int, startedNS int64) []*fakeAudit {
 	var parent *archive.Record
 	var audits []*fakeAudit
+	parentID := ""
 	for index := 0; index < turns; index++ {
 		id := fmt.Sprintf("%s-t%02d", conversationID, index)
 		started := startedNS + int64(index)*int64(time.Second)
@@ -154,7 +155,8 @@ func (h *harness) addConversation(conversationID, protocol string, turns int, st
 		conversation, created := conversationID, started+10
 		built := record
 		audit := &fakeAudit{id: id, startedNS: started, protocol: protocol, conversation: &conversation, turnCreatedNS: &created,
-			stamp: stampOf(id, 0), build: func() *archive.Record { return built }}
+			stamp: stampOf(id, 0), build: func() *archive.Record { return built }, parent: parentID}
+		parentID = id
 		h.store.audits[id] = audit
 		audits = append(audits, audit)
 	}

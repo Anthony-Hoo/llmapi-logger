@@ -24,6 +24,9 @@ type fakeAudit struct {
 	integrity     bool
 	stamp         [32]byte
 	build         func() *archive.Record
+	// parent is the audit of the parent turn; removing it checkpoints this
+	// audit, which changes its stamp (remove_test.go).
+	parent string
 }
 
 // fakeStore is an in-memory hot store and catalog with the semantics R.6
@@ -40,11 +43,17 @@ type fakeStore struct {
 	deferred   map[string]storage.ArchiveDeferred
 	// fail makes the named method return the error.
 	fail map[string]error
+	// The removal (remove_test.go): the batches in call order, the
+	// checkpoints the removal of a parent caused, and the removed gaps.
+	removalBatches [][]string
+	checkpoints    int
+	removedGaps    map[int64]bool
+	calls          []string
 }
 
 func newFakeStore(payloads *payloads) *fakeStore {
 	return &fakeStore{payloads: payloads, audits: map[string]*fakeAudit{}, segments: map[string]*storage.ArchiveSegment{},
-		gapMembers: map[int64]string{}, deferred: map[string]storage.ArchiveDeferred{}, fail: map[string]error{}}
+		gapMembers: map[int64]string{}, deferred: map[string]storage.ArchiveDeferred{}, fail: map[string]error{}, removedGaps: map[int64]bool{}}
 }
 
 func (store *fakeStore) injected(method string) error {

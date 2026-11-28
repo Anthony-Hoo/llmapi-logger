@@ -10,12 +10,14 @@ import (
 	"strings"
 	"time"
 
+	"llmapi-logger/internal/archive"
 	"llmapi-logger/internal/archive/bundle"
 	"llmapi-logger/internal/archive/runner"
 	"llmapi-logger/internal/audit/staging"
 	"llmapi-logger/internal/config"
 	"llmapi-logger/internal/query"
 	"llmapi-logger/internal/security"
+	"llmapi-logger/internal/storage"
 	"llmapi-logger/internal/storage/postgres"
 )
 
@@ -28,6 +30,23 @@ type archiveSeams struct {
 	now   func() time.Time
 	fault func(operation, path string) error
 	step  func(step string) error
+	// formatVersion, when positive, is runner.Options.FormatVersionOverride:
+	// tests drive the removal of format version 1 before the format is
+	// frozen.
+	formatVersion int64
+}
+
+// archiveFormatVersion is the format version the runner works with: the
+// built-in archive.FormatVersion unless a test seam overrides it.
+func archiveFormatVersion(seams archiveSeams) int64 {
+	if seams.formatVersion > 0 {
+		return seams.formatVersion
+	}
+	version, err := strconv.ParseInt(archive.FormatVersion, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return version
 }
 
 // withArchiveSeams sets the archive runner's clock and fault hooks.
@@ -78,15 +97,22 @@ func archiveKeys(configuration config.Config, key []byte) (*security.ArchiveKeys
 }
 
 // warnArchiveMode writes the start-up lines of guard 2 (L.2, H.5): with the
-// archive on, retention's direct delete is not assembled, so the hot store
-// keeps growing; archive_then_delete exports only in this build step.
-func warnArchiveMode(configuration config.Config, logger *slog.Logger) {
+// archive on, retention's direct delete is not assembled. export_only says
+// the hot store keeps growing. archive_then_delete says verified removal is
+// active for bundles of format version 1 or later and, while the format the
+// runner writes (formatVersion) is the trial version 0, that its bundles are
+// exported but never removed: nothing is removed from the hot store.
+func warnArchiveMode(configuration config.Config, formatVersion int64, logger *slog.Logger) {
 	switch configuration.Archive.Mode {
 	case config.ArchiveModeExportOnly:
 		logger.Warn("archive export only: hot store keeps growing", "error_category", "archive_export_only")
 	case config.ArchiveModeArchiveThenDelete:
-		logger.Warn("archive export only: hot store keeps growing", "error_category", "archive_export_only")
-		logger.Warn("archive removal is not active in this build: archive_then_delete exports only", "error_category", "archive_removal_inactive")
+		logger.Warn("archive verified removal active: archived audits are removed from the hot store once their bundle of format version 1 or later is sealed and their change stamp is unchanged",
+			"error_category", "archive_removal_active", "format_version", formatVersion)
+		if formatVersion < storage.ArchiveRemovalMinFormatVersion {
+			logger.Warn("archive format version 0 is the trial format: its bundles are exported but never removed, so nothing is removed from the hot store and it keeps growing",
+				"error_category", "archive_removal_trial_format", "format_version", formatVersion)
+		}
 	}
 }
 
@@ -144,6 +170,7 @@ func assembleArchive(configuration config.Config, runtime auditRuntime, service 
 		Sampler:             runner.QuerySampler{Hot: service, Fingerprinter: runtime.archiveKeys},
 		SourceSchemaVersion: strconv.Itoa(postgres.LatestSchemaVersion),
 		Logger:              logger, Now: seams.now, Fault: seams.fault, Step: seams.step,
+		FormatVersionOverride: seams.formatVersion,
 	})
 	if err != nil {
 		logger.Warn("archive runner unavailable", "error_category", "archive_unavailable", "reason", "invalid_options")

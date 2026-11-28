@@ -121,13 +121,18 @@ func (current *run) execute() error {
 	return current.removalPhase()
 }
 
-// removalPhase is the seam of the P4 package (design M): in
-// archive_then_delete, after every pass of the run has sealed its segments,
-// remove the sealed members of the sealed segments of format version 1 or
-// later in the order of M.2, then the exported gaps (P item 16), and
-// continue what H.6 item 4 found. This build step exports only, so it does
-// nothing in either mode.
-func (current *run) removalPhase() error { return nil }
+// removalPhase is the removal of design M: in archive_then_delete, after
+// every pass of the run has sealed its segments, remove the sealed members
+// of the sealed segments of format version 1 or later in the order of M.2,
+// then the exported gaps (P item 16). Members left sealed by an earlier run
+// are among them, which continues what H.6 item 4 finds. export_only never
+// removes anything.
+func (current *run) removalPhase() error {
+	if current.options().Mode != storage.ArchiveModeArchiveThenDelete {
+		return nil
+	}
+	return current.remove()
+}
 
 // loadLookback reads the ids of every deferred audit.
 func (current *run) loadLookback() error {

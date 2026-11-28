@@ -331,7 +331,7 @@ func newContextWithStore(ctx context.Context, configuration config.Config, logge
 	}
 	warnDeprecatedInsights(configuration.Insights, logger)
 	warnWeakAdminToken(configuration, logger)
-	warnArchiveMode(configuration, logger)
+	warnArchiveMode(configuration, archiveFormatVersion(seams.archive), logger)
 	newAPIClient, err := assembleNewAPIClient(configuration.NewAPI, upstreamProxy)
 	if err != nil {
 		return nil, fmt.Errorf("assemble NewAPI management client: %w", err)

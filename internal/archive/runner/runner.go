@@ -26,6 +26,7 @@ import (
 	"llmapi-logger/internal/archive"
 	"llmapi-logger/internal/archive/bundle"
 	"llmapi-logger/internal/config"
+	"llmapi-logger/internal/retention"
 	"llmapi-logger/internal/security"
 	"llmapi-logger/internal/storage"
 )
@@ -85,6 +86,12 @@ type Options struct {
 	Step func(step string) error
 	// Random returns a number in [0, 1) for the sample; nil uses math/rand.
 	Random func() float64
+	// FormatVersionOverride, when positive, replaces archive.FormatVersion
+	// as the format version the run selects by and registers its segments
+	// with. It exists for tests that drive the removal of format version 1
+	// before the format is frozen; the bundles themselves still carry
+	// archive.FormatVersion. Production never sets it.
+	FormatVersionOverride int64
 }
 
 // Points of Options.Step.
@@ -93,6 +100,11 @@ const (
 	StepAfterPublish     = "after_publish"
 	StepBeforeSeal       = "before_seal"
 	StepBeforeRecordPass = "before_record_pass"
+	// StepBetweenRemovalBatches is reached after each committed removal
+	// batch that is not the last, StepAfterRemoval after the last batch of
+	// audits and gaps, before the run record is finished (M.3).
+	StepBetweenRemovalBatches = "between_removal_batches"
+	StepAfterRemoval          = "after_removal"
 )
 
 // Runner runs the archive once a day. It never runs twice at the same time.
@@ -101,9 +113,13 @@ type Runner struct {
 	hour, minute  int
 	formatVersion int64
 	running       atomic.Bool
-	stop          context.CancelFunc
-	done          chan struct{}
-	stopOnce      sync.Once
+	// batcher sizes the removal batches (retention.Batcher); kept across
+	// runs. pause leaves the writer alone after a batch.
+	batcher  *retention.Batcher
+	pause    func(context.Context, time.Duration)
+	stop     context.CancelFunc
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // New validates the options.
@@ -132,6 +148,12 @@ func New(options Options) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
+	if options.FormatVersionOverride < 0 {
+		return nil, errors.New("archive runner: invalid format version override")
+	}
+	if options.FormatVersionOverride > 0 {
+		formatVersion = options.FormatVersionOverride
+	}
 	if options.Location == nil {
 		options.Location = time.Local
 	}
@@ -150,7 +172,8 @@ func New(options Options) (*Runner, error) {
 	if options.SourceSchemaVersion == "" {
 		return nil, errors.New("archive runner: needs the source schema version")
 	}
-	return &Runner{options: options, hour: hour, minute: minute, formatVersion: formatVersion}, nil
+	return &Runner{options: options, hour: hour, minute: minute, formatVersion: formatVersion,
+		batcher: retention.NewBatcher(), pause: retention.Wait}, nil
 }
 
 // Start runs the schedule until ctx ends or Close is called: a catch-up run
@@ -259,8 +282,16 @@ type Result struct {
 	Deferred         map[string]int64
 	DeadlineReached  bool
 	ReconciledSealed int64
-	Duration         time.Duration
+	// Removal is what the removal phase did (archive_then_delete). The
+	// removed audits and gaps are also in Counts, and the members it found
+	// changed in Counts.StaleAudits.
+	Removal  RemovalResult
+	Duration time.Duration
 }
+
+// FormatVersion is the format version the runner selects by and registers
+// segments with.
+func (runner *Runner) FormatVersion() int64 { return runner.formatVersion }
 
 // RunOnce runs the archive once (H.2): reconciliation, passes until nothing
 // is due or the deadline passes, then the gaps. It returns the result of a
@@ -354,6 +385,8 @@ func (current *run) logCompletion(runErr error) {
 		"sample_mismatch_audits", result.SampleMismatched,
 		"segments", result.Counts.Segments,
 		"disk_bytes", result.Counts.DiskBytes,
+		"removed_audits", result.Counts.RemovedAudits,
+		"removed_gaps", result.Counts.RemovedGaps,
 		"duration_ms", result.Duration.Milliseconds(),
 	}
 	for _, reason := range deferralReasons {
