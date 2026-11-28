@@ -73,6 +73,15 @@ func readManifest(path string) (*archive.Manifest, map[string]archive.ManifestFi
 	if err != nil {
 		return nil, nil, fail(ReasonReadFailed, err)
 	}
+	return parseManifest(data)
+}
+
+// parseManifest decodes manifest bytes and checks the file list as
+// readManifest does.
+func parseManifest(data []byte) (*archive.Manifest, map[string]archive.ManifestFile, error) {
+	if len(data) > maxManifestBytes {
+		return nil, nil, fail(ReasonManifestInvalid, errors.New("manifest is not a regular file of bounded size"))
+	}
 	manifest, err := archive.DecodeManifest(data)
 	if err != nil {
 		return nil, nil, fail(ReasonManifestInvalid, err)
@@ -140,6 +149,57 @@ func VerifyFiles(ctx context.Context, manifestPath string) (*archive.Manifest, e
 		}
 	}
 	return manifest, nil
+}
+
+// CheckFiles is the check before a removal (design R.9): the manifest at
+// manifestPath parses, its key fingerprint and MAC verify with signer, and
+// every data file it lists exists with the size and SHA-256 the manifest
+// gives. It reads the manifest once and returns, with the decoded manifest,
+// the SHA-256 of exactly the bytes it checked, for the caller to compare
+// with the digest recorded when the bundle was sealed. Nothing is decrypted
+// or decompressed: one hash pass over the files. The reasons are those of
+// Open and VerifyFiles (ReasonNotFound for the manifest, ReasonFileMissing,
+// ReasonFileMismatch, ReasonManifestInvalid, ReasonKeyMismatch,
+// ReasonMACMismatch, ReasonReadFailed).
+func CheckFiles(ctx context.Context, manifestPath string, signer archive.ManifestSigner) (*archive.Manifest, [32]byte, error) {
+	if signer == nil {
+		return nil, [32]byte{}, fail(ReasonKeyRequired, errors.New("no signer"))
+	}
+	if err := checkContext(ctx); err != nil {
+		return nil, [32]byte{}, err
+	}
+	info, err := os.Lstat(manifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, [32]byte{}, fail(ReasonNotFound, err)
+	}
+	if err != nil {
+		return nil, [32]byte{}, fail(ReasonReadFailed, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxManifestBytes {
+		return nil, [32]byte{}, fail(ReasonManifestInvalid, errors.New("manifest is not a regular file of bounded size"))
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, [32]byte{}, fail(ReasonReadFailed, err)
+	}
+	digest := sha256.Sum256(data)
+	manifest, files, err := parseManifest(data)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	if err := manifest.Verify(signer); err != nil {
+		if errors.Is(err, archive.ErrKeyMismatch) {
+			return nil, [32]byte{}, fail(ReasonKeyMismatch, err)
+		}
+		return nil, [32]byte{}, fail(ReasonMACMismatch, err)
+	}
+	dir := filepath.Dir(manifestPath)
+	for _, file := range manifest.Files {
+		if err := hashFile(ctx, filepath.Join(dir, files[file.Role].Name), file); err != nil {
+			return nil, [32]byte{}, err
+		}
+	}
+	return manifest, digest, nil
 }
 
 // Manifest is the decoded manifest. The caller must not modify it.
