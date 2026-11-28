@@ -649,6 +649,112 @@ func TestPostgresArchiveSampleTreatsAChangedRecordAsStale(t *testing.T) {
 	env.requireOneSealedMember(ids)
 }
 
+// One member in the middle of a pass that cannot be archived must not stop
+// the archive. The member's own response object is damaged in the hot store
+// after the export snapshot was taken: the snapshot still exports and
+// writes it, but the hot store no longer serves it the same, and its change
+// stamp (which does not cover shared content objects) is unchanged, so the
+// read-equivalence sample attributes the difference to that member. Its
+// bundle is rejected, the member deferred export_failed and left hot, and
+// every other due audit ends in a sealed bundle that verifies; the
+// watermark advances and the next run completes.
+//
+// A writer refusal cannot be produced from real rows: Export runs the same
+// checks first and excludes such a record itself. The refusal path is
+// covered by the runner's host tests.
+func TestPostgresArchiveDefersOneUnarchivableMember(t *testing.T) {
+	env := newArchiveEnv(t, config.ArchiveModeExportOnly)
+	env.traffic([]protofixture.Protocol{protofixture.OpenAIChat, protofixture.AnthropicMessages}, 2)
+	ids := env.auditIDs()
+	// A turn no other turn builds on, and its own answer object.
+	var bad string
+	var object []byte
+	if err := env.db.QueryRow(`
+SELECT t.audit_id, i.object_hash FROM turns AS t JOIN turn_response_items AS i ON i.turn_id = t.turn_id
+JOIN audit_records AS a ON a.audit_id = t.audit_id
+WHERE NOT EXISTS (SELECT 1 FROM turns AS c WHERE c.parent_turn_id = t.turn_id)
+  AND (SELECT COUNT(*) FROM turn_response_items AS o WHERE o.object_hash = i.object_hash) = 1
+  AND NOT EXISTS (SELECT 1 FROM turn_context_ops AS p WHERE p.object_hash = i.object_hash)
+ORDER BY a.started_at_ns LIMIT 1 OFFSET 1`).Scan(&bad, &object); err != nil {
+		t.Fatal(err)
+	}
+	env.due()
+	damaged := false
+	damage := func(step string) error {
+		if step == runner.StepAfterPublish && !damaged {
+			damaged = true
+			if _, err := env.db.Exec(`UPDATE content_objects SET data_enc = set_byte(data_enc, 20, get_byte(data_enc, 20) # 1) WHERE object_hash = $1`, object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return nil
+	}
+	env.step.Store(&damage)
+	result := env.mustRun()
+	env.step.Store(nil)
+	if !damaged || result.SampleMismatched != 1 || result.Counts.ExportedAudits != int64(len(ids)-1) {
+		t.Fatalf("result %+v for %d audits", result, len(ids))
+	}
+	var reason string
+	if err := env.db.QueryRow(`SELECT reason FROM archive_deferred WHERE audit_id = $1`, bad).Scan(&reason); err != nil || reason != storage.ArchiveDeferredExportFailed {
+		t.Fatalf("deferral %q (%v)", reason, err)
+	}
+	var current, hot int
+	if err := env.db.QueryRow(`SELECT COUNT(*) FROM archive_members WHERE audit_id = $1 AND state <> 'stale'`, bad).Scan(&current); err != nil || current != 0 {
+		t.Fatalf("the bad member has %d current members", current)
+	}
+	if err := env.db.QueryRow(`SELECT COUNT(*) FROM audit_records WHERE audit_id = $1`, bad).Scan(&hot); err != nil || hot != 1 {
+		t.Fatal("the bad member left the hot store")
+	}
+	var others []string
+	for _, id := range ids {
+		if id != bad {
+			others = append(others, id)
+		}
+	}
+	env.requireOneSealedMember(others)
+	reader, _ := env.readArchive()
+	for _, entry := range reader.Index().Bundles() {
+		for _, member := range entry.Manifest.Members {
+			if member.AuditID == bad {
+				t.Fatal("a live bundle holds the bad member")
+			}
+		}
+	}
+	rejected := 0
+	for name := range env.fileDigests() {
+		if strings.HasSuffix(name, bundle.ManifestSuffix+bundle.RejectedSuffix) {
+			rejected++
+		}
+	}
+	if rejected != 1 {
+		t.Fatalf("%d rejected bundles", rejected)
+	}
+	var watermark sql.NullString
+	if err := env.db.QueryRow(`SELECT watermark_audit_id FROM archive_runs WHERE run_id = $1`, result.RunID).Scan(&watermark); err != nil ||
+		!watermark.Valid || !env.isLastStarted(watermark.String) {
+		t.Fatalf("watermark %v (%v)", watermark, err)
+	}
+	if !strings.Contains(env.logs.String(), `"sample_mismatch_audits":1`) {
+		t.Fatalf("logs %s", env.logs.String())
+	}
+	// The next run looks at the deferred member again (its object no
+	// longer opens, so the export now refuses it as damaged) and completes.
+	again := env.mustRun()
+	if again.Counts.ExportedAudits != 0 || again.Counts.IntegrityFailedAudits != 1 {
+		t.Fatalf("second run %+v", again)
+	}
+}
+
+// isLastStarted reports whether id is the audit that started last.
+func (env *archiveEnv) isLastStarted(id string) bool {
+	var last string
+	if err := env.db.QueryRow(`SELECT audit_id FROM audit_records ORDER BY started_at_ns DESC, audit_id DESC LIMIT 1`).Scan(&last); err != nil {
+		env.t.Fatal(err)
+	}
+	return last == id
+}
+
 // A run interrupted after the intent, after publication, before the seal
 // and before the pass is recorded is completed by the next run's
 // reconciliation: every audit in exactly one sealed member, no duplicate
