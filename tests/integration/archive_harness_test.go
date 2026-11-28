@@ -99,8 +99,10 @@ type archiveRig struct {
 	t        *testing.T
 	ctx      context.Context
 	options  archiveRigOptions
-	dsn      string
-	db       *sql.DB
+	dsn string
+	// db is query-only; rw writes, for the tests that change rows after the
+	// fact as an attacker or a bug would.
+	db, rw   *sql.DB
 	keyPath  string
 	key      []byte
 	cipher   *security.AESGCM
@@ -153,6 +155,10 @@ func newArchiveRig(t *testing.T, options archiveRigOptions) *archiveRig {
 	rig.key = key
 	rig.db = openAuditDatabase(t, rig.dsn)
 	t.Cleanup(func() { _ = rig.db.Close() })
+	if rig.rw, err = sql.Open("pgx", rig.dsn); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rig.rw.Close() })
 	store, err := postgres.Open(ctx, rig.dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -260,8 +266,8 @@ func (rig *archiveRig) buildRunner() {
 		Location: time.UTC, RetentionDays: 1, SegmentMaxBytes: segmentMax, ConversationMinTurns: minTurns,
 		ConversationMinBytes: config.DefaultArchiveConversationMinBytes, PassAudits: config.DefaultArchivePassAudits,
 		RunDeadline: time.Duration(config.DefaultArchiveRunDeadlineMinutes) * time.Minute, VerifySample: 1,
-		Store:  runner.FromPostgres(rig.store, postgres.ArchiveSnapshotOptions{Cipher: rig.cipher, Fingerprinter: rig.keys}),
-		Keys:   rig.keys, Events: rig.events,
+		Store: runner.FromPostgres(rig.store, postgres.ArchiveSnapshotOptions{Cipher: rig.cipher, Fingerprinter: rig.keys}),
+		Keys:  rig.keys, Events: rig.events,
 		Sampler:             runner.QuerySampler{Hot: rig.hot, Fingerprinter: rig.keys},
 		SourceSchemaVersion: strconv.Itoa(postgres.LatestSchemaVersion),
 		Logger:              slog.New(slog.NewJSONHandler(rig.logs, nil)),
@@ -309,6 +315,18 @@ func (rig *archiveRig) mustRun() runner.Result {
 // failure or rejected bundle (R.5 item 8 on real traffic).
 func (rig *archiveRig) requireCleanRun(result runner.Result, want int) {
 	rig.t.Helper()
+	rig.requireCleanCounts(result, want)
+	for name := range rig.files() {
+		if strings.HasSuffix(name, bundle.RejectedSuffix) {
+			rig.t.Fatalf("rejected bundle %s", name)
+		}
+	}
+}
+
+// requireCleanCounts is requireCleanRun without the look for rejected
+// bundles on disk, for a run after one whose bundle was rejected.
+func (rig *archiveRig) requireCleanCounts(result runner.Result, want int) {
+	rig.t.Helper()
 	deferred := int64(0)
 	for _, count := range result.Deferred {
 		deferred += count
@@ -316,11 +334,6 @@ func (rig *archiveRig) requireCleanRun(result runner.Result, want int) {
 	if result.Counts.ExportedAudits != int64(want) || result.Excluded != 0 || result.Refused != 0 || result.SampleMismatched != 0 ||
 		deferred != 0 || result.Counts.IntegrityFailedAudits != 0 || result.Counts.StaleAudits != 0 || result.Counts.DeferredAudits != 0 {
 		rig.t.Fatalf("run for %d audits: %+v", want, result)
-	}
-	for name := range rig.files() {
-		if strings.HasSuffix(name, bundle.RejectedSuffix) {
-			rig.t.Fatalf("rejected bundle %s", name)
-		}
 	}
 }
 
@@ -539,7 +552,7 @@ WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' AND table_na
 		var digest string
 		var count int64
 		// The row's text form covers every column, BYTEA included (as hex).
-		if err := rig.db.QueryRow(`SELECT COUNT(*), encode(sha256(convert_to(COALESCE(string_agg(r::text, E'\n' ORDER BY r::text), ''), 'UTF8')), 'hex') FROM "` + table + `" AS r`).Scan(&count, &digest); err != nil {
+		if err := rig.db.QueryRow(`SELECT COUNT(*), encode(sha256(convert_to(COALESCE(string_agg(r::text, E'\n' ORDER BY r::text), ''), 'UTF8')), 'hex') FROM "`+table+`" AS r`).Scan(&count, &digest); err != nil {
 			t.Fatal(err)
 		}
 		out[table] = fmt.Sprintf("%d:%s", count, digest)
